@@ -52,6 +52,7 @@ from sqlalchemy.orm import Session
 from db.queue import HEARTBEAT_PROTOCOL_SCORE, record_heartbeat
 from services.monitoring import emit_monitor_cycle
 from services.scoring.dirty import SCORE_DIRTY_STALENESS_SWEEP
+from services.scoring.distill import load_protocol_universe
 from services.scoring.fold import compute_protocol_score
 from services.scoring.persist import persist_score_document
 from utils.scoring_status import SCORE_TRIGGER_DIRTY_LOOP, SCORE_TRIGGER_STALENESS_SWEEP
@@ -309,11 +310,16 @@ def score_protocol(session: Session, due: DueProtocol) -> Any:
     supplied here.
     """
     computed_at = session.execute(select(func.clock_timestamp())).scalar_one()
+    # Assembled before the fold because it reads object storage and the fold's
+    # planes may not. ``None`` is the fail-closed answer to an unreadable source
+    # artifact and disposes nothing.
+    universe = load_protocol_universe(session, due.protocol_id)
     document = compute_protocol_score(
         session,
         due.protocol_id,
         trigger=due.trigger,
         computed_at=computed_at,
+        universe=universe,
     )
     row = persist_score_document(session, document)
     cleared = _clear_mark(session, due)

@@ -18,7 +18,15 @@ from services.monitoring.tvl import (
 )
 from tests.conftest import requires_postgres
 from tests.support.balance_stubs import page, pinned_native_unavailable
-from utils.balance_status import ASSET_SET_STATUS_FETCH_FAILED, NATIVE_STATUS_FETCH_FAILED
+from utils.balance_status import (
+    ASSET_SET_SOURCE_CHAIN_LOG_SWEEP,
+    ASSET_SET_STATUS_FETCH_FAILED,
+    ASSET_SET_STATUS_RETURNED_EMPTY,
+    BALANCE_WRITER_TVL,
+    NATIVE_STATUS_FETCH_FAILED,
+    NATIVE_STATUS_PROVEN_ZERO,
+    SWEEP_STATUS_COMPLETED,
+)
 
 # Unique address helpers — each test class gets its own prefix to avoid
 # unique-constraint collisions across tests sharing the same DB.
@@ -145,6 +153,86 @@ class TestGetProtocolAddresses:
         assert proxy_addr.lower() in addr_set
         assert regular_addr.lower() in addr_set
         assert impl_addr.lower() not in addr_set
+
+    def test_the_implementation_of_a_SCANNING_proxy_is_read_at_its_own_address(self, db_session, _cleanup):
+        """The value plane folds the two addresses into one sheet, and a sheet
+        that publishes an asset list as COMPLETE claims it of both. Nothing could
+        earn that while the implementation's own address was never read — so a
+        proxy carrying a completed chain scan pulls its implementation back into
+        the population. An implementation whose proxy is NOT scanning stays out:
+        the exception is the completeness claim, not a general re-admission."""
+        protocol = Protocol(name="TestProto_scanimpl")
+        db_session.add(protocol)
+        db_session.flush()
+
+        scanning_proxy_addr = _addr("get_addrs", "a1")
+        scanning_impl_addr = _addr("get_addrs", "a2")
+        quiet_proxy_addr = _addr("get_addrs", "a3")
+        quiet_impl_addr = _addr("get_addrs", "a4")
+
+        scanning_proxy = Contract(
+            address=scanning_proxy_addr,
+            chain="ethereum",
+            protocol_id=protocol.id,
+            contract_name="ScanningProxy",
+            is_proxy=True,
+            implementation=scanning_impl_addr,
+        )
+        quiet_proxy = Contract(
+            address=quiet_proxy_addr,
+            chain="ethereum",
+            protocol_id=protocol.id,
+            contract_name="QuietProxy",
+            is_proxy=True,
+            implementation=quiet_impl_addr,
+        )
+        db_session.add_all(
+            [
+                scanning_proxy,
+                quiet_proxy,
+                Contract(
+                    address=scanning_impl_addr,
+                    chain="ethereum",
+                    protocol_id=protocol.id,
+                    contract_name="ScanningImpl",
+                ),
+                Contract(address=quiet_impl_addr, chain="ethereum", protocol_id=protocol.id, contract_name="QuietImpl"),
+            ]
+        )
+        db_session.flush()
+        db_session.add(
+            ContractBalanceFetch(
+                contract_id=scanning_proxy.id,
+                chain_id=1,
+                observed_address=scanning_proxy_addr,
+                block_number=12,
+                native_status=NATIVE_STATUS_PROVEN_ZERO,
+                asset_set_status=ASSET_SET_STATUS_RETURNED_EMPTY,
+                asset_set_source=ASSET_SET_SOURCE_CHAIN_LOG_SWEEP,
+                sweep_status=SWEEP_STATUS_COMPLETED,
+                swept_from_block=0,
+                swept_through_block=12,
+                typed_assets=[],
+                writer=BALANCE_WRITER_TVL,
+            )
+        )
+        db_session.add(
+            ContractBalanceFetch(
+                contract_id=quiet_proxy.id,
+                chain_id=1,
+                observed_address=quiet_proxy_addr,
+                native_status=NATIVE_STATUS_PROVEN_ZERO,
+                block_number=12,
+                asset_set_status=ASSET_SET_STATUS_RETURNED_EMPTY,
+                writer=BALANCE_WRITER_TVL,
+            )
+        )
+        db_session.commit()
+
+        kept = {c.address.lower() for c in _get_protocol_addresses(db_session, protocol.id)}
+        assert scanning_proxy_addr.lower() in kept and quiet_proxy_addr.lower() in kept
+        assert scanning_impl_addr.lower() in kept
+        assert quiet_impl_addr.lower() not in kept
 
     def test_impl_twin_on_other_chain_not_excluded(self, db_session, _cleanup):
         # A base standalone contract sharing an address with an ethereum proxy's

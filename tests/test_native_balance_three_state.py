@@ -47,6 +47,8 @@ from services.monitoring.balance_reads import (
 from services.monitoring.tvl import _read_existing_balances
 from tests.conftest import requires_postgres
 from utils.balance_status import (
+    ASSET_SET_SOURCE_CHAIN_LOG_SWEEP,
+    ASSET_SET_SOURCE_ETHERSCAN_PAGES,
     ASSET_SET_STATUS_AT_PAGE_CAP,
     ASSET_SET_STATUS_FETCH_FAILED,
     ASSET_SET_STATUS_RETURNED_ASSETS,
@@ -57,6 +59,7 @@ from utils.balance_status import (
     NATIVE_STATUS_NOT_DETERMINED,
     NATIVE_STATUS_PROVEN_NONZERO,
     NATIVE_STATUS_PROVEN_ZERO,
+    SWEEP_STATUS_COMPLETED,
 )
 from utils.etherscan import TOKEN_BALANCE_PAGE_SIZE
 
@@ -90,6 +93,12 @@ def _fetch(
     block: int | None = None,
     page_length: int | None = None,
     observed: str | None = None,
+    source: str | None = None,
+    basis: str | None = None,
+    sweep_status: str | None = None,
+    swept_from: int | None = None,
+    swept_through: int | None = None,
+    typed: list | None = None,
 ) -> ContractBalanceFetch:
     f = ContractBalanceFetch(
         contract_id=contract.id,
@@ -99,6 +108,12 @@ def _fetch(
         native_status=native,
         asset_set_status=assets,
         asset_page_length=page_length,
+        asset_set_source=source,
+        asset_set_basis=basis,
+        sweep_status=sweep_status,
+        swept_from_block=swept_from,
+        swept_through_block=swept_through,
+        typed_assets=typed,
         writer=BALANCE_WRITER_TVL,
     )
     session.add(f)
@@ -168,23 +183,26 @@ class TestCompletenessMappingIsTotalAndCannotSayComplete:
     """A13 — the merged ``asset_set_status`` must not leak a whole-list reading."""
 
     @pytest.mark.parametrize("status", ASSET_SET_STATUSES + (None,))
-    @pytest.mark.parametrize("page_length", [None, 0, 7, TOKEN_BALANCE_PAGE_SIZE, TOKEN_BALANCE_PAGE_SIZE + 3])
-    def test_total_over_the_whole_vocabulary(self, status, page_length):
-        out = _completeness_from_fetch(status, page_length)
+    def test_total_over_the_whole_vocabulary(self, status):
+        out = _completeness_from_fetch(status)
         assert out in (HOLDINGS_COMPLETENESS_AT_PAGE_CAP, HOLDINGS_COMPLETENESS_NOT_DETERMINED)
         # There is no "complete" member to return, and that is the invariant:
-        # a page below the cap is consistent with a whole list AND with paging.
+        # a status other than at-cap is consistent with a whole list AND with a
+        # list the fetch simply never proved whole.
         assert out != "complete"
 
-    def test_returned_assets_below_cap_is_not_determined(self):
-        assert _completeness_from_fetch(ASSET_SET_STATUS_RETURNED_ASSETS, 7) == HOLDINGS_COMPLETENESS_NOT_DETERMINED
+    def test_returned_assets_is_not_determined(self):
+        assert _completeness_from_fetch(ASSET_SET_STATUS_RETURNED_ASSETS) == HOLDINGS_COMPLETENESS_NOT_DETERMINED
 
-    def test_capped_page_is_witnessed_either_way(self):
-        assert _completeness_from_fetch(ASSET_SET_STATUS_AT_PAGE_CAP, None) == HOLDINGS_COMPLETENESS_AT_PAGE_CAP
-        assert (
-            _completeness_from_fetch(ASSET_SET_STATUS_RETURNED_ASSETS, TOKEN_BALANCE_PAGE_SIZE)
-            == HOLDINGS_COMPLETENESS_AT_PAGE_CAP
-        )
+    def test_only_the_status_witnesses_the_cap(self):
+        """The fetch's own status, and never a length.
+
+        The fetch pages the endpoint to exhaustion, so an exhausted list of exactly
+        ``TOKEN_BALANCE_PAGE_SIZE`` entries — or more — was never cut off. Only
+        ``at_page_cap`` says the stored list is a prefix.
+        """
+        assert _completeness_from_fetch(ASSET_SET_STATUS_AT_PAGE_CAP) == HOLDINGS_COMPLETENESS_AT_PAGE_CAP
+        assert _completeness_from_fetch(ASSET_SET_STATUS_RETURNED_ASSETS) == HOLDINGS_COMPLETENESS_NOT_DETERMINED
 
 
 class TestPositiveQuantityGuardFailsClosedWithoutRaising:
@@ -624,3 +642,398 @@ class TestViewCurrencyIsPerContractNotPerObservedAddress:
         # And the per-contract sum is that one row, never 10 + 999.
         graph = build_authority_graph(db_session, proto.id)
         assert str(graph.balance[c.address.lower()]) == "999.00"
+
+
+@requires_postgres
+class TestValuePlaneReadsAssetSetCompleteness:
+    """The scorer's half of the at-cap fact: it reaches the sheet, not just the row.
+
+    ``asset_set_status`` was written by the producers and read by nothing on the
+    scoring side, so a sheet assembled from a list cut off at entry 100
+    published the same state as one assembled from a whole list — and
+    ``ceiling_for`` bounded a move from above with a prefix of the holdings. The
+    plane carries the truncated case per ENTITY so the ceiling can refuse it.
+    """
+
+    def test_the_latest_at_cap_fetch_marks_the_entity_truncated(self, db_session):
+        from services.scoring.planes import load_value_plane
+
+        proto = _protocol(db_session, "3s-plane-atcap")
+        capped = _contract(db_session, proto.id, _addr("e1"))
+        whole = _contract(db_session, proto.id, _addr("e2"))
+        _fetch(
+            db_session,
+            capped,
+            assets=ASSET_SET_STATUS_AT_PAGE_CAP,
+            page_length=TOKEN_BALANCE_PAGE_SIZE,
+        )
+        _fetch(db_session, whole, assets=ASSET_SET_STATUS_RETURNED_ASSETS, page_length=5)
+        db_session.commit()
+
+        plane = load_value_plane(db_session, proto.id)
+        assert plane.asset_set_is_truncated(f"ethereum::{capped.address.lower()}")
+        # The other contract is not marked — and not thereby claimed complete.
+        assert plane.asset_set_is_truncated(f"ethereum::{whole.address.lower()}") is False
+
+    def test_a_later_uncapped_read_supersedes_the_capped_one(self, db_session):
+        """LATEST fetch, so re-reading a shorter list withdraws the refusal."""
+        from services.scoring.planes import load_value_plane
+
+        proto = _protocol(db_session, "3s-plane-atcap-super")
+        c = _contract(db_session, proto.id, _addr("e3"))
+        _fetch(db_session, c, assets=ASSET_SET_STATUS_AT_PAGE_CAP, page_length=TOKEN_BALANCE_PAGE_SIZE)
+        db_session.commit()
+        assert load_value_plane(db_session, proto.id).asset_set_truncated
+
+        _fetch(db_session, c, assets=ASSET_SET_STATUS_RETURNED_ASSETS, page_length=7)
+        db_session.commit()
+        assert load_value_plane(db_session, proto.id).asset_set_truncated == set()
+
+    def test_a_capped_implementation_truncates_the_proxy_sheet_it_folds_onto(self, db_session):
+        """One sheet: the alias fold makes the two accounts one asset list."""
+        from services.scoring.planes import load_value_plane
+
+        proto = _protocol(db_session, "3s-plane-atcap-alias")
+        impl_address = _addr("e5")
+        proxy = _contract(db_session, proto.id, _addr("e4"))
+        proxy.implementation = impl_address
+        impl = _contract(db_session, proto.id, impl_address)
+        db_session.flush()
+        _fetch(db_session, proxy, assets=ASSET_SET_STATUS_RETURNED_ASSETS, page_length=3)
+        _fetch(db_session, impl, assets=ASSET_SET_STATUS_AT_PAGE_CAP, page_length=TOKEN_BALANCE_PAGE_SIZE)
+        db_session.commit()
+
+        plane = load_value_plane(db_session, proto.id)
+        proxy_key = f"ethereum::{proxy.address.lower()}"
+        assert plane.canonical(f"ethereum::{impl_address.lower()}") == proxy_key
+        assert plane.asset_set_truncated == {proxy_key}
+
+
+@requires_postgres
+class TestValuePlaneReadsAChainScanAsAnEmptySheet:
+    """The other half of the completeness fact: the earned POSITIVE.
+
+    ``asset_set_truncated`` carries "this list is a prefix". Nothing carried
+    "this list is everything", so a contract whose every quantity was witnessed
+    zero still published ``no_rows`` — an absence where a measurement had been
+    made — and ``ceiling_for`` refused it under "no balance was ever observed".
+    The witness is the chain's own transfer history through a named block, and it
+    is the ONLY one: a third-party index answering "no tokens" is the trigger
+    that sends the producer to the chain, never the proof (§2 of
+    SHEET_OBSERVATION_SPEC.md).
+    """
+
+    SCAN_BASIS = "chain log sweep of Transfer/TransferSingle/TransferBatch, blocks 0-21000000"
+
+    def _swept(self, session, contract, *, assets=ASSET_SET_STATUS_RETURNED_EMPTY, typed=None, native_block=99):
+        return _fetch(
+            session,
+            contract,
+            native=NATIVE_STATUS_PROVEN_ZERO,
+            block=native_block,
+            assets=assets,
+            source=ASSET_SET_SOURCE_CHAIN_LOG_SWEEP,
+            basis=self.SCAN_BASIS,
+            sweep_status=SWEEP_STATUS_COMPLETED,
+            swept_from=0,
+            swept_through=21_000_000,
+            typed=typed if typed is not None else [],
+        )
+
+    def test_a_completed_scan_plus_a_pinned_zero_native_publishes_a_proven_empty_sheet(self, db_session):
+        from services.scoring import planes as P
+
+        proto = _protocol(db_session, "3s-plane-swept")
+        c = _contract(db_session, proto.id, _addr("f1"))
+        self._swept(db_session, c)
+        db_session.commit()
+
+        plane = P.load_value_plane(db_session, proto.id)
+        key = f"ethereum::{c.address.lower()}"
+        assert plane.asset_set_is_proven_complete(key) is True
+        assert plane.sheet_state(key) == P.SHEET_PROVEN_EMPTY
+        assert plane.total(key) == 0.0
+        assert P.ceiling_for(plane, key) == (0.0, P.CEILING_PROVEN_EMPTY)
+        # The published record is the CARRIER's, not a sentence written here.
+        record = plane.asset_set_proven_complete[key]
+        assert record["swept_through_block"] == 21_000_000 and record["swept_from_block"] == 0
+        assert record["basis"] == [self.SCAN_BASIS]
+        assert plane.provenance["asset_set_completeness"]["sheets_published_empty"] == 1
+
+    def test_the_etherscan_negative_alone_publishes_nothing(self, db_session):
+        """No scan, same empty answer, same pinned zero — and no $0.
+
+        This is §2's ruling as a test: the index's empty list is a completeness
+        claim about the index, and under-indexing is precisely its failure mode.
+        """
+        from services.scoring import planes as P
+
+        proto = _protocol(db_session, "3s-plane-unswept")
+        c = _contract(db_session, proto.id, _addr("f2"))
+        _fetch(
+            db_session,
+            c,
+            native=NATIVE_STATUS_PROVEN_ZERO,
+            block=99,
+            assets=ASSET_SET_STATUS_RETURNED_EMPTY,
+            source=ASSET_SET_SOURCE_ETHERSCAN_PAGES,
+        )
+        db_session.commit()
+
+        plane = P.load_value_plane(db_session, proto.id)
+        key = f"ethereum::{c.address.lower()}"
+        assert plane.native_fact[key].startswith("proven_zero")
+        assert plane.asset_set_is_proven_complete(key) is False
+        assert plane.sheet_state(key) == P.SHEET_NO_ROWS
+        assert plane.total(key) is None
+        assert P.ceiling_for(plane, key) == (None, P.CEILING_NO_ROWS)
+
+    @pytest.mark.parametrize("answer", [ASSET_SET_STATUS_RETURNED_EMPTY, ASSET_SET_STATUS_RETURNED_ASSETS])
+    def test_the_scan_publishes_whatever_the_index_answered(self, db_session, answer: str):
+        """The Etherscan status is not a conjunct in either direction.
+
+        An at-cap sheet that swept clean, a persistent failure that swept clean
+        and an entity that never got its own index answer are all publishable
+        once the SCAN proves them empty — so the sheet state reads the scan and
+        never the answer that triggered it.
+        """
+        from services.scoring import planes as P
+
+        proto = _protocol(db_session, f"3s-plane-anyanswer-{answer}")
+        c = _contract(db_session, proto.id, _addr("f3"))
+        self._swept(db_session, c, assets=answer)
+        db_session.commit()
+
+        plane = P.load_value_plane(db_session, proto.id)
+        assert plane.sheet_state(f"ethereum::{c.address.lower()}") == P.SHEET_PROVEN_EMPTY
+
+    def test_an_unreadable_typed_receipt_refuses_the_empty_sheet(self, db_session):
+        from services.scoring import planes as P
+
+        proto = _protocol(db_session, "3s-plane-typed")
+        c = _contract(db_session, proto.id, _addr("f4"))
+        self._swept(
+            db_session,
+            c,
+            typed=[{"address": _addr("aa"), "kind": "typed", "quantity_readable": False, "quantity": None}],
+        )
+        db_session.commit()
+
+        plane = P.load_value_plane(db_session, proto.id)
+        key = f"ethereum::{c.address.lower()}"
+        assert plane.unresolved_typed_receipts(key)
+        assert plane.proven_empty_refusal(key) == P.EMPTY_REFUSED_TYPED_RECEIPT_UNRESOLVED
+        assert plane.sheet_state(key) == P.SHEET_UNPRICED
+        assert plane.total(key) is None
+
+    def test_a_typed_receipt_read_back_to_zero_is_a_resolved_one(self, db_session):
+        """Arrived and provably gone. The evidence resolved, so it refuses nothing."""
+        from services.scoring import planes as P
+
+        proto = _protocol(db_session, "3s-plane-typed-zero")
+        c = _contract(db_session, proto.id, _addr("f5"))
+        self._swept(
+            db_session,
+            c,
+            typed=[{"address": _addr("ab"), "kind": "typed", "quantity_readable": True, "quantity": "0"}],
+        )
+        db_session.commit()
+
+        plane = P.load_value_plane(db_session, proto.id)
+        key = f"ethereum::{c.address.lower()}"
+        assert plane.unresolved_typed_receipts(key) == []
+        assert plane.sheet_state(key) == P.SHEET_PROVEN_EMPTY
+
+    def test_a_malformed_typed_record_refuses_rather_than_degrading_to_empty(self, db_session):
+        """Evidence nobody can read is not evidence of nothing."""
+        from services.scoring import planes as P
+
+        proto = _protocol(db_session, "3s-plane-typed-bad")
+        c = _contract(db_session, proto.id, _addr("f6"))
+        self._swept(db_session, c, typed=[{"kind": "typed"}])
+        db_session.commit()
+
+        plane = P.load_value_plane(db_session, proto.id)
+        assert plane.sheet_state(f"ethereum::{c.address.lower()}") == P.SHEET_UNPRICED
+
+    def test_an_unscanned_account_of_the_same_sheet_refuses_it(self, db_session):
+        """The alias fold makes two accounts one asset list, so both must be scanned.
+
+        No exemption for an implementation nothing has read: its rows fold into
+        this sheet, so publishing the sheet empty asserts that its address holds
+        nothing, and nobody looked. The refusal carries its own token and names
+        the address, because one producer cycle closes it.
+        """
+        from services.scoring import planes as P
+
+        proto = _protocol(db_session, "3s-plane-halfswept")
+        impl_address = _addr("f8")
+        proxy = _contract(db_session, proto.id, _addr("f7"))
+        proxy.implementation = impl_address
+        impl = _contract(db_session, proto.id, impl_address)
+        db_session.flush()
+        self._swept(db_session, proxy)
+        impl_fetch = _fetch(
+            db_session,
+            impl,
+            native=NATIVE_STATUS_PROVEN_NONZERO,
+            assets=ASSET_SET_STATUS_RETURNED_ASSETS,
+            source=ASSET_SET_SOURCE_ETHERSCAN_PAGES,
+        )
+        _row(db_session, impl, token=_addr("cc"), raw="5", usd=None, fetch=impl_fetch)
+        db_session.commit()
+
+        plane = P.load_value_plane(db_session, proto.id)
+        proxy_key = f"ethereum::{proxy.address.lower()}"
+        assert plane.canonical(f"ethereum::{impl_address.lower()}") == proxy_key
+        assert plane.asset_set_is_proven_complete(proxy_key) is False
+        assert plane.asset_set_accounts_unscanned[proxy_key] == [impl_address.lower()]
+        assert plane.proven_empty_refusal(proxy_key) == P.EMPTY_REFUSED_UNSCANNED_ACCOUNT
+        assert plane.sheet_state(proxy_key) == P.SHEET_UNPRICED
+
+    def test_a_capped_account_contradicts_the_scan_and_the_refusal_wins(self, db_session):
+        """Two witnesses of one sheet that disagree prove nothing together."""
+        from services.scoring import planes as P
+
+        proto = _protocol(db_session, "3s-plane-contradiction")
+        impl_address = _addr("fa")
+        proxy = _contract(db_session, proto.id, _addr("f9"))
+        proxy.implementation = impl_address
+        impl = _contract(db_session, proto.id, impl_address)
+        db_session.flush()
+        self._swept(db_session, proxy)
+        _fetch(
+            db_session,
+            impl,
+            assets=ASSET_SET_STATUS_AT_PAGE_CAP,
+            page_length=TOKEN_BALANCE_PAGE_SIZE,
+            source=ASSET_SET_SOURCE_ETHERSCAN_PAGES,
+        )
+        db_session.commit()
+
+        plane = P.load_value_plane(db_session, proto.id)
+        proxy_key = f"ethereum::{proxy.address.lower()}"
+        assert plane.asset_set_is_truncated(proxy_key) is True
+        assert plane.asset_set_is_proven_complete(proxy_key) is False
+        # No completeness witness, so the pinned zero native never becomes a
+        # sheet reading and the sheet is back to having observed nothing.
+        assert plane.sheet_state(proxy_key) == P.SHEET_NO_ROWS
+        assert P.ceiling_for(plane, proxy_key) == (None, P.CEILING_ASSET_LIST_TRUNCATED)
+
+    def test_an_implementation_nobody_ever_read_refuses_the_sheet(self, db_session):
+        """The fail-open this rule closes, in its live shape.
+
+        The implementation has one fetch and it was observed AT THE PROXY — the
+        divergent-address policy's legacy. Nothing has ever read the
+        implementation's own address, so the proxy's sheet cannot be shown whole
+        however cleanly the proxy itself sweeps, and "we never looked" is
+        not_determined rather than $0.
+        """
+        from services.scoring import planes as P
+
+        proto = _protocol(db_session, "3s-plane-unread-impl")
+        impl_address = _addr("fc")
+        proxy = _contract(db_session, proto.id, _addr("fb"))
+        proxy.implementation = impl_address
+        impl = _contract(db_session, proto.id, impl_address)
+        db_session.flush()
+        self._swept(db_session, proxy)
+        # The implementation's only fetch: a read of the PROXY, filed here.
+        _fetch(
+            db_session,
+            impl,
+            native=NATIVE_STATUS_PROVEN_ZERO,
+            block=99,
+            assets=ASSET_SET_STATUS_FETCH_FAILED,
+            observed=proxy.address,
+        )
+        db_session.commit()
+
+        plane = P.load_value_plane(db_session, proto.id)
+        proxy_key = f"ethereum::{proxy.address.lower()}"
+        assert plane.asset_set_is_proven_complete(proxy_key) is False
+        assert plane.proven_empty_refusal(proxy_key) == P.EMPTY_REFUSED_UNSCANNED_ACCOUNT
+        assert plane.sheet_state(proxy_key) == P.SHEET_NO_ROWS
+
+        # One producer cycle at the implementation's OWN address closes it.
+        self._swept(db_session, impl)
+        db_session.commit()
+        reread = P.load_value_plane(db_session, proto.id)
+        assert reread.asset_set_is_proven_complete(proxy_key) is True
+        record = reread.asset_set_proven_complete[proxy_key]
+        assert record["accounts_scanned"] == record["accounts_folded"] == 2
+        assert reread.sheet_state(proxy_key) == P.SHEET_PROVEN_EMPTY
+
+    def test_a_scan_filed_against_a_row_but_issued_elsewhere_scans_nothing(self, db_session):
+        """A fetch names the contract it belongs to and the address it read.
+
+        The recipient-topic filter that makes a scan a proof is built from the
+        second, so a scan of one address filed against another contract's row
+        proves nothing about that contract's address.
+        """
+        from services.scoring import planes as P
+
+        proto = _protocol(db_session, "3s-plane-foreign-scan")
+        c = _contract(db_session, proto.id, _addr("fd"))
+        other = _addr("fe")
+        f = self._swept(db_session, c)
+        f.observed_address = other
+        db_session.commit()
+
+        plane = P.load_value_plane(db_session, proto.id)
+        key = f"ethereum::{c.address.lower()}"
+        assert plane.asset_set_is_proven_complete(key) is False
+        assert plane.sheet_state(key) == P.SHEET_NO_ROWS
+
+    def test_two_accounts_that_disagree_about_the_native_balance_publish_neither(self, db_session):
+        """A folded account's zero is not this entity's zero.
+
+        Live shape: a proxy holding ETH read ``proven_nonzero`` at its own
+        address while its implementation row carried a stale ``proven_zero``, and
+        the higher ``contracts.id`` won the map. The polarities disagree, one of
+        them is wrong about this entity, and the plane cannot say which — so it
+        publishes the third state and the sheet earns no empty.
+        """
+        from services.scoring import planes as P
+
+        proto = _protocol(db_session, "3s-plane-native-disagree")
+        impl_address = _addr("e8")
+        proxy = _contract(db_session, proto.id, _addr("e7"))
+        proxy.implementation = impl_address
+        impl = _contract(db_session, proto.id, impl_address)
+        db_session.flush()
+        proxy_fetch = self._swept(db_session, proxy, native_block=200)
+        proxy_fetch.native_status = NATIVE_STATUS_PROVEN_NONZERO
+        self._swept(db_session, impl, native_block=100)
+        db_session.commit()
+
+        plane = P.load_value_plane(db_session, proto.id)
+        proxy_key = f"ethereum::{proxy.address.lower()}"
+        assert plane.asset_set_is_proven_complete(proxy_key) is True
+        assert plane.native_fact[proxy_key] == "not_determined"
+        assert plane.sheet_state(proxy_key) == P.SHEET_NO_ROWS
+        assert plane.provenance["asset_set_completeness"]["native_facts_refused_on_cross_account_disagreement"] == 1
+
+    def test_the_entitys_own_account_is_what_answers_its_native_balance(self, db_session):
+        """Agreeing polarities, different heights: the entity's own read wins.
+
+        Both accounts say proven_zero, so nothing is refused — but the block
+        published is the one read AT the entity, not whichever folded row sorted
+        last.
+        """
+        from services.scoring import planes as P
+
+        proto = _protocol(db_session, "3s-plane-native-own")
+        impl_address = _addr("ea")
+        proxy = _contract(db_session, proto.id, _addr("e9"))
+        proxy.implementation = impl_address
+        impl = _contract(db_session, proto.id, impl_address)
+        db_session.flush()
+        self._swept(db_session, proxy, native_block=777)
+        self._swept(db_session, impl, native_block=111)
+        db_session.commit()
+
+        plane = P.load_value_plane(db_session, proto.id)
+        proxy_key = f"ethereum::{proxy.address.lower()}"
+        assert plane.native_fact[proxy_key] == "proven_zero_at_block_777"
+        assert plane.sheet_state(proxy_key) == P.SHEET_PROVEN_EMPTY

@@ -68,13 +68,45 @@ describe("gradeBands — letter from λ, keyed by model version", () => {
     expect(bandsFor("1.2.0-provisional")).toEqual(bandsFor("1.1.0-provisional"));
     expect(letterFor("1.2.0-provisional", 73.2508).letter).toBe("B+");
     expect(letterFor("1.2.0-provisional", 71.7053).letter).toBe("B");
-    // The published document lands on the B side of that boundary.
-    expect(ETHERFI.model_version).toBe("1.2.0-provisional");
+  });
+
+  it("prices 1.3.0 λ on the same cut points, with λ and the letter both flat", () => {
+    // The carry-forward reasoned a third time, in the case that tests it
+    // differently again: 1.3.0 revokes a $0.05 sheet ceiling whose entity's
+    // asset list was read at the page cap, and $0.05 does not move a λ
+    // published to four decimals. So the table is carried forward where nothing
+    // forced it — a cut point chosen because it costs nothing to choose is the
+    // same defect as one chosen to save a letter.
+    expect(bandsFor("1.3.0-provisional")).toEqual(bandsFor("1.2.0-provisional"));
+    expect(letterFor("1.3.0-provisional", 71.7053).letter).toBe("B");
+    // The published document lands on the B side of the 72.0 boundary, under
+    // whatever version the GOLDEN is stamped with. The version is read off the
+    // document rather than named as a literal: 1.4.0 carries the same cuts and
+    // the same λ, so this claim survives the regeneration — and a version with
+    // no band table would fail it here, on `calibrated`, which is the failure
+    // that actually matters.
+    expect(bandsFor(ETHERFI.model_version)).not.toBeNull();
     expect(letterFor(ETHERFI.model_version, ETHERFI.grade_lambda)).toEqual({
       letter: "B",
       tone: "b",
       calibrated: true,
     });
+  });
+
+  it("prices 1.4.0 λ on the same cut points, through a presentation-only change", () => {
+    // The carry-forward reasoned a fourth time, in the case that is easiest to
+    // slip through: 1.4.0 withholds airdrop-delivered rows from being PRESENTED
+    // as holdings, and every disposed reading on this corpus is unpriced — so
+    // it contributed $0 before and $0 after, and λ provably cannot move. Same
+    // table, same λ, same letter, and the argument is recorded beside the entry
+    // rather than left as a copy.
+    expect(bandsFor("1.4.0-provisional")).toEqual(bandsFor("1.3.0-provisional"));
+    expect(letterFor("1.4.0-provisional", 71.7053).letter).toBe("B");
+    // The B/B+ boundary is where a silent recut would have hidden, so both
+    // sides of it are pinned under the new version too.
+    expect(letterFor("1.4.0-provisional", 72).letter).toBe("B+");
+    expect(letterFor("1.4.0-provisional", 71.9999).letter).toBe("B");
+    expect(letterFor("1.4.0-provisional", 71.7053).calibrated).toBe(true);
   });
 
   it("withholds the letter for a model version with no band table", () => {

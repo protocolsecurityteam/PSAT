@@ -309,16 +309,33 @@ def test_every_arm_this_run_added_is_flagged_uncalibrated_and_disclosed():
     block = parameters["uncalibrated_arm_disclosures"]
     registered = block["registered"]
 
-    # Seven arms this run added, plus the one pre-existing zero-population arm
-    # CAP-B ruled into the same register (ruling 2), plus the code-control
-    # ceiling's three zero-carrier arms: its two admission arms and the
-    # per-entity ceiling DIRECTION, which no published entry earns because every
-    # ceiling-bearing entity on this corpus holds assets nobody priced. The COUNT
-    # is derived and not chosen: the ceiling STATE itself fires here and is
-    # calibrated, so it is absent, and the row-header bound-direction arm stays
-    # because no row earns that direction — every one of those facts measured
-    # against protocol 1 rather than assumed.
-    assert len(registered) == 11
+    # Seven arms this run added, plus the code-control ceiling's one surviving
+    # zero-carrier arm — the shared-implementation refusal, which no row can
+    # publish because the fold refuses such a key before any magnitude branch
+    # reads a sheet. THREE came off when the chain-log sweep earned this corpus
+    # its first proven-empty sheets: ``code_control_ceiling:proven_empty`` and
+    # the per-entity ``sheet_ceiling_bound_direction:ceiling`` gained carriers on
+    # 115 such sheets, and the pre-existing row-header
+    # ``value_at_stake_bound_direction:ceiling`` gained its first carrying row (a
+    # subsumed one, every contributing entity a proven $0 with no coverage gap).
+    # The COUNT is authored, not derived — nothing in this suite counts a corpus
+    # — so it is checked by a reader against the scored document and moves only
+    # with such a reading.
+    # The disposition run added ``code_control_ceiling:airdrop_determined`` and
+    # then took it straight back off: its live one-shot determined 13 sheets and
+    # one of them publishes a ceiling under that reason, so the register's own
+    # rule — an entry whose positive branch has fired is removed — fired inside
+    # the same run. Checked against the scored document's
+    # ``sheet_ceilings.entities_by_ceiling_reason``, which reads
+    # ``airdrop_determined: 1``.
+    #
+    # The run's ONE surviving zero-carrier arm is
+    # ``sheet_bound_refused:sheet_determined_by_disposition_does_not_bound`` —
+    # the trim sites' answer where a sheet exists, is determined, and still may
+    # not bound a witness. The 13 determined sheets carry no witnessed magnitude
+    # for it to refuse a bound for, so it has no carrier on this corpus and is
+    # disclosed like its siblings rather than left as a bare flag. Ninth entry.
+    assert len(registered) == 9
     for entry in registered:
         assert entry["arm"] in flagged, entry["arm"]
         assert entry["state"] and entry["note"]
@@ -474,25 +491,134 @@ def test_the_1_1_0_migration_stamp_is_frozen_and_cannot_silently_re_interpolate(
     assert _migration("1.0.1-provisional")["to"] == "1.1.0-provisional"
 
 
+def test_the_1_2_0_migration_stamp_is_frozen_and_cannot_silently_re_interpolate(monkeypatch):
+    """The same freeze, one bump later, on the record that has just stopped
+    describing the current version.
+
+    The 1.1.0 -> 1.2.0 record reports what was measured while 1.2.0 was CURRENT.
+    Once 1.3.0 shipped, an interpolated `MODEL_VERSION` there would restamp
+    those dated figures — the λ fall to 71.7053, the B+ -> B drop — with
+    whatever is shipping now. Frozen, and this is what keeps it frozen."""
+    from services.scoring import constants as C
+
+    shipped = _migration("1.1.0-provisional")
+    monkeypatch.setattr(C, "MODEL_VERSION", "9.9.9-fictional")
+    unmoved = _migration("1.1.0-provisional")
+
+    assert unmoved == shipped
+    assert "this bump's own tip (1.2.0-provisional)" in unmoved["measured_at"]
+    assert "9.9.9-fictional" not in unmoved["measured_at"]
+    # The record's own endpoint is frozen with it: this bump ENDED at 1.2.0 and
+    # no later version can claim to be where it landed.
+    assert unmoved["to"] == "1.2.0-provisional"
+
+
+def test_the_1_3_0_migration_stamp_is_frozen_and_cannot_silently_re_interpolate(monkeypatch):
+    """The same freeze, one bump later again.
+
+    The 1.2.0 -> 1.3.0 record reports what was measured while 1.3.0 was CURRENT.
+    Once 1.4.0 shipped, an interpolated `MODEL_VERSION` there would restamp those
+    dated figures — the revoked $0.05 ceiling, the 11 -> 10 entity fall — with
+    whatever is shipping now. Frozen, and this is what keeps it frozen."""
+    from services.scoring import constants as C
+
+    shipped = _migration("1.2.0-provisional")
+    monkeypatch.setattr(C, "MODEL_VERSION", "9.9.9-fictional")
+    unmoved = _migration("1.2.0-provisional")
+
+    assert unmoved == shipped
+    assert "this bump's own tip (1.3.0-provisional)" in unmoved["measured_at"]
+    assert "9.9.9-fictional" not in unmoved["measured_at"]
+    # The record's own endpoint is frozen with it: this bump ENDED at 1.3.0 and
+    # no later version can claim to be where it landed.
+    assert unmoved["to"] == "1.3.0-provisional"
+
+
 def test_the_migration_version_stamp_moves_with_the_version(monkeypatch):
     """B1's S1 lesson applied to CAP-B's stamp: a literal reads identically
     today and drifts silently at the next bump.
 
-    Moved onto the 1.1.0 -> 1.2.0 record, which is the one describing the
+    Moved onto the 1.3.0 -> 1.4.0 record, which is the one describing the
     version that is CURRENT — the only record for which "moves with the version"
-    is the honest behaviour. Its predecessor is frozen by the test above."""
+    is the honest behaviour. Its three predecessors are frozen by the tests
+    above."""
     from services.scoring import constants as C
 
-    shipped = _migration("1.1.0-provisional")["measured_at"]
+    shipped = _migration("1.3.0-provisional")["measured_at"]
     monkeypatch.setattr(C, "MODEL_VERSION", "9.9.9-fictional")
-    moved = _migration("1.1.0-provisional")["measured_at"]
+    moved = _migration("1.3.0-provisional")["measured_at"]
 
     assert moved != shipped
     assert "at this bump's own tip (9.9.9-fictional)" in moved
-    assert "1.2.0-provisional" not in moved
+    assert "1.4.0-provisional" not in moved
     # The endpoint interpolates too, so the record cannot name one version in
     # its prose and a different one in its field.
-    assert _migration("1.1.0-provisional")["to"] == "9.9.9-fictional"
+    assert _migration("1.3.0-provisional")["to"] == "9.9.9-fictional"
+
+
+def test_the_1_3_0_migration_record_states_its_invariant_6_exception():
+    """A bump that LOWERS a term has to say so where the model is published.
+
+    1.3.0's guard un-publishes a sheet ceiling, which moves a confidence term
+    DOWN — the one direction invariant 6 forbids. The exception is ruled and it
+    is ruled here, on the record a reader joins to by `model_version`, rather
+    than in a spec file no consumer of the document can see."""
+    record = _migration("1.2.0-provisional")
+    exception = record["the_invariant_6_exception_this_bump_takes"]
+
+    assert "invariant 6" in exception
+    # The ruling's own shape: what is withdrawn was never earned, so the fall is
+    # the correction rather than the price of one.
+    assert "reach_magnitude_witnessed_of_reaching_pct" in exception
+    assert "35.6 -> 35.5" in exception
+    assert "never earned" in exception
+    # And the grade surface it does NOT move, which is the other half of the
+    # ruling: only the ceiling dollars move, by the revoked $0.05.
+    unmoved = record["what_did_not_move_and_why_that_was_a_ruling"]
+    assert "grade_lambda stays 71.7053" in unmoved
+    assert "$4,218,707,276.09 -> $4,218,707,276.04" in unmoved
+
+
+def test_the_current_migration_record_states_its_invariant_6_exception():
+    """1.4.0 takes its own, and of the opposite shape.
+
+    The disposition rule's protocol-reference conjunct is ANTI-MONOTONE:
+    discovery growing moves a token INTO the universe and WITHDRAWS a
+    determination. The ruling is that withdrawal is the safe direction — and the
+    consequence a reader has to carry is that the document is not stable across
+    discovery growth. Every single point of failure the measurement found is
+    named on the record itself, not left in a spec no consumer can see."""
+    record = _migration("1.3.0-provisional")
+    exception = record["the_invariant_6_exception_this_bump_takes"]
+
+    assert "invariant 6" in exception
+    assert "ANTI-MONOTONE" in exception
+    assert "NOT STABLE ACROSS DISCOVERY GROWTH" in exception
+    # The named tokens, and the reason the condemnation of a REAL one is not a
+    # lie: the published state is a delivery-shape claim. The class the rule
+    # touches is FIVE real tokens, not the two the pre-run analysis named.
+    assert "FIVE demonstrably real tokens" in exception
+    assert "HEX" in exception and "SINGLE effect_verdicts row" in exception
+    # The second single point of failure, measured after the pre-run census: one
+    # source, one real token, and the source with no chain column at all.
+    assert "base USDC is spared by dapp_interactions ALONE" in exception
+    assert "uniETH" in exception and "delivery-shape claim" in exception
+    # What the bump does not close travels with it, on its own key.
+    open_items = record["what_this_bump_does_not_close"]
+    assert "INERT ON BASE" in open_items
+    assert "1,175 of 1,175" in open_items
+    assert "NOT proven whole" in open_items
+    # And what the live one-shot behind this bump did and did not move. The four
+    # dollar surfaces held byte-for-byte; confidence is the one figure that
+    # moved, and the record states both halves rather than either alone.
+    unmoved = record["what_did_not_move_and_why_that_was_a_ruling"]
+    assert "grade_lambda stays 71.7053" in unmoved
+    assert "ceiling_usd_over_distinct_entities stays $4,218,743,833.16" in unmoved
+    assert "confidence_pct 42.5 -> 43.2" in unmoved
+    assert record["confidence_pct"] == [42.5, 43.2]
+    # The measurement is real data, not a rule shipped ahead of any: the record
+    # counts the readings the one-shot disposed.
+    assert "1,973 readings over 1,264 tokens" in record["what_moved"]
 
 
 def test_the_frontend_golden_was_regenerated_for_the_current_model_version():
@@ -516,38 +642,32 @@ def test_the_frontend_golden_was_regenerated_for_the_current_model_version():
     )
 
 
-def test_the_pre_existing_ceiling_arm_is_flagged_in_the_document_and_not_only_in_a_spec():
-    """CAP-B ruling 2. The arm has 0 rows before Phase A and 0 after, and a spec
-    deferral does not discharge §8's obligation to flag it in the DOCUMENT —
-    `site/src/score/derive.js` allow-lists the direction, so a `<=` badge would
-    render for a state nothing can earn. Registering it does not reopen its
-    earnability."""
+def test_the_pre_existing_ceiling_arm_came_off_when_a_row_finally_earned_it():
+    """CAP-B ruling 2, discharged by evidence rather than by a deferral.
+
+    The arm was registered while ``value_at_stake_bound_direction: ceiling`` had
+    0 carrying rows before Phase A and 0 after — ``site/src/score/derive.js``
+    allow-lists the direction, so a ``<=`` badge would have rendered for a state
+    nothing could earn. The chain-log sweep changed the corpus, not the rule: a
+    row every one of whose contributing entities is a PROVEN $0 with no coverage
+    gap satisfies the conjunction, and one such row now publishes the direction.
+
+    The register's own rule (``constants.py``: entries are rules whose positive
+    branch has never fired) then requires REMOVAL, and removal rather than a
+    narrowing of scope: an entry kept because some slice of the population still
+    reads zero would say the model was never fitted to a state the document
+    publishes, which is the one thing this register must not say. The removal is
+    authored and reader-checked against the scored corpus; what is asserted here
+    is only that no half-removed reference survives in either list.
+    """
     parameters = K.model_parameters()
-    entry = next(
-        item
-        for item in parameters["uncalibrated_arm_disclosures"]["registered"]
-        if item["arm"] == "value_at_stake_bound_direction:ceiling"
-    )
-    assert entry["arm"] in parameters["uncalibrated_arms"]
-    assert entry["state"] == FOLD.BOUND_DIRECTION_CEILING
-    # The FIELD is published on every row; it is the VALUE that has no carrier,
-    # so the path is named rather than nulled — unlike the retired token, whose
-    # producer cannot emit it at all.
-    assert entry["published_at"] == "findings[].value_at_stake_bound_direction"
-    assert entry["population_census"] is None
-    assert "derive.js" in entry["note"]
-    # The arm now has a SECOND producer — a sheet ceiling — so the note may no
-    # longer say the direction is unearnable. What it says instead is measured:
-    # earnable, and unearned on this corpus because every sheet-ceiling row also
-    # reaches entities it cannot price.
-    assert "0 rows before and 0 after" in entry["note"]
-    assert "unearnable" not in entry["note"]
-    # The measured blocker is the COVERAGE conjunct, and the note may not narrow
-    # it to the undetermined-instance half: one ceiling-bearing row here reaches
-    # exactly one entity and prices it, and is refused on the partly-priced half
-    # alone.
-    assert "NO COVERAGE GAP" in entry["note"]
-    assert "the priced sheet does not cover" in entry["note"]
+    assert "value_at_stake_bound_direction:ceiling" not in parameters["uncalibrated_arms"]
+    assert "value_at_stake_bound_direction:ceiling" not in {
+        entry["arm"] for entry in parameters["uncalibrated_arm_disclosures"]["registered"]
+    }
+    # The direction itself is untouched and still earnable — the arm came off
+    # because it fired, not because the state was withdrawn.
+    assert FOLD.BOUND_DIRECTION_CEILING == "ceiling"
 
 
 def test_the_ceiling_direction_stays_allow_listed_on_the_page():

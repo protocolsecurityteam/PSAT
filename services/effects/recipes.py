@@ -1698,7 +1698,8 @@ def _add_reach(
     }
     # Uniform per holder (see ``AssetHolding.completeness``): what is KNOWN about an
     # asset absent from ``known`` for that holder. Two states, and neither is "the
-    # list is whole" — the stored rows cannot prove that (``_holdings_completeness``),
+    # list is whole" — nothing recorded can prove that (``selection
+    # ._completeness_from_fetch`` registers no ``complete`` member),
     # so the reason an absent asset gets is "not in the holdings we recorded, which
     # are not provably all of them", never "this holder does not hold it".
     completeness: dict[str, str] = {h.holder.lower(): h.completeness for h in value_holders}
@@ -1823,10 +1824,10 @@ def _add_reach(
 # Why an asset that moved could not be valued, keyed on what is KNOWN about the
 # holder's holdings list. Neither reason asserts the holder does not hold the asset:
 # ``asset_not_in_recorded_holdings`` says only that our recorded set does not contain
-# it and that set is not provably complete (the stored rows already dropped every
-# zero-balance entry, so a below-cap count proves nothing — ``selection
-# ._holdings_completeness``). The previous name, ``unrecorded_asset``, read as a
-# proven absence and was derived from exactly that lossy count.
+# it and that set is not provably complete: the fetch's recorded ``asset_set_status``
+# can witness the at-cap case and nothing witnesses its negation, so
+# ``selection._completeness_from_fetch`` registers no ``complete`` member at all. The
+# previous name, ``unrecorded_asset``, read as a proven absence.
 _UNVALUED_REASON_BY_COMPLETENESS = {
     HOLDINGS_COMPLETENESS_AT_PAGE_CAP: "holdings_at_page_cap",
     HOLDINGS_NOT_DETERMINED: "asset_not_in_recorded_holdings",

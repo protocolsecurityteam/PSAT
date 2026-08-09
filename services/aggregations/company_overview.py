@@ -40,6 +40,7 @@ from db.jsonb import jsonb_has_payload
 from db.models import (
     CONTROL_EDGE_RELATIONS,
     Contract,
+    ContractBalanceFetch,
     ContractBalanceLatest,
     ControlGraphEdge,
     ControlGraphNode,
@@ -54,11 +55,19 @@ from db.models import (
     UpgradeEvent,
     derive_job_chain_id,
 )
+from services.effects.selection import disposed_from_holdings, load_protocol_reference_shapes
 from services.governance.primary_controller import assign_co_controllers, assign_primary_controllers
 from services.governance.principals import _build_company_function_entry
+from services.monitoring.delivery_evidence import load_delivery_evidence
 from services.scoring.planes import CONTROL_RELATIONS as SCORER_REACH_RELATIONS
+from utils.balance_status import (
+    ASSET_SET_STATUS_AT_PAGE_CAP,
+    DELIVERY_SHAPE_FAN_OUT_ALL,
+    DELIVERY_SHAPE_NOT_DETERMINED,
+    TOKEN_REFERENCE_NOT_DETERMINED,
+)
 from utils.chains import UnknownChainError, chain_by_id, chain_by_name
-from utils.etherscan import TOKEN_BALANCE_PAGE_SIZE, token_balances_may_be_truncated
+from utils.etherscan import TOKEN_BALANCE_PAGE_SIZE
 
 logger = logging.getLogger("services.aggregations.company_overview")
 
@@ -425,6 +434,7 @@ def _prefetch_child_tables(
         "upgrade_events_count": {},
         "upgrade_events_last": {},
         "balances": {},
+        "balance_fetches": {},
         "cgn": {},
         "cge": {},
         "terminal_walk": {},
@@ -794,6 +804,21 @@ def _prefetch_child_tables(
             rows += 1
         return local, rows
 
+    def _balance_fetches(s: Session) -> tuple[dict[int, Any], int]:
+        """``fetch id -> the fetch row``, for the fetches the latest rows came from.
+
+        Keyed by fetch id because that is what ``contract_balances_latest.fetch_id``
+        names. The fetch carries the ONLY truncation witness there is
+        (``asset_set_status == at_page_cap``) plus the chain the read was issued on;
+        neither is derivable from the stored rows.
+        """
+        local: dict[int, Any] = {}
+        rows = 0
+        for f in s.execute(select(ContractBalanceFetch).where(ContractBalanceFetch.contract_id.in_(id_list))).scalars():
+            local[f.id] = f
+            rows += 1
+        return local, rows
+
     def _cgn(s: Session) -> tuple[dict[int, list[ControlGraphNode]], int]:
         local: dict[int, list[ControlGraphNode]] = {}
         rows = 0
@@ -881,6 +906,7 @@ def _prefetch_child_tables(
         ("control_graph_edges", "cge", _cge),
         ("control_graph_nodes", "cgn", _cgn),
         ("balances", "balances", _balances),
+        ("balance_fetches", "balance_fetches", _balance_fetches),
         ("ef_effects", "ef_effects", _ef_effects),
         ("fp_governance_rows", "fp_governance_rows", _fp_governance),
         ("fp_in_contract_principals", "fp_in_contract_principals", _fp_in_contract_principals),
@@ -1263,6 +1289,7 @@ def build_governance_view(
     upgrade_events_count_by_cid: dict[int, dict[str, Any]] = children["upgrade_events_count"]
     last_upgrade_by_cid: dict[int, dict[str, Any]] = children["upgrade_events_last"]
     balances_by_cid: dict[int, list[Any]] = children["balances"]
+    balance_fetch_by_id: dict[int, Any] = children["balance_fetches"]
     cgn_by_cid: dict[int, list[ControlGraphNode]] = children["cgn"]
     cge_by_cid: dict[int, list[ControlGraphEdge]] = children["cge"]
     fp_in_contract_by_cid: dict[int, set[str]] = children["fp_in_contract_principals"]
@@ -1271,6 +1298,57 @@ def build_governance_view(
     # Keyed by ADDRESS, unlike every sibling stage's contract_id map — the walk is a
     # fact about the address, not about the subject contract that recorded it.
     terminal_walk_by_address: dict[str, dict[str, Any]] = children["terminal_walk"]  # type: ignore[assignment]
+
+    # Delivery shape for every balance row in this view, read ONCE for the whole
+    # request. The evidence plane is keyed by the account the read was issued
+    # against, so the key is built from each row's own ``observed_address`` — it
+    # differs from ``contracts.address`` on 162 of this protocol's token rows, and
+    # keying on the contract would answer ``not_determined`` for all of them.
+    chain_name_by_cid: dict[int, str | None] = {c.id: c.chain for c in contracts_by_job_id.values() if c is not None}
+
+    def _fetch_for(balance_row: Any) -> Any | None:
+        """The fetch a latest-view row came from, or ``None`` for a legacy row.
+
+        A legacy row (``fetch_id IS NULL``) predates the fetch-provenance plane; it
+        has no status and no chain of its own, and both callers below read that
+        absence as not-determined rather than filling it in.
+        """
+        fetch_id = getattr(balance_row, "fetch_id", None)
+        return balance_fetch_by_id.get(int(fetch_id)) if fetch_id is not None else None
+
+    def _delivery_account(balance_row: Any) -> tuple[int, str] | None:
+        observed = (getattr(balance_row, "observed_address", None) or "").lower()
+        if not observed:
+            return None
+        chain_id = getattr(_fetch_for(balance_row), "chain_id", None)
+        if chain_id is None:
+            chain_name = chain_name_by_cid.get(balance_row.contract_id)
+            if not chain_name:
+                return None
+            try:
+                chain_id = chain_by_name(chain_name).chain_id
+            except UnknownChainError:
+                return None
+        return int(chain_id), observed
+
+    delivery_facts = load_delivery_evidence(
+        session,
+        {
+            account
+            for rows_for_cid in balances_by_cid.values()
+            for row in rows_for_cid
+            if (account := _delivery_account(row)) is not None
+        },
+    )
+    # The second disposition conjunct, read as the producer last MEASURED it. This
+    # plane cannot assemble the protocol's universe itself — that is a 26.5 s
+    # object-storage read and this is an API path — so it reads the stored verdict and
+    # inherits its staleness; :func:`services.effects.selection.disposed_from_holdings`
+    # states what that costs.
+    reference_shapes = load_protocol_reference_shapes(
+        session,
+        {c.protocol_id for c in contracts_by_job_id.values() if c is not None and c.protocol_id is not None},
+    )
 
     # Fold each proxy's secondary-impl child rows into its PRIMARY impl's
     # contract_id buckets. The flow/principal passes key on the primary impl
@@ -1462,11 +1540,52 @@ def build_governance_view(
         balances_list = []
         total_usd = 0.0
         unvalued_rows = 0
+        airdrop_delivered_rows = 0
+        disposed_rows = 0
+        at_page_cap = False
         if balance_contract:
             for b in balances_by_cid.get(balance_contract.id, []):
                 usd = float(b.usd_value) if b.usd_value is not None else None
                 if usd is None:
                     unvalued_rows += 1
+                if getattr(_fetch_for(b), "asset_set_status", None) == ASSET_SET_STATUS_AT_PAGE_CAP:
+                    # WEAKEST WINS across the rows: one contributing fetch that was
+                    # cut off means this list may be missing entries, whatever the
+                    # others recorded.
+                    at_page_cap = True
+                account = _delivery_account(b)
+                token = (b.token_address or "").lower()
+                fact = delivery_facts.get((*account, token)) if account and token else None
+                delivery_shape = fact.shape if fact is not None else DELIVERY_SHAPE_NOT_DETERMINED
+                reference_shape = (
+                    reference_shapes.get(
+                        (balance_contract.protocol_id, account[0], token), TOKEN_REFERENCE_NOT_DETERMINED
+                    )
+                    if account and token and balance_contract.protocol_id is not None
+                    else TOKEN_REFERENCE_NOT_DETERMINED
+                )
+                if delivery_shape == DELIVERY_SHAPE_FAN_OUT_ALL:
+                    airdrop_delivered_rows += 1
+                # The DISPOSITION, which is the delivery shape AND the universe verdict
+                # AND the reading being unpriced — never the delivery shape alone. The
+                # two counts are published side by side because they answer different
+                # questions: how many rows arrived in a batch, and how many rows that
+                # is enough to stop presenting as a position.
+                #
+                # THIS PAGE AND THE SCORE DIVERGE BY DESIGN, and the gap is not a
+                # defect: ``disposed_from_holdings`` disposes only an UNPRICED reading,
+                # while the scorer's arm
+                # (``services.scoring.planes._resolve_asset_disposition``) also disposes
+                # a ``priced_below_resolution`` one — so presentation is WEAKER and
+                # spares 30 rows here that the score has already stopped counting,
+                # never the reverse. Showing a holding the score dropped is the safe
+                # direction; hiding one it still counts is not. Both rules are stated
+                # in full on ``disposed_from_holdings``.
+                disposed = disposed_from_holdings(
+                    delivery_shape=delivery_shape, reference_shape=reference_shape, usd_value=usd
+                )
+                if disposed:
+                    disposed_rows += 1
                 balances_list.append(
                     {
                         "token_symbol": b.token_symbol,
@@ -1496,27 +1615,82 @@ def build_governance_view(
                         # two), so a consumer reading this column directly reads
                         # them as worthless. Read ``usd_value`` / ``usd_value_state``.
                         "price_usd": float(b.price_usd) if b.price_usd is not None else None,
+                        # How this balance ARRIVED, one of
+                        # ``utils.balance_status.DELIVERY_SHAPES``. A claim about
+                        # DELIVERY and never about worth: two demonstrably real
+                        # tokens on this corpus are airdrop-delivered (uniETH at
+                        # fan-out 101, HEX at 199/399/399), so ``fan_out_all`` says
+                        # every delivery on record was a mass distribution and says
+                        # nothing at all about what the holding is worth.
+                        #
+                        # The row is PUBLISHED under every shape, and this shape ALONE
+                        # withholds nothing: HEX, WETH and base USDC are all
+                        # airdrop-delivered on this corpus and all real holdings. The
+                        # withholding predicate is ``disposition_state`` below.
+                        "delivery_shape": delivery_shape,
+                        # The evidence row's own basis string, carried verbatim so a
+                        # consumer quoting the scope quotes the carrier. ``None``
+                        # where no evidence row exists, which is what
+                        # ``not_determined`` means here.
+                        "delivery_shape_basis": (fact.basis if fact is not None else None),
+                        # Whether this token was found in the protocol's own discovered
+                        # universe, one of ``utils.balance_status.TOKEN_REFERENCE_SHAPES``,
+                        # read off the last verdict the producer measured. A pair with
+                        # no stored row is ``not_determined`` and therefore stays a
+                        # presented holding.
+                        "reference_shape": reference_shape,
+                        # The published verdict, so no consumer has to re-derive the
+                        # conjunction (and get it wrong): ``disposed`` only where all
+                        # three conjuncts hold, ``presented`` otherwise. The row is
+                        # here either way — a disposed row is withheld from the
+                        # holdings CLAIM, never from the record.
+                        "disposition_state": ("disposed" if disposed else "presented"),
                     }
                 )
+                # Delivery shape does NOT gate this sum. A priced holding is a real
+                # dollar figure whatever the shape of its arrival, and dropping one
+                # here would publish a total lower than the money that was measured.
+                # It costs nothing on today's data — every ``fan_out_all`` reading in
+                # the census is unpriced and already contributes $0 — but the reason
+                # it is not gated is the invariant, not the coincidence.
                 if usd:
                     total_usd += usd
         # Whether this contract's holdings list is the whole set. There is no
-        # ``complete`` member ON PURPOSE: the Etherscan holdings fetch returns ONE
-        # page capped at ``TOKEN_BALANCE_PAGE_SIZE`` and neither writer persists
-        # the raw page length, so nothing here can prove a short list was not a
-        # truncated one (the loop that stores rows drops zero-balance entries, so
-        # a full page can store fewer than the cap). At-the-cap is therefore the
-        # only positive statement available — ``token_balances_may_be_truncated``'s
-        # own one-directional contract — and the other arm is not-determined,
-        # never "whole".
+        # ``complete`` member ON PURPOSE, and the witness is the FETCH's recorded
+        # ``asset_set_status``, never a length. The fetch pages the endpoint to
+        # exhaustion and the stored list routinely exceeds
+        # ``TOKEN_BALANCE_PAGE_SIZE`` without having been cut off at all, so
+        # comparing its length to the cap read a complete list as a truncated one.
+        # ``at_page_cap`` is the producer's own statement that what it stored is a
+        # prefix, and it is the only positive statement available — the other arm is
+        # not-determined, never "whole".
         holdings_coverage = {
             "rows": len(balances_list),
             "page_cap": TOKEN_BALANCE_PAGE_SIZE,
-            "state": ("may_be_incomplete" if token_balances_may_be_truncated(len(balances_list)) else "not_determined"),
+            "state": ("may_be_incomplete" if at_page_cap else "not_determined"),
             # Rows inside the stored set whose USD value was never determined.
             # ``total_usd`` skips them, so any non-zero total is a lower bound
             # whenever this is non-zero — independently of truncation.
             "unvalued_rows": unvalued_rows,
+            # Rows every recorded delivery of which was a mass distribution. A NAMED
+            # count, published as a zero when there are none. It is a DELIVERY count
+            # and not an exclusion count — the two differ by every real token the
+            # protocol was airdropped, which on this corpus is 39 rows of HEX, WETH
+            # and base USDC.
+            "airdrop_delivered_rows": airdrop_delivered_rows,
+            # Rows actually withheld from the holdings claim: airdrop-delivered AND
+            # absent from the protocol's own universe AND unpriced. Always
+            # ``<= airdrop_delivered_rows``. Published so a consumer reads the
+            # exclusion off the payload instead of inferring it from rows that are
+            # present but not presented.
+            "disposed_rows": disposed_rows,
+            "delivery_shape_reading": (
+                "delivery_shape states how a balance ARRIVED and never what it is worth, and it "
+                "withholds nothing on its own — real tokens are airdropped too (HEX, WETH, USDC "
+                "on this corpus). A row is withheld from the holdings claim only when it is "
+                "fan_out_all AND absent from the protocol's discovered universe AND unpriced; "
+                "read disposition_state per row. Withheld rows are kept and labelled, never removed"
+            ),
         }
 
         entry: dict[str, Any] = {

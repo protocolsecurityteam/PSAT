@@ -299,4 +299,94 @@ NO_SELECTOR = ""
 # boundary is the version stamp and nothing else: readers join on
 # model_version, which is why the settlement is recorded here and republished
 # on the migration record rather than left in a spec.
-MODEL_VERSION = "1.2.0-provisional"
+#
+# 1.3.0: a truncated asset list no longer ADMITS A SHEET CEILING — that arm and
+# no other. The ERC-20 discovery endpoint answers one 100-entry page, so a
+# holder with more assets than that is stored as a PREFIX of its holdings — and
+# 1.2.0 admitted that prefix as a ceiling, because the sheet's state reads
+# ``priced`` whether the list was cut off or not. The plane now carries the
+# at-cap fact per entity (``planes.ValuePlane.asset_set_truncated``, off the
+# latest ``contract_balance_fetches.asset_set_status``) and ``ceiling_for``
+# refuses those sheets under a fifth refusal token, ``asset_list_truncated``,
+# which is closed by paging or a chain-derived sweep rather than by a price
+# lookup.
+#
+# What this bump does NOT close, stated because the version stamp is what a
+# reader joins on: a sheet caps a figure from above at two other sites — the
+# composed-magnitude cap in ``fold._compose`` and the entity-holdings cap in
+# ``fold._entity_contribution``, both a ``min(witness, sheet)`` — and
+# neither consults ``asset_set_truncated``, so a page-capped sheet still trims a
+# composed magnitude on a 1.3.0 document. Live here on
+# base::0x86b5780b606940eb59a062aa85a07959518c0161. Registered as open items in
+# SHEET_OBSERVATION_SPEC.md; extending the guard to those sites is a separate
+# change with its own measured differential.
+# Measured on protocol 1: one live ceiling revoked (the $0.05 row on
+# base::0x6c240dda…), ceiling entities 11 -> 10, signals credited 21 -> 20,
+# refused calls 49 -> 50 (one re-tokenised from unpriced, one new), lambda
+# 71.7053 and exposure_usd $18,059,003.86 UNCHANGED, letter B unchanged. The
+# gradeBands.js obligation above is live for this bump too: it carries a
+# 1.3.0-provisional entry that reasons 1.2.0's cut points forward.
+#
+# The direction is the point and it is ruled, not tolerated: this bump LOWERS a
+# confidence term (see the migration record's invariant-6 exception). Invariant
+# 6 governs earning evidence; un-publishing an at-most that was never earned is
+# outside it.
+#
+# 1.4.0: a sheet may now be DETERMINED at $0 by the DELIVERY SHAPE of what
+# arrived on it. A (entity, asset) reading is disposed only where every one of
+# five conjuncts holds: the protocol's discovered address universe was assembled
+# at all (unset ⇒ nothing is disposed anywhere), the asset is not the native
+# coin, the reading is unpriced or below the storage column's resolution (a
+# PRICED reading is never disposed), the token address is absent from that
+# universe tested CHAIN-BLIND, and EVERY observed account contributing to the
+# reading carries stored delivery evidence whose every incoming delivery arrived
+# in a transaction carrying at least K = 25 same-token transfer LOGS. The log
+# count is the meter K is calibrated in, and it is an upper bound on that
+# transaction's distinct recipients rather than a count of them. Such a sheet
+# answers a sixth state (``airdrop_determined``, distinct from ``proven_empty``
+# — "what arrived arrived as a mass distribution" is not "nothing ever arrived")
+# and an eighth ``ceiling_for`` reason of the same name, in the ADMITTING set.
+#
+# WHAT IT CLAIMS IS DELIVERY SHAPE AND NEVER WORTH, and that is load-bearing
+# rather than decorative: this corpus carries a class of FIVE demonstrably real
+# tokens with this delivery shape. The protocol-reference conjunct spares three
+# — HEX (fan-out census 199 ×13, 399 ×14, 400 ×1, 500 ×6), WETH and base USDC —
+# and condemns two, which are IN the state: uniETH (one delivery, 101) and USDtb
+# (one delivery, 175). No consumer may rename any of it spam, scam or worthless:
+# under any such name the published claim would be false of all five.
+#
+# What this bump does NOT close, stated because the version stamp is what a
+# reader joins on:
+#   * the protocol-reference conjunct is INERT ON BASE — it condemns 1,175 of
+#     1,175 base unpriced tokens, so it partitions nothing there and delivery
+#     shape carries the claim alone over 1,745 readings; its precision on base
+#     is not_determined at n=6.
+#   * the asset list a disposition covers is NOT proven whole. The gate refuses
+#     only a list read AT the page cap (D1 parity), so the determination is over
+#     the readings observed and never over the holdings. That is exactly why the
+#     state is BARRED from the two min(witness, sheet) trim sites — the disposed
+#     assets are still held, and trimming a witnessed magnitude to $0 there
+#     would publish a false zero — and why a disposition alone does not earn
+#     asset-set coverage completeness.
+#   * the rule is ANTI-MONOTONE in discovery (see the migration record's
+#     invariant-6 exception): growing the universe withdraws determinations,
+#     which is the safe direction, but this document is NOT stable across
+#     discovery growth. TWO of the three spared real tokens hang on a single
+#     row each — HEX on one ``effect_verdicts`` row, and base USDC on
+#     ``dapp_interactions`` ALONE — so each is one discovery change away from
+#     being condemned.
+# Measured on protocol 1 at this bump, against a live one-shot that ran before
+# it shipped: 1,973 readings over 1,264 tokens carry delivery evidence and are
+# disposed, 13 sheets are determined by it (sheet_states unpriced 19 → 8,
+# priced_below_resolution 19 → 17, airdrop_determined 13), one of those sheets
+# publishes a ceiling under the new reason, entities_priced_from_a_sheet_ceiling
+# 24 → 25 and signals_credited_in_confidence 46 → 47. A further 484 disposed
+# readings are REFUSED their sheet's determination because one folded account of
+# the sheet was never scanned — a named, closable gap. Confidence is the one
+# published figure that moved: confidence_pct 42.5 → 43.2 on value_priced_pct
+# 42.5 → 45.0 and reach_magnitude_witnessed_pct 43.1 → 43.2. lambda 71.7053,
+# grade_exposure 99.582, exposure_usd $18,061,300.76,
+# ceiling_usd_over_distinct_entities $4,218,743,833.16 and letter B are
+# byte-unchanged. The gradeBands.js obligation is live for this bump too: it
+# carries a 1.4.0-provisional entry reasoning 1.3.0's cut points forward.
+MODEL_VERSION = "1.4.0-provisional"

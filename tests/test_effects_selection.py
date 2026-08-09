@@ -25,6 +25,7 @@ from db.models import (
     Artifact,
     Contract,
     ContractBalance,
+    ContractBalanceFetch,
     ControlGraphEdge,
     EffectiveFunction,
     EffectsPlanMarker,
@@ -45,6 +46,11 @@ from services.effects.selection import (
     select_candidates,
 )
 from tests.conftest import ADDR, requires_postgres
+from utils.balance_status import (
+    ASSET_SET_STATUS_AT_PAGE_CAP,
+    ASSET_SET_STATUS_RETURNED_ASSETS,
+    BALANCE_WRITER_TVL,
+)
 
 pytestmark = requires_postgres
 
@@ -134,9 +140,20 @@ def _balance(
     )
 
 
-def _token_balance(session: Session, contract_id: int, token: str | None, usd: float | Decimal | str | None) -> None:
+def _token_balance(
+    session: Session,
+    contract_id: int,
+    token: str | None,
+    usd: float | Decimal | str | None,
+    *,
+    fetch: Any = None,
+) -> None:
     """One ``contract_balances`` row. ``usd=None`` is the UNPRICED shape (the producer
-    writes ``price_usd = 0`` and leaves ``usd_value`` NULL on 1001 of 1376 local rows)."""
+    writes ``price_usd = 0`` and leaves ``usd_value`` NULL on 1001 of 1376 local rows).
+
+    ``fetch`` links the row to a recorded read. Left off, the row is the LEGACY shape
+    (``fetch_id IS NULL``) that predates the fetch-provenance plane and carries no
+    status and no observed address of its own."""
     session.add(
         ContractBalance(
             contract_id=contract_id,
@@ -144,6 +161,8 @@ def _token_balance(session: Session, contract_id: int, token: str | None, usd: f
             raw_balance="1",
             decimals=18,
             usd_value=usd,
+            fetch_id=(fetch.id if fetch is not None else None),
+            observed_address=(fetch.observed_address if fetch is not None else None),
         )
     )
 
@@ -819,22 +838,21 @@ def test_the_tvl_ceiling_reads_defillama_tvl_and_never_total_usd(db_session):
 
 
 @requires_postgres
-def test_holdings_at_the_fetch_page_cap_are_marked_incomplete(db_session):
-    """The holdings fetch takes ONE page, and exactly-at-the-cap cannot be told
-    from truncated — so an at-cap holder is marked ``at_page_cap`` and the reach probe
-    names it as the reason an asset could not be valued instead of quietly skipping it.
+def test_holdings_the_fetch_recorded_at_the_page_cap_are_marked_incomplete(db_session):
+    """The witness is the FETCH's ``asset_set_status``, and nothing else.
 
-    INVERTED: the below-cap arm used to assert ``holdings_complete is True``.
-    A stored-row count cannot establish completeness in that direction — the rows are
-    the fetch's output AFTER its ``raw_balance > 0`` filter, so a FULL page containing
-    any zero-balance entry stores fewer than the cap and read as proven-complete. The
-    below-cap answer is ``not_determined``; there is no ``complete`` state.
+    An at-cap holder is marked ``at_page_cap`` so the reach probe names it as the
+    reason an asset could not be valued instead of quietly skipping it.
 
-    ARMED POPULATION, honestly: ``at_page_cap`` fires on ZERO local holders. The 7
-    local contracts at the cap all have ``protocol_id IS NULL`` and this function
-    filters on ``protocol_id``, so none can enter a holder set; the most token rows any
-    protocol-1 contract carries is 90. Reachable by construction, covered here, 0 of 29
-    holders armed on one protocol/one chain — a lower bound, not an absence."""
+    THE LENGTH ARM IS GONE (§9.5-addendum B.1). The fetch now pages the endpoint to
+    exhaustion, so a stored list longer than ``TOKEN_BALANCE_PAGE_SIZE`` is a routine
+    COMPLETE list; comparing a count to the cap announced every large sheet as
+    possibly incomplete. ``not_determined`` is still the below-cap answer — there is
+    no ``complete`` state — but the long holder here reaches it on the merits.
+
+    ARMED POPULATION, honestly: ``at_page_cap`` fires on ZERO local holders today
+    (U2's de-capping retired every truncated list), so this is reachable by
+    construction and covered here rather than measured on the corpus."""
     from utils.etherscan import TOKEN_BALANCE_PAGE_SIZE
 
     p = _protocol(db_session, "holdings-cap")
@@ -842,9 +860,31 @@ def test_holdings_at_the_fetch_page_cap_are_marked_incomplete(db_session):
     whole = _contract(db_session, p.id, ADDR(0x9601))
     _fn(db_session, capped.id, name="a", selector="0x96000001", effect_targets=["S"])
     _fn(db_session, whole.id, name="b", selector="0x96000002", effect_targets=["S"])
-    for n in range(TOKEN_BALANCE_PAGE_SIZE):
-        _token_balance(db_session, capped.id, ADDR(0x970000 + n), 1.0)
-    _token_balance(db_session, whole.id, ADDR(0x98A1), 1.0)
+    capped_fetch = ContractBalanceFetch(
+        contract_id=capped.id,
+        chain_id=1,
+        observed_address=capped.address,
+        native_status="not_determined",
+        asset_set_status=ASSET_SET_STATUS_AT_PAGE_CAP,
+        writer=BALANCE_WRITER_TVL,
+    )
+    whole_fetch = ContractBalanceFetch(
+        contract_id=whole.id,
+        chain_id=1,
+        observed_address=whole.address,
+        native_status="not_determined",
+        asset_set_status=ASSET_SET_STATUS_RETURNED_ASSETS,
+        asset_page_length=TOKEN_BALANCE_PAGE_SIZE + 5,
+        writer=BALANCE_WRITER_TVL,
+    )
+    db_session.add_all([capped_fetch, whole_fetch])
+    db_session.flush()
+    # The capped holder stores THREE rows and is still a prefix; the whole holder
+    # stores more than a page and is still not a prefix. Neither fact is a count.
+    for n in range(3):
+        _token_balance(db_session, capped.id, ADDR(0x970000 + n), 1.0, fetch=capped_fetch)
+    for n in range(TOKEN_BALANCE_PAGE_SIZE + 5):
+        _token_balance(db_session, whole.id, ADDR(0x980000 + n), 1.0, fetch=whole_fetch)
     db_session.commit()
 
     by_holder = {}
@@ -2156,8 +2196,11 @@ def test_the_page_cap_signal_is_read_off_the_response_not_the_filtered_rows(monk
     rows = etherscan.get_token_balances("0x" + "ab" * 20, 1)
 
     assert len(rows) == cap - 1, "the zero-balance entry is still filtered out of the stored rows"
-    assert any("FULL page" in w for w in warnings), "a full page went unreported because the filter shrank the list"
-    assert any(f"({cap} entries, {cap - 1} with a balance)" in w for w in warnings)
+    # The stub re-serves page 1 for every request, so paging cannot reach a short
+    # page and the list stays a declared PREFIX — which is the same fail-closed
+    # answer a full first page always produced, reported in the paged wording.
+    assert any("PREFIX" in w for w in warnings), "a full page went unreported because the filter shrank the list"
+    assert any(f"({cap} entries over 2 page(s), {cap - 1} with a balance)" in w for w in warnings)
     # NEGATIVE CONTROL: a genuinely short page reports nothing.
     monkeypatch.setattr(etherscan, "get", lambda *a, **k: {"result": page[:3]})
     warnings.clear()

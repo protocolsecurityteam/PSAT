@@ -73,7 +73,7 @@ describe("ScoreBand — computed grade", () => {
     const { container } = renderBand({ score: ETHERFI });
     expect(screen.getByText("B")).toBeInTheDocument();
     expect(screen.getByText("71.7")).toBeInTheDocument();
-    expect(screen.getByText(/provisional · confidence 18.6%/)).toBeInTheDocument();
+    expect(screen.getByText(/provisional · confidence 43.2%/)).toBeInTheDocument();
     expect(screen.getByText("71.7 kept")).toBeInTheDocument();
     expect(screen.getByText("99.6")).toBeInTheDocument();
     expect(screen.getByText("+55 subsumed")).toBeInTheDocument();
@@ -99,9 +99,103 @@ describe("ScoreBand — computed grade", () => {
     expect(container.querySelectorAll(".sc-frow")).toHaveLength(8);
     const tail = screen.getByRole("button", { name: /19 more/ });
     expect(tail.textContent).toContain("−0.19 combined");
-    expect(tail.textContent).toContain("16 with value not determined");
+    // 15, one fewer than at 1.3.0: the disposition run determined a further
+    // sheet at $0 by delivery shape, so the row that reached it now carries a
+    // banded figure instead of an unanswered value. The count tracks the
+    // document rather than a pinned constant.
+    expect(tail.textContent).toContain("15 with value not determined");
     await userEvent.setup().click(tail);
     expect(container.querySelectorAll(".sc-frow")).toHaveLength(27);
+  });
+
+  it("renders a disposed sheet as $0 WITH its delivery-shape reason, never as a bare zero", async () => {
+    // 1.4.0. A sheet whose remaining holdings all arrived by mass distribution
+    // publishes a $0 ceiling. A bare $0 in this cell reads as "this reaches
+    // nothing" — a different claim, and one nobody proved — so the figure is
+    // rendered with its reason attached, and the reason is about DELIVERY.
+    const disposed = {
+      ...ETHERFI,
+      findings: ETHERFI.findings.map((f, i) =>
+        i === 0
+          ? {
+              ...f,
+              reach_sheet_ceiling_magnitudes: [
+                {
+                  entity: "ethereum::0x1b7a4c37c5b2b0b3b0d0f0a0b0c0d0e0f0a0b0c0",
+                  published_usd: 0,
+                  sheet_usd: 0,
+                  sheet_state: "airdrop_determined",
+                  ceiling_reason: "airdrop_determined",
+                  bound_direction: "ceiling",
+                },
+              ],
+            }
+          : f,
+      ),
+    };
+    const { container } = renderBand({ score: disposed });
+    await openBreakdown();
+    const cells = [...container.querySelectorAll(".sc-val")];
+    const badge = cells.map((c) => within(c).queryByText(/airdrop-delivered/i)).find(Boolean);
+    expect(badge).toBeTruthy();
+    expect(badge.textContent).toContain("$0");
+    expect(badge.getAttribute("title")).toMatch(/mass distribution/i);
+    // Never a claim about worth: real tokens arrive this way too.
+    for (const word of [/spam/i, /scam/i, /junk/i, /worthless/i]) {
+      expect(badge.getAttribute("title")).not.toMatch(word);
+    }
+    // And the badge is never blank — an unlabelled zero is the shape this
+    // replaces.
+    expect(badge.textContent.trim()).not.toBe("");
+  });
+
+  it("renders the disposition the shipped document actually carries, on that row alone", async () => {
+    // The 1.3.0 negative control ("nothing disposes, so no row may grow a
+    // badge") is stale: the shipped 1.4.0 document determines 13 sheets and
+    // exactly ONE of them publishes a ceiling under `airdrop_determined`. So the
+    // claim worth pinning is the positive — the page renders the state the
+    // document carries — and the negative that still has teeth is every other
+    // row, whose document names no disposition and must therefore show none.
+    const carriers = ETHERFI.findings
+      .map((f, i) => [
+        i,
+        (f.reach_sheet_ceiling_magnitudes || []).filter(
+          (m) => m?.ceiling_reason === "airdrop_determined" || m?.sheet_state === "airdrop_determined",
+        ),
+      ])
+      .filter(([, records]) => records.length > 0);
+    expect(carriers).toHaveLength(1);
+    const [carrierIndex] = carriers[0];
+
+    const { container } = renderBand({ score: ETHERFI });
+    await openBreakdown();
+    // The carrier sits in the tail, so the badge is only reachable once the
+    // summary is expanded — which is itself part of the claim.
+    await userEvent.setup().click(screen.getByRole("button", { name: /19 more/ }));
+    const cells = [...container.querySelectorAll(".sc-val")];
+    expect(cells).toHaveLength(ETHERFI.findings.length);
+    const badges = cells.map((c) =>
+      [...c.querySelectorAll(".sc-fl")].find((b) => /airdrop-delivered/i.test(b.textContent)),
+    );
+    // POSITIVE: the one row the document names, and it is that row.
+    expect(badges.filter(Boolean)).toHaveLength(1);
+    expect(badges.findIndex(Boolean)).toBe(carrierIndex);
+    const badge = badges[carrierIndex];
+    expect(badge.getAttribute("title")).toMatch(/mass distribution/i);
+    // Never a claim about worth: real tokens arrive this way too.
+    for (const word of [/spam/i, /scam/i, /junk/i, /worthless/i]) {
+      expect(badge.getAttribute("title")).not.toMatch(word);
+    }
+    // NEGATIVE, and still a real one: a row with no disposition in the document
+    // grows no badge, so the badge tracks published state rather than appearing
+    // wherever a value happens to be small or missing.
+    for (const [i, cell] of cells.entries()) {
+      if (i === carrierIndex) continue;
+      expect(ETHERFI.findings[i].reach_sheet_ceiling_magnitudes || []).not.toContainEqual(
+        expect.objectContaining({ ceiling_reason: "airdrop_determined" }),
+      );
+      expect(cell.textContent).not.toMatch(/airdrop/i);
+    }
   });
 
   it("tags a bound the producer proved and italicises an undetermined one — never $0", async () => {
@@ -117,7 +211,10 @@ describe("ScoreBand — computed grade", () => {
     const priced = cells.find((c) => c.textContent.startsWith("$1M-$10M"));
     expect(within(priced).getByText("bound not determined")).toBeInTheDocument();
     const nd = cells.filter((c) => c.querySelector(".sc-nd"));
-    expect(nd).toHaveLength(19);
+    // 18, down one with the tail summary above: an airdrop-determined sheet
+    // answers "how much" with a determined $0, exactly as a proven-empty one
+    // does, and a determined value is not a blank.
+    expect(nd).toHaveLength(18);
     expect(nd[0].textContent).toBe("value not determined");
     expect(cells.some((c) => c.textContent.trim() === "$0")).toBe(false);
   });
@@ -201,9 +298,9 @@ describe("ScoreBand — computed grade", () => {
     const saved = [...container.querySelectorAll(".sc-prot-saved")].map((n) => n.textContent);
     expect(saved).toEqual(["+48.6", "+27.3", "+17.8", "+17.8"]);
     expect(screen.getByText("64 reports on file")).toBeInTheDocument();
-    expect(screen.getByText(/12 witnessed upgrades bypassed this timelock/)).toBeInTheDocument();
+    expect(screen.getByText(/14 witnessed upgrades bypassed this timelock/)).toBeInTheDocument();
     const byContract = screen.getByText(/contracts matched to an audit/);
-    expect(byContract.textContent).toContain("57 / 234");
+    expect(byContract.textContent).toContain("57 / 236");
     expect(byContract.textContent).toContain("35");
   });
 
@@ -238,12 +335,15 @@ describe("ScoreBand — computed grade", () => {
     await openBreakdown();
     const channels = [...container.querySelectorAll(".sc-channel")];
     // Four terms, all four measured on this document; the tag follows whichever
-    // is actually lowest rather than the one that happened to be first.
+    // is actually lowest rather than the one that happened to be first. On this
+    // document that is the FOURTH channel — the disposition run lifted
+    // value_priced_pct off the floor to 45.0 and the reach magnitude term at
+    // 43.2 became the minimum, so the tag moved with the data.
     expect(channels).toHaveLength(4);
     expect(channels[0].querySelector(".sc-hd")).toBeNull();
     expect(channels[1].querySelector(".sc-hd")).toBeNull();
-    expect(channels[2].querySelector(".sc-hd").textContent).toBe("min");
-    expect(channels[3].querySelector(".sc-hd")).toBeNull();
+    expect(channels[2].querySelector(".sc-hd")).toBeNull();
+    expect(channels[3].querySelector(".sc-hd").textContent).toBe("min");
     expect(screen.getByText(/it measures how much of the protocol the grade is built on/)).toBeInTheDocument();
   });
 

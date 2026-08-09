@@ -24,6 +24,9 @@ import {
   safeShape,
   timelockProposer,
   undeterminedTargets,
+  ceilingReasonLabel,
+  sheetDisposition,
+  sheetStateLabel,
   upgradeBypassCount,
   valueCell,
 } from "./derive.js";
@@ -87,6 +90,18 @@ describe("derive — value cell", () => {
     );
     expect(published.size).toBeGreaterThan(0);
     for (const direction of published) expect(BOUND_DIRECTIONS).toContain(direction);
+    // "ceiling" is no longer a token only a constructed row can carry: the
+    // chain-log sweep proved sheets empty, and a row every one of whose
+    // contributing entities is a proven $0 with no coverage gap publishes it.
+    // The uncalibrated-arm register was updated to match, so this asserts the
+    // corpus side of that removal.
+    expect(published.has("ceiling")).toBe(true);
+    const carrier = [...ETHERFI.findings, ...(ETHERFI.provenance?.subsumed_rows || [])].find(
+      (f) => f.value_at_stake_bound_direction === "ceiling",
+    );
+    // And it reaches the cell as a real badge rather than being nulled away.
+    expect(valueCell(carrier).direction).toBe("ceiling");
+    expect(valueCell(carrier).determined).toBe(true);
   });
 
   it("reads a ceiling and a two-sided unknown as their own directions, never as a floor", () => {
@@ -456,10 +471,12 @@ describe("derive — cautions", () => {
   });
 
   it("counts the upgrades that went round a timelock", () => {
-    expect(upgradeBypassCount(ETHERFI)).toBe(12);
+    // 14, not 12: the producer's protocol_id backfill gave two code-bearing
+    // contracts a protocol, so their upgrade witnesses are distilled now.
+    expect(upgradeBypassCount(ETHERFI)).toBe(14);
     const cautions = cautionsFor(ETHERFI, F[4]);
     expect(cautions.map((c) => c.text)).toContain(
-      "12 witnessed upgrades bypassed this timelock (executed directly by a Safe)",
+      "14 witnessed upgrades bypassed this timelock (executed directly by a Safe)",
     );
   });
 
@@ -490,10 +507,12 @@ describe("derive — audit posture", () => {
     expect(posture.reportsOnFile).toBe(64);
     expect(posture.contractsCovered).toBe(57);
     expect(posture.contractsProven).toBe(35);
-    expect(posture.contractsTotal).toBe(234);
-    expect(posture.trackedTotalUsd).toBe(4323839515.29);
-    expect(posture.valueProvenPct).toBeCloseTo(97.49, 2);
-    expect(posture.contractProvenPct).toBeCloseTo(14.96, 2);
+    // 236: the same two contracts the backfill admitted.
+    expect(posture.contractsTotal).toBe(236);
+    // Price drift on re-observed contracts between the two folds; no rule moved.
+    expect(posture.trackedTotalUsd).toBe(4322770988.76);
+    expect(posture.valueProvenPct).toBeCloseTo(97.52, 2);
+    expect(posture.contractProvenPct).toBeCloseTo(14.83, 2);
     expect(posture.provablyDiffers).toBe(13);
   });
 
@@ -527,8 +546,15 @@ describe("derive — audit posture", () => {
 describe("derive — confidence", () => {
   it("tags whichever channel actually is the minimum", () => {
     const channels = confidenceChannels(ETHERFI);
-    expect(channels.map((c) => c.pct)).toEqual([45, 59.1, 18.6, 40.9]);
-    expect(channels.filter((c) => c.isMin).map((c) => c.id)).toEqual(["value_priced_pct"]);
+    // Read off the page after the disposition run: value_priced_pct is no
+    // longer the floor at all — it climbed to 45.0 while the magnitude term
+    // moved only to 43.2, so the minimum CHANGED CHANNEL and the tag moved
+    // with it. That the tag follows the data rather than a pinned channel is
+    // the property under test.
+    expect(channels.map((c) => c.pct)).toEqual([45.4, 59.6, 45, 43.2]);
+    expect(channels.filter((c) => c.isMin).map((c) => c.id)).toEqual([
+      "reach_magnitude_witnessed_pct",
+    ]);
   });
 
   it("moves the tag when a different channel is lowest", () => {
@@ -550,5 +576,101 @@ describe("derive — confidence", () => {
     });
     expect(channels[1].pct).toBeNull();
     expect(channels.filter((c) => c.isMin).map((c) => c.id)).toEqual(["capability_scored_pct"]);
+  });
+});
+
+describe("derive — sheet disposition (1.4.0 airdrop_determined)", () => {
+  const disposedFinding = (over = {}) => ({
+    ...F[0],
+    reach_sheet_ceiling_magnitudes: [
+      {
+        entity: "ethereum::0x1b7a4c37c5b2b0b3b0d0f0a0b0c0d0e0f0a0b0c0",
+        published_usd: 0,
+        sheet_usd: 0,
+        sheet_state: "airdrop_determined",
+        ceiling_reason: "airdrop_determined",
+        bound_direction: "ceiling",
+      },
+    ],
+    ...over,
+  });
+
+  it("labels the new sheet state and ceiling reason rather than dropping them", () => {
+    // The label tables are NOT allow-lists: a token the page cannot name is
+    // still a token the document published, so the fall-through is the raw
+    // token and never a blank.
+    expect(sheetStateLabel("airdrop_determined")).toBe("airdrop-delivered");
+    expect(ceilingReasonLabel("airdrop_determined")).toBe("airdrop-delivered");
+    expect(sheetStateLabel("some_future_state")).toBe("some_future_state");
+    expect(ceilingReasonLabel("some_future_reason")).toBe("some_future_reason");
+    expect(sheetStateLabel(null)).toBeNull();
+  });
+
+  it("carries the disposed figure WITH its reason, so $0 is never bare", () => {
+    const d = sheetDisposition(disposedFinding());
+    expect(d.count).toBe(1);
+    expect(d.usd).toBe(0);
+    expect(d.usdText).toBe("$0");
+    expect(d.label).toBe("airdrop-delivered");
+    // The SUBSTANCE of the sentence, not just that it mentions a distribution.
+    // The superseded note said these holdings are "not presented as positions
+    // this protocol holds", which describes what the page does and lets a
+    // reader assume the $0 covers them. It does not, and the two clauses that
+    // say so are the ones worth pinning: the holdings are still held, and this
+    // document does not value them.
+    expect(d.reason).toMatch(/STILL HELD/);
+    expect(d.reason).toMatch(/not_determined/);
+    expect(d.reason).toMatch(/PRICES/);
+    expect(d.reason).toMatch(/mass distribution/i);
+    // And it must NOT revert to describing the page's own behaviour.
+    expect(d.reason).not.toMatch(/not presented as positions/i);
+    // A DELIVERY claim. Real tokens arrive this way, so none of these words may
+    // appear beside the figure.
+    for (const word of [/spam/i, /scam/i, /junk/i, /worthless/i]) {
+      expect(d.reason).not.toMatch(word);
+    }
+  });
+
+  it("publishes no number rather than another zero when the document withheld one", () => {
+    const d = sheetDisposition(
+      disposedFinding({
+        reach_sheet_ceiling_magnitudes: [
+          { entity: "ethereum::0xabc", published_usd: null, sheet_state: "airdrop_determined" },
+        ],
+      }),
+    );
+    expect(d.usd).toBeNull();
+    expect(d.usdText).toBeNull();
+  });
+
+  it("reads the shipped document's own disposed rows and no others", () => {
+    // The golden now CARRIES the state: the live run determined 13 sheets, and
+    // exactly one of them reaches a finding row. Every other row must still
+    // answer null — a badge on a row whose sheet nobody disposed would be a
+    // state invented by the page.
+    const disposed = F.filter((finding) => sheetDisposition(finding) !== null);
+    expect(disposed.length).toBe(1);
+    const d = sheetDisposition(disposed[0]);
+    expect(d.label).toBe("airdrop-delivered");
+    expect(d.usdText).toBe("$0");
+  });
+
+  it("reaches the deduction row so the cell can render it", () => {
+    const doc = { findings: F.map((f, i) => (i === 0 ? disposedFinding() : f)) };
+    const rows = deductionRows(doc, buildContractIndex([]));
+    const row = rows.find((r) => r.index === 0);
+    expect(row.sheetDisposition.usdText).toBe("$0");
+    // The constructed row PLUS the one the shipped document already carries:
+    // the substitution above replaces findings[0], and the golden's own
+    // disposed row is a different finding, so both must reach a cell.
+    expect(rows.filter((r) => r.sheetDisposition).length).toBe(2);
+  });
+
+  it("leaves BOUND_DIRECTIONS alone — the disposition is not a direction", () => {
+    // The bound direction of a disposed sheet ceiling is still `ceiling`; the
+    // new token belongs to the state/reason vocabularies and must not be smuggled
+    // into the direction allow-list, where it would render as a bound nobody proved.
+    expect(BOUND_DIRECTIONS).toEqual(["floor", "ceiling", "not_determined"]);
+    expect(valueCell({ value_band: "<$100k", value_at_stake_bound_direction: "airdrop_determined" }).direction).toBeNull();
   });
 });

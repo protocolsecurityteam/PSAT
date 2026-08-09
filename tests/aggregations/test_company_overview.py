@@ -21,6 +21,7 @@ from sqlalchemy import select  # noqa: E402
 from db.models import (  # noqa: E402
     Contract,
     ContractBalance,
+    ContractBalanceFetch,
     ContractSummary,
     ControlGraphEdge,
     ControlGraphNode,
@@ -32,6 +33,8 @@ from db.models import (  # noqa: E402
     JobStatus,
     PrincipalLabel,
     Protocol,
+    TokenDeliveryEvidence,
+    TokenProtocolReference,
     UpgradeEvent,
 )
 from services.aggregations.company_overview import (  # noqa: E402
@@ -48,6 +51,17 @@ from services.aggregations.company_overview import (  # noqa: E402
     resolve_implementation_contracts,
 )
 from tests.conftest import requires_postgres  # noqa: E402
+from utils.balance_status import (  # noqa: E402
+    ASSET_SET_STATUS_AT_PAGE_CAP,
+    ASSET_SET_STATUS_RETURNED_ASSETS,
+    BALANCE_WRITER_TVL,
+    DELIVERY_SHAPE_FAN_OUT_ALL,
+    DELIVERY_SHAPE_HAS_DIRECT_DELIVERY,
+    DELIVERY_SHAPE_NOT_DETERMINED,
+    TOKEN_REFERENCE_ABSENT_FROM_UNIVERSE,
+    TOKEN_REFERENCE_IN_UNIVERSE,
+    TOKEN_REFERENCE_NOT_DETERMINED,
+)
 
 pytestmark = requires_postgres
 
@@ -2308,19 +2322,32 @@ def test_balance_payload_splits_unpriced_from_a_measured_zero(db_session):
     assert entry["total_usd"] == 5000.0
 
 
-def test_holdings_at_the_page_cap_are_flagged_as_possibly_incomplete(db_session):
-    """POSITIVE CONTROL for the coverage state: 7 local contracts sit exactly at
-    the 100-row cap (one holding $8.6B) and nothing could say so."""
-    from utils.etherscan import TOKEN_BALANCE_PAGE_SIZE
+def test_holdings_the_fetch_recorded_at_the_page_cap_are_flagged_as_possibly_incomplete(db_session):
+    """POSITIVE CONTROL for the coverage state.
 
+    The witness is the FETCH's ``asset_set_status``, not a row count: this list is
+    three rows long and is still a prefix, because the fetch that produced it says
+    the endpoint cut it off.
+    """
     p = _add_protocol(db_session, f"e2e-cap-{uuid.uuid4().hex[:8]}")
     addr = _addr("cap1")
     job = _add_job(db_session, address=addr, protocol_id=p.id, name="Whale")
     c = _add_contract(db_session, address=addr, job=job, protocol_id=p.id, contract_name="Whale")
+    fetch = ContractBalanceFetch(
+        contract_id=c.id,
+        chain_id=1,
+        observed_address=addr,
+        native_status="not_determined",
+        writer=BALANCE_WRITER_TVL,
+        asset_set_status=ASSET_SET_STATUS_AT_PAGE_CAP,
+    )
+    db_session.add(fetch)
+    db_session.flush()
     db_session.add_all(
         [
             ContractBalance(
                 contract_id=c.id,
+                fetch_id=fetch.id,
                 token_address=_addr(f"cap{i}"),
                 token_symbol=f"T{i}",
                 decimals=18,
@@ -2328,15 +2355,282 @@ def test_holdings_at_the_page_cap_are_flagged_as_possibly_incomplete(db_session)
                 usd_value=100,
                 price_usd=100,
             )
-            for i in range(TOKEN_BALANCE_PAGE_SIZE)
+            for i in range(3)
         ]
     )
     db_session.commit()
 
     payload = build_company_overview(db_session, p.name)
     entry = next(e for e in payload["contracts"] if e["address"] == addr)
-    assert entry["holdings_coverage"]["rows"] == TOKEN_BALANCE_PAGE_SIZE
+    assert entry["holdings_coverage"]["rows"] == 3
     assert entry["holdings_coverage"]["state"] == "may_be_incomplete"
+
+
+def test_a_long_list_the_fetch_paged_to_exhaustion_is_not_read_as_truncated(db_session):
+    """§9.5-addendum B.1. A de-capped list is longer than the page size and WHOLE.
+
+    Before the migration onto ``asset_set_status`` this compared the rendered list's
+    LENGTH to ``TOKEN_BALANCE_PAGE_SIZE``, so paging the endpoint to exhaustion made
+    every large sheet announce itself as possibly incomplete. ``not_determined`` is
+    still the answer — there is no ``complete`` member — but it is now the honest one
+    rather than a false positive.
+    """
+    from utils.etherscan import TOKEN_BALANCE_PAGE_SIZE
+
+    p = _add_protocol(db_session, f"e2e-decap-{uuid.uuid4().hex[:8]}")
+    addr = _addr("decap1")
+    job = _add_job(db_session, address=addr, protocol_id=p.id, name="Wide")
+    c = _add_contract(db_session, address=addr, job=job, protocol_id=p.id, contract_name="Wide")
+    rows = TOKEN_BALANCE_PAGE_SIZE + 7
+    fetch = ContractBalanceFetch(
+        contract_id=c.id,
+        chain_id=1,
+        observed_address=addr,
+        native_status="not_determined",
+        writer=BALANCE_WRITER_TVL,
+        asset_set_status=ASSET_SET_STATUS_RETURNED_ASSETS,
+        asset_page_length=rows,
+    )
+    db_session.add(fetch)
+    db_session.flush()
+    db_session.add_all(
+        [
+            ContractBalance(
+                contract_id=c.id,
+                fetch_id=fetch.id,
+                token_address=_addr(f"decap{i}"),
+                token_symbol=f"D{i}",
+                decimals=18,
+                raw_balance="1000000000000000000",
+                usd_value=100,
+                price_usd=100,
+            )
+            for i in range(rows)
+        ]
+    )
+    db_session.commit()
+
+    payload = build_company_overview(db_session, p.name)
+    entry = next(e for e in payload["contracts"] if e["address"] == addr)
+    assert entry["holdings_coverage"]["rows"] == rows
+    assert entry["holdings_coverage"]["state"] == "not_determined"
+
+
+def test_an_airdrop_delivered_row_is_published_labelled_and_not_presented_as_a_holding(db_session):
+    """§10.6.9. The row stays, carries both shapes, and the disposition is counted.
+
+    Four rows on one account: one that meets every disposition conjunct, one with a
+    direct delivery on record, one nobody measured, and one that is airdrop-delivered
+    but named by the protocol's OWN discovery — the HEX / WETH / base USDC shape.
+    Only the first is disposed, and it is disposed by LABEL — never by removal, and
+    never by a claim about what it is worth.
+    """
+    p = _add_protocol(db_session, f"e2e-airdrop-{uuid.uuid4().hex[:8]}")
+    addr = _addr("air1")
+    job = _add_job(db_session, address=addr, protocol_id=p.id, name="Holder")
+    c = _add_contract(db_session, address=addr, job=job, protocol_id=p.id, contract_name="Holder")
+    junk, real, unknown, spared = _addr("airjunk"), _addr("airreal"), _addr("airunk"), _addr("airspared")
+    fetch = ContractBalanceFetch(
+        contract_id=c.id,
+        chain_id=1,
+        observed_address=addr,
+        native_status="not_determined",
+        writer=BALANCE_WRITER_TVL,
+        asset_set_status=ASSET_SET_STATUS_RETURNED_ASSETS,
+    )
+    db_session.add(fetch)
+    db_session.flush()
+    db_session.add_all(
+        [
+            ContractBalance(
+                contract_id=c.id,
+                fetch_id=fetch.id,
+                token_address=token,
+                token_symbol=symbol,
+                decimals=18,
+                raw_balance="1000000000000000000",
+                usd_value=usd,
+                price_usd=usd,
+                observed_address=addr,
+            )
+            for token, symbol, usd in (
+                (junk, "JUNK", None),
+                (real, "REAL", 700),
+                (unknown, "UNK", None),
+                (spared, "SPARED", None),
+            )
+        ]
+    )
+    db_session.add_all(
+        [
+            TokenDeliveryEvidence(
+                chain_id=1,
+                holder_address=addr.lower(),
+                token_address=junk.lower(),
+                scanned_from_block=0,
+                measured_through_block=100,
+                deliveries=[{"tx": "0x01", "log_index": 1, "fan_out": 400, "fan_out_basis": "receipt"}],
+                delivery_count=1,
+                unreadable_deliveries=0,
+                min_fan_out=400,
+                fan_out_threshold_k=25,
+                delivery_shape=DELIVERY_SHAPE_FAN_OUT_ALL,
+                basis="scan 0..100",
+            ),
+            TokenDeliveryEvidence(
+                chain_id=1,
+                holder_address=addr.lower(),
+                token_address=real.lower(),
+                scanned_from_block=0,
+                measured_through_block=100,
+                deliveries=[{"tx": "0x02", "log_index": 1, "fan_out": 1, "fan_out_basis": "receipt"}],
+                delivery_count=1,
+                unreadable_deliveries=0,
+                min_fan_out=1,
+                fan_out_threshold_k=25,
+                delivery_shape=DELIVERY_SHAPE_HAS_DIRECT_DELIVERY,
+                basis="scan 0..100",
+            ),
+            TokenDeliveryEvidence(
+                chain_id=1,
+                holder_address=addr.lower(),
+                token_address=spared.lower(),
+                scanned_from_block=0,
+                measured_through_block=100,
+                deliveries=[{"tx": "0x04", "log_index": 1, "fan_out": 399, "fan_out_basis": "receipt"}],
+                delivery_count=1,
+                unreadable_deliveries=0,
+                min_fan_out=399,
+                fan_out_threshold_k=25,
+                delivery_shape=DELIVERY_SHAPE_FAN_OUT_ALL,
+                basis="scan 0..100",
+            ),
+        ]
+    )
+    db_session.add_all(
+        [
+            TokenProtocolReference(
+                protocol_id=p.id,
+                chain_id=1,
+                token_address=token.lower(),
+                reference_shape=shape,
+                universe_addresses=4,
+                basis="universe of 4 addresses, chain-blind",
+            )
+            for token, shape in (
+                (junk, TOKEN_REFERENCE_ABSENT_FROM_UNIVERSE),
+                (spared, TOKEN_REFERENCE_IN_UNIVERSE),
+            )
+        ]
+    )
+    db_session.commit()
+
+    payload = build_company_overview(db_session, p.name)
+    entry = next(e for e in payload["contracts"] if e["address"] == addr)
+    by_symbol = {b["token_symbol"]: b for b in entry["balances"]}
+
+    # (a) STILL RETURNED. A suppressed row would be an unwitnessed deletion.
+    assert set(by_symbol) == {"JUNK", "REAL", "UNK", "SPARED"}
+    # (b) LABELLED on both planes — with the evidence row's own basis.
+    assert by_symbol["JUNK"]["delivery_shape"] == DELIVERY_SHAPE_FAN_OUT_ALL
+    assert by_symbol["JUNK"]["delivery_shape_basis"] == "scan 0..100"
+    assert by_symbol["JUNK"]["reference_shape"] == TOKEN_REFERENCE_ABSENT_FROM_UNIVERSE
+    assert by_symbol["JUNK"]["disposition_state"] == "disposed"
+    # The three fail-closed directions: an earned negative, an unmeasured pair, and a
+    # mass-distributed token the protocol's own discovery names. NONE is disposed.
+    assert by_symbol["REAL"]["delivery_shape"] == DELIVERY_SHAPE_HAS_DIRECT_DELIVERY
+    assert by_symbol["UNK"]["delivery_shape"] == DELIVERY_SHAPE_NOT_DETERMINED
+    assert by_symbol["UNK"]["delivery_shape_basis"] is None
+    assert by_symbol["UNK"]["reference_shape"] == TOKEN_REFERENCE_NOT_DETERMINED
+    assert by_symbol["SPARED"]["delivery_shape"] == DELIVERY_SHAPE_FAN_OUT_ALL
+    assert by_symbol["SPARED"]["reference_shape"] == TOKEN_REFERENCE_IN_UNIVERSE
+    assert [by_symbol[s]["disposition_state"] for s in ("REAL", "UNK", "SPARED")] == ["presented"] * 3
+    # (c) COUNTED, as named numbers rather than an inference from the rows — and the
+    # two counts are DIFFERENT, which is the whole point: two rows arrived as mass
+    # distributions and only one of them is withheld.
+    cov = entry["holdings_coverage"]
+    assert cov["airdrop_delivered_rows"] == 2
+    assert cov["disposed_rows"] == 1
+    assert "worth" in cov["delivery_shape_reading"]
+    # The priced row's dollars are untouched: delivery shape is not a price.
+    assert entry["total_usd"] == 700.0
+
+
+def test_a_priced_airdrop_delivered_row_is_presented_and_counts_toward_the_total(db_session):
+    """A priced holding is a real dollar figure whatever the shape of its arrival.
+
+    Both other conjuncts hold here — mass-distributed AND absent from the protocol's
+    universe — and the price alone keeps the row a presented holding, because a
+    number was determined for it and delivery evidence cannot unmake that number.
+
+    The census's ``fan_out_all`` readings are all unpriced today, so this shape does
+    not occur on the corpus — which is exactly why it is pinned here rather than left
+    to the coincidence.
+    """
+    p = _add_protocol(db_session, f"e2e-airdrop-priced-{uuid.uuid4().hex[:8]}")
+    addr = _addr("airp1")
+    job = _add_job(db_session, address=addr, protocol_id=p.id, name="PricedHolder")
+    c = _add_contract(db_session, address=addr, job=job, protocol_id=p.id, contract_name="PricedHolder")
+    token = _addr("airptok")
+    fetch = ContractBalanceFetch(
+        contract_id=c.id,
+        chain_id=1,
+        observed_address=addr,
+        native_status="not_determined",
+        writer=BALANCE_WRITER_TVL,
+        asset_set_status=ASSET_SET_STATUS_RETURNED_ASSETS,
+    )
+    db_session.add(fetch)
+    db_session.flush()
+    db_session.add(
+        ContractBalance(
+            contract_id=c.id,
+            fetch_id=fetch.id,
+            token_address=token,
+            token_symbol="AIRP",
+            decimals=18,
+            raw_balance="1000000000000000000",
+            usd_value=1234,
+            price_usd=1234,
+            observed_address=addr,
+        )
+    )
+    db_session.add(
+        TokenDeliveryEvidence(
+            chain_id=1,
+            holder_address=addr.lower(),
+            token_address=token.lower(),
+            scanned_from_block=0,
+            measured_through_block=100,
+            deliveries=[{"tx": "0x03", "log_index": 1, "fan_out": 900, "fan_out_basis": "receipt"}],
+            delivery_count=1,
+            unreadable_deliveries=0,
+            min_fan_out=900,
+            fan_out_threshold_k=25,
+            delivery_shape=DELIVERY_SHAPE_FAN_OUT_ALL,
+            basis="scan 0..100",
+        )
+    )
+    db_session.add(
+        TokenProtocolReference(
+            protocol_id=p.id,
+            chain_id=1,
+            token_address=token.lower(),
+            reference_shape=TOKEN_REFERENCE_ABSENT_FROM_UNIVERSE,
+            universe_addresses=4,
+            basis="universe of 4 addresses, chain-blind",
+        )
+    )
+    db_session.commit()
+
+    payload = build_company_overview(db_session, p.name)
+    entry = next(e for e in payload["contracts"] if e["address"] == addr)
+    assert entry["balances"][0]["delivery_shape"] == DELIVERY_SHAPE_FAN_OUT_ALL
+    assert entry["balances"][0]["reference_shape"] == TOKEN_REFERENCE_ABSENT_FROM_UNIVERSE
+    assert entry["balances"][0]["disposition_state"] == "presented"
+    assert entry["holdings_coverage"]["airdrop_delivered_rows"] == 1
+    assert entry["holdings_coverage"]["disposed_rows"] == 0
+    assert entry["total_usd"] == 1234.0
 
 
 def test_terminal_principal_walk_reaches_the_principal_payloads(db_session):

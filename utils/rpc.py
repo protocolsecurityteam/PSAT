@@ -508,15 +508,26 @@ def rpc_request(
     headers: Mapping[str, str] | None = None,
     *,
     chain_id: int | None = None,
+    timeout: float | None = None,
 ) -> Any:
+    """One JSON-RPC call. ``timeout`` overrides :data:`JSON_RPC_TIMEOUT_SECONDS`.
+
+    The override exists because the module default is sized for the hot
+    per-address reads, and a read whose honest service time exceeds it comes
+    back as a ``requests.Timeout`` — indistinguishable, at the call site, from an
+    upstream that had nothing to return. A caller whose query is legitimately
+    slow (a wide multi-address ``eth_getLogs``) passes its own ceiling so a
+    long answer stays an answer instead of arriving as a failure.
+    """
     _assert_url_chain_id(rpc_url, chain_id)
     session = _get_session()
+    effective_timeout = JSON_RPC_TIMEOUT_SECONDS if timeout is None else timeout
     for attempt in range(retries + 1):
         try:
             response = session.post(
                 rpc_url,
                 json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
-                timeout=JSON_RPC_TIMEOUT_SECONDS,
+                timeout=effective_timeout,
                 headers=rpc_headers(rpc_url, headers),
             )
             if response.status_code in RETRYABLE_HTTP_CODES and attempt < retries:
@@ -545,6 +556,44 @@ def rpc_request(
     from utils.secrets import sanitize_url
 
     raise RuntimeError(f"RPC request failed for {sanitize_url(rpc_url)}: all {retries + 1} attempts exhausted")
+
+
+def get_transaction_receipt(
+    rpc_url: str,
+    tx_hash: str,
+    *,
+    chain_id: int | None = None,
+    retries: int = 1,
+    timeout: float | None = None,
+) -> dict | None:
+    """One ``eth_getTransactionReceipt``. The receipt dict, or ``None``.
+
+    ``None`` IS NOT AN EMPTY LOG SET, and a caller that reads it as one is
+    wrong. It means the receipt could not be read — transport failure, an
+    upstream error, a pending or pruned transaction, a payload that was not a
+    receipt — and every one of those leaves the transaction's log set unknown.
+    Counting it as zero logs would turn an unread receipt into a measurement,
+    so a caller must carry it as not_determined all the way to whatever it
+    publishes.
+
+    Reorg note: this method takes no block parameter, so unlike most chain reads
+    it cannot be pinned by parameter. The receipt carries ``blockHash`` and
+    ``blockNumber``, so a caller that stores either can DETECT a reorg later
+    rather than having to trust this observation.
+    """
+    try:
+        receipt = rpc_request(
+            rpc_url,
+            "eth_getTransactionReceipt",
+            [tx_hash],
+            retries=retries,
+            chain_id=chain_id,
+            timeout=timeout,
+        )
+    except Exception as exc:
+        logger.debug("receipt fetch failed", extra={"tx_hash": tx_hash, "error": str(exc)})
+        return None
+    return receipt if isinstance(receipt, dict) else None
 
 
 def get_code(rpc_url: str, address: str, *, chain_id: int | None = None) -> str:
