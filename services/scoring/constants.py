@@ -281,11 +281,6 @@ UNCALIBRATED_ARMS: tuple[str, ...] = (
     # implementation before any magnitude branch reads a sheet, so no row can
     # carry it and only a direct call to the resolver reaches it.
     "code_control_ceiling_refused:alias_ambiguous",
-    # The disposition run's own arm, added at 1.4.0 with ZERO carriers: the
-    # delivery-evidence table exists and is empty, so no sheet on the corpus the
-    # model was calibrated against is airdrop_determined. Comes off by hand once
-    # one is.
-    "code_control_ceiling:airdrop_determined",
 )
 
 # What each of the run's arms IS, beside the bare token. §8 of
@@ -429,27 +424,6 @@ UNCALIBRATED_ARM_DISCLOSURES: tuple[dict[str, object], ...] = (
             "so the double guard holds and this token is answerable only where the resolver is "
             "called on its own. Registered so the redundancy is a stated fact — a reader who "
             "removed either guard would otherwise find no record that the other was relied on"
-        ),
-    },
-    {
-        "arm": "code_control_ceiling:airdrop_determined",
-        "state": "airdrop_determined",
-        "published_at": "findings[].reach_sheet_ceiling_magnitudes[].ceiling_reason",
-        "population_census": "sheet_ceilings.entities_by_ceiling_reason",
-        "exercised_by": (
-            "tests/test_value_plane_ceiling.py::test_every_sheet_shape_answers_under_its_own_reason[airdrop_determined]",
-            "tests/test_asset_disposition.py::test_a_disposed_sheet_admits_a_zero_ceiling_under_its_own_reason",
-        ),
-        "note": (
-            "the third admitting ceiling reason: a sheet DETERMINED at $0 because every reading "
-            "on it arrived only in mass distributions or is a witnessed zero. Its claim is "
-            "delivery shape and never worth. At authoring time the delivery-evidence table is "
-            "EMPTY, so no entity is in this state on the corpus the model was calibrated against "
-            "and nothing published was fitted to it. ⚠ This entry must be HAND-REMOVED once a "
-            "carrier lands — the register's own rule is that an entry whose positive branch has "
-            "fired comes off — and that removal is a manual authoring convention, not a derived "
-            "one: nothing in this module reads data, and a reader must check the scored "
-            "document's entities_by_ceiling_reason to know"
         ),
     },
 )

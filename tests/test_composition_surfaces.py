@@ -321,11 +321,14 @@ def test_every_arm_this_run_added_is_flagged_uncalibrated_and_disclosed():
     # The COUNT is authored, not derived — nothing in this suite counts a corpus
     # — so it is checked by a reader against the scored document and moves only
     # with such a reading.
-    # Plus the disposition run's own zero-carrier arm, ``code_control_ceiling:
-    # airdrop_determined``: the delivery-evidence table exists and is empty, so
-    # no sheet on this corpus is in that state and nothing published was fitted
-    # to it. It comes off by hand when a carrier lands.
-    assert len(registered) == 9
+    # The disposition run added ``code_control_ceiling:airdrop_determined`` and
+    # then took it straight back off: its live one-shot determined 13 sheets and
+    # one of them publishes a ceiling under that reason, so the register's own
+    # rule — an entry whose positive branch has fired is removed — fired inside
+    # the same run. Checked against the scored document's
+    # ``sheet_ceilings.entities_by_ceiling_reason``, which reads
+    # ``airdrop_determined: 1``.
+    assert len(registered) == 8
     for entry in registered:
         assert entry["arm"] in flagged, entry["arm"]
         assert entry["state"] and entry["note"]
