@@ -333,7 +333,7 @@ describe("BalanceTable — airdrop-delivered rows are labelled, never suppressed
     render(<BalanceTable machine={machine([row(), junk()])} />);
     // Real tokens arrive this way (uniETH at fan-out 101, HEX at 199/399/399),
     // so any of these words would be a claim the evidence does not carry — of
-    // the collapsed summary as much as of the expanded note.
+    // the collapsed summary as much as of the expanded rows.
     const forbidden = [/spam/i, /scam/i, /junk/i, /worthless/i];
     const summary = withheldToggle();
     expect(summary).toBeDefined();
@@ -342,14 +342,17 @@ describe("BalanceTable — airdrop-delivered rows are labelled, never suppressed
     }
 
     await userEvent.click(summary);
-    const note = screen.getAllByRole("note").find((n) => /mass distribution|transfer logs/i.test(n.textContent));
-    expect(note).toBeDefined();
-    expect(note).toHaveTextContent(/not about what it is worth/i);
-    // The threshold, not a size: the claim is a log count in one transaction,
-    // never a recipient count.
-    expect(note).toHaveTextContent(/published fan-out threshold of same-token transfer logs/i);
+    // The toggle line carries the whole claim; the expansion is rows only.
+    // Negative pin so the removed explanatory paragraph cannot silently return.
+    const note = screen
+      .queryAllByRole("note")
+      .find((n) => /fan-out threshold|transfer logs|what it is worth/i.test(n.textContent));
+    expect(note).toBeUndefined();
+    // Forbidden words apply to OUR copy (the toggle and any notes), never to a
+    // token's own on-chain name, which the rows must render faithfully.
+    const ourCopy = [summary.textContent, ...screen.queryAllByRole("note").map((n) => n.textContent)].join(" ");
     for (const word of [...forbidden, /hundreds of recipients/i]) {
-      expect(note.textContent).not.toMatch(word);
+      expect(ourCopy).not.toMatch(word);
     }
   });
 

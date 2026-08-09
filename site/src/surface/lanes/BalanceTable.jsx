@@ -181,29 +181,13 @@ export function BalanceTable({ machine }) {
             <span className="ps-balance-caret">{showWithheld ? "▾" : "▸"}</span>
           </button>
           {showWithheld ? (
-            <>
-              {/*
-                States the THRESHOLD, not a size. The superseded wording said
-                every delivery "went to hundreds of recipients at once", which is
-                false of 42 of its own carriers on the reference corpus — the
-                smallest disposed fan-out measured is 27 — and it used the
-                recipient meter, which is not what the threshold is calibrated
-                on. The meter is same-token transfer LOGS in one transaction, and
-                a log count is an upper bound on distinct recipients; the only
-                claim the evidence carries is that every delivery cleared the
-                published threshold.
-              */}
-              <div className="ps-balance-coverage" role="note">
-                Every delivery on record carried at least the published fan-out threshold of same-token transfer
-                logs in one transaction, so the contract holds these but did not take them as positions — a
-                statement about how the balance arrived, not about what it is worth.
-              </div>
-              <div className="ps-balance-list">
-                {airdropped.map((b, i) => (
-                  <BalanceRow key={i} row={b} />
-                ))}
-              </div>
-            </>
+            // The toggle line itself carries the whole claim ("arrived by mass
+            // distribution", "not positions"); the expanded view is just the rows.
+            <div className="ps-balance-list">
+              {airdropped.map((b, i) => (
+                <BalanceRow key={i} row={b} />
+              ))}
+            </div>
           ) : null}
         </div>
       ) : null}
