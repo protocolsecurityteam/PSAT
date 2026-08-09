@@ -205,3 +205,52 @@ describe("EntityCard principal-only", () => {
     expect(container.querySelectorAll(".ps-principal-signer")).toHaveLength(3);
   });
 });
+
+describe("EntityCard balances tab count", () => {
+  const bal = (over) => ({
+    token_symbol: "T",
+    token_address: "0x1",
+    raw_balance: "1",
+    decimals: 18,
+    usd_value: null,
+    usd_value_state: "not_determined",
+    ...over,
+  });
+
+  it("counts the holdings the BACKEND presents, not the ones the page re-judges", () => {
+    // The regression this pins: the count split on delivery_shape alone, so a
+    // mass-distributed token the protocol's own discovery names — HEX, WETH,
+    // base USDC on the reference corpus — was dropped from the count while the
+    // score spared it. The withholding rule is a conjunction; the backend
+    // publishes its verdict so a consumer never carries half of it.
+    const card = render(
+      <EntityCard
+        machine={machine({
+          balances: [
+            bal({ token_symbol: "HEX", delivery_shape: "fan_out_all", disposition_state: "presented" }),
+            bal({ token_symbol: "REAL", delivery_shape: "has_direct_delivery", disposition_state: "presented" }),
+            bal({ token_symbol: "JUNK", delivery_shape: "fan_out_all", disposition_state: "disposed" }),
+          ],
+        })}
+        onSelectGuard={vi.fn()}
+        onNavigate={vi.fn()}
+        governsIndex={new Map()}
+      />,
+    );
+    const tab = card.getByText("Balances").closest("button");
+    expect(within(tab).getByText("2")).toBeInTheDocument();
+  });
+
+  it("counts a row carrying no verdict — an unjudged holding is still a holding", () => {
+    const card = render(
+      <EntityCard
+        machine={machine({ balances: [bal({ token_symbol: "NOVERDICT", delivery_shape: "fan_out_all" })] })}
+        onSelectGuard={vi.fn()}
+        onNavigate={vi.fn()}
+        governsIndex={new Map()}
+      />,
+    );
+    const tab = card.getByText("Balances").closest("button");
+    expect(within(tab).getByText("1")).toBeInTheDocument();
+  });
+});

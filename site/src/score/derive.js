@@ -175,9 +175,15 @@ export function ceilingReasonLabel(reason) {
 
 export const AIRDROP_DETERMINED = "airdrop_determined";
 
+// The backend's own claim, not a weaker paraphrase of it. The superseded
+// sentence said the holdings "are not presented as positions this protocol
+// holds", which describes what the PAGE does and leaves a reader to infer the
+// figure covers them. It does not: the assets are still held, and this document
+// values none of them.
 const AIRDROP_NOTE =
-  "every delivery of these holdings on record was a mass distribution, so they are not presented as positions " +
-  "this protocol holds — a claim about how the balance arrived, never about what it is worth";
+  "the figure totals what this document PRICES at these nodes; the holdings behind it are STILL HELD and their " +
+  "worth is not_determined here — every delivery of them on record was a mass distribution, which is a claim " +
+  "about how they arrived and never about what they are worth";
 
 // The disposed part of a row's sheet ceilings, or `null` where there is none.
 //

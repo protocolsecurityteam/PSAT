@@ -157,6 +157,10 @@ describe("BalanceTable — airdrop-delivered rows are labelled, never suppressed
       usd_value: null,
       usd_value_state: "not_determined",
       delivery_shape: "fan_out_all",
+      reference_shape: "absent_from_universe",
+      // The BACKEND'S verdict, which is the conjunction of both shapes above.
+      // The page reads this field and never re-derives it from the two.
+      disposition_state: "disposed",
       delivery_shape_basis: "own-history scan 0..25710573",
     });
 
@@ -208,8 +212,8 @@ describe("BalanceTable — airdrop-delivered rows are labelled, never suppressed
     render(
       <BalanceTable
         machine={machine([
-          row({ token_symbol: "REAL", delivery_shape: "has_direct_delivery" }),
-          row({ token_symbol: "UNK2", delivery_shape: "not_determined" }),
+          row({ token_symbol: "REAL", delivery_shape: "has_direct_delivery", disposition_state: "presented" }),
+          row({ token_symbol: "UNK2", delivery_shape: "not_determined", disposition_state: "presented" }),
           row({ token_symbol: "NOKEY" }),
         ])}
       />,
@@ -218,5 +222,44 @@ describe("BalanceTable — airdrop-delivered rows are labelled, never suppressed
     for (const symbol of ["REAL", "UNK2", "NOKEY"]) {
       expect(screen.getByText(symbol)).toBeInTheDocument();
     }
+  });
+});
+
+describe("BalanceTable — the withholding rule is the backend's, not the page's", () => {
+  // THE REGRESSION THIS PINS. The page used to split on `delivery_shape ===
+  // "fan_out_all"` alone, which is half of a two-part rule. These three are
+  // mass-distributed AND named by the protocol's own discovery, so the score
+  // spares them — and the page withheld all three anyway: HEX x34, WETH x4 and
+  // base USDC x1, one of them a fully-liquid stablecoin.
+  const spared = (symbol) =>
+    row({
+      token_symbol: symbol,
+      usd_value: null,
+      usd_value_state: "not_determined",
+      delivery_shape: "fan_out_all",
+      reference_shape: "in_universe",
+      disposition_state: "presented",
+    });
+
+  it("keeps a mass-distributed holding the protocol's own discovery names", () => {
+    render(<BalanceTable machine={machine([spared("HEX"), spared("WETH"), spared("USDC")])} />);
+    for (const symbol of ["HEX", "WETH", "USDC"]) {
+      expect(screen.getByText(symbol)).toBeInTheDocument();
+    }
+    // Presented, so they raise the unpriced-holdings disclosure and no row is
+    // filed under the withheld heading.
+    expect(screen.queryByRole("note", { name: /mass distribution/i })).toBeNull();
+    expect(screen.queryByText(/Delivered by mass distribution/i)).toBeNull();
+  });
+
+  it("treats a missing verdict as PRESENTED, never as disposed", () => {
+    // Fail closed toward showing a real holding: a payload with no verdict is a
+    // payload that judged nothing, and hiding a holding on that basis would be
+    // the page inventing a claim.
+    render(
+      <BalanceTable machine={machine([row({ token_symbol: "NOVERDICT", delivery_shape: "fan_out_all" })])} />,
+    );
+    expect(screen.getByText("NOVERDICT")).toBeInTheDocument();
+    expect(screen.queryByText(/Delivered by mass distribution/i)).toBeNull();
   });
 });

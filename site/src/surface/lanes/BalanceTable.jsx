@@ -21,19 +21,30 @@ function usdCell(row) {
   return { text: formatted || "$0.00", className: "ps-balance-usd" };
 }
 
-// Every recorded delivery of this balance was a mass distribution. The row is
-// PUBLISHED and LABELLED — a suppressed row is a deletion nobody can see — but
-// it is not presented as a position this contract holds, so it is out of the
+// Whether the backend WITHHELD this balance from the holdings claim. The row is
+// still PUBLISHED and LABELLED — a suppressed row is a deletion nobody can see —
+// but it is not presented as a position this contract holds, so it is out of the
 // holdings list, out of the holdings count, and shown under its own heading.
+//
+// READ THE BACKEND'S VERDICT; DO NOT RE-DERIVE IT. `disposition_state` exists
+// precisely so a consumer does not restate the rule, and restating it is how
+// this page went wrong: it split on `delivery_shape === "fan_out_all"` alone,
+// which is only HALF the conjunction. The other half is the protocol-reference
+// conjunct, and without it the page withheld HEX, WETH and base USDC — real
+// assets, one of them a fully-liquid stablecoin — that the score itself spares.
+// A page that re-derives a two-part rule will sooner or later carry one part.
 //
 // A DELIVERY claim, never a worth claim. Real tokens arrive this way (uniETH at
 // fan-out 101, HEX at 199/399/399), so the label says how the balance arrived
 // and the word "spam" appears nowhere: that would be a claim the evidence does
 // not carry.
-const AIRDROP_DELIVERED = "fan_out_all";
+const DISPOSED = "disposed";
 
 export function isAirdropDelivered(row) {
-  return row?.delivery_shape === AIRDROP_DELIVERED;
+  // Absence of the field is NOT disposal: a payload from before this field
+  // existed, or a row the backend declined to judge, must keep its place in the
+  // holdings list. Fail closed toward showing a real holding.
+  return row?.disposition_state === DISPOSED;
 }
 
 // Whether this contract's holdings list can be reported as the whole set.

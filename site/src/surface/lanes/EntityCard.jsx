@@ -114,9 +114,11 @@ export function EntityCard({
         control: machine.lanes.top.length + machine.lanes.ops.length,
         inflows: machine.lanes.left.length,
         outflows: machine.lanes.right.length,
-        // The count is of HOLDINGS. An airdrop-delivered balance is still
-        // listed on the tab and still published by the backend, but counting it
-        // here would present it as a position this contract took.
+        // The count is of HOLDINGS. A balance the backend WITHHELD is still
+        // listed on the tab and still published, but counting it here would
+        // present it as a position this contract took. The predicate is the
+        // backend's own `disposition_state` — see BalanceTable: the withholding
+        // rule is a conjunction and a consumer that re-derives it carries half.
         balances: (machine.balances || []).filter((b) => !isAirdropDelivered(b)).length,
         governs: canCallRows.length,
       }
