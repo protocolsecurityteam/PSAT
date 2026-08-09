@@ -1027,6 +1027,59 @@ def test_a_named_token_is_in_the_universe_and_an_unnamed_one_is_absent(db_sessio
     assert rows[(CHAIN, OTHER_TOKEN)].universe_addresses == 1
 
 
+def test_an_empty_universe_condemns_nothing_and_does_not_poison_the_write(db_session, monkeypatch):
+    """A universe that named NO address is refused in the WRITER.
+
+    An empty set condemns everything absent from it. ``ck_tpr_absence_needs_a_universe``
+    says so at the table too, but reaching it is not a defence: this pass runs
+    inside a producer that swallows what it raises, so the constraint violation
+    would abort the surrounding transaction and take the BALANCE WRITE down with
+    it. The verdict is ``not_determined`` and the session is still usable after.
+    """
+    import services.scoring.distill as distill
+
+    monkeypatch.setattr(distill, "load_protocol_universe", lambda session, protocol_id: _Universe(set()))
+    proto = _protocol(db_session, "empty universe")
+
+    written = delivery_shape.record_protocol_reference(
+        db_session, protocol_id=proto.id, requests=[_request(tokens=(TOKEN, OTHER_TOKEN))]
+    )
+    db_session.flush()
+
+    assert written == 2
+    rows = _references(db_session)
+    assert {row.reference_shape for row in rows.values()} == {TOKEN_REFERENCE_NOT_DETERMINED}
+    assert all(row.universe_addresses == 0 for row in rows.values())
+    assert all("named NO address" in row.basis for row in rows.values())
+
+    # The transaction is alive: a poisoned one would refuse this.
+    _contract(db_session, proto.id, _addr("live"))
+    db_session.flush()
+
+
+def test_an_empty_universe_withdraws_a_standing_absence(db_session, monkeypatch):
+    """It writes ``not_determined`` ROWS rather than nothing at all.
+
+    Writing nothing would leave a previous cycle's ``absent_from_universe``
+    standing against a universe this cycle could not measure — a condemnation
+    outliving the evidence for it.
+    """
+    import services.scoring.distill as distill
+
+    proto = _protocol(db_session, "withdrawn by an empty universe")
+    monkeypatch.setattr(distill, "load_protocol_universe", lambda session, protocol_id: _Universe({OTHER_TOKEN}))
+    delivery_shape.record_protocol_reference(db_session, protocol_id=proto.id, requests=[_request()])
+    db_session.flush()
+    assert _references(db_session)[(CHAIN, TOKEN)].reference_shape == TOKEN_REFERENCE_ABSENT_FROM_UNIVERSE
+
+    delivery_shape.clear_protocol_universe_memo()
+    monkeypatch.setattr(distill, "load_protocol_universe", lambda session, protocol_id: _Universe(set()))
+    delivery_shape.record_protocol_reference(db_session, protocol_id=proto.id, requests=[_request()])
+    db_session.flush()
+
+    assert _references(db_session)[(CHAIN, TOKEN)].reference_shape == TOKEN_REFERENCE_NOT_DETERMINED
+
+
 def test_discovery_growth_withdraws_an_absence(db_session, monkeypatch):
     """The anti-monotone direction, and it is why this table is refreshed.
 
@@ -1042,6 +1095,11 @@ def test_discovery_growth_withdraws_an_absence(db_session, monkeypatch):
     db_session.flush()
     assert _references(db_session)[(CHAIN, TOKEN)].reference_shape == TOKEN_REFERENCE_ABSENT_FROM_UNIVERSE
 
+    # The universe memo is what a LATER CYCLE crosses: this test runs both
+    # cycles in one process against an unchanged discovery extent, which is
+    # exactly the case the memo is entitled to serve from. Cleared so the
+    # refresh under test is the table's and not the memo's.
+    delivery_shape.clear_protocol_universe_memo()
     monkeypatch.setattr(distill, "load_protocol_universe", lambda session, protocol_id: _Universe({OTHER_TOKEN, TOKEN}))
     delivery_shape.record_protocol_reference(db_session, protocol_id=proto.id, requests=[_request()])
     db_session.flush()
@@ -1050,3 +1108,163 @@ def test_discovery_growth_withdraws_an_absence(db_session, monkeypatch):
     assert row.reference_shape == TOKEN_REFERENCE_IN_UNIVERSE
     assert row.universe_addresses == 2
     assert db_session.query(TokenProtocolReference).count() == 1
+
+
+# --- the per-process universe memo -------------------------------------------
+
+
+def _counting_loader(monkeypatch, *universes):
+    """Install a loader that answers each call in turn and counts assemblies.
+
+    Returns the call log, so a test asserts on how many 26.5-second assemblies
+    the phase actually paid for rather than on how many it was asked for.
+    """
+    import services.scoring.distill as distill
+
+    calls: list[int] = []
+
+    def _load(session, protocol_id):
+        calls.append(int(protocol_id))
+        answer = universes[min(len(calls) - 1, len(universes) - 1)]
+        return answer
+
+    monkeypatch.setattr(distill, "load_protocol_universe", _load)
+    return calls
+
+
+def test_the_universe_is_assembled_once_per_process_over_one_discovery_extent(db_session, monkeypatch):
+    """The 26.5-second assembly is paid once, not once per contract.
+
+    The resolution worker runs this phase per CONTRACT, so on a protocol with
+    ~91 contracts carrying unpriced tokens the unmemoized path assembled the
+    same universe ~91 times.
+    """
+    proto = _protocol(db_session, "memo")
+    _contract(db_session, proto.id, _addr("memo-1"))
+    calls = _counting_loader(monkeypatch, _Universe({TOKEN}))
+
+    for _ in range(5):
+        delivery_shape.record_protocol_reference(db_session, protocol_id=proto.id, requests=[_request()])
+    db_session.flush()
+
+    assert len(calls) == 1
+    row = _references(db_session)[(CHAIN, TOKEN)]
+    assert row.reference_shape == TOKEN_REFERENCE_IN_UNIVERSE
+    assert "reused" in row.basis
+
+
+def test_a_widened_discovery_extent_retires_the_memo(db_session, monkeypatch):
+    """A memo may never serve a universe built from a NARROWER discovery.
+
+    The extent key is the jobs and contracts the universe would be assembled
+    over. One more contract is one more body of source literals and one more
+    contract-scoped row set, so the entry is retired and the next call rebuilds.
+    """
+    proto = _protocol(db_session, "widening")
+    _contract(db_session, proto.id, _addr("wide-1"))
+    calls = _counting_loader(monkeypatch, _Universe({TOKEN}))
+
+    delivery_shape.record_protocol_reference(db_session, protocol_id=proto.id, requests=[_request()])
+    delivery_shape.record_protocol_reference(db_session, protocol_id=proto.id, requests=[_request()])
+    assert len(calls) == 1
+
+    _contract(db_session, proto.id, _addr("wide-2"))
+    delivery_shape.record_protocol_reference(db_session, protocol_id=proto.id, requests=[_request()])
+    assert len(calls) == 2
+
+
+def test_a_reused_universe_can_only_grow(db_session, monkeypatch):
+    """WHICH WAY THE MEMO ERRS: larger.
+
+    The predicate this universe feeds condemns what is ABSENT, so a short
+    universe condemns MORE — a stale-short entry is the one dangerous direction.
+    What is carried forward is the UNION of every assembly this process made for
+    the protocol, so a rebuild that answers with fewer addresses cannot take one
+    back: the token the first assembly named stays named.
+    """
+    proto = _protocol(db_session, "union")
+    _contract(db_session, proto.id, _addr("union-1"))
+    calls = _counting_loader(monkeypatch, _Universe({TOKEN}), _Universe({OTHER_TOKEN}))
+
+    delivery_shape.record_protocol_reference(db_session, protocol_id=proto.id, requests=[_request()])
+    db_session.flush()
+    assert _references(db_session)[(CHAIN, TOKEN)].reference_shape == TOKEN_REFERENCE_IN_UNIVERSE
+
+    _contract(db_session, proto.id, _addr("union-2"))
+    delivery_shape.record_protocol_reference(
+        db_session, protocol_id=proto.id, requests=[_request(tokens=(TOKEN, OTHER_TOKEN))]
+    )
+    db_session.flush()
+
+    assert len(calls) == 2
+    rows = _references(db_session)
+    assert rows[(CHAIN, TOKEN)].reference_shape == TOKEN_REFERENCE_IN_UNIVERSE
+    assert rows[(CHAIN, OTHER_TOKEN)].reference_shape == TOKEN_REFERENCE_IN_UNIVERSE
+    assert rows[(CHAIN, TOKEN)].universe_addresses == 2
+    assert "UNION" in rows[(CHAIN, TOKEN)].basis
+
+
+def test_an_unbuildable_universe_is_never_memoized(db_session, monkeypatch):
+    """``None`` is a refusal, not an answer, so it is not carried.
+
+    Caching it would spend the whole reuse window condemning nothing — safe, but
+    it would also hide a storage fault that has since cleared behind an answer
+    nobody re-asked for. Re-asking costs one assembly and can only narrow the
+    refusal.
+    """
+    proto = _protocol(db_session, "unbuildable memo")
+    _contract(db_session, proto.id, _addr("unbuildable-1"))
+    calls = _counting_loader(monkeypatch, None, None, _Universe({TOKEN}))
+
+    delivery_shape.record_protocol_reference(db_session, protocol_id=proto.id, requests=[_request()])
+    delivery_shape.record_protocol_reference(db_session, protocol_id=proto.id, requests=[_request()])
+    db_session.flush()
+    assert len(calls) == 2
+    assert _references(db_session)[(CHAIN, TOKEN)].reference_shape == TOKEN_REFERENCE_NOT_DETERMINED
+
+    delivery_shape.record_protocol_reference(db_session, protocol_id=proto.id, requests=[_request()])
+    db_session.flush()
+    assert len(calls) == 3
+    assert _references(db_session)[(CHAIN, TOKEN)].reference_shape == TOKEN_REFERENCE_IN_UNIVERSE
+
+
+def test_the_reuse_window_is_bounded_in_time(db_session, monkeypatch):
+    """The extent key cannot see every row the assembly reads.
+
+    Control-graph, principal, effect-verdict, dApp-interaction, monitored-contract
+    and restaking rows are read per contract or per protocol, so a resolution job
+    can add addresses to an already-keyed contract without widening the extent.
+    The TTL is the bound on that residual, and it is a real bound rather than a
+    comment: past it the entry is retired whatever the key says.
+    """
+    proto = _protocol(db_session, "ttl")
+    _contract(db_session, proto.id, _addr("ttl-1"))
+    calls = _counting_loader(monkeypatch, _Universe({TOKEN}))
+
+    delivery_shape.record_protocol_reference(db_session, protocol_id=proto.id, requests=[_request()])
+    delivery_shape.record_protocol_reference(db_session, protocol_id=proto.id, requests=[_request()])
+    assert len(calls) == 1
+
+    monkeypatch.setattr(delivery_shape, "_UNIVERSE_MEMO_TTL_SECONDS", 0.0)
+    delivery_shape.record_protocol_reference(db_session, protocol_id=proto.id, requests=[_request()])
+    assert len(calls) == 2
+
+
+def test_the_memo_is_per_protocol_and_the_clear_hook_empties_it(db_session, monkeypatch):
+    """Two protocols never share an answer, and the hook drops every one."""
+    first = _protocol(db_session, "memo A")
+    second = _protocol(db_session, "memo B")
+    _contract(db_session, first.id, _addr("memo-a"))
+    _contract(db_session, second.id, _addr("memo-b"))
+    calls = _counting_loader(monkeypatch, _Universe({TOKEN}))
+
+    delivery_shape.record_protocol_reference(db_session, protocol_id=first.id, requests=[_request()])
+    delivery_shape.record_protocol_reference(db_session, protocol_id=second.id, requests=[_request()])
+    assert calls == [first.id, second.id]
+
+    delivery_shape.record_protocol_reference(db_session, protocol_id=first.id, requests=[_request()])
+    assert len(calls) == 2
+
+    delivery_shape.clear_protocol_universe_memo()
+    delivery_shape.record_protocol_reference(db_session, protocol_id=first.id, requests=[_request()])
+    assert len(calls) == 3

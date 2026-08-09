@@ -49,6 +49,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -605,6 +606,168 @@ def scan_delivery_shape(
     return cost
 
 
+# --- the universe memo ------------------------------------------------------
+# ``load_protocol_universe`` is a measured 26.5-second object-storage assembly.
+# The TVL path pays it once per cycle; the resolution worker calls this phase
+# once per CONTRACT, so on the reference protocol's ~91 contracts carrying
+# unpriced tokens the same universe was assembled ~91 times — ~40 minutes of a
+# full re-resolution spent rebuilding one answer.
+#
+# TTL for the reuse window. Bounded rather than unbounded because the extent key
+# below cannot see every row the assembly reads (see ``_protocol_universe``).
+_UNIVERSE_MEMO_TTL_SECONDS = float(os.getenv("PSAT_UNIVERSE_MEMO_TTL_SECONDS", "900"))
+
+_UNIVERSE_MEMO_LOCK = threading.Lock()
+
+
+@dataclass(frozen=True)
+class _MemoUniverse:
+    """The three fields the reference pass reads off a universe, and nothing else."""
+
+    addresses: frozenset[str]
+    sources: dict[str, int]
+    basis: str
+
+
+@dataclass
+class _UniverseMemoEntry:
+    extent: tuple[tuple[str, ...], tuple[int, ...]]
+    addresses: frozenset[str]
+    sources: dict[str, int]
+    basis: str
+    built_at: float
+    builds: int = 1
+    reuses: int = 0
+
+
+_UNIVERSE_MEMO: dict[int, _UniverseMemoEntry] = {}
+
+
+def clear_protocol_universe_memo() -> None:
+    """Drop every memoized universe in this process.
+
+    The hook exists for tests and for any caller that wants the next assembly
+    measured rather than reused; nothing in the producers calls it, because a
+    cycle that wants a fresh universe gets one from the extent key or the TTL.
+    """
+    with _UNIVERSE_MEMO_LOCK:
+        _UNIVERSE_MEMO.clear()
+
+
+def _discovery_extent(session: Session, protocol_id: int) -> tuple[tuple[str, ...], tuple[int, ...]]:
+    """The jobs and contracts a universe for this protocol would be assembled OVER.
+
+    Two indexed id reads, and they mirror ``load_protocol_universe``'s own
+    population exactly: the protocol's jobs, the contracts carrying its
+    ``protocol_id`` or reachable through one of those jobs, and the jobs THOSE
+    contracts name (a contract attributed to this protocol whose job belongs to
+    another one still has its source bodies read). Any of these growing widens
+    the universe, so all of them are in the key.
+    """
+    from sqlalchemy import select
+
+    from db.models import Contract, Job
+
+    job_ids = session.execute(select(Job.id).where(Job.protocol_id == protocol_id)).scalars().all()
+    rows = session.execute(
+        select(Contract.id, Contract.job_id).where(
+            (Contract.protocol_id == protocol_id) | (Contract.job_id.in_(job_ids) if job_ids else False)
+        )
+    ).all()
+    jobs = {str(job_id) for job_id in job_ids} | {str(job_id) for _, job_id in rows if job_id}
+    return tuple(sorted(jobs)), tuple(sorted(int(cid) for cid, _ in rows))
+
+
+def _protocol_universe(session: Session, protocol_id: int) -> _MemoUniverse | None:
+    """The protocol's address universe, assembled once per process and reused.
+
+    **WHICH WAY THIS ERRS: LARGER.** A served entry is the UNION of every
+    universe this process has assembled for the protocol, so a reuse can only add
+    addresses and never take one away — and the direction is the whole point,
+    because the predicate the universe feeds condemns what is ABSENT. A short
+    universe condemns MORE, so an entry that is stale in the short direction is
+    the one that could manufacture an ``absent_from_universe`` verdict for a
+    token the protocol really does refer to. Two things keep it out:
+
+    * **the extent key.** An entry is served only while the jobs and contracts
+      the universe would be assembled over are exactly the ones it WAS assembled
+      over (:func:`_discovery_extent`). Discovery widening — a new contract, a
+      new job — retires the entry and the next call rebuilds.
+    * **the TTL.** The extent key cannot see everything: the control-graph,
+      principal, effect-verdict, dApp-interaction, monitored-contract and
+      restaking rows are read per contract or per protocol, and a resolution job
+      can add addresses to an already-keyed contract without changing the key.
+      That residual is bounded by ``_UNIVERSE_MEMO_TTL_SECONDS`` rather than left
+      open, and it is a bound on a reuse WINDOW and not a claim that the window
+      is safe: ``token_protocol_reference`` is refreshed every cycle, so a
+      verdict taken against a stale universe withdraws on the next pass.
+
+    ``None`` — the loader's fail-closed answer — is NEVER cached, and that choice
+    is deliberate in the same direction. An unbuildable universe means every
+    token lands ``not_determined``; caching it would spend the whole TTL
+    condemning nothing, which is safe, but it would also hide a storage blip that
+    has since cleared behind an answer nobody re-asked for. Re-asking costs one
+    assembly and can only narrow the refusal.
+
+    A raise from the loader propagates: the caller reads it exactly as ``None``,
+    and the memo stores nothing either way.
+    """
+    from services.scoring import distill
+
+    extent = _discovery_extent(session, protocol_id)
+    now = time.monotonic()
+    with _UNIVERSE_MEMO_LOCK:
+        entry = _UNIVERSE_MEMO.get(protocol_id)
+        if entry is not None and entry.extent == extent and now - entry.built_at <= _UNIVERSE_MEMO_TTL_SECONDS:
+            entry.reuses += 1
+            return _MemoUniverse(
+                addresses=entry.addresses,
+                sources=dict(entry.sources),
+                basis=(
+                    f"{entry.basis}. Assembled once in this process and reused "
+                    f"{entry.reuses} time(s) over an unchanged discovery extent of "
+                    f"{len(extent[0])} job(s) and {len(extent[1])} contract(s), within a "
+                    f"{_UNIVERSE_MEMO_TTL_SECONDS:.0f}s reuse window; the reused set is the UNION of "
+                    "every assembly this process made for the protocol, so reuse can only add an "
+                    "address and never withdraw one"
+                ),
+            )
+        previous = entry.addresses if entry is not None else frozenset()
+
+    universe = distill.load_protocol_universe(session, protocol_id)
+    if universe is None:
+        return None
+
+    addresses = frozenset(universe.addresses) | previous
+    with _UNIVERSE_MEMO_LOCK:
+        standing = _UNIVERSE_MEMO.get(protocol_id)
+        _UNIVERSE_MEMO[protocol_id] = _UniverseMemoEntry(
+            extent=extent,
+            # Another thread may have assembled the same protocol while this one
+            # was reading object storage. Its addresses are folded in rather than
+            # overwritten, for the same reason the union exists at all.
+            addresses=addresses | (standing.addresses if standing is not None else frozenset()),
+            sources=dict(universe.sources),
+            basis=str(universe.basis),
+            built_at=now,
+            builds=(standing.builds + 1) if standing is not None else 1,
+        )
+        stored = _UNIVERSE_MEMO[protocol_id]
+    return _MemoUniverse(
+        addresses=stored.addresses,
+        sources=dict(stored.sources),
+        basis=(
+            str(universe.basis)
+            if stored.addresses == frozenset(universe.addresses)
+            else (
+                f"{universe.basis}. Widened by {len(stored.addresses) - len(universe.addresses)} address(es) this "
+                "process assembled for the protocol under an earlier discovery extent — the set carried forward is "
+                "the UNION, which can only spare a token and never condemn one"
+            )
+        ),
+    )
+
+
 def record_protocol_reference(session: Session, *, protocol_id: int, requests: Sequence[DispositionRequest]) -> int:
     """Store, per token in the population, whether THIS protocol's discovery names it.
 
@@ -622,9 +785,20 @@ def record_protocol_reference(session: Session, *, protocol_id: int, requests: S
     downstream may dispose a pair on the strength of an absence from a universe
     nobody assembled.
 
+    **A universe of NO addresses reads the same way, and is refused HERE.** An
+    empty set condemns everything absent from it, which is everything. The
+    refusal is the writer's own — ``ck_tpr_absence_needs_a_universe`` says the
+    same thing at the table, and reaching it is not a defence: this pass runs
+    inside a producer that swallows what it raises, so a constraint violation
+    would poison the surrounding transaction and take the BALANCE WRITE with it.
+    The guard keeps the verdict correct and the write alive.
+
     Rows are REFRESHED, not accreted (see ``db.models.TokenProtocolReference``):
     the predicate is anti-monotone, so a verdict must be able to withdraw when
-    discovery grows.
+    discovery grows. Which is also why an unbuildable or empty universe writes
+    ``not_determined`` rows rather than nothing at all — writing nothing would
+    leave a previous cycle's ``absent_from_universe`` standing against a universe
+    this cycle could not measure.
 
     Returns the number of tokens written.
     """
@@ -636,27 +810,29 @@ def record_protocol_reference(session: Session, *, protocol_id: int, requests: S
     if not pairs:
         return 0
 
-    from services.scoring.distill import load_protocol_universe
-
     try:
-        universe = load_protocol_universe(session, protocol_id)
+        universe = _protocol_universe(session, protocol_id)
     except Exception as exc:
         # Same reading as the loader's own ``None``: an assembly that raised is
         # an assembly that did not happen.
         logger.warning("disposition: protocol universe for %s could not be assembled: %s", protocol_id, exc)
         universe = None
 
+    addresses: frozenset[str] = frozenset() if universe is None else universe.addresses
+    universe_size = len(addresses)
     if universe is None:
-        addresses: frozenset[str] = frozenset()
-        universe_size = 0
         basis = (
             "protocol reference not determined: the protocol universe could not be assembled whole "
             "(services.scoring.distill.load_protocol_universe returned no universe), and an absence "
             "measured against a short universe condemns more rather than less"
         )
+    elif universe_size == 0:
+        basis = (
+            "protocol reference not determined: the protocol universe was assembled and named NO address, "
+            "and an absence measured against an empty universe condemns every token rather than none; "
+            f"{universe.basis}"
+        )
     else:
-        addresses = universe.addresses
-        universe_size = len(addresses)
         basis = (
             f"protocol reference measured against {universe_size} discovered address(es), chain-blind; {universe.basis}"
         )
@@ -667,9 +843,12 @@ def record_protocol_reference(session: Session, *, protocol_id: int, requests: S
             "protocol_id": int(protocol_id),
             "chain_id": chain_id,
             "token_address": token,
+            # ``universe_size == 0`` covers BOTH refusals — the unbuildable
+            # universe and the empty one — because they are the same fact to a
+            # consumer: no address was available to measure an absence against.
             "reference_shape": (
                 TOKEN_REFERENCE_NOT_DETERMINED
-                if universe is None
+                if universe_size == 0
                 else (TOKEN_REFERENCE_IN_UNIVERSE if token in addresses else TOKEN_REFERENCE_ABSENT_FROM_UNIVERSE)
             ),
             "universe_addresses": universe_size,
@@ -1154,6 +1333,7 @@ __all__ = [
     "DispositionCost",
     "DispositionRequest",
     "clear_creation_block_cache",
+    "clear_protocol_universe_memo",
     "creation_block",
     "discovered_request",
     "disposition_cost_note",

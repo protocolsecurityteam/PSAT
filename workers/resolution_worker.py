@@ -732,7 +732,16 @@ class ResolutionWorker(BaseWorker):
                 rpc_url_for=lambda cid: rpc_url_for_chain_id(cid),
                 # Refreshes the protocol-reference verdict for this contract's
                 # tokens alongside the delivery scan; the universe it is measured
-                # against is assembled once here, never on a read path.
+                # against is assembled on this side, never on a read path.
+                #
+                # This runs PER CONTRACT, and the universe is a per-PROTOCOL
+                # object: assembling one costs a measured 26.5 s of object
+                # storage, so a full re-resolution of this protocol's ~91
+                # contracts carrying unpriced tokens paid ~42 minutes to build
+                # the same answer 91 times. It is now assembled once per process
+                # and reused while the protocol's discovery extent is unchanged
+                # (``delivery_shape._protocol_universe``, which states which way
+                # a stale entry errs — larger, never shorter).
                 protocol_id=contract.protocol_id,
             )
             if disposition_cost.total:

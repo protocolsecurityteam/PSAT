@@ -454,6 +454,24 @@ def _stub_balance_asset_sweep(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _clear_protocol_universe_memo():
+    """Start and end every test with no memoized protocol universe.
+
+    ``services.monitoring.delivery_shape`` memoizes the 26.5-second universe
+    assembly per PROCESS, keyed on the protocol and the discovery extent it was
+    built over. A pytest process is one process across every test in it, so a
+    universe a test built could otherwise be served to a later test that rebuilt
+    the same extent — the memo working exactly as designed, on a database whose
+    rows were rolled back underneath it. Cleared on both sides so neither the
+    arrival nor the departure of a test can carry one."""
+    from services.monitoring.delivery_shape import clear_protocol_universe_memo
+
+    clear_protocol_universe_memo()
+    yield
+    clear_protocol_universe_memo()
+
+
+@pytest.fixture(autouse=True)
 def _force_differential_probe_off(monkeypatch):
     """Keep the offline suite hermetic against the differential probe (default ON in
     code, so real runs need no env). With the flag on, in-process resolution tests
