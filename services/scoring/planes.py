@@ -16,8 +16,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import Text
+from sqlalchemy import Text, tuple_
+from sqlalchemy import false as sql_false
 from sqlalchemy import func as sql_func
+from sqlalchemy import or_ as sql_or
 from sqlalchemy.orm import Session
 
 from services.scoring.schema import Tri, coalesce_chain, entity_key, is_entity_key
@@ -979,15 +981,51 @@ def _resolve_asset_disposition(
     return out, census
 
 
+def _balance_account(row: Any) -> Any:
+    """The ACCOUNT identity a balance/fetch row is keyed on.
+
+    ``contracts.id`` where the row has one, ``(entity_chain, entity_address)``
+    where it does not. The schema keeps exactly one of the two arms populated
+    (``ck_*_exactly_one_subject_key``), so this is a read of the row's own key
+    and never a choice between two candidates.
+    """
+    if row.contract_id is not None:
+        return row.contract_id
+    return (row.entity_chain or "", row.entity_address or "")
+
+
+def _account_sort_key(item: tuple[Any, Any]) -> tuple[int, str]:
+    """A total order over accounts of both kinds, for deterministic iteration.
+
+    ``sorted`` over a mixed int/tuple key space raises; the plane's output must
+    not depend on dict insertion order, so the two arms are ordered explicitly —
+    contracts first, by id, then entity accounts by their key.
+    """
+    account = item[0]
+    if isinstance(account, tuple):
+        return (1, "::".join(str(part) for part in account))
+    return (0, f"{int(account):012d}")
+
+
 def load_value_plane(session: Session, protocol_id: int, *, universe: ProtocolUniverse | None = None) -> ValuePlane:
     from db.models import Contract, ContractBalanceFetch, ContractBalanceLatest, RestakingPositionLatest
-    from services.monitoring.balance_reads import native_balance_fact, winning_asset_fetches
+    from services.monitoring.balance_reads import (
+        ObservationSubject,
+        native_balance_fact,
+        winning_asset_fetches,
+        winning_entity_asset_fetches,
+    )
     from services.monitoring.delivery_evidence import FAN_OUT_CALIBRATION_CORPUS, FAN_OUT_THRESHOLD_K
 
     plane = ValuePlane()
     contracts = session.query(Contract).filter(Contract.protocol_id == protocol_id).order_by(Contract.id).all()
-    chain_of: dict[int, str] = {}
-    address_of: dict[int, str] = {}
+    # An ACCOUNT this plane reads, keyed the way its balance records are keyed:
+    # a ``contracts.id``, or the ``(chain, address)`` of an entity that has no
+    # ``contracts`` row. The two arms are disjoint types, so a contract id and an
+    # entity identity can never collide in one of the mappings below — which a
+    # single int space with sentinel values could.
+    chain_of: dict[Any, str] = {}
+    address_of: dict[Any, str] = {}
     impl_to_proxy: dict[str, str] = {}
     impl_proxies: dict[str, set[str]] = defaultdict(set)
     for contract in contracts:
@@ -1014,6 +1052,23 @@ def load_value_plane(session: Session, protocol_id: int, *, universe: ProtocolUn
     plane.alias = _alias_fixed_point(impl_to_proxy)
     plane.alias_ambiguous = ambiguous
 
+    # The perimeter's proven-codeless principals: entities the control graph
+    # reached and the ``contracts`` table does not name. Their balance records
+    # are keyed on ``(chain, address)`` and carry no ``contract_id``, so they are
+    # loaded by identity rather than by a join — a join to ``contracts`` is what
+    # made them unreadable in the first place. Membership is the SAME earned
+    # ``eth_getCode`` witness the vacuous-credit arm reads (``resolved_type ==
+    # 'eoa'``); an entity outside it is not looked up here at all.
+    entity_identities = sorted(
+        (chain, address)
+        for chain, _, address in (key.partition("::") for key in load_proven_eoa_entities(session, protocol_id))
+        if chain and address
+    )
+    entity_subjects = [ObservationSubject.of_entity(chain, address) for chain, address in entity_identities]
+    for chain, address in entity_identities:
+        chain_of[(chain, address)] = chain
+        address_of[(chain, address)] = address
+
     native_seen: set[str] = set()
     fetched: list[Any] = []
     rows = (
@@ -1023,6 +1078,21 @@ def load_value_plane(session: Session, protocol_id: int, *, universe: ProtocolUn
         .order_by(ContractBalanceLatest.contract_id, ContractBalanceLatest.token_address, ContractBalanceLatest.id)
         .all()
     )
+    if entity_identities:
+        rows = list(rows) + (
+            session.query(ContractBalanceLatest)
+            .filter(
+                ContractBalanceLatest.contract_id.is_(None),
+                tuple_(ContractBalanceLatest.entity_chain, ContractBalanceLatest.entity_address).in_(entity_identities),
+            )
+            .order_by(
+                ContractBalanceLatest.entity_chain,
+                ContractBalanceLatest.entity_address,
+                ContractBalanceLatest.token_address,
+                ContractBalanceLatest.id,
+            )
+            .all()
+        )
     # One bucket per (entity, asset, observed account). The alias fold puts a
     # proxy's rows and its implementation's rows under one entity key, and those
     # are the SAME on-chain account read twice at two heights by two writers —
@@ -1033,9 +1103,9 @@ def load_value_plane(session: Session, protocol_id: int, *, universe: ProtocolUn
     # never on a folded entity key — so the disposition's all-quantifier is
     # evaluated over exactly the addresses that contributed to the bucket.
     accounts_by_bucket: dict[tuple[str, str], set[tuple[str, str]]] = defaultdict(set)
-    observed_contracts: set[int] = set()
     for row in rows:
-        key = plane.canonical(entity_key(chain_of.get(row.contract_id), address_of.get(row.contract_id)))
+        account = _balance_account(row)
+        key = plane.canonical(entity_key(chain_of.get(account), address_of.get(account)))
         # A NULL token_address IS the native asset by this column's definition,
         # not a missing value standing in for one.
         asset = _lower(row.token_address) if row.token_address else NATIVE_ASSET
@@ -1043,29 +1113,46 @@ def load_value_plane(session: Session, protocol_id: int, *, universe: ProtocolUn
             native_seen.add(key)
         if row.fetched_at is not None:
             fetched.append(row.fetched_at)
-        observed_contracts.add(row.contract_id)
         observations[(key, asset)][_lower(row.observed_address)].append(row)
-        accounts_by_bucket[(key, asset)].add((chain_of.get(row.contract_id) or "", _lower(row.observed_address)))
+        accounts_by_bucket[(key, asset)].add((chain_of.get(account) or "", _lower(row.observed_address)))
 
     per_asset, per_asset_state, reduction = _reduce_observations(observations)
     plane.per_asset = per_asset
     plane.per_asset_state = per_asset_state
 
     # The proven-zero / fetch-failed discriminator for an ABSENT native row.
-    latest_fetch: dict[int, Any] = {}
-    for fetch in (
+    latest_fetch: dict[Any, Any] = {}
+    fetch_rows = list(
         session.query(ContractBalanceFetch)
         .join(Contract, Contract.id == ContractBalanceFetch.contract_id)
         .filter(Contract.protocol_id == protocol_id)
         .order_by(ContractBalanceFetch.contract_id, ContractBalanceFetch.fetched_at, ContractBalanceFetch.id)
         .all()
-    ):
-        latest_fetch[fetch.contract_id] = fetch
+    )
+    if entity_identities:
+        fetch_rows += (
+            session.query(ContractBalanceFetch)
+            .filter(
+                ContractBalanceFetch.contract_id.is_(None),
+                tuple_(ContractBalanceFetch.entity_chain, ContractBalanceFetch.entity_address).in_(entity_identities),
+            )
+            .order_by(
+                ContractBalanceFetch.entity_chain,
+                ContractBalanceFetch.entity_address,
+                ContractBalanceFetch.fetched_at,
+                ContractBalanceFetch.id,
+            )
+            .all()
+        )
+    for fetch in fetch_rows:
+        latest_fetch[_balance_account(fetch)] = fetch
     # Completeness is a property of THE ROW SET, so it is read from the fetch
     # whose rows this plane just loaded — never from the latest fetch, which may
     # be a later failure that would withdraw the truncation while the truncated
     # prefix rows are still what the sheet sums.
-    winning_asset_fetch = winning_asset_fetches(session, protocol_id)
+    winning_asset_fetch: dict[Any, Any] = dict(winning_asset_fetches(session, protocol_id))
+    for subject, fetch in winning_entity_asset_fetches(session, entity_subjects).items():
+        winning_asset_fetch[(subject.chain, subject.address)] = fetch
     # EVERY account that folds onto a key, with no exemption. The sheet is the
     # sum over its accounts, so its asset list is whole only where every one of
     # those addresses was scanned AT ITSELF. An implementation nothing has ever
@@ -1076,13 +1163,19 @@ def load_value_plane(session: Session, protocol_id: int, *, universe: ProtocolUn
     # address is a reading of that account. The producer's population is what
     # closes this (``tvl._get_protocol_addresses`` reads the folded
     # implementations of a scanning entity), not a weaker rule here.
-    accounts_of: dict[str, set[int]] = defaultdict(set)
+    accounts_of: dict[str, set[Any]] = defaultdict(set)
     for contract in contracts:
         accounts_of[plane.canonical(entity_key(chain_of[contract.id], address_of[contract.id]))].add(contract.id)
+    # An entity-keyed subject is one account and it IS the entity, so the sheet's
+    # "every folded account was scanned at its own address" conjunct is asked of
+    # it exactly as it is asked of a contract — never waived because the account
+    # happens to have no contracts row.
+    for account in entity_identities:
+        accounts_of[plane.canonical(entity_key(chain_of[account], address_of[account]))].add(account)
     scanned: dict[str, list[dict[str, Any]]] = defaultdict(list)
     typed_unresolved: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for contract_id, fetch in sorted(winning_asset_fetch.items()):
-        key = plane.canonical(entity_key(chain_of.get(contract_id), address_of.get(contract_id)))
+    for account, fetch in sorted(winning_asset_fetch.items(), key=_account_sort_key):
+        key = plane.canonical(entity_key(chain_of.get(account), address_of.get(account)))
         # Recorded for EVERY contract, independently of the native-row shortcut
         # below: a truncated asset list is a fact about the ERC-20 list and holds
         # whether or not a native row was also stored. Unioned over the contracts
@@ -1116,11 +1209,11 @@ def load_value_plane(session: Session, protocol_id: int, *, universe: ProtocolUn
             # against the implementation's row proves nothing about the
             # implementation's address, and that is the exact shape on this
             # corpus.
-            and _lower(fetch.observed_address) == address_of.get(contract_id)
+            and _lower(fetch.observed_address) == address_of.get(account)
         ):
             scanned[key].append(
                 {
-                    "contract_id": contract_id,
+                    "account": account,
                     "source": str(fetch.asset_set_source),
                     "swept_from_block": int(fetch.swept_from_block or 0),
                     "swept_through_block": int(fetch.swept_through_block),
@@ -1129,14 +1222,12 @@ def load_value_plane(session: Session, protocol_id: int, *, universe: ProtocolUn
             )
     plane.typed_receipts_unresolved = {key: records for key, records in sorted(typed_unresolved.items())}
     for key, records in sorted(scanned.items()):
-        unscanned = accounts_of.get(key, set()) - {record["contract_id"] for record in records}
+        unscanned = accounts_of.get(key, set()) - {record["account"] for record in records}
         if unscanned:
             # A scan ran at some of this sheet's accounts and never at these.
             # Named rather than merely refused: it is the one refusal a producer
             # cycle can close, and the addresses are the work list.
-            plane.asset_set_accounts_unscanned[key] = sorted(
-                address_of.get(contract_id) or "" for contract_id in unscanned
-            )
+            plane.asset_set_accounts_unscanned[key] = sorted(address_of.get(account) or "" for account in unscanned)
             continue
         if key in plane.asset_set_truncated:
             # One account scanned and another came back at the index's page cap.
@@ -1152,7 +1243,7 @@ def load_value_plane(session: Session, protocol_id: int, *, universe: ProtocolUn
             # beside it makes the claim checkable at a glance.
             "accounts_scanned": len(records),
             "accounts_folded": len(accounts_of.get(key, ())),
-            "accounts": sorted(address_of.get(record["contract_id"]) or "" for record in records),
+            "accounts": sorted(address_of.get(record["account"]) or "" for record in records),
             # The WEAKEST end of the accounts' scans, because the sheet is only
             # covered where all of them are: the latest first block any account's
             # scan started at, and the earliest block any of them ran through.
@@ -1179,8 +1270,8 @@ def load_value_plane(session: Session, protocol_id: int, *, universe: ProtocolUn
     #     the honest answer is the third state rather than the majority or the
     #     latest.
     native_by_account: dict[str, dict[str, str]] = defaultdict(dict)
-    for contract_id, fetch in sorted(latest_fetch.items()):
-        own = entity_key(chain_of.get(contract_id), address_of.get(contract_id))
+    for account, fetch in sorted(latest_fetch.items(), key=_account_sort_key):
+        own = entity_key(chain_of.get(account), address_of.get(account))
         native_by_account[plane.canonical(own)][own] = native_balance_fact(fetch.native_status, fetch.block_number)
     native_facts_refused_on_disagreement = 0
     for key, by_account in sorted(native_by_account.items()):
@@ -4193,10 +4284,25 @@ def plane_row_counts(session: Session, protocol_id: int) -> dict[str, Any]:
         .join(Contract, Contract.id == EffectiveFunction.contract_id)
         .filter(Contract.protocol_id == protocol_id)
     )
-    balances = (
-        session.query(sql_func.count(ContractBalanceLatest.id))
-        .join(Contract, Contract.id == ContractBalanceLatest.contract_id)
-        .filter(Contract.protocol_id == protocol_id)
+    # Both keying arms, because both are rows the value plane reads. Counting
+    # only the join to ``contracts`` would report a plane smaller than the one
+    # the score was computed over the moment an entity-keyed holder is observed.
+    entity_identities = sorted(
+        (chain, address)
+        for chain, _, address in (key.partition("::") for key in load_proven_eoa_entities(session, protocol_id))
+        if chain and address
+    )
+    balances = session.query(sql_func.count(ContractBalanceLatest.id)).filter(
+        sql_or(
+            ContractBalanceLatest.contract_id.in_(
+                session.query(Contract.id).filter(Contract.protocol_id == protocol_id)
+            ),
+            (
+                tuple_(ContractBalanceLatest.entity_chain, ContractBalanceLatest.entity_address).in_(entity_identities)
+                if entity_identities
+                else sql_false()
+            ),
+        )
     )
     signals = session.query(sql_func.count(FunctionScoreSignal.id)).filter(
         FunctionScoreSignal.protocol_id == protocol_id

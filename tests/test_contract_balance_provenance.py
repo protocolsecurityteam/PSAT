@@ -13,6 +13,7 @@ import pytest
 from sqlalchemy import select, text
 
 from db.models import Contract, ContractBalance, ContractBalanceFetch, ContractBalanceLatest, Protocol
+from services.monitoring.balance_observation import NativeReading
 from services.monitoring.balance_reads import PINNED_FINALITY_MARGIN
 from services.monitoring.tvl import refresh_contract_balances
 from tests.conftest import requires_postgres
@@ -716,3 +717,118 @@ class TestHalvesFailIndependently:
         view_native = [r for r in _view(db_session, c.id) if r.token_address is None]
         # The last thing actually observed is still published.
         assert [r.id for r in view_native] == [r.id for r in first_native]
+
+
+def _entity_view(session, chain: str, address: str) -> list[ContractBalanceLatest]:
+    return list(
+        session.execute(
+            select(ContractBalanceLatest)
+            .where(
+                ContractBalanceLatest.contract_id.is_(None),
+                ContractBalanceLatest.entity_chain == chain,
+                ContractBalanceLatest.entity_address == address,
+            )
+            .order_by(ContractBalanceLatest.id)
+        ).scalars()
+    )
+
+
+def _observe_entity(session, chain: str, address: str, *, wei: int, block: int | None, failed_assets: bool = False):
+    """One entity-keyed observation through the shared write point."""
+    from services.monitoring.balance_observation import record_observation
+    from services.monitoring.balance_reads import ObservationSubject
+
+    return record_observation(
+        session,
+        subject=ObservationSubject.of_entity(chain, address),
+        chain_id=1,
+        native=NativeReading(wei=wei, block_number=block, failed=False, price_usd=2000.0, symbol="ETH", name="Ether"),
+        page=failed_page() if failed_assets else page([]),
+        writer=BALANCE_WRITER_TVL,
+    )
+
+
+@requires_postgres
+class TestEntityKeyedRecordsReachTheView:
+    """The carrier for entities with no ``contracts`` row, and the view's key.
+
+    ``contract_balances_latest`` decided which fetch is current with
+    ``f.contract_id = cb.contract_id``. That comparison is NULL — never true —
+    for an entity-keyed row, so every one of them would have been written,
+    stored, and silently absent from the view every consumer reads. These arms
+    pin the coalesced key: the entity arm returns its rows and runs the same
+    write-order contest, and the contract arm is unchanged term for term.
+    """
+
+    def test_an_entity_keyed_row_is_returned_by_the_view(self, db_session):
+        address = _addr("e1")
+        recorded = _observe_entity(db_session, "ethereum", address, wei=7, block=BLOCK)
+        db_session.flush()
+        assert recorded.fetch.contract_id is None
+        assert (recorded.fetch.entity_chain, recorded.fetch.entity_address) == ("ethereum", address)
+
+        view = _entity_view(db_session, "ethereum", address)
+        assert [(r.raw_balance, r.block_number) for r in view] == [("7", BLOCK)]
+        assert [r.observed_address for r in view] == [address]
+
+    def test_the_later_non_failed_fetch_wins_the_entity_arm_wholesale(self, db_session):
+        address = _addr("e2")
+        _observe_entity(db_session, "ethereum", address, wei=1, block=BLOCK)
+        db_session.flush()
+        _observe_entity(db_session, "ethereum", address, wei=2, block=BLOCK + 1)
+        db_session.flush()
+
+        view = _entity_view(db_session, "ethereum", address)
+        assert [(r.raw_balance, r.block_number) for r in view] == [("2", BLOCK + 1)]
+        # Insert-only: the earlier reading is still on record, it just is not current.
+        stored = db_session.execute(
+            select(ContractBalance).where(ContractBalance.entity_address == address).order_by(ContractBalance.id)
+        ).scalars()
+        assert [r.raw_balance for r in stored] == ["1", "2"]
+
+    def test_a_failed_asset_class_does_not_withdraw_the_entity_native_row(self, db_session):
+        address = _addr("e3")
+        _observe_entity(db_session, "ethereum", address, wei=5, block=BLOCK)
+        db_session.flush()
+        _observe_entity(db_session, "ethereum", address, wei=6, block=BLOCK + 1, failed_assets=True)
+        db_session.flush()
+        # The native class did not fail, so it advances; the ERC-20 class did, so
+        # the failed fetch never wins it. Same per-class rule as the contract arm.
+        view = _entity_view(db_session, "ethereum", address)
+        assert [(r.raw_balance, r.token_address) for r in view] == [("6", None)]
+
+    def test_one_address_two_subjects_never_share_rows(self, db_session, monkeypatch):
+        """The identity is the SUBJECT, not the address.
+
+        A contract and an entity holder at the same address are two subjects, and
+        a view keyed on anything looser would let either one's fetch withdraw the
+        other's rows.
+        """
+        proto = _protocol(db_session, "prov-entity-collision")
+        address = _addr("e4")
+        c = _contract(db_session, proto.id, address)
+        db_session.commit()
+        _stub_pinned(monkeypatch, {address: 11}, head=HEAD)
+        _stub_etherscan(monkeypatch, wei=0)
+        refresh_contract_balances(db_session, proto.id)
+
+        _observe_entity(db_session, "ethereum", address, wei=99, block=BLOCK + 5)
+        db_session.flush()
+
+        assert [r.raw_balance for r in _view(db_session, c.id)] == ["11"]
+        assert [r.raw_balance for r in _entity_view(db_session, "ethereum", address)] == ["99"]
+
+    def test_a_row_must_carry_exactly_one_subject_key(self, db_session):
+        proto = _protocol(db_session, "prov-entity-check")
+        c = _contract(db_session, proto.id, _addr("e5"))
+        db_session.commit()
+        for kwargs in (
+            {"contract_id": c.id, "entity_chain": "ethereum", "entity_address": _addr("e5")},
+            {"contract_id": None, "entity_chain": None, "entity_address": None},
+            {"contract_id": None, "entity_chain": "ethereum", "entity_address": None},
+        ):
+            db_session.add(ContractBalance(token_address=None, decimals=18, raw_balance="1", **kwargs))
+            with pytest.raises(Exception) as exc:
+                db_session.flush()
+            assert "exactly_one_subject_key" in str(exc.value)
+            db_session.rollback()

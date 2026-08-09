@@ -45,7 +45,7 @@ from services.monitoring.asset_sweep import (
     SweepOutcome,
     carried_typed_receipt,
 )
-from services.monitoring.balance_reads import native_status_for, prune_balance_fetches
+from services.monitoring.balance_reads import ObservationSubject, native_status_for, prune_balance_fetches
 from utils.balance_status import (
     ASSET_SET_SOURCE_CHAIN_LOG_SWEEP,
     ASSET_SET_SOURCE_ETHERSCAN_PAGES,
@@ -106,11 +106,14 @@ ESCALATE_NO_FETCH_RECORD = "no prior fetch record for this contract"
 # reached without spending a four-figure request budget to buy it.
 AT_CAP_COMPLETENESS_MECHANISM = "etherscan pagination past the first page (not a chain sweep)"
 
-# The measured non-priority, recorded rather than left as an omission: 153
-# proven-codeless EOAs in this perimeter are NOT read. They move a non-binding
-# confidence term and the published headline by zero, and reading them would
-# spend the sweep budget where no number changes.
-SWEEP_POPULATION_NOTE = "proven-codeless EOA principals are out of the swept population (measured non-priority)"
+# The swept population's own scope sentence, carried onto every basis string.
+# Proven-codeless EOA principals used to be excluded from it — they have no
+# ``contracts`` row and nothing could read them — and the exclusion was recorded
+# here rather than left silent. They are now read at their own (chain, address)
+# identity, so the sentence states what the population IS.
+SWEEP_POPULATION_NOTE = (
+    "swept population: the protocol's contracts plus its proven-codeless EOA principals, each read at its own address"
+)
 
 
 @dataclass(frozen=True)
@@ -148,9 +151,9 @@ class RecordedObservation:
 
 @dataclass(frozen=True)
 class SweepRequest:
-    """One contract queued for the chain-derived escalation."""
+    """One holder queued for the chain-derived escalation."""
 
-    contract_id: int
+    subject: ObservationSubject
     address: str
     chain_id: int
     from_block: int
@@ -235,13 +238,13 @@ def fetch_asset_page(address: str, *, chain_id: int) -> TokenBalancePage:
         )
 
 
-def escalation_reason(session: Session, *, contract_id: int, page: TokenBalancePage) -> str | None:
+def escalation_reason(session: Session, *, subject: ObservationSubject, page: TokenBalancePage) -> str | None:
     """Why this contract's asset set must be asked of the chain, or ``None``.
 
     Uniform: the trigger is the shape of the answer, never what a claim wants to
     be true of the contract.
     """
-    if sweep_keeps_failing(session, contract_id=contract_id):
+    if sweep_keeps_failing(session, subject=subject):
         return None
     if page.status == ASSET_SET_STATUS_RETURNED_EMPTY:
         return ESCALATE_RETURNED_EMPTY
@@ -253,7 +256,7 @@ def escalation_reason(session: Session, *, contract_id: int, page: TokenBalanceP
     recent = (
         session.execute(
             select(ContractBalanceFetch.asset_set_status)
-            .where(ContractBalanceFetch.contract_id == contract_id)
+            .where(*subject.filters(ContractBalanceFetch))
             .order_by(ContractBalanceFetch.fetched_at.desc(), ContractBalanceFetch.id.desc())
             .limit(PERSISTENT_FAILURE_RUN)
         )
@@ -268,7 +271,7 @@ def escalation_reason(session: Session, *, contract_id: int, page: TokenBalanceP
     return None
 
 
-def sweep_from_block(session: Session, *, contract_id: int) -> int:
+def sweep_from_block(session: Session, *, subject: ObservationSubject) -> int:
     """Where this contract's next scan starts.
 
     The stored cursor plus one, or 0 for a contract never swept. Without it the
@@ -299,14 +302,16 @@ def sweep_from_block(session: Session, *, contract_id: int) -> int:
     and where the ids are undecodable the re-scan is bounded rather than endless
     (:data:`ID_RESCAN_RUN`).
     """
-    current = _current_asset_fetch(session, contract_id=contract_id)
-    if not _cursor_is_inheritable(session, current, contract_id=contract_id):
+    current = _current_asset_fetch(session, subject=subject)
+    if not _cursor_is_inheritable(session, current, subject=subject):
         return 0
     assert current is not None and current.swept_through_block is not None
     return int(current.swept_through_block) + 1
 
 
-def _cursor_is_inheritable(session: Session, fetch: ContractBalanceFetch | None, *, contract_id: int) -> bool:
+def _cursor_is_inheritable(
+    session: Session, fetch: ContractBalanceFetch | None, *, subject: ObservationSubject
+) -> bool:
     """The single condition behind both the cursor and the scan extent.
 
     One predicate rather than two copies: a union extent inherited past a refused
@@ -318,10 +323,10 @@ def _cursor_is_inheritable(session: Session, fetch: ContractBalanceFetch | None,
         return False
     if _typed_record_is_id_complete(fetch):
         return True
-    return id_rescan_keeps_failing(session, contract_id=contract_id)
+    return id_rescan_keeps_failing(session, subject=subject)
 
 
-def id_rescan_keeps_failing(session: Session, *, contract_id: int) -> bool:
+def id_rescan_keeps_failing(session: Session, *, subject: ObservationSubject) -> bool:
     """Whether this contract's last few full-history scans all failed to settle ids.
 
     Looks only at scans that ran from the union's first block — the re-scan the
@@ -335,7 +340,7 @@ def id_rescan_keeps_failing(session: Session, *, contract_id: int) -> bool:
         session.execute(
             select(ContractBalanceFetch.typed_assets)
             .where(
-                ContractBalanceFetch.contract_id == contract_id,
+                *subject.filters(ContractBalanceFetch),
                 ContractBalanceFetch.sweep_status == SWEEP_STATUS_COMPLETED,
                 ContractBalanceFetch.swept_from_block == 0,
             )
@@ -348,14 +353,14 @@ def id_rescan_keeps_failing(session: Session, *, contract_id: int) -> bool:
     return len(recent) >= ID_RESCAN_RUN and not any(_entries_are_id_complete(entries) for entries in recent)
 
 
-def known_swept_assets(session: Session, *, contract_id: int) -> tuple[str, ...]:
+def known_swept_assets(session: Session, *, subject: ObservationSubject) -> tuple[str, ...]:
     """The assets a previous scan already attributed to this contract.
 
     Read off the rows of the fetch whose ERC-20 set is CURRENT — the same fetch
     ``contract_balances_latest`` publishes — so the list carried into the next
     incremental window is exactly the one a consumer is reading today.
     """
-    fetch = _current_asset_fetch(session, contract_id=contract_id)
+    fetch = _current_asset_fetch(session, subject=subject)
     if fetch is None:
         return ()
     winner = fetch.id
@@ -373,7 +378,7 @@ def known_swept_assets(session: Session, *, contract_id: int) -> tuple[str, ...]
     return tuple(sorted({str(a).lower() for a in rows if a}))
 
 
-def known_typed_assets(session: Session, *, contract_id: int) -> tuple[CarriedTypedReceipt, ...]:
+def known_typed_assets(session: Session, *, subject: ObservationSubject) -> tuple[CarriedTypedReceipt, ...]:
     """The ERC-721/1155 receipts the current fetch record already knows about.
 
     This is the durable half of the completeness refusal. A typed receipt whose
@@ -385,7 +390,7 @@ def known_typed_assets(session: Session, *, contract_id: int) -> tuple[CarriedTy
     Each receipt carries its standard and its stored token ids, so the next cycle
     can read an ERC-1155 holding without re-scanning the history that named them.
     """
-    fetch = _current_asset_fetch(session, contract_id=contract_id)
+    fetch = _current_asset_fetch(session, subject=subject)
     if fetch is None or not _typed_record_is_readable(fetch):
         return ()
     receipts = {}
@@ -449,25 +454,25 @@ def _entries_are_id_complete(entries: object) -> bool:
     return all(isinstance(entry, dict) and entry.get("ids_complete") is True for entry in entries)
 
 
-def scanned_from_block(session: Session, *, contract_id: int) -> int | None:
+def scanned_from_block(session: Session, *, subject: ObservationSubject) -> int | None:
     """The first block of the union of the scans behind the current asset set."""
-    fetch = _current_asset_fetch(session, contract_id=contract_id)
+    fetch = _current_asset_fetch(session, subject=subject)
     # Same row and same predicate as :func:`sweep_from_block`: an extent is only
     # readable off the fetch that carries the scan it describes, and a scan being
     # redone has no extent yet.
-    if not _cursor_is_inheritable(session, fetch, contract_id=contract_id):
+    if not _cursor_is_inheritable(session, fetch, subject=subject):
         return None
     assert fetch is not None
     return int(fetch.swept_from_block) if fetch.swept_from_block is not None else 0
 
 
-def _current_asset_fetch(session: Session, *, contract_id: int) -> ContractBalanceFetch | None:
+def _current_asset_fetch(session: Session, *, subject: ObservationSubject) -> ContractBalanceFetch | None:
     """The fetch whose ERC-20 row set ``contract_balances_latest`` publishes."""
     return (
         session.execute(
             select(ContractBalanceFetch)
             .where(
-                ContractBalanceFetch.contract_id == contract_id,
+                *subject.filters(ContractBalanceFetch),
                 ContractBalanceFetch.asset_set_status != ASSET_SET_STATUS_FETCH_FAILED,
             )
             .order_by(ContractBalanceFetch.fetched_at.desc(), ContractBalanceFetch.id.desc())
@@ -478,13 +483,13 @@ def _current_asset_fetch(session: Session, *, contract_id: int) -> ContractBalan
     )
 
 
-def _has_scan_record(session: Session, *, contract_id: int) -> bool:
+def _has_scan_record(session: Session, *, subject: ObservationSubject) -> bool:
     """Whether any fetch for this contract carries a completed scan."""
     return (
         session.execute(
             select(ContractBalanceFetch.id)
             .where(
-                ContractBalanceFetch.contract_id == contract_id,
+                *subject.filters(ContractBalanceFetch),
                 ContractBalanceFetch.swept_through_block.is_not(None),
             )
             .limit(1)
@@ -495,7 +500,7 @@ def _has_scan_record(session: Session, *, contract_id: int) -> bool:
     )
 
 
-def sweep_keeps_failing(session: Session, *, contract_id: int) -> bool:
+def sweep_keeps_failing(session: Session, *, subject: ObservationSubject) -> bool:
     """Whether this contract's last few scans all failed.
 
     A scan that cannot be proven whole is usually a holder whose transfer history
@@ -508,7 +513,7 @@ def sweep_keeps_failing(session: Session, *, contract_id: int) -> bool:
         session.execute(
             select(ContractBalanceFetch.sweep_status)
             .where(
-                ContractBalanceFetch.contract_id == contract_id,
+                *subject.filters(ContractBalanceFetch),
                 ContractBalanceFetch.sweep_status.is_not(None),
             )
             .order_by(ContractBalanceFetch.fetched_at.desc(), ContractBalanceFetch.id.desc())
@@ -525,7 +530,7 @@ def run_sweeps(
     *,
     rpc_url_for: Callable[[int], str | None],
     cost: SweepCost | None = None,
-) -> tuple[dict[int, SweepOutcome], SweepCost]:
+) -> tuple[dict[ObservationSubject, SweepOutcome], SweepCost]:
     """Run the escalation for a whole cycle's candidates, batched per chain.
 
     Batching is not an optimisation here: the recipient filter is an OR-set in
@@ -533,7 +538,7 @@ def run_sweeps(
     one. Per-contract scans would multiply the cycle's request count by N.
     """
     cost = cost if cost is not None else SweepCost()
-    outcomes: dict[int, SweepOutcome] = {}
+    outcomes: dict[ObservationSubject, SweepOutcome] = {}
     by_chain: dict[int, list[SweepRequest]] = {}
     for request in requests:
         by_chain.setdefault(request.chain_id, []).append(request)
@@ -561,14 +566,14 @@ def run_sweeps(
         for address, outcome in results.items():
             request = by_address.get(address)
             if request is not None:
-                outcomes[request.contract_id] = outcome
+                outcomes[request.subject] = outcome
     return outcomes, cost
 
 
 def record_observation(
     session: Session,
     *,
-    contract: Contract,
+    subject: ObservationSubject,
     chain_id: int,
     native: NativeReading,
     page: TokenBalancePage,
@@ -584,7 +589,7 @@ def record_observation(
     was written — possibly empty, when empty is what was observed, never merely
     skipped.
     """
-    observed_address = contract.address
+    observed_address = subject.address
     native_status = native_status_for(wei=native.wei, pinned=native.block_number is not None, failed=native.failed)
 
     assets: dict[str, dict] = {}
@@ -740,7 +745,7 @@ def record_observation(
                 f"{basis}; chain sweep ABORTED, asset set NOT proven complete: "
                 f"{sweep.failure_reason or 'no reason recorded'}"
             )
-            if _has_scan_record(session, contract_id=contract.id):
+            if _has_scan_record(session, subject=subject):
                 # A scan already established this contract's asset set, and this
                 # cycle's scan aborted. The Etherscan page is not a replacement
                 # for it: it is the answer whose incompleteness triggered the
@@ -761,7 +766,7 @@ def record_observation(
         basis = f"{basis}; {cost_note}"
 
     fetch = ContractBalanceFetch(
-        contract_id=contract.id,
+        **subject.columns(),
         chain_id=chain_id,
         observed_address=observed_address,
         block_number=native.block_number,
@@ -794,7 +799,7 @@ def record_observation(
         native_usd = (native.wei / 1e18) * native.price_usd if native.price_usd is not None else None
         written.append(
             ContractBalance(
-                contract_id=contract.id,
+                **subject.columns(),
                 token_address=None,
                 token_name=native.name,
                 token_symbol=native.symbol,
@@ -820,7 +825,7 @@ def record_observation(
         row = assets[token]
         written.append(
             ContractBalance(
-                contract_id=contract.id,
+                **subject.columns(),
                 token_address=row["token_address"],
                 token_name=row["token_name"],
                 token_symbol=row["token_symbol"],
@@ -842,7 +847,7 @@ def record_observation(
     for row_obj in written:
         session.add(row_obj)
 
-    prune_balance_fetches(session, contract.id, observed_address)
+    prune_balance_fetches(session, subject, observed_address)
     return RecordedObservation(
         fetch=fetch,
         asset_set_status=asset_set_status,
@@ -861,6 +866,7 @@ __all__ = [
     "PERSISTENT_FAILURE_RUN",
     "SWEEP_POPULATION_NOTE",
     "NativeReading",
+    "ObservationSubject",
     "RecordedObservation",
     "SweepRequest",
     "escalation_reason",

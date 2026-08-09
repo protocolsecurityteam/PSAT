@@ -6,20 +6,31 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from db.models import Contract, ContractBalance, ContractBalanceFetch, Protocol, TvlSnapshot
+from db.models import (
+    Contract,
+    ContractBalance,
+    ContractBalanceFetch,
+    ControlGraphNode,
+    Protocol,
+    TvlSnapshot,
+)
 from services.aggregations.company_overview import _entity_key
+from services.monitoring.asset_sweep import SweepCost
 from services.monitoring.tvl import (
     _get_protocol_addresses,
     _read_existing_balances,
     fetch_defillama_tvl,
+    proven_codeless_holders,
     refresh_all_protocols,
     refresh_contract_balances,
+    refresh_entity_balances,
     take_tvl_snapshot,
 )
 from tests.conftest import requires_postgres
 from tests.support.balance_stubs import page, pinned_native_unavailable
 from utils.balance_status import (
     ASSET_SET_SOURCE_CHAIN_LOG_SWEEP,
+    ASSET_SET_SOURCE_ETHERSCAN_PAGES,
     ASSET_SET_STATUS_FETCH_FAILED,
     ASSET_SET_STATUS_RETURNED_EMPTY,
     BALANCE_WRITER_TVL,
@@ -1108,3 +1119,195 @@ class TestFailedReadIsNotAMeasuredZero:
         # is withheld.
         rows = db_session.query(ContractBalance).all()
         assert len(rows) == 1 and rows[0].token_symbol == "ETH"
+
+
+@requires_postgres
+class TestProvenCodelessHolderPopulation:
+    """Who ``refresh_entity_balances`` reads, and why nobody else is in it.
+
+    The population is the earned ``eth_getCode`` witness and nothing looser: a
+    node is in it because an empty code read put ``resolved_type = 'eoa'`` on it,
+    never because a name, a relation or a row suggests an EOA. Everything the
+    producer declines to read comes back as an ``ExcludedHolder`` carrying the
+    reason, because a population that quietly shrinks is indistinguishable from
+    one that was never that size.
+    """
+
+    PREFIX = "0x000000000000000000000000000000000000e"
+
+    def _addr(self, suffix: str) -> str:
+        return (self.PREFIX + suffix).ljust(42, "0")[:42]
+
+    def _fixture(self, db_session, monkeypatch, *, rpc: bool = True):
+        monkeypatch.setattr(
+            "services.monitoring.tvl.rpc_url_for_chain_id",
+            lambda chain_id: "http://rpc.invalid" if rpc else None,
+        )
+        proto = Protocol(name=f"TestProto_codeless_{self._addr('0')[-6:]}")
+        db_session.add(proto)
+        db_session.flush()
+        host = Contract(protocol_id=proto.id, address=self._addr("1"), chain="ethereum", contract_name="Host")
+        db_session.add(host)
+        db_session.flush()
+        return proto, host
+
+    def _node(self, db_session, host, address: str, resolved_type: str | None) -> None:
+        db_session.add(
+            ControlGraphNode(contract_id=host.id, address=address, node_type="owner", resolved_type=resolved_type)
+        )
+        db_session.flush()
+
+    def test_only_the_earned_eoa_witness_is_in_the_population(self, db_session, monkeypatch, _cleanup):
+        proto, host = self._fixture(db_session, monkeypatch)
+        eoa = self._addr("2")
+        self._node(db_session, host, eoa, "eoa")
+        # The three kinds that are NOT the witness. ``unknown`` is the one that
+        # matters: a node nobody probed carries it, and sweeping it as an EOA
+        # would be a name standing in for the getCode that was never issued.
+        self._node(db_session, host, self._addr("3"), "unknown")
+        self._node(db_session, host, self._addr("4"), "contract")
+        self._node(db_session, host, self._addr("5"), None)
+        db_session.commit()
+
+        holders, excluded = proven_codeless_holders(db_session, proto.id)
+        assert [h.entity_key for h in holders] == [f"ethereum::{eoa}"]
+        # The three non-EOAs are not "excluded" either — they were never
+        # candidates, so publishing a reason for them would misreport the
+        # predicate as a filter over every node.
+        assert excluded == []
+
+    def test_an_eoa_node_that_also_carries_an_unknown_node_stays_in(self, db_session, monkeypatch, _cleanup):
+        """An unprobed sibling does not retract an earned witness.
+
+        ``resolved_type='eoa'`` is only written after an empty ``eth_getCode``.
+        A second node for the same address that nobody probed says nothing about
+        the address, so it cannot withdraw what the probe established.
+        """
+        proto, host = self._fixture(db_session, monkeypatch)
+        eoa = self._addr("6")
+        self._node(db_session, host, eoa, "eoa")
+        self._node(db_session, host, eoa, "unknown")
+        db_session.commit()
+
+        holders, _excluded = proven_codeless_holders(db_session, proto.id)
+        assert [h.entity_key for h in holders] == [f"ethereum::{eoa}"]
+
+    def test_an_address_with_its_own_contracts_row_is_never_a_second_subject(self, db_session, monkeypatch, _cleanup):
+        """The guard at the heart of the carrier.
+
+        One address read as a contract subject AND as an entity subject would
+        fold TWO accounts onto one entity key, and the sheet's "every folded
+        account was scanned at its own address" conjunct would then be asking
+        about the same account twice — a completeness claim that counts one
+        witness as two. The address is read through its ``contracts`` row, and
+        the entity population declines it WITH the reason.
+        """
+        proto, host = self._fixture(db_session, monkeypatch)
+        # The host contract's own address, also reached as an owner node.
+        self._node(db_session, host, host.address, "eoa")
+        db_session.commit()
+
+        holders, excluded = proven_codeless_holders(db_session, proto.id)
+        assert holders == []
+        assert [(e.entity_key, e.reason) for e in excluded] == [
+            (f"ethereum::{host.address}", "already observed through its own contracts row")
+        ]
+
+    def test_an_entity_the_producer_cannot_reach_is_excluded_with_its_reason(self, db_session, monkeypatch, _cleanup):
+        proto, host = self._fixture(db_session, monkeypatch, rpc=False)
+        eoa = self._addr("7")
+        self._node(db_session, host, eoa, "eoa")
+        db_session.commit()
+
+        holders, excluded = proven_codeless_holders(db_session, proto.id)
+        assert holders == []
+        assert [e.entity_key for e in excluded] == [f"ethereum::{eoa}"]
+        assert "no RPC URL configured" in excluded[0].reason
+
+    def test_every_candidate_is_a_holder_or_an_exclusion_with_a_reason(self, db_session, monkeypatch, _cleanup):
+        """Nothing leaves the population silently.
+
+        The candidate set is the plane's own ``load_proven_eoa_entities``; this
+        pins that the two output lists partition it, so a future guard cannot
+        drop an address without either reading it or saying why.
+        """
+        from services.scoring.planes import load_proven_eoa_entities
+
+        proto, host = self._fixture(db_session, monkeypatch)
+        self._node(db_session, host, self._addr("8"), "eoa")
+        self._node(db_session, host, host.address, "eoa")
+        db_session.commit()
+
+        candidates = load_proven_eoa_entities(db_session, proto.id)
+        holders, excluded = proven_codeless_holders(db_session, proto.id)
+        assert {h.entity_key for h in holders} | {e.entity_key for e in excluded} == candidates
+        assert all(e.reason for e in excluded)
+
+    def test_a_holder_already_carrying_rows_stays_in_the_population(self, db_session, monkeypatch, _cleanup):
+        """``no_rows`` is the LEVER's framing, deliberately not a producer filter.
+
+        Filtering the population on "has no sheet yet" would read each holder
+        exactly once and never again: the cursor would stop advancing, and a
+        proven-empty sheet published through block N would stand for a holder
+        that has since been paid. The producer's population is the witness; what
+        bounds the cost is the sweep cursor, not a one-shot population.
+        """
+        proto, host = self._fixture(db_session, monkeypatch)
+        eoa = self._addr("9")
+        self._node(db_session, host, eoa, "eoa")
+        db_session.add(
+            ContractBalanceFetch(
+                contract_id=None,
+                entity_chain="ethereum",
+                entity_address=eoa,
+                chain_id=1,
+                observed_address=eoa,
+                native_status=NATIVE_STATUS_FETCH_FAILED,
+                asset_set_status=ASSET_SET_STATUS_RETURNED_EMPTY,
+                writer=BALANCE_WRITER_TVL,
+            )
+        )
+        db_session.commit()
+
+        holders, _excluded = proven_codeless_holders(db_session, proto.id)
+        assert [h.entity_key for h in holders] == [f"ethereum::{eoa}"]
+
+    def test_the_producer_writes_entity_keyed_records_for_the_population(self, db_session, monkeypatch, _cleanup):
+        """End to end, offline: the population is what gets written, keyed on itself.
+
+        Also the carrier's own invariant, asserted where it is produced rather
+        than only where it is consumed: reading an entity holder mints no
+        ``contracts`` row.
+        """
+        proto, host = self._fixture(db_session, monkeypatch)
+        eoa = self._addr("a")
+        self._node(db_session, host, eoa, "eoa")
+        db_session.commit()
+        contracts_before = db_session.query(Contract).count()
+
+        monkeypatch.setattr("utils.etherscan.get_eth_price", lambda chain_id=1: 2000.0)
+        monkeypatch.setattr("utils.etherscan.get_token_balances_page", lambda address, chain_id=1: page([]))
+        # The escalation fires (an empty page is a trigger, never a proof) and
+        # the scan is what would answer it; this test pins the RECORD, so the
+        # scan is stubbed to no outcome and the sheet stays honestly unproven.
+        monkeypatch.setattr("services.monitoring.tvl.run_sweeps", lambda requests, **kw: ({}, SweepCost()))
+
+        report = refresh_entity_balances(db_session, proto.id)
+        assert [h.entity_key for h in report.holders] == [f"ethereum::{eoa}"]
+        assert report.excluded == []
+        assert report.etherscan_pages == 1
+
+        fetch = (
+            db_session.query(ContractBalanceFetch)
+            .filter(ContractBalanceFetch.entity_address == eoa)
+            .order_by(ContractBalanceFetch.id.desc())
+            .first()
+        )
+        assert fetch is not None
+        assert fetch.contract_id is None
+        assert (fetch.entity_chain, fetch.entity_address) == ("ethereum", eoa)
+        assert fetch.observed_address == eoa
+        # No sweep answered, so no completeness is claimed and the source stays
+        # the third-party index's.
+        assert fetch.asset_set_source == ASSET_SET_SOURCE_ETHERSCAN_PAGES
+        assert db_session.query(Contract).count() == contracts_before

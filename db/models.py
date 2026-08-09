@@ -1573,7 +1573,19 @@ class ContractBalanceFetch(Base):
     __tablename__ = "contract_balance_fetches"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    contract_id: Mapped[int] = mapped_column(Integer, ForeignKey("contracts.id", ondelete="CASCADE"), nullable=False)
+    # NULL = this read is about an ENTITY with no ``contracts`` row, and
+    # ``(entity_chain, entity_address)`` below is its identity. Exactly one of
+    # the two arms is populated (``ck_cbf_exactly_one_subject_key``), so every
+    # predicate written against ``contract_id`` still selects exactly the
+    # contract-keyed rows it selected when the column was NOT NULL.
+    contract_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("contracts.id", ondelete="CASCADE"), nullable=True
+    )
+    # The other identity arm: a discovery-only principal (a Safe owner, a
+    # capability principal) is named by chain and address and by nothing else.
+    # NULL on every contract-keyed row.
+    entity_chain: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    entity_address: Mapped[str | None] = mapped_column(String(42), nullable=True)
     chain_id: Mapped[int] = mapped_column(Integer, nullable=False)
     # The address the read was actually ISSUED against, captured verbatim from
     # the write-point local. Not necessarily ``contracts.address``: the
@@ -1632,6 +1644,20 @@ class ContractBalanceFetch(Base):
 
     __table_args__ = (
         Index("ix_cbf_contract_fetched", "contract_id", "fetched_at", "id"),
+        # The entity arm's twin of the index above. The view picks a subject's
+        # current fetch with ORDER BY fetched_at DESC, id DESC LIMIT 1 under an
+        # equality on the subject, and an arm without that index turns the
+        # per-row correlated subquery into a sequential scan of this table.
+        Index("ix_cbf_entity_fetched", "entity_chain", "entity_address", "fetched_at", "id"),
+        # One subject per row. A row carrying both keys would be two subjects at
+        # once — the view would match it on either arm and a consumer could not
+        # say whose holdings it is — and a row carrying neither would be a
+        # reading of nobody.
+        CheckConstraint(
+            "(contract_id IS NOT NULL AND entity_chain IS NULL AND entity_address IS NULL) "
+            "OR (contract_id IS NULL AND entity_chain IS NOT NULL AND entity_address IS NOT NULL)",
+            name="ck_cbf_exactly_one_subject_key",
+        ),
         CheckConstraint(
             f"native_status <> '{NATIVE_STATUS_PROVEN_ZERO}' OR block_number IS NOT NULL",
             name="ck_cbf_proven_zero_requires_block",
@@ -1663,7 +1689,13 @@ class ContractBalance(Base):
     __tablename__ = "contract_balances"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    contract_id: Mapped[int] = mapped_column(Integer, ForeignKey("contracts.id", ondelete="CASCADE"), nullable=False)
+    # See ``ContractBalanceFetch``: NULL means the holding belongs to an entity
+    # with no ``contracts`` row, identified by ``(entity_chain, entity_address)``.
+    contract_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("contracts.id", ondelete="CASCADE"), nullable=True
+    )
+    entity_chain: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    entity_address: Mapped[str | None] = mapped_column(String(42), nullable=True)
     token_address: Mapped[str | None] = mapped_column(String(42), nullable=True)  # NULL = native ETH
     token_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     token_symbol: Mapped[str | None] = mapped_column(String(50), nullable=True)
@@ -1713,6 +1745,12 @@ class ContractBalance(Base):
     __table_args__ = (
         Index("ix_contract_balances_contract_id", "contract_id"),
         Index("ix_contract_balances_fetch_id", "fetch_id"),
+        Index("ix_contract_balances_entity", "entity_chain", "entity_address"),
+        CheckConstraint(
+            "(contract_id IS NOT NULL AND entity_chain IS NULL AND entity_address IS NULL) "
+            "OR (contract_id IS NULL AND entity_chain IS NOT NULL AND entity_address IS NOT NULL)",
+            name="ck_contract_balances_exactly_one_subject_key",
+        ),
         CheckConstraint(
             "token_address IS NULL OR block_number IS NULL",
             name="ck_contract_balances_token_block_null",
@@ -1732,6 +1770,14 @@ class ContractBalanceLatest(Base):
     a subset of the rows, never a join that can multiply or manufacture one — and
     it answers one question per (contract, row class): which fetch's row set is
     current?
+
+    The question is asked per SUBJECT, and a subject is a ``contracts`` row or
+    an entity that has none — ``(entity_chain, entity_address)``. The two arms
+    are mutually exclusive at the schema (``ck_*_exactly_one_subject_key``), so
+    the coalesced rule the view carries is the contract rule, term for term, for
+    every row that has a contract. Matching on ``contract_id`` alone would have
+    been NULL for every entity-keyed row: written, stored, and silently absent
+    from the view every consumer reads.
 
     * Per ROW CLASS (native vs ERC-20), independently: the latest fetch that did
       NOT fail for that class wins WHOLESALE. A fetch's rows ARE the set it
@@ -1755,7 +1801,9 @@ class ContractBalanceLatest(Base):
     __table_args__ = {"info": {"is_view": True}}
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    contract_id: Mapped[int] = mapped_column(Integer)
+    contract_id: Mapped[int | None] = mapped_column(Integer)
+    entity_chain: Mapped[str | None] = mapped_column(String(100))
+    entity_address: Mapped[str | None] = mapped_column(String(42))
     token_address: Mapped[str | None] = mapped_column(String(42))
     token_name: Mapped[str | None] = mapped_column(String(255))
     token_symbol: Mapped[str | None] = mapped_column(String(50))

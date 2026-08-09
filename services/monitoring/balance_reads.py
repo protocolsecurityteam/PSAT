@@ -22,11 +22,13 @@ from __future__ import annotations
 
 import logging
 import os
+from dataclasses import dataclass
+from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, tuple_
 from sqlalchemy.orm import Session
 
-from db.models import ContractBalance, ContractBalanceFetch
+from db.models import Contract, ContractBalance, ContractBalanceFetch
 from utils.balance_status import (
     NATIVE_STATUS_FETCH_FAILED,
     NATIVE_STATUS_NOT_DETERMINED,
@@ -37,6 +39,76 @@ from utils.balance_status import (
 from utils.rpc import MULTICALL3_ADDRESS, multicall3_aggregate3, rpc_request, rpc_url_for_chain_id, selector
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ObservationSubject:
+    """WHO a balance observation is about.
+
+    Two arms, exactly one populated, mirroring the schema's
+    ``ck_*_exactly_one_subject_key``: a ``contracts`` row, or an entity that has
+    none. The second arm exists because the perimeter the score is computed over
+    is wider than the ``contracts`` table: a proven-codeless principal reached
+    through the control graph is an entity whose balance sheet is asked about,
+    and its only identity is ``(chain, address)``.
+
+    Hashable, and used directly as the key of every per-subject mapping in the
+    observation modules — a contract id and an entity key can then never collide
+    in one dict, which an int-keyed mapping with negative sentinels could.
+
+    ``address`` is the address a read is ISSUED against and is recorded verbatim
+    from the contracts row, which is what a fetch row's ``observed_address``
+    has always carried. For the entity arm it is ALSO half of the identity, so
+    it is normalised there: two spellings of one address are one subject, and
+    the equality that decides which fetch is current has to say so. The entity
+    key it is built from is already lower case, so the normalisation restates
+    the caller's contract rather than changing it.
+    """
+
+    contract_id: int | None
+    chain: str | None
+    address: str
+
+    @classmethod
+    def of_contract(cls, contract: Contract) -> ObservationSubject:
+        return cls(contract_id=contract.id, chain=None, address=contract.address)
+
+    @classmethod
+    def of_entity(cls, chain: str, address: str) -> ObservationSubject:
+        """An entity with no ``contracts`` row. *chain* is the plane's own
+        coalesced chain name — the identity the entity key is built from, so a
+        record written here and an entity key read there name the same thing.
+        """
+        return cls(contract_id=None, chain=chain, address=(address or "").lower())
+
+    @property
+    def is_entity(self) -> bool:
+        return self.contract_id is None
+
+    def filters(self, model: Any) -> list[Any]:
+        """The predicate selecting exactly this subject's rows of *model*.
+
+        For a contract subject it is the ``contract_id`` equality every reader
+        here used before the entity arm existed — unchanged, so contract-keyed
+        behaviour is identical. For an entity subject the ``contract_id IS NULL``
+        conjunct is not decoration: without it the entity columns alone would
+        also match a contract-keyed row if one ever carried them, and the schema
+        CHECK is the only thing standing between those two readings.
+        """
+        if self.contract_id is not None:
+            return [model.contract_id == self.contract_id]
+        return [
+            model.contract_id.is_(None),
+            model.entity_chain == self.chain,
+            model.entity_address == self.address,
+        ]
+
+    def columns(self) -> dict[str, Any]:
+        """The identity columns to write on a new row of either table."""
+        if self.contract_id is not None:
+            return {"contract_id": self.contract_id, "entity_chain": None, "entity_address": None}
+        return {"contract_id": None, "entity_chain": self.chain, "entity_address": self.address}
+
 
 # Steps back from head before pinning. Same margin the resolver's probe uses, and
 # the reason a height can be published at all: the read is issued AT this number,
@@ -174,7 +246,7 @@ def balance_history_depth() -> int:
     return depth
 
 
-def prune_balance_fetches(session: Session, contract_id: int, observed_address: str) -> int:
+def prune_balance_fetches(session: Session, subject: ObservationSubject, observed_address: str) -> int:
     """Bound insert-only growth without ever deleting a published observation.
 
     The writers are insert-only now (the destructive per-contract DELETE is
@@ -199,7 +271,7 @@ def prune_balance_fetches(session: Session, contract_id: int, observed_address: 
             ContractBalanceFetch.asset_set_status,
         )
         .where(
-            ContractBalanceFetch.contract_id == contract_id,
+            *subject.filters(ContractBalanceFetch),
             ContractBalanceFetch.observed_address == observed_address,
         )
         .order_by(ContractBalanceFetch.fetched_at.desc(), ContractBalanceFetch.id.desc())
@@ -252,7 +324,52 @@ def winning_asset_fetches(session: Session, protocol_id: int) -> dict[int, Contr
     )
     winners: dict[int, ContractBalanceFetch] = {}
     for fetch in rows:
-        winners.setdefault(fetch.contract_id, fetch)
+        if fetch.contract_id is not None:
+            winners.setdefault(fetch.contract_id, fetch)
+    return winners
+
+
+def winning_entity_asset_fetches(
+    session: Session, subjects: list[ObservationSubject]
+) -> dict[ObservationSubject, ContractBalanceFetch]:
+    """The same question as :func:`winning_asset_fetches`, for entity subjects.
+
+    Same rule — latest non-failed fetch per subject wins the ERC-20 class — asked
+    over the OTHER identity arm. It is a separate function rather than a widened
+    one because the two are scoped differently and neither scope can stand in for
+    the other: a contract's fetches are scoped by ``contracts.protocol_id``, and
+    an entity that has no ``contracts`` row carries no protocol at all, so its
+    scope is the caller's enumerated perimeter and nothing else. An entity is
+    absent from the mapping when nothing non-failed has answered for it, which is
+    a third state and not a completeness verdict either way.
+    """
+    if not subjects:
+        return {}
+    by_identity = {(s.chain, s.address): s for s in subjects if s.is_entity}
+    if not by_identity:
+        return {}
+    rows = (
+        session.query(ContractBalanceFetch)
+        .filter(
+            ContractBalanceFetch.contract_id.is_(None),
+            tuple_(ContractBalanceFetch.entity_chain, ContractBalanceFetch.entity_address).in_(list(by_identity)),
+            ContractBalanceFetch.asset_set_status != STATUS_FETCH_FAILED,
+        )
+        .order_by(
+            ContractBalanceFetch.entity_chain,
+            ContractBalanceFetch.entity_address,
+            ContractBalanceFetch.fetched_at.desc(),
+            ContractBalanceFetch.id.desc(),
+        )
+        .all()
+    )
+    winners: dict[ObservationSubject, ContractBalanceFetch] = {}
+    for fetch in rows:
+        if fetch.entity_address is None:
+            continue
+        subject = by_identity.get((fetch.entity_chain, fetch.entity_address))
+        if subject is not None:
+            winners.setdefault(subject, fetch)
     return winners
 
 
@@ -358,9 +475,11 @@ def positive_raw_balance(raw_balance: object) -> bool:
 
 __all__ = [
     "PINNED_FINALITY_MARGIN",
+    "ObservationSubject",
     "balance_history_depth",
     "contracts_missing_current_rows",
     "winning_asset_fetches",
+    "winning_entity_asset_fetches",
     "native_balance_fact",
     "native_status_for",
     "pinned_native_balances",
