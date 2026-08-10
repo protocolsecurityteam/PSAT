@@ -1675,6 +1675,7 @@ def test_company_overview_with_proxy_and_effects(db_session, api_client):
         Contract,
         ContractBalance,
         ContractSummary,
+        ControllerValue,
         EffectiveFunction,
         FunctionPrincipal,
         Job,
@@ -1771,6 +1772,21 @@ def test_company_overview_with_proxy_and_effects(db_session, api_client):
             price_usd=3000.50,
         )
     )
+    # The discriminating ingredient for the balances lookup: a controller value
+    # on the IMPL swaps the card's governance lookup row to the implementation,
+    # while the balance above is filed under the PROXY row — the writer's
+    # attribution (a proxy's holdings belong to the proxy's own row). Without
+    # this row the two lookup paths coincide and the balances assertion below
+    # holds for the wrong reason.
+    db_session.add(
+        ControllerValue(
+            contract_id=impl_contract.id,
+            controller_id="state_variable:owner",
+            value="0x" + "1" * 40,
+            resolved_type="eoa",
+            source="owner()",
+        )
+    )
 
     ef = EffectiveFunction(
         contract_id=impl_contract.id,
@@ -1843,7 +1859,13 @@ def test_company_overview_with_proxy_and_effects(db_session, api_client):
         assert fn["direct_owner"]["address"] == ("0x" + "1" * 40)
         assert fn["authority_roles"] and fn["authority_roles"][0]["role"] == 1
         assert any(p["address"] == "0x" + "3" * 40 for ctrl in fn["controllers"] for p in ctrl["principals"])
-        assert len(c["balances"]) >= 1
+        # The owner surfacing proves the governance lookup read the IMPL's
+        # controller values; the balance surfacing proves the balances lookup
+        # did NOT follow it there — holdings are filed under (and read from)
+        # the proxy's own row.
+        assert c["owner"] == "0x" + "1" * 40
+        assert [b["token_symbol"] for b in c["balances"]] == ["ETH"]
+        assert c["total_usd"] == 3000.50
     finally:
         db_session.execute(text("DELETE FROM contracts WHERE protocol_id = :p"), {"p": protocol.id})
         db_session.execute(text("DELETE FROM jobs WHERE company = :c"), {"c": "myproj_proxy_test"})

@@ -1548,7 +1548,11 @@ def build_governance_view(
             else "not_determined"
         )
 
-        balance_contract = lookup_contract or contract_row
+        # Balances are FILED against the row whose ADDRESS was read — a proxy's
+        # holdings belong to the proxy's own row (resolution_worker._fetch_balances),
+        # which is this entry's row. ``lookup_contract`` answers governance lookups
+        # and may be the implementation's row, where no balance is ever filed.
+        balance_contract = contract_row or lookup_contract
         balances_list = []
         total_usd = 0.0
         unvalued_rows = 0
