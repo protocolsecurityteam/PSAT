@@ -410,8 +410,30 @@ def test_msg_sender_destination_with_an_open_gate_is_unconstrained(corpus):
     signal = corpus.only(contract, "flow.out")
     assert signal.destination.state == DESTINATION_STATE_UNCONSTRAINED_PROVEN
     assert signal.destination.value == "caller_arbitrary"
-    assert signal.severity.value == FLOW_SEVERITY_CALLER_ARBITRARY
     assert "destination_msg_sender_with_open_caller_gate" in signal.witness_notes
+
+
+def test_an_open_msg_sender_payee_publishes_the_destination_and_withholds_the_price(corpus):
+    """The two questions are answered separately and the row must publish both answers.
+
+    The payee IS the caller, proven. What the payout is bounded BY — the caller's
+    own position, or the contract's whole balance — has no witness, so the price
+    is withheld. Publishing either half without the other is the defect: a
+    withheld destination would un-earn a proof, and a priced row would charge a
+    bound nobody read.
+    """
+    contract = corpus.contract("0x" + "3a" * 20)
+    corpus.function(contract, name="unwrap", claims=[_caller_relative_flow("msg_sender")], openness="open")
+
+    signal = corpus.only(contract, "flow.out")
+    assert signal.destination.state == DESTINATION_STATE_UNCONSTRAINED_PROVEN
+    assert signal.severity.state == SEVERITY_STATE_NOT_DETERMINED
+    assert "flow_severity_withheld_pending_amount_witness" in signal.witness_notes
+    assert not signal.enters_grade
+    # The refusal is on the price alone: the destination keeps naming its proof.
+    assert str(signal.gate_input("destination_basis").value).endswith("+open_caller+severity_pending_amount_witness")
+    # The unread-destination token is a different fact and must not ride along.
+    assert "destination_not_determined_row_withheld" not in signal.witness_notes
 
 
 def test_an_open_gate_licenses_no_escalation_where_the_caller_cannot_name_the_payee(corpus):

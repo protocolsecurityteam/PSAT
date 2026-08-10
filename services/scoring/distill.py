@@ -823,8 +823,8 @@ def _exec_destination(claim_id: str, witness: dict[str, Any], fork_param: str | 
 
 
 def _caller_relative_destination(shape: str, basis: str, openness: str) -> _Destination:
-    """A destination the static lattice proved is caller-RELATIVE, priced by the
-    gate that decides who may call.
+    """A destination the static lattice proved is caller-RELATIVE, and what the
+    gate that decides who may call is worth against it.
 
     The lattice proof is a UNIVERSAL over every out-flow of the function, so it
     needs no behavioural existence witness the way the fork's ``caller_arbitrary``
@@ -834,8 +834,12 @@ def _caller_relative_destination(shape: str, basis: str, openness: str) -> _Dest
     ``msg_sender`` — the payee IS the caller. The caller names the destination by
     choosing which address makes the call, so:
 
-    * ``open`` — anyone can be ``msg.sender``, so the destination is
-      unconstrained and takes the flow plane's unconstrained convention;
+    * ``open`` — anyone can be ``msg.sender``, so the destination is proven
+      unconstrained. The PRICE is a second question and this arm does not answer
+      it: an open payout to the caller is the shape of a drain and the shape of a
+      redemption alike, and what the amount is bounded BY has no witness here. So
+      the destination is published and the severity is withheld — the basis says
+      so, and ``_severity`` names the refusal on the row;
     * ``restricted`` — the recipient is inside the privileged caller set: the
       ordinary constrained-destination convention, and no stronger than the gate
       that produces it.
@@ -869,10 +873,15 @@ def _caller_relative_destination(shape: str, basis: str, openness: str) -> _Dest
                 basis=f"{basis}+open_caller_does_not_name_the_payee",
                 notes=(f"destination_{shape}_open_gate_licenses_no_escalation",),
             )
+        # The refusal token is NOT stamped here: what a withheld price means is
+        # ``_severity``'s to say, on the row it actually withheld. A destination
+        # travels through ``_meet_destinations``, which borrows a sibling site's
+        # severity, so a note fixed to this half could ride onto a row that ends
+        # up priced and graded.
         return _Destination(
             tri=Tri.proven(DESTINATION_STATE_UNCONSTRAINED_PROVEN, "caller_arbitrary"),
-            severity=K.FLOW_SEVERITY_CALLER_ARBITRARY,
-            basis=f"{basis}+open_caller",
+            severity=None,
+            basis=f"{basis}+open_caller+severity_pending_amount_witness",
             notes=(f"destination_{shape}_with_open_caller_gate",),
         )
     if openness == OPENNESS_RESTRICTED:
@@ -1778,7 +1787,14 @@ def _severity(
 
     if claim_id in K.DESTINATION_BEARING_SEVERITY:
         if destination.severity is None:
-            notes.add("destination_not_determined_row_withheld")
+            # A withheld price has two different reasons and one token cannot
+            # carry both: an unread destination, or a proven destination whose
+            # price waits on a witness of its own.
+            notes.add(
+                "destination_not_determined_row_withheld"
+                if not destination.tri.is_determined
+                else "flow_severity_withheld_pending_amount_witness"
+            )
             return Tri[float].not_determined(), (), notes
         return Tri.proven(SEVERITY_STATE_PROVEN, destination.severity), (destination.basis,), notes
 

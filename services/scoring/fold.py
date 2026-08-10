@@ -6796,6 +6796,11 @@ _NOTE_WARNINGS = {
         "the destination was not proven, so no severity is assigned and the row does not "
         "enter the grade; absence of a resolved constraint is not proof the destination is open"
     ),
+    "flow_severity_withheld_pending_amount_witness": (
+        "the destination is proven caller-relative; what the payout is bounded BY has no witness, "
+        "so no severity is assigned and the row does not enter the grade — absence of a bound is "
+        "not proof the payout is unbounded"
+    ),
     "destination_witnesses_contradict": (
         "two destination witnesses cannot both be true, so neither is adopted and the row is withheld"
     ),

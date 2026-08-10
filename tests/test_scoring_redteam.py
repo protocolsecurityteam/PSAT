@@ -38,8 +38,10 @@ from services.scoring.schema import (
 from tests import composition_admission_fixtures as CA
 from utils import execution_record as EX
 from utils.scoring_status import (
+    DESTINATION_STATE_UNCONSTRAINED_PROVEN,
     GRADE_STATE_COMPUTED,
     GRADE_STATE_NOT_DETERMINED,
+    SEVERITY_STATE_NOT_DETERMINED,
     SEVERITY_STATE_PROVEN,
     VALUE_BOUND_EXACT,
     VALUE_BOUND_FLOOR,
@@ -1129,6 +1131,36 @@ def test_g3_destination_operand_does_not_corroborate_self_ness():
     )
     assert weak.notes == ()
     assert "destination_self_corroborated_by_literal" in literal.notes
+
+
+def test_g3_a_priced_destination_with_a_withheld_severity_charges_nothing_and_says_so(fold):
+    """A proven destination is not a proven price.
+
+    The row's payee is proven caller-relative and the entity it reaches is
+    priced — everything a charge needs except the one witness that says what the
+    payout is bounded by. It must land nowhere in the ledger, and the refusal
+    must be legible: an excluded row's notes reach no finding, so the warning
+    channel is the only surface that can carry the reason.
+    """
+    signal = flow_sig(
+        function_name="unwrap",
+        authority_openness="open",
+        destination=Tri.proven(DESTINATION_STATE_UNCONSTRAINED_PROVEN, "caller_arbitrary"),
+        witness_notes=(
+            "destination_msg_sender_with_open_caller_gate",
+            "flow_severity_withheld_pending_amount_witness",
+        ),
+        gates=magnitude(1_000_000.0),
+        **reaches(KEY_C),
+    )
+    document = fold([signal], value=value_plane({KEY_C: {"usdc": 1_000_000.0}}))
+
+    assert signal.destination.state == DESTINATION_STATE_UNCONSTRAINED_PROVEN
+    assert signal.severity.state == SEVERITY_STATE_NOT_DETERMINED
+    assert not signal.enters_grade
+    assert document.findings == []
+    withheld = [w for w in document.warnings if w["kind"] == "flow_severity_withheld_pending_amount_witness"]
+    assert [(w["function"], w["capability"]) for w in withheld] == [("unwrap", "flow.out")]
 
 
 def test_d1_the_published_principal_is_the_one_that_set_the_weakness(fold):
