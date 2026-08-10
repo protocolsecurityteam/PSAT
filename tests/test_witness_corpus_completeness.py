@@ -976,9 +976,7 @@ def _label_golden_flow_rows():
     golden = label_harness.load_golden()
     for contract in golden["contracts"]:
         for fn in contract["functions"]:
-            witness_flows = [
-                f for c in fn["claims"] for f in (c["witness"].get("flows") or []) if isinstance(f, dict)
-            ]
+            witness_flows = [f for c in fn["claims"] for f in (c["witness"].get("flows") or []) if isinstance(f, dict)]
             yield contract["contract"], fn["full_name"], witness_flows, fn["value_flows"]
 
 

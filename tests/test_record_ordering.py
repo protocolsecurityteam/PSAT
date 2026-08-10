@@ -1041,6 +1041,4 @@ def test_pipeline_orders_against_the_record_the_amount_producer_names(_effects):
     # Spot the two poles of the composition through the whole pipeline.
     assert keyed["goodClearThenPay(uint256)"]["state"] == "proven_ordering"
     assert keyed["daoClearAfterPay()"]["state"] == "not_determined"
-    assert (
-        keyed["daoClearAfterPay()"]["reason"] == ro.CLEARING_WRITE_DOES_NOT_DOMINATE_CALLS
-    )
+    assert keyed["daoClearAfterPay()"]["reason"] == ro.CLEARING_WRITE_DOES_NOT_DOMINATE_CALLS
