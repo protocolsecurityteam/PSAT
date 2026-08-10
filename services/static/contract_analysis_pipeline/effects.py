@@ -52,6 +52,7 @@ from eth_utils.crypto import keccak
 from typing_extensions import NotRequired
 
 from .provenance import ProvenanceEngine, is_top
+from .record_ordering import OrderingWitness, attach_record_ordering
 from .shared import _all_state_variables
 from .summaries import (
     _action_summary,
@@ -341,6 +342,12 @@ class ValueFlow(TypedDict):
     # one member can never be read as the whole. Exactly the
     # ``target_variables`` discipline.
     amount_record_variables: NotRequired[list[str]]
+    # W2: does a clearing write to the record this amount came out of
+    # must-precede every external call? Three-valued, computed by
+    # ``record_ordering``. Present only where the amount NAMES a record — the
+    # ordering question does not exist otherwise, and absence is never a
+    # refusal.
+    record_ordering: NotRequired[OrderingWitness]
 
 
 class EffectInfo(TypedDict):
@@ -4212,6 +4219,12 @@ def _effect_info_for_function(function: Any) -> EffectInfo:
     state_writes = _state_write_facts(function, sinks)
     zero_value_sinks: set[str] = set()
     value_flows = _value_flow_facts(function, zero_value_sinks=zero_value_sinks)
+    assembly_state_access = any(
+        s["kind"] in ("state_write", "delegatecall")
+        and (s["target"].startswith("assembly_storage:") or s["target"].startswith("assembly_delegatecall:"))
+        for s in sinks
+    )
+    attach_record_ordering(value_flows, function, assembly_state_access=assembly_state_access)
     effects: list[str] = []
 
     # Guard-origin sinks (a modifier's own auth call, a reentrancy latch) are
@@ -4269,11 +4282,7 @@ def _effect_info_for_function(function: Any) -> EffectInfo:
         "state_changing": _is_state_changing_entry_point(function),
         "parameter_names": [str(getattr(p, "name", "") or "") for p in (getattr(function, "parameters", None) or [])],
         "payable": bool(getattr(function, "payable", False)),
-        "assembly_state_access": any(
-            s["kind"] in ("state_write", "delegatecall")
-            and (s["target"].startswith("assembly_storage:") or s["target"].startswith("assembly_delegatecall:"))
-            for s in sinks
-        ),
+        "assembly_state_access": assembly_state_access,
     }
 
 
