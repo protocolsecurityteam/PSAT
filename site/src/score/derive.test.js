@@ -424,6 +424,21 @@ describe("derive — protections", () => {
     expect(rows[0].what).toBe("upgrade.implementation on >$1B");
   });
 
+  it("carries the value cell whole, direction and all", () => {
+    const rows = protectionRows(ETHERFI);
+    expect(rows[0].value).toEqual({ determined: true, text: ">$1B", direction: "not_determined" });
+    // The flattened text stays for consumers that only print, but it is not
+    // the row's only account of the band: `valueText: null` on an unmeasured
+    // band is indistinguishable from a row that carries no value at all.
+    expect(rows[0].valueText).toBe(">$1B");
+    const unmeasured = protectionRows({
+      ...ETHERFI,
+      findings: ETHERFI.findings.map((f) => ({ ...f, value_band: "not_determined" })),
+    });
+    expect(unmeasured[0].value).toEqual({ determined: false, text: null, direction: null });
+    expect(unmeasured[0].valueText).toBeNull();
+  });
+
   it("excludes principals with no credited coordination", () => {
     const rows = protectionRows(ETHERFI, 99);
     for (const row of rows) {
