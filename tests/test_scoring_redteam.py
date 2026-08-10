@@ -4171,6 +4171,118 @@ def test_b7_a_row_mixing_a_ceiling_with_an_ungraded_figure_claims_neither_bound(
     assert "1 entity(ies) whose figure is not a proven ceiling and is graded in no direction" in basis
 
 
+def _attributed(usd: float, **over: Any) -> FunctionSignal:
+    """A ``flow.out`` instance whose figure came off the ATTRIBUTION path.
+
+    ``proven_upper_bound`` is the constant-amount probe crediting a holder's
+    whole priced balance — the live shape behind the reference corpus's rank-1
+    finding, and no ceiling to :func:`_ceiling_bearing_basis`, which is exactly
+    why its prose used to be written from coverage alone.
+    """
+    return flow_sig(
+        authority_openness="restricted",
+        principal_state="enumerated",
+        principal_refs=(PrincipalRef(1, "ethereum", EOA),),
+        gates={"reach_magnitude_usd": Tri.proven("proven_upper_bound", usd).to_json()},
+        **proven(1.0),
+        **reaches(KEY_C),
+        **over,
+    )
+
+
+def _unwitnessed_elsewhere() -> FunctionSignal:
+    """A sibling instance on the same row that answered no magnitude at all."""
+    return flow_sig(
+        function_name="g",
+        selector="0xfeedface",
+        authority_openness="restricted",
+        principal_state="enumerated",
+        principal_refs=(PrincipalRef(1, "ethereum", EOA),),
+        **proven(1.0),
+        **reaches(KEY_V),
+    )
+
+
+def test_f1_an_attribution_derived_total_under_a_gap_names_the_refusal_not_a_floor(fold):
+    """The live carrier: the basis said ">= proven floor" beside no floor.
+
+    The string was built from the COVERAGE axis in :func:`_row_value`, where the
+    attribution axis is not visible, so a row whose header refused the floor —
+    ``bound_direction: not_determined``, ``is_floor: false`` — still published
+    floor prose. Both axes are read where the direction is, and the refusal is
+    COUNTED off the membership test it was made on rather than asserted.
+    """
+    plane = value_plane(
+        {KEY_C: {"usdc": 5_000_000.0}},
+        per_asset_state={KEY_C: {"usdc": P.ASSET_PRICED, "wsteth": P.ASSET_UNPRICED}},
+    )
+    document = fold(
+        [_attributed(5_000.0), _unwitnessed_elsewhere()],
+        principals={1: facts(1, EOA, "eoa")},
+        value=plane,
+    )
+    finding = document.findings[0]
+    assert finding["value_at_stake_usd"] == 5_000.0
+    assert finding["entities_priced_from_a_composed_ceiling"] == []
+    assert finding["entities_priced_from_a_sheet_ceiling"] == []
+    assert finding["entities_holding_unpriced_assets"] == [KEY_C]
+    assert len(finding["undetermined_instances"]) == 1
+    assert finding["value_at_stake_bound_direction"] == FOLD.BOUND_DIRECTION_NOT_DETERMINED
+    assert finding["value_at_stake_is_floor"] is False
+    basis = finding["value_at_stake_basis"]
+    assert not basis.startswith(">= ")
+    assert "proven floor" not in basis
+    assert basis.startswith("bounded in NEITHER direction: 1 of 1 entity(ies)")
+    # Named as what the membership test establishes and no further: a sheet
+    # ceiling whose label was withheld reaches this arm too, so the population
+    # is "not proven free of" an upper bound, never "is attribution-derived".
+    assert "NOT proven free of an upper-bounding witness" in basis
+    # Both halves of the coverage gap are still counted — the reason it is not
+    # an at-most either — and neither is left for the reader to infer.
+    assert "1 instance(s) not_determined" in basis
+    assert "1 entity(ies) holding assets the priced sheet does not cover" in basis
+
+
+def test_f1_a_floor_counts_the_partly_priced_entities_it_was_earned_on(fold):
+    """The mirror face, which the reference corpus has no carrier for.
+
+    ``_bound_direction``'s coverage axis reads undetermined instances AND partly
+    priced entities; the floor string counted only the first. A floor earned on
+    the second alone therefore had no floor prose at all, and one earned on both
+    published a count that omitted half of what earned it.
+    """
+    plane = value_plane(
+        {KEY_C: {"usdc": 5_000_000.0}},
+        per_asset_state={KEY_C: {"usdc": P.ASSET_PRICED, "wsteth": P.ASSET_UNPRICED}},
+    )
+    floor = flow_sig(
+        authority_openness="restricted",
+        principal_state="enumerated",
+        principal_refs=(PrincipalRef(1, "ethereum", EOA),),
+        gates={"reach_magnitude_usd": Tri.proven("proven_floor", 5_000_000.0).to_json()},
+        **proven(1.0),
+        **reaches(KEY_C),
+    )
+    finding = fold([floor], principals={1: facts(1, EOA, "eoa")}, value=plane).findings[0]
+    assert finding["undetermined_instances"] == []
+    assert finding["entities_holding_unpriced_assets"] == [KEY_C]
+    assert finding["value_at_stake_bound_direction"] == FOLD.BOUND_DIRECTION_FLOOR
+    assert finding["value_at_stake_is_floor"] is True
+    assert (
+        finding["value_at_stake_basis"]
+        == ">= proven floor over 1 entity(ies); 1 entity(ies) holding assets the priced sheet does not cover"
+    )
+
+    # And beside an unanswered instance, both populations appear — the count the
+    # old string made of the instances alone is now the whole gap.
+    both = fold([floor, _unwitnessed_elsewhere()], principals={1: facts(1, EOA, "eoa")}, value=plane).findings[0]
+    assert both["value_at_stake_bound_direction"] == FOLD.BOUND_DIRECTION_FLOOR
+    assert both["value_at_stake_basis"] == (
+        ">= proven floor over 1 entity(ies); 1 instance(s) not_determined, "
+        "1 entity(ies) holding assets the priced sheet does not cover"
+    )
+
+
 def test_b7_a_direction_is_published_only_where_one_was_proven():
     """Two claims and a fall-through, each earned separately.
 

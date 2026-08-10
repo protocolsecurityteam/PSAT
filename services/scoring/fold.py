@@ -2351,10 +2351,16 @@ def _aggregate(
             ),
             valued.non_attributed_entities,
         )
-        # Only a row that HAS a total and carries a ceiling in it has a
+        # Only a row that HAS a total and something in it to grade has a
         # direction to explain. A row whose value is not_determined publishes
         # that word as its basis, and a proven_no_reach row publishes an earned
         # negative consumers branch on by name — neither is a bound claim.
+        #
+        # Both writers live HERE and not in :func:`_row_value` for one reason:
+        # the string names a direction, and the direction is not known until the
+        # attribution axis has been read beside the coverage one. A basis built
+        # from coverage alone said ">= proven floor" beside a header refusing to
+        # publish a floor.
         if valued.ceiling_entities:
             value_basis = _ceiling_bearing_basis(
                 direction,
@@ -2369,6 +2375,16 @@ def _aggregate(
                 valued.withheld_behind_hops,
                 valued.composed_magnitudes,
                 value_plane,
+            )
+        elif value_usd is not None and (undetermined or partially_priced):
+            value_basis = _coverage_bearing_basis(
+                direction,
+                per_entity,
+                undetermined,
+                partially_priced,
+                valued.non_attributed_entities,
+                valued.proven_no_reach,
+                row.zero_reach_stripped,
             )
         is_floor = direction == BOUND_DIRECTION_FLOOR
         weakness_by_entity, weakness, weakest = _member_weakness(
@@ -3430,6 +3446,62 @@ def _ceiling_bearing_basis(
     return basis + scoped
 
 
+def _coverage_bearing_basis(
+    direction: str,
+    per_entity: dict[str, float],
+    undetermined: list[dict[str, Any]],
+    partially_priced: list[str],
+    non_attributed_entities: frozenset[str],
+    proven_no_reach: list[dict[str, Any]],
+    zero_reach_stripped: list[dict[str, Any]],
+) -> str:
+    """The basis for a row with a coverage gap and no ceiling-bearing figure.
+
+    The gap is what a floor is made of — value this row reaches that the sum
+    does not carry can only push the truth up — but it is not the whole of it.
+    :func:`_bound_direction` also requires every contributing entity's standing
+    figure to be PROVEN free of an upper-bounding witness, and where that second
+    axis refuses, the row bounds this principal in neither direction. The two
+    arms are written together here so the prose and the header can never come
+    apart: the floor sentence is reachable only from the branch that earned the
+    floor.
+
+    Both arms count the SAME two populations. The gap the floor is earned from
+    is instances that answered nothing AND entities holding assets the priced
+    sheet never covered — the coverage axis reads both, and the floor string
+    used to name only the first, which read as a floor over a fully priced
+    entity set on a row where one entity was partly priced.
+    """
+    n_entities = len(per_entity)
+    missing: list[str] = []
+    if undetermined:
+        clause = f"{len(undetermined)} instance(s) not_determined"
+        if zero_reach_stripped:
+            clause += f" (of which {len(zero_reach_stripped)} reached only the refused zero address)"
+        missing.append(clause)
+    if partially_priced:
+        missing.append(f"{len(partially_priced)} entity(ies) holding assets the priced sheet does not cover")
+    if direction == BOUND_DIRECTION_FLOOR:
+        basis = f">= proven floor over {n_entities} entity(ies); " + ", ".join(missing)
+    else:
+        # Counted off the membership test the direction was refused on, and
+        # named as what that test establishes: NOT proven free of an
+        # upper-bounding witness. The attribution path is the live producer of
+        # this refusal and is glossed, but a sheet ceiling whose label was
+        # withheld lands here too, so the population may not be asserted to be
+        # attribution-derived — only that none of it is proven not to be.
+        ungraded = len(set(per_entity) - non_attributed_entities)
+        basis = (
+            f"bounded in NEITHER direction: {ungraded} of {n_entities} entity(ies) contribute a figure "
+            "NOT proven free of an upper-bounding witness — the attribution path credits a holder's "
+            "whole priced balance off a constant-amount probe, which bounds this principal from ABOVE "
+            "— so the sum is not an at-least; " + ", ".join(missing) + " leave it short of an at-most too"
+        )
+    if proven_no_reach:
+        basis += f"; {len(proven_no_reach)} instance(s) proven_no_reach"
+    return basis
+
+
 def _row_value(
     row: _Row,
     value_plane: P.ValuePlane,
@@ -3733,8 +3805,10 @@ def _row_value(
         if transitive
         else "per-instance witnessed value, MAX per entity over latest-observation sheets"
     )
-    if undetermined:
-        basis = f">= proven floor over {len(per_entity)} entity(ies); {len(undetermined)} instance(s) not_determined"
+    # The coverage gap is NOT written into the basis here. A gap alone does not
+    # decide the direction — :func:`_bound_direction` reads the attribution axis
+    # beside it — and this function cannot see that axis's verdict, so the
+    # direction-bearing sentence is :func:`_coverage_bearing_basis`'s to write.
     if proven_no_reach:
         basis += f"; {len(proven_no_reach)} instance(s) proven_no_reach"
     # A sheet ceiling is capped by its node's own sheet BY CONSTRUCTION — it is
