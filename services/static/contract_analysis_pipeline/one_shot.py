@@ -525,11 +525,15 @@ def _scalar_candidate(
     const_writes: dict[str, dict[str, Any]],
 ) -> dict[str, Any] | None:
     operands = leaf.get("operands") or []
-    sv_ops = [op for op in operands if op.get("source") == "state_variable" and not op.get("member_path")]
-    other = [op for op in operands if op not in sv_ops]
-    if len(sv_ops) != 1 or any(op.get("source") != "constant" for op in other):
+    # Partition by position. The equality form this replaces was correct only
+    # because the state-variable test is a pure function of the operand dict;
+    # the invariant here is local to the partition instead.
+    sv_idxs = [i for i, op in enumerate(operands) if op.get("source") == "state_variable" and not op.get("member_path")]
+    excluded = set(sv_idxs)
+    other = [op for i, op in enumerate(operands) if i not in excluded]
+    if len(sv_idxs) != 1 or any(op.get("source") != "constant" for op in other):
         return None
-    name = sv_ops[0].get("state_variable_name")
+    name = operands[sv_idxs[0]].get("state_variable_name")
     if not isinstance(name, str) or not name:
         return None
     writes = const_writes.get(name)

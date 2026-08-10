@@ -17,6 +17,7 @@ from __future__ import annotations
 import sys
 import textwrap
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -25,7 +26,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
 
+from services.static.contract_analysis_pipeline.predicate_types import Operand  # noqa: E402
 from services.static.contract_analysis_pipeline.predicates import (  # noqa: E402
+    _operand_sort_key,
     build_predicate_tree,
     build_return_predicate_tree,
 )
@@ -1657,3 +1660,26 @@ def test_uncertain_marker_reaches_artifact_and_policy_routes_unsupported(tmp_pat
     ping = next(f for f in payload["functions"] if f["function"] == "ping()")
     assert ping.get("status") == "public"
     assert ping["authority_public"] is True
+
+
+def test_operand_sort_key_totally_orders_element_fields():
+    """``absorbed_operands`` is evidence, so its order must come from content.
+    Two operands separated only by the element fields a later unit stamps would
+    otherwise settle on input order under a stable sort — and an operand that
+    predates those fields has to order against one that carries them without
+    the comparison raising."""
+
+    def key(op: dict[str, Any]) -> tuple[str, ...]:
+        # The element fields land in a later unit, so these are not yet Operand keys.
+        return _operand_sort_key(cast(Operand, op))
+
+    bare = {"source": "state_variable", "state_variable_name": "bids"}
+    keyed = {**bare, "element_base_variable": "bids", "element_member_path": ["amount"], "element_key_param_index": 0}
+    other_key = {**keyed, "element_key_param_index": 2}
+
+    assert key(bare) != key(keyed)
+    assert key(keyed) != key(other_key)
+    # Absent sorts before present, and every slot is a str, so mixed operands
+    # compare rather than raise.
+    assert sorted([keyed, bare, other_key], key=key)[0] is bare
+    assert all(isinstance(slot, str) for slot in key(keyed))

@@ -144,7 +144,17 @@ logger = logging.getLogger(__name__)
 # republishing that FALSE into ``contract_summaries.source_verified`` and the
 # frontend's data-confidence axis; the version was already minted on this unreleased
 # branch and this rides it.
-ANALYSIS_SCHEMA_VERSION = 5
+# v6: predicate-tree operands carry the element-record fields — which base
+# variable an element read is rooted in, the member path reached on it, and
+# which parameter keys it. A v5 tree records none of them, and the self-service
+# payout witness reads a missing base variable as "not determined", never as
+# "not an element read" — so a served v5 tree would silently withhold the
+# witness on every cached deployment while a rebuilt one proves it, which is a
+# verdict that depends on cache age rather than on the code. Minted with the
+# safety prep (index-based operand exclusion, element-aware operand ordering)
+# so the shape change and its invalidation land together rather than thrashing
+# through ``_bundle_differs``, which compares the whole serialized tree.
+ANALYSIS_SCHEMA_VERSION = 6
 
 
 # ── Provenance ─────────────────────────────────────────────────────────────

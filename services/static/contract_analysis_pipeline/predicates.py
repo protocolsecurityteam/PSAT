@@ -1608,9 +1608,19 @@ def _stamp_absorbed_operands(
 
 
 def _operand_sort_key(op: Operand) -> tuple[str, ...]:
-    return tuple(
-        str(op.get(key) or "")
-        for key in (
+    """Canonical total order over operands.
+
+    Two operands distinguishable only by the element fields would otherwise
+    settle on input order under a stable sort, which is not evidence. The
+    element fields are read off a plain-dict view because they are stamped by
+    a later unit: an operand that predates them must still order against one
+    that carries them, so each contributes a presence flag (absent sorts first)
+    and a value slot, and every slot stays a ``str``.
+    """
+    fields = cast("dict[str, Any]", op)
+    key = [
+        str(fields.get(name) or "")
+        for name in (
             "source",
             "state_variable_name",
             "parameter_name",
@@ -1618,7 +1628,15 @@ def _operand_sort_key(op: Operand) -> tuple[str, ...]:
             "computed_kind",
             "constant_value",
         )
-    )
+    ]
+    for name in ("element_base_variable", "element_member_path", "element_key_param_index"):
+        value = fields.get(name)
+        key.append("0" if value is None else "1")
+        if isinstance(value, (list, tuple)):
+            key.append(".".join(str(part) for part in value))
+        else:
+            key.append("" if value is None else str(value))
+    return tuple(key)
 
 
 def _attach_int_constant_value(op: Operand, value: Any) -> None:
