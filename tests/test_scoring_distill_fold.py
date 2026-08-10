@@ -24,12 +24,20 @@ from services.scoring.constants import (
     DEST_SEVERITY_EXEC_SELF,
     DEST_SEVERITY_UNCONSTRAINED,
     FLOW_SEVERITY_CALLER_ARBITRARY,
+    FLOW_SEVERITY_FIXED_DESTINATION,
+    FLOW_SEVERITY_MSG_VALUE_SELF_RETURN,
     ROLE_BREADTH_MULTI_HOLDER_WEAKNESS,
     WEAKNESS_SAFE_SUPERMAJORITY,
     WEAKNESS_SAFE_UNCREDITED,
 )
-from services.scoring.distill import distill_contract_signals, distill_job_signals
-from services.scoring.fold import compute_protocol_score
+from services.scoring.distill import (
+    MSG_VALUE_ARM_PASSTHROUGH,
+    MSG_VALUE_ARM_SELF_RETURN,
+    MSG_VALUE_REPETITION_RESIDUAL,
+    distill_contract_signals,
+    distill_job_signals,
+)
+from services.scoring.fold import _NOTE_WARNINGS, compute_protocol_score
 from services.scoring.planes import (
     CONTROL_RELATIONS,
     REFUSAL_SELF_EDGE,
@@ -542,6 +550,302 @@ def test_an_indeterminate_member_still_blocks_a_caller_relative_conjunction(corp
     signal = corpus.only(contract, "flow.out")
     assert signal.destination.state == DESTINATION_STATE_NOT_DETERMINED
     assert not signal.enters_grade
+
+
+# --------------------------------------------------------------------------
+# The msg_value witness (W3): what the caller just attached, and who gets it
+# --------------------------------------------------------------------------
+
+
+def _msg_value_flow(target: str, **over: Any) -> dict[str, Any]:
+    flow: dict[str, Any] = {
+        "kind": "low_level_value_call",
+        "from_is_self": True,
+        "amount_kind": {"kind": "msg_value", "tier": "dispositive_ast"},
+        "target_kind": {"kind": target, "tier": "dispositive_ast"},
+    }
+    flow.update(over)
+    return flow
+
+
+def _msg_value_claims(*flows: dict[str, Any]) -> list[dict[str, Any]]:
+    return [_flow_out(None, list(flows), "idiom_structural")]
+
+
+def test_msg_value_returned_to_the_caller_carries_no_severity_of_its_own(corpus):
+    """W3a, the exact conjunction: every out-flow pays out this contract's own
+    balance, in the amount the caller attached to THIS call, to the caller. The
+    payout can move no position the caller did not just fund, so it is priced at a
+    named zero — and the destination fact the lattice earned is republished
+    untouched rather than swapped for the amount's."""
+    contract = corpus.contract("0x" + "4a" * 20)
+    corpus.function(
+        contract, name="unwrapL2Eth", claims=_msg_value_claims(_msg_value_flow("msg_sender")), openness="restricted"
+    )
+
+    signal = corpus.only(contract, "flow.out")
+    assert signal.destination.state == DESTINATION_STATE_CONSTRAINED_PROVEN
+    assert signal.destination.value == "constrained:msg_sender"
+    assert signal.severity.state == SEVERITY_STATE_PROVEN
+    assert signal.severity.value == FLOW_SEVERITY_MSG_VALUE_SELF_RETURN
+    assert signal.severity_basis == (MSG_VALUE_ARM_SELF_RETURN,)
+    assert MSG_VALUE_ARM_SELF_RETURN in signal.witness_notes
+    assert MSG_VALUE_ARM_PASSTHROUGH not in signal.witness_notes
+    # The zero says what it did not look at, and the warning table renders it.
+    assert MSG_VALUE_REPETITION_RESIDUAL in signal.witness_notes
+    assert MSG_VALUE_REPETITION_RESIDUAL in _NOTE_WARNINGS
+
+
+def test_msg_value_self_return_answers_the_withhold_it_is_pending_on(corpus):
+    """The compose ordering, on the branch that created the pending state. An open
+    caller-relative destination is PROVEN and its price is withheld *pending an
+    amount witness*; this is that witness, so it is read first. A row that carries
+    both the refusal and the witness that answers it would be publishing a question
+    it has the answer to — and the destination fact stays exactly what the lattice
+    proved, because it is the AMOUNT that carries the bound."""
+    contract = corpus.contract("0x" + "4d" * 20)
+    corpus.function(contract, name="refund", claims=_msg_value_claims(_msg_value_flow("msg_sender")), openness="open")
+
+    signal = corpus.only(contract, "flow.out")
+    assert signal.destination.state == DESTINATION_STATE_UNCONSTRAINED_PROVEN
+    assert signal.destination.value == "caller_arbitrary"
+    assert signal.severity.state == SEVERITY_STATE_PROVEN
+    assert signal.severity.value == FLOW_SEVERITY_MSG_VALUE_SELF_RETURN
+    assert signal.severity_basis == (MSG_VALUE_ARM_SELF_RETURN,)
+    assert "destination_msg_sender_with_open_caller_gate" in signal.witness_notes
+    assert "flow_severity_withheld_pending_amount_witness" not in signal.witness_notes
+
+
+def test_the_self_return_arm_cannot_price_a_destination_nobody_read(corpus):
+    """The gate on the reordering is the destination being PROVEN, not priced. With
+    the caller gate unread the payee is neither open nor restricted, so the row
+    keeps the unread-destination withhold — the amount fact is still published,
+    because it is true, but it prices nothing and the repetition residual, which
+    belongs to the priced verdict, is not published either."""
+    contract = corpus.contract("0x" + "4e" * 20)
+    corpus.function(
+        contract,
+        name="refund",
+        claims=_msg_value_claims(_msg_value_flow("msg_sender")),
+        openness="not_determined",
+    )
+
+    signal = corpus.only(contract, "flow.out")
+    assert signal.destination.state == DESTINATION_STATE_NOT_DETERMINED
+    assert signal.severity.state == SEVERITY_STATE_NOT_DETERMINED
+    assert signal.severity_basis == ()
+    assert not signal.enters_grade
+    assert "destination_not_determined_row_withheld" in signal.witness_notes
+    assert MSG_VALUE_ARM_SELF_RETURN in signal.witness_notes
+    assert MSG_VALUE_REPETITION_RESIDUAL not in signal.witness_notes
+
+
+def test_msg_value_passed_through_to_a_fixed_payee_is_recognised_and_scores_as_before(corpus):
+    """W3b is a RECOGNITION and nothing more. That the caller's own ETH went to a
+    payee no caller can name is published as a fact; whether that makes the row
+    product surface is an owner ruling nobody here has, so the severity, its basis
+    and the destination are exactly what they were without the witness."""
+    contract = corpus.contract("0x" + "4b" * 20)
+    corpus.function(contract, name="receive", claims=_msg_value_claims(_msg_value_flow("immutable")), openness="open")
+
+    signal = corpus.only(contract, "flow.out")
+    assert signal.destination.state == DESTINATION_STATE_CONSTRAINED_PROVEN
+    assert signal.destination.value == "immutable_fixed"
+    assert signal.severity.state == SEVERITY_STATE_PROVEN
+    assert signal.severity.value == FLOW_SEVERITY_FIXED_DESTINATION
+    assert signal.severity_basis == ("static_lattice:static_conjunction",)
+    assert MSG_VALUE_ARM_PASSTHROUGH in signal.witness_notes
+    assert MSG_VALUE_ARM_SELF_RETURN not in signal.witness_notes
+
+
+_MSG_VALUE_REFUSALS = [
+    # The fold declined to answer. ``amount_kinds`` is emitted exactly where the
+    # contributing sites disagreed, and a ``several`` carrying a ``msg_value``
+    # member says nothing about the member beside it.
+    (
+        "several_fold",
+        "5a",
+        _msg_value_claims(
+            _msg_value_flow(
+                "msg_sender",
+                amount_kind={"kind": "several", "tier": "dispositive_ast"},
+                amount_kinds=[
+                    {"kind": "msg_value", "tier": "dispositive_ast"},
+                    {"kind": "capped_by_balance", "tier": "dispositive_ast"},
+                ],
+            )
+        ),
+        "amount_fold_disagreed",
+        DEST_SEVERITY_CONSTRAINED_OTHER,
+    ),
+    # The scalar and the breakdown disagree with each other. The scalar alone
+    # would read as proven; the breakdown is the producer saying it is not.
+    (
+        "breakdown_beside_a_msg_value_scalar",
+        "5b",
+        _msg_value_claims(
+            _msg_value_flow(
+                "msg_sender",
+                amount_kinds=[
+                    {"kind": "msg_value", "tier": "dispositive_ast"},
+                    {"kind": "param", "tier": "dispositive_ast"},
+                ],
+            )
+        ),
+        "amount_fold_disagreed",
+        DEST_SEVERITY_CONSTRAINED_OTHER,
+    ),
+    # A TRACED msg.value is that the tracer arrived at the opcode, not that the
+    # amount IS the value attached to this call.
+    (
+        "traced_amount",
+        "5c",
+        _msg_value_claims(_msg_value_flow("msg_sender", amount_kind={"kind": "msg_value", "tier": "static_trace"})),
+        "amount_not_dispositive_ast",
+        DEST_SEVERITY_CONSTRAINED_OTHER,
+    ),
+    # The universal: one sibling flow paying something else refuses the function.
+    (
+        "sibling_flow_is_not_msg_value",
+        "5d",
+        _msg_value_claims(
+            _msg_value_flow("msg_sender"),
+            _msg_value_flow("msg_sender", amount_kind={"kind": "param", "tier": "dispositive_ast"}),
+        ),
+        "amount_not_msg_value",
+        DEST_SEVERITY_CONSTRAINED_OTHER,
+    ),
+    # An absent ``from_is_self`` is not "this contract is the source".
+    (
+        "source_not_self",
+        "5e",
+        _msg_value_claims(
+            {
+                "kind": "low_level_value_call",
+                "amount_kind": {"kind": "msg_value", "tier": "dispositive_ast"},
+                "target_kind": {"kind": "msg_sender", "tier": "dispositive_ast"},
+            }
+        ),
+        "flow_source_not_self",
+        DEST_SEVERITY_CONSTRAINED_OTHER,
+    ),
+    (
+        "target_breakdown",
+        "5f",
+        _msg_value_claims(
+            _msg_value_flow(
+                "several",
+                target_kinds=[
+                    {"kind": "msg_sender", "tier": "dispositive_ast"},
+                    {"kind": "immutable", "tier": "dispositive_ast"},
+                ],
+            )
+        ),
+        "target_fold_disagreed",
+        DEST_SEVERITY_CONSTRAINED_OTHER,
+    ),
+    # A payee neither arm names. The lattice's own answer stands; this witness
+    # adds nothing to it.
+    (
+        "third_payee_kind",
+        "6a",
+        _msg_value_claims(_msg_value_flow("storage_setter")),
+        "target_not_a_witnessed_arm",
+        None,
+    ),
+    # The bound is per ENTRY, and two entries paying the caller move twice what
+    # the caller attached — the surplus out of a balance somebody else funded.
+    # This shape is what the conjunction must refuse rather than read as one
+    # payment; it is also why the two arms can never be mixed on a proven set.
+    (
+        "multiple_paying_entries",
+        "6b",
+        _msg_value_claims(_msg_value_flow("msg_sender"), _msg_value_flow("msg_sender")),
+        "multiple_out_flow_entries",
+        DEST_SEVERITY_CONSTRAINED_OTHER,
+    ),
+    (
+        "one_entry_per_arm",
+        "6d",
+        _msg_value_claims(_msg_value_flow("msg_sender"), _msg_value_flow("immutable")),
+        "multiple_out_flow_entries",
+        DEST_SEVERITY_CONSTRAINED_OTHER,
+    ),
+    (
+        "unreadable_kind",
+        "6c",
+        _msg_value_claims(
+            _msg_value_flow("msg_sender"),
+            {"kind": "low_level_value_call", "from_is_self": True, "target_kind": {"kind": "msg_sender"}},
+        ),
+        "flow_kind_unreadable",
+        DEST_SEVERITY_CONSTRAINED_OTHER,
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("slug", "claims", "reason", "severity"),
+    [case[1:] for case in _MSG_VALUE_REFUSALS],
+    ids=[case[0] for case in _MSG_VALUE_REFUSALS],
+)
+def test_msg_value_return_refuses(corpus, slug, claims, reason, severity):
+    """Every conjunct, removed one at a time: the witness publishes its named
+    refusal and NOTHING positive, and the row scores exactly what the destination
+    lattice scored it without the witness."""
+    from services.scoring import distill as D
+
+    assert D._msg_value_return(claims) == D._MsgValueReturn(arm=None, refusal=reason)
+
+    contract = corpus.contract("0x" + slug * 20)
+    corpus.function(contract, name="withdraw", claims=claims, openness="restricted")
+
+    signal = corpus.only(contract, "flow.out")
+    assert f"msg_value_return_refused:{reason}" in signal.witness_notes
+    assert MSG_VALUE_ARM_SELF_RETURN not in signal.witness_notes
+    assert MSG_VALUE_ARM_PASSTHROUGH not in signal.witness_notes
+    assert MSG_VALUE_ARM_SELF_RETURN not in signal.severity_basis
+    assert MSG_VALUE_REPETITION_RESIDUAL not in signal.witness_notes
+    if severity is None:
+        assert signal.severity.state == SEVERITY_STATE_NOT_DETERMINED
+        assert not signal.enters_grade
+    else:
+        assert signal.severity.state == SEVERITY_STATE_PROVEN
+        assert signal.severity.value == severity
+
+
+def test_a_payout_that_never_mentions_msg_value_is_asked_nothing(corpus):
+    """The third state, and the reason it is silence rather than a refusal: on a
+    payout whose amount is a parameter the question does not arise, and hanging a
+    reason off it would put this witness's vocabulary on every flow in the corpus
+    while proving nothing about any of them."""
+    contract = corpus.contract("0x" + "4c" * 20)
+    corpus.function(
+        contract,
+        name="rescueTokens",
+        claims=_msg_value_claims(
+            _msg_value_flow("msg_sender", amount_kind={"kind": "param", "tier": "dispositive_ast"})
+        ),
+        openness="restricted",
+    )
+
+    signal = corpus.only(contract, "flow.out")
+    assert not [note for note in signal.witness_notes if note.startswith("msg_value_return_refused")]
+    assert MSG_VALUE_ARM_SELF_RETURN not in signal.witness_notes
+    assert MSG_VALUE_ARM_PASSTHROUGH not in signal.witness_notes
+    assert signal.severity.value == DEST_SEVERITY_CONSTRAINED_OTHER
+    assert signal.severity_basis == ("constrained:msg_sender+restricted_caller",)
+
+
+def test_a_blocked_flow_set_proves_no_msg_value_arm():
+    """A claim with no ``flows`` key blocks the read, and a universal over a set
+    that could not be read must not come out vacuously true."""
+    from services.scoring import distill as D
+
+    blocked = [{"claim_id": "flow.out", "tier": "idiom_structural", "witness": {"kind": "value_flow"}}]
+    policy = [{"claim_id": "flow.out", "tier": "policy_derived", "witness": {"kind": "value_flow", "flows": []}}]
+    assert D._msg_value_return(blocked) == D._MsgValueReturn(arm=None, refusal=None)
+    assert D._msg_value_return(policy) == D._MsgValueReturn(arm=None, refusal=None)
 
 
 def test_destination_fold_is_a_meet_not_last_wins(corpus):

@@ -568,13 +568,14 @@ def _target_kinds(flow: dict[str, Any]) -> list[str | None]:
     return out or [None]
 
 
-def _static_destination_shape(claims: list[dict[str, Any]]) -> tuple[str | None, str]:
-    """Replay of the static lattice over every out-flow of the function.
+def _considered_out_flows(claims: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], str | None]:
+    """Every out-flow entry of the function, or the reason the set cannot be read.
 
-    Three rules, each of which fails OPEN if skipped: ``several`` reduces to its
-    worst member; ``value_router`` flows are inside the conjunction; and a
-    ``flow.out``/``value_router`` claim with no ``flows`` key BLOCKS — silence is
-    not evidence. ``policy_derived`` blocks for the same reason.
+    Two rules, each of which fails OPEN if skipped: ``value_router`` flows are
+    inside the conjunction, and a ``flow.out``/``value_router`` claim with no
+    ``flows`` key BLOCKS — silence is not evidence. ``policy_derived`` blocks for
+    the same reason. A blocked set is returned as a named reason rather than as
+    an empty list, so a universal over it cannot come out vacuously true.
     """
     considered: list[dict[str, Any]] = []
     for claim in claims:
@@ -582,17 +583,29 @@ def _static_destination_shape(claims: list[dict[str, Any]]) -> tuple[str | None,
         if claim_id not in ("flow.out", "value_router"):
             continue
         if claim.get("tier") == "policy_derived":
-            return None, "blocked_policy_derived"
+            return [], "blocked_policy_derived"
         witness = claim.get("witness") or {}
         flows = witness.get("flows")
         if flows is None:
-            return None, "blocked_no_flows"
+            return [], "blocked_no_flows"
         # ``direction`` lives on the WITNESS. Read off a flow entry it is always
         # absent, which silently empties the conjunction.
         direction = str(witness.get("direction") or ("value_router" if claim_id == "value_router" else "out"))
         if direction not in ("out", "eth_out", "value_router"):
             continue
         considered.extend(f for f in flows if isinstance(f, dict))
+    return considered, None
+
+
+def _static_destination_shape(claims: list[dict[str, Any]]) -> tuple[str | None, str]:
+    """Replay of the static lattice over every out-flow of the function.
+
+    ``several`` reduces to its worst member, over the flow set
+    ``_considered_out_flows`` closes.
+    """
+    considered, blocked = _considered_out_flows(claims)
+    if blocked is not None:
+        return None, blocked
     if not considered:
         return None, "no_out_flows"
     kinds: set[str | None] = set()
@@ -633,6 +646,131 @@ def _amount_kinds(claims: list[dict[str, Any]]) -> set[str]:
             elif kind:
                 kinds.add(str(kind))
     return kinds
+
+
+# ------------------------------------------------------------------ msg_value
+
+# The two arms of the ``msg_value`` witness, each named for what it PROVES. They
+# are disjoint by construction and carry separate tokens so the owner can rule on
+# them one at a time: the self-return arm is the caller getting back the value it
+# just attached; the pass-through arm is that same value reaching a payee no
+# caller can name.
+MSG_VALUE_ARM_SELF_RETURN = "proven_msg_value_self_return"
+MSG_VALUE_ARM_PASSTHROUGH = "proven_msg_value_passthrough"
+# What the proven arm did NOT look at, travelling with it. ``_fold_sites``
+# collapses agreeing IR sites into one entry and publishes no count, so "each
+# payment is bounded by the value attached to this call" is the whole of the
+# claim: how many such payments one call makes is unwitnessed, and a bound with
+# no repetition count is not a bound on the call.
+MSG_VALUE_REPETITION_RESIDUAL = "msg_value_self_return_repetition_not_witnessed"
+_MSG_VALUE_REFUSAL_PREFIX = "msg_value_return_refused"
+_AMOUNT_TIER_DISPOSITIVE = "dispositive_ast"
+_MSG_VALUE_TARGET_ARMS = {"msg_sender": MSG_VALUE_ARM_SELF_RETURN, "immutable": MSG_VALUE_ARM_PASSTHROUGH}
+
+
+@dataclass(frozen=True)
+class _MsgValueReturn:
+    """Three states, and the third one is silence.
+
+    An arm PROVEN, a refusal NAMED, or neither — the last being "no out-flow of
+    this function mentions ``msg.value`` at all", where the question does not
+    arise. Publishing a refusal there would hang a reason off every payout in the
+    corpus and say nothing about any of them; publishing the arm off an
+    unanswered question is the defect this scorer exists to avoid.
+    """
+
+    arm: str | None
+    refusal: str | None
+
+    @property
+    def notes(self) -> tuple[str, ...]:
+        if self.arm is not None:
+            return (self.arm,)
+        if self.refusal is not None:
+            return (f"{_MSG_VALUE_REFUSAL_PREFIX}:{self.refusal}",)
+        return ()
+
+
+_MSG_VALUE_NOT_ASKED = _MsgValueReturn(arm=None, refusal=None)
+
+
+def _mentions_msg_value(flow: dict[str, Any]) -> bool:
+    """Whether the question arises on this flow — the fold's scalar OR any member
+    of its breakdown, because a ``several`` is the fold declining to answer, not
+    the absence of a ``msg.value`` site."""
+    amount = flow.get("amount_kind")
+    if isinstance(amount, dict) and amount.get("kind") == "msg_value":
+        return True
+    for member in flow.get("amount_kinds") or []:
+        if (member.get("kind") if isinstance(member, dict) else member) == "msg_value":
+            return True
+    return False
+
+
+def _msg_value_return(claims: list[dict[str, Any]]) -> _MsgValueReturn:
+    """W3: whether what leaves is the value the caller just attached, and who gets it.
+
+    UNIVERSAL over every out-flow the way ``_static_destination_shape`` is: one
+    flow paying anything other than the caller's own ``msg.value``, or paying it
+    to a third kind of payee, refuses the whole function rather than being
+    outvoted by its siblings.
+
+    One further structural refusal, and it is not a technicality: each entry is
+    bounded by ``msg.value``, the SET is bounded by nothing, so a function with
+    more than one out-flow entry can move a multiple of what the caller attached
+    — the surplus coming out of a balance somebody else funded. What survives
+    inside a single entry is the fold's own residual (agreeing IR sites collapse
+    with no count), which the proven arm discloses rather than hides.
+
+    Two readings this arm may not take. The amount must be read straight off the
+    AST — a ``static_trace`` ``msg.value`` is that the tracer arrived at the
+    opcode, not that the amount IS the attached value. And the fold's scalar is
+    read together with its breakdown: ``amount_kinds``/``target_kinds`` are
+    emitted exactly where the contributing sites DISAGREED
+    (``effects._site_breakdown``), so a ``several`` carrying a ``msg_value``
+    member proves nothing about the members beside it — ``effects._fold_sites``
+    instructs its consumers to take the worst, and the worst here is unproven.
+    """
+    considered, blocked = _considered_out_flows(claims)
+    if blocked is not None or not considered:
+        return _MSG_VALUE_NOT_ASKED
+    if not any(_mentions_msg_value(flow) for flow in considered):
+        return _MSG_VALUE_NOT_ASKED
+
+    targets: set[str] = set()
+    for flow in considered:
+        amount = flow.get("amount_kind")
+        target = flow.get("target_kind")
+        if not isinstance(amount, dict) or not isinstance(target, dict) or not target.get("kind"):
+            return _MsgValueReturn(arm=None, refusal="flow_kind_unreadable")
+        if flow.get("amount_kinds"):
+            return _MsgValueReturn(arm=None, refusal="amount_fold_disagreed")
+        if amount.get("kind") != "msg_value":
+            return _MsgValueReturn(arm=None, refusal="amount_not_msg_value")
+        if amount.get("tier") != _AMOUNT_TIER_DISPOSITIVE:
+            return _MsgValueReturn(arm=None, refusal="amount_not_dispositive_ast")
+        # An absent ``from_is_self`` is not "this contract is the source": the
+        # amount can only bound what the CONTRACT pays out if the contract is
+        # what pays.
+        if flow.get("from_is_self") is not True:
+            return _MsgValueReturn(arm=None, refusal="flow_source_not_self")
+        if flow.get("target_kinds"):
+            return _MsgValueReturn(arm=None, refusal="target_fold_disagreed")
+        targets.add(str(target["kind"]))
+
+    if len(considered) > 1:
+        # Each entry is bounded by ``msg.value``; the SET is bounded by nothing.
+        # Two entries paying the caller move twice what the caller attached, and
+        # the second one comes out of a balance somebody else funded — so a flow
+        # set with more than one entry refuses rather than being read as one
+        # payment repeated in the witness's favour.
+        return _MsgValueReturn(arm=None, refusal="multiple_out_flow_entries")
+    if len(targets) != 1:
+        return _MsgValueReturn(arm=None, refusal="target_not_a_witnessed_arm")
+    arm = _MSG_VALUE_TARGET_ARMS.get(next(iter(targets)))
+    if arm is None:
+        return _MsgValueReturn(arm=None, refusal="target_not_a_witnessed_arm")
+    return _MsgValueReturn(arm=arm, refusal=None)
 
 
 def _flow_asset_class(claims: list[dict[str, Any]]) -> str | None:
@@ -1433,6 +1571,9 @@ def _build_signal(
         openness=openness,
         deployment_address=deployment_address,
         self_gated=_function_is_self_gated(facts, func),
+        # Asked only where the flow set is what the claim is ABOUT; every other
+        # claim carries the state where the question was never put.
+        msg_value=_msg_value_return(all_claims) if claim_id == "flow.out" else _MSG_VALUE_NOT_ASKED,
     )
     fields["severity"] = severity
     fields["severity_basis"] = severity_basis
@@ -1767,7 +1908,11 @@ def _severity(
     openness: str,
     deployment_address: str,
     self_gated: bool = False,
+    msg_value: _MsgValueReturn = _MSG_VALUE_NOT_ASKED,
 ) -> tuple[Tri[float], tuple[str, ...], set[str]]:
+    # The ``msg_value`` default is the state where the question was never put —
+    # it publishes nothing and moves nothing, so a caller that omits it loses the
+    # witness rather than gaining a verdict.
     notes: set[str] = set()
 
     if claim_id in K.UNMODELLED_CLAIMS:
@@ -1786,6 +1931,30 @@ def _severity(
         return Tri[float].not_determined(), (), notes
 
     if claim_id in K.DESTINATION_BEARING_SEVERITY:
+        # Published whatever the destination turns out to be: what the flow set
+        # proved about the amount is a fact about the amount, and a withheld
+        # destination is not a reason to un-say it.
+        notes.update(msg_value.notes)
+        if msg_value.arm == MSG_VALUE_ARM_SELF_RETURN and destination.tri.is_determined:
+            # AHEAD of the withhold, and conditional on it: the open-caller arm
+            # withholds the price *pending an amount witness*, and this IS that
+            # witness. Reading the withhold first would leave the row carrying
+            # both "no witness bounds this payout" and the witness that bounds
+            # it. The gate is the destination being PROVEN, not priced — an
+            # unread destination still reaches nothing here, so the arm cannot
+            # fire on a payee nobody read. The wave-4 self-service consumer arm
+            # sits beside this one the same way, for the same reason.
+            #
+            # What the zero rests on: the caller is paid its own attached value,
+            # to itself, on the function's ONE out-flow entry, so the payout
+            # moves no position the caller did not just fund. How many times one
+            # call makes that payment is a question this witness did not ask,
+            # and the residual note says so.
+            return (
+                Tri.proven(SEVERITY_STATE_PROVEN, K.FLOW_SEVERITY_MSG_VALUE_SELF_RETURN),
+                (MSG_VALUE_ARM_SELF_RETURN,),
+                notes | {MSG_VALUE_REPETITION_RESIDUAL},
+            )
         if destination.severity is None:
             # A withheld price has two different reasons and one token cannot
             # carry both: an unread destination, or a proven destination whose
@@ -1796,6 +1965,10 @@ def _severity(
                 else "flow_severity_withheld_pending_amount_witness"
             )
             return Tri[float].not_determined(), (), notes
+        # The PASS-THROUGH arm deliberately moves nothing: whether a fixed payee
+        # receiving the caller's own ETH is product surface is an open owner
+        # ruling, and until it is made that row scores exactly as it did,
+        # carrying only its recognition note.
         return Tri.proven(SEVERITY_STATE_PROVEN, destination.severity), (destination.basis,), notes
 
     if claim_id == "pause.set":

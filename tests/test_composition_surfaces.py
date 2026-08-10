@@ -352,7 +352,18 @@ def test_every_arm_this_run_added_is_flagged_uncalibrated_and_disclosed():
     # because the ``msg_sender`` half of the same arm is calibrated; checked
     # against the scored document, whose only carriers are one entity's pair of
     # subsumed rows. Tenth and eleventh entries.
-    assert len(registered) == 11
+    #
+    # The msg_value witness added its eight named refusals, and NEITHER of its
+    # two proven arms: measured over the 369 stored functions carrying a
+    # flow.out/value_router claim (of 3104 stored functions), the self-return arm
+    # carries ``Liquifier.unwrapL2Eth`` and the pass-through arm carries
+    # ``RestakingRewardsRouter.receive``, so both are calibrated and neither is
+    # flagged. Both of those functions PROVE the witness, so no refusal reason
+    # has a carrier — and each is registered separately rather than as one
+    # family token, because a reader branching on "the witness refused" has to
+    # be able to tell which refusal has never been seen. Twelfth through
+    # nineteenth entries.
+    assert len(registered) == 19
     for entry in registered:
         assert entry["arm"] in flagged, entry["arm"]
         assert entry["state"] and entry["note"]

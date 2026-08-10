@@ -6801,6 +6801,10 @@ _NOTE_WARNINGS = {
         "so no severity is assigned and the row does not enter the grade — absence of a bound is "
         "not proof the payout is unbounded"
     ),
+    "msg_value_self_return_repetition_not_witnessed": (
+        "the amount witness bounds each payment by the value attached to this call; nothing "
+        "witnesses how many such payments one call makes"
+    ),
     "destination_witnesses_contradict": (
         "two destination witnesses cannot both be true, so neither is adopted and the row is withheld"
     ),

@@ -80,6 +80,12 @@ DEST_SEVERITY_DELEGATECALL_SELF = 0.0
 DEST_SEVERITY_EXEC_SELF = 0.35
 FLOW_SEVERITY_CALLER_ARBITRARY = 0.9
 FLOW_SEVERITY_FIXED_DESTINATION = 0.10
+# The caller is paid back the value it attached to this very call, and the
+# witness closes over every out-flow of the function. Zero because the bound is
+# PROVEN — the payout can move no position the caller did not just fund — and
+# never because nothing was read: an unread amount yields no severity at all and
+# the row is withheld from the grade instead.
+FLOW_SEVERITY_MSG_VALUE_SELF_RETURN = 0.0
 OWNERSHIP_DEFAULT_ADMIN_RULES = 0.35
 # The self-gated delay credit is RETIRED, not tuned to zero: it rested on "no
 # other caller resolved", and the principal enumeration it read is a documented
@@ -312,6 +318,18 @@ UNCALIBRATED_ARMS: tuple[str, ...] = (
     # 15 and is calibrated.
     "fork:simulation+destination_param",
     "constrained:token_owner+restricted_caller",
+    # The msg_value witness's eight named refusals. Both of its PROVEN arms have
+    # a carrier on the reference corpus and neither is registered; the refusals
+    # have none, because the two functions that raise the question both prove it.
+    # See the disclosure family below for what each one means.
+    "msg_value_return_refused:amount_fold_disagreed",
+    "msg_value_return_refused:amount_not_dispositive_ast",
+    "msg_value_return_refused:amount_not_msg_value",
+    "msg_value_return_refused:flow_source_not_self",
+    "msg_value_return_refused:target_fold_disagreed",
+    "msg_value_return_refused:target_not_a_witnessed_arm",
+    "msg_value_return_refused:flow_kind_unreadable",
+    "msg_value_return_refused:multiple_out_flow_entries",
 )
 
 # What each of the run's arms IS, beside the bare token. §8 of
@@ -530,6 +548,78 @@ UNCALIBRATED_ARM_DISCLOSURES: tuple[dict[str, object], ...] = (
             "nothing at all and so is not an arm to register"
         ),
     },
+    # The msg_value witness's refusal family. Its two PROVEN arms are calibrated —
+    # measured over the 369 stored functions that carry a flow.out/value_router
+    # claim (of 3104 stored functions, 1304 of them carrying any claim at all),
+    # each arm has exactly one carrier — but those same two functions PROVE the
+    # witness, so every named refusal below has zero carriers and each is a state
+    # a consumer can only meet on a fixture. Registered one per reason rather
+    # than once for the family: a reader branching on "the witness refused" needs
+    # to know WHICH refusal has never been seen, and folding eight unfired
+    # reasons into one token would hide seven of them.
+    *(
+        {
+            "arm": f"msg_value_return_refused:{reason}",
+            "state": "not_determined",
+            "published_at": ("signals' witness_notes, and findings[].witness_notes where such a row enters the grade"),
+            "population_census": None,
+            "exercised_by": tuple(
+                f"tests/test_scoring_distill_fold.py::test_msg_value_return_refuses[{i}]" for i in ids
+            ),
+            "note": note,
+        }
+        for reason, ids, note in (
+            (
+                "amount_fold_disagreed",
+                ("several_fold", "breakdown_beside_a_msg_value_scalar"),
+                "the amount's contributing sites disagreed, so the scalar is not the whole answer and a "
+                "several carrying a msg_value member proves nothing about the member beside it",
+            ),
+            (
+                "amount_not_dispositive_ast",
+                ("traced_amount",),
+                "the amount was reached by tracing rather than read off the AST: that the tracer arrived "
+                "at the opcode is not that the amount IS the value attached to this call",
+            ),
+            (
+                "amount_not_msg_value",
+                ("sibling_flow_is_not_msg_value",),
+                "one out-flow pays something other than the caller's attached value, which refuses the "
+                "whole function — the witness is a universal, not a majority",
+            ),
+            (
+                "flow_source_not_self",
+                ("source_not_self",),
+                "from_is_self is not proven true, so nothing says this contract's own balance is what "
+                "pays and the amount bounds a payment somebody else makes",
+            ),
+            (
+                "target_fold_disagreed",
+                ("target_breakdown",),
+                "the payee's contributing sites disagreed; the arms are disjoint and neither is proven "
+                "by a set of destinations",
+            ),
+            (
+                "target_not_a_witnessed_arm",
+                ("third_payee_kind",),
+                "the payee is neither the caller nor an immutable, so neither arm's claim is the claim "
+                "this flow set would support",
+            ),
+            (
+                "flow_kind_unreadable",
+                ("unreadable_kind",),
+                "a flow carries no readable amount or target classification at all, which is the one "
+                "refusal that says the witness could not look rather than that it looked and refused",
+            ),
+            (
+                "multiple_out_flow_entries",
+                ("multiple_paying_entries", "one_entry_per_arm"),
+                "each entry is bounded by the value attached to the call and the SET is bounded by "
+                "nothing, so a function with two paying entries can move a multiple of it — the surplus "
+                "out of a balance somebody else funded",
+            ),
+        )
+    ),
 )
 
 
@@ -654,6 +744,7 @@ def model_parameters() -> dict[str, Any]:
             "exec_self": DEST_SEVERITY_EXEC_SELF,
             "flow_caller_arbitrary": FLOW_SEVERITY_CALLER_ARBITRARY,
             "flow_fixed_destination": FLOW_SEVERITY_FIXED_DESTINATION,
+            "flow_msg_value_self_return": FLOW_SEVERITY_MSG_VALUE_SELF_RETURN,
             "note": (
                 "these are reachable only on a PROVEN destination state; an unread "
                 "destination yields no severity and the row is withheld from the grade"
