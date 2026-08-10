@@ -1664,17 +1664,22 @@ def test_uncertain_marker_reaches_artifact_and_policy_routes_unsupported(tmp_pat
 
 def test_operand_sort_key_totally_orders_element_fields():
     """``absorbed_operands`` is evidence, so its order must come from content.
-    Two operands separated only by the element fields a later unit stamps would
-    otherwise settle on input order under a stable sort — and an operand that
-    predates those fields has to order against one that carries them without
-    the comparison raising."""
+    Two operands separated only by the element fields would otherwise settle on
+    input order under a stable sort — and an operand carrying none of them has
+    to order against one that does without the comparison raising."""
 
     def key(op: dict[str, Any]) -> tuple[str, ...]:
-        # The element fields land in a later unit, so these are not yet Operand keys.
+        # A plain dict, because ``bare`` is the shape an operand that resolved
+        # no element read still has, and the order has to accept it.
         return _operand_sort_key(cast(Operand, op))
 
     bare = {"source": "state_variable", "state_variable_name": "bids"}
-    keyed = {**bare, "element_base_variable": "bids", "element_member_path": ["amount"], "element_key_param_index": 0}
+    keyed = {
+        **bare,
+        "element_base_variable": "C.bids",
+        "element_member_path": ["amount"],
+        "element_key_param_index": 0,
+    }
     other_key = {**keyed, "element_key_param_index": 2}
 
     assert key(bare) != key(keyed)
@@ -1683,3 +1688,211 @@ def test_operand_sort_key_totally_orders_element_fields():
     # compare rather than raise.
     assert sorted([keyed, bare, other_key], key=key)[0] is bare
     assert all(isinstance(slot, str) for slot in key(keyed))
+
+
+# ---------------------------------------------------------------------------
+# Element-read operand fields (element_base_variable / element_member_path /
+# element_key_param_index)
+# ---------------------------------------------------------------------------
+
+_ELEMENT_FIELDS = ("element_base_variable", "element_member_path", "element_key_param_index")
+
+_ELEMENT_SRC = """
+pragma solidity ^0.8.19;
+contract C {
+    struct Bid { address bidderAddress; uint256 amount; }
+    mapping(uint256 => Bid) public bids;
+    mapping(address => uint256) public balances;
+    mapping(uint256 => mapping(uint256 => address)) public nested;
+    address[] public admins;
+
+    function guardedRecord(uint256 _bidId) external view {
+        require(bids[_bidId].bidderAddress == msg.sender);
+    }
+    function scalarCollection(uint256 _idx) external view {
+        require(admins[_idx] == msg.sender);
+    }
+    function bareParameter(address who) external view {
+        require(msg.sender == who);
+    }
+    function callerKeyed() external view {
+        require(balances[msg.sender] > 0);
+    }
+    function constantKey() external view {
+        require(admins[3] == msg.sender);
+    }
+    function computedKey(uint256 _bidId) external view {
+        require(bids[_bidId + 1].bidderAddress == msg.sender);
+    }
+    function storagePointer(uint256 _bidId) external view {
+        Bid storage b = bids[_bidId];
+        require(b.bidderAddress == msg.sender);
+    }
+    function twoKeyLevels(uint256 a, uint256 b) external view {
+        require(nested[a][b] == msg.sender);
+    }
+    function mergedChain(uint256 _id, bool flag) external view {
+        address who = flag ? bids[_id].bidderAddress : admins[_id];
+        require(who == msg.sender);
+    }
+    function mergedKeyTernary(uint256 a, uint256 b, bool flag) external view {
+        uint256 k = flag ? a : b;
+        require(bids[k].bidderAddress == msg.sender);
+    }
+    function mergedKeyIfElse(uint256 a, uint256 b, bool flag) external view {
+        uint256 k;
+        if (flag) { k = a; } else { k = b; }
+        require(bids[k].bidderAddress == msg.sender);
+    }
+    function mergedCallerOrParameterKey(address who, bool flag) external view {
+        address k = flag ? msg.sender : who;
+        require(balances[k] > 0);
+    }
+}
+"""
+
+
+@pytest.fixture(scope="module")
+def element_slither(tmp_path_factory):
+    return _compile(tmp_path_factory.mktemp("element"), _ELEMENT_SRC)
+
+
+def _operands(sl: Slither, name: str) -> list[dict[str, Any]]:
+    tree = build_predicate_tree(_function(sl, name))
+    out: list[dict[str, Any]] = []
+    for leaf in _all_leaves(tree):
+        out.extend(cast("list[dict[str, Any]]", leaf.get("operands") or []))
+    assert out, f"{name} produced no operands"
+    # The three are one fact about one cell: a base without its key is not a
+    # cell, and a consumer must never see half of one.
+    for op in out:
+        present = [field for field in _ELEMENT_FIELDS if field in op]
+        assert present in ([], list(_ELEMENT_FIELDS)), op
+    return out
+
+
+def test_element_read_stamps_record_on_the_parameter_polarity(element_slither):
+    """``bids[_bidId].bidderAddress == msg.sender``: the pick publishes the bare
+    parameter, so without the stamp the record the guard names is gone. The
+    caller side of the same comparison reads no element and stays bare."""
+    element, caller = _operands(element_slither, "guardedRecord")
+    assert element["element_base_variable"] == "C.bids"
+    assert element["element_member_path"] == ["bidderAddress"]
+    assert element["element_key_param_index"] == 0
+    # Additive: what the operand already published is untouched.
+    assert element["source"] == "parameter"
+    assert element["parameter_index"] == 0
+    assert element["parameter_name"] == "_bidId"
+    assert caller["source"] == "msg_sender"
+    assert not any(field in caller for field in _ELEMENT_FIELDS)
+
+
+def test_scalar_collection_read_stamps_an_empty_member_path(element_slither):
+    """``admins[_idx]`` reads a whole element, not a member of one. The empty
+    path is the proven answer to "which member", not a missing one — which is
+    why it rides with the other two rather than standing alone."""
+    element, _caller = _operands(element_slither, "scalarCollection")
+    assert element["element_base_variable"] == "C.admins"
+    assert element["element_member_path"] == []
+    assert element["element_key_param_index"] == 0
+
+
+def test_bare_parameter_comparison_stamps_no_element_fields(element_slither):
+    """``msg.sender == who`` reads no storage element at all."""
+    for op in _operands(element_slither, "bareParameter"):
+        assert not any(field in op for field in _ELEMENT_FIELDS)
+
+
+def test_caller_keyed_read_stamps_a_proven_null_key_slot(element_slither):
+    """``balances[msg.sender]``: the key is proven to be the caller, so no entry
+    parameter names the cell. That is an earned negative and must reach the
+    consumer as a present ``None``, distinguishable from the absence that means
+    no element read was resolved."""
+    element = next(op for op in _operands(element_slither, "callerKeyed") if "element_base_variable" in op)
+    assert element["element_base_variable"] == "C.balances"
+    assert element["element_member_path"] == []
+    assert "element_key_param_index" in element
+    assert element["element_key_param_index"] is None
+    # The caller won the source pick; the element fields ride the same operand.
+    assert element["source"] == "msg_sender"
+
+
+def test_collection_polarity_refuses_a_key_it_cannot_pin(element_slither):
+    """``admins[3] == msg.sender`` is the collection-wins fold — the stamp runs
+    over it too, and refuses, because a constant key names no entry parameter
+    and this pass proves nothing else about it."""
+    collection = next(op for op in _operands(element_slither, "constantKey") if op["source"] == "state_variable")
+    assert collection["state_variable_name"] == "admins"
+    assert not any(field in collection for field in _ELEMENT_FIELDS)
+
+
+def test_computed_key_stamps_nothing(element_slither):
+    """``bids[_bidId + 1]`` carries ``_bidId``'s own source alongside the
+    arithmetic. Reading the slot off it would publish agreement with
+    ``bids[_bidId]`` over two different cells."""
+    for op in _operands(element_slither, "computedKey"):
+        assert not any(field in op for field in _ELEMENT_FIELDS)
+
+
+def test_storage_pointer_local_stamps_nothing(element_slither):
+    """The member is read off a storage-pointer local, so the walk never reaches
+    the state variable and publishes no cell rather than guessing one."""
+    for op in _operands(element_slither, "storagePointer"):
+        assert not any(field in op for field in _ELEMENT_FIELDS)
+
+
+def test_two_key_levels_stamp_nothing(element_slither):
+    """One published slot cannot name two key levels; an ambiguous cell is not a
+    narrower one."""
+    for op in _operands(element_slither, "twoKeyLevels"):
+        assert not any(field in op for field in _ELEMENT_FIELDS)
+
+
+def test_merged_chain_stamps_nothing(element_slither):
+    """A value joined from two different collections has no single record."""
+    for op in _operands(element_slither, "mergedChain"):
+        assert not any(field in op for field in _ELEMENT_FIELDS)
+
+
+def test_ternary_merged_key_stamps_nothing(element_slither):
+    """``bids[flag ? a : b]`` is keyed by ``a`` OR ``b``. Provenance folds the
+    merged local back to one source, so the source-set test that refuses
+    ``bids[_bidId + 1]`` sees nothing wrong here — only the SSA ``Phi`` does."""
+    for op in _operands(element_slither, "mergedKeyTernary"):
+        assert not any(field in op for field in _ELEMENT_FIELDS)
+    # Non-vacuity: the sibling differing only in the merge does stamp.
+    sibling, _caller = _operands(element_slither, "guardedRecord")
+    assert sibling["element_key_param_index"] == 0
+
+
+def test_if_else_merged_key_stamps_nothing(element_slither):
+    """The statement form of the same merge, which reaches the read through a
+    ``Phi`` in a different node than the one holding the ``Index``."""
+    for op in _operands(element_slither, "mergedKeyIfElse"):
+        assert not any(field in op for field in _ELEMENT_FIELDS)
+    sibling, _caller = _operands(element_slither, "guardedRecord")
+    assert sibling["element_base_variable"] == "C.bids"
+
+
+def test_caller_or_parameter_merged_key_stamps_nothing(element_slither):
+    """``balances[flag ? msg.sender : who]`` is the merge that matters most: the
+    surviving source is the parameter, so a slot-only reading would publish a
+    cell that may be the CALLER's as one an entry parameter names — inverting
+    the distinction the fields carry. It publishes neither."""
+    for op in _operands(element_slither, "mergedCallerOrParameterKey"):
+        assert not any(field in op for field in _ELEMENT_FIELDS)
+    # Non-vacuity: the unmerged caller-keyed sibling still earns its null slot.
+    sibling = next(op for op in _operands(element_slither, "callerKeyed") if "element_base_variable" in op)
+    assert sibling["element_base_variable"] == "C.balances"
+    assert sibling["element_key_param_index"] is None
+
+
+def test_element_stamp_does_not_widen_the_leaf_classification(element_slither):
+    """The stamp is operand vocabulary only. An element-read operand recognized
+    as one must not change what the leaf was classified as."""
+    guarded = _all_leaves(build_predicate_tree(_function(element_slither, "guardedRecord")))
+    scalar = _all_leaves(build_predicate_tree(_function(element_slither, "scalarCollection")))
+    assert [leaf["kind"] for leaf in guarded] == ["equality"]
+    assert [leaf["authority_role"] for leaf in guarded] == ["caller_authority"]
+    assert [leaf["kind"] for leaf in scalar] == ["equality"]
+    assert [leaf["authority_role"] for leaf in scalar] == ["caller_authority"]

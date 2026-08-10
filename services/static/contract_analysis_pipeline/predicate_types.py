@@ -80,6 +80,35 @@ class Operand(TypedDict):
     # ``op.get("derived_from") or []`` therefore reads not-determined as
     # proven-none and is wrong; test for ``None`` explicitly.
     derived_from: NotRequired[list["Operand"] | None]
+    # The ONE storage element this operand read, when its def chain is a single
+    # ``<state var>[key](.member)*`` access: the base's canonical
+    # ``Contract.var``, the member path below it, and the entry-parameter slot
+    # the key came from. The builder picks ONE source out of a value's source
+    # set, so ``bids[_bidId].bidderAddress`` publishes either the bare parameter
+    # (``source == "parameter"``) or the bare collection
+    # (``source == "state_variable"``) and the other half of the read is gone.
+    # These name what the pick discarded, on both polarities. They add to
+    # ``source``/``parameter_index``/``parameter_name``; they never restate or
+    # move them.
+    #
+    # All three are present together or all three are absent — a base without
+    # its key is not a cell, and a consumer joining two reads onto one record
+    # must refuse rather than assume. ABSENCE IS NOT "not an element read": it
+    # is "no element read was resolved here", which is equally what every
+    # operand published before these fields existed says.
+    #
+    # ``element_key_param_index`` is three-valued and a consumer must keep the
+    # three apart:
+    #   key absent — no resolved element read (see above)
+    #   ``None``   — resolved, and the key is PROVEN to be ``msg.sender``: a
+    #                caller-keyed cell, which no entry parameter names. An
+    #                earned negative, never a shrug — a key this pass could not
+    #                pin (a constant, a computed index, a second key level)
+    #                publishes no element fields at all.
+    #   ``int``    — resolved: the key is exactly this entry-parameter slot.
+    element_base_variable: NotRequired[str]
+    element_member_path: NotRequired[list[str]]
+    element_key_param_index: NotRequired[int | None]
 
 
 # ---------------------------------------------------------------------------

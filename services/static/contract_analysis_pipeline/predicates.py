@@ -36,6 +36,7 @@ try:
     from slither.core.variables.state_variable import StateVariable  # type: ignore[import]
     from slither.core.variables.variable import Variable  # type: ignore[import]
     from slither.slithir.operations import (  # type: ignore[import]
+        Assignment,
         Binary,
         Condition,
         HighLevelCall,
@@ -44,6 +45,7 @@ try:
         LibraryCall,
         LowLevelCall,
         Member,
+        Phi,
         Return,
         Send,
         SolidityCall,
@@ -52,7 +54,7 @@ try:
         UnaryType,
         Unpack,
     )
-    from slither.slithir.variables import Constant  # type: ignore[import]
+    from slither.slithir.variables import Constant, ReferenceVariable  # type: ignore[import]
 
     SLITHER_AVAILABLE = True
 except Exception:  # pragma: no cover
@@ -2530,6 +2532,15 @@ def _operand_for_value(value: Any, prov: ProvenanceMap) -> Operand:
         op: Operand = {"source": "constant", "constant_value": str(value) if value is not None else ""}
         _attach_value_type(op, value)
         return op
+    op = _picked_source_operand(value, sources)
+    _attach_element_read(op, value, sources, prov)
+    return op
+
+
+def _picked_source_operand(value: Any, sources: SourceSet) -> Operand:
+    """The source the projection publishes, out of everything that reached the
+    value. Extracted so the element-read stamp runs once, over whichever source
+    won."""
     view_call = _derived_view_call_source(sources)
     if view_call is not None:
         op = _source_to_operand(view_call)
@@ -2564,6 +2575,210 @@ def _operand_for_value(value: Any, prov: ProvenanceMap) -> Operand:
     op = _source_to_operand(min(sources, key=_source_sort_key))
     _attach_state_constant_value(op, value)
     return op
+
+
+# Deeper nesting than ``record.member.member`` is a coverage question of its own
+# and is not answered here, so it publishes nothing rather than a truncated path.
+_MAX_ELEMENT_MEMBER_DEPTH = 2
+# An access chain is straight-line ``Index``/``Member`` IR; the cap only bounds a
+# malformed self-referential one.
+_ELEMENT_CHAIN_CAP = 8
+
+
+def _attach_element_read(op: Operand, value: Any, sources: SourceSet, prov: ProvenanceMap) -> None:
+    """Stamp the three ``element_*`` facts when ``value`` is one resolved storage
+    element read, and stamp nothing at all otherwise.
+
+    All three or none: they describe a single cell, so a chain that pins a base
+    but not its key must publish no cell — the consumer joining an amount to a
+    guard has no way to recover the missing half and would otherwise join on the
+    base name alone.
+
+    All-or-none is also what keeps ``_operand_sort_key`` total across these
+    fields. Its presence flag for ``element_key_param_index`` cannot on its own
+    separate an operand carrying no element read from one whose key is a proven
+    ``None`` — both render as the absent flag — and it is
+    ``element_base_variable``'s slot, present exactly when the other two are,
+    that discriminates them. A later unit that relaxes all-or-none collapses
+    that distinction in the published order and owes the sort key a fix.
+    """
+    fields = _element_read_fields(value, sources, prov)
+    if fields is None:
+        return
+    base_variable, member_path, key_param_index = fields
+    op["element_base_variable"] = base_variable
+    op["element_member_path"] = member_path
+    op["element_key_param_index"] = key_param_index
+
+
+def _element_read_fields(
+    value: Any, sources: SourceSet, prov: ProvenanceMap
+) -> tuple[str, list[str], int | None] | None:
+    if not SLITHER_AVAILABLE or not isinstance(value, ReferenceVariable):
+        return None
+    chain = _element_access_chain(value)
+    if chain is None:
+        return None
+    base, member_path, keys = chain
+    # Exactly one key level: the published slot names ONE level, and a second
+    # would have nowhere to land — an ambiguous cell, not a narrower one.
+    if len(keys) != 1 or len(member_path) > _MAX_ELEMENT_MEMBER_DEPTH:
+        return None
+    canonical = getattr(base, "canonical_name", None)
+    if not canonical:
+        return None
+    # Provenance has to have seen the read the IR walk just described: one base
+    # declaration, and a state-variable source carrying exactly this member path.
+    # A chain merged through a phi, or one whose base saturated to top, fails
+    # here instead of publishing a cell nothing proves was read.
+    if {source.state_variable_name for source in sources if source.kind == "state_variable"} != {base.name}:
+        return None
+    if not any(source.kind == "state_variable" and tuple(source.member_path) == member_path for source in sources):
+        return None
+    resolved, key_param_index = _element_key_param_index(keys[0], prov)
+    if not resolved or _key_definition_is_merged(keys[0], value):
+        return None
+    return str(canonical), list(member_path), key_param_index
+
+
+def _element_access_chain(value: Any) -> tuple[Any, tuple[str, ...], list[Any]] | None:
+    """Walk a reference back through its defining ``Index``/``Member`` IR to the
+    state variable it reads, collecting the member path and the index keys.
+
+    ``None`` for anything else on the chain — a storage-pointer local, an
+    assignment, a type conversion, a reference whose definition is not singular —
+    because a read this walk cannot follow is a read it cannot name.
+    """
+    member_path: list[str] = []
+    keys: list[Any] = []
+    current = value
+    for _ in range(_ELEMENT_CHAIN_CAP):
+        if not isinstance(current, ReferenceVariable):
+            break
+        ir = _defining_reference_ir(current)
+        if isinstance(ir, Member):
+            field = getattr(ir.variable_right, "value", None) or getattr(ir.variable_right, "name", None)
+            if not isinstance(field, str) or not field:
+                return None
+            member_path.append(field)
+            current = ir.variable_left
+        elif isinstance(ir, Index):
+            keys.append(ir.variable_right)
+            current = ir.variable_left
+        else:
+            return None
+    else:
+        return None
+    if not isinstance(current, StateVariable):
+        return None
+    member_path.reverse()
+    keys.reverse()
+    return current, tuple(member_path), keys
+
+
+def _defining_reference_ir(ref: Any) -> Any | None:
+    """The ONE IR in the reference's home node whose lvalue IS this reference.
+
+    The uniqueness rule is what makes the answer safe: a reference with two
+    definitions in its node is a chain this walk cannot read, so it yields
+    nothing rather than the first candidate. Identity rather than name because
+    identity is what "this reference" means; ``REF_n`` names carry no promise.
+    """
+    node = getattr(ref, "node", None)
+    if node is None:
+        return None
+    defining = [ir for ir in (getattr(node, "irs_ssa", None) or ()) if getattr(ir, "lvalue", None) is ref]
+    return defining[0] if len(defining) == 1 else None
+
+
+def _key_definition_is_merged(key: Any, value: Any) -> bool:
+    """True when the index key's SSA definition chain passes through a ``Phi``
+    that joins more than one value — ``recs[flag ? a : b]`` and its if/else form.
+
+    Structural on purpose, because the key's SOURCE SET does not answer this and
+    cannot be made to: provenance folds a merged local back to a single source,
+    so ``recs[flag ? a : b]`` reports the one parameter ``b`` and the cardinality
+    test that refuses ``recs[_bidId + 1]`` never fires. Publishing that slot
+    would name a cell the read is only sometimes keyed by, and
+    ``balances[flag ? msg.sender : who]`` would publish a possibly-caller-keyed
+    cell as parameter-keyed — inverting the one distinction these fields exist
+    to carry.
+
+    Refuses outright when the containing declaration cannot be reached: a key
+    whose definitions cannot be enumerated is not a proven key. The BASE chain
+    needs no equivalent test — ``_element_access_chain`` follows only
+    ``Index``/``Member``, so a ``Phi`` on the base stops the walk before any cell
+    is named.
+    """
+    definitions = _ssa_definitions(value)
+    if definitions is None:
+        return True
+    seen: set[int] = set()
+    pending = [key]
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        defining = definitions.get(id(current)) or []
+        if len(defining) > 1:
+            return True
+        if not defining:
+            continue
+        ir = defining[0]
+        if isinstance(ir, Phi):
+            rvalues = list(getattr(ir, "rvalues", None) or ())
+            if len({id(rvalue) for rvalue in rvalues}) > 1:
+                return True
+            pending.extend(rvalues)
+        elif isinstance(ir, Assignment):
+            pending.append(getattr(ir, "rvalue", None))
+    return False
+
+
+def _ssa_definitions(value: Any) -> dict[int, list[Any]] | None:
+    """Every SSA lvalue in the reference's containing declaration and its
+    modifiers, mapped by identity to the IRs that define it.
+
+    ``None`` when the declaration cannot be reached at all, which the caller
+    reads as a refusal rather than as an empty answer.
+    """
+    node = getattr(value, "node", None)
+    container = getattr(node, "function", None) if node is not None else None
+    if container is None:
+        return None
+    declarations = [container]
+    declarations.extend(getattr(container, "modifiers", []) or [])
+    definitions: dict[int, list[Any]] = {}
+    for declaration in declarations:
+        for declaration_node in getattr(declaration, "nodes", []) or []:
+            for ir in getattr(declaration_node, "irs_ssa", None) or ():
+                lvalue = getattr(ir, "lvalue", None)
+                if lvalue is not None:
+                    definitions.setdefault(id(lvalue), []).append(ir)
+    return definitions
+
+
+def _element_key_param_index(key: Any, prov: ProvenanceMap) -> tuple[bool, int | None]:
+    """``(resolved, slot)`` for an index key: the entry-parameter slot it came
+    from, or ``None`` for a key proven to be ``msg.sender``.
+
+    One source and one source only. ``bids[_bidId + 1]`` carries the parameter's
+    own source alongside the arithmetic, and reading the slot off it would
+    publish agreement with ``bids[_bidId]`` over two different cells. ``None`` is
+    reserved for the caller: it is the one non-parameter key whose identity is
+    proven rather than merely unresolved, and a consumer reads it as "no entry
+    parameter names this cell", not as "the key is unknown".
+    """
+    key_sources = _sources_for_value(key, prov)
+    if len(key_sources) != 1:
+        return (False, None)
+    (source,) = tuple(key_sources)
+    if source.kind == "parameter" and source.parameter_index is not None:
+        return (True, source.parameter_index)
+    if source.kind == "msg_sender":
+        return (True, None)
+    return (False, None)
 
 
 def _derived_view_call_source(sources: SourceSet) -> Source | None:
