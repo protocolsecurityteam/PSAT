@@ -1,5 +1,5 @@
 {
-  "schema_version": 5,
+  "schema_version": 6,
   "description": "Golden effect-labels, Plane-1 claim (claim_id, tier) tuples AND value-flow facts for the frozen fixture corpus, pinned to CURRENT producer behavior. Regenerate with tests/regenerate_label_golden.py only for reviewed, intended changes — and justify each hunk of the diff, since a diff here is a change in what the pipeline publishes about real contracts.",
   "contracts": [
     {
@@ -6590,6 +6590,252 @@
                 ],
                 "sink_receivers": {
                   "withdrawUnlimited(address,uint256):sink0:external_call:token.transfer": {
+                    "auto_getter_selector": "0xfc0c546a",
+                    "binding": "state_variable",
+                    "mutability": "immutable_in_implementation",
+                    "param_index": null,
+                    "param_scope": null,
+                    "receiver_provenance": "contract_state_unresolved",
+                    "variable": "token",
+                    "visibility": "public"
+                  }
+                }
+              }
+            }
+          ],
+          "value_flows": [
+            {
+              "kind": "callee_erc20_selector",
+              "selector": "0xa9059cbb",
+              "direction": "out",
+              "from_is_self": true,
+              "origin": "body",
+              "target_kind": {
+                "kind": "param",
+                "tier": "dispositive_ast"
+              },
+              "amount_kind": {
+                "kind": "param",
+                "tier": "dispositive_ast"
+              },
+              "target_param_index": 0,
+              "amount_param_index": 1
+            }
+          ],
+          "external_calls": [
+            {
+              "target": "token.transfer",
+              "selector": "0xa9059cbb",
+              "origin": "body",
+              "receiver": {
+                "auto_getter_selector": "0xfc0c546a",
+                "binding": "state_variable",
+                "mutability": "immutable_in_implementation",
+                "param_index": null,
+                "param_scope": null,
+                "receiver_provenance": "contract_state_unresolved",
+                "variable": "token",
+                "visibility": "public"
+              }
+            }
+          ],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "token.transfer"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": true
+          }
+        }
+      ]
+    },
+    {
+      "address": "0x0000000000000000000000000000000000000120",
+      "chain": "synthetic",
+      "contract": "SelfServicePayout",
+      "solc_version": "0.8.27",
+      "functions": [
+        {
+          "full_name": "cancelBid(uint256)",
+          "selector": "0x9703ef35",
+          "effect_labels": [
+            "asset_send"
+          ],
+          "action_summary": "Sends assets out of the contract.",
+          "claims": [
+            {
+              "claim_id": "flow.out",
+              "tier": "standard_exact",
+              "witness": {
+                "direction": "out",
+                "flows": [
+                  {
+                    "amount_kind": {
+                      "kind": "bounded_by_storage",
+                      "tier": "static_trace"
+                    },
+                    "amount_record_constraint": {
+                      "basis": "owner_guarded_record",
+                      "record": "SelfServicePayout.bids",
+                      "state": "constrained"
+                    },
+                    "from_is_self": true,
+                    "kind": "callee_erc20_selector",
+                    "selector": "0xa9059cbb",
+                    "self_service_payout": {
+                      "disclosures": [
+                        "self_service_bound_conditional_on_upgrade_authority",
+                        "self_service_sibling_function_residual_not_proven"
+                      ],
+                      "record": "SelfServicePayout.bids",
+                      "state": "proven_self_service",
+                      "w1_basis": "owner_guarded_record",
+                      "w2_basis": "clear_dominates_calls"
+                    },
+                    "target_kind": {
+                      "kind": "msg_sender",
+                      "tier": "dispositive_ast"
+                    }
+                  }
+                ],
+                "kind": "value_flow",
+                "sink_ids": [
+                  "cancelBid(uint256):sink1:external_call:token.transfer"
+                ],
+                "sink_receivers": {
+                  "cancelBid(uint256):sink1:external_call:token.transfer": {
+                    "auto_getter_selector": "0xfc0c546a",
+                    "binding": "state_variable",
+                    "mutability": "immutable_in_implementation",
+                    "param_index": null,
+                    "param_scope": null,
+                    "receiver_provenance": "contract_state_unresolved",
+                    "variable": "token",
+                    "visibility": "public"
+                  }
+                }
+              }
+            }
+          ],
+          "value_flows": [
+            {
+              "kind": "callee_erc20_selector",
+              "selector": "0xa9059cbb",
+              "direction": "out",
+              "from_is_self": true,
+              "origin": "body",
+              "target_kind": {
+                "kind": "msg_sender",
+                "tier": "dispositive_ast"
+              },
+              "amount_kind": {
+                "kind": "bounded_by_storage",
+                "tier": "static_trace"
+              },
+              "amount_record_variable": "SelfServicePayout.bids",
+              "amount_record_member_path": [
+                "amount"
+              ],
+              "amount_record_key_kinds": [
+                "param"
+              ],
+              "amount_record_key_param_indexes": [
+                0
+              ],
+              "record_ordering": {
+                "state": "proven_ordering",
+                "w2_basis": "clear_dominates_calls",
+                "record": "SelfServicePayout.bids",
+                "clearing_shape": "zero_assignment"
+              }
+            }
+          ],
+          "external_calls": [
+            {
+              "target": "token.transfer",
+              "selector": "0xa9059cbb",
+              "origin": "body",
+              "receiver": {
+                "auto_getter_selector": "0xfc0c546a",
+                "binding": "state_variable",
+                "mutability": "immutable_in_implementation",
+                "param_index": null,
+                "param_scope": null,
+                "receiver_provenance": "contract_state_unresolved",
+                "variable": "token",
+                "visibility": "public"
+              }
+            }
+          ],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "bids",
+            "token.transfer"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": true
+          }
+        },
+        {
+          "full_name": "rescueTokens(address,uint256)",
+          "selector": "0x57376198",
+          "effect_labels": [
+            "asset_send"
+          ],
+          "action_summary": "Sends assets out of the contract.",
+          "claims": [
+            {
+              "claim_id": "flow.out",
+              "tier": "standard_exact",
+              "witness": {
+                "direction": "out",
+                "flows": [
+                  {
+                    "amount_constraint": {
+                      "state": "unconstrained_proven"
+                    },
+                    "amount_kind": {
+                      "kind": "param",
+                      "tier": "dispositive_ast"
+                    },
+                    "amount_param_index": 1,
+                    "from_is_self": true,
+                    "kind": "callee_erc20_selector",
+                    "selector": "0xa9059cbb",
+                    "target_constraint": {
+                      "state": "unconstrained_proven"
+                    },
+                    "target_kind": {
+                      "kind": "param",
+                      "tier": "dispositive_ast"
+                    },
+                    "target_param_index": 0
+                  }
+                ],
+                "kind": "value_flow",
+                "sink_ids": [
+                  "rescueTokens(address,uint256):sink0:external_call:token.transfer"
+                ],
+                "sink_receivers": {
+                  "rescueTokens(address,uint256):sink0:external_call:token.transfer": {
                     "auto_getter_selector": "0xfc0c546a",
                     "binding": "state_variable",
                     "mutability": "immutable_in_implementation",

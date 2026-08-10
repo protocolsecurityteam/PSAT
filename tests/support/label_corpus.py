@@ -59,7 +59,10 @@ GOLDEN_PATH = REPO_ROOT / "tests" / "fixtures" / "label_corpus" / "golden.json"
 # 4: ``claims[].witness`` and ``predicate_tree`` pinned per function.
 # 5: per-function ``action_summary`` pinned — the PROSE copy of the labels, which a
 # narrowed structured witness does not move.
-GOLDEN_SCHEMA_VERSION = 5
+# 6: the amount-record identity (``amount_record_*``) and the W2 ordering witness
+# (``record_ordering``) pinned per flow — the substrate the self-service payout
+# join reads. Until these were pinned a zero-diff said nothing about them.
+GOLDEN_SCHEMA_VERSION = 6
 
 # Frozen fixture corpus for the effect-labels A/B golden gate. Every entry is a
 # small synthetic source that reproduces one real-world claim SHAPE — either a
@@ -247,6 +250,20 @@ MANIFEST: list[dict[str, Any]] = [
         "source_path": "tests/fixtures/contracts/label_corpus/rate_limited_flow.sol",
     },
     {
+        # The self-service payout pair: a cancelBid-shaped refund whose amount
+        # is read out of the caller's OWN record and cleared before the pay
+        # (proves ``self_service_payout``: W1 owner_guarded_record ∧ W2
+        # clear_dominates_calls), and the rescueTokens-shaped admin sweep that
+        # must never carry the fact. The corpus's only prior bounded_by_storage
+        # amount refuses at the root, so the join had no positive row anywhere
+        # and the ``amount_record_*`` / ``record_ordering`` pins were vacuous.
+        "address": "0x0000000000000000000000000000000000000120",
+        "name": "SelfServicePayout",
+        "chain": "synthetic",
+        "solc_version": "0.8.27",
+        "source_path": "tests/fixtures/contracts/label_corpus/self_service_payout.sol",
+    },
+    {
         # The only ``policy_derived`` producer in the corpus. One body call
         # resolves onto CastWrappedPull above and inherits its standard_exact
         # flow.in at the policy tier; the second resolves onto AssetRecovery —
@@ -398,6 +415,18 @@ _FLOW_KEYS = (
     "target_writer_scan_complete",
     "target_writer_absent_reason",
     "writer_surface_closed",
+    # The storage record an out-of-storage amount was read from — which cell,
+    # which struct member, and who chose the key — plus the W2 ordering witness
+    # over that record. This is the whole evidentiary substrate of the
+    # self-service payout join; unpinned, a producer could stop resolving the
+    # record (every verdict silently falls to not_determined) without a byte of
+    # golden diff.
+    "amount_record_variable",
+    "amount_record_member_path",
+    "amount_record_key_kinds",
+    "amount_record_key_param_indexes",
+    "amount_record_variables",
+    "record_ordering",
 )
 
 

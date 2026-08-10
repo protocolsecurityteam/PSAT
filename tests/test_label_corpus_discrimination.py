@@ -31,6 +31,7 @@ TREE_ABSENT = "0x00000000000000000000000000000000000000e0"
 TIMED_LATCH = "0x00000000000000000000000000000000000000f0"
 RATE_LIMITED = "0x0000000000000000000000000000000000000110"
 POLICY_CALLER = "0x0000000000000000000000000000000000000100"
+SELF_SERVICE = "0x0000000000000000000000000000000000000120"
 
 
 def _functions(address: str) -> dict[str, dict]:
@@ -605,3 +606,71 @@ def test_a_same_named_different_selector_callee_earns_nothing():
     selector. Nothing here keys on the identifier."""
     fns = _functions(RATE_LIMITED)
     assert [c["claim_id"] for c in fns["withdrawDecoy(address,uint256)"]["claims"]] == ["flow.out"]
+
+
+# ---------------------------------------------------------------------------
+# self-service payout — the cancelBid / rescueTokens pair
+# ---------------------------------------------------------------------------
+
+
+def test_the_cancel_bid_shape_proves_self_service_and_the_rescue_sibling_earns_nothing():
+    """The discrimination pair for the whole W1∧W2 join. ``cancelBid`` reads the
+    amount out of the caller's OWN record (the guard and the amount name the
+    same ``bids[_bidId]`` cell, membership by ``.bidder == msg.sender``) and
+    clears it before the pay, so the verdict is the full proven dict — pinned
+    whole, including the two canonical disclosure tokens, so a dropped
+    disclosure or a renamed basis diffs here and not just in the golden bytes.
+
+    ``rescueTokens`` moves value with a caller-chosen destination AND amount
+    behind an owner gate: the self-service question does not exist for a param
+    amount, so the keys must be ABSENT — an owner gate must never stand in for
+    a witness, and absence (not a refusal record) is the fail-closed state a
+    consumer reads."""
+    fns = _functions(SELF_SERVICE)
+    cancel = _claim(fns["cancelBid(uint256)"], "flow.out")["witness"]["flows"][0]
+    assert cancel["self_service_payout"] == {
+        "state": "proven_self_service",
+        "w1_basis": "owner_guarded_record",
+        "w2_basis": "clear_dominates_calls",
+        "record": "SelfServicePayout.bids",
+        "disclosures": [
+            "self_service_bound_conditional_on_upgrade_authority",
+            "self_service_sibling_function_residual_not_proven",
+        ],
+    }
+    assert cancel["amount_record_constraint"] == {
+        "state": "constrained",
+        "basis": "owner_guarded_record",
+        "record": "SelfServicePayout.bids",
+    }
+    rescue = _claim(fns["rescueTokens(address,uint256)"], "flow.out")["witness"]["flows"][0]
+    assert "self_service_payout" not in rescue
+    assert "amount_record_constraint" not in rescue
+    # The sibling still carries the SS-R3 substrate for its param amount: the
+    # owner gate does not confine WHICH amount, and the fact says so.
+    assert rescue["amount_constraint"] == {"state": "unconstrained_proven"}
+
+
+def test_the_flow_plane_pins_the_record_identity_and_the_ordering_witness():
+    """Golden schema 6. The join's evidentiary substrate lives on the flow
+    itself — which cell, which member, who chose the key, and the W2 ordering
+    proof — and none of it was pinned before, so a producer that stopped
+    resolving the record would have regressed every verdict to not_determined
+    with a zero-byte golden diff."""
+    fns = _functions(SELF_SERVICE)
+    flow = fns["cancelBid(uint256)"]["value_flows"][0]
+    assert flow["amount_record_variable"] == "SelfServicePayout.bids"
+    assert flow["amount_record_member_path"] == ["amount"]
+    assert flow["amount_record_key_kinds"] == ["param"]
+    assert flow["amount_record_key_param_indexes"] == [0]
+    assert flow["record_ordering"] == {
+        "state": "proven_ordering",
+        "w2_basis": "clear_dominates_calls",
+        "record": "SelfServicePayout.bids",
+        "clearing_shape": "zero_assignment",
+    }
+    # The sibling's flow carries none of the record keys: a param amount never
+    # names a record, and the ordering question does not exist without one.
+    sibling = fns["rescueTokens(address,uint256)"]["value_flows"][0]
+    assert not any(k.startswith("amount_record") for k in sibling)
+    assert "record_ordering" not in sibling

@@ -878,7 +878,7 @@ def _proven_ssp(**over: Any) -> dict[str, Any]:
     return fact
 
 
-def _ss_flow(target: str = "msg_sender", ssp: dict[str, Any] | None = "proven", **over: Any) -> dict[str, Any]:
+def _ss_flow(target: str = "msg_sender", ssp: dict[str, Any] | str | None = "proven", **over: Any) -> dict[str, Any]:
     flow: dict[str, Any] = {
         "kind": "callee_erc20_selector",
         "from_is_self": True,
