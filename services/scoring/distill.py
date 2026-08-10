@@ -773,6 +773,112 @@ def _msg_value_return(claims: list[dict[str, Any]]) -> _MsgValueReturn:
     return _MsgValueReturn(arm=arm, refusal=None)
 
 
+# ---------------------------------------------------------- self-service (W1∧W2)
+
+# The consumer of U5's per-flow ``self_service_payout`` fact: W1 (the paid amount
+# is read from a storage cell the caller is proven to own) ∧ W2 (that cell is
+# cleared before any external call, or a verified reentrancy guard stands in for
+# that order). U5 computed the conjunction; this replays it as a UNIVERSAL over
+# the function's out-flows and never re-derives the proof (inv. 9 — the scorer
+# consumes published witnesses, it does not recompute them).
+SELF_SERVICE_BASIS = "proven_self_service_bounded"
+SELF_SERVICE_UNCHARGED_NOTE = "self_service_uncharged_product_surface"
+# The two G7 disclosures (SPEC §7, authoritative over the annexes' variant): the
+# payout entities are UUPS proxies, so a proven bound is conditional on whatever
+# authority can replace the code; and the proof is same-function only — no
+# witness looked at what a sibling function does to the same record.
+SELF_SERVICE_DISCLOSE_UPGRADE = "self_service_bound_conditional_on_upgrade_authority"
+SELF_SERVICE_DISCLOSE_SIBLING = "self_service_sibling_function_residual_not_proven"
+_SELF_SERVICE_PROVEN_STATE = "proven_self_service"
+_SS_REFUSAL_PREFIX = "self_service_bound_refused"
+_SS_UNREAD_FLOW = "unread_out_flow"
+_SS_PAYEE_NOT_CALLER_RELATIVE = "payee_not_caller_relative"
+_SS_SOURCE_NOT_SELF = "flow_source_not_self"
+
+
+@dataclass(frozen=True)
+class _SelfServiceBound:
+    """Three states, the third being silence — the mirror of ``_MsgValueReturn``.
+
+    PROVEN carries the disclosures U5 stamped on the conjunction; a refusal NAMES
+    the conjunct that failed; NOT-ASKED is "no out-flow of this function even
+    raises the self-service question", where publishing a refusal would hang a
+    reason off a payout the witness was never about.
+    """
+
+    proven: bool
+    refusal: str | None
+    disclosures: tuple[str, ...] = ()
+
+    @property
+    def notes(self) -> tuple[str, ...]:
+        """The tokens a PROVEN verdict publishes; empty when not proven — the
+        withhold reads :attr:`refusal_note`, never these."""
+        if self.proven:
+            return (SELF_SERVICE_UNCHARGED_NOTE, *self.disclosures)
+        return ()
+
+    @property
+    def refusal_note(self) -> str | None:
+        return f"{_SS_REFUSAL_PREFIX}:{self.refusal}" if self.refusal is not None else None
+
+
+_SELF_SERVICE_NOT_ASKED = _SelfServiceBound(proven=False, refusal=None)
+
+
+def _self_service_bound(claims: list[dict[str, Any]]) -> _SelfServiceBound:
+    """UNIVERSAL over every out-flow: the full W1 ∧ W2 conjunction, or a named refusal.
+
+    U5 attaches ``self_service_payout`` per flow only where the amount is read out
+    of storage — the one place the "is this the caller's own cell" question is
+    even asked. So a function with NO such flow is NOT-ASKED (no note, exactly as
+    ``_msg_value_return`` is silent on a function that mentions no ``msg.value``).
+    Once ANY out-flow raises the question the conjunction is universal: one flow
+    whose witness is absent or refused refuses the whole function — a sibling flow
+    the caller does not own would otherwise let a proven one buy the 0.0 for both.
+    """
+    considered, blocked = _considered_out_flows(claims)
+    # A blocked out-flow set (policy_derived, or a claim with no flows key) is
+    # NOT-ASKED, exactly as in ``_msg_value_return``: the producer could not read
+    # the flows, so no ``self_service_payout`` fact was ever attachable and the
+    # question was never put. It fails closed on the GRADE regardless — a
+    # not-asked witness proves nothing, so no 0.0 is granted — and stamping a
+    # refusal here would hang a reason off every unreadable payout in the corpus.
+    if blocked is not None or not considered:
+        return _SELF_SERVICE_NOT_ASKED
+    if not any(isinstance(f.get("self_service_payout"), dict) for f in considered):
+        return _SELF_SERVICE_NOT_ASKED
+
+    disclosures: set[str] = set()
+    for flow in considered:
+        fact = flow.get("self_service_payout")
+        if not isinstance(fact, dict):
+            # C4: a sibling out-flow whose amount is not read from a caller-owned
+            # cell (no W1∧W2 fact attached) is an UNREAD flow, not a benign one.
+            return _SelfServiceBound(proven=False, refusal=_SS_UNREAD_FLOW)
+        if fact.get("state") != _SELF_SERVICE_PROVEN_STATE:
+            # C1/C2: W1 (amount) or W2 (ordering/verified-guard) refused; the
+            # producer named which conjunct fell short, and it rides through.
+            return _SelfServiceBound(proven=False, refusal=str(fact.get("reason") or _SS_UNREAD_FLOW))
+        # C3: the payee is the caller and the contract is the source. U5 proves the
+        # AMOUNT is the caller's own position; that the PAYEE is the caller too is
+        # a structural fact about the flow, read here directly rather than
+        # re-derived — a fixed payee paid out of the caller's recorded balance is
+        # NOT a self-service payout and refuses.
+        if flow.get("from_is_self") is not True:
+            return _SelfServiceBound(proven=False, refusal=_SS_SOURCE_NOT_SELF)
+        kinds = set(_target_kinds(flow))
+        if not kinds or not kinds <= K.CALLER_RELATIVE_TARGET_KINDS:
+            return _SelfServiceBound(proven=False, refusal=_SS_PAYEE_NOT_CALLER_RELATIVE)
+        disclosures.update(str(d) for d in (fact.get("disclosures") or []))
+
+    # The two G7 tokens ride every proof: a missing disclosure never downgrades a
+    # proof, but the canonical pair is always published so the earned negative an
+    # excluded row leaves behind is legible without them.
+    disclosures.update({SELF_SERVICE_DISCLOSE_UPGRADE, SELF_SERVICE_DISCLOSE_SIBLING})
+    return _SelfServiceBound(proven=True, refusal=None, disclosures=tuple(sorted(disclosures)))
+
+
 def _flow_asset_class(claims: list[dict[str, Any]]) -> str | None:
     """native / ERC-20 partition of the out-flows, gated on ``from_is_self``.
 
@@ -1574,6 +1680,7 @@ def _build_signal(
         # Asked only where the flow set is what the claim is ABOUT; every other
         # claim carries the state where the question was never put.
         msg_value=_msg_value_return(all_claims) if claim_id == "flow.out" else _MSG_VALUE_NOT_ASKED,
+        self_service=_self_service_bound(all_claims) if claim_id == "flow.out" else _SELF_SERVICE_NOT_ASKED,
     )
     fields["severity"] = severity
     fields["severity_basis"] = severity_basis
@@ -1909,6 +2016,7 @@ def _severity(
     deployment_address: str,
     self_gated: bool = False,
     msg_value: _MsgValueReturn = _MSG_VALUE_NOT_ASKED,
+    self_service: _SelfServiceBound = _SELF_SERVICE_NOT_ASKED,
 ) -> tuple[Tri[float], tuple[str, ...], set[str]]:
     # The ``msg_value`` default is the state where the question was never put —
     # it publishes nothing and moves nothing, so a caller that omits it loses the
@@ -1955,6 +2063,32 @@ def _severity(
                 (MSG_VALUE_ARM_SELF_RETURN,),
                 notes | {MSG_VALUE_REPETITION_RESIDUAL},
             )
+        # The PASS-THROUGH arm, ruled in by the owner (W3b): the caller's own
+        # msg.value reaching a fixed payee it cannot name. Beside the self-return
+        # arm and for the same reason — AHEAD of the withhold, gated on a PROVEN
+        # destination — the amount moved is bounded by what the caller just
+        # attached, so it is uncharged product surface and scores 0.0. Its basis
+        # names the arm, which is how ``fold._uncharged_product`` excludes it.
+        if msg_value.arm == MSG_VALUE_ARM_PASSTHROUGH and destination.tri.is_determined:
+            return (
+                Tri.proven(SEVERITY_STATE_PROVEN, K.FLOW_SEVERITY_MSG_VALUE_PASSTHROUGH),
+                (MSG_VALUE_ARM_PASSTHROUGH,),
+                notes,
+            )
+        # The self-service consumer arm, sitting beside the msg_value arms for the
+        # same reason and with the same gate: an open-caller payout has its
+        # destination PROVEN and its severity withheld pending an amount witness,
+        # and W1 ∧ W2 IS that witness. Evaluated BEFORE the ``severity is None``
+        # withhold so a proven row is reachable (SPEC §4 compose-ordering); gated
+        # on the destination being determined, never priced, so it cannot fire on
+        # a payee nobody read; and a REFUSED conjunction falls through to the
+        # withhold below, never to a cheaper number.
+        if claim_id == "flow.out" and self_service.proven and destination.tri.is_determined:
+            return (
+                Tri.proven(SEVERITY_STATE_PROVEN, K.FLOW_SEVERITY_SELF_SERVICE_BOUNDED),
+                (SELF_SERVICE_BASIS,),
+                notes | set(self_service.notes),
+            )
         if destination.severity is None:
             # A withheld price has two different reasons and one token cannot
             # carry both: an unread destination, or a proven destination whose
@@ -1964,11 +2098,13 @@ def _severity(
                 if not destination.tri.is_determined
                 else "flow_severity_withheld_pending_amount_witness"
             )
+            # A self-service witness that was ASKED and refused names why on the
+            # row it leaves withheld, so the refusal is not lost to silence. A
+            # not-asked / proven-but-unread-destination witness adds nothing here.
+            refusal = self_service.refusal_note
+            if refusal is not None:
+                notes.add(refusal)
             return Tri[float].not_determined(), (), notes
-        # The PASS-THROUGH arm deliberately moves nothing: whether a fixed payee
-        # receiving the caller's own ETH is product surface is an open owner
-        # ruling, and until it is made that row scores exactly as it did,
-        # carrying only its recognition note.
         return Tri.proven(SEVERITY_STATE_PROVEN, destination.severity), (destination.basis,), notes
 
     if claim_id == "pause.set":

@@ -1282,6 +1282,7 @@ def compute_protocol_score(
     ]
     earned_negatives: list[dict[str, Any]] = []
     seen_negatives: set[tuple[str, str]] = set()
+    uncharged_product_rows = 0
 
     units = _UnitResolver(signals, principal_facts, role_floors)
     rows_by_key: dict[tuple[str, str, str], _Row] = {}
@@ -1297,6 +1298,16 @@ def compute_protocol_score(
 
         _collect_disclosures(signal, earned_negatives, seen_negatives, warnings)
         if not signal.enters_grade:
+            continue
+
+        if _uncharged_product(signal, warnings):
+            # A proven benign payout of the caller's own value: it kept its
+            # confidence credit above (it entered the grade), and here it creates
+            # NO row — so no finding, no value_at_stake, no exposure key. Its
+            # disclosures already left on the earned-negative record above; this
+            # is the finding-half of the decoupling the ruling needs (inv. 3 — a
+            # permissionless self-service payout is not a finding worth zero).
+            uncharged_product_rows += 1
             continue
 
         if signal.authority_openness == OPENNESS_OPEN:
@@ -1402,6 +1413,11 @@ def compute_protocol_score(
             # consumer as grade_state=not_determined.
             "disposition": _population_disposition(signals, findings),
             "rows_withheld_malformed": len(row_faults),
+            # Signals that entered the grade (their confidence credit stands) but
+            # created no row: proven benign product surface, excluded from the
+            # ledger. Without this counter a reader can only find them by
+            # subtraction — a zero here is a zero, not an absence.
+            "rows_uncharged_product": uncharged_product_rows,
         },
         "value": value_plane.provenance,
         "value_annotations": value_plane.annotations,
@@ -6712,6 +6728,55 @@ def _confidence(
 # ---------------------------------------------------------------- disclosures
 
 
+# The upgrade-authority disclosure and the same-function residual an uncharged
+# row carries, in preference order — the first present on the row wins each slot.
+# Both the self-service pair (SPEC §7 G7) and the msg_value siblings are here, so
+# the earned negative reads the actual token the excluded row published rather
+# than a hard-coded self-service one it may not carry.
+_UNCHARGED_CONDITIONAL_TOKENS = (
+    "self_service_bound_conditional_on_upgrade_authority",
+    "fixed_destination_conditional_on_upgrade_authority",
+)
+_UNCHARGED_RESIDUAL_TOKENS = (
+    "self_service_sibling_function_residual_not_proven",
+    "msg_value_self_return_repetition_not_witnessed",
+)
+
+
+def _is_uncharged_product(signal: FunctionSignal) -> bool:
+    """A proven-0.0 row whose severity_basis names an uncharged-product token.
+
+    Gated on BOTH the token AND the value, never the float alone: a proven 0.0
+    with no such token (``pause.set``'s build-up-from-zero) is a real charge that
+    happens to start at zero, not a benign payout. A token beside a non-zero
+    value is a disagreement handled by :func:`_uncharged_product`, not here."""
+    if not (set(signal.severity_basis) & K.UNCHARGED_PRODUCT_BASES):
+        return False
+    return signal.severity.state == SEVERITY_STATE_PROVEN and signal.severity.value == 0.0
+
+
+def _uncharged_product(signal: FunctionSignal, warnings: list[dict[str, Any]]) -> bool:
+    """Whether the fold excludes this row as uncharged product surface.
+
+    A severity_basis that names an uncharged-product token beside a severity that
+    is not proven 0.0 is a bug, not a benign row: it is published as a warning and
+    the row is NOT excluded (it keeps whatever charge its non-zero severity
+    carries), so the disagreement can never buy a silent exclusion."""
+    tokens = set(signal.severity_basis) & K.UNCHARGED_PRODUCT_BASES
+    if not tokens:
+        return False
+    if not (signal.severity.state == SEVERITY_STATE_PROVEN and signal.severity.value == 0.0):
+        warnings.append(
+            _warning(
+                "uncharged_product_basis_value_disagreement",
+                signal,
+                f"severity_basis names uncharged-product token(s) {sorted(tokens)} but severity is not proven 0.0",
+            )
+        )
+        return False
+    return True
+
+
 def _collect_disclosures(
     signal: FunctionSignal,
     earned_negatives: list[dict[str, Any]],
@@ -6774,6 +6839,34 @@ def _collect_disclosures(
                 "re_enablable_by": NOT_DETERMINED,
             }
         )
+    if _is_uncharged_product(signal) and (entity, signal.function_name + ":uncharged") not in seen:
+        # An excluded row leaves NO finding, so its witness_notes reach no
+        # document surface (``row.notes`` is the only path). The UUPS disclosure
+        # and the same-function residual would vanish with it — so the earned
+        # negative carries them here, read from the row's own notes rather than
+        # hard-coded, because the excluded row may be a msg_value arm whose
+        # disclosures are not the self-service pair.
+        seen.add((entity, signal.function_name + ":uncharged"))
+        notes = set(signal.witness_notes)
+        conditional_on = next((t for t in _UNCHARGED_CONDITIONAL_TOKENS if t in notes), NOT_DETERMINED)
+        residual = next((t for t in _UNCHARGED_RESIDUAL_TOKENS if t in notes), NOT_DETERMINED)
+        earned_negatives.append(
+            {
+                "entity": entity,
+                "function": signal.function_name,
+                "capability": signal.claim_id,
+                "fact": (
+                    "the payout is bounded to the caller's own attached value or storage position and "
+                    "moves no position the caller did not fund"
+                ),
+                "state": "uncharged_product_surface",
+                "basis": list(signal.severity_basis),
+                "conditional_on": conditional_on,
+                "residual": residual,
+                "counterfactual": "replacing the implementation removes the bound this verdict rests on",
+                "re_enablable_by": NOT_DETERMINED,
+            }
+        )
     latch = _gate(signal, "latch_witness")
     if latch.is_determined:
         payload = latch.value if isinstance(latch.value, dict) else {}
@@ -6833,6 +6926,21 @@ _NOTE_WARNINGS = {
     "destination_redirectable_by_unresolved_setter": "the destination's setter is named by no witness",
     "concrete_destination_existential_not_a_fixed_destination": (
         "an observed sink is existential and cannot prove a fixed destination"
+    ),
+    # The self-service arm's disclosures. An excluded row publishes no
+    # witness_notes on any finding, so these must surface as warnings (inv. 6's
+    # third channel) as well as ride the earned negative — otherwise a proven
+    # benign payout's residuals would be legible on no document surface at all.
+    "self_service_uncharged_product_surface": (
+        "the payout is proven bounded to the caller's own position and the record is cleared before "
+        "the external call, so the row is uncharged product surface and creates no finding"
+    ),
+    "self_service_bound_conditional_on_upgrade_authority": (
+        "the self-service bound holds against the current implementation; the payout entity is a UUPS "
+        "proxy, so whatever authority can replace the code can replace the bound"
+    ),
+    "self_service_sibling_function_residual_not_proven": (
+        "the bound is proven for THIS function only; no witness names what sibling functions may do to the same record"
     ),
 }
 

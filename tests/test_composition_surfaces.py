@@ -363,7 +363,15 @@ def test_every_arm_this_run_added_is_flagged_uncalibrated_and_disclosed():
     # family token, because a reader branching on "the witness refused" has to
     # be able to tell which refusal has never been seen. Twelfth through
     # nineteenth entries.
-    assert len(registered) == 19
+    #
+    # The self-service consumer arm added its one PROVEN state,
+    # ``self_service_bound:proven``. Its producer fact (``self_service_payout``)
+    # is materialized on no stored flow — the witness proves out only in the
+    # owner's fresh run — so the arm has zero carriers on this corpus and is
+    # exercised by fixtures alone; its two sibling uncharged arms
+    # (``proven_msg_value_self_return``, ``proven_msg_value_passthrough``) each
+    # HAVE a carrier and are not flagged. Twentieth entry.
+    assert len(registered) == 20
     for entry in registered:
         assert entry["arm"] in flagged, entry["arm"]
         assert entry["state"] and entry["note"]

@@ -86,6 +86,16 @@ FLOW_SEVERITY_FIXED_DESTINATION = 0.10
 # never because nothing was read: an unread amount yields no severity at all and
 # the row is withheld from the grade instead.
 FLOW_SEVERITY_MSG_VALUE_SELF_RETURN = 0.0
+# The caller's own ``msg.value`` reaching a fixed payee it cannot name (the W3b
+# pass-through arm, ruled product surface by the owner). Zero for the same reason
+# self-return is: the amount moved is bounded by what the caller just attached to
+# this call, so the payout moves no position the caller did not just fund.
+FLOW_SEVERITY_MSG_VALUE_PASSTHROUGH = 0.0
+# W1 ∧ W2 proven: the payout is bounded to the caller's own storage position and
+# that record is cleared before the external call. Zero because the bound is
+# PROVEN uncharged product surface, never because a witness was unread — an
+# unproven conjunction yields no severity and the row stays withheld.
+FLOW_SEVERITY_SELF_SERVICE_BOUNDED = 0.0
 OWNERSHIP_DEFAULT_ADMIN_RULES = 0.35
 # The self-gated delay credit is RETIRED, not tuned to zero: it rested on "no
 # other caller resolved", and the principal enumeration it read is a documented
@@ -178,6 +188,23 @@ GATE_CONTROL_CAPABILITIES = frozenset(
 TRANSITIVE_CAPABILITIES = CODE_CONTROL_CAPABILITIES | GATE_CONTROL_CAPABILITIES
 
 DESTINATION_BEARING_SEVERITY = frozenset({"flow.out", "delegatecall.execute", "exec.arbitrary"})
+
+# The severity_basis tokens whose proven-0.0 verdict is an UNCHARGED PRODUCT
+# SURFACE: the row is a proven benign payout of the caller's own value, kept in
+# the population (its confidence credit stays) but excluded from the finding
+# ledger (SCORING_INVARIANTS inv. 3 — a permissionless self-service payout is not
+# a finding worth zero, it is not a finding). The fold gates the exclusion on
+# BOTH the token AND severity value 0.0, never on the float alone: reading
+# ``value == 0.0`` would sweep in ``pause.set``'s proven build-up-from-zero, a
+# different fact. A token/value disagreement is a bug, published as a warning.
+UNCHARGED_PRODUCT_BASES = frozenset(
+    {
+        "proven_self_service_bounded",
+        "proven_msg_value_self_return",
+        # W3b, ruled in by the owner: the caller's own msg.value to a fixed payee.
+        "proven_msg_value_passthrough",
+    }
+)
 
 # Product surface: scored only where permissionlessness is PROVEN. ``claim_id``
 # does not prove it, so a ``not_determined`` openness is not product and is
@@ -330,6 +357,14 @@ UNCALIBRATED_ARMS: tuple[str, ...] = (
     "msg_value_return_refused:target_not_a_witnessed_arm",
     "msg_value_return_refused:flow_kind_unreadable",
     "msg_value_return_refused:multiple_out_flow_entries",
+    # The self-service consumer arm's PROVEN state. Measured 0 carriers on the
+    # reference corpus: the producer facts it consumes (``self_service_payout``)
+    # are not materialized on any stored flow — the witness proves out only after
+    # the owner's fresh-from-scratch run — so no row reaches ``proven_self_service_bounded``
+    # here and no published number was fitted to it. Its two sibling uncharged
+    # arms (``proven_msg_value_self_return``, ``proven_msg_value_passthrough``)
+    # each HAVE a carrier and are therefore NOT registered.
+    "self_service_bound:proven",
 )
 
 # What each of the run's arms IS, beside the bare token. §8 of
@@ -620,6 +655,28 @@ UNCALIBRATED_ARM_DISCLOSURES: tuple[dict[str, object], ...] = (
             ),
         )
     ),
+    {
+        "arm": "self_service_bound:proven",
+        "state": "proven_self_service_bounded",
+        "published_at": (
+            "signals' severity_basis; the row is excluded from findings, so the verdict "
+            "surfaces as earned_negatives[].state = uncharged_product_surface and "
+            "provenance.population.rows_uncharged_product"
+        ),
+        "population_census": "provenance.population.rows_uncharged_product",
+        "exercised_by": (
+            "tests/test_scoring_distill_fold.py::test_self_service_bound_conjuncts",
+            "tests/test_scoring_distill_fold.py::test_self_service_proven_reclassifies_an_open_payout_to_uncharged_product",
+        ),
+        "note": (
+            "W1 ∧ W2 proven — the payout is bounded to the caller's own storage position and "
+            "the record is cleared before the external call. Zero carriers on the reference corpus: "
+            "the ``self_service_payout`` producer fact is materialized on no stored flow (the witness "
+            "proves out only in the owner's fresh run), so on this corpus the arm is exercised by "
+            "fixtures alone and no published number was fitted to it. The consumer arm is complete; "
+            "it is inert here, not absent"
+        ),
+    },
 )
 
 
@@ -745,6 +802,8 @@ def model_parameters() -> dict[str, Any]:
             "flow_caller_arbitrary": FLOW_SEVERITY_CALLER_ARBITRARY,
             "flow_fixed_destination": FLOW_SEVERITY_FIXED_DESTINATION,
             "flow_msg_value_self_return": FLOW_SEVERITY_MSG_VALUE_SELF_RETURN,
+            "flow_msg_value_passthrough": FLOW_SEVERITY_MSG_VALUE_PASSTHROUGH,
+            "flow_self_service_bounded": FLOW_SEVERITY_SELF_SERVICE_BOUNDED,
             "note": (
                 "these are reachable only on a PROVEN destination state; an unread "
                 "destination yields no severity and the row is withheld from the grade"

@@ -24,9 +24,11 @@ from services.scoring.constants import (
     DEST_SEVERITY_EXEC_SELF,
     DEST_SEVERITY_UNCONSTRAINED,
     FLOW_SEVERITY_CALLER_ARBITRARY,
-    FLOW_SEVERITY_FIXED_DESTINATION,
+    FLOW_SEVERITY_MSG_VALUE_PASSTHROUGH,
     FLOW_SEVERITY_MSG_VALUE_SELF_RETURN,
+    FLOW_SEVERITY_SELF_SERVICE_BOUNDED,
     ROLE_BREADTH_MULTI_HOLDER_WEAKNESS,
+    UNCHARGED_PRODUCT_BASES,
     WEAKNESS_SAFE_SUPERMAJORITY,
     WEAKNESS_SAFE_UNCREDITED,
 )
@@ -34,6 +36,10 @@ from services.scoring.distill import (
     MSG_VALUE_ARM_PASSTHROUGH,
     MSG_VALUE_ARM_SELF_RETURN,
     MSG_VALUE_REPETITION_RESIDUAL,
+    SELF_SERVICE_BASIS,
+    SELF_SERVICE_DISCLOSE_SIBLING,
+    SELF_SERVICE_DISCLOSE_UPGRADE,
+    SELF_SERVICE_UNCHARGED_NOTE,
     distill_contract_signals,
     distill_job_signals,
 )
@@ -640,11 +646,12 @@ def test_the_self_return_arm_cannot_price_a_destination_nobody_read(corpus):
     assert MSG_VALUE_REPETITION_RESIDUAL not in signal.witness_notes
 
 
-def test_msg_value_passed_through_to_a_fixed_payee_is_recognised_and_scores_as_before(corpus):
-    """W3b is a RECOGNITION and nothing more. That the caller's own ETH went to a
-    payee no caller can name is published as a fact; whether that makes the row
-    product surface is an owner ruling nobody here has, so the severity, its basis
-    and the destination are exactly what they were without the witness."""
+def test_msg_value_passed_through_to_a_fixed_payee_is_uncharged_product(corpus):
+    """W3b, ruled in by the owner. The caller's own ETH reaching a payee no caller
+    can name is bounded by what the caller just attached, so — beside the
+    self-return arm and ahead of the withhold — it is uncharged product surface at
+    a named zero. Its basis names the pass-through arm, which is the token the fold
+    reads to exclude the row; the destination fact the lattice earned is unchanged."""
     contract = corpus.contract("0x" + "4b" * 20)
     corpus.function(contract, name="receive", claims=_msg_value_claims(_msg_value_flow("immutable")), openness="open")
 
@@ -652,10 +659,16 @@ def test_msg_value_passed_through_to_a_fixed_payee_is_recognised_and_scores_as_b
     assert signal.destination.state == DESTINATION_STATE_CONSTRAINED_PROVEN
     assert signal.destination.value == "immutable_fixed"
     assert signal.severity.state == SEVERITY_STATE_PROVEN
-    assert signal.severity.value == FLOW_SEVERITY_FIXED_DESTINATION
-    assert signal.severity_basis == ("static_lattice:static_conjunction",)
+    assert signal.severity.value == FLOW_SEVERITY_MSG_VALUE_PASSTHROUGH
+    assert signal.severity.value == 0.0
+    assert signal.severity_basis == (MSG_VALUE_ARM_PASSTHROUGH,)
+    assert MSG_VALUE_ARM_PASSTHROUGH in signal.severity_basis
+    assert MSG_VALUE_ARM_PASSTHROUGH in UNCHARGED_PRODUCT_BASES
     assert MSG_VALUE_ARM_PASSTHROUGH in signal.witness_notes
     assert MSG_VALUE_ARM_SELF_RETURN not in signal.witness_notes
+    # The immutable destination's UUPS disclosure is preserved for the earned
+    # negative the fold leaves behind (the excluded row publishes no finding).
+    assert "fixed_destination_conditional_on_upgrade_authority" in signal.witness_notes
 
 
 _MSG_VALUE_REFUSALS = [
@@ -846,6 +859,194 @@ def test_a_blocked_flow_set_proves_no_msg_value_arm():
     policy = [{"claim_id": "flow.out", "tier": "policy_derived", "witness": {"kind": "value_flow", "flows": []}}]
     assert D._msg_value_return(blocked) == D._MsgValueReturn(arm=None, refusal=None)
     assert D._msg_value_return(policy) == D._MsgValueReturn(arm=None, refusal=None)
+
+
+# --------------------------------------------------------------------------
+# The self-service witness (W1 ∧ W2): the consumer arm
+# --------------------------------------------------------------------------
+
+
+def _proven_ssp(**over: Any) -> dict[str, Any]:
+    fact = {
+        "state": "proven_self_service",
+        "w1_basis": "keyed_by_caller",
+        "w2_basis": "clear_dominates_calls",
+        "record": "bids",
+        "disclosures": [SELF_SERVICE_DISCLOSE_UPGRADE, SELF_SERVICE_DISCLOSE_SIBLING],
+    }
+    fact.update(over)
+    return fact
+
+
+def _ss_flow(target: str = "msg_sender", ssp: dict[str, Any] | None = "proven", **over: Any) -> dict[str, Any]:
+    flow: dict[str, Any] = {
+        "kind": "callee_erc20_selector",
+        "from_is_self": True,
+        "amount_kind": {"kind": "bounded_by_storage", "tier": "dispositive_ast"},
+        "target_kind": {"kind": target, "tier": "dispositive_ast"},
+    }
+    if ssp == "proven":
+        flow["self_service_payout"] = _proven_ssp()
+    elif ssp is not None:
+        flow["self_service_payout"] = ssp
+    flow.update(over)
+    return flow
+
+
+def _ss_claims(*flows: dict[str, Any]) -> list[dict[str, Any]]:
+    return [_flow_out(None, list(flows), "idiom_structural")]
+
+
+def test_self_service_bound_conjuncts():
+    """G2, the universal directly. A COMPLETE fixture proves; dropping any one
+    conjunct — W1 (C1), W2 (C2), the caller-relative payee (C3), a readable
+    sibling flow (C4) — yields a NAMED refusal and nothing positive. A refused
+    conjunct never reaches a proven verdict, so the arm can never clear a payout
+    whose bound was not fully witnessed."""
+    from services.scoring import distill as D
+
+    proven = D._self_service_bound(_ss_claims(_ss_flow()))
+    assert proven.proven is True
+    assert proven.refusal is None
+    assert SELF_SERVICE_DISCLOSE_UPGRADE in proven.disclosures
+    assert SELF_SERVICE_DISCLOSE_SIBLING in proven.disclosures
+
+    # C1 — W1 refused (the amount is not proven read from the caller's own cell).
+    c1 = D._self_service_bound(_ss_claims(_ss_flow(ssp={"state": "not_determined", "reason": "guard_not_mandatory"})))
+    assert c1 == D._SelfServiceBound(proven=False, refusal="guard_not_mandatory")
+    # C2 — W2 refused (the record is not cleared before the external call).
+    c2 = D._self_service_bound(_ss_claims(_ss_flow(ssp={"state": "not_determined", "reason": "no_clearing_write"})))
+    assert c2 == D._SelfServiceBound(proven=False, refusal="no_clearing_write")
+    # C3 — the payee is NOT the caller (a fixed payee out of the caller's balance).
+    c3 = D._self_service_bound(_ss_claims(_ss_flow(target="immutable")))
+    assert c3 == D._SelfServiceBound(proven=False, refusal="payee_not_caller_relative")
+    # C3 — the contract is not the proven source.
+    c3b = D._self_service_bound(_ss_claims(_ss_flow(from_is_self=False)))
+    assert c3b == D._SelfServiceBound(proven=False, refusal="flow_source_not_self")
+    # C4 — one sibling out-flow carries no witness at all: the universal refuses.
+    c4 = D._self_service_bound(_ss_claims(_ss_flow(), _ss_flow(ssp=None)))
+    assert c4 == D._SelfServiceBound(proven=False, refusal="unread_out_flow")
+
+    # NOT-ASKED: no out-flow raises the question, so no note and no refusal.
+    not_asked = D._self_service_bound(_ss_claims(_msg_value_flow("msg_sender")))
+    assert not_asked == D._SELF_SERVICE_NOT_ASKED
+    # A blocked (unreadable) set is NOT-ASKED, never a vacuous proof.
+    blocked = [{"claim_id": "flow.out", "tier": "policy_derived", "witness": {"kind": "value_flow", "flows": []}}]
+    assert D._self_service_bound(blocked) == D._SELF_SERVICE_NOT_ASKED
+
+
+def test_self_service_proven_reclassifies_an_open_payout_to_uncharged_product(corpus):
+    """The compose ordering the SPEC demands: an open ``msg_sender`` payout has its
+    destination PROVEN and its price withheld pending an amount witness, and W1 ∧
+    W2 IS that witness — so it is read BEFORE the withhold and the row reclassifies
+    to a named zero rather than staying withheld. Row kept; the two G7 disclosures
+    ride the notes so the fold's earned negative can carry them."""
+    contract = corpus.contract("0x" + "51" * 20)
+    corpus.function(contract, name="cancelBid", claims=_ss_claims(_ss_flow()), openness="open")
+
+    signal = corpus.only(contract, "flow.out")
+    assert signal.destination.state == DESTINATION_STATE_UNCONSTRAINED_PROVEN
+    assert signal.severity.state == SEVERITY_STATE_PROVEN
+    assert signal.severity.value == FLOW_SEVERITY_SELF_SERVICE_BOUNDED
+    assert signal.severity.value == 0.0
+    assert signal.severity_basis == (SELF_SERVICE_BASIS,)
+    assert signal.enters_grade
+    assert SELF_SERVICE_UNCHARGED_NOTE in signal.witness_notes
+    assert SELF_SERVICE_DISCLOSE_UPGRADE in signal.witness_notes
+    assert SELF_SERVICE_DISCLOSE_SIBLING in signal.witness_notes
+    # The interim withhold is NOT published beside the proof that answered it.
+    assert "flow_severity_withheld_pending_amount_witness" not in signal.witness_notes
+
+
+def test_self_service_refused_open_payout_stays_at_the_interim_withhold(corpus):
+    """A refused conjunction returns the row to the U-IW withhold — the
+    pre-pass-2 state, not_determined and withheld from the grade — never to a
+    cheaper number. The refusal reason rides the row it withheld."""
+    contract = corpus.contract("0x" + "52" * 20)
+    corpus.function(
+        contract,
+        name="cancelBid",
+        claims=_ss_claims(_ss_flow(ssp={"state": "not_determined", "reason": "guard_not_mandatory"})),
+        openness="open",
+    )
+
+    signal = corpus.only(contract, "flow.out")
+    assert signal.destination.state == DESTINATION_STATE_UNCONSTRAINED_PROVEN
+    assert signal.severity.state == SEVERITY_STATE_NOT_DETERMINED
+    assert signal.severity_basis == ()
+    assert not signal.enters_grade
+    assert "flow_severity_withheld_pending_amount_witness" in signal.witness_notes
+    assert "self_service_bound_refused:guard_not_mandatory" in signal.witness_notes
+    assert SELF_SERVICE_BASIS not in signal.severity_basis
+
+
+def test_self_service_uncharged_row_is_excluded_and_leaves_an_earned_negative(corpus):
+    """G1 + G7 together. A proven-bounded row keeps its confidence credit (it
+    enters the grade) but creates NO finding — and its disclosures, which would
+    vanish with the finding, ride an earned negative instead."""
+    contract = corpus.contract("0x" + "53" * 20)
+    corpus.function(contract, name="cancelBid", claims=_ss_claims(_ss_flow()), openness="open")
+
+    document = corpus.score()
+    # G1: the proven-bounded row carries no finding.
+    assert [f for f in document.findings if f["capability"] == "flow.out"] == []
+    assert document.provenance["population"]["rows_uncharged_product"] == 1
+    # entered the grade (credit kept), then excluded — not deleted.
+    assert document.provenance["population"]["signals_entering_grade"] == 1
+
+    payload = document.document()
+    negatives = [e for e in payload["earned_negatives"] if e["state"] == "uncharged_product_surface"]
+    assert len(negatives) == 1
+    (neg,) = negatives
+    assert neg["function"] == "cancelBid"
+    assert neg["basis"] == [SELF_SERVICE_BASIS]
+    # G7: the UUPS disclosure and the same-function residual survive the exclusion.
+    assert neg["conditional_on"] == SELF_SERVICE_DISCLOSE_UPGRADE
+    assert neg["residual"] == SELF_SERVICE_DISCLOSE_SIBLING
+    # ... and surface as warnings too (inv. 6's third channel).
+    kinds = {w["kind"] for w in payload["warnings"]}
+    assert SELF_SERVICE_DISCLOSE_UPGRADE in kinds
+    assert SELF_SERVICE_DISCLOSE_SIBLING in kinds
+    assert SELF_SERVICE_UNCHARGED_NOTE in kinds
+
+
+def test_uncharged_product_basis_value_disagreement_warns_and_does_not_exclude():
+    """G8. A severity_basis that names an uncharged-product token beside a severity
+    that is not proven 0.0 is a bug, not a benign row: it warns and is NOT
+    excluded, so the disagreement can never buy a silent exclusion. The corpus
+    count of that warning is 0 (checked by the differential harness)."""
+    import types
+    from typing import cast
+
+    from services.scoring.fold import _is_uncharged_product, _uncharged_product
+    from services.scoring.schema import SEVERITY_STATE_PROVEN as PROVEN
+    from services.scoring.schema import Tri
+
+    def sig(value: float) -> Any:
+        return cast(
+            Any,
+            types.SimpleNamespace(
+                severity_basis=(SELF_SERVICE_BASIS,),
+                severity=Tri.proven(PROVEN, value),
+                chain="ethereum",
+                deployment_address="0x" + "aa" * 20,
+                function_name="cancelBid",
+                claim_id="flow.out",
+            ),
+        )
+
+    warnings: list[dict[str, Any]] = []
+    assert _uncharged_product(sig(0.0), warnings) is True
+    assert warnings == []
+    assert _uncharged_product(sig(0.35), warnings) is False
+    assert [w["kind"] for w in warnings] == ["uncharged_product_basis_value_disagreement"]
+
+    # And the token is REQUIRED: a proven 0.0 with no uncharged token (pause.set's
+    # build-up-from-zero) is a real charge that starts at zero, never excluded.
+    plain_zero = cast(
+        Any, types.SimpleNamespace(severity_basis=("capability_class_base",), severity=Tri.proven(PROVEN, 0.0))
+    )
+    assert _is_uncharged_product(plain_zero) is False
 
 
 def test_destination_fold_is_a_meet_not_last_wins(corpus):
