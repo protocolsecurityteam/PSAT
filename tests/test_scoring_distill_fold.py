@@ -16,25 +16,41 @@ from typing import Any
 
 import pytest
 
-from db.models import Contract, EffectiveFunction, FunctionPrincipal, Job, Protocol, RoleHolderPlane
+from db.models import Contract, EffectiveFunction, EffectVerdict, FunctionPrincipal, Job, Protocol, RoleHolderPlane
 from services.scoring.cli import distill_protocol_in_memory
 from services.scoring.constants import (
     DEST_SEVERITY_CONSTRAINED_OTHER,
     DEST_SEVERITY_DELEGATECALL_SELF,
     DEST_SEVERITY_EXEC_SELF,
+    DEST_SEVERITY_UNCONSTRAINED,
     FLOW_SEVERITY_CALLER_ARBITRARY,
+    FLOW_SEVERITY_MSG_VALUE_PASSTHROUGH,
+    FLOW_SEVERITY_MSG_VALUE_SELF_RETURN,
+    FLOW_SEVERITY_SELF_SERVICE_BOUNDED,
     ROLE_BREADTH_MULTI_HOLDER_WEAKNESS,
+    UNCHARGED_PRODUCT_BASES,
     WEAKNESS_SAFE_SUPERMAJORITY,
     WEAKNESS_SAFE_UNCREDITED,
 )
-from services.scoring.distill import distill_contract_signals, distill_job_signals
-from services.scoring.fold import compute_protocol_score
+from services.scoring.distill import (
+    MSG_VALUE_ARM_PASSTHROUGH,
+    MSG_VALUE_ARM_SELF_RETURN,
+    MSG_VALUE_REPETITION_RESIDUAL,
+    SELF_SERVICE_BASIS,
+    SELF_SERVICE_DISCLOSE_SIBLING,
+    SELF_SERVICE_DISCLOSE_UPGRADE,
+    SELF_SERVICE_UNCHARGED_NOTE,
+    distill_contract_signals,
+    distill_job_signals,
+)
+from services.scoring.fold import _NOTE_WARNINGS, compute_protocol_score
 from services.scoring.planes import (
     CONTROL_RELATIONS,
     REFUSAL_SELF_EDGE,
     REFUSAL_ZERO_ANCHOR,
     REFUSAL_ZERO_PRINCIPAL,
     SHEET_BELOW_RESOLUTION,
+    SHEET_NO_ROWS,
     SHEET_PROVEN_EMPTY,
     UNCONSUMED_REASON_UNCLASSIFIED,
     load_audit_posture,
@@ -262,6 +278,775 @@ def test_unread_exec_destination_scores_nothing(corpus):
     signal = corpus.only(contract, "exec.arbitrary")
     assert signal.destination.state == DESTINATION_STATE_NOT_DETERMINED
     assert not signal.enters_grade
+
+
+# --------------------------------------------------------------------------
+# The fork's caller_arbitrary answer, consumed only on the SAME parameter
+# --------------------------------------------------------------------------
+
+
+def _exec_param_claim(param: str) -> dict[str, Any]:
+    return {
+        "claim_id": "exec.arbitrary",
+        "tier": "idiom_structural",
+        "witness": {
+            "kind": "param_taint",
+            "destination_kind": "param",
+            "destination_param": param,
+            "destination_constraint": {"state": "not_determined"},
+        },
+    }
+
+
+def _caller_arbitrary_verdict(function: EffectiveFunction, *, sentinel_param: str | None) -> EffectVerdict:
+    witness: dict[str, Any] = {
+        "value_moved": True,
+        "observation": "executed",
+        "destination_shape": "caller_arbitrary",
+        "shape_proved_by": "simulation",
+    }
+    if sentinel_param is not None:
+        witness["sentinel_param"] = sentinel_param
+    return EffectVerdict(
+        function_id=function.id,
+        chain_id=1,
+        contract_address=function.deployment_address,
+        selector=function.selector,
+        effect_class="value_out",
+        behavior_hash="bh",
+        verdict="proven",
+        tier="tier1",
+        witness=witness,
+    )
+
+
+def test_fork_caller_arbitrary_is_consumed_on_the_destination_parameter(corpus):
+    """The 15 already-proven verdicts the exec arm never read: a sentinel that
+    landed in the SAME parameter this sink calls through proves the destination is
+    the caller's to choose."""
+    contract = corpus.contract("0x" + "1a" * 20)
+    function = corpus.function(contract, name="manage", claims=[_exec_param_claim("target")], openness="restricted")
+    corpus.session.add(_caller_arbitrary_verdict(function, sentinel_param="target"))
+    corpus.session.commit()
+
+    signal = corpus.only(contract, "exec.arbitrary")
+    assert signal.destination.state == DESTINATION_STATE_UNCONSTRAINED_PROVEN
+    assert signal.severity.state == SEVERITY_STATE_PROVEN
+    assert signal.severity.value == DEST_SEVERITY_UNCONSTRAINED
+    assert "fork:simulation+destination_param" in signal.severity_basis
+
+
+def test_fork_caller_arbitrary_about_another_parameter_licenses_nothing(corpus):
+    """The refusal that keeps the arm honest, and the ordinary shape on this corpus:
+    an arbitrary-call executor takes the sentinel in its PAYLOAD slot while the call
+    target keeps the value the base probe passed, so the verdict proves the payload
+    recipient is caller-chosen and says nothing about the destination parameter."""
+    contract = corpus.contract("0x" + "1b" * 20)
+    function = corpus.function(contract, name="manage", claims=[_exec_param_claim("target")], openness="restricted")
+    corpus.session.add(_caller_arbitrary_verdict(function, sentinel_param="data"))
+    corpus.session.commit()
+
+    signal = corpus.only(contract, "exec.arbitrary")
+    assert signal.destination.state == DESTINATION_STATE_NOT_DETERMINED
+    assert signal.severity.state == SEVERITY_STATE_NOT_DETERMINED
+    assert not signal.enters_grade
+    assert "fork_caller_arbitrary_witness_is_about_another_parameter" in signal.witness_notes
+
+
+def test_fork_verdict_that_names_no_parameter_licenses_nothing(corpus):
+    """A verdict whose subject is unnamed is not a weaker proof — it is a proof
+    about an unidentified parameter, and there is no join to make."""
+    contract = corpus.contract("0x" + "1c" * 20)
+    function = corpus.function(contract, name="manage", claims=[_exec_param_claim("target")], openness="restricted")
+    corpus.session.add(_caller_arbitrary_verdict(function, sentinel_param=None))
+    corpus.session.commit()
+
+    signal = corpus.only(contract, "exec.arbitrary")
+    assert signal.destination.state == DESTINATION_STATE_NOT_DETERMINED
+    assert not signal.enters_grade
+
+
+def test_fork_verdicts_disagreeing_on_the_parameter_yield_nothing():
+    """Two proven verdicts naming different sentinel parameters is not a menu."""
+    from types import SimpleNamespace
+
+    from services.scoring import distill as D
+
+    def verdict(param: str):
+        return SimpleNamespace(
+            verdict="proven",
+            witness={
+                "destination_shape": "caller_arbitrary",
+                "shape_proved_by": "simulation",
+                "sentinel_param": param,
+            },
+        )
+
+    assert D._fork_caller_arbitrary_param([verdict("target")]) == "target"
+    assert D._fork_caller_arbitrary_param([verdict("target"), verdict("data")]) is None
+    # Neither an unproven verdict nor a shape proved by something other than the
+    # landed sentinel is a caller_arbitrary proof.
+    unknown = SimpleNamespace(
+        verdict="unknown",
+        witness={
+            "destination_shape": "caller_arbitrary",
+            "shape_proved_by": "simulation",
+            "sentinel_param": "target",
+        },
+    )
+    static = SimpleNamespace(
+        verdict="proven",
+        witness={"destination_shape": "immutable_fixed", "shape_proved_by": "static", "sentinel_param": "target"},
+    )
+    assert D._fork_caller_arbitrary_param([unknown, static]) is None
+
+
+# --------------------------------------------------------------------------
+# The caller-relative static destinations (msg_sender / token_owner)
+# --------------------------------------------------------------------------
+
+
+def _caller_relative_flow(kind: str) -> dict[str, Any]:
+    return _flow_out(
+        None,
+        [{"kind": "callee_erc20_selector", "from_is_self": True, "target_kind": {"kind": kind}}],
+        "idiom_structural",
+    )
+
+
+def test_msg_sender_destination_with_an_open_gate_is_unconstrained(corpus):
+    """Anyone can be ``msg.sender``: with a proven-open caller gate the caller names
+    the destination by choosing which address calls, and it takes the unconstrained
+    convention."""
+    contract = corpus.contract("0x" + "2a" * 20)
+    corpus.function(contract, name="redeem", claims=[_caller_relative_flow("msg_sender")], openness="open")
+
+    signal = corpus.only(contract, "flow.out")
+    assert signal.destination.state == DESTINATION_STATE_UNCONSTRAINED_PROVEN
+    assert signal.destination.value == "caller_arbitrary"
+    assert "destination_msg_sender_with_open_caller_gate" in signal.witness_notes
+
+
+def test_an_open_msg_sender_payee_publishes_the_destination_and_withholds_the_price(corpus):
+    """The two questions are answered separately and the row must publish both answers.
+
+    The payee IS the caller, proven. What the payout is bounded BY — the caller's
+    own position, or the contract's whole balance — has no witness, so the price
+    is withheld. Publishing either half without the other is the defect: a
+    withheld destination would un-earn a proof, and a priced row would charge a
+    bound nobody read.
+    """
+    contract = corpus.contract("0x" + "3a" * 20)
+    corpus.function(contract, name="unwrap", claims=[_caller_relative_flow("msg_sender")], openness="open")
+
+    signal = corpus.only(contract, "flow.out")
+    assert signal.destination.state == DESTINATION_STATE_UNCONSTRAINED_PROVEN
+    assert signal.severity.state == SEVERITY_STATE_NOT_DETERMINED
+    assert "flow_severity_withheld_pending_amount_witness" in signal.witness_notes
+    assert not signal.enters_grade
+    # The refusal is on the price alone: the destination keeps naming its proof.
+    assert str(signal.gate_input("destination_basis").value).endswith("+open_caller+severity_pending_amount_witness")
+    # The unread-destination token is a different fact and must not ride along.
+    assert "destination_not_determined_row_withheld" not in signal.witness_notes
+
+
+def test_an_open_gate_licenses_no_escalation_where_the_caller_cannot_name_the_payee(corpus):
+    """``token_owner`` is not ``msg_sender``. The caller picks the token id; the
+    token's transfer history picks the address — so an open gate is the canonical
+    SAFE shape here ("anyone may settle, the funds go to the rightful owner"), not
+    evidence the destination is the attacker's. The escalation is withheld rather
+    than taken; whether the open-caller ruling reaches this kind is the owner's
+    call, and until it is made the row publishes no positive destination."""
+    contract = corpus.contract("0x" + "2b" * 20)
+    corpus.function(contract, name="claimWithdraw", claims=[_caller_relative_flow("token_owner")], openness="open")
+
+    signal = corpus.only(contract, "flow.out")
+    assert signal.destination.state == DESTINATION_STATE_NOT_DETERMINED
+    assert signal.severity.state == SEVERITY_STATE_NOT_DETERMINED
+    assert not signal.enters_grade
+    assert "destination_token_owner_open_gate_licenses_no_escalation" in signal.witness_notes
+
+
+@pytest.mark.parametrize(
+    ("kind", "note"),
+    [
+        ("msg_sender", "constraint_only_as_strong_as_the_caller_gate"),
+        ("token_owner", "destination_is_the_current_owner_of_a_caller_chosen_token_id"),
+    ],
+    ids=["msg_sender", "token_owner"],
+)
+def test_caller_relative_destination_behind_a_gate_is_the_constrained_convention(corpus, kind, note):
+    """Both kinds take the pipeline's existing constrained-destination severity, and
+    each names the constraint that actually holds it: for ``msg_sender`` that IS the
+    caller gate; for ``token_owner`` the gate bounds who may trigger the settlement
+    and the payee is fixed by token ownership instead."""
+    contract = corpus.contract("0x" + ("2c" if kind == "msg_sender" else "2d") * 20)
+    corpus.function(contract, name="rescueTokens", claims=[_caller_relative_flow(kind)], openness="restricted")
+
+    signal = corpus.only(contract, "flow.out")
+    assert signal.destination.state == DESTINATION_STATE_CONSTRAINED_PROVEN
+    assert signal.destination.value == f"constrained:{kind}"
+    assert signal.severity.value == DEST_SEVERITY_CONSTRAINED_OTHER
+    assert note in signal.witness_notes
+    if kind == "token_owner":
+        # The claim the caller gate cannot support: it bounds who triggers, never who is paid.
+        assert "constraint_only_as_strong_as_the_caller_gate" not in signal.witness_notes
+
+
+def test_caller_relative_destination_with_an_unread_gate_stays_undetermined(corpus):
+    """An unread caller gate is neither open nor restricted, and either arm would
+    price an unread witness."""
+    contract = corpus.contract("0x" + "2e" * 20)
+    corpus.function(
+        contract, name="unwrapForEEthAndBurn", claims=[_caller_relative_flow("msg_sender")], openness="not_determined"
+    )
+
+    signal = corpus.only(contract, "flow.out")
+    assert signal.destination.state == DESTINATION_STATE_NOT_DETERMINED
+    assert signal.severity.state == SEVERITY_STATE_NOT_DETERMINED
+    assert not signal.enters_grade
+    assert "destination_msg_sender_caller_gate_unread" in signal.witness_notes
+
+
+def test_caller_relative_conjunction_takes_the_worst_member(corpus):
+    """A flow set mixing a fixed payee with a caller-relative one reduces to the
+    caller-relative one — the meet, not whichever entry was read last."""
+    contract = corpus.contract("0x" + "2f" * 20)
+    corpus.function(
+        contract,
+        name="claimWithdraw",
+        claims=[
+            _flow_out(
+                None,
+                [
+                    {"kind": "callee_erc20_selector", "from_is_self": True, "target_kind": {"kind": "immutable"}},
+                    {"kind": "callee_erc20_selector", "from_is_self": True, "target_kind": {"kind": "token_owner"}},
+                ],
+                "idiom_structural",
+            )
+        ],
+        openness="restricted",
+    )
+
+    signal = corpus.only(contract, "flow.out")
+    assert signal.destination.value == "constrained:token_owner"
+    assert signal.severity.value == DEST_SEVERITY_CONSTRAINED_OTHER
+
+
+def test_an_indeterminate_member_still_blocks_a_caller_relative_conjunction(corpus):
+    """The new arms widen what the lattice can PROVE; they do not weaken what it
+    refuses. One unreadable member and the destination stays unread."""
+    contract = corpus.contract("0x" + "3a" * 20)
+    corpus.function(
+        contract,
+        name="withdraw",
+        claims=[
+            _flow_out(
+                None,
+                [
+                    {"kind": "callee_erc20_selector", "from_is_self": True, "target_kind": {"kind": "msg_sender"}},
+                    {"kind": "callee_erc20_selector", "from_is_self": True, "target_kind": {"kind": "indeterminate"}},
+                ],
+                "idiom_structural",
+            )
+        ],
+        openness="open",
+    )
+
+    signal = corpus.only(contract, "flow.out")
+    assert signal.destination.state == DESTINATION_STATE_NOT_DETERMINED
+    assert not signal.enters_grade
+
+
+# --------------------------------------------------------------------------
+# The msg_value witness (W3): what the caller just attached, and who gets it
+# --------------------------------------------------------------------------
+
+
+def _msg_value_flow(target: str, **over: Any) -> dict[str, Any]:
+    flow: dict[str, Any] = {
+        "kind": "low_level_value_call",
+        "from_is_self": True,
+        "amount_kind": {"kind": "msg_value", "tier": "dispositive_ast"},
+        "target_kind": {"kind": target, "tier": "dispositive_ast"},
+    }
+    flow.update(over)
+    return flow
+
+
+def _msg_value_claims(*flows: dict[str, Any]) -> list[dict[str, Any]]:
+    return [_flow_out(None, list(flows), "idiom_structural")]
+
+
+def test_msg_value_returned_to_the_caller_carries_no_severity_of_its_own(corpus):
+    """W3a, the exact conjunction: every out-flow pays out this contract's own
+    balance, in the amount the caller attached to THIS call, to the caller. The
+    payout can move no position the caller did not just fund, so it is priced at a
+    named zero — and the destination fact the lattice earned is republished
+    untouched rather than swapped for the amount's."""
+    contract = corpus.contract("0x" + "4a" * 20)
+    corpus.function(
+        contract, name="unwrapL2Eth", claims=_msg_value_claims(_msg_value_flow("msg_sender")), openness="restricted"
+    )
+
+    signal = corpus.only(contract, "flow.out")
+    assert signal.destination.state == DESTINATION_STATE_CONSTRAINED_PROVEN
+    assert signal.destination.value == "constrained:msg_sender"
+    assert signal.severity.state == SEVERITY_STATE_PROVEN
+    assert signal.severity.value == FLOW_SEVERITY_MSG_VALUE_SELF_RETURN
+    assert signal.severity_basis == (MSG_VALUE_ARM_SELF_RETURN,)
+    assert MSG_VALUE_ARM_SELF_RETURN in signal.witness_notes
+    assert MSG_VALUE_ARM_PASSTHROUGH not in signal.witness_notes
+    # The zero says what it did not look at, and the warning table renders it.
+    assert MSG_VALUE_REPETITION_RESIDUAL in signal.witness_notes
+    assert MSG_VALUE_REPETITION_RESIDUAL in _NOTE_WARNINGS
+
+
+def test_msg_value_self_return_answers_the_withhold_it_is_pending_on(corpus):
+    """The compose ordering, on the branch that created the pending state. An open
+    caller-relative destination is PROVEN and its price is withheld *pending an
+    amount witness*; this is that witness, so it is read first. A row that carries
+    both the refusal and the witness that answers it would be publishing a question
+    it has the answer to — and the destination fact stays exactly what the lattice
+    proved, because it is the AMOUNT that carries the bound."""
+    contract = corpus.contract("0x" + "4d" * 20)
+    corpus.function(contract, name="refund", claims=_msg_value_claims(_msg_value_flow("msg_sender")), openness="open")
+
+    signal = corpus.only(contract, "flow.out")
+    assert signal.destination.state == DESTINATION_STATE_UNCONSTRAINED_PROVEN
+    assert signal.destination.value == "caller_arbitrary"
+    assert signal.severity.state == SEVERITY_STATE_PROVEN
+    assert signal.severity.value == FLOW_SEVERITY_MSG_VALUE_SELF_RETURN
+    assert signal.severity_basis == (MSG_VALUE_ARM_SELF_RETURN,)
+    assert "destination_msg_sender_with_open_caller_gate" in signal.witness_notes
+    assert "flow_severity_withheld_pending_amount_witness" not in signal.witness_notes
+
+
+def test_the_self_return_arm_cannot_price_a_destination_nobody_read(corpus):
+    """The gate on the reordering is the destination being PROVEN, not priced. With
+    the caller gate unread the payee is neither open nor restricted, so the row
+    keeps the unread-destination withhold — the amount fact is still published,
+    because it is true, but it prices nothing and the repetition residual, which
+    belongs to the priced verdict, is not published either."""
+    contract = corpus.contract("0x" + "4e" * 20)
+    corpus.function(
+        contract,
+        name="refund",
+        claims=_msg_value_claims(_msg_value_flow("msg_sender")),
+        openness="not_determined",
+    )
+
+    signal = corpus.only(contract, "flow.out")
+    assert signal.destination.state == DESTINATION_STATE_NOT_DETERMINED
+    assert signal.severity.state == SEVERITY_STATE_NOT_DETERMINED
+    assert signal.severity_basis == ()
+    assert not signal.enters_grade
+    assert "destination_not_determined_row_withheld" in signal.witness_notes
+    assert MSG_VALUE_ARM_SELF_RETURN in signal.witness_notes
+    assert MSG_VALUE_REPETITION_RESIDUAL not in signal.witness_notes
+
+
+def test_msg_value_passed_through_to_a_fixed_payee_is_uncharged_product(corpus):
+    """W3b, ruled in by the owner. The caller's own ETH reaching a payee no caller
+    can name is bounded by what the caller just attached, so — beside the
+    self-return arm and ahead of the withhold — it is uncharged product surface at
+    a named zero. Its basis names the pass-through arm, which is the token the fold
+    reads to exclude the row; the destination fact the lattice earned is unchanged."""
+    contract = corpus.contract("0x" + "4b" * 20)
+    corpus.function(contract, name="receive", claims=_msg_value_claims(_msg_value_flow("immutable")), openness="open")
+
+    signal = corpus.only(contract, "flow.out")
+    assert signal.destination.state == DESTINATION_STATE_CONSTRAINED_PROVEN
+    assert signal.destination.value == "immutable_fixed"
+    assert signal.severity.state == SEVERITY_STATE_PROVEN
+    assert signal.severity.value == FLOW_SEVERITY_MSG_VALUE_PASSTHROUGH
+    assert signal.severity.value == 0.0
+    assert signal.severity_basis == (MSG_VALUE_ARM_PASSTHROUGH,)
+    assert MSG_VALUE_ARM_PASSTHROUGH in signal.severity_basis
+    assert MSG_VALUE_ARM_PASSTHROUGH in UNCHARGED_PRODUCT_BASES
+    assert MSG_VALUE_ARM_PASSTHROUGH in signal.witness_notes
+    assert MSG_VALUE_ARM_SELF_RETURN not in signal.witness_notes
+    # The immutable destination's UUPS disclosure is preserved for the earned
+    # negative the fold leaves behind (the excluded row publishes no finding).
+    assert "fixed_destination_conditional_on_upgrade_authority" in signal.witness_notes
+
+
+_MSG_VALUE_REFUSALS = [
+    # The fold declined to answer. ``amount_kinds`` is emitted exactly where the
+    # contributing sites disagreed, and a ``several`` carrying a ``msg_value``
+    # member says nothing about the member beside it.
+    (
+        "several_fold",
+        "5a",
+        _msg_value_claims(
+            _msg_value_flow(
+                "msg_sender",
+                amount_kind={"kind": "several", "tier": "dispositive_ast"},
+                amount_kinds=[
+                    {"kind": "msg_value", "tier": "dispositive_ast"},
+                    {"kind": "capped_by_balance", "tier": "dispositive_ast"},
+                ],
+            )
+        ),
+        "amount_fold_disagreed",
+        DEST_SEVERITY_CONSTRAINED_OTHER,
+    ),
+    # The scalar and the breakdown disagree with each other. The scalar alone
+    # would read as proven; the breakdown is the producer saying it is not.
+    (
+        "breakdown_beside_a_msg_value_scalar",
+        "5b",
+        _msg_value_claims(
+            _msg_value_flow(
+                "msg_sender",
+                amount_kinds=[
+                    {"kind": "msg_value", "tier": "dispositive_ast"},
+                    {"kind": "param", "tier": "dispositive_ast"},
+                ],
+            )
+        ),
+        "amount_fold_disagreed",
+        DEST_SEVERITY_CONSTRAINED_OTHER,
+    ),
+    # A TRACED msg.value is that the tracer arrived at the opcode, not that the
+    # amount IS the value attached to this call.
+    (
+        "traced_amount",
+        "5c",
+        _msg_value_claims(_msg_value_flow("msg_sender", amount_kind={"kind": "msg_value", "tier": "static_trace"})),
+        "amount_not_dispositive_ast",
+        DEST_SEVERITY_CONSTRAINED_OTHER,
+    ),
+    # The universal: one sibling flow paying something else refuses the function.
+    (
+        "sibling_flow_is_not_msg_value",
+        "5d",
+        _msg_value_claims(
+            _msg_value_flow("msg_sender"),
+            _msg_value_flow("msg_sender", amount_kind={"kind": "param", "tier": "dispositive_ast"}),
+        ),
+        "amount_not_msg_value",
+        DEST_SEVERITY_CONSTRAINED_OTHER,
+    ),
+    # An absent ``from_is_self`` is not "this contract is the source".
+    (
+        "source_not_self",
+        "5e",
+        _msg_value_claims(
+            {
+                "kind": "low_level_value_call",
+                "amount_kind": {"kind": "msg_value", "tier": "dispositive_ast"},
+                "target_kind": {"kind": "msg_sender", "tier": "dispositive_ast"},
+            }
+        ),
+        "flow_source_not_self",
+        DEST_SEVERITY_CONSTRAINED_OTHER,
+    ),
+    (
+        "target_breakdown",
+        "5f",
+        _msg_value_claims(
+            _msg_value_flow(
+                "several",
+                target_kinds=[
+                    {"kind": "msg_sender", "tier": "dispositive_ast"},
+                    {"kind": "immutable", "tier": "dispositive_ast"},
+                ],
+            )
+        ),
+        "target_fold_disagreed",
+        DEST_SEVERITY_CONSTRAINED_OTHER,
+    ),
+    # A payee neither arm names. The lattice's own answer stands; this witness
+    # adds nothing to it.
+    (
+        "third_payee_kind",
+        "6a",
+        _msg_value_claims(_msg_value_flow("storage_setter")),
+        "target_not_a_witnessed_arm",
+        None,
+    ),
+    # The bound is per ENTRY, and two entries paying the caller move twice what
+    # the caller attached — the surplus out of a balance somebody else funded.
+    # This shape is what the conjunction must refuse rather than read as one
+    # payment; it is also why the two arms can never be mixed on a proven set.
+    (
+        "multiple_paying_entries",
+        "6b",
+        _msg_value_claims(_msg_value_flow("msg_sender"), _msg_value_flow("msg_sender")),
+        "multiple_out_flow_entries",
+        DEST_SEVERITY_CONSTRAINED_OTHER,
+    ),
+    (
+        "one_entry_per_arm",
+        "6d",
+        _msg_value_claims(_msg_value_flow("msg_sender"), _msg_value_flow("immutable")),
+        "multiple_out_flow_entries",
+        DEST_SEVERITY_CONSTRAINED_OTHER,
+    ),
+    (
+        "unreadable_kind",
+        "6c",
+        _msg_value_claims(
+            _msg_value_flow("msg_sender"),
+            {"kind": "low_level_value_call", "from_is_self": True, "target_kind": {"kind": "msg_sender"}},
+        ),
+        "flow_kind_unreadable",
+        DEST_SEVERITY_CONSTRAINED_OTHER,
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("slug", "claims", "reason", "severity"),
+    [case[1:] for case in _MSG_VALUE_REFUSALS],
+    ids=[case[0] for case in _MSG_VALUE_REFUSALS],
+)
+def test_msg_value_return_refuses(corpus, slug, claims, reason, severity):
+    """Every conjunct, removed one at a time: the witness publishes its named
+    refusal and NOTHING positive, and the row scores exactly what the destination
+    lattice scored it without the witness."""
+    from services.scoring import distill as D
+
+    assert D._msg_value_return(claims) == D._MsgValueReturn(arm=None, refusal=reason)
+
+    contract = corpus.contract("0x" + slug * 20)
+    corpus.function(contract, name="withdraw", claims=claims, openness="restricted")
+
+    signal = corpus.only(contract, "flow.out")
+    assert f"msg_value_return_refused:{reason}" in signal.witness_notes
+    assert MSG_VALUE_ARM_SELF_RETURN not in signal.witness_notes
+    assert MSG_VALUE_ARM_PASSTHROUGH not in signal.witness_notes
+    assert MSG_VALUE_ARM_SELF_RETURN not in signal.severity_basis
+    assert MSG_VALUE_REPETITION_RESIDUAL not in signal.witness_notes
+    if severity is None:
+        assert signal.severity.state == SEVERITY_STATE_NOT_DETERMINED
+        assert not signal.enters_grade
+    else:
+        assert signal.severity.state == SEVERITY_STATE_PROVEN
+        assert signal.severity.value == severity
+
+
+def test_a_payout_that_never_mentions_msg_value_is_asked_nothing(corpus):
+    """The third state, and the reason it is silence rather than a refusal: on a
+    payout whose amount is a parameter the question does not arise, and hanging a
+    reason off it would put this witness's vocabulary on every flow in the corpus
+    while proving nothing about any of them."""
+    contract = corpus.contract("0x" + "4c" * 20)
+    corpus.function(
+        contract,
+        name="rescueTokens",
+        claims=_msg_value_claims(
+            _msg_value_flow("msg_sender", amount_kind={"kind": "param", "tier": "dispositive_ast"})
+        ),
+        openness="restricted",
+    )
+
+    signal = corpus.only(contract, "flow.out")
+    assert not [note for note in signal.witness_notes if note.startswith("msg_value_return_refused")]
+    assert MSG_VALUE_ARM_SELF_RETURN not in signal.witness_notes
+    assert MSG_VALUE_ARM_PASSTHROUGH not in signal.witness_notes
+    assert signal.severity.value == DEST_SEVERITY_CONSTRAINED_OTHER
+    assert signal.severity_basis == ("constrained:msg_sender+restricted_caller",)
+
+
+def test_a_blocked_flow_set_proves_no_msg_value_arm():
+    """A claim with no ``flows`` key blocks the read, and a universal over a set
+    that could not be read must not come out vacuously true."""
+    from services.scoring import distill as D
+
+    blocked = [{"claim_id": "flow.out", "tier": "idiom_structural", "witness": {"kind": "value_flow"}}]
+    policy = [{"claim_id": "flow.out", "tier": "policy_derived", "witness": {"kind": "value_flow", "flows": []}}]
+    assert D._msg_value_return(blocked) == D._MsgValueReturn(arm=None, refusal=None)
+    assert D._msg_value_return(policy) == D._MsgValueReturn(arm=None, refusal=None)
+
+
+# --------------------------------------------------------------------------
+# The self-service witness (W1 ∧ W2): the consumer arm
+# --------------------------------------------------------------------------
+
+
+def _proven_ssp(**over: Any) -> dict[str, Any]:
+    fact = {
+        "state": "proven_self_service",
+        "w1_basis": "keyed_by_caller",
+        "w2_basis": "clear_dominates_calls",
+        "record": "bids",
+        "disclosures": [SELF_SERVICE_DISCLOSE_UPGRADE, SELF_SERVICE_DISCLOSE_SIBLING],
+    }
+    fact.update(over)
+    return fact
+
+
+def _ss_flow(target: str = "msg_sender", ssp: dict[str, Any] | str | None = "proven", **over: Any) -> dict[str, Any]:
+    flow: dict[str, Any] = {
+        "kind": "callee_erc20_selector",
+        "from_is_self": True,
+        "amount_kind": {"kind": "bounded_by_storage", "tier": "dispositive_ast"},
+        "target_kind": {"kind": target, "tier": "dispositive_ast"},
+    }
+    if ssp == "proven":
+        flow["self_service_payout"] = _proven_ssp()
+    elif ssp is not None:
+        flow["self_service_payout"] = ssp
+    flow.update(over)
+    return flow
+
+
+def _ss_claims(*flows: dict[str, Any]) -> list[dict[str, Any]]:
+    return [_flow_out(None, list(flows), "idiom_structural")]
+
+
+def test_self_service_bound_conjuncts():
+    """G2, the universal directly. A COMPLETE fixture proves; dropping any one
+    conjunct — W1 (C1), W2 (C2), the caller-relative payee (C3), a readable
+    sibling flow (C4) — yields a NAMED refusal and nothing positive. A refused
+    conjunct never reaches a proven verdict, so the arm can never clear a payout
+    whose bound was not fully witnessed."""
+    from services.scoring import distill as D
+
+    proven = D._self_service_bound(_ss_claims(_ss_flow()))
+    assert proven.proven is True
+    assert proven.refusal is None
+    assert SELF_SERVICE_DISCLOSE_UPGRADE in proven.disclosures
+    assert SELF_SERVICE_DISCLOSE_SIBLING in proven.disclosures
+
+    # C1 — W1 refused (the amount is not proven read from the caller's own cell).
+    c1 = D._self_service_bound(_ss_claims(_ss_flow(ssp={"state": "not_determined", "reason": "guard_not_mandatory"})))
+    assert c1 == D._SelfServiceBound(proven=False, refusal="guard_not_mandatory")
+    # C2 — W2 refused (the record is not cleared before the external call).
+    c2 = D._self_service_bound(_ss_claims(_ss_flow(ssp={"state": "not_determined", "reason": "no_clearing_write"})))
+    assert c2 == D._SelfServiceBound(proven=False, refusal="no_clearing_write")
+    # C3 — the payee is NOT the caller (a fixed payee out of the caller's balance).
+    c3 = D._self_service_bound(_ss_claims(_ss_flow(target="immutable")))
+    assert c3 == D._SelfServiceBound(proven=False, refusal="payee_not_caller_relative")
+    # C3 — the contract is not the proven source.
+    c3b = D._self_service_bound(_ss_claims(_ss_flow(from_is_self=False)))
+    assert c3b == D._SelfServiceBound(proven=False, refusal="flow_source_not_self")
+    # C4 — one sibling out-flow carries no witness at all: the universal refuses.
+    c4 = D._self_service_bound(_ss_claims(_ss_flow(), _ss_flow(ssp=None)))
+    assert c4 == D._SelfServiceBound(proven=False, refusal="unread_out_flow")
+
+    # NOT-ASKED: no out-flow raises the question, so no note and no refusal.
+    not_asked = D._self_service_bound(_ss_claims(_msg_value_flow("msg_sender")))
+    assert not_asked == D._SELF_SERVICE_NOT_ASKED
+    # A blocked (unreadable) set is NOT-ASKED, never a vacuous proof.
+    blocked = [{"claim_id": "flow.out", "tier": "policy_derived", "witness": {"kind": "value_flow", "flows": []}}]
+    assert D._self_service_bound(blocked) == D._SELF_SERVICE_NOT_ASKED
+
+
+def test_self_service_proven_reclassifies_an_open_payout_to_uncharged_product(corpus):
+    """The compose ordering the SPEC demands: an open ``msg_sender`` payout has its
+    destination PROVEN and its price withheld pending an amount witness, and W1 ∧
+    W2 IS that witness — so it is read BEFORE the withhold and the row reclassifies
+    to a named zero rather than staying withheld. Row kept; the two G7 disclosures
+    ride the notes so the fold's earned negative can carry them."""
+    contract = corpus.contract("0x" + "51" * 20)
+    corpus.function(contract, name="cancelBid", claims=_ss_claims(_ss_flow()), openness="open")
+
+    signal = corpus.only(contract, "flow.out")
+    assert signal.destination.state == DESTINATION_STATE_UNCONSTRAINED_PROVEN
+    assert signal.severity.state == SEVERITY_STATE_PROVEN
+    assert signal.severity.value == FLOW_SEVERITY_SELF_SERVICE_BOUNDED
+    assert signal.severity.value == 0.0
+    assert signal.severity_basis == (SELF_SERVICE_BASIS,)
+    assert signal.enters_grade
+    assert SELF_SERVICE_UNCHARGED_NOTE in signal.witness_notes
+    assert SELF_SERVICE_DISCLOSE_UPGRADE in signal.witness_notes
+    assert SELF_SERVICE_DISCLOSE_SIBLING in signal.witness_notes
+    # The interim withhold is NOT published beside the proof that answered it.
+    assert "flow_severity_withheld_pending_amount_witness" not in signal.witness_notes
+
+
+def test_self_service_refused_open_payout_stays_at_the_interim_withhold(corpus):
+    """A refused conjunction returns the row to the U-IW withhold — the
+    pre-pass-2 state, not_determined and withheld from the grade — never to a
+    cheaper number. The refusal reason rides the row it withheld."""
+    contract = corpus.contract("0x" + "52" * 20)
+    corpus.function(
+        contract,
+        name="cancelBid",
+        claims=_ss_claims(_ss_flow(ssp={"state": "not_determined", "reason": "guard_not_mandatory"})),
+        openness="open",
+    )
+
+    signal = corpus.only(contract, "flow.out")
+    assert signal.destination.state == DESTINATION_STATE_UNCONSTRAINED_PROVEN
+    assert signal.severity.state == SEVERITY_STATE_NOT_DETERMINED
+    assert signal.severity_basis == ()
+    assert not signal.enters_grade
+    assert "flow_severity_withheld_pending_amount_witness" in signal.witness_notes
+    assert "self_service_bound_refused:guard_not_mandatory" in signal.witness_notes
+    assert SELF_SERVICE_BASIS not in signal.severity_basis
+
+
+def test_self_service_uncharged_row_is_excluded_and_leaves_an_earned_negative(corpus):
+    """G1 + G7 together. A proven-bounded row keeps its confidence credit (it
+    enters the grade) but creates NO finding — and its disclosures, which would
+    vanish with the finding, ride an earned negative instead."""
+    contract = corpus.contract("0x" + "53" * 20)
+    corpus.function(contract, name="cancelBid", claims=_ss_claims(_ss_flow()), openness="open")
+
+    document = corpus.score()
+    # G1: the proven-bounded row carries no finding.
+    assert [f for f in document.findings if f["capability"] == "flow.out"] == []
+    assert document.provenance["population"]["rows_uncharged_product"] == 1
+    # entered the grade (credit kept), then excluded — not deleted.
+    assert document.provenance["population"]["signals_entering_grade"] == 1
+
+    payload = document.document()
+    negatives = [e for e in payload["earned_negatives"] if e["state"] == "uncharged_product_surface"]
+    assert len(negatives) == 1
+    (neg,) = negatives
+    assert neg["function"] == "cancelBid"
+    assert neg["basis"] == [SELF_SERVICE_BASIS]
+    # G7: the UUPS disclosure and the same-function residual survive the exclusion.
+    assert neg["conditional_on"] == SELF_SERVICE_DISCLOSE_UPGRADE
+    assert neg["residual"] == SELF_SERVICE_DISCLOSE_SIBLING
+    # ... and surface as warnings too (inv. 6's third channel).
+    kinds = {w["kind"] for w in payload["warnings"]}
+    assert SELF_SERVICE_DISCLOSE_UPGRADE in kinds
+    assert SELF_SERVICE_DISCLOSE_SIBLING in kinds
+    assert SELF_SERVICE_UNCHARGED_NOTE in kinds
+
+
+def test_uncharged_product_basis_value_disagreement_warns_and_does_not_exclude():
+    """G8. A severity_basis that names an uncharged-product token beside a severity
+    that is not proven 0.0 is a bug, not a benign row: it warns and is NOT
+    excluded, so the disagreement can never buy a silent exclusion. The corpus
+    count of that warning is 0 (checked by the differential harness)."""
+    import types
+    from typing import cast
+
+    from services.scoring.fold import _is_uncharged_product, _uncharged_product
+    from services.scoring.schema import SEVERITY_STATE_PROVEN as PROVEN
+    from services.scoring.schema import Tri
+
+    def sig(value: float) -> Any:
+        return cast(
+            Any,
+            types.SimpleNamespace(
+                severity_basis=(SELF_SERVICE_BASIS,),
+                severity=Tri.proven(PROVEN, value),
+                chain="ethereum",
+                deployment_address="0x" + "aa" * 20,
+                function_name="cancelBid",
+                claim_id="flow.out",
+            ),
+        )
+
+    warnings: list[dict[str, Any]] = []
+    assert _uncharged_product(sig(0.0), warnings) is True
+    assert warnings == []
+    assert _uncharged_product(sig(0.35), warnings) is False
+    assert [w["kind"] for w in warnings] == ["uncharged_product_basis_value_disagreement"]
+
+    # And the token is REQUIRED: a proven 0.0 with no uncharged token (pause.set's
+    # build-up-from-zero) is a real charge that starts at zero, never excluded.
+    plain_zero = cast(
+        Any, types.SimpleNamespace(severity_basis=("capability_class_base",), severity=Tri.proven(PROVEN, 0.0))
+    )
+    assert _is_uncharged_product(plain_zero) is False
 
 
 def test_destination_fold_is_a_meet_not_last_wins(corpus):
@@ -1190,6 +1975,47 @@ def test_a_sheet_of_rounding_dust_publishes_no_total_and_names_why(corpus, db_se
     assert plane.provenance["sheet_states"][SHEET_BELOW_RESOLUTION] == 1
     assert sum(plane.provenance["sheet_states"].values()) == 1
     assert plane.provenance["sheet_states"][SHEET_PROVEN_EMPTY] == 0
+
+
+def test_the_sheet_state_census_counts_the_entities_nobody_has_read(corpus, db_session):
+    """V2: ``no_rows`` was a STRUCTURAL zero, not a measurement.
+
+    The census walked the observation maps, and every key in those maps has by
+    construction something observed on it — so the one state meaning "nothing
+    observed" could never be incremented. A consumer reading
+    ``sheet_states.no_rows: 0`` was told the earned fact "every entity this
+    protocol names carries a balance sheet" by a counter that had no way to say
+    anything else. Here two of the three contracts have never been read, and the
+    census says two.
+    """
+    read = corpus.contract("0x" + "e1" * 20)
+    corpus.contract("0x" + "e2" * 20)
+    corpus.contract("0x" + "e3" * 20)
+    _balance_row(db_session, read, usd="1500.00", token="0x" + "e9" * 20, observed=read.address)
+
+    states = load_value_plane(db_session, corpus.protocol.id).provenance["sheet_states"]
+    assert states[SHEET_NO_ROWS] == 2
+    assert states["priced"] == 1
+    # The population is the whole base population, not the read part of it.
+    assert sum(states.values()) == 3
+
+
+def test_an_unread_proxy_and_its_implementation_are_one_unread_sheet(corpus, db_session):
+    """The base population is NOT canonical when the census runs.
+
+    ``contract_entities`` is folded onto proxies only after this block, so a
+    census that read it raw would count an implementation apart from the proxy
+    it folds onto and report two unread sheets where there is one. The fold is
+    the whole reason the count is taken over canonical keys.
+    """
+    proxy = "0x" + "e4" * 20
+    impl = "0x" + "e5" * 20
+    corpus.contract(proxy, implementation=impl)
+    corpus.contract(impl)
+
+    states = load_value_plane(db_session, corpus.protocol.id).provenance["sheet_states"]
+    assert states[SHEET_NO_ROWS] == 1
+    assert sum(states.values()) == 1
 
 
 def test_the_zero_address_is_refused_at_both_ends_and_the_refusal_is_counted(corpus, db_session):

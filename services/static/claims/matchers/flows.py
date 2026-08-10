@@ -135,6 +135,22 @@ def _flow_entry(ctx: ClaimContext, function: str, f: dict[str, Any]) -> dict[str
     # (folded kind ``param``), so no consumer reads a guessed value elsewhere.
     if isinstance(f.get("target_kind"), dict) and f["target_kind"].get("kind") == "param":
         entry["target_constraint"] = _facts.param_constraint(ctx, function, f.get("target_param_index"))
+    # The self-service witness and its W1-only substrate, attached only where the
+    # amount is read out of storage — the one place the "is this cell the
+    # caller's own" question is even asked. Guarded (key ABSENT off this path),
+    # so no consumer reads a guessed value on a flow whose amount is a different
+    # kind; absence is fail-closed everywhere downstream.
+    if isinstance(f.get("amount_kind"), dict) and f["amount_kind"].get("kind") == "bounded_by_storage":
+        entry["amount_record_constraint"] = _facts.amount_record_constraint(ctx, function, f)
+        entry["self_service_payout"] = _facts.self_service_payout(ctx, function, f)
+    # SS-R3: the same caller-names-it question for a ``param`` amount, so a later
+    # param-amount shape has the substrate. Moves nothing on today's corpus.
+    if (
+        f.get("amount_param_index") is not None
+        and isinstance(f.get("amount_kind"), dict)
+        and f["amount_kind"].get("kind") == "param"
+    ):
+        entry["amount_constraint"] = _facts.param_constraint(ctx, function, f.get("amount_param_index"))
     # The identity of the op(s) carrying a routed move, so a consumer holding
     # only the persisted witness reads what ``_facts.effect_sink_identities``
     # reads in process. ``callee`` is an INTRA-UNIT AST name, never a resolved

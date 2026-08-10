@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, cast
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -25,8 +27,10 @@ from services.resolution.one_shot_probe import (  # noqa: E402
 from services.static.contract_analysis_pipeline.one_shot import (  # noqa: E402
     _is_monotonic_ascent_latch,
     _parse_constant,
+    _scalar_candidate,
     _write_falsifies_guard,
 )
+from services.static.contract_analysis_pipeline.predicate_types import LeafPredicate  # noqa: E402
 
 _ZERO = "0x" + "0" * 64
 PROXY = "0x" + "11" * 20
@@ -68,6 +72,60 @@ def test_monotonic_ascent_latch_excludes_rearmable_and_descending():
     assert _is_monotonic_ascent_latch("truthy", None, {0}) is False
     assert _is_monotonic_ascent_latch("ne", 0, {1}) is False
     assert _is_monotonic_ascent_latch("eq", None, {1}) is False
+
+
+class _StubType:
+    def __init__(self, name: str, size: int):
+        self._name = name
+        self.storage_size = (size, True)
+
+    def __str__(self) -> str:
+        return self._name
+
+
+class _StubCompilationUnit:
+    def __init__(self, slot: int):
+        self._slot = slot
+
+    def storage_layout_of(self, _contract, _state_var):
+        return (self._slot, 0)
+
+
+def _latch_contract(name: str, type_name: str = "bool", slot: int = 3):
+    var = SimpleNamespace(name=name, type=_StubType(type_name, 1), is_constant=False, is_immutable=False)
+    return SimpleNamespace(state_variables_ordered=[var], compilation_unit=_StubCompilationUnit(slot))
+
+
+def _eq_leaf(operands: list[dict[str, Any]]) -> LeafPredicate:
+    return cast(LeafPredicate, {"operator": "eq", "operands": operands})
+
+
+def test_scalar_candidate_partitions_operands_by_position():
+    """The non-state-variable operands are the complement of the state-variable
+    POSITIONS. This pins that semantics; it is not evidence of a fixed defect —
+    it holds for the dict-equality form too, which was correct exactly because
+    the state-variable test is a pure function of the operand dict. Widening
+    that test is what would separate the two forms."""
+    sv = {"source": "state_variable", "state_variable_name": "initialized"}
+    const = {"source": "constant", "constant_value": "0"}
+    contract = _latch_contract("initialized")
+    writes = {"initialized": {"non_constant": False, "values": {1}}}
+
+    candidate = _scalar_candidate(contract, _eq_leaf([dict(sv), dict(const)]), writes)
+    assert candidate is not None
+    assert candidate["variable"] == "initialized"
+    assert candidate["slot"] == "0x" + "0" * 63 + "3"
+
+    # Two equal state-variable operands occupy two positions: two latch reads,
+    # not one read counted once.
+    twins = _eq_leaf([dict(sv), dict(sv), dict(const)])
+    assert _scalar_candidate(contract, twins, writes) is None
+
+    # A structural twin carrying one extra field is judged on its own: it is
+    # not a state-variable operand and not a constant, so the candidate is
+    # refused.
+    asymmetric = _eq_leaf([dict(sv), {**sv, "member_path": ["flag"]}, dict(const)])
+    assert _scalar_candidate(contract, asymmetric, writes) is None
 
 
 def test_parse_constant_forms():

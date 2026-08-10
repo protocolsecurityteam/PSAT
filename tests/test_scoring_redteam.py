@@ -38,8 +38,10 @@ from services.scoring.schema import (
 from tests import composition_admission_fixtures as CA
 from utils import execution_record as EX
 from utils.scoring_status import (
+    DESTINATION_STATE_UNCONSTRAINED_PROVEN,
     GRADE_STATE_COMPUTED,
     GRADE_STATE_NOT_DETERMINED,
+    SEVERITY_STATE_NOT_DETERMINED,
     SEVERITY_STATE_PROVEN,
     VALUE_BOUND_EXACT,
     VALUE_BOUND_FLOOR,
@@ -1131,6 +1133,36 @@ def test_g3_destination_operand_does_not_corroborate_self_ness():
     assert "destination_self_corroborated_by_literal" in literal.notes
 
 
+def test_g3_a_priced_destination_with_a_withheld_severity_charges_nothing_and_says_so(fold):
+    """A proven destination is not a proven price.
+
+    The row's payee is proven caller-relative and the entity it reaches is
+    priced — everything a charge needs except the one witness that says what the
+    payout is bounded by. It must land nowhere in the ledger, and the refusal
+    must be legible: an excluded row's notes reach no finding, so the warning
+    channel is the only surface that can carry the reason.
+    """
+    signal = flow_sig(
+        function_name="unwrap",
+        authority_openness="open",
+        destination=Tri.proven(DESTINATION_STATE_UNCONSTRAINED_PROVEN, "caller_arbitrary"),
+        witness_notes=(
+            "destination_msg_sender_with_open_caller_gate",
+            "flow_severity_withheld_pending_amount_witness",
+        ),
+        gates=magnitude(1_000_000.0),
+        **reaches(KEY_C),
+    )
+    document = fold([signal], value=value_plane({KEY_C: {"usdc": 1_000_000.0}}))
+
+    assert signal.destination.state == DESTINATION_STATE_UNCONSTRAINED_PROVEN
+    assert signal.severity.state == SEVERITY_STATE_NOT_DETERMINED
+    assert not signal.enters_grade
+    assert document.findings == []
+    withheld = [w for w in document.warnings if w["kind"] == "flow_severity_withheld_pending_amount_witness"]
+    assert [(w["function"], w["capability"]) for w in withheld] == [("unwrap", "flow.out")]
+
+
 def test_d1_the_published_principal_is_the_one_that_set_the_weakness(fold):
     """The named gate must be the argmax, not whichever row was folded last."""
     signal = sig(
@@ -2009,10 +2041,11 @@ def test_a_read_height_nobody_recorded_falls_back_to_write_order_and_says_so():
 
 
 def test_a_rounding_floor_reading_is_not_a_proven_zero():
-    """``usd_value`` is numeric(20,2): $0.0035 stores as 0.00.
+    """``usd_value`` is a scaled decimal column: a holding below its last digit —
+    the eighteenth decimal — stores as zero.
 
     Publishing that as a determined 0.0 mints a proven-empty balance sheet out of
-    a price lookup that answered "below half a cent".
+    a price lookup that answered "below the column's resolution".
     """
     plane = P.ValuePlane()
     plane.per_asset, plane.per_asset_state, _ = _reduce(**{"0x" + "1" * 40: [_Row(0.0, rid=1, raw="12345")]})
@@ -2020,6 +2053,51 @@ def test_a_rounding_floor_reading_is_not_a_proven_zero():
     assert "asset" not in plane.per_asset.get("k", {})
     assert plane.sheet_state("k") == P.SHEET_BELOW_RESOLUTION
     assert plane.total("k") is None
+
+
+def test_a_sub_resolution_priced_reading_keeps_its_magnitude_through_the_reduction():
+    """Pins the ROUNDING guard, and only it.
+
+    A holding worth $2e-9 is a determined NON-ZERO reading — the price answered
+    and the quantity is not zero — and the plane's presentation rounding is six
+    decimals. A rounding that ran to completion would replace the measured figure
+    with 0.0: a bound tighter than anything witnessed, and (with the asset list
+    proven whole) the input from which ``sheet_state``'s magnitude arm would read
+    an empty sheet. What is asserted here is that the figure SURVIVES; the state
+    arm is asserted separately below, because with the magnitude preserved this
+    case cannot tell the two guards apart.
+    """
+    plane = P.ValuePlane()
+    plane.per_asset, plane.per_asset_state, _ = _reduce(**{"0x" + "1" * 40: [_Row(2e-9, rid=1, raw="1")]})
+    plane.asset_set_proven_complete["k"] = SCANNED
+    assert plane.per_asset_state["k"]["asset"] == P.ASSET_PRICED
+    assert plane.per_asset["k"]["asset"] == 2e-9
+    assert plane.sheet_state("k") != P.SHEET_PROVEN_EMPTY
+    assert plane.sheet_state("k") == P.SHEET_PRICED
+    assert plane.total("k") == 2e-9
+    assert plane.proven_empty_refusal("k") is None  # the completeness conjunct is SATISFIED here
+
+
+def test_a_priced_reading_whose_magnitude_is_zero_is_still_never_a_proven_empty_sheet():
+    """Pins the STATE arm, and only it.
+
+    The magnitude is 0.0 here and the asset list is proven whole, so every input
+    the magnitude arm can see says "empty" — the exact shape any future rounding,
+    truncation or unit change could hand ``sheet_state``. The reading's STATE
+    says a price answered on a non-zero quantity, and that is the witness the
+    branch is required to read: publishing ``proven_empty`` from this plane would
+    assert "every asset's quantity is proven zero" of a sheet whose quantity was
+    proven otherwise. The two guards are independent and each closes the hazard
+    on its own; this case is what fails if the state arm is dropped.
+    """
+    plane = value_plane(
+        per_asset={"k": {"asset": 0.0}},
+        per_asset_state={"k": {"asset": P.ASSET_PRICED}},
+        asset_set_proven_complete={"k": SCANNED},
+    )
+    assert plane.proven_empty_refusal("k") is None  # nothing refuses the empty; only the state stands in its way
+    assert plane.sheet_state("k") != P.SHEET_PROVEN_EMPTY
+    assert plane.sheet_state("k") == P.SHEET_PRICED
 
 
 def test_a_proven_zero_QUANTITY_is_the_only_witness_of_an_empty_sheet():
@@ -4123,6 +4201,118 @@ def test_b7_a_row_mixing_a_ceiling_with_an_ungraded_figure_claims_neither_bound(
     basis = row["value_at_stake_basis"]
     assert "1 of 2 entity(ies)" in basis
     assert "1 entity(ies) whose figure is not a proven ceiling and is graded in no direction" in basis
+
+
+def _attributed(usd: float, **over: Any) -> FunctionSignal:
+    """A ``flow.out`` instance whose figure came off the ATTRIBUTION path.
+
+    ``proven_upper_bound`` is the constant-amount probe crediting a holder's
+    whole priced balance — the live shape behind the reference corpus's rank-1
+    finding, and no ceiling to :func:`_ceiling_bearing_basis`, which is exactly
+    why its prose used to be written from coverage alone.
+    """
+    return flow_sig(
+        authority_openness="restricted",
+        principal_state="enumerated",
+        principal_refs=(PrincipalRef(1, "ethereum", EOA),),
+        gates={"reach_magnitude_usd": Tri.proven("proven_upper_bound", usd).to_json()},
+        **proven(1.0),
+        **reaches(KEY_C),
+        **over,
+    )
+
+
+def _unwitnessed_elsewhere() -> FunctionSignal:
+    """A sibling instance on the same row that answered no magnitude at all."""
+    return flow_sig(
+        function_name="g",
+        selector="0xfeedface",
+        authority_openness="restricted",
+        principal_state="enumerated",
+        principal_refs=(PrincipalRef(1, "ethereum", EOA),),
+        **proven(1.0),
+        **reaches(KEY_V),
+    )
+
+
+def test_f1_an_attribution_derived_total_under_a_gap_names_the_refusal_not_a_floor(fold):
+    """The live carrier: the basis said ">= proven floor" beside no floor.
+
+    The string was built from the COVERAGE axis in :func:`_row_value`, where the
+    attribution axis is not visible, so a row whose header refused the floor —
+    ``bound_direction: not_determined``, ``is_floor: false`` — still published
+    floor prose. Both axes are read where the direction is, and the refusal is
+    COUNTED off the membership test it was made on rather than asserted.
+    """
+    plane = value_plane(
+        {KEY_C: {"usdc": 5_000_000.0}},
+        per_asset_state={KEY_C: {"usdc": P.ASSET_PRICED, "wsteth": P.ASSET_UNPRICED}},
+    )
+    document = fold(
+        [_attributed(5_000.0), _unwitnessed_elsewhere()],
+        principals={1: facts(1, EOA, "eoa")},
+        value=plane,
+    )
+    finding = document.findings[0]
+    assert finding["value_at_stake_usd"] == 5_000.0
+    assert finding["entities_priced_from_a_composed_ceiling"] == []
+    assert finding["entities_priced_from_a_sheet_ceiling"] == []
+    assert finding["entities_holding_unpriced_assets"] == [KEY_C]
+    assert len(finding["undetermined_instances"]) == 1
+    assert finding["value_at_stake_bound_direction"] == FOLD.BOUND_DIRECTION_NOT_DETERMINED
+    assert finding["value_at_stake_is_floor"] is False
+    basis = finding["value_at_stake_basis"]
+    assert not basis.startswith(">= ")
+    assert "proven floor" not in basis
+    assert basis.startswith("bounded in NEITHER direction: 1 of 1 entity(ies)")
+    # Named as what the membership test establishes and no further: a sheet
+    # ceiling whose label was withheld reaches this arm too, so the population
+    # is "not proven free of" an upper bound, never "is attribution-derived".
+    assert "NOT proven free of an upper-bounding witness" in basis
+    # Both halves of the coverage gap are still counted — the reason it is not
+    # an at-most either — and neither is left for the reader to infer.
+    assert "1 instance(s) not_determined" in basis
+    assert "1 entity(ies) holding assets the priced sheet does not cover" in basis
+
+
+def test_f1_a_floor_counts_the_partly_priced_entities_it_was_earned_on(fold):
+    """The mirror face, which the reference corpus has no carrier for.
+
+    ``_bound_direction``'s coverage axis reads undetermined instances AND partly
+    priced entities; the floor string counted only the first. A floor earned on
+    the second alone therefore had no floor prose at all, and one earned on both
+    published a count that omitted half of what earned it.
+    """
+    plane = value_plane(
+        {KEY_C: {"usdc": 5_000_000.0}},
+        per_asset_state={KEY_C: {"usdc": P.ASSET_PRICED, "wsteth": P.ASSET_UNPRICED}},
+    )
+    floor = flow_sig(
+        authority_openness="restricted",
+        principal_state="enumerated",
+        principal_refs=(PrincipalRef(1, "ethereum", EOA),),
+        gates={"reach_magnitude_usd": Tri.proven("proven_floor", 5_000_000.0).to_json()},
+        **proven(1.0),
+        **reaches(KEY_C),
+    )
+    finding = fold([floor], principals={1: facts(1, EOA, "eoa")}, value=plane).findings[0]
+    assert finding["undetermined_instances"] == []
+    assert finding["entities_holding_unpriced_assets"] == [KEY_C]
+    assert finding["value_at_stake_bound_direction"] == FOLD.BOUND_DIRECTION_FLOOR
+    assert finding["value_at_stake_is_floor"] is True
+    assert (
+        finding["value_at_stake_basis"]
+        == ">= proven floor over 1 entity(ies); 1 entity(ies) holding assets the priced sheet does not cover"
+    )
+
+    # And beside an unanswered instance, both populations appear — the count the
+    # old string made of the instances alone is now the whole gap.
+    both = fold([floor, _unwitnessed_elsewhere()], principals={1: facts(1, EOA, "eoa")}, value=plane).findings[0]
+    assert both["value_at_stake_bound_direction"] == FOLD.BOUND_DIRECTION_FLOOR
+    assert both["value_at_stake_basis"] == (
+        ">= proven floor over 1 entity(ies); 1 instance(s) not_determined, "
+        "1 entity(ies) holding assets the priced sheet does not cover"
+    )
 
 
 def test_b7_a_direction_is_published_only_where_one_was_proven():

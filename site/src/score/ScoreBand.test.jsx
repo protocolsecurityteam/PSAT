@@ -774,6 +774,68 @@ describe("ScoreBand — protections carry the capability glossary", () => {
   });
 });
 
+describe("ScoreBand — protections publish the band's direction", () => {
+  const withFindings = (patch) => ({
+    ...ETHERFI,
+    findings: ETHERFI.findings.map((f) => ({ ...f, ...patch })),
+  });
+
+  it("badges a proven direction beside the band, outside the ellipsised text", async () => {
+    const { container } = renderBand({ score: withFindings({ value_at_stake_bound_direction: "ceiling" }) });
+    await openBreakdown();
+    const heads = [...container.querySelectorAll(".sc-prot-head")];
+    expect(heads).toHaveLength(4);
+    for (const head of heads) {
+      const badge = head.querySelector(".sc-fl");
+      expect(badge.textContent).toBe("ceiling");
+      expect(badge.title).toMatch(/^at most this much/);
+      // Outside `.sc-prot-what` (which ellipsises) and before `.sc-prot-saved`,
+      // whose margin-left:auto keeps it right-aligned regardless.
+      expect(head.querySelector(".sc-prot-what").contains(badge)).toBe(false);
+      expect(badge.nextElementSibling.className).toBe("sc-prot-saved");
+    }
+  });
+
+  it("says the direction was never proven when the producer proved none", async () => {
+    // Every finding in the corpus is at bound_direction not_determined, so all
+    // four protection rows wear the refusal chip.
+    const { container } = renderBand({ score: ETHERFI });
+    await openBreakdown();
+    const badges = [...container.querySelectorAll(".sc-prot-head .sc-fl")].map((n) => n.textContent);
+    expect(badges).toEqual(Array(4).fill("bound not determined"));
+  });
+
+  it("keeps an earned negative apart from an unmeasured band", async () => {
+    // The corpus has no proven_no_reach finding, so nothing else exercises this
+    // arm — and publishing it as "not determined" would contradict the same
+    // finding's deduction row, which prints the earned negative.
+    expect(ETHERFI.findings.some((f) => f.value_at_stake_basis === "proven_no_reach")).toBe(false);
+    const { container } = renderBand({
+      score: withFindings({ value_band: "not_determined", value_at_stake_basis: "proven_no_reach" }),
+    });
+    await openBreakdown();
+    const heads = [...container.querySelectorAll(".sc-prot-head")];
+    expect(heads).toHaveLength(4);
+    for (const head of heads) {
+      expect(within(head).getByText("proven no reach")).toBeInTheDocument();
+      expect(head.querySelector(".sc-nd")).toBeNull();
+      expect(head.querySelector(".sc-fl")).toBeNull();
+    }
+  });
+
+  it("prints an unmeasured band as not determined, never as no value", async () => {
+    const { container } = renderBand({ score: withFindings({ value_band: "not_determined" }) });
+    await openBreakdown();
+    const heads = [...container.querySelectorAll(".sc-prot-head")];
+    expect(heads).toHaveLength(4);
+    for (const head of heads) {
+      expect(head.querySelector(".sc-fl")).toBeNull();
+      expect(head.querySelector(".sc-nd").textContent).toBe("value not determined");
+      expect(head.querySelector(".sc-prot-what").textContent).not.toMatch(/ on /);
+    }
+  });
+});
+
 describe("ScoreBand — #score hash on an unopenable band", () => {
   it("leaves the hash alone in the error state, then opens when the score lands", async () => {
     window.history.replaceState({}, "", "/company/etherfi#score");

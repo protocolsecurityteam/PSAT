@@ -15,6 +15,7 @@ downstream.
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any, cast
 
 import pytest
@@ -25,6 +26,7 @@ from db.models import (
     ContractBalance,
     ContractBalanceFetch,
     ContractBalanceLatest,
+    ControlGraphNode,
     EffectiveFunction,
     Protocol,
 )
@@ -37,6 +39,7 @@ from services.effects.selection import (
     build_authority_graph,
 )
 from services.monitoring.balance_reads import (
+    ObservationSubject,
     balance_history_depth,
     contracts_missing_current_rows,
     native_balance_fact,
@@ -54,6 +57,7 @@ from utils.balance_status import (
     ASSET_SET_STATUS_RETURNED_ASSETS,
     ASSET_SET_STATUS_RETURNED_EMPTY,
     ASSET_SET_STATUSES,
+    BALANCE_SOURCE_PINNED_NATIVE_READ,
     BALANCE_WRITER_TVL,
     NATIVE_STATUS_FETCH_FAILED,
     NATIVE_STATUS_NOT_DETERMINED,
@@ -341,7 +345,7 @@ class TestRetentionNeverEvictsThePublishedObservation:
         for _ in range(6):
             _fetch(db_session, c, native=NATIVE_STATUS_FETCH_FAILED, assets=ASSET_SET_STATUS_FETCH_FAILED)
             db_session.flush()
-            prune_balance_fetches(db_session, c.id, c.address)
+            prune_balance_fetches(db_session, ObservationSubject.of_contract(c), c.address)
         db_session.commit()
 
         surviving = set(
@@ -360,7 +364,7 @@ class TestRetentionNeverEvictsThePublishedObservation:
         for _ in range(8):
             _fetch(db_session, c)
             db_session.flush()
-            prune_balance_fetches(db_session, c.id, c.address)
+            prune_balance_fetches(db_session, ObservationSubject.of_contract(c), c.address)
         db_session.commit()
         n = db_session.execute(
             select(func.count()).select_from(ContractBalanceFetch).where(ContractBalanceFetch.contract_id == c.id)
@@ -639,9 +643,12 @@ class TestViewCurrencyIsPerContractNotPerObservedAddress:
         assert _view_ids(db_session, c.id) == {proxy_row.id}
         assert self_row.id not in _view_ids(db_session, c.id)
 
-        # And the per-contract sum is that one row, never 10 + 999.
+        # And the per-contract sum is that one row, never 10 + 999. Compared as a
+        # NUMBER: the sum stays exact Decimal all the way through, but its scale
+        # is the storage column's and carries no claim, so pinning the rendering
+        # would pin the column width rather than the arithmetic under test.
         graph = build_authority_graph(db_session, proto.id)
-        assert str(graph.balance[c.address.lower()]) == "999.00"
+        assert graph.balance[c.address.lower()] == Decimal("999.00")
 
 
 @requires_postgres
@@ -1037,3 +1044,136 @@ class TestValuePlaneReadsAChainScanAsAnEmptySheet:
         proxy_key = f"ethereum::{proxy.address.lower()}"
         assert plane.native_fact[proxy_key] == "proven_zero_at_block_777"
         assert plane.sheet_state(proxy_key) == P.SHEET_PROVEN_EMPTY
+
+
+@requires_postgres
+class TestValuePlaneReadsEntityKeyedSheets:
+    """A perimeter entity with no ``contracts`` row still has a balance sheet.
+
+    Proven-codeless principals — Safe owners, capability principals — are in the
+    scored perimeter and have no ``contracts`` row at all, so nothing could read
+    them and their sheets published ``no_rows`` forever: not "holds nothing",
+    not "holds something", but "nobody looked". Their records are keyed on
+    ``(chain, address)`` instead, and the plane reads them through the SAME
+    conjunction it applies to a contract — never a weaker one because the
+    account happens to be absent from a table.
+    """
+
+    SCAN_BASIS = "chain log sweep of Transfer/TransferSingle/TransferBatch, blocks 0-21000000"
+
+    def _eoa_node(self, session, protocol_id: int, host: Contract, address: str) -> None:
+        """The earned ``eth_getCode`` witness that puts an address in the population."""
+        session.add(
+            ControlGraphNode(
+                contract_id=host.id,
+                address=address,
+                node_type="owner",
+                resolved_type="eoa",
+            )
+        )
+        session.flush()
+
+    def _entity_fetch(self, session, address: str, *, typed=None, native=NATIVE_STATUS_PROVEN_ZERO):
+        f = ContractBalanceFetch(
+            contract_id=None,
+            entity_chain="ethereum",
+            entity_address=address.lower(),
+            chain_id=1,
+            observed_address=address.lower(),
+            block_number=99,
+            native_status=native,
+            asset_set_status=ASSET_SET_STATUS_RETURNED_EMPTY,
+            asset_set_source=ASSET_SET_SOURCE_CHAIN_LOG_SWEEP,
+            asset_set_basis=self.SCAN_BASIS,
+            sweep_status=SWEEP_STATUS_COMPLETED,
+            swept_from_block=0,
+            swept_through_block=21_000_000,
+            typed_assets=typed if typed is not None else [],
+            writer=BALANCE_WRITER_TVL,
+        )
+        session.add(f)
+        session.flush()
+        return f
+
+    def _entity_native_row(self, session, address: str, fetch, *, raw: str = "0") -> None:
+        session.add(
+            ContractBalance(
+                contract_id=None,
+                entity_chain="ethereum",
+                entity_address=address.lower(),
+                token_address=None,
+                decimals=18,
+                raw_balance=raw,
+                usd_value=0.0 if raw == "0" else 1.0,
+                observed_address=address.lower(),
+                block_number=99,
+                fetch_id=fetch.id,
+                source=BALANCE_SOURCE_PINNED_NATIVE_READ,
+            )
+        )
+        session.flush()
+
+    def test_a_swept_clean_entity_holder_publishes_a_proven_empty_sheet(self, db_session):
+        from services.scoring import planes as P
+
+        proto = _protocol(db_session, "3s-plane-entity-empty")
+        host = _contract(db_session, proto.id, _addr("g1"))
+        eoa = _addr("g2")
+        self._eoa_node(db_session, proto.id, host, eoa)
+        fetch = self._entity_fetch(db_session, eoa)
+        self._entity_native_row(db_session, eoa, fetch)
+        db_session.commit()
+
+        plane = P.load_value_plane(db_session, proto.id)
+        key = f"ethereum::{eoa.lower()}"
+        assert plane.asset_set_is_proven_complete(key) is True
+        # The account is the entity, so the scanned/folded pair is 1/1 — the
+        # conjunct is ASKED of it, not waived.
+        record = plane.asset_set_proven_complete[key]
+        assert (record["accounts_scanned"], record["accounts_folded"]) == (1, 1)
+        assert record["accounts"] == [eoa.lower()]
+        assert plane.sheet_state(key) == P.SHEET_PROVEN_EMPTY
+        assert plane.total(key) == 0.0
+        # ...and the carrier never leaked into the contracts plane.
+        assert key not in plane.contract_entities
+        assert plane.provenance["contract_entities"] == len(plane.contract_entities)
+
+    def test_an_entity_holder_with_an_unreadable_typed_receipt_is_refused(self, db_session):
+        from services.scoring import planes as P
+
+        proto = _protocol(db_session, "3s-plane-entity-typed")
+        host = _contract(db_session, proto.id, _addr("g3"))
+        eoa = _addr("g4")
+        self._eoa_node(db_session, proto.id, host, eoa)
+        fetch = self._entity_fetch(
+            db_session,
+            eoa,
+            typed=[{"address": _addr("aa"), "kind": "typed", "quantity_readable": False, "quantity": None}],
+        )
+        self._entity_native_row(db_session, eoa, fetch)
+        db_session.commit()
+
+        plane = P.load_value_plane(db_session, proto.id)
+        key = f"ethereum::{eoa.lower()}"
+        assert plane.proven_empty_refusal(key) == P.EMPTY_REFUSED_TYPED_RECEIPT_UNRESOLVED
+        assert plane.sheet_state(key) != P.SHEET_PROVEN_EMPTY
+
+    def test_an_entity_outside_the_earned_eoa_witness_is_not_read_at_all(self, db_session):
+        """A record with no getCode witness behind it is not admitted by existence.
+
+        Rows exist for this address; nothing says the address is codeless. The
+        plane's population is the witness, never the row.
+        """
+        from services.scoring import planes as P
+
+        proto = _protocol(db_session, "3s-plane-entity-unwitnessed")
+        _contract(db_session, proto.id, _addr("g5"))
+        stranger = _addr("g6")
+        fetch = self._entity_fetch(db_session, stranger)
+        self._entity_native_row(db_session, stranger, fetch)
+        db_session.commit()
+
+        plane = P.load_value_plane(db_session, proto.id)
+        key = f"ethereum::{stranger.lower()}"
+        assert plane.sheet_state(key) == P.SHEET_NO_ROWS
+        assert plane.total(key) is None

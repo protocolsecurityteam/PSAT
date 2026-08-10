@@ -37,10 +37,16 @@ PauseAnalyzer:
 Output: per-storage-var classification dict ``{var_name → role}``.
 The predicate builder consumes this in a follow-up pass to update
 membership/equality leaves reading those vars.
+
+Both of the above are contract-scoped. ``verified_guard_verdicts`` is the
+per-FUNCTION export built on the same structural proof, for consumers that
+must not let a guard var declared somewhere on the contract stand in for a
+guard applied to the function in hand.
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, Literal, TypedDict
 
 try:
@@ -80,6 +86,50 @@ class PauseInfo(TypedDict):
     reentrancy_guarded_functions: list[str]
 
 
+W2_VERIFIED_GUARD_BASIS = "w2_verified_guard"
+
+#: The function carries no modifier that the pre/post-placeholder + revert test
+#: proves is a reentrancy guard, though the contract declares at least one such
+#: modifier — a contract-scoped guard var licenses nothing here.
+W2_REASON_GUARD_NOT_APPLIED = "guard_modifier_not_applied"
+#: No modifier on the contract passes the test at all (fake set/restore pairs,
+#: name-only locks, and transient-storage guards all land here).
+W2_REASON_NO_VERIFIED_GUARD = "no_verified_guard_modifier"
+#: Asked about a function this contract's analysis never enumerated. Absence of a
+#: row is never absence of a guard.
+W2_REASON_FUNCTION_NOT_ANALYZED = "function_not_analyzed"
+#: Two live declarations answer to the same signature, so no single body is THE
+#: function being asked about. Refuse rather than pick one.
+W2_REASON_AMBIGUOUS_DECLARATION = "ambiguous_function_declaration"
+
+
+class VerifiedGuardVerdict(TypedDict):
+    """W2's verified-guard satisfier for ONE function, three-valued.
+
+    ``state`` is ``"proven"`` only when a modifier that the analyzer's own
+    pre/post-placeholder-write **and** revert-reading-the-var test proved is a
+    reentrancy guard is applied to this very function. Everything else is
+    ``"not_determined"`` carrying the reason — never a bare bool, and never a
+    proven-absent: this arm cannot earn "this function needs no guard", so it
+    never claims it.
+
+    On a refusal ``basis`` is ``None`` and the evidence lists are empty; on a
+    proof ``reason`` is ``None``. ``basis`` names WHICH proof succeeded so a
+    consumer joining several W2 satisfiers can tell them apart.
+
+    ``declaration`` is the canonical name of the body the verdict is about — the
+    audit trail for the identity question, since a signature alone does not name
+    a body in an inheritance chain.
+    """
+
+    state: Literal["proven", "not_determined"]
+    basis: str | None
+    reason: str | None
+    declaration: str | None
+    guard_vars: list[str]
+    guard_modifiers: list[str]
+
+
 # ---------------------------------------------------------------------------
 # ReentrancyAnalyzer
 # ---------------------------------------------------------------------------
@@ -103,10 +153,12 @@ class ReentrancyAnalyzer:
         # Scan modifier bodies. Modifiers are the canonical home for
         # ReentrancyGuard-style patterns (the entire write-pre-write-
         # post-placeholder dance lives there).
-        for modifier in getattr(self.contract, "modifiers", []) or []:
-            v = self._modifier_guard_var(modifier)
-            if v is not None:
-                guards.add(v)
+        #
+        # A modifier holding two guard vars at once used to contribute whichever
+        # one set iteration reached first, i.e. a hash-seed-dependent answer.
+        # Unioning the proven set publishes every var the modifier earned.
+        for proven in self.reentrancy_guard_modifiers().values():
+            guards |= proven
         # Function bodies could also contain inline guards (rare but
         # legal). Walk them with the same pre-/post-call pattern.
         for fn in getattr(self.contract, "functions", []) or []:
@@ -115,23 +167,46 @@ class ReentrancyAnalyzer:
                 guards.add(v)
         return guards
 
-    def _modifier_guard_var(self, modifier: Any) -> str | None:
+    def reentrancy_guard_modifiers(self) -> dict[int, frozenset[str]]:
+        """``id(modifier) -> the guard vars that modifier is PROVEN to hold``,
+        for every modifier the pre/post-placeholder + revert test admits.
+
+        Same computation as :meth:`_modifier_guard_var`, with the modifier
+        retained — which is what lets a caller ask whether *this* function
+        carries a proven guard instead of only whether the contract declares a
+        guard var somewhere. Modifiers proving nothing are absent.
+
+        Keyed on ``id()`` rather than a name because that is the identity
+        ``fn.modifiers`` can be joined against: Slither hands the derived
+        contract its own copy of an inherited modifier, and the copy in
+        ``contract.modifiers`` is the same object the applying function lists.
+        """
+        proven: dict[int, frozenset[str]] = {}
+        for modifier in getattr(self.contract, "modifiers", []) or []:
+            guard_vars = self._proven_guard_vars(modifier)
+            if guard_vars:
+                proven[id(modifier)] = guard_vars
+        return proven
+
+    def _proven_guard_vars(self, modifier: Any) -> frozenset[str]:
         nodes = getattr(modifier, "nodes", []) or []
         placeholder_idx = self._find_placeholder_index(nodes)
         if placeholder_idx is None:
-            return None
+            return frozenset()
         pre_writes = self._state_var_writes(nodes[:placeholder_idx])
         post_writes = self._state_var_writes(nodes[placeholder_idx + 1 :])
         # The same var written before AND after the placeholder.
         common = pre_writes & post_writes
-        if not common:
-            return None
         # Must also have a require/revert reading the same var
         # before the pre-write.
-        for var in common:
-            if self._has_revert_reading_var(nodes[:placeholder_idx], var):
-                return var
-        return None
+        return frozenset(var for var in common if self._has_revert_reading_var(nodes[:placeholder_idx], var))
+
+    def _modifier_guard_var(self, modifier: Any) -> str | None:
+        # Retained for callers wanting the single-var shape; ``run`` unions.
+        guard_vars = self._proven_guard_vars(modifier)
+        if not guard_vars:
+            return None
+        return sorted(guard_vars)[0]
 
     def _function_guard_var(self, fn: Any) -> str | None:
         # Inline guard pattern: same write/restore around each
@@ -214,6 +289,117 @@ class ReentrancyAnalyzer:
                     if callee_nodes and self._search_revert_reading_var(callee_nodes, var_name, visited | {cid}):
                         return True
         return False
+
+
+# ---------------------------------------------------------------------------
+# W2's verified-guard satisfier (the arm the payout witness consumes)
+# ---------------------------------------------------------------------------
+
+
+def reentrancy_guard_modifiers(contract: Any) -> dict[int, frozenset[str]]:
+    """``id(modifier) -> proven guard vars`` for ``contract``.
+
+    Deliberately NOT the name fallback: ``effects.py::_is_reentrancy_guard_var``
+    ORs its structural proof with an identifier match, which is admissible only
+    because that class is a pure suppressor. Nothing here is reachable from it.
+    """
+    return ReentrancyAnalyzer(contract).reentrancy_guard_modifiers()
+
+
+def live_declarations(contract: Any) -> dict[str, list[Any]]:
+    """``full_name -> the non-constructor declarations that signature still
+    reaches``, shadowed ones dropped.
+
+    ``contract.functions`` is every declaration in the linearized chain, so a
+    signature overridden down the chain appears more than once and the base
+    body — which the deployed contract never executes — is in there beside the
+    override. Slither states the relation itself as ``is_shadowed``; that is the
+    primitive used here rather than any iteration-order assumption. A signature
+    is left as a LIST because more than one survivor is a real (if unusual)
+    parse outcome, and the caller must decide, not a last-write-wins dict.
+
+    ``is_shadowed`` missing is read as live, which can only produce a
+    multi-survivor list — refused below — never a silent pick.
+    """
+    by_signature: dict[str, list[Any]] = {}
+    for fn in getattr(contract, "functions", []) or []:
+        if getattr(fn, "is_constructor", False) or getattr(fn, "is_shadowed", False):
+            continue
+        full_name = getattr(fn, "full_name", None) or getattr(fn, "name", None)
+        if not isinstance(full_name, str) or not full_name:
+            continue
+        by_signature.setdefault(full_name, []).append(fn)
+    return by_signature
+
+
+def verified_guard_verdicts(contract: Any) -> dict[str, VerifiedGuardVerdict]:
+    """Per-function W2 verified-guard verdicts, keyed by ``full_name``.
+
+    A signature is only a usable key because the declarations behind it are
+    resolved first: the verdict describes the body that actually runs, and a
+    signature answered by two live bodies is refused outright rather than
+    decided by which one Slither yielded last. ``declaration`` carries the
+    canonical name of whichever body was read.
+
+    Total over the contract's live non-constructor signatures, so a caller reads
+    a stated ``not_determined`` rather than inferring one from a missing key. The
+    guard var set is contract-scoped; the join below is not — a function earns
+    the proof only by carrying a proven guard modifier itself.
+    """
+    proven_modifiers = reentrancy_guard_modifiers(contract)
+    contract_has_guard = bool(proven_modifiers)
+    verdicts: dict[str, VerifiedGuardVerdict] = {}
+    for full_name, declarations in live_declarations(contract).items():
+        if len(declarations) > 1:
+            verdicts[full_name] = _guard_refusal(W2_REASON_AMBIGUOUS_DECLARATION)
+            continue
+        fn = declarations[0]
+        declaration = getattr(fn, "canonical_name", None) or full_name
+        applied = [m for m in (getattr(fn, "modifiers", []) or []) if id(m) in proven_modifiers]
+        if not applied:
+            verdicts[full_name] = _guard_refusal(
+                W2_REASON_GUARD_NOT_APPLIED if contract_has_guard else W2_REASON_NO_VERIFIED_GUARD,
+                declaration,
+            )
+            continue
+        guard_vars: set[str] = set()
+        for modifier in applied:
+            guard_vars |= proven_modifiers[id(modifier)]
+        verdicts[full_name] = {
+            "state": "proven",
+            "basis": W2_VERIFIED_GUARD_BASIS,
+            "reason": None,
+            "declaration": declaration,
+            "guard_vars": sorted(guard_vars),
+            "guard_modifiers": sorted(
+                {getattr(m, "canonical_name", None) or getattr(m, "name", "") for m in applied} - {""}
+            ),
+        }
+    return verdicts
+
+
+def verified_guard_verdict(
+    verdicts: Mapping[str, VerifiedGuardVerdict],
+    function_full_name: str,
+) -> VerifiedGuardVerdict:
+    """Look up one function in :func:`verified_guard_verdicts`' output.
+
+    Separate from the producer so a consumer computes the contract-scoped
+    analysis once and still gets an explicit verdict for a function the analysis
+    never saw — including one whose only declarations were shadowed away.
+    """
+    return verdicts.get(function_full_name) or _guard_refusal(W2_REASON_FUNCTION_NOT_ANALYZED)
+
+
+def _guard_refusal(reason: str, declaration: str | None = None) -> VerifiedGuardVerdict:
+    return {
+        "state": "not_determined",
+        "basis": None,
+        "reason": reason,
+        "declaration": declaration,
+        "guard_vars": [],
+        "guard_modifiers": [],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -735,6 +921,13 @@ def _build_pause_info(
     * ``reentrancy_guarded_functions``: every function whose modifier
       list includes a reentrancy-classified modifier (one whose body
       writes a reentrancy var on both sides of PLACEHOLDER).
+
+    That last selection is the WEAK predicate — "some modifier writes a var the
+    analyzer flagged" — and it is not a guard proof: the revert conjunct is not
+    re-checked per modifier, so a modifier that merely touches the var enrolls
+    its functions. It stays as-is because this list is a descriptive export.
+    Anything that must not be licensed by a contract-scoped var reads
+    :func:`verified_guard_verdicts` instead, which joins against the proven set.
     """
     pause_toggle_fns: list[str] = []
     reentrancy_guarded_fns: list[str] = []

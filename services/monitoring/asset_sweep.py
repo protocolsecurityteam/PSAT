@@ -422,6 +422,75 @@ def discover_recipient_assets(
     return erc20, typed, None
 
 
+def _discover_with_isolation(
+    batch: list[str],
+    *,
+    rpc_url: str,
+    chain_id: int,
+    from_block: int,
+    to_block: int,
+    cost: SweepCost,
+    fetcher: RpcEventLogFetcher | None = None,
+) -> tuple[dict[str, set[str]], dict[str, dict[str, TypedSighting]], dict[str, str | None]]:
+    """:func:`discover_recipient_assets`, with the failure narrowed to its cause.
+
+    The batch is one request per window because the recipient filter is an
+    OR-set, and that sharing has a cost the batch size hides: a window the
+    upstream cannot serve whole aborts EVERY holder in it, so one address with a
+    dense incoming-transfer history refuses thirty-nine quiet ones a completeness
+    each of them individually could have had. That is fail-closed in the right
+    direction but far wider than the evidence supports.
+
+    So a failed batch is halved and re-asked, down to the single address that
+    actually could not be proven whole. It keeps its failure — the guard is not
+    weakened, and no partial list is ever published as a whole one — while its
+    neighbours keep the answer their own windows produced.
+
+    Two things bound the retry. A batch of one has nothing left to isolate. And
+    a cycle that has spent its request budget stops: the budget is the reason
+    the failure fired, splitting cannot buy an answer with no requests left, and
+    every remaining holder is honestly recorded as unproven.
+    """
+    erc20, typed, failure = discover_recipient_assets(
+        batch,
+        rpc_url=rpc_url,
+        chain_id=chain_id,
+        from_block=from_block,
+        to_block=to_block,
+        cost=cost,
+        fetcher=fetcher,
+    )
+    if failure is None:
+        return erc20, typed, dict.fromkeys(batch, None)
+    if len(batch) == 1 or cost.total >= SWEEP_REQUEST_BUDGET:
+        return erc20, typed, dict.fromkeys(batch, failure)
+
+    logger.info(
+        "asset sweep: batch of %d could not be proven whole on chain %s; isolating (%s)",
+        len(batch),
+        chain_id,
+        failure,
+    )
+    mid = len(batch) // 2
+    merged_erc20: dict[str, set[str]] = {}
+    merged_typed: dict[str, dict[str, TypedSighting]] = {}
+    merged_failures: dict[str, str | None] = {}
+    for half in (batch[:mid], batch[mid:]):
+        half_erc20, half_typed, half_failures = _discover_with_isolation(
+            half,
+            rpc_url=rpc_url,
+            chain_id=chain_id,
+            from_block=from_block,
+            to_block=to_block,
+            cost=cost,
+            fetcher=fetcher,
+        )
+        merged_erc20.update(half_erc20)
+        merged_typed.update(half_typed)
+        merged_failures.update(half_failures)
+    return merged_erc20, merged_typed, merged_failures
+
+
 def _attribute(
     logs: list[FetchedEventLog],
     *,
@@ -922,7 +991,7 @@ def sweep_holders(
             continue
         for index in range(0, len(cohort), SWEEP_ADDRESS_BATCH):
             batch = cohort[index : index + SWEEP_ADDRESS_BATCH]
-            erc20, typed, failure = discover_recipient_assets(
+            erc20, typed, failures = _discover_with_isolation(
                 batch,
                 rpc_url=rpc_url,
                 chain_id=chain_id,
@@ -932,6 +1001,7 @@ def sweep_holders(
                 fetcher=fetcher,
             )
             for address in batch:
+                failure = failures.get(address)
                 if failure is not None:
                     outcomes[address] = SweepOutcome(
                         address=address,

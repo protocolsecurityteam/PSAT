@@ -42,6 +42,8 @@ _STORAGE_ENV_KEYS = (
 from db.models import (  # noqa: E402
     AuditContractCoverage,
     Contract,
+    ContractBalance,
+    ContractBalanceFetch,
     ContractCreationWitness,
     DaemonLease,
     EffectVerdict,
@@ -744,6 +746,20 @@ def db_session():
             # can clear it between tests. Without this line one test's
             # constructed fan-out becomes the next test's stored verdict.
             TokenDeliveryEvidence,
+            # Balance readings have TWO identity arms, and only one of them is
+            # a ``contracts`` FK. An ENTITY-keyed row — a discovery-only
+            # principal, ``contract_id`` NULL, named by ``(entity_chain,
+            # entity_address)`` — is reachable by no cascade above, so this
+            # teardown is the only thing that can clear it. Left behind, one
+            # test's reading is the next run's freshness: a producer whose
+            # cadence is measured against its own rows would see yesterday's
+            # test as today's answer and never fire. The contract-keyed rows
+            # already cascade from ``Contract``; deleting them here is
+            # redundant, not wrong, and keeps the two arms swept by one line.
+            # ``contract_balances_latest`` is a UNION view over these tables,
+            # so it needs no line of its own.
+            ContractBalance,
+            ContractBalanceFetch,
         ]:
             session.query(model).delete()
         session.commit()

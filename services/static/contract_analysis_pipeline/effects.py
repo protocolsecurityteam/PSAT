@@ -45,13 +45,14 @@ claims plane reads):
 from __future__ import annotations
 
 import re
-from typing import Any, Literal, TypedDict, cast
+from typing import Any, Literal, NamedTuple, TypedDict, cast
 from weakref import WeakKeyDictionary
 
 from eth_utils.crypto import keccak
 from typing_extensions import NotRequired
 
 from .provenance import ProvenanceEngine, is_top
+from .record_ordering import OrderingWitness, attach_record_ordering
 from .shared import _all_state_variables
 from .summaries import (
     _action_summary,
@@ -315,6 +316,38 @@ class ValueFlow(TypedDict):
     # Deciding it needs a resolution-plane writer that knows the deployment is
     # neither, which is why the type is a single literal rather than a bool.
     writer_surface_closed: NotRequired[Literal["not_determined"]]
+    # The storage RECORD the amount is read out of, published only when
+    # ``amount_kind`` is ``bounded_by_storage`` and every contributing site
+    # resolved the SAME declaration — canonical (``Contract.var``), because two
+    # contracts in one call graph may each declare ``bids`` and a bare name
+    # cannot tell them apart. This names the cell, not a bound: it says which
+    # record a guard would have to be shown to gate, and says nothing about who
+    # may read or write it.
+    amount_record_variable: NotRequired[str]
+    # The struct member inside that record the amount reads (``[]`` for a scalar
+    # mapping), and the origin of each index level that selected the cell —
+    # ``param`` / ``msg_sender`` / ``indeterminate``, the first index level
+    # first — with the ENTRY parameter slot of each level beside it (``null``
+    # where the key is not one whole entry argument). ``param`` is earned: it
+    # rides only where the slot beside it is proven, so a key the caller merely
+    # DERIVED (``bids[a + b]``, ``bids[uint128(id)]``) reads as indeterminate
+    # rather than as a cell the caller named. Each list rides only where every
+    # contributing site agreed on it: absence is a site disagreement, and a
+    # consumer must read it as "not determined", never as an empty path.
+    amount_record_member_path: NotRequired[list[str]]
+    amount_record_key_kinds: NotRequired[list[str]]
+    amount_record_key_param_indexes: NotRequired[list[int | None]]
+    # The distinct declarations when the sites named more than one — present
+    # precisely where ``amount_record_variable`` is absent for that reason, so
+    # one member can never be read as the whole. Exactly the
+    # ``target_variables`` discipline.
+    amount_record_variables: NotRequired[list[str]]
+    # W2: does a clearing write to the record this amount came out of
+    # must-precede every external call? Three-valued, computed by
+    # ``record_ordering``. Present only where the amount NAMES a record — the
+    # ordering question does not exist otherwise, and absence is never a
+    # refusal.
+    record_ordering: NotRequired[OrderingWitness]
 
 
 class EffectInfo(TypedDict):
@@ -2118,26 +2151,60 @@ def _single_phi_input(var: Any, ctx: _UnitCtx) -> Any:
     return next(iter(rvals.values())) if len(rvals) == 1 else None
 
 
-def _element_root_origins(operand: Any, ctx: _UnitCtx) -> set[tuple[str, ...]] | None:
-    """If ``operand`` reads an array/mapping/struct element (``a[k]`` /
-    ``s.field`` / ``map[k].field``, possibly via a storage-pointer local
-    ``Req storage rq = _requests[id]; rq.recipient``), the set of neutral origins
-    of the access's ROOT base. ``None`` when it is not such an access.
+def _member_name(ir: Any) -> str:
+    """The field name a ``Member`` IR selects. Slither carries it as a Constant
+    whose ``name`` is the identifier; ``str`` is the fallback so an unusual
+    right-hand shape names itself rather than vanishing."""
+    right = getattr(ir, "variable_right", None)
+    name = getattr(right, "name", None)
+    return str(name) if name else str(right)
+
+
+class _ElementRoot(NamedTuple):
+    """One ROOT the element walk reached, with the access path taken to it.
+
+    ``keys`` and ``members`` are in WALK order — the access nearest the read
+    first, which is the reverse of source order: ``m[a][b].f`` walks ``f``, then
+    ``b``, then ``a``. ``variable`` is the state variable the walk actually
+    landed on, carried so a reader takes the declaration off the object it
+    proved rather than re-resolving a bare name. ``merged_base`` records that
+    the root was a multi-input Phi: a genuine cross-branch merge resolved as an
+    argument would be, not a base this walk identified, so nothing may be read
+    off it as a record identity."""
+
+    origin: tuple[str, ...]
+    keys: tuple[Any, ...]
+    members: tuple[str, ...]
+    merged_base: bool
+    variable: Any
+
+
+def _element_walk(operand: Any, ctx: _UnitCtx) -> list[_ElementRoot] | None:
+    """The shared def-edge walk behind every element fact: if ``operand`` reads
+    an array/mapping/struct element (``a[k]`` / ``s.field`` / ``map[k].field``,
+    possibly via a storage-pointer local ``Req storage rq = _requests[id];
+    rq.recipient``), every ROOT base it reaches together with the keys and
+    members the access path selected. ``None`` when it is not such an access.
 
     This is a POSITIVE structural test on the operand's def-use chain — an
     ``Index`` / ``Member`` op — so it distinguishes a genuine element read from
     the source-set-identical shape a forwarded param produces via the entrypoint
-    Phi (which has no Index/Member IR). The KEY is deliberately ignored: every
-    element of one base shares that base's origin, so the base alone decides the
-    kind and a caller-chosen (or loop-merged) index cannot upgrade or degrade it."""
+    Phi (which has no Index/Member IR).
+
+    One walk, two readers: :func:`_element_root_origins` keeps only the roots
+    (the amount/destination LATTICE is decided by the base alone), while
+    :func:`_element_record_site` also reads the path (the RECORD identity is the
+    base, the member and the key together). Forking the walk would let the two
+    drift, and a join across them would then join a record to a different
+    record."""
     from slither.core.variables.state_variable import StateVariable  # type: ignore[import]
 
     seen: set[int] = set()
-    stack: list[Any] = [operand]
-    origins: set[tuple[str, ...]] = set()
+    stack: list[tuple[Any, tuple[Any, ...], tuple[str, ...]]] = [(operand, (), ())]
+    roots: list[_ElementRoot] = []
     found_access = False
     while stack:
-        v = stack.pop()
+        v, keys, members = stack.pop()
         if v is None or id(v) in seen:
             continue
         seen.add(id(v))
@@ -2151,9 +2218,9 @@ def _element_root_origins(operand: Any, ctx: _UnitCtx) -> set[tuple[str, ...]] |
             continue
         tn = type(ir).__name__
         if tn == "TypeConversion":
-            stack.append(getattr(ir, "variable", None))
+            stack.append((getattr(ir, "variable", None), keys, members))
         elif tn == "Assignment":
-            stack.append(getattr(ir, "rvalue", None))
+            stack.append((getattr(ir, "rvalue", None), keys, members))
         elif tn == "Phi":
             # A single-input Phi is pure SSA renaming — a storage-pointer local
             # (``Bid storage bid = bids[id]``) given a fresh version because the
@@ -2165,17 +2232,21 @@ def _element_root_origins(operand: Any, ctx: _UnitCtx) -> set[tuple[str, ...]] |
             # case is routed at the Index/Member handler below.)
             nxt = _single_phi_input(v, ctx)
             if nxt is not None:
-                stack.append(nxt)
+                stack.append((nxt, keys, members))
         elif tn in ("Index", "Member"):
             found_access = True
             base = getattr(ir, "variable_left", None)
+            if tn == "Index":
+                keys = (*keys, getattr(ir, "variable_right", None))
+            else:
+                members = (*members, _member_name(ir))
             base_nsv = getattr(base, "non_ssa_version", None)
             base_var = (
                 base if isinstance(base, StateVariable) else base_nsv if isinstance(base_nsv, StateVariable) else None
             )
             if base_var is not None:
                 if base_var.name:
-                    origins.add(("state_variable", base_var.name))
+                    roots.append(_ElementRoot(("state_variable", base_var.name), keys, members, False, base_var))
             elif type(ctx.def_by_id.get(id(base))).__name__ in _ELEMENT_WALK_DEFS or _single_phi_input(base, ctx):
                 # A nested access (map[k].field), an aliasing local, or a
                 # single-input-Phi storage pointer (``bid.amount`` where ``bid``
@@ -2183,14 +2254,28 @@ def _element_root_origins(operand: Any, ctx: _UnitCtx) -> set[tuple[str, ...]] |
                 # rather than reading the intermediate reference's base∪key source
                 # union. A multi-input Phi base is NOT walked here; it falls to the
                 # ``_arg_origin`` resolution below, exactly as before.
-                stack.append(base)
+                stack.append((base, keys, members))
             else:
                 # A parameter / merged / unresolvable root: resolve it exactly as
                 # a forwarded call-site argument would be (binding-chained, with
                 # the merged-local guard).
-                origins.add(_arg_origin(base, ctx))
+                merged = type(ctx.def_by_id.get(id(base))).__name__ == "Phi"
+                roots.append(_ElementRoot(_arg_origin(base, ctx), keys, members, merged, None))
         # An unknown def (call return, etc.) ends this branch.
-    return origins if (found_access and origins) else None
+    return roots if (found_access and roots) else None
+
+
+def _element_root_origins(operand: Any, ctx: _UnitCtx) -> set[tuple[str, ...]] | None:
+    """The set of neutral origins of an element read's ROOT base(s), or ``None``
+    when the operand is not an element read.
+
+    The KEY is deliberately ignored here: every element of one base shares that
+    base's origin, so the base alone decides the kind and a caller-chosen (or
+    loop-merged) index cannot upgrade or degrade it. The key is not lost — it is
+    read by :func:`_element_record_site` off the same walk, where identity, not
+    kind, is the question."""
+    roots = _element_walk(operand, ctx)
+    return {root.origin for root in roots} if roots is not None else None
 
 
 def _element_origin(operand: Any, ctx: _UnitCtx) -> tuple[str, ...] | None:
@@ -2205,6 +2290,161 @@ def _element_origin(operand: Any, ctx: _UnitCtx) -> tuple[str, ...] | None:
         return None
     root = next(iter(roots))
     return root if root[0] in _ELEMENT_ROOT_TAGS else None
+
+
+class ElementRecordSite(TypedDict):
+    """The storage RECORD one element read names, at one IR site.
+
+    Where :func:`_element_origin` answers "what kind of value is this", this
+    answers "which cell is it read out of" — the base DECLARATION (canonical,
+    because two contracts in one call graph may each declare ``bids``), the
+    member selected inside it, and the origin of every key that selected it.
+    Identity for a join; it resolves nothing on its own."""
+
+    base_variable: str
+    base_canonical: str
+    member_path: tuple[str, ...]
+    # Per index level in SOURCE order — the first index level written first
+    # (``m[a][b]`` gives ``a`` then ``b``). Three tokens only —
+    # ``("param",)``, ``("msg_sender",)``, ``("indeterminate",)`` — because the
+    # question this answers is "which caller-relative slot names this key", and
+    # every other resolved origin (a constant, a state variable) answers "none
+    # of them". ``indeterminate`` here is therefore never readable as "no origin
+    # exists". ``param`` is EARNED: it rides only where the level is one whole
+    # entry argument and ``key_param_indexes`` names its slot, so a consumer
+    # reading the kind alone can never take a caller-derived arithmetic mix
+    # (``bids[a + b]``) for a cell the caller named.
+    key_origins: tuple[tuple[str, ...], ...]
+    # The ENTRY parameter slot of each key level, positionally aligned with
+    # ``key_origins``. ``None`` where the key is not one whole entry argument —
+    # ``msg.sender``, a constant, a merged mix, or a value narrowed on the way
+    # in (see :func:`_key_conversion_is_lossy`).
+    key_param_indexes: tuple[int | None, ...]
+    key_levels: int
+
+
+# Deep nesting is not this pass's problem: past these depths the record identity
+# a join would compare stops being a thing one guard leaf can name, so the site
+# refuses instead of publishing a path no consumer is specified to read.
+_MAX_RECORD_MEMBER_DEPTH = 2
+_MAX_RECORD_KEY_LEVELS = 2
+
+# The key-origin vocabulary — see ``ElementRecordSite.key_origins``.
+_RECORD_KEY_ORIGINS: dict[str, tuple[str, ...]] = {"param": ("param",), "msg_sender": ("msg_sender",)}
+
+
+def _type_bit_width(declared: Any) -> int | None:
+    """The width in bits of a value type, or ``None`` when it is not a fixed
+    width this pass can measure (a dynamic type, an enum, a struct). A contract
+    reference IS an address, which is what lets an ``IERC20(addr)`` /
+    ``uint160`` hop keep resolving."""
+    from slither.core.declarations.contract import Contract  # type: ignore[import]
+    from slither.core.solidity_types.elementary_type import ElementaryType  # type: ignore[import]
+    from slither.core.solidity_types.user_defined_type import UserDefinedType  # type: ignore[import]
+    from slither.exceptions import SlitherException  # type: ignore[import]
+
+    if isinstance(declared, ElementaryType):
+        try:
+            size_bytes, dynamic = declared.storage_size
+        except SlitherException:
+            return None
+        return None if dynamic else size_bytes * 8
+    if isinstance(declared, UserDefinedType) and isinstance(getattr(declared, "type", None), Contract):
+        return 160
+    return None
+
+
+def _key_conversion_is_lossy(operand: Any, ctx: _UnitCtx) -> bool:
+    """True when the key's def chain holds a ``TypeConversion`` this pass cannot
+    prove keeps the whole value — a NARROWING cast (``uint128(id)``), or one
+    between widths it cannot measure. Widening and same-width casts
+    (``uint160`` → ``address``, ``address`` → a contract type) keep resolving.
+
+    The KEY is the cell's identity, and a narrowed key selects a DIFFERENT cell
+    for a large argument while still resolving to that argument's ABI slot. The
+    guard side reads the slot through this same helper, so without this test a
+    guard on ``bids[id]`` and a payout from ``bids[uint128(id)]`` — two cells —
+    AGREE on the slot they were keyed by, and that agreement is the whole join.
+    So the slot is withheld: the argument was not, in whole, the key."""
+    seen: set[int] = set()
+    stack: list[Any] = [operand]
+    while stack:
+        v = stack.pop()
+        if v is None or id(v) in seen:
+            continue
+        seen.add(id(v))
+        ir = ctx.def_by_id.get(id(v))
+        if ir is None:
+            continue
+        tn = type(ir).__name__
+        if tn == "TypeConversion":
+            source = getattr(ir, "variable", None)
+            source_width = _type_bit_width(getattr(source, "type", None))
+            target_width = _type_bit_width(getattr(ir, "type", None))
+            if source_width is None or target_width is None or target_width < source_width:
+                return True
+            stack.append(source)
+        elif tn == "Assignment":
+            stack.append(getattr(ir, "rvalue", None))
+        elif tn == "Phi":
+            stack.append(_single_phi_input(v, ctx))
+    return False
+
+
+def _element_record_site(operand: Any, ctx: _UnitCtx) -> ElementRecordSite | None:
+    """The record ``operand`` is read out of, or ``None`` on any ambiguity.
+
+    Refuses — and a refusal is an absent record downstream, never a weaker one —
+    on more than one root, a root that is not a state variable this walk landed
+    on (a parameter or constant root — a calldata struct, a literal table — has
+    no declaration to compare a guard's against), a merged (multi-input Phi)
+    base, a key reaching a cross-branch merge, no key at all (a whole-struct
+    read is not a keyed record), and depths past ``_MAX_RECORD_*``.
+
+    The key origins reuse ``_arg_origin``, so a key that is a callee formal
+    resolves through the call-site binding the flow walk already threads —
+    which is what makes ``_burn(msg.sender, amt)``'s ``_balances[account]``
+    resolve to the caller's own cell rather than to an unknown address."""
+    roots = _element_walk(operand, ctx)
+    if roots is None or len(roots) != 1:
+        return None
+    root = roots[0]
+    if root.merged_base or root.origin[0] not in _ELEMENT_ROOT_TAGS or root.variable is None:
+        return None
+    name = getattr(root.variable, "name", None)
+    canonical = getattr(root.variable, "canonical_name", None)
+    if not name or not canonical:
+        return None
+    member_path = tuple(reversed(root.members))
+    keys = tuple(reversed(root.keys))
+    if not keys or len(keys) > _MAX_RECORD_KEY_LEVELS or len(member_path) > _MAX_RECORD_MEMBER_DEPTH:
+        return None
+    key_origins: list[tuple[str, ...]] = []
+    key_param_indexes: list[int | None] = []
+    for key in keys:
+        if key is None or _reaches_merged_local(key, ctx):
+            # The key IS the cell's identity: a merged one selects one of several
+            # cells and the walk cannot say which.
+            return None
+        index = None if _key_conversion_is_lossy(key, ctx) else _operand_param_index(key, ctx)
+        origin = _RECORD_KEY_ORIGINS.get(_arg_origin(key, ctx)[0], ("indeterminate",))
+        if origin == ("param",) and index is None:
+            # Caller-DERIVED is not caller-NAMED: ``bids[a + b]`` and
+            # ``bids[uint128(id)]`` both come from the caller's arguments, and
+            # neither says which argument IS the key. Publishing ``param`` there
+            # would let a consumer reading the kind alone take an unproven slot
+            # for a proven one.
+            origin = ("indeterminate",)
+        key_origins.append(origin)
+        key_param_indexes.append(index)
+    return ElementRecordSite(
+        base_variable=str(name),
+        base_canonical=str(canonical),
+        member_path=member_path,
+        key_origins=tuple(key_origins),
+        key_param_indexes=tuple(key_param_indexes),
+        key_levels=len(keys),
+    )
 
 
 # ERC-721 ``ownerOf(uint256)``. A destination read back from it is the CURRENT
@@ -3339,6 +3579,11 @@ def _value_flow_facts(function: Any, *, zero_value_sinks: set[str] | None = None
     amount_sites: dict[tuple[str, str | None, str, bool, str], list[tuple[str, str]]] = {}
     target_indexes: dict[tuple[str, str | None, str, bool, str], list[int | None]] = {}
     amount_indexes: dict[tuple[str, str | None, str, bool, str], list[int | None]] = {}
+    # Per amount site: the storage record it is read out of, or None where the
+    # site named none. Carried per site — like the destination's variable — so
+    # the fold decides agreement instead of a lookup at the end guessing which
+    # site's record it holds.
+    amount_record_sites: dict[tuple[str, str | None, str, bool, str], list[ElementRecordSite | None]] = {}
     # Per destination site: the state variable it names (or None), the writer
     # signatures for that variable IN THE SITE'S OWN classification context, and
     # that context's scan completeness. Carried per site rather than looked up at
@@ -3485,6 +3730,7 @@ def _value_flow_facts(function: Any, *, zero_value_sinks: set[str] | None = None
             if amount_site[0] == "param_derived"
             else _operand_param_index(amount, ctx)
         )
+        amount_record_sites.setdefault(key, []).append(_element_record_site(amount, ctx))
         if key in seen:
             return
         seen.add(key)
@@ -3759,6 +4005,7 @@ def _value_flow_facts(function: Any, *, zero_value_sinks: set[str] | None = None
             index = _fold_param_index(amount, amount_indexes.get(key, []))
             if index is not None:
                 flow["amount_param_index"] = index
+            _attach_amount_record(flow, amount, amount_record_sites.get(key, []))
     return flows
 
 
@@ -3808,6 +4055,45 @@ def _attach_target_variable(
         return
     flow["target_writer_signatures"] = writers
     flow["target_writer_scan_complete"] = all(complete for _, _, _, complete, _ in sites)
+
+
+def _attach_amount_record(
+    flow: ValueFlow,
+    amount: KindTier,
+    sites: list[ElementRecordSite | None],
+) -> None:
+    """Publish the record the amount is read out of — the twin of
+    :func:`_attach_target_variable`, and held to the same rule.
+
+    Requires the folded kind to BE ``bounded_by_storage``: that is the one kind
+    whose value comes out of a storage cell, and a record published beside any
+    other kind would name a cell the amount is not read from. One site that
+    named no record ⇒ nothing is published at all, because a record assembled
+    from the sites that happened to have one is not the record this flow reads.
+    Sites naming different DECLARATIONS publish the member list and no scalar.
+
+    The path and the keys ride only where every site agreed on them: two sites
+    reading ``bids[a].amount`` and ``bids[b].shares`` agree on the declaration
+    and on nothing else, and the first site's path is not the flow's answer."""
+    if amount["kind"] != "bounded_by_storage" or not sites:
+        return
+    if any(site is None for site in sites):
+        return
+    present = [site for site in sites if site is not None]
+    canonicals = {site["base_canonical"] for site in present}
+    if len(canonicals) > 1:
+        flow["amount_record_variables"] = sorted(canonicals)
+        return
+    flow["amount_record_variable"] = next(iter(canonicals))
+    member_paths = {site["member_path"] for site in present}
+    if len(member_paths) == 1:
+        flow["amount_record_member_path"] = list(next(iter(member_paths)))
+    key_kinds = {tuple(origin[0] for origin in site["key_origins"]) for site in present}
+    if len(key_kinds) == 1:
+        flow["amount_record_key_kinds"] = list(next(iter(key_kinds)))
+    key_indexes = {site["key_param_indexes"] for site in present}
+    if len(key_indexes) == 1:
+        flow["amount_record_key_param_indexes"] = list(next(iter(key_indexes)))
 
 
 def _fold_param_index(kind: KindTier, indexes: list[int | None]) -> int | None:
@@ -3933,6 +4219,12 @@ def _effect_info_for_function(function: Any) -> EffectInfo:
     state_writes = _state_write_facts(function, sinks)
     zero_value_sinks: set[str] = set()
     value_flows = _value_flow_facts(function, zero_value_sinks=zero_value_sinks)
+    assembly_state_access = any(
+        s["kind"] in ("state_write", "delegatecall")
+        and (s["target"].startswith("assembly_storage:") or s["target"].startswith("assembly_delegatecall:"))
+        for s in sinks
+    )
+    attach_record_ordering(value_flows, function, assembly_state_access=assembly_state_access)
     effects: list[str] = []
 
     # Guard-origin sinks (a modifier's own auth call, a reentrancy latch) are
@@ -3990,11 +4282,7 @@ def _effect_info_for_function(function: Any) -> EffectInfo:
         "state_changing": _is_state_changing_entry_point(function),
         "parameter_names": [str(getattr(p, "name", "") or "") for p in (getattr(function, "parameters", None) or [])],
         "payable": bool(getattr(function, "payable", False)),
-        "assembly_state_access": any(
-            s["kind"] in ("state_write", "delegatecall")
-            and (s["target"].startswith("assembly_storage:") or s["target"].startswith("assembly_delegatecall:"))
-            for s in sinks
-        ),
+        "assembly_state_access": assembly_state_access,
     }
 
 

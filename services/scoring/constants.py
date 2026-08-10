@@ -80,6 +80,22 @@ DEST_SEVERITY_DELEGATECALL_SELF = 0.0
 DEST_SEVERITY_EXEC_SELF = 0.35
 FLOW_SEVERITY_CALLER_ARBITRARY = 0.9
 FLOW_SEVERITY_FIXED_DESTINATION = 0.10
+# The caller is paid back the value it attached to this very call, and the
+# witness closes over every out-flow of the function. Zero because the bound is
+# PROVEN — the payout can move no position the caller did not just fund — and
+# never because nothing was read: an unread amount yields no severity at all and
+# the row is withheld from the grade instead.
+FLOW_SEVERITY_MSG_VALUE_SELF_RETURN = 0.0
+# The caller's own ``msg.value`` reaching a fixed payee it cannot name (the W3b
+# pass-through arm, ruled product surface by the owner). Zero for the same reason
+# self-return is: the amount moved is bounded by what the caller just attached to
+# this call, so the payout moves no position the caller did not just fund.
+FLOW_SEVERITY_MSG_VALUE_PASSTHROUGH = 0.0
+# W1 ∧ W2 proven: the payout is bounded to the caller's own storage position and
+# that record is cleared before the external call. Zero because the bound is
+# PROVEN uncharged product surface, never because a witness was unread — an
+# unproven conjunction yields no severity and the row stays withheld.
+FLOW_SEVERITY_SELF_SERVICE_BOUNDED = 0.0
 OWNERSHIP_DEFAULT_ADMIN_RULES = 0.35
 # The self-gated delay credit is RETIRED, not tuned to zero: it rested on "no
 # other caller resolved", and the principal enumeration it read is a documented
@@ -173,6 +189,23 @@ TRANSITIVE_CAPABILITIES = CODE_CONTROL_CAPABILITIES | GATE_CONTROL_CAPABILITIES
 
 DESTINATION_BEARING_SEVERITY = frozenset({"flow.out", "delegatecall.execute", "exec.arbitrary"})
 
+# The severity_basis tokens whose proven-0.0 verdict is an UNCHARGED PRODUCT
+# SURFACE: the row is a proven benign payout of the caller's own value, kept in
+# the population (its confidence credit stays) but excluded from the finding
+# ledger (SCORING_INVARIANTS inv. 3 — a permissionless self-service payout is not
+# a finding worth zero, it is not a finding). The fold gates the exclusion on
+# BOTH the token AND severity value 0.0, never on the float alone: reading
+# ``value == 0.0`` would sweep in ``pause.set``'s proven build-up-from-zero, a
+# different fact. A token/value disagreement is a bug, published as a warning.
+UNCHARGED_PRODUCT_BASES = frozenset(
+    {
+        "proven_self_service_bounded",
+        "proven_msg_value_self_return",
+        # W3b, ruled in by the owner: the caller's own msg.value to a fixed payee.
+        "proven_msg_value_passthrough",
+    }
+)
+
 # Product surface: scored only where permissionlessness is PROVEN. ``claim_id``
 # does not prove it, so a ``not_determined`` openness is not product and is
 # published as a warning rather than dropped.
@@ -202,6 +235,12 @@ UNMODELLED_CLAIMS = frozenset({"value_router", "contract_deployment", "callee_po
 # --- static destination lattice --------------------------------------------
 FIXED_TARGET_KINDS = frozenset({"immutable", "constant", "storage_no_setter"})
 ADMIN_TARGET_KIND = "storage_setter"
+# Target kinds the lattice PROVES outright and which are neither fixed nor a
+# gap: the destination is a known function of who calls (``msg_sender``) or of
+# who owns the token (``token_owner``). How constrained that is depends on the
+# caller gate, so these are priced from the authority witness, never from the
+# kind alone (``distill._caller_relative_destination``).
+CALLER_RELATIVE_TARGET_KINDS = frozenset({"msg_sender", "token_owner"})
 TARGET_KIND_RANK: dict[str, int] = {
     "indeterminate": 0,
     "param": 1,
@@ -291,6 +330,41 @@ UNCALIBRATED_ARMS: tuple[str, ...] = (
     # ``sheet_bound_refused`` cannot otherwise tell an unfired rule from one the
     # model was fitted to.
     "sheet_bound_refused:sheet_determined_by_disposition_does_not_bound",
+    # The destination run's two. The first is the register's paradigm case: the
+    # exec arm's PROVEN branch cannot fire on any stored row, because the join
+    # key it requires (the parameter the sentinel was substituted into) is not
+    # recorded on any verdict — and where a caller_arbitrary verdict does sit
+    # beside an exec destination, the two are different parameters. A fixture is
+    # the only thing that reaches it.
+    #
+    # The second is the "0 or tiny" clause. Measured at registration: the
+    # caller-relative constrained arm's ``token_owner`` side carries 2 signals at
+    # 1 entity, both subsumed, so no published number was fitted to it.
+    # Registered per KIND rather than for the arm as a whole, following
+    # ``fixed_target_kind:*`` — the ``msg_sender`` side of the same arm carried
+    # 15 and is calibrated.
+    "fork:simulation+destination_param",
+    "constrained:token_owner+restricted_caller",
+    # The msg_value witness's eight named refusals. Both of its PROVEN arms have
+    # a carrier on the reference corpus and neither is registered; the refusals
+    # have none, because the two functions that raise the question both prove it.
+    # See the disclosure family below for what each one means.
+    "msg_value_return_refused:amount_fold_disagreed",
+    "msg_value_return_refused:amount_not_dispositive_ast",
+    "msg_value_return_refused:amount_not_msg_value",
+    "msg_value_return_refused:flow_source_not_self",
+    "msg_value_return_refused:target_fold_disagreed",
+    "msg_value_return_refused:target_not_a_witnessed_arm",
+    "msg_value_return_refused:flow_kind_unreadable",
+    "msg_value_return_refused:multiple_out_flow_entries",
+    # The self-service consumer arm's PROVEN state. Measured 0 carriers on the
+    # reference corpus: the producer facts it consumes (``self_service_payout``)
+    # are not materialized on any stored flow — the witness proves out only after
+    # the owner's fresh-from-scratch run — so no row reaches ``proven_self_service_bounded``
+    # here and no published number was fitted to it. Its two sibling uncharged
+    # arms (``proven_msg_value_self_return``, ``proven_msg_value_passthrough``)
+    # each HAVE a carrier and are therefore NOT registered.
+    "self_service_bound:proven",
 )
 
 # What each of the run's arms IS, beside the bare token. §8 of
@@ -463,6 +537,146 @@ UNCALIBRATED_ARM_DISCLOSURES: tuple[dict[str, object], ...] = (
             "earns it, and no row here does"
         ),
     },
+    {
+        "arm": "fork:simulation+destination_param",
+        "state": "unconstrained_proven",
+        "published_at": (
+            "signals' severity_basis and gate_inputs.destination_basis, and findings[].severity_basis "
+            "where such a row enters the grade"
+        ),
+        "population_census": None,
+        "exercised_by": (
+            "tests/test_scoring_distill_fold.py::test_fork_caller_arbitrary_is_consumed_on_the_destination_parameter",
+        ),
+        "note": (
+            "the exec arm's consuming branch. It requires the parameter the sentinel was "
+            "substituted into to be NAMED on the verdict and to be the parameter the sink calls "
+            "through, and no verdict in any measured corpus names one — so the branch cannot fire "
+            "on a stored row and only the fixture reaches it. Where a caller_arbitrary verdict does "
+            "sit beside an exec destination the join REFUSES: those are arbitrary-call executors "
+            "whose sentinel rides the payload parameter while the call target keeps the base "
+            "probe's value. The refusing branch is the calibrated one; this one has never fired"
+        ),
+    },
+    {
+        "arm": "constrained:token_owner+restricted_caller",
+        "state": "constrained_proven",
+        "published_at": (
+            "signals' destination_shape (constrained:token_owner) and severity_basis, and "
+            "findings[].subsumed_capabilities[] where such a row is subsumed"
+        ),
+        "population_census": None,
+        "exercised_by": (
+            "tests/test_scoring_distill_fold.py::"
+            "test_caller_relative_destination_behind_a_gate_is_the_constrained_convention[token_owner]",
+            "tests/test_scoring_distill_fold.py::test_caller_relative_conjunction_takes_the_worst_member",
+        ),
+        "note": (
+            "the tiny-population half of the caller-relative constrained arm. Measured at "
+            "registration and not a claim about this document: 2 signals at 1 entity, both "
+            "subsumed, so no published number was fitted to it. Registered per KIND, following "
+            "fixed_target_kind:* — the msg_sender half of the same arm was not tiny and is "
+            "calibrated. "
+            "The severity is the model's existing constrained-destination rung, applied to a "
+            "constraint of a different kind: the payee is the current owner of a caller-chosen "
+            "token id, which the caller gate does not bound. Its open-caller sibling publishes "
+            "nothing at all and so is not an arm to register"
+        ),
+    },
+    # The msg_value witness's refusal family. Its two PROVEN arms are calibrated —
+    # measured over the 369 stored functions that carry a flow.out/value_router
+    # claim (of 3104 stored functions, 1304 of them carrying any claim at all),
+    # each arm has exactly one carrier — but those same two functions PROVE the
+    # witness, so every named refusal below has zero carriers and each is a state
+    # a consumer can only meet on a fixture. Registered one per reason rather
+    # than once for the family: a reader branching on "the witness refused" needs
+    # to know WHICH refusal has never been seen, and folding eight unfired
+    # reasons into one token would hide seven of them.
+    *(
+        {
+            "arm": f"msg_value_return_refused:{reason}",
+            "state": "not_determined",
+            "published_at": ("signals' witness_notes, and findings[].witness_notes where such a row enters the grade"),
+            "population_census": None,
+            "exercised_by": tuple(
+                f"tests/test_scoring_distill_fold.py::test_msg_value_return_refuses[{i}]" for i in ids
+            ),
+            "note": note,
+        }
+        for reason, ids, note in (
+            (
+                "amount_fold_disagreed",
+                ("several_fold", "breakdown_beside_a_msg_value_scalar"),
+                "the amount's contributing sites disagreed, so the scalar is not the whole answer and a "
+                "several carrying a msg_value member proves nothing about the member beside it",
+            ),
+            (
+                "amount_not_dispositive_ast",
+                ("traced_amount",),
+                "the amount was reached by tracing rather than read off the AST: that the tracer arrived "
+                "at the opcode is not that the amount IS the value attached to this call",
+            ),
+            (
+                "amount_not_msg_value",
+                ("sibling_flow_is_not_msg_value",),
+                "one out-flow pays something other than the caller's attached value, which refuses the "
+                "whole function — the witness is a universal, not a majority",
+            ),
+            (
+                "flow_source_not_self",
+                ("source_not_self",),
+                "from_is_self is not proven true, so nothing says this contract's own balance is what "
+                "pays and the amount bounds a payment somebody else makes",
+            ),
+            (
+                "target_fold_disagreed",
+                ("target_breakdown",),
+                "the payee's contributing sites disagreed; the arms are disjoint and neither is proven "
+                "by a set of destinations",
+            ),
+            (
+                "target_not_a_witnessed_arm",
+                ("third_payee_kind",),
+                "the payee is neither the caller nor an immutable, so neither arm's claim is the claim "
+                "this flow set would support",
+            ),
+            (
+                "flow_kind_unreadable",
+                ("unreadable_kind",),
+                "a flow carries no readable amount or target classification at all, which is the one "
+                "refusal that says the witness could not look rather than that it looked and refused",
+            ),
+            (
+                "multiple_out_flow_entries",
+                ("multiple_paying_entries", "one_entry_per_arm"),
+                "each entry is bounded by the value attached to the call and the SET is bounded by "
+                "nothing, so a function with two paying entries can move a multiple of it — the surplus "
+                "out of a balance somebody else funded",
+            ),
+        )
+    ),
+    {
+        "arm": "self_service_bound:proven",
+        "state": "proven_self_service_bounded",
+        "published_at": (
+            "signals' severity_basis; the row is excluded from findings, so the verdict "
+            "surfaces as earned_negatives[].state = uncharged_product_surface and "
+            "provenance.population.rows_uncharged_product"
+        ),
+        "population_census": "provenance.population.rows_uncharged_product",
+        "exercised_by": (
+            "tests/test_scoring_distill_fold.py::test_self_service_bound_conjuncts",
+            "tests/test_scoring_distill_fold.py::test_self_service_proven_reclassifies_an_open_payout_to_uncharged_product",
+        ),
+        "note": (
+            "W1 ∧ W2 proven — the payout is bounded to the caller's own storage position and "
+            "the record is cleared before the external call. Zero carriers on the reference corpus: "
+            "the ``self_service_payout`` producer fact is materialized on no stored flow (the witness "
+            "proves out only in the owner's fresh run), so on this corpus the arm is exercised by "
+            "fixtures alone and no published number was fitted to it. The consumer arm is complete; "
+            "it is inert here, not absent"
+        ),
+    },
 )
 
 
@@ -587,6 +801,9 @@ def model_parameters() -> dict[str, Any]:
             "exec_self": DEST_SEVERITY_EXEC_SELF,
             "flow_caller_arbitrary": FLOW_SEVERITY_CALLER_ARBITRARY,
             "flow_fixed_destination": FLOW_SEVERITY_FIXED_DESTINATION,
+            "flow_msg_value_self_return": FLOW_SEVERITY_MSG_VALUE_SELF_RETURN,
+            "flow_msg_value_passthrough": FLOW_SEVERITY_MSG_VALUE_PASSTHROUGH,
+            "flow_self_service_bounded": FLOW_SEVERITY_SELF_SERVICE_BOUNDED,
             "note": (
                 "these are reachable only on a PROVEN destination state; an unread "
                 "destination yields no severity and the row is withheld from the grade"

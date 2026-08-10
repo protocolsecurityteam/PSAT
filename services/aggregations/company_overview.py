@@ -800,7 +800,19 @@ def _prefetch_child_tables(
         for b in s.execute(
             select(ContractBalanceLatest).where(ContractBalanceLatest.contract_id.in_(id_list))
         ).scalars():
-            local.setdefault(b.contract_id, []).append(b)
+            # An entity-keyed reading — ``contract_id`` NULL, the class the balance
+            # record grew when identity moved off the contracts table — cannot reach
+            # this loop: ``contract_id IN (id_list)`` evaluates to NULL for a NULL
+            # key, never to true. The narrowing states that instead of widening a
+            # CONTRACT-keyed map to admit a ``None`` bucket, which is the shape that
+            # matters here: every consumer reads this map as
+            # ``balances_by_cid.get(contract.id)``, so a row filed under ``None``
+            # would be stored, counted, and unreachable by anything that looks.
+            # This plane answers for contracts; entity sheets are read elsewhere.
+            cid = b.contract_id
+            if cid is None:
+                continue
+            local.setdefault(cid, []).append(b)
             rows += 1
         return local, rows
 
@@ -1536,7 +1548,11 @@ def build_governance_view(
             else "not_determined"
         )
 
-        balance_contract = lookup_contract or contract_row
+        # Balances are FILED against the row whose ADDRESS was read — a proxy's
+        # holdings belong to the proxy's own row (resolution_worker._fetch_balances),
+        # which is this entry's row. ``lookup_contract`` answers governance lookups
+        # and may be the implementation's row, where no balance is ever filed.
+        balance_contract = contract_row or lookup_contract
         balances_list = []
         total_usd = 0.0
         unvalued_rows = 0
@@ -1577,10 +1593,10 @@ def build_governance_view(
                 # while the scorer's arm
                 # (``services.scoring.planes._resolve_asset_disposition``) also disposes
                 # a ``priced_below_resolution`` one — so presentation is WEAKER and
-                # spares 30 rows here that the score has already stopped counting,
-                # never the reverse. Showing a holding the score dropped is the safe
-                # direction; hiding one it still counts is not. Both rules are stated
-                # in full on ``disposed_from_holdings``.
+                # spares every such row here that the score has already stopped
+                # counting, never the reverse. Showing a holding the score dropped is
+                # the safe direction; hiding one it still counts is not. Both rules
+                # are stated in full on ``disposed_from_holdings``.
                 disposed = disposed_from_holdings(
                     delivery_shape=delivery_shape, reference_shape=reference_shape, usd_value=usd
                 )
@@ -1596,10 +1612,10 @@ def build_governance_view(
                         "usd_value": usd,
                         # ``usd_value: null`` and ``usd_value: 0`` are one
                         # truthiness test apart in JS and mean opposite things —
-                        # "we do not know what this holding is worth" (1,001 of
-                        # 1,376 local rows) versus "priced, and worth less than
-                        # half a cent" (100 rows). The state is published rather
-                        # than left to be inferred from the value's shape.
+                        # "we do not know what this holding is worth" versus
+                        # "priced, and the figure is zero to eighteen decimals".
+                        # The state is published rather than left to be inferred
+                        # from the value's shape.
                         #
                         # ``not_determined`` deliberately does not name a CAUSE:
                         # ``utils/etherscan`` distinguishes "no price returned"
@@ -1609,11 +1625,12 @@ def build_governance_view(
                         # and this payload must not pretend otherwise.
                         "usd_value_state": "measured" if usd is not None else "not_determined",
                         # Kept for continuity, and NOT a money fact: the producer
-                        # writes 0 for "no price known" on 1,001 local rows (a
-                        # further 6 rows hold a real sub-1e-8 price truncated to
-                        # 0 by Numeric(20,8) — 0 is ambiguous even between those
-                        # two), so a consumer reading this column directly reads
-                        # them as worthless. Read ``usd_value`` / ``usd_value_state``.
+                        # writes 0 for "no price known", and a row written before
+                        # the column widened to Numeric(38,18) may carry the same
+                        # 0 for a real quote its eighth decimal could not hold —
+                        # so 0 is ambiguous between the two and a consumer reading
+                        # this column directly reads both as worthless. Read
+                        # ``usd_value`` / ``usd_value_state``.
                         "price_usd": float(b.price_usd) if b.price_usd is not None else None,
                         # How this balance ARRIVED, one of
                         # ``utils.balance_status.DELIVERY_SHAPES``. A claim about

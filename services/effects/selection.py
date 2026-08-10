@@ -64,6 +64,7 @@ from utils.balance_status import (
     TOKEN_REFERENCE_ABSENT_FROM_UNIVERSE,
     TOKEN_REFERENCE_IN_UNIVERSE,
     TOKEN_REFERENCE_NOT_DETERMINED,
+    USD_CRUMB_THRESHOLD,
 )
 from utils.chains import UnknownChainError, canonical_chain, chain_by_id, chain_by_name
 from utils.logging import record_degraded
@@ -115,7 +116,7 @@ _ZERO_USD = Decimal(0)
 def _usd(value: Any) -> Decimal:
     """Exact USD from a ``contract_balances.usd_value`` cell.
 
-    The column is ``numeric(20,2)`` and the driver already hands it back as an
+    The column is ``numeric(38,18)`` and the driver already hands it back as an
     exact ``Decimal``; money stays in that type all the way through the closure
     sum. Binary floats cannot represent a cent, so a float sum's low bits depend
     on the ORDER the terms are added — and the terms arrive from a ``set``. See
@@ -490,11 +491,11 @@ def disposed_from_holdings(*, delivery_shape: str, reference_shape: str, usd_val
     defect.** This plane's conjunct 1 tests ``usd_value is None``; the scorer's
     (``services.scoring.planes._resolve_asset_disposition``, conjunct 3, over
     ``_DISPOSABLE_ASSET_STATES``) also disposes ``priced_below_resolution`` — a
-    reading whose every price landed on the numeric(20,2) floor. So PRESENTATION IS
-    DELIBERATELY WEAKER: it spares 30 below-resolution rows on this corpus that the
-    scorer disposes, and never the reverse. That is the safe direction — the page
-    shows a holding the score has already stopped counting, rather than hiding one
-    the score still counts.
+    reading whose every price landed on the storage column's last digit, the
+    eighteenth decimal. So PRESENTATION IS DELIBERATELY WEAKER: it spares every
+    below-resolution row the scorer disposes, and never the reverse. That is the
+    safe direction — the page shows a holding the score has already stopped
+    counting, rather than hiding one the score still counts.
 
     Two consequences of reading a stored verdict, stated because they are real and
     not because they are harmless:
@@ -787,19 +788,28 @@ def _protocol_tvl_usd(session: Session, protocol_id: int) -> float | None:
 def _token_holdings_by_contract(session: Session, protocol_id: int, limit: int) -> dict[int, tuple[str, ...]]:
     """``contract id -> its richest PRICED ERC-20 holdings``, most valuable first.
 
-    Priced only, and that filter is load-bearing rather than cosmetic: an unpriced
-    holding is typically an airdropped spam token, and a mint witnessed against
-    one would carry a ``backing.inflow_observed: true`` indistinguishable from a
-    real deposit. Native balance (``token_address IS NULL``) is excluded — it is
-    not an argument any token parameter can take.
+    Priced at or above :data:`~utils.balance_status.USD_CRUMB_THRESHOLD`, and that
+    filter is load-bearing rather than cosmetic: an unpriced holding is typically an
+    airdropped spam token, and a mint witnessed against one would carry a
+    ``backing.inflow_observed: true`` indistinguishable from a real deposit. Native
+    balance (``token_address IS NULL``) is excluded — it is not an argument any token
+    parameter can take.
+
+    The crumb half of that filter is a RULE and not a consequence of storage. It read
+    ``usd_value > 0`` while the column was ``numeric(20,2)``, and a crumb was excluded
+    because the column had rounded it to 0.00 — so widening the column to
+    ``numeric(38,18)`` would have re-admitted every crumb into the probe's input
+    without anyone deciding to. The threshold now says which figures are positions,
+    and :data:`~utils.balance_status.USD_CRUMB_THRESHOLD` states which readings that
+    moves relative to the rounding it replaces.
 
     Delivery shape does NOT filter this list, and the reason is the disposition
     predicate's own first conjunct (:func:`disposed_from_holdings`): a PRICED reading
-    is never disposed. Every row here is priced above zero by the query itself, so a
-    holding on this list is a real dollar figure however it arrived — withdrawing one
-    because the token reached the account in a batch would delete a measured position
-    from the probe's input on evidence about delivery, which answers a different
-    question."""
+    is never disposed. Every row here carries a dollar figure of at least a cent by
+    the query itself, so a holding on this list is a real position however it arrived
+    — withdrawing one because the token reached the account in a batch would delete a
+    measured position from the probe's input on evidence about delivery, which answers
+    a different question."""
     rows = session.execute(
         select(
             Contract.id,
@@ -810,9 +820,11 @@ def _token_holdings_by_contract(session: Session, protocol_id: int, limit: int) 
             Contract.protocol_id == protocol_id,
             ContractBalanceLatest.token_address.isnot(None),
             # Strictly stronger than the positive-quantity witness
-            # ``_asset_holdings_by_deployment`` requires: a priced holding above
-            # zero is necessarily a held one.
-            ContractBalanceLatest.usd_value > 0,
+            # ``_asset_holdings_by_deployment`` requires: a holding priced at a
+            # cent or more is necessarily a held one. The boundary is on the KEEP
+            # side: $0.01 is a position, which is the side the cent-scaled column
+            # put it on, and $0.009 is a crumb, which is the side it did not.
+            ContractBalanceLatest.usd_value >= USD_CRUMB_THRESHOLD,
         )
         # `usd_value DESC` alone is a PARTIAL order and the tie population is not
         # empty (two contracts here hold 2 and 3 tokens at an identical value), so

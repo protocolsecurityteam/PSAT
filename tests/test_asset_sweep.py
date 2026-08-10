@@ -11,7 +11,10 @@ nothing".
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 import pytest
+from sqlalchemy import text
 
 from db.models import Contract, ContractBalance, ContractBalanceFetch, Protocol
 from services.monitoring import asset_sweep as A
@@ -52,7 +55,7 @@ from services.monitoring.balance_observation import (
     scanned_from_block,
     sweep_from_block,
 )
-from services.monitoring.balance_reads import winning_asset_fetches
+from services.monitoring.balance_reads import ObservationSubject, winning_asset_fetches
 from services.resolution.repos.event_logs_rpc import (
     MIN_BISECT_SPAN,
     RpcEventLogFetcher,
@@ -81,6 +84,10 @@ NFT = "0x000000000000000000000000000000000000f731"
 
 def _pad(address: str) -> str:
     return "0x" + address.lower().removeprefix("0x").rjust(64, "0")
+
+
+def _addr_n(n: int) -> str:
+    return "0x" + f"{n:040x}"
 
 
 def _log(*, emitter: str, topics: list[str], block: int = 5, data: str = "0x" + "0" * 64) -> dict:
@@ -206,6 +213,71 @@ class TestFetchLogsShapes:
         with pytest.raises(ValueError):
             fetcher.fetch_logs(event_address=None, topics=[None, None], from_block=0, to_block=9)
         assert rpc.calls == []
+
+
+class TestBatchFailureIsIsolatedToItsCause:
+    """A batch shares its windows, so it used to share its failures.
+
+    The recipient filter is an OR-set in one topic position, which is what makes
+    forty holders cost one request instead of forty. The same sharing meant one
+    address with a dense incoming history refused thirty-nine quiet neighbours a
+    completeness each of them individually could have had — fail-closed, but far
+    wider than the evidence supports.
+    """
+
+    def _rpc(self, monkeypatch, *, refuse: str):
+        """A wire that rejects exactly the windows naming *refuse*."""
+        calls: list[dict] = []
+
+        def _request(url, method, params, **kwargs):
+            assert method == "eth_getLogs"
+            calls.append(params[0])
+            wanted = [t for slot in params[0]["topics"] if isinstance(slot, list) for t in slot]
+            if _pad(refuse) in wanted:
+                raise RuntimeError("query timed out")
+            return []
+
+        monkeypatch.setattr("services.resolution.repos.event_logs_rpc.rpc_request", _request)
+        monkeypatch.setattr(
+            "services.monitoring.asset_sweep.multicall3_aggregate3",
+            lambda url, calls_, block, **kw: [(True, _word(0))] * len(calls_),
+        )
+        return calls
+
+    def test_only_the_address_that_cannot_be_proven_whole_fails(self, monkeypatch):
+        quiet_a, quiet_b = _addr_n(1), _addr_n(2)
+        busy = _addr_n(3)
+        self._rpc(monkeypatch, refuse=busy)
+        outcomes, _cost = sweep_holders(
+            [quiet_a, quiet_b, busy],
+            rpc_url="http://rpc.invalid",
+            chain_id=1,
+            from_block_by_address={a: 0 for a in (quiet_a, quiet_b, busy)},
+            cost=SweepCost(),
+            head_block=MIN_BISECT_SPAN - 1,
+        )
+        assert outcomes[quiet_a].status == SWEEP_COMPLETED
+        assert outcomes[quiet_b].status == SWEEP_COMPLETED
+        assert outcomes[busy].status == SWEEP_FAILED
+        # The guard is not weakened for the address it fired on.
+        assert outcomes[busy].swept_through_block is None
+        assert "could not be proven whole" in (outcomes[busy].failure_reason or "")
+
+    def test_an_exhausted_budget_stops_the_isolation_rather_than_spending_more(self, monkeypatch):
+        # The budget is why the failure fired; splitting cannot buy an answer
+        # with no requests left, so every holder is honestly recorded unproven.
+        monkeypatch.setattr("services.monitoring.asset_sweep.SWEEP_REQUEST_BUDGET", 0)
+        calls = self._rpc(monkeypatch, refuse=_addr_n(3))
+        outcomes, _cost = sweep_holders(
+            [_addr_n(1), _addr_n(2), _addr_n(3)],
+            rpc_url="http://rpc.invalid",
+            chain_id=1,
+            from_block_by_address={_addr_n(n): 0 for n in (1, 2, 3)},
+            cost=SweepCost(),
+            head_block=MIN_BISECT_SPAN - 1,
+        )
+        assert {o.status for o in outcomes.values()} == {SWEEP_FAILED}
+        assert calls == []
 
 
 class TestSweepFailsClosed:
@@ -522,11 +594,11 @@ def _uint_array_return(values: list[int]) -> str:
     return "0x" + f"{32:064x}" + f"{len(values):064x}" + "".join(f"{v:064x}" for v in values)
 
 
-def _current_typed_entry(session, contract_id: int) -> dict:
+def _current_typed_entry(session, contract) -> dict:
     """The one typed entry a consumer reads off the CURRENT fetch."""
     from services.monitoring.balance_observation import _current_asset_fetch
 
-    fetch = _current_asset_fetch(session, contract_id=contract_id)
+    fetch = _current_asset_fetch(session, subject=ObservationSubject.of_contract(contract))
     assert fetch is not None
     return (fetch.typed_assets or [])[0]
 
@@ -1077,7 +1149,7 @@ class TestTypedIdRecordAndCursor:
 
         return record_observation(
             session,
-            contract=contract,
+            subject=ObservationSubject.of_contract(contract),
             chain_id=1,
             native=self._native(),
             page=page([]),
@@ -1160,9 +1232,9 @@ class TestTypedIdRecordAndCursor:
             (_typed(NFT, standard=TYPED_STANDARD_ERC1155, ids=("7",), ids_complete=True),),
         )
         db_session.flush()
-        assert sweep_from_block(db_session, contract_id=contract.id) == 1235
-        assert scanned_from_block(db_session, contract_id=contract.id) == 0
-        carried = known_typed_assets(db_session, contract_id=contract.id)
+        assert sweep_from_block(db_session, subject=ObservationSubject.of_contract(contract)) == 1235
+        assert scanned_from_block(db_session, subject=ObservationSubject.of_contract(contract)) == 0
+        carried = known_typed_assets(db_session, subject=ObservationSubject.of_contract(contract))
         assert carried == (_carried(NFT, standard=TYPED_STANDARD_ERC1155, ids=("7",), ids_complete=True),)
 
     def test_a_record_that_never_asked_for_ids_pays_for_one_full_re_scan(self, db_session):
@@ -1187,11 +1259,11 @@ class TestTypedIdRecordAndCursor:
             )
         )
         db_session.flush()
-        assert sweep_from_block(db_session, contract_id=contract.id) == 0
-        assert scanned_from_block(db_session, contract_id=contract.id) is None
+        assert sweep_from_block(db_session, subject=ObservationSubject.of_contract(contract)) == 0
+        assert scanned_from_block(db_session, subject=ObservationSubject.of_contract(contract)) is None
         # The receipt itself still carries forward — the refusal must not lapse
         # while the re-scan is pending.
-        assert known_typed_assets(db_session, contract_id=contract.id) == (
+        assert known_typed_assets(db_session, subject=ObservationSubject.of_contract(contract)) == (
             _carried(NFT, standard=TYPED_STANDARD_NOT_DETERMINED, ids=(), ids_complete=False),
         )
 
@@ -1201,7 +1273,7 @@ class TestTypedIdRecordAndCursor:
         _proto, contract = self._fixture(db_session, address="0x" + "e5" * 20)
         self._record(db_session, contract, ())
         db_session.flush()
-        assert sweep_from_block(db_session, contract_id=contract.id) == 1235
+        assert sweep_from_block(db_session, subject=ObservationSubject.of_contract(contract)) == 1235
 
     @pytest.mark.parametrize(
         "ids",
@@ -1234,9 +1306,9 @@ class TestTypedIdRecordAndCursor:
             )
         )
         db_session.flush()
-        assert known_typed_assets(db_session, contract_id=contract.id) == ()
-        assert sweep_from_block(db_session, contract_id=contract.id) == 0
-        assert scanned_from_block(db_session, contract_id=contract.id) is None
+        assert known_typed_assets(db_session, subject=ObservationSubject.of_contract(contract)) == ()
+        assert sweep_from_block(db_session, subject=ObservationSubject.of_contract(contract)) == 0
+        assert scanned_from_block(db_session, subject=ObservationSubject.of_contract(contract)) is None
 
     def _unsettled_scan(self, session, contract, *, through: int):
         """A full-history scan that ran and still could not settle its inventory."""
@@ -1275,18 +1347,18 @@ class TestTypedIdRecordAndCursor:
         _proto, contract = self._fixture(db_session, address="0x" + "e8" * 20)
         for index in range(ID_RESCAN_RUN - 1):
             self._unsettled_scan(db_session, contract, through=1000 + index)
-            assert sweep_from_block(db_session, contract_id=contract.id) == 0
-            assert id_rescan_keeps_failing(db_session, contract_id=contract.id) is False
+            assert sweep_from_block(db_session, subject=ObservationSubject.of_contract(contract)) == 0
+            assert id_rescan_keeps_failing(db_session, subject=ObservationSubject.of_contract(contract)) is False
         self._unsettled_scan(db_session, contract, through=1234)
-        assert id_rescan_keeps_failing(db_session, contract_id=contract.id) is True
+        assert id_rescan_keeps_failing(db_session, subject=ObservationSubject.of_contract(contract)) is True
         # Bounded out: the cursor is inherited again...
-        assert sweep_from_block(db_session, contract_id=contract.id) == 1235
-        assert scanned_from_block(db_session, contract_id=contract.id) == 0
+        assert sweep_from_block(db_session, subject=ObservationSubject.of_contract(contract)) == 1235
+        assert scanned_from_block(db_session, subject=ObservationSubject.of_contract(contract)) == 0
         # ...and the receipt is STILL unresolved, so the sheet is still refused.
         # What the bound buys back is the request budget, never the answer.
-        carried = known_typed_assets(db_session, contract_id=contract.id)
+        carried = known_typed_assets(db_session, subject=ObservationSubject.of_contract(contract))
         assert carried == (_carried(NFT, standard=TYPED_STANDARD_ERC1155, ids=(), ids_complete=False),)
-        entry = _current_typed_entry(db_session, contract.id)
+        entry = _current_typed_entry(db_session, contract)
         assert typed_receipt_is_resolved(entry) is False
 
     def test_one_settled_re_scan_in_the_run_keeps_the_full_re_scan_on(self, db_session):
@@ -1297,8 +1369,8 @@ class TestTypedIdRecordAndCursor:
         self._record(db_session, contract, (_typed(NFT, standard=TYPED_STANDARD_ERC1155, ids=("7",)),))
         self._unsettled_scan(db_session, contract, through=1002)
         db_session.flush()
-        assert id_rescan_keeps_failing(db_session, contract_id=contract.id) is False
-        assert sweep_from_block(db_session, contract_id=contract.id) == 0
+        assert id_rescan_keeps_failing(db_session, subject=ObservationSubject.of_contract(contract)) is False
+        assert sweep_from_block(db_session, subject=ObservationSubject.of_contract(contract)) == 0
 
     def test_an_incremental_cycle_is_not_evidence_that_the_ids_cannot_be_read(self, db_session):
         # Only scans that ran from the union's first block count: an incremental
@@ -1321,7 +1393,7 @@ class TestTypedIdRecordAndCursor:
                 )
             )
         db_session.flush()
-        assert id_rescan_keeps_failing(db_session, contract_id=contract.id) is False
+        assert id_rescan_keeps_failing(db_session, subject=ObservationSubject.of_contract(contract)) is False
 
     def test_an_inventory_the_record_calls_partial_is_not_carried_as_whole(self, db_session):
         _proto, contract = self._fixture(db_session, address="0x" + "e7" * 20)
@@ -1349,9 +1421,9 @@ class TestTypedIdRecordAndCursor:
             )
         )
         db_session.flush()
-        carried = known_typed_assets(db_session, contract_id=contract.id)
+        carried = known_typed_assets(db_session, subject=ObservationSubject.of_contract(contract))
         assert carried == (_carried(NFT, standard=TYPED_STANDARD_ERC1155, ids=(), ids_complete=False),)
-        assert sweep_from_block(db_session, contract_id=contract.id) == 0
+        assert sweep_from_block(db_session, subject=ObservationSubject.of_contract(contract)) == 0
 
 
 @requires_postgres
@@ -1370,14 +1442,25 @@ class TestEscalationAndRecording:
 
     def test_every_answer_shape_that_must_reach_the_chain_does(self, db_session):
         _proto, contract = self._fixture(db_session)
-        assert escalation_reason(db_session, contract_id=contract.id, page=page([])) == ESCALATE_RETURNED_EMPTY
+        assert (
+            escalation_reason(db_session, subject=ObservationSubject.of_contract(contract), page=page([]))
+            == ESCALATE_RETURNED_EMPTY
+        )
         # A list at the cap is NOT one of them: paging past entry 100 is that
         # state's completeness mechanism and has already run by the time this is
         # asked. Sweeping a holder rich enough to overflow the page buys the same
         # completeness at a bisection-dominated cost.
-        assert escalation_reason(db_session, contract_id=contract.id, page=page([], page_length=100)) is None
+        assert (
+            escalation_reason(
+                db_session, subject=ObservationSubject.of_contract(contract), page=page([], page_length=100)
+            )
+            is None
+        )
         # No fetch record at all: the entity never got an answer of its own.
-        assert escalation_reason(db_session, contract_id=contract.id, page=failed_page()) == ESCALATE_NO_FETCH_RECORD
+        assert (
+            escalation_reason(db_session, subject=ObservationSubject.of_contract(contract), page=failed_page())
+            == ESCALATE_NO_FETCH_RECORD
+        )
 
     def test_one_failure_is_not_persistence_but_a_run_of_them_is(self, db_session):
         _proto, contract = self._fixture(db_session, address="0x" + "a2" * 20)
@@ -1393,7 +1476,9 @@ class TestEscalationAndRecording:
                 )
             )
         db_session.flush()
-        assert escalation_reason(db_session, contract_id=contract.id, page=failed_page()) is None
+        assert (
+            escalation_reason(db_session, subject=ObservationSubject.of_contract(contract), page=failed_page()) is None
+        )
         for _ in range(3):
             db_session.add(
                 ContractBalanceFetch(
@@ -1406,7 +1491,10 @@ class TestEscalationAndRecording:
                 )
             )
         db_session.flush()
-        assert escalation_reason(db_session, contract_id=contract.id, page=failed_page()) == ESCALATE_PERSISTENT_FAILURE
+        assert (
+            escalation_reason(db_session, subject=ObservationSubject.of_contract(contract), page=failed_page())
+            == ESCALATE_PERSISTENT_FAILURE
+        )
 
     def test_a_completed_empty_sweep_records_an_earned_empty_with_its_extent(self, db_session):
         from services.monitoring.asset_sweep import SweepOutcome
@@ -1421,7 +1509,7 @@ class TestEscalationAndRecording:
         )
         recorded = record_observation(
             db_session,
-            contract=contract,
+            subject=ObservationSubject.of_contract(contract),
             chain_id=1,
             native=self._native(),
             page=page([]),
@@ -1436,7 +1524,7 @@ class TestEscalationAndRecording:
         assert recorded.fetch.sweep_status == SWEEP_STATUS_COMPLETED
         assert "blocks 0-1234" in (recorded.fetch.asset_set_basis or "")
         # The cursor is what makes the next cycle incremental.
-        assert sweep_from_block(db_session, contract_id=contract.id) == 1235
+        assert sweep_from_block(db_session, subject=ObservationSubject.of_contract(contract)) == 1235
 
     def test_a_cursor_whose_scan_kept_no_typed_record_is_not_trusted(self, db_session):
         # The cursor's promise is "those blocks were read and what they held is
@@ -1459,8 +1547,8 @@ class TestEscalationAndRecording:
             )
         )
         db_session.flush()
-        assert sweep_from_block(db_session, contract_id=contract.id) == 0
-        assert scanned_from_block(db_session, contract_id=contract.id) is None
+        assert sweep_from_block(db_session, subject=ObservationSubject.of_contract(contract)) == 0
+        assert scanned_from_block(db_session, subject=ObservationSubject.of_contract(contract)) is None
 
     def test_an_abort_after_a_completed_scan_never_becomes_the_current_answer(self, db_session):
         """The budget is DESIGNED to abort, so this path has to hold.
@@ -1477,7 +1565,7 @@ class TestEscalationAndRecording:
         _proto, contract = self._fixture(db_session, address="0x" + "d1" * 20)
         first = record_observation(
             db_session,
-            contract=contract,
+            subject=ObservationSubject.of_contract(contract),
             chain_id=1,
             native=self._native(),
             page=page([]),
@@ -1498,7 +1586,7 @@ class TestEscalationAndRecording:
 
         aborted = record_observation(
             db_session,
-            contract=contract,
+            subject=ObservationSubject.of_contract(contract),
             chain_id=1,
             native=self._native(),
             page=page([]),
@@ -1518,10 +1606,10 @@ class TestEscalationAndRecording:
         assert "could not" in (aborted.fetch.asset_set_basis or "")
         # The earlier fetch is still the record: its rows still publish, its typed
         # evidence still refuses completeness, and its cursor is still the cursor.
-        assert known_swept_assets(db_session, contract_id=contract.id) == (TOKEN,)
-        assert known_typed_assets(db_session, contract_id=contract.id) == (_carried(NFT),)
-        assert scanned_from_block(db_session, contract_id=contract.id) == 0
-        assert sweep_from_block(db_session, contract_id=contract.id) == 1235
+        assert known_swept_assets(db_session, subject=ObservationSubject.of_contract(contract)) == (TOKEN,)
+        assert known_typed_assets(db_session, subject=ObservationSubject.of_contract(contract)) == (_carried(NFT),)
+        assert scanned_from_block(db_session, subject=ObservationSubject.of_contract(contract)) == 0
+        assert sweep_from_block(db_session, subject=ObservationSubject.of_contract(contract)) == 1235
 
     def test_a_non_escalating_cycle_does_not_hand_its_successor_an_inherited_cursor(self, db_session):
         """The third door: a cycle that never escalated becomes current.
@@ -1537,7 +1625,7 @@ class TestEscalationAndRecording:
         _proto, contract = self._fixture(db_session, address="0x" + "d3" * 20)
         record_observation(
             db_session,
-            contract=contract,
+            subject=ObservationSubject.of_contract(contract),
             chain_id=1,
             native=self._native(),
             page=page([]),
@@ -1553,13 +1641,13 @@ class TestEscalationAndRecording:
             escalation=ESCALATE_RETURNED_EMPTY,
         )
         db_session.flush()
-        assert sweep_from_block(db_session, contract_id=contract.id) == 1235
+        assert sweep_from_block(db_session, subject=ObservationSubject.of_contract(contract)) == 1235
 
         # A plain cycle: Etherscan answered with assets, so nothing escalated and
         # no scan ran. This fetch is non-failed, so it becomes current.
         plain = record_observation(
             db_session,
-            contract=contract,
+            subject=ObservationSubject.of_contract(contract),
             chain_id=1,
             native=self._native(),
             page=page([_page_row(TOKEN)]),
@@ -1570,9 +1658,9 @@ class TestEscalationAndRecording:
         assert plain.fetch.swept_through_block is None
         assert plain.fetch.typed_assets is None
 
-        assert sweep_from_block(db_session, contract_id=contract.id) == 0
-        assert scanned_from_block(db_session, contract_id=contract.id) is None
-        assert known_typed_assets(db_session, contract_id=contract.id) == ()
+        assert sweep_from_block(db_session, subject=ObservationSubject.of_contract(contract)) == 0
+        assert scanned_from_block(db_session, subject=ObservationSubject.of_contract(contract)) is None
+        assert known_typed_assets(db_session, subject=ObservationSubject.of_contract(contract)) == ()
 
     def test_a_malformed_typed_record_is_distrusted_not_read_as_none(self, db_session):
         # Degrading an unreadable record to "no typed receipts" would republish a
@@ -1594,9 +1682,9 @@ class TestEscalationAndRecording:
             )
         )
         db_session.flush()
-        assert known_typed_assets(db_session, contract_id=contract.id) == ()
-        assert sweep_from_block(db_session, contract_id=contract.id) == 0
-        assert scanned_from_block(db_session, contract_id=contract.id) is None
+        assert known_typed_assets(db_session, subject=ObservationSubject.of_contract(contract)) == ()
+        assert sweep_from_block(db_session, subject=ObservationSubject.of_contract(contract)) == 0
+        assert scanned_from_block(db_session, subject=ObservationSubject.of_contract(contract)) is None
 
     def test_a_failed_sweep_publishes_no_completeness_and_no_cursor(self, db_session):
         from services.monitoring.asset_sweep import SweepOutcome
@@ -1611,7 +1699,7 @@ class TestEscalationAndRecording:
         )
         recorded = record_observation(
             db_session,
-            contract=contract,
+            subject=ObservationSubject.of_contract(contract),
             chain_id=1,
             native=self._native(),
             page=page([], page_length=100),
@@ -1627,7 +1715,7 @@ class TestEscalationAndRecording:
         assert recorded.fetch.sweep_status == SWEEP_STATUS_FAILED
         assert recorded.fetch.swept_through_block is None
         assert "ABORTED" in (recorded.fetch.asset_set_basis or "")
-        assert sweep_from_block(db_session, contract_id=contract.id) == 0
+        assert sweep_from_block(db_session, subject=ObservationSubject.of_contract(contract)) == 0
         # With NO prior scan on record there is nothing to protect, so the
         # Etherscan answer stands as the asset class's answer. The sibling arm
         # above covers the case where a scan HAS established the set.
@@ -1647,7 +1735,7 @@ class TestEscalationAndRecording:
         )
         recorded = record_observation(
             db_session,
-            contract=contract,
+            subject=ObservationSubject.of_contract(contract),
             chain_id=1,
             native=self._native(),
             page=page([]),
@@ -1671,7 +1759,7 @@ class TestEscalationAndRecording:
         # this scan refused.
         assert [e["address"] for e in (recorded.fetch.typed_assets or [])] == [NFT]
         assert [e["quantity_readable"] for e in (recorded.fetch.typed_assets or [])] == [False]
-        assert known_typed_assets(db_session, contract_id=contract.id) == (_carried(NFT),)
+        assert known_typed_assets(db_session, subject=ObservationSubject.of_contract(contract)) == (_carried(NFT),)
 
     def test_the_withheld_completeness_survives_the_next_cycle(self, db_session):
         """The whole point of persisting the evidence, end to end."""
@@ -1680,7 +1768,7 @@ class TestEscalationAndRecording:
         _proto, contract = self._fixture(db_session, address="0x" + "a5b" * 13 + "a")
         first = record_observation(
             db_session,
-            contract=contract,
+            subject=ObservationSubject.of_contract(contract),
             chain_id=1,
             native=self._native(),
             page=page([]),
@@ -1700,11 +1788,11 @@ class TestEscalationAndRecording:
 
         # Cycle two: an incremental window over 63 blocks that names nothing. The
         # carried receipt is what the producer hands back to the scan...
-        carried = known_typed_assets(db_session, contract_id=contract.id)
+        carried = known_typed_assets(db_session, subject=ObservationSubject.of_contract(contract))
         assert carried == (_carried(NFT),)
         second = record_observation(
             db_session,
-            contract=contract,
+            subject=ObservationSubject.of_contract(contract),
             chain_id=1,
             native=self._native(),
             page=page([]),
@@ -1712,7 +1800,7 @@ class TestEscalationAndRecording:
             sweep=SweepOutcome(
                 address=contract.address,
                 status=SWEEP_COMPLETED,
-                swept_from_block=scanned_from_block(db_session, contract_id=contract.id) or 0,
+                swept_from_block=scanned_from_block(db_session, subject=ObservationSubject.of_contract(contract)) or 0,
                 swept_through_block=1297,
                 typed_assets=tuple(_typed(r.address, ids=r.ids, ids_complete=r.ids_complete) for r in carried),
                 basis="full-history log scan ... blocks 0-1297",
@@ -1725,8 +1813,8 @@ class TestEscalationAndRecording:
         # resting on a scan that had refused to claim one.
         assert second.asset_set_source == ASSET_SET_SOURCE_ETHERSCAN_PAGES
         assert second.asset_set_status == ASSET_SET_STATUS_RETURNED_EMPTY
-        assert known_typed_assets(db_session, contract_id=contract.id) == (_carried(NFT),)
-        assert scanned_from_block(db_session, contract_id=contract.id) == 0
+        assert known_typed_assets(db_session, subject=ObservationSubject.of_contract(contract)) == (_carried(NFT),)
+        assert scanned_from_block(db_session, subject=ObservationSubject.of_contract(contract)) == 0
 
     def test_a_swept_asset_is_written_unpriced_and_never_as_zero_dollars(self, db_session):
         from services.monitoring.asset_sweep import SweepOutcome
@@ -1742,7 +1830,7 @@ class TestEscalationAndRecording:
         )
         recorded = record_observation(
             db_session,
-            contract=contract,
+            subject=ObservationSubject.of_contract(contract),
             chain_id=1,
             native=self._native(),
             page=page([]),
@@ -1758,6 +1846,151 @@ class TestEscalationAndRecording:
         assert token_rows[0].source == ASSET_SET_SOURCE_CHAIN_LOG_SWEEP
         assert token_rows[0].raw_balance == "500"
 
+    def test_a_sub_cent_holding_reaches_the_column_at_the_precision_it_was_computed_at(self, db_session):
+        """The write is where a priced fact used to die.
+
+        ``usd_value`` was ``numeric(20,2)`` and the native leg rounded to 2dp
+        before it, so $0.00156 — an integer quantity at a real price — arrived as
+        0.00, which no reader can tell from a holding of nothing. Both halves are
+        pinned: the producer writes what it computed, and the column keeps it.
+        Asserted off a row re-read from Postgres, never off the ORM object, so
+        what is under test is what was STORED.
+        """
+        _proto, contract = self._fixture(db_session, address="0x" + "c1" * 20)
+        # 7.8e-7 ETH at $2000 = $0.00156, and 1 wei at $2000 = $2e-15 — one
+        # figure the old 2dp column erased, one below even six decimals.
+        native = NativeReading(
+            wei=780_000_000_000, block_number=99, failed=False, price_usd=2000.0, symbol="ETH", name="Ether"
+        )
+        recorded = record_observation(
+            db_session,
+            subject=ObservationSubject.of_contract(contract),
+            chain_id=1,
+            native=native,
+            page=page(
+                [
+                    {
+                        "token_address": TOKEN,
+                        "token_name": "T",
+                        "token_symbol": "T",
+                        "decimals": 18,
+                        "balance": 1,
+                        "price_usd": 1.9,
+                        "usd_value": 1.9e-9,
+                    }
+                ]
+            ),
+            writer=BALANCE_WRITER_TVL,
+        )
+        db_session.flush()
+        db_session.expire_all()
+        stored = {
+            r.token_address: r.usd_value
+            for r in db_session.query(ContractBalance).filter(ContractBalance.fetch_id == recorded.fetch.id).all()
+        }
+
+        native_usd = (780_000_000_000 / 1e18) * 2000.0
+        # The producer rounds nothing. The column's own last digit is the 18th
+        # fractional one, so the stored figure is the computed one quantized
+        # THERE and nowhere coarser — the assertion says which resolution is
+        # allowed to be lossy, rather than accepting whatever came back.
+        assert stored[None] == Decimal(str(native_usd)).quantize(Decimal("1e-18"))
+        assert stored[None] == Decimal("0.001560000000000000")
+        # And it is the case the old column destroyed — a figure that rounds to
+        # $0.00 at the cent yet is not zero.
+        assert round(float(stored[None]), 2) == 0.0
+        assert stored[None] != Decimal(0)
+
+        # The token leg carried full precision already; the column is what was
+        # throwing it away, including below the value plane's own six decimals.
+        assert stored[TOKEN] == Decimal(str(1.9e-9)).quantize(Decimal("1e-18"))
+        assert stored[TOKEN] == Decimal("0.000000001900000000")
+        assert round(float(stored[TOKEN]), 6) == 0.0
+        assert stored[TOKEN] != Decimal(0)
+
+    def test_the_columns_hold_eighteen_fractional_digits_and_the_view_projects_them(self, db_session):
+        """The storage claim, asserted against Postgres rather than the model.
+
+        The ORM declaration and the migrated column can disagree — an ALTER that
+        silently no-ops, or a view left rebuilt on the old type, would leave every
+        precision assertion above passing on a widened Python value that the
+        database still truncates.
+        """
+        scales = dict(
+            db_session.execute(
+                text(
+                    "SELECT table_name, numeric_scale FROM information_schema.columns "
+                    "WHERE table_name IN ('contract_balances', 'contract_balances_latest') "
+                    "AND column_name = 'usd_value'"
+                )
+            ).all()
+        )
+        assert scales == {"contract_balances": 18, "contract_balances_latest": 18}
+
+    def test_the_price_column_holds_eighteen_fractional_digits_too(self, db_session):
+        """The quote is a fact of the same fineness as the figure computed from it.
+
+        ``price_usd`` was ``numeric(20,8)``, and 0 is the literal the writers use
+        for "no price known" — so a token quoted below ``1e-8`` had its real quote
+        stored as that same 0 and became indistinguishable from a price that never
+        answered. Asserted against ``information_schema`` rather than the model,
+        for the reason above: the ORM declaration and the migrated column can
+        disagree, and the view can be left rebuilt on the old type.
+        """
+        scales = dict(
+            db_session.execute(
+                text(
+                    "SELECT table_name, numeric_scale FROM information_schema.columns "
+                    "WHERE table_name IN ('contract_balances', 'contract_balances_latest') "
+                    "AND column_name = 'price_usd'"
+                )
+            ).all()
+        )
+        assert scales == {"contract_balances": 18, "contract_balances_latest": 18}
+
+    def test_a_quote_below_the_eighth_decimal_reaches_the_column_intact(self, db_session):
+        """The ambiguity the widening closes, pinned on a stored row.
+
+        ``2.5e-12`` is an ordinary quote for a token with a supply in the
+        trillions. The narrow column stored it as ``0.00000000`` — the same value
+        the producer writes for "no price known" — so the row could no longer say
+        which of the two it was. Re-read from Postgres, never off the ORM object.
+        """
+        _proto, contract = self._fixture(db_session, address="0x" + "c2" * 20)
+        recorded = record_observation(
+            db_session,
+            subject=ObservationSubject.of_contract(contract),
+            chain_id=1,
+            native=NativeReading(wei=None, block_number=None, failed=True, price_usd=None, symbol="ETH", name="Ether"),
+            page=page(
+                [
+                    {
+                        "token_address": TOKEN,
+                        "token_name": "T",
+                        "token_symbol": "T",
+                        "decimals": 18,
+                        "balance": 10**24,
+                        "price_usd": 2.5e-12,
+                        "usd_value": (10**24 / 10**18) * 2.5e-12,
+                    }
+                ]
+            ),
+            writer=BALANCE_WRITER_TVL,
+        )
+        db_session.flush()
+        db_session.expire_all()
+        stored = (
+            db_session.query(ContractBalance)
+            .filter(ContractBalance.fetch_id == recorded.fetch.id, ContractBalance.token_address == TOKEN)
+            .one()
+        )
+
+        assert stored.price_usd == Decimal("0.000000000002500000")
+        # The point of the widening: the quote is no longer the literal that
+        # means "nobody priced this".
+        assert stored.price_usd != Decimal(0)
+        assert round(float(stored.price_usd), 8) == 0.0
+
     def test_the_fetch_row_is_filed_against_the_contract_whose_address_was_read(self, db_session):
         proto, impl = self._fixture(db_session, address="0x" + "a7" * 20)
         proxy = Contract(protocol_id=proto.id, address="0x" + "a8" * 20, chain="ethereum", contract_name="Proxy")
@@ -1769,7 +2002,7 @@ class TestEscalationAndRecording:
         assert target.id == proxy.id
         recorded = record_observation(
             db_session,
-            contract=target,
+            subject=ObservationSubject.of_contract(target),
             chain_id=1,
             native=NativeReading(
                 wei=19 * 10**18, block_number=99, failed=False, price_usd=2000.0, symbol="ETH", name="Ether"
@@ -1796,7 +2029,7 @@ class TestEscalationAndRecording:
 
         recorded = record_observation(
             db_session,
-            contract=contract,
+            subject=ObservationSubject.of_contract(contract),
             chain_id=1,
             native=self._native(),
             page=page([]),
@@ -1815,7 +2048,7 @@ class TestEscalationAndRecording:
         assert recorded.asset_set_status == ASSET_SET_STATUS_RETURNED_ASSETS
         # The next cycle's incremental window would name nothing; this is what
         # keeps the asset from silently disappearing out of the row set.
-        assert known_swept_assets(db_session, contract_id=contract.id) == (TOKEN,)
+        assert known_swept_assets(db_session, subject=ObservationSubject.of_contract(contract)) == (TOKEN,)
 
     def test_a_run_of_failed_scans_stops_the_escalation_asking_again(self, db_session):
         from services.monitoring.balance_observation import sweep_keeps_failing
@@ -1834,10 +2067,10 @@ class TestEscalationAndRecording:
                 )
             )
         db_session.flush()
-        assert sweep_keeps_failing(db_session, contract_id=contract.id) is True
+        assert sweep_keeps_failing(db_session, subject=ObservationSubject.of_contract(contract)) is True
         # ...and the trigger that would otherwise fire stops firing, so an
         # unprovable holder cannot spend the request budget every hour forever.
-        assert escalation_reason(db_session, contract_id=contract.id, page=page([])) is None
+        assert escalation_reason(db_session, subject=ObservationSubject.of_contract(contract), page=page([])) is None
 
     def test_another_tenants_row_is_never_adopted_for_a_read(self, db_session):
         # ``uq_contract_address_chain`` means there is at most ONE row per

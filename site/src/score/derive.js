@@ -622,7 +622,15 @@ export function protectionRows(doc, limit = PROTECTION_ROWS) {
       // The same reading split apart, for consumers that wrap the capability
       // in its own control (the glossary tag) — one derivation, two shapes.
       capability: finding.capability,
+      // The whole cell, not its text: flattening it drops `direction` and
+      // collapses "the band was never measured" into the same null a row with
+      // no value carries. `valueText` stays for consumers that only print.
+      value,
       valueText: value.determined ? value.text : null,
+      // An unmeasured band and an answered-nothing band are different states,
+      // and the deduction row already tells them apart — a protection row that
+      // could not would contradict the same finding one column over.
+      provenNoReach: isProvenNoReach(finding),
       cautions: cautionsFor(doc, finding),
     });
   });

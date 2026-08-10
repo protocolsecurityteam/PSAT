@@ -534,6 +534,24 @@ logger = logging.getLogger(__name__)
 # ``multicall(bytes[])`` (``0xac9650d8``, the OZ v5 ``Multicall`` shape this
 # recognizer settles); the 8th is an assembly ``fallback`` whose slot did not
 # fold and is untouched, as are the 2 ``storage_setter`` and 1 ``param`` rows.
+#
+# Still v35 — the value-out witness gains ``sentinel_param``, the parameter the
+# sentinel address was substituted into. Code-plane by construction (it names a
+# slot of the calldata synthesized from the canonical signature, so a bytecode
+# twin's probe substitutes the same slot), hence not a ``DEPLOYMENT_PLANE_KEYS``
+# member, and not a ``_KERNEL_SIGNATURE_KEYS`` member either, so the self-audit
+# comparison is byte-identical (the allowlist rule stated there is exactly why a
+# new witness key needs no bump). No bump, and the reason it also does not need
+# the SERVING bump is the difference from the v28 precedent —
+# which DID bump for ``destination_shape``/``shape_proved_by``: there, absence
+# was indistinguishable from "we examined the destination and could not classify
+# it", so serving an old row into the new consumer contract published a false
+# non-observation. Here the sole consumer
+# (``services.scoring.distill._fork_caller_arbitrary_param``) treats an unnamed
+# subject as a proof it cannot join and REFUSES — which is exactly what it did
+# for every row before this change existed. A pre-change row therefore serves the
+# identical outcome, and the probe input is byte-identical (the field records
+# which slot the sentinel calldata already used; it changes no calldata).
 EFFECT_CACHE_SCHEMA_VERSION = 35
 
 # ``contract_surface_hash`` sentinel for kernel rows. A sentinel rather than

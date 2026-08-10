@@ -50,6 +50,7 @@ from utils.balance_status import (
     ASSET_SET_STATUS_AT_PAGE_CAP,
     ASSET_SET_STATUS_RETURNED_ASSETS,
     BALANCE_WRITER_TVL,
+    USD_CRUMB_THRESHOLD,
 )
 
 pytestmark = requires_postgres
@@ -1259,6 +1260,38 @@ def test_token_holdings_order_is_total_under_a_value_tie(db_session):
 
     got = _token_holdings_by_contract(db_session, p.id, 2)[c.id]
     assert got == tuple(sorted(t.lower() for t in tied))[:2]
+
+
+def test_a_crumb_holding_is_kept_out_of_the_probe_input_by_the_threshold(db_session):
+    """The probe's input is positions, and a crumb is excluded by RULE.
+
+    $0.004 is a real figure on a real quantity. It used to be excluded because
+    ``usd_value`` was ``numeric(20,2)`` and stored it as 0.00, which the
+    ``> 0`` filter then rejected — so the exclusion lived in the column's scale
+    and nowhere else. The column now holds ``0.004000000000000000`` (asserted
+    below off Postgres, so the crumb under test is a STORED one), and the row
+    stays out because the threshold says a position starts at a cent.
+
+    The boundary is on the keep side: $0.01 exactly is a position, which is the
+    side the old cent-scaled column put it on.
+    """
+    p = _protocol(db_session, "crumb-proto")
+    c = _contract(db_session, p.id, ADDR(0xB1B1))
+    crumb, cent, rich = ADDR(0x7101), ADDR(0x7102), ADDR(0x7103)
+    for token, usd in ((crumb, "0.004"), (cent, "0.01"), (rich, "41.00")):
+        db_session.add(
+            ContractBalance(contract_id=c.id, token_address=token, raw_balance="1", decimals=18, usd_value=Decimal(usd))
+        )
+    db_session.commit()
+    db_session.expire_all()
+    stored = {r.token_address: r.usd_value for r in db_session.query(ContractBalance).all()}
+    assert stored[crumb] == Decimal("0.004000000000000000")
+    assert stored[crumb] != Decimal(0)
+
+    got = _token_holdings_by_contract(db_session, p.id, 5)[c.id]
+
+    assert USD_CRUMB_THRESHOLD == Decimal("0.01")
+    assert got == (rich.lower(), cent.lower())
 
 
 # ---------------------------------------------------------------------------

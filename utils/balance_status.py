@@ -1,9 +1,10 @@
-"""Balance-provenance status vocabularies.
+"""Balance-provenance status vocabularies, and the one money threshold they share.
 
 A leaf module on purpose. The producer (``utils.etherscan``), the schema
 (``db.models``), the writers and the readers must agree on the exact strings,
 and a second copy of any of them is a divergence vector. Nothing here imports
-anything, so every layer can depend on it.
+from the project (``decimal`` is the whole import list), so every layer can
+depend on it.
 
 The governing rule for all of these: a value is published as a positive fact
 only when the evidence proves it. Every failure, swallow, revert and
@@ -12,6 +13,8 @@ polarity, in either direction.
 """
 
 from __future__ import annotations
+
+from decimal import Decimal
 
 # --- native coin -----------------------------------------------------------
 # ``proven_zero`` is reachable ONLY from a pinned read, and the schema enforces
@@ -213,3 +216,37 @@ TOKEN_REFERENCE_SHAPES = (
     TOKEN_REFERENCE_ABSENT_FROM_UNIVERSE,
     TOKEN_REFERENCE_NOT_DETERMINED,
 )
+
+
+# --- the crumb rule ---------------------------------------------------------
+# One cent, and the two filters that consume it treat a holding worth strictly
+# LESS than this as a crumb: a figure too small to separate a position from the
+# dust an address is sent unasked. At or above it the holding is a position and
+# is kept, so the boundary lands on the KEEP side — $0.009 is a crumb, $0.01 is
+# money.
+#
+# It is a RULE, and the point of naming it is that it was not one before. Both
+# filters used to test a stored ``usd_value`` against 0, and small figures landed
+# there because ``contract_balances.usd_value`` was ``numeric(20,2)``: the column
+# rounded to the nearest cent and the predicate read the resulting 0.00 as "no
+# price". Widening the column to ``numeric(38,18)`` (``b8d3c5f21a04``) removed
+# the rounding, and with it the only thing that had ever implemented any
+# threshold — so both populations would have silently taken every crumb back in,
+# on no decision by anyone.
+#
+# The rule is NOT a restatement of what the rounding did, and the difference is
+# worth knowing. Postgres rounds half away from zero, so the old cut sat at HALF
+# a cent: $0.004 vanished and $0.009 survived as a stored $0.01. A cent is the
+# deliberate line, so the readings in [$0.005, $0.01) — which used to be kept by
+# being rounded UP into a position — are crumbs now. Exactly $0.01 is unmoved: it
+# stored as 0.01 then and is a position now.
+#
+# Shared rather than duplicated because the two filters answer the SAME question
+# about the same column, one in SQL and one in Python, and a divergence between
+# them is invisible from either side. It is a ``Decimal`` because the column is
+# numeric and the comparison must be exact at the boundary; binary floats put
+# 0.01 slightly above itself.
+#
+# It is NOT a claim about worth: nothing here says a crumb is worthless, spam or
+# fake. It says the figure is below the resolution these two consumers act on.
+USD_CRUMB_THRESHOLD = Decimal("0.01")

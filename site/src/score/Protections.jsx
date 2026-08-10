@@ -1,3 +1,4 @@
+import BoundBadge from "./BoundBadge.jsx";
 import CapabilityTag from "./CapabilityTag.jsx";
 import EntityButton, { entityProps } from "./EntityButton.jsx";
 import { shortAddress, usdCompact } from "./format.js";
@@ -170,6 +171,18 @@ export default function Protections({ doc, view, note, onSelect }) {
               <CapabilityTag capability={row.capability} />
               {row.valueText ? ` on ${row.valueText}` : ""}
             </span>
+            {/* Outside `.sc-prot-what`, which ellipsises: a chip inside it is the
+                first thing a narrow row would cut, and the direction is the part
+                of the band that must not be droppable. */}
+            {row.value.determined ? (
+              <BoundBadge direction={row.value.direction} />
+            ) : row.provenNoReach ? (
+              // An earned negative, printed in the row's own voice like the
+              // deduction row prints it — not the unknown's italic.
+              <span>proven no reach</span>
+            ) : (
+              <Nd>value not determined</Nd>
+            )}
             <span className="sc-prot-saved">+{row.delta.toFixed(1)}</span>
           </div>
           <div className="sc-pbar" style={{ width: `${row.widthPct}%` }}>

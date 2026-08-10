@@ -38,7 +38,7 @@ from services.monitoring.balance_observation import (
     scanned_from_block,
     sweep_from_block,
 )
-from services.monitoring.balance_reads import pinned_native_balances
+from services.monitoring.balance_reads import ObservationSubject, pinned_native_balances
 from services.monitoring.delivery_shape import (
     discovered_request,
     disposition_cost_note,
@@ -688,21 +688,22 @@ class ResolutionWorker(BaseWorker):
         # page whose every entry was zero-balance), but never merely skipped.
         # It is enforced in ``balance_observation.record_observation``, the one
         # write point both producers go through.
-        escalation = escalation_reason(session, contract_id=contract.id, page=page)
-        sweeps: dict[int, SweepOutcome] = {}
+        subject = ObservationSubject.of_contract(contract)
+        escalation = escalation_reason(session, subject=subject, page=page)
+        sweeps: dict[ObservationSubject, SweepOutcome] = {}
         sweep_cost = None
         if escalation is not None and contract.address:
             sweeps, sweep_cost = run_sweeps(
                 [
                     SweepRequest(
-                        contract_id=contract.id,
+                        subject=subject,
                         address=contract.address,
                         chain_id=chain_id,
-                        from_block=sweep_from_block(session, contract_id=contract.id),
+                        from_block=sweep_from_block(session, subject=subject),
                         reason=escalation,
-                        known_assets=known_swept_assets(session, contract_id=contract.id),
-                        known_typed=known_typed_assets(session, contract_id=contract.id),
-                        union_from_block=scanned_from_block(session, contract_id=contract.id),
+                        known_assets=known_swept_assets(session, subject=subject),
+                        known_typed=known_typed_assets(session, subject=subject),
+                        union_from_block=scanned_from_block(session, subject=subject),
                     )
                 ],
                 rpc_url_for=lambda cid: rpc_url_for_chain_id(cid),
@@ -719,7 +720,7 @@ class ResolutionWorker(BaseWorker):
                 chain_id=chain_id,
                 holder_address=observed_address,
                 page=page,
-                sweep=sweeps.get(contract.id),
+                sweep=sweeps.get(subject),
             )
             disposition_cost = run_disposition(
                 session,
@@ -753,7 +754,7 @@ class ResolutionWorker(BaseWorker):
 
         recorded = record_observation(
             session,
-            contract=contract,
+            subject=subject,
             chain_id=chain_id,
             native=NativeReading(
                 wei=eth_wei,
@@ -765,7 +766,7 @@ class ResolutionWorker(BaseWorker):
             ),
             page=page,
             writer=BALANCE_WRITER_RESOLUTION,
-            sweep=cast(SweepOutcome | None, sweeps.get(contract.id)),
+            sweep=cast(SweepOutcome | None, sweeps.get(subject)),
             escalation=escalation,
             cost_note=(
                 f"cycle scan cost {sweep_cost.get_logs} getLogs + {sweep_cost.multicall} multicall + "

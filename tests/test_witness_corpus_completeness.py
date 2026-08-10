@@ -961,3 +961,66 @@ def test_the_two_old_new_shapes_differ_only_in_the_slot(corpus):
     assert [i.get("name") for i in mapping_spec["inputs"]] == [i.get("name") for i in scalar_spec["inputs"]]
     assert len(mapping_spec["effect_tags"]["writes"]) == len(scalar_spec["effect_tags"]["writes"]) == 1
     assert mapping_spec["witness_tier"] != scalar_spec["witness_tier"]
+
+
+# ---------------------------------------------------------------------------
+# Self-service payout — the label corpus actually contains the shapes
+# ---------------------------------------------------------------------------
+
+
+def _label_golden_flow_rows():
+    """Every (claim-witness flow entry, value_flows record) pair in the label
+    golden, which the A/B gate has already proved equal to a live compile."""
+    from tests.support import label_corpus as label_harness
+
+    golden = label_harness.load_golden()
+    for contract in golden["contracts"]:
+        for fn in contract["functions"]:
+            witness_flows = [f for c in fn["claims"] for f in (c["witness"].get("flows") or []) if isinstance(f, dict)]
+            yield contract["contract"], fn["full_name"], witness_flows, fn["value_flows"]
+
+
+def test_the_label_corpus_contains_an_element_read_amount():
+    """Non-vacuity for W1's amount half. Every A-fixture that asserts a W1
+    refusal ("A5 fails W1") is only a gate if the corpus holds at least one
+    amount that IS an element read — a record cell selected by a caller-named
+    key, with the member path resolved. Before SelfServicePayout the only
+    bounded_by_storage amount refused at the root, so the refusal assertions
+    could pass with the shape entirely absent from the corpus."""
+    element_reads = [
+        vf
+        for _c, _fn, _wf, value_flows in _label_golden_flow_rows()
+        for vf in value_flows
+        if vf.get("amount_record_variable") and vf.get("amount_record_member_path")
+    ]
+    assert element_reads, "no element-read amount anywhere in the label corpus"
+    # ...and at least one is keyed by a whole caller argument, the shape whose
+    # key the caller names (`bids[_bidId]`), with the ordering witness beside it.
+    assert any(
+        vf.get("amount_record_key_kinds") == ["param"]
+        and vf.get("amount_record_key_param_indexes") == [0]
+        and isinstance(vf.get("record_ordering"), dict)
+        for vf in element_reads
+    )
+
+
+def test_the_label_corpus_contains_a_caller_authority_element_guard():
+    """Non-vacuity for W1's guard half: at least one witness proves the guard
+    and the amount name the SAME record with the caller's own membership
+    (`owner_guarded_record`), and the full conjunction is exercised positively —
+    so a producer that stops resolving the guard side falls to not_determined
+    and a golden test goes red, rather than every refusal holding vacuously."""
+    witness_entries = [f for _c, _fn, wf, _vf in _label_golden_flow_rows() for f in wf]
+    constrained = [
+        f["amount_record_constraint"]
+        for f in witness_entries
+        if (f.get("amount_record_constraint") or {}).get("state") == "constrained"
+    ]
+    assert constrained, "no proven W1 (amount_record_constraint) anywhere in the label corpus"
+    assert any(v.get("basis") == "owner_guarded_record" for v in constrained)
+    proven = [
+        f["self_service_payout"]
+        for f in witness_entries
+        if (f.get("self_service_payout") or {}).get("state") == "proven_self_service"
+    ]
+    assert proven, "the full W1∧W2 conjunction is never exercised positively in the label corpus"

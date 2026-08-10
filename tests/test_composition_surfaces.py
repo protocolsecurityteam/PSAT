@@ -19,17 +19,23 @@ import pytest
 from services.scoring import constants as K
 from services.scoring import fold as FOLD
 from services.scoring import planes as P
+from services.scoring.schema import PrincipalRef
 from tests import composition_admission_fixtures as CA
 from tests.test_scoring_redteam import (
     CALLING_SELECTOR,
     COMPOSED_SELECTOR,
+    EOA,
     KEY_C,
     KEY_V,
+    _composing_case,
     _composing_principals,
+    _composing_signals,
     _gate_row,
     _tied_case,
     _tied_signals,
+    facts,
     fold,  # noqa: F401  — the fold fixture
+    value_plane,
 )
 from utils import execution_record as EX
 
@@ -335,7 +341,37 @@ def test_every_arm_this_run_added_is_flagged_uncalibrated_and_disclosed():
     # not bound a witness. The 13 determined sheets carry no witnessed magnitude
     # for it to refuse a bound for, so it has no carrier on this corpus and is
     # disclosed like its siblings rather than left as a bare flag. Ninth entry.
-    assert len(registered) == 9
+    #
+    # The destination run added two more. ``fork:simulation+destination_param``
+    # is the register's paradigm case — the exec arm's consuming branch requires
+    # the verdict to NAME the parameter its sentinel was substituted into, no
+    # verdict in any measured corpus names one, and where a caller_arbitrary
+    # verdict does sit beside an exec destination the two parameters differ, so
+    # the branch is fixture-only. ``constrained:token_owner+restricted_caller``
+    # is the "0 or tiny" clause, registered per KIND like ``fixed_target_kind:*``
+    # because the ``msg_sender`` half of the same arm is calibrated; checked
+    # against the scored document, whose only carriers are one entity's pair of
+    # subsumed rows. Tenth and eleventh entries.
+    #
+    # The msg_value witness added its eight named refusals, and NEITHER of its
+    # two proven arms: measured over the 369 stored functions carrying a
+    # flow.out/value_router claim (of 3104 stored functions), the self-return arm
+    # carries ``Liquifier.unwrapL2Eth`` and the pass-through arm carries
+    # ``RestakingRewardsRouter.receive``, so both are calibrated and neither is
+    # flagged. Both of those functions PROVE the witness, so no refusal reason
+    # has a carrier — and each is registered separately rather than as one
+    # family token, because a reader branching on "the witness refused" has to
+    # be able to tell which refusal has never been seen. Twelfth through
+    # nineteenth entries.
+    #
+    # The self-service consumer arm added its one PROVEN state,
+    # ``self_service_bound:proven``. Its producer fact (``self_service_payout``)
+    # is materialized on no stored flow — the witness proves out only in the
+    # owner's fresh run — so the arm has zero carriers on this corpus and is
+    # exercised by fixtures alone; its two sibling uncharged arms
+    # (``proven_msg_value_self_return``, ``proven_msg_value_passthrough``) each
+    # HAVE a carrier and are not flagged. Twentieth entry.
+    assert len(registered) == 20
     for entry in registered:
         assert entry["arm"] in flagged, entry["arm"]
         assert entry["state"] and entry["note"]
@@ -676,3 +712,258 @@ def test_the_ceiling_direction_stays_allow_listed_on_the_page():
     derive = (ROOT / "site" / "src" / "score" / "derive.js").read_text()
     assert f'"{FOLD.BOUND_DIRECTION_CEILING}"' in derive
     assert "BOUND_DIRECTIONS" in derive
+
+
+# --------------------------------------------------------------------------
+# U1-F4 — a magnitude trimmed to an incomplete sheet says the sheet is incomplete
+# --------------------------------------------------------------------------
+
+# The destination's witness is $1M (``_composing_signals``), so a sheet below it
+# is what caps the entry and the trim is live.
+_TRIMMING_SHEET = 250_000.0
+
+
+def _trimmed_entry(fold, per_asset_state):  # noqa: F811
+    document = fold(
+        _composing_signals(),
+        principals=_composing_principals(),
+        **_composing_case(
+            value=value_plane(
+                {KEY_V: {"usdc": _TRIMMING_SHEET}},
+                per_asset_state={KEY_V: per_asset_state},
+                contracts=(KEY_C,),
+            )
+        ),
+    )
+    return _gate_row(document)["reach_composed_magnitudes"][0]
+
+
+def test_a_magnitude_trimmed_to_an_incomplete_sheet_publishes_that_it_is_incomplete(fold):  # noqa: F811
+    """U1-F4. ``min(witness, sheet)`` against a sheet nobody proved whole.
+
+    The published figure is $250k where the destination's own witness says $1M,
+    and the entry said the sheet capped it and stopped there. But this sheet
+    carries an asset no price answered, so it is a FLOOR over what was priced —
+    not an at-most on what is there to move — and a min against a floor hands
+    back a smaller number on a bound nothing established. The dollars stand;
+    what the entry may no longer do is call them a ceiling in silence.
+    """
+    entry = _trimmed_entry(fold, {"usdc": P.ASSET_PRICED, "other": P.ASSET_UNPRICED})
+
+    assert entry["bounded_by"] == FOLD._BOUNDED_BY_SHEET
+    assert entry["published_usd"] == _TRIMMING_SHEET
+    assert entry["destination_sheet_bound_direction"] == FOLD.BOUND_DIRECTION_NOT_DETERMINED
+    # The basis ENUMERATES the conjunct that failed, off the destination's own
+    # coverage, through the same derivation the per-entity ceiling records use —
+    # so a reader is pointed at a field that says something rather than at three
+    # candidate causes, two of which read empty here.
+    basis = entry["destination_sheet_bound_direction_basis"]
+    assert "assets_not_priced" in basis
+    assert "asset_list_proven_whole" not in basis
+    # And the entry's own sentence carries the caveat rather than leaving the
+    # typed field to be joined by somebody who thought to look.
+    assert FOLD._TRIMMED_TO_AN_UNPROVEN_CEILING in entry["reading"]
+
+
+def test_a_trim_onto_a_fully_covered_sheet_claims_the_ceiling_it_earned(fold):  # noqa: F811
+    """The negative path. Every asset observed at the destination is priced, so
+    the sheet IS an at-most and the entry says so with no caveat attached — a
+    disclosure that fired on every trim would say nothing about any of them."""
+    entry = _trimmed_entry(fold, {"usdc": P.ASSET_PRICED})
+
+    assert entry["bounded_by"] == FOLD._BOUNDED_BY_SHEET
+    assert entry["destination_sheet_bound_direction"] == FOLD.BOUND_DIRECTION_CEILING
+    assert "every asset observed at this entity" in entry["destination_sheet_bound_direction_basis"]
+    assert FOLD._TRIMMED_TO_AN_UNPROVEN_CEILING not in entry["reading"]
+
+
+def test_an_entry_no_sheet_bounded_publishes_no_direction_at_all(fold):  # noqa: F811
+    """``null`` is the third state, and it is not "not_determined".
+
+    Where no sheet exists there is no direction to publish and no completeness
+    to refuse; ``sheet_not_determined`` beside it already carries the fact.
+    Spelling a refusal here would put "there is no sheet" and "there is a sheet
+    and it proves no at-most" under one token.
+    """
+    document = fold(_composing_signals(), principals=_composing_principals(), **_composing_case(value=value_plane()))
+    entry = _gate_row(document)["reach_composed_magnitudes"][0]
+
+    assert entry["sheet_not_determined"] is True
+    assert entry["destination_sheet_bound_direction"] is None
+    assert entry["destination_sheet_bound_direction_basis"] is None
+    assert FOLD._TRIMMED_TO_AN_UNPROVEN_CEILING not in entry["reading"]
+
+
+def test_an_entry_built_without_a_plane_cannot_claim_a_ceiling_it_never_read(fold):  # noqa: F811
+    """Fail-closed on the third state of the completeness question itself.
+
+    ``sheet_is_proven_complete`` is ``None`` where nobody read the destination's
+    coverage — the state every hand-built entry is in. That is the absence of a
+    completeness proof, which is not a completeness proof, so the direction is
+    not_determined and never ``ceiling``. The two coverage fields are also one
+    answer and may not be published apart.
+    """
+    entry = FOLD._ComposedMagnitude(
+        entity=KEY_V,
+        selector=COMPOSED_SELECTOR,
+        function="exit",
+        witness_state="proven_floor",
+        witnessed_usd=1_000_000.0,
+        usd=_TRIMMING_SHEET,
+        sheet_usd=_TRIMMING_SHEET,
+        chain=(),
+        predicates=P.DestinationPredicates(P.PREDICATES_FUNCTION_NOT_LOCATED, None, None, None, None, 0),
+        execution=EX.not_determined(EX.REASON_NOT_PERSISTED),
+    )
+    assert entry.sheet_bound_direction == FOLD.BOUND_DIRECTION_NOT_DETERMINED
+
+    with pytest.raises(ValueError):
+        replace(entry, sheet_is_proven_complete=True)
+
+    # And the sentence stays OFF, because the field it exists to point at is
+    # null here. A reading that told a reader to consult an enumeration of the
+    # conjuncts this sheet fails, beside a null enumeration, is the
+    # authored-string defect one level up from the one it was written to fix —
+    # the typed direction above carries the refusal on its own.
+    published = entry.as_json()
+    assert published["destination_sheet_bound_direction"] == FOLD.BOUND_DIRECTION_NOT_DETERMINED
+    assert published["destination_sheet_bound_direction_basis"] is None
+    assert FOLD._TRIMMED_TO_AN_UNPROVEN_CEILING not in published["reading"]
+    # The general rule behind that, over every field the sentence names: it is
+    # published only where every field it points at is.
+    for field in ("destination_sheet_bound_direction", "destination_sheet_bound_direction_basis"):
+        assert field in FOLD._TRIMMED_TO_AN_UNPROVEN_CEILING
+        if FOLD._TRIMMED_TO_AN_UNPROVEN_CEILING in published["reading"]:
+            assert published[field] is not None
+
+
+# --------------------------------------------------------------------------
+# U-B2 — the shared pot is counted ONCE and both doors onto it stay visible
+# --------------------------------------------------------------------------
+
+# A second admin address, holding no setter at the vault, so the two powers over
+# one pot take DIFFERENT arms of the composition rule.
+_SECOND_ADMIN = "0x" + "4" * 40
+
+
+def _two_powers_over_one_pot(fold):  # noqa: F811
+    """Two admin capabilities at one seized node, both reaching one destination.
+
+    The owner's ruling is about this exact shape on the reference corpus:
+    ``authority.replace`` and ``ownership.transfer`` at the same unit, both
+    licensing the same selector at the same vault, whose composed figure is
+    BYTE-IDENTICAL under either — one pot, two doors. The pot is counted once;
+    what may not happen is the second door disappearing to achieve that.
+
+    The two rows are separated by the one witness the composition rule reads:
+    only the ``authority.replace`` principal holds a setter at the destination,
+    so its figure is republished and the other's is withheld.
+    """
+    ownership = replace(
+        _composing_signals()[0],
+        claim_id="ownership.transfer",
+        function_name="transferOwnership",
+        selector="0xf2fde38b",
+        principal_refs=(PrincipalRef(3, "ethereum", _SECOND_ADMIN),),
+    )
+    return fold(
+        [*_composing_signals(), ownership],
+        principals={**_composing_principals(), 3: facts(3, _SECOND_ADMIN, "eoa")},
+        **_composing_case(
+            deletability=CA.deletability_plane(host=((KEY_V, EOA, "setAuthority"),)),
+        ),
+    )
+
+
+def _row_for(document, capability: str) -> dict[str, Any]:
+    """The published row for a capability, findings or subsumed — a subsumed row
+    is published in full and is not the same thing as a row that vanished."""
+    published = (*document.findings, *(document.provenance.get("subsumed_rows") or ()))
+    rows = [row for row in published if row["capability"] == capability]
+    assert len(rows) == 1, f"{capability}: expected one published row, got {len(rows)}"
+    return rows[0]
+
+
+def test_the_shared_pot_is_priced_once_and_both_admin_powers_stay_attributed(fold):  # noqa: F811
+    """R2/U-B2, the owner's ruling and its condition, in one document.
+
+    THE RULING: composition stays withheld for the second power, so the pot is
+    charged once. THE CONDITION: both powers over that pot remain visibly
+    attributed on the published unit — the withheld one is not silently dropped,
+    because "we decided not to charge you twice" and "we never saw the second
+    door" are different documents and only one of them is true.
+    """
+    document = _two_powers_over_one_pot(fold)
+    replace_row = _row_for(document, "authority.replace")
+    ownership_row = _row_for(document, "ownership.transfer")
+
+    # Both doors published, each attributed to its OWN principal — the pair is
+    # what makes them two powers rather than one row read twice.
+    assert replace_row["example_functions"] == ["setAuthority"]
+    assert ownership_row["example_functions"] == ["transferOwnership"]
+    assert replace_row["principal_unit"] != ownership_row["principal_unit"]
+
+    # The pot is priced ONCE: exactly one of the two rows carries the composed
+    # figure at the vault.
+    priced = [row["capability"] for row in (replace_row, ownership_row) if row["reach_composed_magnitudes"]]
+    assert priced == ["authority.replace"]
+    assert [entry["entity"] for entry in replace_row["reach_composed_magnitudes"]] == [KEY_V]
+
+    # And the second power's dollars are WITHHELD, not absent: the entry names
+    # the same entity and the same selector, publishes no figure, and carries
+    # the typed reason the rule refused it.
+    withheld = _withheld(ownership_row)
+    assert [(entry["entity"], entry["selector"]) for entry in withheld] == [(KEY_V, COMPOSED_SELECTOR)]
+    assert withheld[0]["published_usd"] is None
+    assert withheld[0]["arm_taken"] == FOLD.ARM_NOT_DETERMINED
+    assert withheld[0]["withheld_reason"]
+    assert ownership_row["reach_composed_magnitudes"] == []
+
+
+def test_the_withheld_door_is_counted_in_its_rows_own_census(fold):  # noqa: F811
+    """A refusal nobody counted reads the same as a rule nobody ran.
+
+    The visibility the ruling turns on is not only the entry: the row's census
+    has to say a candidate reached the admission rule and was refused there, or
+    a reader aggregating censuses sees a unit with one power over the pot.
+    """
+    census = _row_for(_two_powers_over_one_pot(fold), "ownership.transfer")["reach_composition_census"]
+
+    assert census["composed_selected"] == 1
+    assert census["composed"] == 0
+    assert census["composed_withheld"] == 1
+    assert census["composed_withheld_by_arm"] == {FOLD.ARM_NOT_DETERMINED: 1}
+
+
+def test_the_composed_figure_is_the_same_under_either_power(fold):  # noqa: F811
+    """Why counting it once is the right answer rather than a convenient one.
+
+    The reason the second charge is refused is that it is the SAME dollars: the
+    destination's own witness at the same selector, reached from the same seized
+    node. Pinned by measuring it — a document where the two figures differed
+    would be two pots and the ruling would not apply to it.
+    """
+    both = _two_powers_over_one_pot(fold)
+    replace_only = fold(
+        _composing_signals(),
+        principals=_composing_principals(),
+        **_composing_case(deletability=CA.deletability_plane(host=((KEY_V, EOA, "setAuthority"),))),
+    )
+    ownership_admitted = fold(
+        [
+            *_composing_signals()[1:],
+            replace(
+                _composing_signals()[0],
+                claim_id="ownership.transfer",
+                function_name="transferOwnership",
+                selector="0xf2fde38b",
+            ),
+        ],
+        principals=_composing_principals(),
+        **_composing_case(deletability=CA.deletability_plane(host=((KEY_V, EOA, "setAuthority"),))),
+    )
+
+    charged = _row_for(both, "authority.replace")["reach_composed_magnitudes"][0]["published_usd"]
+    assert charged == _gate_row(replace_only)["reach_composed_magnitudes"][0]["published_usd"]
+    admitted = _row_for(ownership_admitted, "ownership.transfer")["reach_composed_magnitudes"][0]
+    assert charged == admitted["published_usd"]

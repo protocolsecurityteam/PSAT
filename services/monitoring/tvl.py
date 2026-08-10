@@ -13,17 +13,19 @@ from __future__ import annotations
 import logging
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Event
 
 import requests
 from dotenv import load_dotenv
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from db.models import (
     Contract,
+    ContractBalanceFetch,
     ContractBalanceLatest,
     Protocol,
     SessionLocal,
@@ -31,8 +33,10 @@ from db.models import (
 )
 from db.queue import record_heartbeat
 from services.monitoring import HEARTBEAT_PROTOCOL_TVL, emit_monitor_cycle
+from services.monitoring.asset_sweep import SweepCost, SweepOutcome
 from services.monitoring.balance_observation import (
     NativeReading,
+    RecordedObservation,
     SweepRequest,
     escalation_reason,
     fetch_asset_page,
@@ -44,6 +48,7 @@ from services.monitoring.balance_observation import (
     sweep_from_block,
 )
 from services.monitoring.balance_reads import (
+    ObservationSubject,
     contracts_missing_current_rows,
     pinned_native_balances,
 )
@@ -77,6 +82,12 @@ MIN_SNAPSHOT_INTERVAL = int(os.getenv("PROTOCOL_TVL_MIN_INTERVAL", "300"))
 # Protocols refreshed per tick, oldest-snapshot-first — bounds the per-tick
 # Etherscan/DefiLlama fan-out (design §2.7).
 DEFAULT_TVL_PROTOCOLS_PER_PASS = 10
+# How stale the entity cohort's reading may get before the cycle re-reads it.
+# Deliberately a day rather than the TVL tick: these holders are the protocol's
+# signers and capability principals, not its deployments, and their scan is
+# batched — N holders sharing a cursor cost the same windows as one — so the
+# cadence, not the population, is what the spend is bought with.
+DEFAULT_ENTITY_BALANCE_INTERVAL = int(os.getenv("PSAT_ENTITY_BALANCE_INTERVAL", "86400"))
 DEFILLAMA_PROTOCOL_URL = "https://api.llama.fi/protocol"
 
 
@@ -221,6 +232,10 @@ class _PendingObservation:
     native: NativeReading
     page: TokenBalancePage
     escalation: str | None
+
+    @property
+    def subject(self) -> ObservationSubject:
+        return ObservationSubject.of_contract(self.contract)
 
 
 def refresh_contract_balances(
@@ -369,7 +384,7 @@ def refresh_contract_balances(
                 native_failed = True
 
         page = fetch_asset_page(address, chain_id=chain_id)
-        escalation = escalation_reason(session, contract_id=contract.id, page=page)
+        escalation = escalation_reason(session, subject=ObservationSubject.of_contract(contract), page=page)
         pending.append(
             _PendingObservation(
                 contract=contract,
@@ -393,14 +408,14 @@ def refresh_contract_balances(
     # costs the same windows as a single holder.
     sweep_requests = [
         SweepRequest(
-            contract_id=p.contract.id,
+            subject=p.subject,
             address=p.contract.address,
             chain_id=p.chain_id,
-            from_block=sweep_from_block(session, contract_id=p.contract.id),
+            from_block=sweep_from_block(session, subject=p.subject),
             reason=p.escalation,
-            known_assets=known_swept_assets(session, contract_id=p.contract.id),
-            known_typed=known_typed_assets(session, contract_id=p.contract.id),
-            union_from_block=scanned_from_block(session, contract_id=p.contract.id),
+            known_assets=known_swept_assets(session, subject=p.subject),
+            known_typed=known_typed_assets(session, subject=p.subject),
+            union_from_block=scanned_from_block(session, subject=p.subject),
         )
         for p in pending
         if p.escalation is not None and p.contract.address
@@ -437,7 +452,7 @@ def refresh_contract_balances(
                 chain_id=p.chain_id,
                 holder_address=p.contract.address,
                 page=p.page,
-                sweep=sweeps.get(p.contract.id),
+                sweep=sweeps.get(p.subject),
             )
             for p in pending
             if p.contract.address
@@ -469,12 +484,12 @@ def refresh_contract_balances(
         eth_wei = entry.native.wei
         recorded = record_observation(
             session,
-            contract=contract,
+            subject=entry.subject,
             chain_id=chain_id,
             native=entry.native,
             page=page,
             writer=BALANCE_WRITER_TVL,
-            sweep=sweeps.get(contract.id),
+            sweep=sweeps.get(entry.subject),
             escalation=entry.escalation,
             cost_note=cost_note,
         )
@@ -545,6 +560,358 @@ def refresh_contract_balances(
 
 
 # ---------------------------------------------------------------------------
+# Entity-keyed holders: the perimeter's principals that have no contracts row
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ExcludedHolder:
+    """One entity the sweep population did NOT take, and why.
+
+    Published rather than dropped. A population that quietly shrinks is
+    indistinguishable from one that was never that size, and every exclusion
+    here is a decision a reader is entitled to check.
+    """
+
+    entity_key: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class EntityHolder:
+    """One proven-codeless principal queued for observation at its own address."""
+
+    subject: ObservationSubject
+    entity_key: str
+    chain: str
+    chain_id: int
+    address: str
+
+
+@dataclass
+class EntityObservationReport:
+    """What one entity-holder cycle read, per subject and per batch.
+
+    The sweep's batch outcomes are carried, not just the per-address ones: a
+    batch that cannot be proven whole fails EVERY holder in it, so a report that
+    named only addresses would show forty independent failures where there was
+    one.
+    """
+
+    holders: list[EntityHolder] = field(default_factory=list)
+    excluded: list[ExcludedHolder] = field(default_factory=list)
+    observations: dict[str, RecordedObservation] = field(default_factory=dict)
+    sweep_outcomes: dict[str, SweepOutcome] = field(default_factory=dict)
+    cost: SweepCost = field(default_factory=SweepCost)
+    etherscan_pages: int = 0
+    native_multicalls: int = 0
+    partial: bool = False
+
+
+def proven_codeless_holders(
+    session: Session,
+    protocol_id: int,
+    *,
+    entity_keys: set[str] | None = None,
+) -> tuple[list[EntityHolder], list[ExcludedHolder]]:
+    """The protocol's proven-codeless principals, as observation subjects.
+
+    The membership witness is the scorer's own
+    :func:`services.scoring.planes.load_proven_eoa_entities` — imported here
+    rather than re-expressed, because the producer's population and the plane's
+    idea of "proven codeless" must be ONE predicate. ``resolved_type == 'eoa'``
+    is only ever written after an empty ``eth_getCode``; a node that was never
+    probed carries ``unknown`` and is not in this set, and sweeping it as an EOA
+    would be a name standing in for a witness.
+
+    Returns ``(holders, excluded)``. Nothing is dropped silently: an entity this
+    producer cannot read is returned with the reason it cannot.
+    """
+    # Local import: the scorer reads the monitoring plane, so a module-level
+    # import here would close the cycle. Nothing about the predicate is copied.
+    from services.scoring.planes import load_proven_eoa_entities
+    from services.scoring.schema import coalesce_chain
+    from services.scoring.schema import entity_key as make_entity_key
+
+    keys = sorted(load_proven_eoa_entities(session, protocol_id))
+    if entity_keys is not None:
+        wanted = {k.lower() for k in entity_keys}
+        keys = [k for k in keys if k.lower() in wanted]
+
+    # An address this protocol already has a ``contracts`` row for is observed
+    # through that row. Two subjects reading one address would fold two accounts
+    # onto one entity key, and the sheet's "every account scanned at itself"
+    # conjunct would then be asking about an account that is the same account
+    # twice.
+    contract_keys = {
+        make_entity_key(chain, address)
+        for address, chain in session.execute(
+            select(Contract.address, Contract.chain).where(Contract.protocol_id == protocol_id)
+        ).all()
+    }
+
+    holders: list[EntityHolder] = []
+    excluded: list[ExcludedHolder] = []
+    for key in keys:
+        chain, _, address = key.partition("::")
+        if not address:
+            excluded.append(ExcludedHolder(key, "entity key carries no address"))
+            continue
+        if key in contract_keys:
+            excluded.append(ExcludedHolder(key, "already observed through its own contracts row"))
+            continue
+        try:
+            chain_id = chain_id_for(chain)
+        except Exception as exc:
+            excluded.append(ExcludedHolder(key, f"no chain id for {chain!r}: {type(exc).__name__}"))
+            continue
+        if rpc_url_for_chain_id(chain_id) is None:
+            excluded.append(ExcludedHolder(key, f"no RPC URL configured for chain {chain_id}"))
+            continue
+        holders.append(
+            EntityHolder(
+                subject=ObservationSubject.of_entity(coalesce_chain(chain), address),
+                entity_key=key,
+                chain=coalesce_chain(chain),
+                chain_id=chain_id,
+                address=address,
+            )
+        )
+    return holders, excluded
+
+
+def refresh_entity_balances(
+    session: Session,
+    protocol_id: int,
+    *,
+    entity_keys: set[str] | None = None,
+) -> EntityObservationReport:
+    """Observe the protocol's entity-keyed holders through the shared ladder.
+
+    Same escalation ladder and the same single write point as
+    :func:`refresh_contract_balances` — Etherscan's page first, the chain's own
+    transfer history when the page is empty or persistently unobtainable — so a
+    guard added on one population holds on the other by construction.
+
+    What it deliberately does NOT share is the TVL side of that function:
+
+    * **No breakdown, no snapshot contribution.** These addresses are the
+      protocol's signers and capability principals, not its deployments. Their
+      personal holdings are not the protocol's money and must never be summed
+      into a published TVL figure.
+    * **No disposition pass.** The delivery-evidence plane is keyed on contract
+      rows; an entity holder's unpriced token therefore stays ``unpriced``
+      rather than being determined as airdrop-delivered. That is the fail-closed
+      direction — a weaker claim, never a stronger one.
+    """
+    from utils.etherscan import get_eth_price, get_native_price
+
+    holders, excluded = proven_codeless_holders(session, protocol_id, entity_keys=entity_keys)
+    report = EntityObservationReport(holders=holders, excluded=excluded)
+    if not holders:
+        return report
+
+    # One pinned native read per chain, before the per-holder loop, for the same
+    # reason the contract pass does it: a zero is publishable only when it was
+    # read AT a named height.
+    pinned_by_chain: dict[int, tuple[int | None, dict[str, int]]] = {}
+    for chain_id in sorted({h.chain_id for h in holders}):
+        addresses = [h.address for h in holders if h.chain_id == chain_id]
+        pinned_by_chain[chain_id] = pinned_native_balances(addresses, chain_id=chain_id)
+        report.native_multicalls += 1
+
+    eth_price: float | None = None
+    try:
+        eth_price = get_eth_price(chain_id=1)
+    except Exception as exc:
+        logger.warning("entity balances: ETH price fetch failed: %s", exc)
+        report.partial = True
+    native_price_by_chain: dict[int, float | None] = {}
+
+    pending: list[tuple[EntityHolder, NativeReading, TokenBalancePage, str | None]] = []
+    for holder in holders:
+        native_asset = chain_by_id(holder.chain_id).native_asset
+        if native_asset == "ETH":
+            native_price = eth_price
+            native_symbol, native_name = "ETH", "Ether"
+            if native_price is None:
+                report.partial = True
+        else:
+            if holder.chain_id not in native_price_by_chain:
+                try:
+                    native_price_by_chain[holder.chain_id] = get_native_price(holder.chain_id)
+                except Exception as exc:
+                    logger.warning("entity balances: native price failed for chain %s: %s", holder.chain_id, exc)
+                    native_price_by_chain[holder.chain_id] = None
+            native_price = native_price_by_chain[holder.chain_id]
+            if native_price is None:
+                report.partial = True
+                report.excluded.append(
+                    ExcludedHolder(holder.entity_key, f"no USD quote for chain {holder.chain_id} native coin")
+                )
+                continue
+            native_symbol, native_name = native_asset, native_asset
+
+        pinned_block, pinned_wei = pinned_by_chain.get(holder.chain_id, (None, {}))
+        if pinned_block is not None and holder.address in pinned_wei:
+            wei: int | None = pinned_wei[holder.address]
+            native_block: int | None = pinned_block
+            native_failed = False
+        else:
+            # No unpinned fallback here. The contract pass has Etherscan's
+            # ``account/balance`` to fall back on; spending one request per
+            # holder to obtain a quantity whose zero can never be published as
+            # proven would buy nothing this population needs, so the read is
+            # recorded as failed and the sheet stays not_determined.
+            wei, native_block, native_failed = None, None, True
+
+        page = fetch_asset_page(holder.address, chain_id=holder.chain_id)
+        report.etherscan_pages += 1
+        escalation = escalation_reason(session, subject=holder.subject, page=page)
+        pending.append(
+            (
+                holder,
+                NativeReading(
+                    wei=wei,
+                    block_number=native_block,
+                    failed=native_failed,
+                    price_usd=native_price,
+                    symbol=native_symbol,
+                    name=native_name,
+                ),
+                page,
+                escalation,
+            )
+        )
+
+    sweep_requests = [
+        SweepRequest(
+            subject=holder.subject,
+            address=holder.address,
+            chain_id=holder.chain_id,
+            from_block=sweep_from_block(session, subject=holder.subject),
+            reason=escalation,
+            known_assets=known_swept_assets(session, subject=holder.subject),
+            known_typed=known_typed_assets(session, subject=holder.subject),
+            union_from_block=scanned_from_block(session, subject=holder.subject),
+        )
+        for holder, _native, _page, escalation in pending
+        if escalation is not None
+    ]
+    # The entity cohort spends its OWN request counter. ``SWEEP_REQUEST_BUDGET``
+    # is a ceiling on whatever counter ``run_sweeps`` carries, so a per-cohort
+    # counter is what makes the daily entity pass and the hourly contract sweep
+    # two separate allowances rather than one shared one. ``run_sweeps`` already
+    # mints a counter per call, so this argument states that invariant at the
+    # call site rather than establishing it — pinned here, and by a test,
+    # because the isolation is a property this producer depends on and not one
+    # a reader should have to infer from a default argument two modules away.
+    sweeps, sweep_cost = run_sweeps(
+        sweep_requests,
+        rpc_url_for=lambda cid: rpc_url_for_chain_id(cid),
+        cost=SweepCost(),
+    )
+    report.cost = sweep_cost
+    cost_note = (
+        f"cycle scan cost {sweep_cost.get_logs} getLogs + {sweep_cost.multicall} multicall + "
+        f"{sweep_cost.head_reads} head over {len(sweep_requests)} escalated entity holder(s)"
+        if sweep_requests
+        else None
+    )
+    if sweep_requests:
+        logger.info(
+            "entity balances: %d holder(s) escalated, %d getLogs + %d multicall + %d head request(s)",
+            len(sweep_requests),
+            sweep_cost.get_logs,
+            sweep_cost.multicall,
+            sweep_cost.head_reads,
+        )
+
+    for holder, native, page, escalation in pending:
+        outcome = sweeps.get(holder.subject)
+        if outcome is not None:
+            report.sweep_outcomes[holder.entity_key] = outcome
+        report.observations[holder.entity_key] = record_observation(
+            session,
+            subject=holder.subject,
+            chain_id=holder.chain_id,
+            native=native,
+            page=page,
+            writer=BALANCE_WRITER_TVL,
+            sweep=outcome,
+            escalation=escalation,
+            cost_note=cost_note,
+        )
+    session.commit()
+    return report
+
+
+def entity_cohort_oldest_reading(session: Session, holders: list[EntityHolder]) -> datetime | None:
+    """The OLDEST current reading in this cohort — the age the cohort really is.
+
+    Per holder its newest fetch, then the minimum across holders, because a
+    cohort is only as fresh as its stalest member. The newest-anywhere reading
+    would be the wrong anchor for a reason that is structural rather than
+    hypothetical: a fetch row's identity is ``(chain, address)`` and carries no
+    protocol, while this cohort is protocol-scoped, so one EOA reached from two
+    protocols' control graphs is ONE row. Anchoring on the maximum would let
+    protocol A's daily pass keep that shared row fresh and starve protocol B's
+    exclusive holders for as long as both protocols exist.
+
+    Holders that have never been read are deliberately NOT in the minimum. They
+    are not a stale reading, they are no reading, and folding them in as a
+    floor would make a cohort the producer keeps declining re-fire every tick.
+    Their first reading arrives with the next pass this anchor does open.
+
+    ``None`` = nobody in the cohort has ever been read, so nothing bounds how
+    old it is and the caller must read it.
+    """
+    if not holders:
+        return None
+    # Scoped by ``ObservationSubject.filters`` — the same predicate the
+    # observation modules select a subject's rows with, not a second spelling.
+    newest_per_holder = session.execute(
+        select(func.max(ContractBalanceFetch.fetched_at))
+        .where(or_(*[and_(*holder.subject.filters(ContractBalanceFetch)) for holder in holders]))
+        .group_by(ContractBalanceFetch.entity_chain, ContractBalanceFetch.entity_address)
+    ).scalars()
+    return min((ts for ts in newest_per_holder if ts is not None), default=None)
+
+
+def refresh_entity_balances_if_due(
+    session: Session,
+    protocol_id: int,
+    *,
+    now: datetime | None = None,
+    interval_s: int = DEFAULT_ENTITY_BALANCE_INTERVAL,
+) -> EntityObservationReport | None:
+    """The cycle's daily arm: read the entity cohort, or report it still fresh.
+
+    ``None`` means the pass did not run, and the two reasons are both honest
+    ones: the protocol has no proven-codeless holders, or every holder that has
+    ever been read was read inside the window.
+
+    The window is measured against the cohort's own fetch rows, the way
+    :func:`take_tvl_snapshot` measures ``MIN_SNAPSHOT_INTERVAL`` against its own
+    snapshots. The producer's output IS the schedule: a cadence held in
+    loop-local state re-spends the day's requests on every restart, and one held
+    in a second marker can claim a reading that was never written. What the
+    window is measured FROM is :func:`entity_cohort_oldest_reading` — read its
+    docstring before changing this to a maximum.
+    """
+    holders, _excluded = proven_codeless_holders(session, protocol_id)
+    if not holders:
+        return None
+    oldest = entity_cohort_oldest_reading(session, holders)
+    if oldest is not None:
+        if oldest.tzinfo is None:
+            oldest = oldest.replace(tzinfo=timezone.utc)
+        if (now or datetime.now(timezone.utc)) - oldest < timedelta(seconds=interval_s):
+            return None
+    return refresh_entity_balances(session, protocol_id)
+
+
+# ---------------------------------------------------------------------------
 # Snapshot orchestration
 # ---------------------------------------------------------------------------
 
@@ -577,7 +944,10 @@ def _read_existing_balances(session: Session, protocol_id: int) -> tuple[dict[st
     for b in session.execute(
         select(ContractBalanceLatest).where(ContractBalanceLatest.contract_id.in_(contract_ids))
     ).scalars():
-        rows_by_cid.setdefault(b.contract_id, []).append(b)
+        # The IN above already excludes entity-keyed rows (their contract_id is
+        # NULL); the guard states it rather than leaning on the query's shape.
+        if b.contract_id is not None:
+            rows_by_cid.setdefault(b.contract_id, []).append(b)
     breakdown: dict[str, dict] = {}
     for contract in contracts:
         if contract.id in missing:
@@ -739,6 +1109,32 @@ def refresh_all_protocols(session: Session) -> int:
             session.rollback()
             logger.warning(
                 "TVL snapshot failed for protocol %s: %s",
+                protocol.name,
+                exc,
+                extra={"exc_type": type(exc).__name__},
+            )
+        # The daily arm, after the snapshot and in a try of its own. These
+        # holders are the protocol's principals, not its deployments: they
+        # contribute nothing to the snapshot, so neither pass's failure may be
+        # reported as the other's and the snapshot cycle's counters stay a
+        # statement about the snapshot.
+        try:
+            entity_report = refresh_entity_balances_if_due(session, protocol.id)
+            if entity_report is not None:
+                logger.info(
+                    "entity balances for %s: %d holder(s) read, %d excluded, %d getLogs + "
+                    "%d multicall + %d head request(s)",
+                    protocol.name,
+                    len(entity_report.holders),
+                    len(entity_report.excluded),
+                    entity_report.cost.get_logs,
+                    entity_report.cost.multicall,
+                    entity_report.cost.head_reads,
+                )
+        except Exception as exc:
+            session.rollback()
+            logger.warning(
+                "entity balance refresh failed for protocol %s: %s",
                 protocol.name,
                 exc,
                 extra={"exc_type": type(exc).__name__},

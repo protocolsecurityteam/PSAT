@@ -266,6 +266,56 @@ def test_value_out_sentinel_lands_in_taint_slot():
     # param 0 is the taint index → sentinel there, base calldata keeps the principal.
     assert spec.sentinel_calldata[10:74].endswith("ee" * 20)
     assert spec.calldata[10:74].endswith("22" * 20)
+    # ...and the plan SAYS which parameter that was, under its DECLARED name —
+    # the vocabulary the exec witness's ``destination_param`` also speaks, which
+    # is the only thing the two can be joined on. (The taint fact here calls slot
+    # 0 ``token``; the declaration calls it ``to``, and the declaration wins.)
+    assert spec.sentinel_param == "to"
+
+
+def test_a_slot_the_static_plane_never_named_publishes_no_sentinel_subject():
+    """No positional invention. ``arg0`` is not a name anything else in the
+    pipeline speaks, so a consumer joining on it would be joining on a token this
+    module made up — the field stays absent and the join refuses.
+
+    The sentinel still gets planted: the lattice proves the recipient SLOT without
+    proving a name for it, so "we probed a parameter" and "we can say which" come
+    apart, and only the second is withheld."""
+    fn = cd.FunctionFacts(
+        full_name="transfer(address,uint256)",
+        selector=TRANSFER,
+        canonical_signature="transfer(address,uint256)",
+        effect_info=_effect_info(
+            "transfer(address,uint256)",
+            TRANSFER,
+            value_flows=[
+                {
+                    "kind": "callee_erc20_selector",
+                    "direction": "out",
+                    "origin": "body",
+                    "target_kind": {"kind": "param", "tier": "static_trace"},
+                    "target_param_index": 0,
+                }
+            ],
+            parameter_names=[],
+        ),
+        tree=None,
+        legacy_value_flows=(),
+    )
+    spec = cd.synthesize_value_out(_candidate(TRANSFER), fn)
+    assert spec is not None
+    assert spec.sentinel_calldata is not None
+    assert spec.sentinel_param is None
+
+
+def test_a_plan_with_no_sentinel_names_no_sentinel_subject():
+    facts = _token_facts()
+    fn = cd.resolve_function(facts, TRANSFER)
+    assert fn is not None
+    spec = cd.synthesize_value_out(_candidate(TRANSFER), fn)
+    assert spec is not None
+    assert spec.sentinel_calldata is None
+    assert spec.sentinel_param is None
 
 
 BATCH_SIG = "batchClaim(uint256[],address[])"
@@ -468,6 +518,23 @@ def test_the_claim_witness_names_the_executor_slots_directly():
     )
     assert executor is not None
     assert executor.slots == (0, 3)
+
+
+def test_an_executor_names_its_payload_slot_as_the_sentinel_subject():
+    """The join key's whole reason for existing. An executor's sentinel rides the
+    inner call INSIDE the payload; the outer call target keeps the value the base
+    probe passed. So the proof is about ``payload``, and a consumer joining it
+    onto the ``exec.arbitrary`` witness's ``destination_param`` (``target``) must
+    see the mismatch rather than read the proof as being about the destination."""
+    fn = _exec_fn(
+        "execute(address,uint256,bytes,bytes32,bytes32)",
+        ["target", "value", "payload", "predecessor", "salt"],
+        flows=[_FORWARDS_PARAM],
+    )
+    spec = cd.synthesize_value_out(_candidate(BATCH_SEL, holdings=(HELD_TOKEN,)), fn)
+    assert spec is not None
+    assert spec.sentinel_calldata is not None
+    assert spec.sentinel_param == "payload"
 
 
 def test_a_witness_that_names_no_binding_does_not_get_treated_as_one():

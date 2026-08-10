@@ -409,6 +409,7 @@ def _value_out_plan(ctx: ProbeContext, spec: calldata_synth.ValueOutPlanInputs) 
             static_shape=spec.static_shape,
             inputs_vacuous=spec.inputs_vacuous,
             contract_holdings=spec.contract_holdings,
+            sentinel_param=spec.sentinel_param,
         )
 
     return ProbePlan(effect_class=EFFECT_CLASS_VALUE_OUT, scope=SCOPE_KERNEL, run=_run, gate_ref=spec.gate_ref)

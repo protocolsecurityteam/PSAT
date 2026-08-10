@@ -698,7 +698,9 @@ def get_token_balances(address: str, chain_id: int) -> list[dict]:
     ``usd_value`` is ``None`` whenever it could not be computed from data Etherscan
     actually returned — including when ``TokenDivisor`` is missing, because the scale
     is then a guess and the error mode is a factor of 10^n on a money figure. It is
-    never 0 to mean "unknown": 0 means priced and worth less than half a cent.
+    never 0 to mean "unknown": 0 means priced, and the product of the quantity and
+    the quote is zero. Nothing between here and the column rounds it — a sub-cent
+    holding arrives as the figure it is.
 
     A caller that PERSISTS this list must use :func:`get_token_balances_page`
     instead: this signature cannot distinguish the empty page from the failed

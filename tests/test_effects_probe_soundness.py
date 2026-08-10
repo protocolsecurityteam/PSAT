@@ -554,3 +554,77 @@ def test_a_landed_sentinel_still_outranks_the_static_shape():
 
     assert eff.details["destination_shape"] == "caller_arbitrary"
     assert eff.details["shape_proved_by"] == "simulation"
+
+
+# ---------------------------------------------------------------------------
+# The subject of a caller_arbitrary proof
+# ---------------------------------------------------------------------------
+
+
+def test_a_landed_sentinel_publishes_the_parameter_it_landed_in():
+    """A ``caller_arbitrary`` verdict is a proof about ONE parameter, and the
+    prober is the only thing that can say which. Without the subject the scorer's
+    exec join cannot tell a sentinel that rode the call target from one that rode
+    an executor payload, so it refuses every such verdict."""
+    eff = recipes.value_out(
+        simulate=_Recorder(
+            SimResult(calls=(SimCallResult(True, "0x", None, (transfer_log(VAULT, VAULT, TOKEN_A, 5),)),)),
+            SimResult(calls=(SimCallResult(True, "0x", None, (transfer_log(VAULT, VAULT, SENTINEL, 5),)),)),
+        ),
+        store=RecordingStore(),
+        ctx=CTX,
+        contract_address=VAULT,
+        principal=PRINCIPAL,
+        calldata="0x11111111",
+        simulate_supported=True,
+        sentinel_address=SENTINEL,
+        sentinel_calldata="0x22222222",
+        sentinel_param="payload",
+    )
+
+    assert eff.details["destination_shape"] == "caller_arbitrary"
+    assert eff.details["sentinel_param"] == "payload"
+
+
+def test_a_sentinel_that_moved_nothing_still_names_its_subject():
+    """The subject is a fact about the calldata that was ISSUED, not about the
+    outcome. Publishing it only on a landing would leave a reader unable to tell
+    "we probed that slot and it held" from "we never probed that slot"."""
+    eff = recipes.value_out(
+        simulate=_Recorder(
+            SimResult(calls=(SimCallResult(True, "0x", None, (transfer_log(VAULT, VAULT, TOKEN_A, 5),)),)),
+            SimResult(calls=(SimCallResult(True, "0x", None, ()),)),
+        ),
+        store=RecordingStore(),
+        ctx=CTX,
+        contract_address=VAULT,
+        principal=PRINCIPAL,
+        calldata="0x11111111",
+        simulate_supported=True,
+        sentinel_address=SENTINEL,
+        sentinel_calldata="0x22222222",
+        sentinel_param="to",
+    )
+
+    assert eff.details["destination_shape"] == "unknown"
+    assert eff.details["sentinel_param"] == "to"
+
+
+def test_no_sentinel_probe_names_no_subject():
+    """Absence is the third state: no sentinel was issued, so there is no
+    parameter this verdict is a proof about — and a consumer must read that as
+    "unnamed", never as "the destination"."""
+    eff = recipes.value_out(
+        simulate=_Recorder(
+            SimResult(calls=(SimCallResult(True, "0x", None, (transfer_log(VAULT, VAULT, TOKEN_A, 5),)),))
+        ),
+        store=RecordingStore(),
+        ctx=CTX,
+        contract_address=VAULT,
+        principal=PRINCIPAL,
+        calldata="0x11111111",
+        simulate_supported=True,
+        sentinel_param="to",
+    )
+
+    assert "sentinel_param" not in eff.details
