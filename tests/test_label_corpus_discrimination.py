@@ -542,11 +542,24 @@ def test_the_rate_limiter_is_recorded_as_a_zero_weight_fact():
         assert claim["witness"]["mandatory"] == {"state": "proven"}, name
 
 
+# The self-service family reads the MANDATORY-GATE surface, not the amount
+# lattice: ``amount_constraint`` (SS-R3), ``amount_record_constraint`` and
+# ``self_service_payout``. The limiter's own ``consume(id, amount)`` revert is a
+# real effectful leaf that references the amount, so param_constraint refuses the
+# unconstrained proof for it — a MORE-conservative reading, never a ceiling. The
+# ceiling thesis below is about the amount LATTICE, so it compares that.
+_MANDATORY_GATE_FIELDS = ("amount_constraint", "amount_record_constraint", "self_service_payout")
+
+
+def _lattice_only(flow_entry: dict) -> dict:
+    return {k: v for k, v in flow_entry.items() if k not in _MANDATORY_GATE_FIELDS}
+
+
 def test_the_limiter_does_not_change_a_single_byte_of_the_flow_witness():
     """THE ASSERTION THAT PINS THE DECISION. ``withdrawLimited`` and
     ``withdrawUnlimited`` differ by exactly one statement — the limiter call —
-    and their ``flow.out`` witnesses must be byte-identical. A refilling bucket
-    bounds throughput per window, not total loss, so crediting it in
+    and their ``flow.out`` amount LATTICE must be byte-identical. A refilling
+    bucket bounds throughput per window, not total loss, so crediting it in
     ``amount_kind`` would invent a ceiling that does not exist.
 
     If a later change moves the lattice for a limiter, THIS test goes red, which
@@ -554,8 +567,17 @@ def test_the_limiter_does_not_change_a_single_byte_of_the_flow_witness():
     fns = _functions(RATE_LIMITED)
     limited = _claim(fns["withdrawLimited(address,uint256)"], "flow.out")
     control = _claim(fns["withdrawUnlimited(address,uint256)"], "flow.out")
-    assert limited["witness"]["flows"] == control["witness"]["flows"]
+    limited_flows = limited["witness"]["flows"]
+    control_flows = control["witness"]["flows"]
+    # The lattice — the ceiling — is byte-identical, limiter present or not.
+    assert [_lattice_only(f) for f in limited_flows] == [_lattice_only(f) for f in control_flows]
+    assert [f["amount_kind"] for f in limited_flows] == [f["amount_kind"] for f in control_flows]
     assert limited["tier"] == control["tier"]
+    # The ONLY thing the extra statement moves is the mandatory-gate reading of
+    # the amount param, and it moves it toward LESS certainty, not a ceiling: the
+    # limiter's effectful revert surface blocks the unconstrained proof.
+    assert control_flows[0]["amount_constraint"] == {"state": "unconstrained_proven"}
+    assert limited_flows[0]["amount_constraint"] == {"state": "not_determined"}
     # ...and the limiter-free control carries no limiter fact at all.
     assert [c["claim_id"] for c in fns["withdrawUnlimited(address,uint256)"]["claims"]] == ["flow.out"]
 

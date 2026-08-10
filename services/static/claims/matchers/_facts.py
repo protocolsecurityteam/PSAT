@@ -730,6 +730,230 @@ def param_constraint(
 
 
 # ---------------------------------------------------------------------------
+# Self-service payout — the W1 amount-record join and the W1 ∧ W2 witness
+# ---------------------------------------------------------------------------
+#
+# A payout is "self-service" when the paid amount is read out of a storage cell
+# the caller is PROVEN to own (W1) AND that cell is cleared before any external
+# call in the function, or a verified reentrancy guard stands in for that order
+# (W2). Every state traces to a witness; a refusal carries the reason it fell
+# short and is never a bare bool. Two separate producer walks meet here — the
+# amount side (``effects.py`` publishes ``amount_record_*`` on the flow) and the
+# guard side (``predicates.py`` stamps ``element_*`` on the leaf operand). Both
+# name the base off Slither's ``StateVariable.canonical_name`` (the DECLARING
+# contract, so an inherited var reads the same on both sides), so the join
+# compares canonical names and refuses on any disagreement rather than guessing.
+#
+# ``unconstrained_proven`` is deliberately never minted for W1: proving the
+# caller does NOT own the cell is an absence proof, and reading a missing
+# owner-guard as "not owned" is exactly the over-claim discipline forbids. W1 is
+# ``constrained`` (proven owned) or ``not_determined``.
+
+_W1_KEYED_BY_CALLER = "keyed_by_caller"
+_W1_OWNER_GUARDED_RECORD = "owner_guarded_record"
+
+_W1_AMOUNT_ROOT_NOT_CLASSIFIABLE = "amount_root_not_classifiable"
+_W1_MULTIPLE_RECORD_DECLARATIONS = "multiple_record_declarations"
+_W1_RECORD_MISMATCH = "record_mismatch"
+_W1_KEY_INDEX_DISAGREEMENT = "key_index_disagreement"
+_W1_GUARD_NOT_MANDATORY = "guard_not_mandatory"
+
+# W2 bases, normalized off U3's ``clear_dominates_calls`` and U4's
+# ``w2_verified_guard`` so the payload names one vocabulary.
+_W2_CLEAR_DOMINATES_CALLS = "clear_dominates_calls"
+_W2_VERIFIED_GUARD = "verified_guard"
+
+_W2_GUARD_FUNCTION_NOT_ANALYZED = "function_not_analyzed"
+
+# Disclosures that ride EVERY proven verdict (SPEC §5 G7): the corpus's payout
+# entities are UUPS proxies, so a proven bound is conditional on whatever
+# authority can replace the code; and the proof is same-function only — no
+# witness looked at what a sibling function may do to the same record. They
+# travel WITH the verdict so an excluded row still carries them.
+_DISCLOSE_UPGRADE = "self_service_bound_conditional_on_upgrade_authority"
+_DISCLOSE_SIBLING = "self_service_sibling_function_residual_not_proven"
+
+_STATE_PROVEN_SELF_SERVICE = "proven_self_service"
+
+# The full closed vocabulary the fact publishes, for the reviewer and for a
+# consumer that wants to assert it never sees an unlisted token. W1 reasons,
+# U3's ordering reasons, U4's guard reasons, and the two positive states.
+SELF_SERVICE_REFUSAL_REASONS = frozenset(
+    {
+        _W1_AMOUNT_ROOT_NOT_CLASSIFIABLE,
+        _W1_MULTIPLE_RECORD_DECLARATIONS,
+        _W1_RECORD_MISMATCH,
+        _W1_KEY_INDEX_DISAGREEMENT,
+        _W1_GUARD_NOT_MANDATORY,
+        # U3 (record_ordering) — W2 ordering refusals.
+        "clearing_write_does_not_dominate_calls",
+        "no_clearing_write",
+        "assembly_state_access",
+        "cross_unit_ordering_unproven",
+        "loop_nesting_mismatch",
+        "call_enumeration_incomplete",
+        "record_not_resolvable",
+        # U4 (verified guard) — W2 guard refusals.
+        "guard_modifier_not_applied",
+        "no_verified_guard_modifier",
+        "ambiguous_function_declaration",
+        _W2_GUARD_FUNCTION_NOT_ANALYZED,
+        # burn variant (SPEC S1 §1.5), registered for forward compatibility —
+        # the shipped producers publish no burn record for this join to read.
+        "amount_is_external_conversion_of_burn",
+    }
+)
+
+
+_VERIFIED_GUARD_VERDICTS: WeakKeyDictionary[ClaimContext, dict[str, Any]] = WeakKeyDictionary()
+
+
+def _verified_guard_verdicts(ctx: ClaimContext) -> dict[str, Any]:
+    """U4's per-function verified-guard verdicts for this contract, memoized per
+    context. A context with no live Slither contract yields an empty map, so the
+    lookup below returns an explicit ``function_not_analyzed`` refusal rather
+    than inferring a guard from a missing row."""
+    cached = _VERIFIED_GUARD_VERDICTS.get(ctx)
+    if cached is not None:
+        return cached
+    verdicts: dict[str, Any] = {}
+    if ctx.contract is not None:
+        from ...contract_analysis_pipeline.reentrancy_pause import verified_guard_verdicts
+
+        try:
+            verdicts = verified_guard_verdicts(ctx.contract)
+        except Exception:  # pragma: no cover - a malformed contract view refuses closed
+            verdicts = {}
+    _VERIFIED_GUARD_VERDICTS[ctx] = verdicts
+    return verdicts
+
+
+def _owner_guarded_record_constraint(
+    ctx: ClaimContext, function: str, flow: dict[str, Any], record: str
+) -> dict[str, Any]:
+    """W1 via an ownership guard: a mandatory ``caller_authority`` leaf that
+    reads the SAME record against ``msg.sender``.
+
+    A guard leaf names exactly one key level (U1 refuses multi-level element
+    reads), so it can vouch only for a single-level record, and only when the
+    amount side pinned that level to an entry slot: a ``param`` kind whose index
+    the cross-site fold stripped is a disagreement, never a proof, so the index
+    must be present AND equal, never ``kind == param`` alone."""
+    key_indexes = flow.get("amount_record_key_param_indexes")
+    single_index = (
+        key_indexes[0]
+        if isinstance(key_indexes, list) and len(key_indexes) == 1 and isinstance(key_indexes[0], int)
+        else None
+    )
+    tree = ctx.predicate_tree(function)
+    saw_base_mismatch = False
+    saw_key_mismatch = False
+    if tree is not None:
+        for leaf, _path in _mandatory_leaves_with_paths(tree):
+            if leaf.get("authority_role") != "caller_authority":
+                continue
+            operands = [o for o in (leaf.get("operands") or []) if isinstance(o, dict)]
+            if not any(o.get("source") == "msg_sender" for o in operands):
+                continue
+            for op in operands:
+                if "element_base_variable" not in op:
+                    continue
+                # Canonical comparison: both sides derive the base from
+                # ``StateVariable.canonical_name``, so a bare-name match would be
+                # the silent-zero the two-walk split threatens.
+                if op.get("element_base_variable") != record:
+                    saw_base_mismatch = True
+                    continue
+                idx = op.get("element_key_param_index")
+                if single_index is not None and isinstance(idx, int) and idx == single_index:
+                    return {"state": "constrained", "basis": _W1_OWNER_GUARDED_RECORD, "record": record}
+                # Same base, but the guard reads a different cell (a different
+                # key slot) or the amount side pinned no single slot to align to.
+                saw_key_mismatch = True
+    if saw_key_mismatch:
+        reason = _W1_KEY_INDEX_DISAGREEMENT
+    elif saw_base_mismatch:
+        reason = _W1_RECORD_MISMATCH
+    else:
+        reason = _W1_GUARD_NOT_MANDATORY
+    return {"state": "not_determined", "reason": reason}
+
+
+def amount_record_constraint(ctx: ClaimContext, function: str, flow: dict[str, Any]) -> dict[str, Any]:
+    """W1: is the flow's AMOUNT read out of a storage record the caller is proven
+    to own? Three-state, shaped on :func:`param_constraint`.
+
+    ``constrained`` carries the basis and the canonical record; anything short of
+    a full proof is ``not_determined`` with the reason it fell short. See the
+    module comment for why ``unconstrained_proven`` is never minted."""
+    record = flow.get("amount_record_variable")
+    if not isinstance(record, str) or not record:
+        variables = flow.get("amount_record_variables")
+        reason = (
+            _W1_MULTIPLE_RECORD_DECLARATIONS
+            if isinstance(variables, list) and variables
+            else _W1_AMOUNT_ROOT_NOT_CLASSIFIABLE
+        )
+        return {"state": "not_determined", "reason": reason}
+
+    key_kinds = flow.get("amount_record_key_kinds")
+    # keyed_by_caller: a level of the cell's own key IS the caller's address, so
+    # the cell is the caller's with no guard leaf needed. ``msg_sender`` is an
+    # EARNED origin (proven, not a name fallback), and the folded kinds are
+    # published only where every contributing site agreed — so its presence is
+    # itself the proof, even if another level is a caller-chosen param: the
+    # caller can only ever reach cells under their own address at that level.
+    if isinstance(key_kinds, list) and "msg_sender" in key_kinds:
+        return {"state": "constrained", "basis": _W1_KEYED_BY_CALLER, "record": record}
+
+    return _owner_guarded_record_constraint(ctx, function, flow, record)
+
+
+def self_service_payout(ctx: ClaimContext, function: str, flow: dict[str, Any]) -> dict[str, Any]:
+    """W1 ∧ W2: the paid amount is read from a cell the caller owns (W1) AND that
+    cell is cleared before any external call, or a verified reentrancy guard
+    stands in for that order (W2). Three-state; proven only on the full
+    conjunction, and every refusal names the conjunct that failed.
+
+    W2 is satisfied by EITHER U3's ordering proof (``record_ordering`` on the
+    flow) OR U4's verified guard — distinct proofs with distinct residuals, so
+    the basis names which one. When both refuse, the ordering reason wins: it
+    names WHY the code order is unsafe, the security-relevant fact."""
+    w1 = amount_record_constraint(ctx, function, flow)
+    if w1.get("state") != "constrained":
+        return {"state": "not_determined", "reason": w1.get("reason", _W1_AMOUNT_ROOT_NOT_CLASSIFIABLE)}
+
+    ordering = flow.get("record_ordering")
+    ordering = ordering if isinstance(ordering, dict) else {}
+    guard = _verified_guard_verdicts(ctx).get(function) or {
+        "state": "not_determined",
+        "reason": _W2_GUARD_FUNCTION_NOT_ANALYZED,
+    }
+
+    if ordering.get("state") == "proven_ordering":
+        w2_basis = _W2_CLEAR_DOMINATES_CALLS
+        disclosures = [str(d) for d in (ordering.get("disclosures") or [])]
+    elif guard.get("state") == "proven":
+        w2_basis = _W2_VERIFIED_GUARD
+        disclosures = []
+    else:
+        reason = ordering.get("reason") if ordering.get("state") == "not_determined" else None
+        if not reason:
+            reason = guard.get("reason") or _W2_GUARD_FUNCTION_NOT_ANALYZED
+        return {"state": "not_determined", "reason": reason}
+
+    return {
+        "state": _STATE_PROVEN_SELF_SERVICE,
+        "w1_basis": w1["basis"],
+        "w2_basis": w2_basis,
+        "record": w1["record"],
+        # The two G7 disclosures ride every proof; the loop residual rides only a
+        # per-iteration ordering proof (U3's ``cross_iteration_ordering_not_proven``).
+        "disclosures": [_DISCLOSE_UPGRADE, _DISCLOSE_SIBLING, *disclosures],
+    }
+
+
+# ---------------------------------------------------------------------------
 # State-write facts
 # ---------------------------------------------------------------------------
 

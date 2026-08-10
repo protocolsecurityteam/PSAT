@@ -1288,6 +1288,9 @@
                 "direction": "value_router",
                 "flows": [
                   {
+                    "amount_constraint": {
+                      "state": "unconstrained_proven"
+                    },
                     "amount_kind": {
                       "kind": "param",
                       "tier": "dispositive_ast"
@@ -1411,6 +1414,9 @@
                 "direction": "value_router",
                 "flows": [
                   {
+                    "amount_constraint": {
+                      "state": "not_determined"
+                    },
                     "amount_kind": {
                       "kind": "param",
                       "tier": "dispositive_ast"
@@ -1516,6 +1522,9 @@
                 "direction": "in",
                 "flows": [
                   {
+                    "amount_constraint": {
+                      "state": "unconstrained_proven"
+                    },
                     "amount_kind": {
                       "kind": "param",
                       "tier": "dispositive_ast"
@@ -2013,6 +2022,9 @@
                 "direction": "out",
                 "flows": [
                   {
+                    "amount_constraint": {
+                      "state": "unconstrained_proven"
+                    },
                     "amount_kind": {
                       "kind": "param",
                       "tier": "dispositive_ast"
@@ -2290,6 +2302,9 @@
                 "direction": "value_router",
                 "flows": [
                   {
+                    "amount_constraint": {
+                      "state": "unconstrained_proven"
+                    },
                     "amount_kind": {
                       "kind": "param",
                       "tier": "static_trace"
@@ -2561,9 +2576,17 @@
                       "kind": "bounded_by_storage",
                       "tier": "static_trace"
                     },
+                    "amount_record_constraint": {
+                      "reason": "amount_root_not_classifiable",
+                      "state": "not_determined"
+                    },
                     "from_is_self": true,
                     "kind": "low_level_value_call",
                     "selector": null,
+                    "self_service_payout": {
+                      "reason": "amount_root_not_classifiable",
+                      "state": "not_determined"
+                    },
                     "target_constraint": {
                       "state": "unconstrained_proven"
                     },
@@ -2639,6 +2662,9 @@
                 "direction": "out",
                 "flows": [
                   {
+                    "amount_constraint": {
+                      "state": "unconstrained_proven"
+                    },
                     "amount_kind": {
                       "kind": "param",
                       "tier": "static_trace"
@@ -2718,6 +2744,9 @@
                 "direction": "out",
                 "flows": [
                   {
+                    "amount_constraint": {
+                      "state": "unconstrained_proven"
+                    },
                     "amount_kind": {
                       "kind": "param",
                       "tier": "static_trace"
@@ -2800,6 +2829,9 @@
                 "direction": "out",
                 "flows": [
                   {
+                    "amount_constraint": {
+                      "state": "unconstrained_proven"
+                    },
                     "amount_kind": {
                       "kind": "param",
                       "tier": "static_trace"
@@ -2879,6 +2911,9 @@
                 "direction": "out",
                 "flows": [
                   {
+                    "amount_constraint": {
+                      "state": "unconstrained_proven"
+                    },
                     "amount_kind": {
                       "kind": "param",
                       "tier": "static_trace"
@@ -2964,6 +2999,9 @@
                 "direction": "out",
                 "flows": [
                   {
+                    "amount_constraint": {
+                      "state": "unconstrained_proven"
+                    },
                     "amount_kind": {
                       "kind": "param",
                       "tier": "static_trace"
@@ -3049,6 +3087,9 @@
                 "direction": "out",
                 "flows": [
                   {
+                    "amount_constraint": {
+                      "state": "unconstrained_proven"
+                    },
                     "amount_kind": {
                       "kind": "param",
                       "tier": "static_trace"
@@ -3170,6 +3211,9 @@
                 "direction": "in",
                 "flows": [
                   {
+                    "amount_constraint": {
+                      "state": "not_determined"
+                    },
                     "amount_kind": {
                       "kind": "param",
                       "tier": "static_trace"
@@ -3383,6 +3427,9 @@
                 "direction": "out",
                 "flows": [
                   {
+                    "amount_constraint": {
+                      "state": "unconstrained_proven"
+                    },
                     "amount_kind": {
                       "kind": "param",
                       "tier": "dispositive_ast"
@@ -3496,6 +3543,9 @@
                 "direction": "out",
                 "flows": [
                   {
+                    "amount_constraint": {
+                      "state": "unconstrained_proven"
+                    },
                     "amount_kind": {
                       "kind": "param",
                       "tier": "dispositive_ast"
@@ -3601,6 +3651,9 @@
                 "direction": "out",
                 "flows": [
                   {
+                    "amount_constraint": {
+                      "state": "not_determined"
+                    },
                     "amount_kind": {
                       "kind": "param",
                       "tier": "dispositive_ast"
@@ -3713,6 +3766,9 @@
                 "direction": "out",
                 "flows": [
                   {
+                    "amount_constraint": {
+                      "state": "unconstrained_proven"
+                    },
                     "amount_kind": {
                       "kind": "param",
                       "tier": "dispositive_ast"
@@ -4931,6 +4987,9 @@
                 "direction": "out",
                 "flows": [
                   {
+                    "amount_constraint": {
+                      "state": "unconstrained_proven"
+                    },
                     "amount_kind": {
                       "kind": "param",
                       "tier": "static_trace"
@@ -6050,6 +6109,9 @@
                 "direction": "out",
                 "flows": [
                   {
+                    "amount_constraint": {
+                      "state": "not_determined"
+                    },
                     "amount_kind": {
                       "kind": "param",
                       "tier": "dispositive_ast"
@@ -6173,6 +6235,9 @@
                 "direction": "out",
                 "flows": [
                   {
+                    "amount_constraint": {
+                      "state": "not_determined"
+                    },
                     "amount_kind": {
                       "kind": "param",
                       "tier": "dispositive_ast"
@@ -6334,6 +6399,9 @@
                 "direction": "out",
                 "flows": [
                   {
+                    "amount_constraint": {
+                      "state": "not_determined"
+                    },
                     "amount_kind": {
                       "kind": "param",
                       "tier": "dispositive_ast"
@@ -6495,6 +6563,9 @@
                 "direction": "out",
                 "flows": [
                   {
+                    "amount_constraint": {
+                      "state": "unconstrained_proven"
+                    },
                     "amount_kind": {
                       "kind": "param",
                       "tier": "dispositive_ast"
@@ -6768,6 +6839,13 @@
                 "direction": "out",
                 "flows": [
                   {
+                    "amount_constraint": {
+                      "binding": "operand",
+                      "guard": "equality_vs_caller",
+                      "leaf_path": [],
+                      "pins": true,
+                      "state": "constrained"
+                    },
                     "amount_kind": {
                       "kind": "param",
                       "tier": "dispositive_ast"
