@@ -234,9 +234,13 @@ describe("confidence zone — pools", () => {
   });
 
   it("pools the two base questions separately, as pool B", () => {
-    const base = ZONE.rows.filter((r) => r.lever.chain === "base");
-    expect(base.map((r) => r.pool?.name)).toEqual(["B", "B"]);
+    const base = ZONE.rows.filter((r) => r.pool?.name === "B");
+    expect(base).toHaveLength(2);
+    expect(base.every((r) => r.lever.chain === "base")).toBe(true);
     expect(base[0].pool.contracts).toBe(7);
+    // The other base questions hold different money and join nothing.
+    const unpooled = ZONE.rows.filter((r) => r.lever.chain === "base" && !r.pool);
+    expect(unpooled.length).toBeGreaterThan(0);
   });
 
   it("needs an overlap, not merely an equal ceiling", () => {
@@ -313,16 +317,22 @@ describe("confidence zone — rows", () => {
   });
 
   it("counts the tail in levers, not in rows", () => {
-    // 20 levers stay open; the visible six carry one lever each, so fourteen
-    // questions remain — eight of them inside the single grouped row.
+    // 20 levers stay open over 13 rows; the head's six carry one lever each, so
+    // fourteen questions remain — eight of them inside the single grouped row.
     expect(ZONE.open).toBe(20);
-    expect(ZONE.rows).toHaveLength(6);
+    expect(ZONE.rows).toHaveLength(13);
+    expect(ZONE.head).toHaveLength(6);
+    expect(ZONE.tail).toHaveLength(7);
     expect(ZONE.remaining).toBe(14);
   });
 
   it("keeps the producer's arrival order", () => {
-    expect(ZONE.rows.map((r) => r.lever.points_ceiling)).toEqual([
+    expect(ZONE.head.map((r) => r.lever.points_ceiling)).toEqual([
       20.25, 20.25, 16.5, 12.15, 9.9, 8.4,
+    ]);
+    // and the tail continues down the same ranking rather than restarting it
+    expect(ZONE.tail.map((r) => r.lever.points_ceiling)).toEqual([
+      6.75, 4.86, 2.7225, 1.7325, 0.9504, 0.81, 0.405,
     ]);
   });
 
@@ -330,6 +340,8 @@ describe("confidence zone — rows", () => {
     const zone = confidenceZone({ provenance: {} }, ROWS);
     expect(zone.published).toBe(false);
     expect(zone.rows).toEqual([]);
+    expect(zone.head).toEqual([]);
+    expect(zone.tail).toEqual([]);
   });
 
   it("joins each lever to the finding that carries its functions and targets", () => {

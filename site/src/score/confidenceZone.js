@@ -208,7 +208,7 @@ export const VISIBLE_LEVER_ROWS = 6;
 // keeps its row and shows only what the lever itself witnesses.
 export function confidenceZone(doc, deductionRows) {
   const rollup = doc?.provenance?.unresolved_levers;
-  if (!rollup) return { published: false, rows: [], remaining: 0, open: 0 };
+  if (!rollup) return { published: false, rows: [], head: [], tail: [], remaining: 0, open: 0 };
   const byKey = new Map();
   for (const row of deductionRows || []) byKey.set(joinKey(row.finding), row);
   const grouped = new Map();
@@ -238,14 +238,15 @@ export function confidenceZone(doc, deductionRows) {
     entry.refusals = refusalCount(entry.lever);
     entry.status = statusLines(entry.lever);
   }
-  const open = rows.reduce((count, entry) => count + entry.levers.length, 0);
-  const visible = rows.slice(0, VISIBLE_LEVER_ROWS);
+  const tail = rows.slice(VISIBLE_LEVER_ROWS);
   return {
     published: true,
-    rows: visible,
+    rows,
+    head: rows.slice(0, VISIBLE_LEVER_ROWS),
+    tail,
     // The tail counts LEVERS, not rows: it stands for the questions still to
     // read, and a grouped row hides more than one of them.
-    remaining: rows.slice(VISIBLE_LEVER_ROWS).reduce((count, entry) => count + entry.levers.length, 0),
-    open,
+    remaining: tail.reduce((count, entry) => count + entry.levers.length, 0),
+    open: rows.reduce((count, entry) => count + entry.levers.length, 0),
   };
 }

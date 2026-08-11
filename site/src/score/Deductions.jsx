@@ -3,6 +3,7 @@ import { useState } from "react";
 import BoundBadge from "./BoundBadge.jsx";
 import CapabilityTag from "./CapabilityTag.jsx";
 import EntityButton from "./EntityButton.jsx";
+import TailToggle from "./TailToggle.jsx";
 import { ActorLine, TargetList } from "./rowAnatomy.jsx";
 
 const VISIBLE_ROWS = 8;
@@ -141,29 +142,20 @@ export default function Deductions({ view, onSelect }) {
       ))}
       {tailOpen && tail.map((row) => <DeductionRow key={row.index} row={row} onSelect={onSelect} />)}
       {tail.length > 0 && (
-        <button type="button" className="sc-tail-btn" onClick={() => setTailOpen((was) => !was)}>
-          {tailOpen ? (
-            <>
-              <span className="sc-tail-chev">▲</span> hide the tail
-            </>
+        <TailToggle open={tailOpen} onToggle={() => setTailOpen((was) => !was)}>
+          + {tail.length} more ·{" "}
+          {tailSum === null ? (
+            <i className="sc-nd">combined points not determined</i>
           ) : (
+            `−${tailSum.toFixed(2)} combined`
+          )}
+          {tailNd > 0 && (
             <>
-              + {tail.length} more ·{" "}
-              {tailSum === null ? (
-                <i className="sc-nd">combined points not determined</i>
-              ) : (
-                `−${tailSum.toFixed(2)} combined`
-              )}
-              {tailNd > 0 && (
-                <>
-                  {" "}
-                  · {tailNd} with <i>value not determined</i>
-                </>
-              )}
-              <span className="sc-tail-chev">▼</span>
+              {" "}
+              · {tailNd} with <i>value not determined</i>
             </>
           )}
-        </button>
+        </TailToggle>
       )}
       <FixFirst fix={view.fix} onSelect={onSelect} />
     </div>

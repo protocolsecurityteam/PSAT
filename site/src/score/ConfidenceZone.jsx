@@ -1,7 +1,8 @@
-import { Fragment } from "react";
+import { Fragment, useState } from "react";
 
 import CapabilityTag from "./CapabilityTag.jsx";
 import HelpTag from "./HelpTag.jsx";
+import TailToggle from "./TailToggle.jsx";
 import { principalChip, timelockProposer } from "./derive.js";
 import { categoryById, confidenceZone } from "./confidenceZone.js";
 import { ceilingText, countWord, pointsText } from "./format.js";
@@ -188,6 +189,7 @@ function LeverRow({ entry, onSelect }) {
 }
 
 export default function ConfidenceZone({ doc, view, onSelect, withheld = false }) {
+  const [tailOpen, setTailOpen] = useState(false);
   const zone = confidenceZone(doc, view.rows);
   return (
     <div className="scz-zone">
@@ -226,10 +228,18 @@ export default function ConfidenceZone({ doc, view, onSelect, withheld = false }
               <span>not yet verified</span>
               <span>dollar ceiling</span>
             </div>
-            {zone.rows.map((entry) => (
+            {zone.head.map((entry) => (
               <LeverRow key={entry.key} entry={entry} onSelect={onSelect} />
             ))}
-            {zone.remaining > 0 && <div className="scz-tail">+ {zone.remaining} more</div>}
+            {tailOpen &&
+              zone.tail.map((entry) => (
+                <LeverRow key={entry.key} entry={entry} onSelect={onSelect} />
+              ))}
+            {zone.tail.length > 0 && (
+              <TailToggle open={tailOpen} onToggle={() => setTailOpen((was) => !was)}>
+                + {zone.remaining} more
+              </TailToggle>
+            )}
           </>
         )}
       </div>

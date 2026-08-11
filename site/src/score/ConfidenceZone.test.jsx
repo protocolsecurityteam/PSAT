@@ -77,7 +77,42 @@ describe("ConfidenceZone — the table", () => {
   it("renders six rows and counts the rest in levers", () => {
     const { container } = renderZone();
     expect(container.querySelectorAll(".scz-trow")).toHaveLength(6);
-    expect(container.querySelector(".scz-tail").textContent).toBe("+ 14 more");
+    const tail = screen.getByRole("button", { name: /14 more/ });
+    expect(tail.textContent).toBe("+ 14 more▼");
+    expect(tail.className).toBe("sc-tail-btn");
+  });
+
+  it("expands the tail in place and collapses it again", async () => {
+    const user = userEvent.setup();
+    const { container } = renderZone();
+    // 20 open levers over 13 rows: the head shows six, and the button counts
+    // the fourteen QUESTIONS behind it — eight of which share one row.
+    await user.click(screen.getByRole("button", { name: /14 more/ }));
+    expect(container.querySelectorAll(".scz-trow")).toHaveLength(13);
+    await user.click(screen.getByRole("button", { name: /hide the tail/ }));
+    expect(container.querySelectorAll(".scz-trow")).toHaveLength(6);
+    expect(screen.getByRole("button", { name: /14 more/ })).toBeInTheDocument();
+  });
+
+  it("gives the revealed rows the same anatomy as the head", async () => {
+    const { container } = renderZone();
+    await userEvent.setup().click(screen.getByRole("button", { name: /14 more/ }));
+    const revealed = [...container.querySelectorAll(".scz-trow")].slice(6);
+    expect(revealed).toHaveLength(7);
+    for (const row of revealed) {
+      expect(row.querySelector(".scz-pc").textContent).toMatch(/score points$/);
+      expect(row.querySelector(".sc-kchip")).toBeTruthy();
+      expect(row.querySelector(".sc-cap")).toBeTruthy();
+      expect(row.querySelector(".scz-miss").textContent).not.toBe("");
+      expect(row.querySelector(".scz-chain").textContent).toMatch(/^(ethereum|base)$/);
+    }
+    // The grouped row rides in the tail, holder chip and all.
+    expect(revealed[0].querySelector(".scz-nprin").textContent).toBe("× 8 holders");
+    // Pools are assigned over every row, not only the visible ones — the tail
+    // carries a chip wherever the document puts one, and this corpus puts none
+    // past the head, which is a fact about the data rather than about the cut.
+    const pooled = [...container.querySelectorAll(".scz-poolchip")];
+    expect(pooled).toHaveLength(5);
   });
 
   it("prints each row's points as an at-most, never as a charge", () => {
@@ -188,7 +223,8 @@ describe("ConfidenceZone — the table", () => {
       const controller = lever.principal.match(/0x[0-9a-f]{40}/)[0];
       expect(addr).toContain(`${controller.slice(0, 6)}…${controller.slice(-4)}`);
     }
-    expect(container.querySelector(".scz-tail")).toBeNull();
+    // One row and nothing behind it: no tail, so no control offering one.
+    expect(container.querySelector(".sc-tail-btn")).toBeNull();
   });
 
   it("publishes an unrecognised witness token raw rather than guessing", () => {
