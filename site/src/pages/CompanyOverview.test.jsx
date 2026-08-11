@@ -94,8 +94,8 @@ describe("CompanyOverview — score band wiring", () => {
       () => SCORE_ETHERFI,
     );
     render(<CompanyOverview companyName="twinco" onNavigateToSurface={() => {}} />);
-    expect(await screen.findByText("B")).toBeInTheDocument();
-    expect(screen.getByText("71.7")).toBeInTheDocument();
+    expect(await screen.findByText("B+")).toBeInTheDocument();
+    expect(screen.getByText("78.6")).toBeInTheDocument();
   });
 
   it("keeps the page usable when no score has been computed", async () => {

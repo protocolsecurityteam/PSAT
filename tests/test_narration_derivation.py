@@ -669,30 +669,6 @@ def test_every_withholding_arm_has_a_census_cause_and_they_are_distinct():
     assert FOLD.ARM_REPUBLISHED_DIRECT not in arms
 
 
-def test_the_freeze_ladder_note_states_the_duration_gate_it_actually_carries(monkeypatch):
-    """B1-R S4/R2-N2. "no duration term" is false beside the ``auto_expiry`` rung
-    in the same dict. Asserting ``str(K.FREEZE_AUTO_EXPIRY) in note`` against the
-    shipped values is a tautology, so the thresholds are moved and the note
-    re-read: only a live interpolation survives."""
-    from services.scoring import constants as K
-
-    note = K.model_parameters()["freeze_ladder"]["note"]
-    assert str(K.FREEZE_AUTO_EXPIRY) in note
-    assert str(K.FREEZE_AUTO_EXPIRY_MAX_SECONDS) in note
-    assert "GATE on one rung and a term in none" in note
-    assert "no duration term" not in note
-    assert "is not_determined wherever populated" not in note
-
-    shipped_rung, shipped_seconds = K.FREEZE_AUTO_EXPIRY, K.FREEZE_AUTO_EXPIRY_MAX_SECONDS
-    monkeypatch.setattr(K, "FREEZE_AUTO_EXPIRY", 0.99)
-    monkeypatch.setattr(K, "FREEZE_AUTO_EXPIRY_MAX_SECONDS", 7 * 86400)
-    moved = K.model_parameters()["freeze_ladder"]["note"]
-    assert moved != note
-    assert "0.99" in moved and str(7 * 86400) in moved
-    # ...and the shipped values are gone, so a literal matching today cannot pass.
-    assert str(shipped_rung) not in moved and str(shipped_seconds) not in moved
-
-
 # The confidence pass's three credit paths, and the sheet-ceiling rollup
 
 

@@ -8,6 +8,10 @@ code with the signals written to ``function_score_signals`` in between.
     python -m services.scoring.cli score --protocol 1 [--out FILE]
     python -m services.scoring.cli differential --protocol 1 \
         --against scoring_prototype/score_v3.json [--out FILE]
+    python -m services.scoring.cli dirty --protocol 1
+
+``dirty`` is the one persisting command: it queues the protocol so the score
+loop's next pass re-folds and persists. ``score`` never consumes the mark.
 """
 
 from __future__ import annotations
@@ -342,9 +346,21 @@ def main(argv: list[str] | None = None) -> int:
     diff_parser.add_argument("--against", required=True)
     diff_parser.add_argument("--out")
 
+    dirty_parser = sub.add_parser("dirty", help="queue the protocol for a persisted re-fold")
+    dirty_parser.add_argument("--protocol", type=int, required=True)
+
     args = parser.parse_args(argv)
 
     from db.models import SessionLocal
+
+    if args.command == "dirty":
+        from services.scoring.dirty import SCORE_DIRTY_MANUAL, mark_protocol_score_dirty
+
+        with SessionLocal() as session:
+            written = mark_protocol_score_dirty(session, args.protocol, SCORE_DIRTY_MANUAL)
+            session.commit()
+        print(f"protocol {args.protocol} dirty mark {'written' if written else 'NOT written (see log)'}")
+        return 0 if written else 1
 
     with SessionLocal() as session:
         document = score(session, args.protocol)

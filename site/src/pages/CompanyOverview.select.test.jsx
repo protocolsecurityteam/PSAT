@@ -80,10 +80,10 @@ async function openBreakdown(user) {
 }
 
 // The row these cases need has ONE host and a wider reach set, so a target
-// click has a route to carry. It is row 7 of the published ranking; the pin
+// click has a route to carry. It is row 6 of the published ranking; the pin
 // below fails loudly if the ranking moves it rather than silently testing some
 // other row's shape.
-const ROW = 7;
+const ROW = 6;
 
 function firstRow() {
   return document.querySelectorAll(".sc-frow")[ROW];
