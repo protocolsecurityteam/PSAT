@@ -2404,6 +2404,11 @@ def _aggregate(
                 row.zero_reach_stripped,
             )
         is_floor = direction == BOUND_DIRECTION_FLOOR
+        weakness_by_entity, weakness, weakest = _member_weakness(
+            row, per_entity, value_plane, closure, conditions, conferral, act_as, magnitudes, admission
+        )
+        severity = max(instance.severity for instance in row.instances)
+        band = K.band(value_usd)
         unresolved = _unresolved_stake(
             undetermined,
             valued.withheld_behind_hops,
@@ -2411,11 +2416,19 @@ def _aggregate(
             value_plane,
             hops_not_determined=valued.hops_not_determined,
         )
-        weakness_by_entity, weakness, weakest = _member_weakness(
-            row, per_entity, value_plane, closure, conditions, conferral, act_as, magnitudes, admission
-        )
-        severity = max(instance.severity for instance in row.instances)
-        band = K.band(value_usd)
+        # The at-most in the grade's own units: the raw points this row would
+        # earn if every open question resolved against the protocol at its
+        # ceiling. Proven severity x proven weakness x the ceiling's band —
+        # nothing here is minted, and it never enters lambda. A proven-$0
+        # ceiling bounds points at zero (the band floor is for unpriced, not
+        # for an earned nothing); an unbounded ceiling bounds nothing.
+        ceiling_usd = unresolved["ceiling_usd"]
+        if ceiling_usd is None:
+            unresolved["points_ceiling"] = None
+        elif ceiling_usd == 0.0:
+            unresolved["points_ceiling"] = 0.0
+        else:
+            unresolved["points_ceiling"] = round(K.SEV_SCALE * severity * weakness * K.band(ceiling_usd), 4)
         if value_usd is None or value_usd < 100_000:
             warnings.append(
                 {
@@ -3184,6 +3197,21 @@ def _disposition_scope(coverage: dict[str, Any], carrier: dict[str, Any]) -> str
     )
 
 
+# Where each missing-witness class sits on the proof chain. The frontier is the
+# EARLIEST missing link: a row missing only pricing is one lookup from proven,
+# one missing reach itself is furthest. Unregistered tokens publish a
+# not_determined frontier rather than borrowing a place on the chain.
+_MISSING_LINK_CHAIN = ("reach", "effect", "magnitude", "value")
+_MISSING_LINK_OF = {
+    "reach_not_witnessed": "reach",
+    "pause_effective_not_witnessed": "effect",
+    "reach_magnitude_not_witnessed": "magnitude",
+    "code_control_sheet_ceiling_refused": "value",
+    "closure_entity_value_not_determined": "value",
+    "token_identity_not_decidable": "value",
+}
+
+
 def _unresolved_stake(
     undetermined: list[dict[str, Any]],
     withheld_behind_hops: dict[str, Any],
@@ -3226,6 +3254,10 @@ def _unresolved_stake(
     for hop in hops_not_determined:
         reason = str(hop.get("reason", "hop_not_determined"))
         hop_missing[reason] = hop_missing.get(reason, 0) + 1
+    entity_missing: dict[str, set[str]] = {}
+    for token, keys in reached_missing.items():
+        for key in keys:
+            entity_missing.setdefault(key, set()).add(token)
     total = 0.0
     any_contributing = False
     by_basis: dict[str, Any] = {}
@@ -3238,8 +3270,17 @@ def _unresolved_stake(
         ceiling = 0.0
         contributing = 0
         refused: dict[str, int] = {}
+        itemized: list[dict[str, Any]] = []
         for key in sorted(keys):
             usd, reason = P.ceiling_for(value_plane, key)
+            entry: dict[str, Any] = {
+                "entity": key,
+                "ceiling_usd": _round_published(usd) if usd is not None else None,
+                "refusal": None if usd is not None else reason,
+            }
+            if basis == "reached_unwitnessed":
+                entry["missing"] = sorted(entity_missing.get(key, ()))
+            itemized.append(entry)
             if usd is not None:
                 ceiling += usd
                 contributing += 1
@@ -3251,27 +3292,39 @@ def _unresolved_stake(
             "entities_contributing": contributing,
             "entities_refused_by_reason": dict(sorted(refused.items())),
             "missing_witnesses": dict(sorted(missing.items())),
+            "entities_itemized": itemized,
         }
         if contributing:
             total += ceiling
             any_contributing = True
+    links = {_MISSING_LINK_OF[t] for t in reached_missing if t in _MISSING_LINK_OF}
+    if behind or hop_missing:
+        links.add("reach")
+    frontier = next((link for link in _MISSING_LINK_CHAIN if link in links), None)
+    if frontier is None and (reached or behind):
+        frontier = NOT_DETERMINED
     return {
         "ceiling_usd": _round_published(total) if any_contributing else None,
         "entities_total": len(reached) + len(behind),
+        "proof_frontier": frontier,
         "by_basis": by_basis,
     }
 
 
 def _unresolved_levers(findings: list[dict[str, Any]]) -> dict[str, Any]:
-    """Document rollup: partial-proof rows ranked by what their resolution could
-    put in play. Ranked on the witnessed ceiling first — an unbounded unknown
-    publishes its entity count and refusals instead of a rank it never earned.
-    Carries no lambda figures; join to findings on (principal_unit, capability,
+    """Document rollup: partial-proof rows ranked by the points ceiling — the
+    proven half's weight times the unresolved ceiling's band, so an almost-
+    proven EOA over $2M outranks a diffuse low-severity gap over similar
+    dollars. Dollar ceiling breaks ties; an unbounded unknown publishes its
+    entity count and refusals instead of a rank it never earned. Carries no
+    lambda figures; join to findings on (principal_unit, capability,
     principal)."""
     admitted = [f for f in findings if f.get("partial_proof")]
     ranked = sorted(
         admitted,
         key=lambda f: (
+            f["unresolved_stake"]["points_ceiling"] is None,
+            -(f["unresolved_stake"]["points_ceiling"] or 0.0),
             -(f["unresolved_stake"]["ceiling_usd"] or 0.0),
             -f["unresolved_stake"]["entities_total"],
             f["principal_unit"],
@@ -3285,7 +3338,9 @@ def _unresolved_levers(findings: list[dict[str, Any]]) -> dict[str, Any]:
                 "principal": f["principal"],
                 "principal_unit": f["principal_unit"],
                 "chain": f["chain"],
+                "points_ceiling": f["unresolved_stake"]["points_ceiling"],
                 "ceiling_usd": f["unresolved_stake"]["ceiling_usd"],
+                "proof_frontier": f["unresolved_stake"]["proof_frontier"],
                 "entities_total": f["unresolved_stake"]["entities_total"],
                 "by_basis": f["unresolved_stake"]["by_basis"],
             }
