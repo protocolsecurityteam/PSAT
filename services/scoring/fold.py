@@ -1508,6 +1508,7 @@ def compute_protocol_score(
             subsumed,
             confidence["reach_magnitude_signals"]["sheet_ceiling_by_capability"],
         ),
+        "unresolved_levers": _unresolved_levers(findings),
         "principal_units": units.published_units(),
         "safe_keyset_overlaps": units.overlaps,
         "unit_evidence_scope": (
@@ -2403,6 +2404,13 @@ def _aggregate(
                 row.zero_reach_stripped,
             )
         is_floor = direction == BOUND_DIRECTION_FLOOR
+        unresolved = _unresolved_stake(
+            undetermined,
+            valued.withheld_behind_hops,
+            set(per_entity),
+            value_plane,
+            hops_not_determined=valued.hops_not_determined,
+        )
         weakness_by_entity, weakness, weakest = _member_weakness(
             row, per_entity, value_plane, closure, conditions, conferral, act_as, magnitudes, admission
         )
@@ -2641,6 +2649,12 @@ def _aggregate(
                 # withhold twenty-two entities; without this the other twenty
                 # appear nowhere in the document.
                 "reach_withheld_behind_hops": valued.withheld_behind_hops,
+                # The at-most behind this row's unanswered questions, from the
+                # unresolved entities' own sheets. Out of lambda and exposure.
+                "unresolved_stake": unresolved,
+                # Proven actor and act (ledger membership), unsized consequence.
+                # The row's lambda contribution is unchanged by this stamp.
+                "partial_proof": bool(unresolved["entities_total"]),
                 "example_functions": sorted({i.signal.function_name for i in row.instances})[:6],
                 "witness_tiers": sorted(row.tiers),
                 "witness_notes": sorted(row.notes),
@@ -3168,6 +3182,118 @@ def _disposition_scope(coverage: dict[str, Any], carrier: dict[str, Any]) -> str
         "this figure is a total over what the document PRICES at this node, and nothing on the "
         "entry says the held assets are worth nothing or that the entity holds nothing"
     )
+
+
+def _unresolved_stake(
+    undetermined: list[dict[str, Any]],
+    withheld_behind_hops: dict[str, Any],
+    sized_entities: set[str],
+    value_plane: P.ValuePlane,
+    hops_not_determined: list[dict[str, Any]] | tuple = (),
+) -> dict[str, Any]:
+    """The at-most behind this row's unanswered questions. Never enters lambda
+    or exposure: the reach/magnitude is not witnessed, only the entities' own
+    sheets are, so the figure is a ceiling on what resolution could put in play.
+
+    Two bases, disjoint, reached takes precedence: ``reached_unwitnessed`` holds
+    entities the row reaches whose contribution was refused; ``behind_unestablished_hops``
+    holds entities the closure places behind hops the row could not establish —
+    a bound on a bound, since that subtree is itself the widest walk's upper
+    bound. Entities already carrying a published figure on this row are sized,
+    not unresolved, and are excluded. An earned $0 sheet contributes 0.0 and
+    counts as contributing; a refused sheet is counted under its refusal token
+    (the work list), never as a zero. ``missing_witnesses`` counts the witness
+    class each unresolved entity (or hop) waits on, so a consumer reads what
+    closes the gap off the entry instead of re-parsing the instance lists.
+    """
+    # Canonical keys throughout: an implementation folds onto its proxy, so a
+    # raw impl key would pass the sized-exclusion and then draw the proxy's
+    # sheet out of ``ceiling_for`` — re-counting dollars the row already sized.
+    sized = {value_plane.canonical(key) for key in sized_entities}
+    reached = {value_plane.canonical(str(record["entity"])) for record in undetermined} - sized
+    behind = (
+        {value_plane.canonical(str(key)) for key in withheld_behind_hops.get("entity_keys") or ()} - sized - reached
+    )
+    reached_missing: dict[str, set[str]] = {}
+    for record in undetermined:
+        key = value_plane.canonical(str(record["entity"]))
+        if key in reached:
+            # 'token(detail) x qualifier' -> 'token'; the detail and qualifier
+            # stay on the instance record, this is the class count.
+            token = str(record.get("why", "")).partition("(")[0].partition(" x ")[0]
+            reached_missing.setdefault(token, set()).add(key)
+    hop_missing: dict[str, int] = {}
+    for hop in hops_not_determined:
+        reason = str(hop.get("reason", "hop_not_determined"))
+        hop_missing[reason] = hop_missing.get(reason, 0) + 1
+    total = 0.0
+    any_contributing = False
+    by_basis: dict[str, Any] = {}
+    for basis, keys, missing in (
+        ("reached_unwitnessed", reached, {k: len(v) for k, v in reached_missing.items()}),
+        ("behind_unestablished_hops", behind, hop_missing),
+    ):
+        if not keys:
+            continue
+        ceiling = 0.0
+        contributing = 0
+        refused: dict[str, int] = {}
+        for key in sorted(keys):
+            usd, reason = P.ceiling_for(value_plane, key)
+            if usd is not None:
+                ceiling += usd
+                contributing += 1
+            else:
+                refused[reason] = refused.get(reason, 0) + 1
+        by_basis[basis] = {
+            "ceiling_usd": _round_published(ceiling) if contributing else None,
+            "entities": len(keys),
+            "entities_contributing": contributing,
+            "entities_refused_by_reason": dict(sorted(refused.items())),
+            "missing_witnesses": dict(sorted(missing.items())),
+        }
+        if contributing:
+            total += ceiling
+            any_contributing = True
+    return {
+        "ceiling_usd": _round_published(total) if any_contributing else None,
+        "entities_total": len(reached) + len(behind),
+        "by_basis": by_basis,
+    }
+
+
+def _unresolved_levers(findings: list[dict[str, Any]]) -> dict[str, Any]:
+    """Document rollup: partial-proof rows ranked by what their resolution could
+    put in play. Ranked on the witnessed ceiling first — an unbounded unknown
+    publishes its entity count and refusals instead of a rank it never earned.
+    Carries no lambda figures; join to findings on (principal_unit, capability,
+    principal)."""
+    admitted = [f for f in findings if f.get("partial_proof")]
+    ranked = sorted(
+        admitted,
+        key=lambda f: (
+            -(f["unresolved_stake"]["ceiling_usd"] or 0.0),
+            -f["unresolved_stake"]["entities_total"],
+            f["principal_unit"],
+            f["capability"],
+        ),
+    )
+    return {
+        "levers": [
+            {
+                "capability": f["capability"],
+                "principal": f["principal"],
+                "principal_unit": f["principal_unit"],
+                "chain": f["chain"],
+                "ceiling_usd": f["unresolved_stake"]["ceiling_usd"],
+                "entities_total": f["unresolved_stake"]["entities_total"],
+                "by_basis": f["unresolved_stake"]["by_basis"],
+            }
+            for f in ranked
+        ],
+        "findings_admitted": len(admitted),
+        "findings_fully_determined": len(findings) - len(admitted),
+    }
 
 
 def _sheet_ceiling_records(

@@ -639,8 +639,8 @@ def ceiling_for(plane: ValuePlane, key: str) -> tuple[float | None, str]:
     because "the list is incomplete" is closed by paging or sweeping the chain,
     which is not the pipeline that answers "nobody priced these rows".
 
-    ``fold._entity_contribution`` is the only caller, and it calls with the
-    canonical key. Every reason is pinned by ``tests/test_value_plane_ceiling.py``
+    ``fold._entity_contribution`` and ``fold._unresolved_stake`` are the
+    callers, both with canonical keys. Every reason is pinned by ``tests/test_value_plane_ceiling.py``
     over hand-built planes, because the corpus does not carry all of them: it now
     carries proven-empty sheets in quantity — the chain-log sweep earned them —
     but no ambiguous alias and no unregistered sheet state, so those two are
