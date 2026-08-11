@@ -79,15 +79,15 @@ describe("gradeBands — letter from λ, keyed by model version", () => {
     // same defect as one chosen to save a letter.
     expect(bandsFor("1.3.0-provisional")).toEqual(bandsFor("1.2.0-provisional"));
     expect(letterFor("1.3.0-provisional", 71.7053).letter).toBe("B");
-    // The published document lands on the B side of the 72.0 boundary, under
-    // whatever version the GOLDEN is stamped with. The version is read off the
-    // document rather than named as a literal: 1.4.0 carries the same cuts and
-    // the same λ, so this claim survives the regeneration — and a version with
-    // no band table would fail it here, on `calibrated`, which is the failure
-    // that actually matters.
+    // The published document now lands on the B+ side of the 72.0 boundary —
+    // 1.4.1 carries the same cuts and λ rose to 78.5611, so the letter moved
+    // because the grade did and not because anything was recut. The version is
+    // read off the GOLDEN rather than named as a literal, and a version with no
+    // band table would fail it here, on `calibrated`, which is the failure that
+    // actually matters.
     expect(bandsFor(ETHERFI.model_version)).not.toBeNull();
     expect(letterFor(ETHERFI.model_version, ETHERFI.grade_lambda)).toEqual({
-      letter: "B",
+      letter: "B+",
       tone: "b",
       calibrated: true,
     });

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import ConfidenceStrip from "./ConfidenceStrip.jsx";
+import ConfidenceZone from "./ConfidenceZone.jsx";
 import Deductions from "./Deductions.jsx";
 import GradeHeader from "./GradeHeader.jsx";
 import Protections from "./Protections.jsx";
@@ -132,8 +132,7 @@ export default function ScoreBand({ companyName, contracts, score, error, onSele
   }
 
   const withheld = state === "not_determined";
-  // projectScore computes both unconditionally, withheld or not.
-  const channels = view.confidence;
+  // projectScore computes it unconditionally, withheld or not.
   const posture = view.posture;
 
   return (
@@ -173,7 +172,7 @@ export default function ScoreBand({ companyName, contracts, score, error, onSele
                 <Protections doc={score} view={view} onSelect={onSelectEntity} />
               )}
             </div>
-            <ConfidenceStrip channels={channels} />
+            <ConfidenceZone doc={score} view={view} onSelect={onSelectEntity} withheld={withheld} />
           </div>
         </section>
       )}
