@@ -3,8 +3,7 @@ import { Fragment, useState } from "react";
 import CapabilityTag from "./CapabilityTag.jsx";
 import HelpTag from "./HelpTag.jsx";
 import TailToggle from "./TailToggle.jsx";
-import { principalChip, timelockProposer } from "./derive.js";
-import { categoryById, confidenceZone } from "./confidenceZone.js";
+import { categoryById, confidenceZone, leverChip, proposerUnproven } from "./confidenceZone.js";
 import { ceilingText, countWord, pointsText } from "./format.js";
 import { ActorLine, TargetList } from "./rowAnatomy.jsx";
 
@@ -158,8 +157,10 @@ function CeilingCell({ entry }) {
 
 function LeverRow({ entry, onSelect }) {
   const { lever, levers, row } = entry;
-  const chip = principalChip(row?.finding || { principal_kind: "", principal: lever.principal });
-  const proposer = row?.finding ? timelockProposer(row.finding) : null;
+  // Read through the same helpers the grouping reads: the row may only say
+  // what the group key proved every holder shares.
+  const chip = leverChip(lever, row);
+  const unprovenProposer = proposerUnproven(row);
   const points = pointsText(lever.points_ceiling);
   return (
     <div className="scz-trow">
@@ -177,7 +178,7 @@ function LeverRow({ entry, onSelect }) {
           ) : (
             <span className="sc-addr">{entry.controllers.join(" · ")}</span>
           )}
-          {proposer && !proposer.proven && <span className="scz-nd-line">proposer not determined</span>}
+          {unprovenProposer && <span className="scz-nd-line">proposer not determined</span>}
         </div>
         {row && <TargetList row={row} onSelect={onSelect} />}
         <div className="scz-chain">{lever.chain}</div>

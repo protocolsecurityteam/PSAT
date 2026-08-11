@@ -85,10 +85,11 @@ describe("ConfidenceZone — the table", () => {
   it("expands the tail in place and collapses it again", async () => {
     const user = userEvent.setup();
     const { container } = renderZone();
-    // 20 open levers over 13 rows: the head shows six, and the button counts
-    // the fourteen QUESTIONS behind it — eight of which share one row.
+    // 20 open levers over 17 rows: the head shows six, and the button counts
+    // the fourteen QUESTIONS behind it — four of which share one row, so the
+    // label is not the number of rows it reveals.
     await user.click(screen.getByRole("button", { name: /14 more/ }));
-    expect(container.querySelectorAll(".scz-trow")).toHaveLength(13);
+    expect(container.querySelectorAll(".scz-trow")).toHaveLength(17);
     await user.click(screen.getByRole("button", { name: /hide the tail/ }));
     expect(container.querySelectorAll(".scz-trow")).toHaveLength(6);
     expect(screen.getByRole("button", { name: /14 more/ })).toBeInTheDocument();
@@ -98,7 +99,7 @@ describe("ConfidenceZone — the table", () => {
     const { container } = renderZone();
     await userEvent.setup().click(screen.getByRole("button", { name: /14 more/ }));
     const revealed = [...container.querySelectorAll(".scz-trow")].slice(6);
-    expect(revealed).toHaveLength(7);
+    expect(revealed).toHaveLength(11);
     for (const row of revealed) {
       expect(row.querySelector(".scz-pc").textContent).toMatch(/score points$/);
       expect(row.querySelector(".sc-kchip")).toBeTruthy();
@@ -106,13 +107,17 @@ describe("ConfidenceZone — the table", () => {
       expect(row.querySelector(".scz-miss").textContent).not.toBe("");
       expect(row.querySelector(".scz-chain").textContent).toMatch(/^(ethereum|base)$/);
     }
-    // The grouped row rides in the tail, holder chip and all.
-    expect(revealed[0].querySelector(".scz-nprin").textContent).toBe("× 8 holders");
-    // Pools are assigned over every row, not only the visible ones — the tail
-    // carries a chip wherever the document puts one, and this corpus puts none
-    // past the head, which is a fact about the data rather than about the cut.
-    const pooled = [...container.querySelectorAll(".scz-poolchip")];
-    expect(pooled).toHaveLength(5);
+    // The grouped row rides in the tail, holder chip and all — and it is the
+    // only one, because the other transfer_policy holders differ in what the
+    // row would say about them.
+    const chips = revealed.map((r) => r.querySelector(".scz-nprin")?.textContent ?? null);
+    expect(chips.filter(Boolean)).toEqual(["× 4 holders"]);
+    // Pools are assigned over every row, not only the visible ones: the five
+    // transfer_policy rows reach one $1.45M pot, and the tail says so once per
+    // row so a reader cannot add them up.
+    const pooled = [...container.querySelectorAll(".scz-poolchip")].map((n) => n.textContent);
+    expect(pooled.filter((t) => t.startsWith("⬡ POOL C"))).toHaveLength(5);
+    expect(pooled).toHaveLength(10);
   });
 
   it("prints each row's points as an at-most, never as a charge", () => {
@@ -213,17 +218,46 @@ describe("ConfidenceZone — the table", () => {
   });
 
   it("chips the holder count on a grouped row and names every one of them", () => {
+    // The eight transfer_policy holders wait on one byte-identical set, but the
+    // row speaks for all of them: only the four the document gives the SAME
+    // function, kind and points ceiling merge. The other four each get a row.
     const transfer = LEVERS.filter((l) => l.capability === "transfer_policy.configure");
     const doc = docWithLevers(transfer);
     const { container } = render(<ConfidenceZone doc={doc} view={projectScore(doc, CONTRACTS)} />);
-    expect(container.querySelectorAll(".scz-trow")).toHaveLength(1);
-    expect(container.querySelector(".scz-nprin").textContent).toBe("× 8 holders");
-    const addr = container.querySelector(".sc-addr").textContent;
-    for (const lever of transfer) {
-      const controller = lever.principal.match(/0x[0-9a-f]{40}/)[0];
-      expect(addr).toContain(`${controller.slice(0, 6)}…${controller.slice(-4)}`);
+    const rows = [...container.querySelectorAll(".scz-trow")];
+    expect(rows).toHaveLength(5);
+
+    const grouped = rows[0];
+    expect(grouped.querySelector(".scz-nprin").textContent).toBe("× 4 holders");
+    expect(grouped.querySelector(".sc-kchip").textContent).toBe("EOA");
+    expect(grouped.querySelector(".sc-addr").textContent).toContain("addAsset");
+    const merged = transfer
+      .filter((l) => l.points_ceiling === 6.75 && !l.principal.includes("0xa4c5"))
+      .map((l) => l.principal.match(/0x[0-9a-f]{40}/)[0]);
+    expect(merged).toHaveLength(4);
+    for (const controller of merged) {
+      expect(grouped.querySelector(".sc-addr").textContent).toContain(
+        `${controller.slice(0, 6)}…${controller.slice(-4)}`,
+      );
     }
-    // One row and nothing behind it: no tail, so no control offering one.
+
+    // 0xa4c5… holds removeAsset and stands alone rather than being spoken for.
+    const removeRow = rows.find((r) => r.textContent.includes("removeAsset"));
+    expect(removeRow.querySelector(".scz-nprin")).toBeNull();
+    expect(removeRow.querySelector(".sc-addr").textContent).toContain("0xa4c5…6bb4");
+    expect(grouped.textContent).not.toContain("removeAsset");
+    expect(grouped.textContent).not.toContain("0xa4c5…6bb4");
+
+    // …and the three Safes are not published as EOAs.
+    const safes = rows.filter((r) => /^Safe /.test(r.querySelector(".sc-kchip").textContent));
+    expect(safes.map((r) => r.querySelector(".sc-kchip").textContent)).toEqual([
+      "Safe 2/5",
+      "Safe 2/7",
+      "Safe 2/4",
+    ]);
+    for (const safe of safes) expect(safe.querySelector(".scz-nprin")).toBeNull();
+
+    // Five rows, none hidden: no tail, so no control offering one.
     expect(container.querySelector(".sc-tail-btn")).toBeNull();
   });
 

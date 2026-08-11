@@ -6,7 +6,7 @@
 //
 // Pure functions, no React.
 
-import { controllerAddress } from "./derive.js";
+import { controllerAddress, principalChip, timelockProposer } from "./derive.js";
 
 // The category a missing-witness token belongs to. This is a fixed 1:1 table,
 // not an allow-list with a default: a token no category claims renders as
@@ -102,10 +102,15 @@ export function statusLines(lever) {
 // not: these contracts contribute nothing to the ceiling, so the real ceiling
 // may be higher — which is what the chip says. A refused set is never rendered
 // as a $0.
+//
+// Dollar-carrying is the same test the status lines use — every basis except a
+// proven $0. A basis whose ceiling is null carries dollars nobody could bound,
+// usually because EVERY entity in it was refused; skipping it would drop the
+// chip exactly where the ceiling is most incomplete.
 export function refusalCount(lever) {
   let total = 0;
   for (const entry of Object.values(lever?.by_basis || {})) {
-    if (!(usdOrNull(entry?.ceiling_usd) > 0)) continue;
+    if (usdOrNull(entry?.ceiling_usd) === 0) continue;
     for (const count of Object.values(entry?.entities_refused_by_reason || {})) {
       total += Number(count) || 0;
     }
@@ -150,14 +155,47 @@ function stableString(value) {
   return JSON.stringify(value === undefined ? null : value);
 }
 
-// Two levers are one row when they are the same capability on the same chain
-// waiting on a byte-identical set of unanswered entities. Answering it answers
-// both, and their ceilings are one pot of money seen twice — so they are shown
-// once, with a count of who holds the permission. Capability is part of the
-// key: a row names one capability, and merging two under one label would
-// publish a claim the document does not make.
-export function groupKey(lever) {
-  return `${lever?.capability}|${lever?.chain}|${stableString(lever?.by_basis)}`;
+// The kind chip a row wears, and whether its principal routes through a
+// proposer set nobody proved. Both are read here as well as rendered, so the
+// grouping and the row can never disagree about what the row says.
+export function leverChip(lever, row) {
+  return principalChip(row?.finding || { principal_kind: "", principal: lever?.principal });
+}
+
+export function proposerUnproven(row) {
+  return row?.finding ? timelockProposer(row.finding)?.proven === false : false;
+}
+
+// Two levers become one row only when the row would say exactly the SAME thing
+// about both — because a grouped row renders the lead's claim once and hangs
+// every holder's address off it. Anything the row takes from the lead is
+// therefore part of the key: the eight transfer_policy holders look like one
+// question and are not, since one of them holds removeAsset rather than
+// addAsset, three are Safes rather than EOAs, and their points ceilings run
+// 6.75 / 4.125 / 2.625. Merging them published a function, a principal kind and
+// a ceiling for holders the document never gave them to.
+//
+// Only the controller ADDRESS may vary inside a group — it is the one thing the
+// row aggregates rather than asserts. Any field added to the rendered row must
+// be added here too, or the row will start speaking for holders again.
+export function claimSignature(lever, row) {
+  const chip = leverChip(lever, row);
+  return stableString({
+    capability: lever?.capability ?? null,
+    chain: lever?.chain ?? null,
+    pointsCeiling: lever?.points_ceiling ?? null,
+    ceilingUsd: lever?.ceiling_usd ?? null,
+    entitiesTotal: lever?.entities_total ?? null,
+    byBasis: lever?.by_basis ?? null,
+    chip: [chip.kind, chip.label],
+    proposerUnproven: proposerUnproven(row),
+    functions: row?.functions ?? null,
+    exampleFunction: row?.exampleFunction ?? null,
+    hosts: (row?.hosts || []).map((host) => host.canonical),
+    targets: (row?.targets || []).map((target) => target.canonical),
+    reachWitnessed: row?.reachWitnessed ?? null,
+    undeterminedCount: row?.undeterminedCount ?? null,
+  });
 }
 
 export const POOL_EPSILON_USD = 0.01;
@@ -219,7 +257,7 @@ export function confidenceZone(doc, deductionRows) {
   for (const lever of rollup.levers || []) {
     const row = byKey.get(joinKey(lever)) || null;
     if (isClosed(lever, row)) continue;
-    const key = groupKey(lever);
+    const key = claimSignature(lever, row);
     const existing = grouped.get(key);
     if (existing) {
       existing.levers.push(lever);

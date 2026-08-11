@@ -6,7 +6,7 @@ import {
   assignPools,
   ceilingBearingEntities,
   confidenceZone,
-  groupKey,
+  claimSignature,
   isClosed,
   refusalCount,
   statusLines,
@@ -176,6 +176,28 @@ describe("confidence zone — refusals", () => {
     expect(refusalCount(LEVERS[5])).toBe(7);
   });
 
+  it("counts the refusals on a basis nobody could bound at all", () => {
+    // Not in this corpus, and the case the chip exists for: every entity in the
+    // basis was refused, so the ceiling is null rather than a figure. Reading
+    // only bases with a positive ceiling would drop the chip exactly where the
+    // ceiling is most incomplete.
+    const unbounded = lever({
+      ceiling_usd: null,
+      entities_total: 9,
+      by_basis: {
+        reached_unwitnessed: {
+          ceiling_usd: null,
+          entities: 9,
+          entities_contributing: 0,
+          entities_refused_by_reason: { unpriced: 6, no_rows: 3 },
+          missing_witnesses: { closure_entity_value_not_determined: 9 },
+          entities_itemized: [],
+        },
+      },
+    });
+    expect(refusalCount(unbounded)).toBe(9);
+  });
+
   it("counts no refusal off a basis holding none of the money", () => {
     const zeroBasis = lever({
       by_basis: {
@@ -274,12 +296,65 @@ describe("confidence zone — pools", () => {
 });
 
 describe("confidence zone — rows", () => {
-  it("collapses the eight transfer_policy holders onto one key", () => {
-    // Eight principals, one unanswered set: answering it answers all eight, so
-    // the queue asks the question once and counts the holders.
+  it("merges the transfer_policy holders only where the claim really is one", () => {
+    // Eight principals wait on a byte-identical unanswered set, so the earlier
+    // key made them one row — and that row then said addAsset, EOA and 6.75
+    // points about all eight. The document says otherwise: 0xa4c5… holds
+    // removeAsset, three of them are Safes, and the ceilings run 6.75 / 4.125 /
+    // 2.625. Only the four that agree on every rendered word merge.
     const transfer = LEVERS.filter((l) => l.capability === "transfer_policy.configure");
     expect(transfer).toHaveLength(8);
-    expect(new Set(transfer.map(groupKey)).size).toBe(1);
+    expect(new Set(transfer.map((l) => JSON.stringify(l.by_basis))).size).toBe(1);
+
+    const merged = ZONE.rows.filter((r) => r.lever.capability === "transfer_policy.configure");
+    expect(merged.map((r) => r.levers.length)).toEqual([4, 1, 1, 1, 1]);
+    expect(merged.map((r) => r.row.exampleFunction)).toEqual([
+      "addAsset",
+      "removeAsset",
+      "addAsset",
+      "addAsset",
+      "addAsset",
+    ]);
+    expect(merged.map((r) => r.row.chip.label)).toEqual([
+      "EOA",
+      "EOA",
+      "Safe 2/5",
+      "Safe 2/7",
+      "Safe 2/4",
+    ]);
+    expect(merged.map((r) => r.lever.points_ceiling)).toEqual([6.75, 6.75, 4.125, 4.125, 2.625]);
+  });
+
+  it("splits holders whose function differs, alike in every other word", () => {
+    const shared = { hosts: [], targets: [], reachWitnessed: true, undeterminedCount: 0, chip: { kind: "eoa", label: "EOA" } };
+    const addAsset = { ...shared, functions: ["addAsset"], exampleFunction: "addAsset", finding: { principal_kind: "eoa" } };
+    const removeAsset = { ...shared, functions: ["removeAsset"], exampleFunction: "removeAsset", finding: { principal_kind: "eoa" } };
+    const one = lever();
+    const other = lever({ principal: "EOA 0x2222222222222222222222222222222222222222" });
+    // Identical levers — the split comes entirely from the function the row
+    // would print, which is the claim it makes about every holder on it.
+    expect(claimSignature(one, addAsset)).toBe(claimSignature(other, addAsset));
+    expect(claimSignature(one, addAsset)).not.toBe(claimSignature(other, removeAsset));
+  });
+
+  it("splits holders whose chip, points ceiling or undetermined count differs", () => {
+    const row = (patch = {}) => ({
+      hosts: [],
+      targets: [],
+      reachWitnessed: true,
+      undeterminedCount: 2,
+      functions: ["addAsset"],
+      exampleFunction: "addAsset",
+      finding: { principal_kind: "eoa", principal: "EOA 0x1" },
+      ...patch,
+    });
+    const base = claimSignature(lever(), row());
+    expect(base).not.toBe(
+      claimSignature(lever(), row({ finding: { principal_kind: "safe", principal: "Safe 2/5 0x1" } })),
+    );
+    expect(base).not.toBe(claimSignature(lever({ points_ceiling: 4.125 }), row()));
+    expect(base).not.toBe(claimSignature(lever(), row({ undeterminedCount: 4 })));
+    expect(base).not.toBe(claimSignature(lever(), row({ reachWitnessed: false })));
   });
 
   it("splits levers whose by_basis differ, however alike they look", () => {
@@ -293,7 +368,7 @@ describe("confidence zone — rows", () => {
         },
       },
     });
-    expect(groupKey(one)).not.toBe(groupKey(other));
+    expect(claimSignature(one, null)).not.toBe(claimSignature(other, null));
     const zone = confidenceZone(docOf([one, other]), []);
     expect(zone.rows).toHaveLength(2);
   });
@@ -317,12 +392,13 @@ describe("confidence zone — rows", () => {
   });
 
   it("counts the tail in levers, not in rows", () => {
-    // 20 levers stay open over 13 rows; the head's six carry one lever each, so
-    // fourteen questions remain — eight of them inside the single grouped row.
+    // 20 levers stay open over 17 rows; the head's six carry one lever each, so
+    // fourteen questions remain — four of them inside the one grouped row. The
+    // label counts questions, so splitting a row never moves it.
     expect(ZONE.open).toBe(20);
-    expect(ZONE.rows).toHaveLength(13);
+    expect(ZONE.rows).toHaveLength(17);
     expect(ZONE.head).toHaveLength(6);
-    expect(ZONE.tail).toHaveLength(7);
+    expect(ZONE.tail).toHaveLength(11);
     expect(ZONE.remaining).toBe(14);
   });
 
@@ -331,8 +407,11 @@ describe("confidence zone — rows", () => {
       20.25, 20.25, 16.5, 12.15, 9.9, 8.4,
     ]);
     // and the tail continues down the same ranking rather than restarting it
+    // Arrival order, not a re-rank: a row sits where its FIRST lever arrived, so
+    // the split rows keep the producer's positions rather than re-sorting into
+    // a descending run.
     expect(ZONE.tail.map((r) => r.lever.points_ceiling)).toEqual([
-      6.75, 4.86, 2.7225, 1.7325, 0.9504, 0.81, 0.405,
+      6.75, 6.75, 4.86, 4.125, 4.125, 2.7225, 2.625, 1.7325, 0.9504, 0.81, 0.405,
     ]);
   });
 
