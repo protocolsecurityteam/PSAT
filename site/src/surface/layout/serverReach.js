@@ -26,9 +26,9 @@ function keyOnChain(key, chain) {
 //   pathEdges     — Set<"from>to"> reconstructed from `parents` (the walk tree
 //                   behind the hop counts — the routes the canvas lights);
 //   frontier      — Map<destination addrLc, { from, to, reason, basis }> over
-//                   the not_determined entries, first entry per destination;
-//   frontierPairs — Set<"from>to"> of every frontier (from, to) pair, for the
-//                   dashed edge styling.
+//                   the not_determined entries, first entry per destination.
+//                   Not drawn on the canvas (proven reach only, owner ruling
+//                   2026-08-12); it feeds the Governs tab's count line.
 //
 // Null when the payload carries no reach block or no record for this entity —
 // absence of the witness is not reach, and the caller renders no overlay at
@@ -57,7 +57,6 @@ export function deriveReachOverlay(reach, chain, address) {
   }
 
   const frontier = new Map();
-  const frontierPairs = new Set();
   for (const entry of record.frontier || []) {
     const from = keyOnChain(entry?.from, chain);
     const to = keyOnChain(entry?.to, chain);
@@ -66,11 +65,10 @@ export function deriveReachOverlay(reach, chain, address) {
     // re-asserted so a payload carrying both can never render a walked node
     // as unconfirmed.
     if (to === self || distances.has(to)) continue;
-    frontierPairs.add(`${from}>${to}`);
     if (!frontier.has(to)) {
       frontier.set(to, { from, to, reason: entry.reason || null, basis: entry.basis || null });
     }
   }
 
-  return { distances, pathEdges, frontier, frontierPairs };
+  return { distances, pathEdges, frontier };
 }

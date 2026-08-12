@@ -729,11 +729,12 @@ function ProtocolSurface({
   // a pair with no drawn edge (an intra-group hop inside a collapsed box)
   // simply lights nothing.
   const reachPathEdges = reachOverlay?.pathEdges.size ? reachOverlay.pathEdges : null;
-  // not_determined frontier: destination → the scorer's refusal entry, plus
-  // the (from, to) pairs for the dashed edge styling. A distinct third state —
-  // never merged into reachDistances.
+  // not_determined frontier: destination → the scorer's refusal entry. A
+  // distinct third state, never merged into reachDistances — and deliberately
+  // NOT rendered on the canvas (owner ruling 2026-08-12: the graph shows
+  // proven reach only; the unknowns' home is the score page's confidence zone
+  // and the Governs tab's count line below).
   const reachFrontier = reachOverlay?.frontier.size ? reachOverlay.frontier : null;
-  const reachFrontierPairs = reachOverlay?.frontierPairs.size ? reachOverlay.frontierPairs : null;
   // The sidebar's unconfirmed count names only destinations the reader can
   // LOCATE — ones with a node on this page. The server's frontier also names
   // off-page destinations (the scorer's graph is wider than the payload's
@@ -895,8 +896,6 @@ function ProtocolSurface({
             highlightedAddresses={highlightedAddresses}
             reachDistances={reachDistances}
             reachPathEdges={reachPathEdges}
-            reachFrontier={reachFrontier}
-            reachFrontierPairs={reachFrontierPairs}
             onSelectMachine={(m) => {
               // Auto-switch to Detail when the user clicks a contract
               // ON THE CANVAS so the function lanes are immediately

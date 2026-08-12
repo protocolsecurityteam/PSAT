@@ -773,13 +773,6 @@
   border: 1px solid rgba(167, 139, 250, 0.75);
 }
 
-/* Unconfirmed-reach legend swatch — the dashed hedged chip in miniature,
-   for the not_determined third state. */
-.ps-selection-legend-swatch--reach-nd {
-  background: #1c1533;
-  border: 1px dashed rgba(167, 139, 250, 0.55);
-}
-
 /* Transitive reach on the canvas: the card carries no tint and no fade — a
    reached node renders exactly as crisp as a directly-connected one, and the
    chip above it is the whole claim. The violet border is a locator only, so the
@@ -793,17 +786,6 @@
    GroupNode). */
 .ps-group-reach {
   border-color: rgba(124, 58, 237, 0.5) !important;
-}
-
-/* not_determined frontier locators: fainter than the walked violet — the
-   node's mid-dim + the dashed chip carry the hedge; the border only helps the
-   eye find the chipped cards. */
-.ps-node-reach-nd {
-  border-color: rgba(167, 139, 250, 0.3);
-}
-
-.ps-group-reach-nd {
-  border-color: rgba(124, 58, 237, 0.3) !important;
 }
 
 /* Selection chip rendered on each related contract / group container.
@@ -861,21 +843,6 @@
 }
 
 .ps-node-chip--reach.ps-node-chip--stacked {
-  bottom: calc(100% + 26px);
-}
-
-/* `reach unconfirmed` chip (dashed, muted violet): the scorer refused a hop
-   short of this card, so its reach is not_determined — a hedged claim,
-   visually a step down from the walked chip. The title carries the refusal
-   reason token. */
-.ps-node-chip--reach-nd {
-  bottom: calc(100% + 4px);
-  background: #1c1533;
-  color: #b9abe4;
-  border: 1px dashed rgba(167, 139, 250, 0.55);
-}
-
-.ps-node-chip--reach-nd.ps-node-chip--stacked {
   bottom: calc(100% + 26px);
 }
 

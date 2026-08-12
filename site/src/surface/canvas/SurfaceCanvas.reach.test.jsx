@@ -34,7 +34,6 @@ const D = "0x" + "d4".repeat(20); // frontier destination / off the walk
 const E = "0x" + "e5".repeat(20); // off the walk
 
 const REACH_VIOLET = "#a78bfa";
-const REACH_ND_VIOLET = "#8b80ba";
 const RESTING_GREY = "#94a3b8";
 
 function machine(address, name) {
@@ -66,18 +65,6 @@ const PATH_EDGES = new Set([
   `${A.toLowerCase()}>${B.toLowerCase()}`,
   `${B.toLowerCase()}>${C.toLowerCase()}`,
 ]);
-
-// The scorer refused the C→D hop: D is a not_determined frontier destination.
-const ND_TITLE = "reach unconfirmed · gate does not confer this scope";
-const FRONTIER = new Map([
-  [D.toLowerCase(), {
-    from: C.toLowerCase(),
-    to: D.toLowerCase(),
-    reason: "gate_does_not_confer_this_scope",
-    basis: "conferral",
-  }],
-]);
-const FRONTIER_PAIRS = new Set([`${C.toLowerCase()}>${D.toLowerCase()}`]);
 
 function renderCanvas(props) {
   return render(
@@ -196,95 +183,37 @@ describe("SurfaceCanvas — reach-route edges", () => {
   });
 });
 
-describe("SurfaceCanvas — not_determined frontier (three-state overlay)", () => {
+describe("SurfaceCanvas — not_determined frontier is not drawn (owner ruling 2026-08-12)", () => {
   beforeEach(() => {
     captured.edges = null;
     captured.nodes = null;
   });
 
-  function renderThreeState(extra = {}) {
-    return renderCanvas({
+  it("renders a frontier destination exactly like an unreached node — dim, no chip, grey edge", async () => {
+    // The canvas shows proven reach only; the unknowns' home is the score
+    // page's confidence zone and the Governs tab's count line. D (the refused
+    // hop's destination) must be indistinguishable from E (never named).
+    renderCanvas({
       selectedAddress: A,
       reachDistances: REACH_DISTANCES,
       reachPathEdges: PATH_EDGES,
-      reachFrontier: FRONTIER,
-      reachFrontierPairs: FRONTIER_PAIRS,
-      ...extra,
     });
-  }
-
-  it("chips the frontier destination `reach unconfirmed` with the reason-token title, at mid dim", async () => {
-    renderThreeState();
     await settle();
 
-    const nd = nodeFor(D);
-    expect(nd.data.reachNdChip).toBe(ND_TITLE);
-    expect(nd.data.reachChip).toBeNull();
-    // Between walked-bright and dimmed-out: legible, never a walked claim.
-    expect(nd.style.opacity).toBe(0.55);
-
-    // The walked node keeps its bright treatment and only its own chip.
+    for (const addr of [D, E]) {
+      const node = nodeFor(addr);
+      expect(node.data.reachChip).toBeNull();
+      expect(node.data.reachNdChip).toBeUndefined();
+      expect(node.style.opacity).toBe(0.2);
+    }
     const walked = nodeFor(C);
     expect(walked.data.reachChip).toBe("reach · 2 hops");
-    expect(walked.data.reachNdChip).toBeNull();
     expect(walked.style.opacity).toBeUndefined();
 
-    // Absent state: neither walked nor frontier — dim, no chip of either kind.
-    const absent = nodeFor(E);
-    expect(absent.data.reachChip).toBeNull();
-    expect(absent.data.reachNdChip).toBeNull();
-    expect(absent.style.opacity).toBe(0.2);
-  });
-
-  it("draws the refused hop dashed and muted while walked hops stay solid violet", async () => {
-    renderThreeState();
-    await settle();
-
     const refused = edgeFor(C, D);
-    expect(refused.style.stroke).toBe(REACH_ND_VIOLET);
-    expect(refused.style.strokeDasharray).toBe("7 5");
-    expect(refused.style.opacity).toBe(1);
-
-    const walked = edgeFor(B, C);
-    expect(walked.style.stroke).toBe(REACH_VIOLET);
-    expect(walked.style.strokeDasharray).toBeUndefined();
-
-    // Off both routes: grey and dimmed as before.
-    const other = edgeFor(D, E);
-    expect(other.style.stroke).toBe(RESTING_GREY);
-    expect(other.style.opacity).toBe(0.08);
-  });
-
-  it("never hedges a walked destination — reached wins over a colliding frontier entry", async () => {
-    renderThreeState({
-      reachFrontier: new Map([
-        [C.toLowerCase(), { from: B.toLowerCase(), to: C.toLowerCase(), reason: "gate_scope_not_determined", basis: "conferral" }],
-      ]),
-      reachFrontierPairs: new Set([`${B.toLowerCase()}>${C.toLowerCase()}`]),
-    });
-    await settle();
-    const walked = nodeFor(C);
-    expect(walked.data.reachChip).toBe("reach · 2 hops");
-    expect(walked.data.reachNdChip).toBeNull();
-  });
-
-  it("chips nothing for a frontier destination with no node on this canvas", async () => {
-    const offCanvas = "0x" + "f6".repeat(20);
-    renderThreeState({
-      reachFrontier: new Map([
-        [offCanvas, { from: C.toLowerCase(), to: offCanvas, reason: "gate_scope_not_determined", basis: "conferral" }],
-      ]),
-      reachFrontierPairs: new Set([`${C.toLowerCase()}>${offCanvas}`]),
-    });
-    await settle();
-    expect((captured.nodes || []).every((n) => !n.data.reachNdChip)).toBe(true);
-  });
-
-  it("suppresses the frontier styling under an audit/agent highlight overlay", async () => {
-    renderThreeState({ highlightedAddresses: new Set([A.toLowerCase(), E.toLowerCase()]) });
-    await settle();
-    expect((captured.nodes || []).every((n) => !n.data.reachNdChip)).toBe(true);
-    expect(edgeFor(C, D).style.strokeDasharray).toBeUndefined();
+    expect(refused.style.stroke).toBe(RESTING_GREY);
+    expect(refused.style.strokeDasharray).toBeUndefined();
+    expect(refused.style.opacity).toBe(0.08);
   });
 });
 

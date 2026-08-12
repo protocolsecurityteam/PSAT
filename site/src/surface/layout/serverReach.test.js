@@ -96,7 +96,6 @@ describe("deriveReachOverlay — not_determined frontier", () => {
       reason: "gate_does_not_confer_this_scope",
       basis: "conferral",
     });
-    expect(overlay.frontierPairs.has(`${B}>${C}`)).toBe(true);
   });
 
   it("drops a frontier entry whose destination is reached — reached wins", () => {
@@ -110,7 +109,6 @@ describe("deriveReachOverlay — not_determined frontier", () => {
     };
     const overlay = deriveReachOverlay(merged, "ethereum", S);
     expect(overlay.frontier.size).toBe(0);
-    expect(overlay.frontierPairs.size).toBe(0);
   });
 });
 
