@@ -1740,6 +1740,18 @@
   padding: 2px 6px 4px;
 }
 
+/* not_determined count line under the governance-path rows: paths the server
+   walk could not confirm. A count only — never rows mixed into the reached
+   list. Muted violet like the canvas's unconfirmed chip so the two read as
+   the same state. */
+.ps-governs-ndcount {
+  padding: 4px 6px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  color: #8b80ba;
+}
+
 /* Depends-on tab — the contract's outbound call surface. Chips reuse
    .ps-ctrl-fnchip at the same 11px the Governs tab scopes them to, so function
    chips are byte-identical across the two tabs; the read/write/delegatecall

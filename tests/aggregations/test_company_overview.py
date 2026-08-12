@@ -1103,6 +1103,104 @@ def test_prefetch_child_tables_parallel_sequential_parity(db_session):
     assert norm["upgrade_events_last"][contract_a.id]["block"] == 22345
 
 
+def test_reach_block_carries_the_scorer_verdict_three_state(db_session):
+    """The top-level ``reach`` block is the scorer's own computation: a stored
+    authority reaches its anchor at hop 1 and its anchor's onward edges are
+    published as an unwitnessed frontier, while an admin-column holder expands
+    as code control. ``fund_flows`` stays display edges; the claims live here.
+    """
+    from services.scoring.reach import (
+        AUTHORITY_EXERCISE_NOT_WITNESSED,
+        BASIS_CLOSURE_EDGE,
+        BASIS_WALKED_HOP,
+        REACH_MODEL,
+    )
+
+    p = _add_protocol(db_session, f"reach-block-{uuid.uuid4().hex[:8]}")
+
+    authority_addr = _addr("authority")
+    vault_addr = _addr("vault")
+    downstream_addr = _addr("downstream")
+    proxy_addr = _addr("proxy")
+    admin_addr = _addr("padmin")
+
+    by_addr: dict[str, Contract] = {}
+    for addr, name in (
+        (authority_addr, "RolesAuthority"),
+        (vault_addr, "Vault"),
+        (downstream_addr, "Downstream"),
+        (admin_addr, "ProxyAdmin"),
+    ):
+        job = _add_job(db_session, address=addr, protocol_id=p.id, name=name)
+        by_addr[addr] = _add_contract(db_session, address=addr, job=job, protocol_id=p.id, contract_name=name)
+    proxy_job = _add_job(db_session, address=proxy_addr, protocol_id=p.id, name="VaultProxy", is_proxy=True)
+    proxy_contract = _add_contract(
+        db_session, address=proxy_addr, job=proxy_job, protocol_id=p.id, is_proxy=True, contract_name="VaultProxy"
+    )
+    proxy_contract.admin = admin_addr.lower()
+
+    vault_contract = by_addr[vault_addr]
+    downstream_contract = by_addr[downstream_addr]
+    # Stored from=anchor, to=principal (authority direction is the reverse).
+    db_session.add(
+        ControlGraphEdge(
+            contract_id=vault_contract.id,
+            from_node_id=f"address:{vault_addr.lower()}",
+            to_node_id=f"address:{authority_addr.lower()}",
+            relation="controller_value",
+            label="authority",
+        )
+    )
+    db_session.add(
+        ControlGraphEdge(
+            contract_id=downstream_contract.id,
+            from_node_id=f"address:{downstream_addr.lower()}",
+            to_node_id=f"address:{vault_addr.lower()}",
+            relation="controller_value",
+            label="owner",
+        )
+    )
+    db_session.add(
+        ControlGraphEdge(
+            contract_id=vault_contract.id,
+            from_node_id=f"address:{vault_addr.lower()}",
+            to_node_id=f"address:{proxy_addr.lower()}",
+            relation="controller_value",
+            label="manager",
+        )
+    )
+    db_session.commit()
+
+    payload = build_company_overview(db_session, p.name)
+    reach = payload["reach"]
+    assert reach["model"] == REACH_MODEL
+
+    vault_key = _entity_key("ethereum", vault_addr)
+    downstream_key = _entity_key("ethereum", downstream_addr)
+
+    # Stored authority: hop 1 witnessed, no blind expansion past the anchor.
+    authority = reach["entities"][_entity_key("ethereum", authority_addr)]
+    assert authority["reached"] == {vault_key: {"hop": 1, "basis": BASIS_CLOSURE_EDGE}}
+    (entry,) = authority["frontier"]
+    assert (entry["from"], entry["to"], entry["reason"]) == (
+        vault_key,
+        downstream_key,
+        AUTHORITY_EXERCISE_NOT_WITNESSED,
+    )
+    assert entry["basis"]
+
+    # Admin column: code control, the walk continues past the proxy.
+    admin = reach["entities"][_entity_key("ethereum", admin_addr)]
+    proxy_key = _entity_key("ethereum", proxy_addr)
+    assert admin["reached"][proxy_key] == {"hop": 1, "basis": BASIS_CLOSURE_EDGE}
+    assert admin["reached"][vault_key] == {"hop": 2, "basis": BASIS_WALKED_HOP}
+    assert admin["parents"][vault_key] == proxy_key
+
+    # An entity with no closure edge and no proven-reach signal is ABSENT —
+    # the fail-closed state the frontend renders as nothing.
+    assert downstream_key not in reach["entities"]
+
+
 def test_fund_flows_principal_requires_authorization_edge(db_session):
     """A bare ``ControlGraphNode`` row pointing at another in-protocol
     contract must NOT produce a ``type=principal`` fund_flow on its own.

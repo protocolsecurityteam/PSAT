@@ -1007,6 +1007,54 @@ def _account_sort_key(item: tuple[Any, Any]) -> tuple[int, str]:
     return (0, f"{int(account):012d}")
 
 
+def _implementation_alias(
+    rows: Iterable[tuple[str | None, str | None, str | None]],
+) -> tuple[dict[str, str], set[str], dict[str, set[str]]]:
+    """The proxy/impl fold from ``(chain, address, implementation)`` rows.
+
+    Two proxies sharing one implementation. Pinning either of them — by
+    ``min``, by ``contracts.id`` order, by anything — charges a finding that
+    reaches only proxy B's implementation with proxy A's whole balance sheet,
+    publishes A as an entity nothing reached, and spends A's exposure budget.
+    The implementation is not a fold of either proxy, so it folds onto
+    NEITHER: it keeps its own key and the collision is published.
+    """
+    impl_to_proxy: dict[str, str] = {}
+    impl_proxies: dict[str, set[str]] = defaultdict(set)
+    for chain, address, implementation in rows:
+        if not implementation:
+            continue
+        chain_tok = coalesce_chain(chain)
+        impl_key = entity_key(chain_tok, implementation)
+        proxy_key = entity_key(chain_tok, address)
+        impl_proxies[impl_key].add(proxy_key)
+        impl_to_proxy[impl_key] = proxy_key
+    ambiguous = {impl for impl, proxies in impl_proxies.items() if len(proxies) > 1}
+    for impl in ambiguous:
+        impl_to_proxy.pop(impl, None)
+    return _alias_fixed_point(impl_to_proxy), ambiguous, impl_proxies
+
+
+def load_entity_alias(session: Session, protocol_id: int) -> tuple[dict[str, str], set[str]]:
+    """The value plane's proxy/impl fold alone, without loading any sheet.
+
+    Same admission rules as :func:`load_value_plane` (one extraction, shared),
+    for consumers that only need :meth:`ValuePlane.canonical`'s answer.
+    """
+    from db.models import Contract
+
+    rows = (
+        session.query(Contract.chain, Contract.address, Contract.implementation)
+        .filter(Contract.protocol_id == protocol_id)
+        .order_by(Contract.id)
+        .all()
+    )
+    alias, ambiguous, _ = _implementation_alias(
+        (chain, address, implementation) for chain, address, implementation in rows
+    )
+    return alias, ambiguous
+
+
 def load_value_plane(session: Session, protocol_id: int, *, universe: ProtocolUniverse | None = None) -> ValuePlane:
     from db.models import Contract, ContractBalanceFetch, ContractBalanceLatest, RestakingPositionLatest
     from services.monitoring.balance_reads import (
@@ -1026,30 +1074,16 @@ def load_value_plane(session: Session, protocol_id: int, *, universe: ProtocolUn
     # single int space with sentinel values could.
     chain_of: dict[Any, str] = {}
     address_of: dict[Any, str] = {}
-    impl_to_proxy: dict[str, str] = {}
-    impl_proxies: dict[str, set[str]] = defaultdict(set)
     for contract in contracts:
         chain = coalesce_chain(contract.chain)
         chain_of[contract.id] = chain
         address_of[contract.id] = _lower(contract.address)
         plane.contract_entities.add(entity_key(chain, contract.address))
-        if not contract.implementation:
-            continue
-        impl_key = entity_key(chain, contract.implementation)
-        proxy_key = entity_key(chain, contract.address)
-        impl_proxies[impl_key].add(proxy_key)
-        impl_to_proxy[impl_key] = proxy_key
-    # Two proxies sharing one implementation. Pinning either of them — by
-    # ``min``, by ``contracts.id`` order, by anything — charges a finding that
-    # reaches only proxy B's implementation with proxy A's whole balance sheet,
-    # publishes A as an entity nothing reached, and spends A's exposure budget.
-    # The implementation is not a fold of either proxy, so it folds onto
-    # NEITHER: it keeps its own key and the collision is published.
-    ambiguous = {impl for impl, proxies in impl_proxies.items() if len(proxies) > 1}
+    alias, ambiguous, impl_proxies = _implementation_alias(
+        (contract.chain, contract.address, contract.implementation) for contract in contracts
+    )
     shared_impl = [{"implementation": impl, "proxies": sorted(impl_proxies[impl])} for impl in sorted(ambiguous)]
-    for impl in ambiguous:
-        impl_to_proxy.pop(impl, None)
-    plane.alias = _alias_fixed_point(impl_to_proxy)
+    plane.alias = alias
     plane.alias_ambiguous = ambiguous
 
     # The perimeter's proven-codeless principals: entities the control graph

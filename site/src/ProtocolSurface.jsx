@@ -12,15 +12,12 @@ import { findCaller, findFunctionMatches, findFunctionView } from "./surface/lan
 import { buildMachines } from "./surface/layout/buildMachines.js";
 import { buildGovernsIndex } from "./surface/layout/governsIndex.js";
 import {
-  buildAgencyIndex,
-  buildControlAdjacency,
   buildControlEdgeIndex,
-  controlClosure,
-  controlPathEdges,
   edgeClaims,
   flowOnChain,
   shortestControlPath,
 } from "./surface/layout/governancePath.js";
+import { deriveReachOverlay } from "./surface/layout/serverReach.js";
 import { buildEntityIndex } from "./surface/layout/entities.js";
 import { useSurfaceSelection } from "./surface/useSurfaceSelection.js";
 import { coalesceChain, entityKey, principalOnChain } from "./surface/entityKey.js";
@@ -321,7 +318,7 @@ function ProtocolSurface({
   // build machines, so the canvas/selection/entity-index all operate on a
   // single-chain dataset. Principals (chains) and fund_flows (from_chain/
   // to_chain) carry their own chain fields, consumed by principalOnChain and
-  // buildControlAdjacency; visiblePrincipals keeps only principals that
+  // flowOnChain; visiblePrincipals keeps only principals that
   // control a visible (now chain-scoped) machine, and elkLayout keeps only
   // flows whose endpoints are visible contracts.
   const scopedCompanyData = useMemo(() => {
@@ -350,22 +347,6 @@ function ProtocolSurface({
     [allMachines, functionData]
   );
 
-  // Control-relation adjacency over fund_flows — the entity card walks it to
-  // build the "governance path for" list of a machine-only authority (one with
-  // no principal.controls to read). Built once, never per-render inside the card.
-  const controlAdjacency = useMemo(
-    () => buildControlAdjacency(companyData?.fund_flows || [], activeChain),
-    [companyData, activeChain]
-  );
-
-  // Per-(controller, contract) agency witnesses — what licenses the reach walk
-  // to continue THROUGH a node rather than stop at it. Built once beside the
-  // adjacency it gates.
-  const agencyIndex = useMemo(
-    () => buildAgencyIndex(companyData?.principals || [], activeChain),
-    [companyData, activeChain]
-  );
-
   // Same control edges, keyed so a hop can name itself (type + the witnessed
   // relation/role label the payload carries). Feeds the reached-from path block
   // on the entity card; built once here, never per render inside it.
@@ -375,9 +356,9 @@ function ProtocolSurface({
   );
 
   // Fund flows feeding the canvas are chain-scoped like the principals + the
-  // adjacency: SurfaceCanvas draws contract→contract edges keyed by bare
+  // edge index: SurfaceCanvas draws contract→contract edges keyed by bare
   // address, so a same-address twin's flow on another chain must not draw onto
-  // this chain's nodes (inv. 13). Same predicate the adjacency walk uses.
+  // this chain's nodes (inv. 13). Same predicate the edge index uses.
   const scopedFundFlows = useMemo(
     () => (companyData?.fund_flows || []).filter((f) => flowOnChain(f, activeChain)),
     [companyData, activeChain]
@@ -730,29 +711,43 @@ function ProtocolSurface({
     return merged.size ? merged : null;
   }, [auditHighlights, agentHighlights]);
 
-  // Reach overlay: every contract the SELECTED entity reaches over the control
-  // graph, keyed to the hop distance on the shortest route. Transitivity is
-  // licensed per hop by the agency index: where the payload witnesses what the
-  // standpoint can do to a target, only an agency-conferring capability lets
-  // the walk continue through it — a pause-only principal reaches what it
-  // pauses and nothing beyond. Memoized per selection: one BFS over a few
-  // hundred edges, never a walk per render.
-  const reachClosure = useMemo(() => {
-    if (!selection?.address) return null;
-    const closure = controlClosure(selection.address, controlAdjacency, agencyIndex);
-    return closure.distances.size ? closure : null;
-  }, [selection, controlAdjacency, agencyIndex]);
-  const reachDistances = reachClosure ? reachClosure.distances : null;
-
-  // The routes behind those hop counts: the walk-tree edges of the same closure.
-  // The canvas lights the drawn edges matching these pairs, so a "reach · 3 hops"
-  // chip has a visible line back to the selection rather than asking the reader
-  // to take the number on faith. Synthesizes nothing — a pair with no drawn edge
-  // (an intra-group hop inside a collapsed box) simply lights nothing.
-  const reachPathEdges = useMemo(
-    () => (reachClosure ? controlPathEdges(selection?.address, controlAdjacency, reachClosure) : null),
-    [selection, controlAdjacency, reachClosure],
+  // Reach overlay for the SELECTED entity: the SERVER's reach record
+  // (companyData.reach, model scorer_closure_v1) — the scorer's own walk,
+  // shipped as three distinct states. The client renders; it never re-derives.
+  // An absent block or absent entity yields null everything: absence of the
+  // witness is not reach (fail closed).
+  const reachOverlay = useMemo(
+    () => deriveReachOverlay(companyData?.reach, activeChain, selection?.address),
+    [companyData, activeChain, selection],
   );
+  // Walked state: hop distances the canvas chips show.
+  const reachDistances = reachOverlay?.distances.size ? reachOverlay.distances : null;
+  // The routes behind those hop counts, reconstructed from the server's
+  // `parents` tree. The canvas lights the drawn edges matching these pairs, so
+  // a "reach · 3 hops" chip has a visible line back to the selection rather
+  // than asking the reader to take the number on faith. Synthesizes nothing —
+  // a pair with no drawn edge (an intra-group hop inside a collapsed box)
+  // simply lights nothing.
+  const reachPathEdges = reachOverlay?.pathEdges.size ? reachOverlay.pathEdges : null;
+  // not_determined frontier: destination → the scorer's refusal entry. A
+  // distinct third state, never merged into reachDistances — and deliberately
+  // NOT rendered on the canvas (owner ruling 2026-08-12: the graph shows
+  // proven reach only; the unknowns' home is the score page's confidence zone
+  // and the Governs tab's count line below).
+  const reachFrontier = reachOverlay?.frontier.size ? reachOverlay.frontier : null;
+  // The sidebar's unconfirmed count names only destinations the reader can
+  // LOCATE — ones with a node on this page. The server's frontier also names
+  // off-page destinations (the scorer's graph is wider than the payload's
+  // contract list); advertising those as findable rows would send the reader
+  // hunting for nodes the canvas cannot show.
+  const reachFrontierOnPage = useMemo(() => {
+    if (!reachFrontier) return 0;
+    const onPage = new Set(allMachines.map((m) => m.address?.toLowerCase()));
+    for (const p of visiblePrincipals) onPage.add((p.address || "").toLowerCase());
+    let count = 0;
+    for (const addr of reachFrontier.keys()) if (onPage.has(addr)) count += 1;
+    return count;
+  }, [reachFrontier, allMachines, visiblePrincipals]);
 
   // Human name for an address on this graph: the contract's, else the
   // principal's, else the short address. Never a bare "unknown" — the short
@@ -983,8 +978,8 @@ function ProtocolSurface({
               highlightedFunctionKey={radarFunctionKey}
               highlightedCaller={radarCallerAddress}
               governsIndex={governsIndex}
-              controlAdjacency={controlAdjacency}
-              agencyIndex={agencyIndex}
+              reachDistances={reachDistances}
+              reachFrontierCount={reachFrontierOnPage}
               reachPath={reachPath}
               machines={allMachines}
               chain={activeChain}

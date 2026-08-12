@@ -30,7 +30,7 @@ vi.mock("@xyflow/react", async (importOriginal) => {
 const A = "0x" + "a1".repeat(20); // selected
 const B = "0x" + "b2".repeat(20); // hop 1
 const C = "0x" + "c3".repeat(20); // hop 2
-const D = "0x" + "d4".repeat(20); // off the walk
+const D = "0x" + "d4".repeat(20); // frontier destination / off the walk
 const E = "0x" + "e5".repeat(20); // off the walk
 
 const REACH_VIOLET = "#a78bfa";
@@ -48,10 +48,12 @@ const MACHINES = [
   machine(E, "AlsoUnrelated"),
 ];
 
-// A→B→C is the spine; D→E shares nothing with it.
+// A→B→C is the spine; C→D is the refused continuation; D→E shares nothing
+// with the walk.
 const FLOWS = [
   { from: A, to: B, type: "controls" },
   { from: B, to: C, type: "controls" },
+  { from: C, to: D, type: "controls" },
   { from: D, to: E, type: "controls" },
 ];
 
@@ -85,6 +87,10 @@ function edgeFor(from, to) {
       e.source?.toLowerCase() === from.toLowerCase() &&
       e.target?.toLowerCase() === to.toLowerCase(),
   );
+}
+
+function nodeFor(addr) {
+  return (captured.nodes || []).find((n) => n.id?.toLowerCase() === addr.toLowerCase());
 }
 
 async function settle() {
@@ -160,8 +166,8 @@ describe("SurfaceCanvas — reach-route edges", () => {
     const cleared = edgeFor(B, C);
     expect(cleared.style.strokeWidth).toBe(1);
     expect(cleared.style.opacity).toBe(1);
-    // No node wears a reach chip any more either.
-    expect((captured.nodes || []).every((n) => !n.data.reachChip)).toBe(true);
+    // No node wears a reach chip — walked or unconfirmed — any more either.
+    expect((captured.nodes || []).every((n) => !n.data.reachChip && !n.data.reachNdChip)).toBe(true);
   });
 
   it("suppresses the route styling under an audit/agent highlight overlay", async () => {
@@ -174,6 +180,40 @@ describe("SurfaceCanvas — reach-route edges", () => {
     });
     await settle();
     expect(edgeFor(B, C).style.stroke).toBe(RESTING_GREY);
+  });
+});
+
+describe("SurfaceCanvas — not_determined frontier is not drawn (owner ruling 2026-08-12)", () => {
+  beforeEach(() => {
+    captured.edges = null;
+    captured.nodes = null;
+  });
+
+  it("renders a frontier destination exactly like an unreached node — dim, no chip, grey edge", async () => {
+    // The canvas shows proven reach only; the unknowns' home is the score
+    // page's confidence zone and the Governs tab's count line. D (the refused
+    // hop's destination) must be indistinguishable from E (never named).
+    renderCanvas({
+      selectedAddress: A,
+      reachDistances: REACH_DISTANCES,
+      reachPathEdges: PATH_EDGES,
+    });
+    await settle();
+
+    for (const addr of [D, E]) {
+      const node = nodeFor(addr);
+      expect(node.data.reachChip).toBeNull();
+      expect(node.data.reachNdChip).toBeUndefined();
+      expect(node.style.opacity).toBe(0.2);
+    }
+    const walked = nodeFor(C);
+    expect(walked.data.reachChip).toBe("reach · 2 hops");
+    expect(walked.style.opacity).toBeUndefined();
+
+    const refused = edgeFor(C, D);
+    expect(refused.style.stroke).toBe(RESTING_GREY);
+    expect(refused.style.strokeDasharray).toBeUndefined();
+    expect(refused.style.opacity).toBe(0.08);
   });
 });
 

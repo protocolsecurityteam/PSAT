@@ -120,4 +120,12 @@ describe("ContractNode — reach chip", () => {
     expect(renderWith({}).querySelector(".ps-node-chip--reach")).toBeNull();
     expect(renderWith({}).querySelector(".ps-node").className).not.toContain("ps-node-reach");
   });
+
+  it("renders no hedged state — the canvas shows proven reach only (owner ruling 2026-08-12)", () => {
+    // A stale reachNdChip in the data must render nothing: not_determined
+    // lives on the score page and the Governs count line, never as a chip.
+    const c = renderWith({ reachNdChip: "reach unconfirmed" });
+    expect(c.querySelector(".ps-node-chip--reach-nd")).toBeNull();
+    expect(c.querySelector(".ps-node").className).not.toContain("ps-node-reach-nd");
+  });
 });

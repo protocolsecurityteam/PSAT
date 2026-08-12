@@ -66,4 +66,10 @@ describe("SelectionLegend", () => {
     expect(screen.getByText("selected acts on this contract")).toBeInTheDocument();
     expect(screen.getByText("this contract acts on selected")).toBeInTheDocument();
   });
+
+  it("carries no unconfirmed row — the canvas legend names proven states only (owner ruling 2026-08-12)", () => {
+    const { container } = render(<SelectionLegend onClear={() => {}} hasReach />);
+    expect(screen.queryByText("reach to this contract unconfirmed")).toBeNull();
+    expect(container.querySelector(".ps-selection-legend-swatch--reach-nd")).toBeNull();
+  });
 });

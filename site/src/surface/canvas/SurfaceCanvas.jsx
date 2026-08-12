@@ -42,7 +42,7 @@ export function buildControlsDetailMap(rows, chain) {
 // sends value / owns / proxies-to); the chip text spells out which
 // specifically.
 //
-// The third row appears only when the selection HAS transitive reach: a legend
+// The reach row appears only when the selection HAS transitive reach: a legend
 // entry for a chip nothing on the canvas is wearing would name a relationship
 // this selection does not have.
 export function SelectionLegend({ onClear, hasReach = false }) {
@@ -464,7 +464,6 @@ export function SurfaceCanvas({ machines, fundFlows, principals, chain = "ethere
         reachPathTargets.add(to);
       }
     }
-
     setNodes(
       initNodes.map((n) => {
         const nid = n.id?.toLowerCase();

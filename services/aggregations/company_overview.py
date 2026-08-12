@@ -60,6 +60,7 @@ from services.governance.primary_controller import assign_co_controllers, assign
 from services.governance.principals import _build_company_function_entry
 from services.monitoring.delivery_evidence import load_delivery_evidence
 from services.scoring.planes import CONTROL_RELATIONS as SCORER_REACH_RELATIONS
+from services.scoring.reach import REACH_MODEL, load_protocol_reach, merge_reach
 from utils.balance_status import (
     ASSET_SET_STATUS_AT_PAGE_CAP,
     DELIVERY_SHAPE_FAN_OUT_ALL,
@@ -2121,6 +2122,12 @@ def _protocol_reach_edges(
 ) -> list[tuple[str, str, str, str | None, str | None]]:
     """The control edges the scorer's closure walks, protocol-wide.
 
+    DISPLAY EDGES ONLY: each row is a witnessed relation the frontend draws
+    and names, never a transitive claim. The reach *claims* — walked /
+    not_determined / absent, per entity — travel in the top-level ``reach``
+    block (:mod:`services.scoring.reach`), which is the scorer's own verdict
+    per hop; nothing here says any path along these edges is established.
+
     Mirrors ``services.scoring.planes.load_control_closure`` exactly: every
     ``ControlGraphEdge`` row of the protocol whose relation is in
     ``SCORER_REACH_RELATIONS`` (reversed to authority direction), plus the
@@ -2795,12 +2802,29 @@ def _latest_tvl(session: Session, protocol_row: Protocol | None) -> dict[str, An
     }
 
 
+def _company_reach(session: Session, contracts_by_job_id: dict[Any, Contract]) -> dict[str, Any]:
+    """The scorer-computed reach claims (services.scoring.reach) for the payload.
+
+    Computed HERE and not in ``build_governance_view``: the governance view's
+    other caller is the monitoring reconciler (``governance_controllers_for_
+    protocol``), which reads only ``principals`` and must not pay for three
+    scorer planes and the signal population on a 512 MB process. The block is
+    always present, and an entity absent from it holds no reach claim at all.
+    """
+    protocol_ids = {c.protocol_id for c in contracts_by_job_id.values() if c is not None and c.protocol_id is not None}
+    return {
+        "model": REACH_MODEL,
+        "entities": merge_reach(load_protocol_reach(session, pid) for pid in sorted(protocol_ids)),
+    }
+
+
 def assemble_company_payload(
     session: Session,
     name: str,
     protocol_row: Protocol | None,
     jobs: list[Job],
     governance: GovernanceView,
+    reach: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "company": name,
@@ -2811,6 +2835,7 @@ def assemble_company_payload(
         "principals": governance.principals,
         "ownership_hierarchy": governance.hierarchy,
         "fund_flows": governance.fund_flows,
+        "reach": reach,
         # Just the count here — the full inventory (~167 KB for ether.fi) is
         # served by /api/company/{name}/addresses and fetched lazily by
         # AddressesModal when the user opens it.
@@ -2832,8 +2857,10 @@ def build_company_overview(session: Session, name: str) -> dict[str, Any]:
         impl_job_by_entity, contracts_by_job_id = resolve_implementation_contracts(session, jobs, contracts_by_job_id)
     with _time_phase(timings_ms, "build_governance_view"):
         governance = build_governance_view(session, jobs, contracts_by_job_id, impl_job_by_entity)
+    with _time_phase(timings_ms, "compute_reach"):
+        reach = _company_reach(session, contracts_by_job_id)
     with _time_phase(timings_ms, "assemble_payload"):
-        payload = assemble_company_payload(session, name, protocol_row, jobs, governance)
+        payload = assemble_company_payload(session, name, protocol_row, jobs, governance, reach)
 
     total_ms = int((time.monotonic() - start) * 1000)
     logger.info(

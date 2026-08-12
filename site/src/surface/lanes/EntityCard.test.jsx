@@ -102,7 +102,7 @@ describe("EntityCard Governs tab", () => {
 
   it("gives governance-path rows no expand button (reachability only, no function data)", () => {
     const onPreview = vi.fn();
-    const principal = { address: TIMELOCK, type: "timelock", details: { delay: 864000 }, controls: [POOL] };
+    const principal = { address: TIMELOCK, type: "timelock", details: { delay: 864000 } };
     const machines = [{ address: POOL, name: "LiquidityPool" }];
     const { getByText, container } = render(
       <EntityCard
@@ -112,6 +112,7 @@ describe("EntityCard Governs tab", () => {
         governsIndex={new Map()}
         principal={principal}
         machines={machines}
+        reachDistances={new Map([[POOL, 1]])}
       />,
     );
     fireEvent.click(getByText("Governs").closest("button"));
@@ -121,6 +122,46 @@ describe("EntityCard Governs tab", () => {
     expect(container.querySelector(".ps-governs-expand")).toBeNull();
     fireEvent.click(getByText("LiquidityPool").closest(".ps-governs-head"));
     expect(onPreview).toHaveBeenCalledWith(POOL);
+  });
+
+  it("shows no governance-path rows without a server reach record — fail closed", () => {
+    // principal.controls is NOT a path source any more: the rows come from the
+    // server's reached set alone, and its absence renders nothing.
+    const principal = { address: TIMELOCK, type: "timelock", details: { delay: 864000 }, controls: [POOL] };
+    const machines = [{ address: POOL, name: "LiquidityPool" }];
+    const { getByText, queryByText } = render(
+      <EntityCard
+        machine={machine()}
+        onSelectGuard={vi.fn()}
+        onPreview={vi.fn()}
+        governsIndex={new Map()}
+        principal={principal}
+        machines={machines}
+      />,
+    );
+    fireEvent.click(getByText("Governs").closest("button"));
+    expect(queryByText(/Appears In Governance Path For/)).toBeNull();
+  });
+
+  it("renders the frontier as a count line only — never rows in the reached list", () => {
+    const machines = [{ address: POOL, name: "LiquidityPool" }];
+    const { getByText, container } = render(
+      <EntityCard
+        machine={machine()}
+        onSelectGuard={vi.fn()}
+        onPreview={vi.fn()}
+        governsIndex={new Map()}
+        machines={machines}
+        reachDistances={new Map([[POOL, 1]])}
+        reachFrontierCount={2}
+      />,
+    );
+    fireEvent.click(getByText("Governs").closest("button"));
+    expect(getByText("Appears In Governance Path For (1)")).toBeInTheDocument();
+    const ndLine = container.querySelector(".ps-governs-ndcount");
+    expect(ndLine).toHaveTextContent("reach unconfirmed · 2 destinations");
+    // The reached list itself stays at one row.
+    expect(container.querySelectorAll(".ps-governs-row")).toHaveLength(1);
   });
 });
 
