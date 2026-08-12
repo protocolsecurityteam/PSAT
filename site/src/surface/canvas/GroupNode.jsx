@@ -88,7 +88,7 @@ export function GroupNode({ data }) {
   return (
     <div
       className={`ps-group-node ps-group-${p.type}${data.focused ? " ps-group-focused" : ""}${data.selected ? " ps-group-selected" : ""}${
-        data.reachChip ? " ps-group-reach" : ""
+        data.reachChip ? " ps-group-reach" : data.reachNdChip ? " ps-group-reach-nd" : ""
       }`}
       style={{
         "--principal-color": color,
@@ -103,6 +103,16 @@ export function GroupNode({ data }) {
           title="reached from the selected entity through the control graph"
         >
           {data.reachChip}
+        </div>
+      )}
+      {/* not_determined frontier — same hedged chip the contract cards wear
+          (see ContractNode); title carries the refusal reason token. */}
+      {!data.reachChip && data.reachNdChip && (
+        <div
+          className={`ps-node-chip ps-node-chip--reach-nd${chip?.out ? " ps-node-chip--stacked" : ""}`}
+          title={data.reachNdChip}
+        >
+          reach unconfirmed
         </div>
       )}
       {chip?.out && (

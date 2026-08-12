@@ -1,5 +1,16 @@
-// Control-graph reach derivation: the entity card's Governs tab and the
-// canvas reach overlay. Pure — no React.
+// Control-relation edge indexing and the witnessed-agency walk. Pure — no
+// React.
+//
+// Reach CLAIMS on the surface (chips / routes / Governs-tab path rows) come
+// from the server's reach block (`companyData.reach`, see serverReach.js) —
+// nothing here publishes reach any more. What remains has two consumers:
+//   - buildControlEdgeIndex + shortestControlPath: the ReachPath sidebar
+//     block, illustrating a host → reach-entity pair the score document
+//     already vouches for;
+//   - the agency-gated closure walk (buildControlAdjacency / buildAgencyIndex
+//     / controlClosure / agencyRoute): the indirect-caller derivation
+//     (controlGraph.js), which reports governance STANDING above a function's
+//     direct callers.
 //
 // The walk follows the payload's control-relation fund_flows edges, but
 // transitivity is not free: standing on a node confers that node's own powers
@@ -9,9 +20,7 @@
 // agency-conferring — pausing a contract reaches the contract, it never
 // confers the contract's authority over anything else. Where no such witness
 // exists (a plain contract standpoint, a machine-only authority like
-// EtherFiTimelock), the walk stays blind, which is exactly how the backend
-// closure treats contract nodes (services/scoring/planes.py
-// load_control_closure + fold.py's seed-gated expansion).
+// EtherFiTimelock), the walk stays blind.
 
 import { coalesceChain } from "../entityKey.js";
 
@@ -144,23 +153,23 @@ function walkContinues(agencyIndex, from, to) {
   return agency ? agency.has(to) : true;
 }
 
-// The reach closure from `address` over the control adjacency.
+// The agency-gated closure from `address` over the control adjacency — the
+// standing behind the indirect-caller derivation (controlGraph.js).
 //
 // Returns { distances, expandHops, expandParent }; the first two are
 // Map<addrLc, hop> with the start excluded from distances:
 //  - distances:  every reached address at the hop count of the SHORTEST route
-//    to it — what the reach chips show;
+//    to it;
 //  - expandHops: the hop at which the walk could first CONTINUE from an
 //    address (start at 0). An address held only by a non-agency power is
 //    reached but absent here — it is where a claim ends, not a thoroughfare.
-//    It can still be re-entered later through an agency route (its chip keeps
-//    the shorter hop; expansion resumes at the longer one) — dropping that
+//    It can still be re-entered later through an agency route (its shortest
+//    hop stands; expansion resumes at the longer one) — dropping that
 //    re-entry would hide routes the control graph carries.
 //  - expandParent: Map<addrLc, addrLc> — the node the walk stood on when it
 //    licensed continuing through the key. Following it back to the start
 //    reconstructs one agency-licensed route (every hop on it passed
-//    walkContinues), which is a stronger claim than the shortest-route edges
-//    in controlPathEdges: those justify a hop COUNT, this justifies standing.
+//    walkContinues): it justifies standing, not merely a hop count.
 export function controlClosure(address, adjacency, agencyIndex = null) {
   const start = String(address || "").toLowerCase();
   const distances = new Map();
@@ -204,48 +213,6 @@ export function agencyRoute(target, closure, edgeIndex) {
   }
   hops.reverse();
   return hops;
-}
-
-// Map<addrLc, hop distance ≥ 1> — every address reachable from `address`, at
-// its shortest witnessed hop count. The start is excluded: it is where the
-// walk begins, not something it reaches.
-export function controlReach(address, adjacency, agencyIndex = null) {
-  return controlClosure(address, adjacency, agencyIndex).distances;
-}
-
-// The walk-tree edges of a reach closure: every control edge `u → v` the walk
-// actually traversed to give v its shortest hop count — u was a point the walk
-// could continue from, and stepping off it reached v at its charged distance.
-// Returned as a Set of "from>to" keys (both lowercased).
-//
-// Highlighting this set draws the routes the hop counts on the reach chips
-// were derived from, and nothing else. A diamond (two continuing parents both
-// reaching the same child at its shortest hop) contributes both edges: both
-// are genuine shortest routes, and dropping either would claim a route the
-// walk never ruled out. Edges leaving a terminal node (one the walk was not
-// licensed to continue from), edges running backwards, and same-tier edges are
-// all excluded — none of them carried a claim, so drawing them would overstate
-// what the walk proved.
-//
-// `closure` is a controlClosure() result over the same adjacency. Two kinds of
-// edge light: shortest-arrival edges (they justify the chip's hop count) and
-// expansion-tree edges (they justify the walk CONTINUING — the agency route
-// back into a node first reached by a terminal power). Without the second
-// kind, a node beyond a re-entered one would wear a hop chip with no complete
-// lit route back to the selection. On a walk with no re-entry the two sets
-// coincide, so nothing extra lights in the common case.
-export function controlPathEdges(address, adjacency, closure) {
-  const start = String(address || "").toLowerCase();
-  const out = new Set();
-  if (!start || !adjacency || !closure?.distances || !closure?.expandHops) return out;
-  for (const [from, hop] of closure.expandHops) {
-    for (const to of adjacency.get(from) || []) {
-      if (closure.distances.get(to) === hop + 1 || closure.expandHops.get(to) === hop + 1) {
-        out.add(`${from}>${to}`);
-      }
-    }
-  }
-  return out;
 }
 
 // Shortest control-graph route from any of `fromAddresses` to `toAddress`.
@@ -304,14 +271,6 @@ export function shortestControlPath(fromAddresses, toAddress, edgeIndex) {
     }
   }
   return none;
-}
-
-// The addresses reachable from `address` over the control adjacency, excluding
-// the start itself — same witnessed-agency walk the reach overlay draws, so the
-// Governs tab and the canvas never disagree about what an entity reaches.
-// Order is discovery order; the card dedups + sorts downstream.
-export function governancePathTargets(address, adjacency, agencyIndex = null) {
-  return [...controlClosure(address, adjacency, agencyIndex).distances.keys()];
 }
 
 // Dedup a governed-contract row list by lowercased address, then disambiguate

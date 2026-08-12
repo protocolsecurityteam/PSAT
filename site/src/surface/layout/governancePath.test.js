@@ -5,11 +5,8 @@ import {
   buildControlAdjacency,
   buildControlEdgeIndex,
   controlClosure,
-  controlPathEdges,
-  controlReach,
   dedupeAndTagRows,
   edgeClaims,
-  governancePathTargets,
   shortestControlPath,
 } from "./governancePath.js";
 
@@ -41,31 +38,6 @@ describe("buildControlAdjacency", () => {
     ]);
     expect(adj.has(TIMELOCK) && adj.get(TIMELOCK).has(TIMELOCK)).toBe(false);
     expect(adj.get(TIMELOCK).has(POOL)).toBe(true);
-  });
-});
-
-describe("governancePathTargets", () => {
-  it("walks the control graph transitively, excluding the start", () => {
-    const adj = buildControlAdjacency([
-      { from: TIMELOCK, to: POOL, type: "principal" },
-      { from: POOL, to: VAULT, type: "controls" },
-      { from: VAULT, to: NFT, type: "controls" },
-    ]);
-    expect(governancePathTargets(TIMELOCK, adj).sort()).toEqual([POOL, VAULT, NFT].sort());
-    expect(governancePathTargets(TIMELOCK, adj)).not.toContain(TIMELOCK);
-  });
-
-  it("terminates on a cycle", () => {
-    const adj = buildControlAdjacency([
-      { from: TIMELOCK, to: POOL, type: "controls" },
-      { from: POOL, to: TIMELOCK, type: "controls" },
-    ]);
-    expect(governancePathTargets(TIMELOCK, adj)).toEqual([POOL]);
-  });
-
-  it("returns empty for an address with no outbound control edges", () => {
-    const adj = buildControlAdjacency([{ from: POOL, to: VAULT, type: "controls" }]);
-    expect(governancePathTargets(TIMELOCK, adj)).toEqual([]);
   });
 });
 
@@ -118,99 +90,26 @@ const REACH_FLOWS = [
   { from: POOL, to: TELLER, label: "swap", usd: 5 }, // typeless value row, never a control hop
 ];
 
-describe("controlReach", () => {
+describe("controlClosure — shortest distances", () => {
   it("records the hop distance of the SHORTEST route to each reached node", () => {
-    const reach = controlReach(POOL, buildControlAdjacency(REACH_FLOWS));
-    expect(reach.get(SOLVER)).toBe(1);
-    expect(reach.get(TELLER)).toBe(2);
-    expect(reach.get(VAULT)).toBe(3);
-    expect(reach.get(FAR)).toBe(4);
-    expect(reach.get(NFT)).toBe(5);
+    const { distances } = controlClosure(POOL, buildControlAdjacency(REACH_FLOWS));
+    expect(distances.get(SOLVER)).toBe(1);
+    // TELLER is reached at hop 2 through the control chain, never at hop 1
+    // through the typeless value row.
+    expect(distances.get(TELLER)).toBe(2);
+    expect(distances.get(VAULT)).toBe(3);
+    expect(distances.get(FAR)).toBe(4);
+    expect(distances.get(NFT)).toBe(5);
   });
 
   it("excludes the start even when the graph cycles back to it", () => {
-    const reach = controlReach(POOL, buildControlAdjacency(REACH_FLOWS));
-    expect(reach.has(POOL)).toBe(false);
-  });
-
-  it("excludes what only a value flow would have reached", () => {
-    // TELLER is reached at hop 2 through the control chain, never at hop 1
-    // through the typeless value row.
-    expect(controlReach(POOL, buildControlAdjacency(REACH_FLOWS)).get(TELLER)).toBe(2);
+    const { distances } = controlClosure(POOL, buildControlAdjacency(REACH_FLOWS));
+    expect(distances.has(POOL)).toBe(false);
   });
 
   it("is empty for an address with no outbound control edges", () => {
-    expect(controlReach(NFT, buildControlAdjacency(REACH_FLOWS)).size).toBe(0);
-    expect(controlReach("", buildControlAdjacency(REACH_FLOWS)).size).toBe(0);
-  });
-});
-
-describe("controlPathEdges", () => {
-  const adj = buildControlAdjacency(REACH_FLOWS);
-  const pathEdges = controlPathEdges(POOL, adj, controlClosure(POOL, adj));
-
-  it("carries every hop of the spine, in direction", () => {
-    expect(pathEdges.has(`${POOL}>${SOLVER}`)).toBe(true);
-    expect(pathEdges.has(`${SOLVER}>${TELLER}`)).toBe(true);
-    expect(pathEdges.has(`${TELLER}>${VAULT}`)).toBe(true);
-    expect(pathEdges.has(`${VAULT}>${FAR}`)).toBe(true);
-    expect(pathEdges.has(`${FAR}>${NFT}`)).toBe(true);
-  });
-
-  it("drops the cycle back to the start and the off-walk branch", () => {
-    // SOLVER→POOL runs backwards (hop 1 → hop 0) — no route it shortens.
-    expect(pathEdges.has(`${SOLVER}>${POOL}`)).toBe(false);
-    // TIMELOCK is outside the closure entirely.
-    expect(pathEdges.has(`${TIMELOCK}>${NFT}`)).toBe(false);
-    // The value flow was never a control hop.
-    expect(pathEdges.has(`${POOL}>${TELLER}`)).toBe(false);
-    expect(pathEdges.size).toBe(5);
-  });
-
-  it("keeps BOTH parents' edges into a shared child (diamond)", () => {
-    // start → A, start → B, A → C, B → C. C is hop 2 either way, so both
-    // arriving edges are shortest routes: dropping one would claim a route the
-    // walk never ruled out.
-    const dAdj = buildControlAdjacency([
-      { from: POOL, to: SOLVER, type: "controls" },
-      { from: POOL, to: TELLER, type: "controls" },
-      { from: SOLVER, to: VAULT, type: "controls" },
-      { from: TELLER, to: VAULT, type: "controls" },
-    ]);
-    const edges = controlPathEdges(POOL, dAdj, controlClosure(POOL, dAdj));
-    expect([...edges].sort()).toEqual(
-      [
-        `${POOL}>${SOLVER}`,
-        `${POOL}>${TELLER}`,
-        `${SOLVER}>${VAULT}`,
-        `${TELLER}>${VAULT}`,
-      ].sort(),
-    );
-  });
-
-  it("drops a same-tier edge — it is a detour, not a route", () => {
-    const sAdj = buildControlAdjacency([
-      { from: POOL, to: SOLVER, type: "controls" },
-      { from: POOL, to: TELLER, type: "controls" },
-      { from: SOLVER, to: TELLER, type: "controls" }, // hop 1 → hop 1
-    ]);
-    const edges = controlPathEdges(POOL, sAdj, controlClosure(POOL, sAdj));
-    expect(edges.has(`${SOLVER}>${TELLER}`)).toBe(false);
-    expect(edges.size).toBe(2);
-  });
-
-  it("is empty without a start, an adjacency, or a closure", () => {
-    expect(controlPathEdges("", adj, controlClosure(POOL, adj)).size).toBe(0);
-    expect(controlPathEdges(POOL, null, controlClosure(POOL, adj)).size).toBe(0);
-    expect(controlPathEdges(POOL, adj, null).size).toBe(0);
-    // A start with no outbound control edges reaches nothing to route to.
-    expect(controlPathEdges(NFT, adj, controlClosure(NFT, adj)).size).toBe(0);
-  });
-
-  it("lowercases both endpoints so canvas addresses match", () => {
-    const uAdj = buildControlAdjacency([{ from: POOL.toUpperCase(), to: SOLVER.toUpperCase(), type: "controls" }]);
-    const edges = controlPathEdges(POOL.toUpperCase(), uAdj, controlClosure(POOL, uAdj));
-    expect([...edges]).toEqual([`${POOL}>${SOLVER}`]);
+    expect(controlClosure(NFT, buildControlAdjacency(REACH_FLOWS)).distances.size).toBe(0);
+    expect(controlClosure("", buildControlAdjacency(REACH_FLOWS)).distances.size).toBe(0);
   });
 });
 
@@ -302,17 +201,11 @@ describe("controlClosure — agency gating", () => {
     expect(distances.get(NFT)).toBe(3);
   });
 
-  it("lights no route out of a terminal node", () => {
-    const closure = controlClosure(EOA, adj, agency);
-    const edges = controlPathEdges(EOA, adj, closure);
-    expect([...edges]).toEqual([`${EOA}>${POOL}`]);
-  });
-
-  it("re-enters a terminal direct target through an agency route, keeping the shorter chip", () => {
-    // S pauses B directly, but also owns A which controls B: B's chip stays
-    // hop 1, and the walk resumes through B at hop 2 — the ownership route is
-    // one the control graph carries, and hiding what lies beyond it would
-    // under-claim.
+  it("re-enters a terminal direct target through an agency route, keeping the shorter distance", () => {
+    // S pauses B directly, but also owns A which controls B: B's shortest
+    // distance stays hop 1, and the walk resumes through B at hop 2 — the
+    // ownership route is one the control graph carries, and hiding what lies
+    // beyond it would under-claim.
     const dAdj = buildControlAdjacency([
       { from: EOA, to: VAULT, type: "principal" }, // pause-only, terminal
       { from: EOA, to: POOL, type: "principal" }, // ownership, continues
@@ -332,15 +225,6 @@ describe("controlClosure — agency gating", () => {
     expect(distances.get(VAULT)).toBe(1); // shortest reach: the direct pause
     expect(expandHops.get(VAULT)).toBe(2); // expansion resumes via ownership of POOL
     expect(distances.get(NFT)).toBe(3);
-
-    // Every hop chip has a COMPLETE lit route: the licensing edge into the
-    // re-entered node (POOL→VAULT, an expansion edge that shortens no
-    // distance) lights alongside the shortest-arrival edges, so NFT's chip
-    // traces EOA→POOL→VAULT→NFT without a gap.
-    const edges = controlPathEdges(EOA, dAdj, controlClosure(EOA, dAdj, dAgency));
-    expect(edges.has(`${EOA}>${POOL}`)).toBe(true);
-    expect(edges.has(`${POOL}>${VAULT}`)).toBe(true);
-    expect(edges.has(`${VAULT}>${NFT}`)).toBe(true);
   });
 });
 

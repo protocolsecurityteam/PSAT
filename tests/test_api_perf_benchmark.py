@@ -583,7 +583,10 @@ def test_benchmark_high_impact_endpoints(seeded, api_client, db_session, monkeyp
 
 # Post-perf actuals + ~3 slack. Tighten when you intentionally lower a count.
 QUERY_BUDGETS = {
-    "company_overview": 25,
+    # 25 -> 32 when the payload gained the scorer-computed ``reach`` block:
+    # closure/condition/conferral plane loads + the signal population, a fixed
+    # per-protocol count (no N+1).
+    "company_overview": 35,
     "analyses": 5,
     "analysis_detail": 12,
     "list_jobs": 3,

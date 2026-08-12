@@ -1,7 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
-import { SelectionLegend, buildControlsDetailMap, reachChipText } from "./SurfaceCanvas.jsx";
+import { SelectionLegend, buildControlsDetailMap, reachChipText, reachNdTitle } from "./SurfaceCanvas.jsx";
 import { entityKey } from "../entityKey.js";
 
 const ADDR = "0x" + "ab".repeat(20);
@@ -51,6 +51,24 @@ describe("reachChipText — hop distance → chip label", () => {
   });
 });
 
+describe("reachNdTitle — refusal reason token → chip title", () => {
+  it("projects the scorer's tokens mechanically, never composing prose", () => {
+    expect(reachNdTitle("gate_scope_not_determined")).toBe("reach unconfirmed · gate scope not determined");
+    expect(reachNdTitle("gate_does_not_confer_this_scope")).toBe("reach unconfirmed · gate does not confer this scope");
+    expect(reachNdTitle("caller_condition_not_satisfiable")).toBe("reach unconfirmed · caller condition not satisfiable");
+    expect(reachNdTitle("authority_exercise_not_witnessed")).toBe("reach unconfirmed · authority exercise not witnessed");
+  });
+
+  it("carries an unknown token verbatim rather than inventing a name for it", () => {
+    expect(reachNdTitle("some_future_token")).toBe("reach unconfirmed · some future token");
+  });
+
+  it("keeps the bare claim for an entry with no reason", () => {
+    expect(reachNdTitle(null)).toBe("reach unconfirmed");
+    expect(reachNdTitle("")).toBe("reach unconfirmed");
+  });
+});
+
 describe("SelectionLegend", () => {
   it("names the reach chip when the selection has transitive reach", () => {
     const { container } = render(<SelectionLegend onClear={() => {}} hasReach />);
@@ -65,5 +83,17 @@ describe("SelectionLegend", () => {
     // The two direction rows are untouched.
     expect(screen.getByText("selected acts on this contract")).toBeInTheDocument();
     expect(screen.getByText("this contract acts on selected")).toBeInTheDocument();
+  });
+
+  it("names the unconfirmed chip only when a frontier entry is on the canvas", () => {
+    const { container } = render(<SelectionLegend onClear={() => {}} hasReachNd />);
+    expect(screen.getByText("reach to this contract unconfirmed")).toBeInTheDocument();
+    expect(container.querySelector(".ps-selection-legend-swatch--reach-nd")).not.toBeNull();
+  });
+
+  it("omits the unconfirmed row when no frontier destination owns a node", () => {
+    const { container } = render(<SelectionLegend onClear={() => {}} hasReach />);
+    expect(screen.queryByText("reach to this contract unconfirmed")).toBeNull();
+    expect(container.querySelector(".ps-selection-legend-swatch--reach-nd")).toBeNull();
   });
 });

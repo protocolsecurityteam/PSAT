@@ -71,13 +71,17 @@ function GovernsRow({ row, onPreview, onNavigate }) {
 //   1. Can Call — one row per governed contract (client-inverted from every
 //      contract's per-function authority, so it resolves for machine-only
 //      authorities too). Rows carry the concrete function list, expandable.
-//   2. Appears in governance path for — the (transitive) reachability set.
-//      Reachability-only, so rows carry no function list (no expand button).
+//   2. Appears in governance path for — the server-walked reached set (the
+//      same record the canvas reach chips render). Reachability-only, so rows
+//      carry no function list (no expand button). `frontierCount` — on-page
+//      destinations the server walk could NOT confirm a path to — renders as
+//      a count line only, never as rows: not_determined stays a distinct
+//      third state from reached.
 //
 // Both lists are pre-deduped and proxy/impl-tagged by the card. Every row body
 // previews the contract on the canvas; its arrow commits to the contract's card.
-export function GovernsTab({ canCallRows, pathRows, onPreview, onNavigate }) {
-  if (!canCallRows.length && !pathRows.length) {
+export function GovernsTab({ canCallRows, pathRows, frontierCount = 0, onPreview, onNavigate }) {
+  if (!canCallRows.length && !pathRows.length && !frontierCount) {
     return <div className="ps-lane-empty">Governs nothing</div>;
   }
 
@@ -99,7 +103,7 @@ export function GovernsTab({ canCallRows, pathRows, onPreview, onNavigate }) {
       {pathRows.length > 0 && (
         <section className="ps-principal-section">
           <div className="ps-principal-section-hdr">
-            <span title="Computed from the recursive control graph — does not imply direct call rights on these contracts' privileged functions">
+            <span title="The server-computed control-graph walk — does not imply direct call rights on these contracts' privileged functions">
               Appears In Governance Path For ({pathRows.length})
             </span>
           </div>
@@ -107,6 +111,12 @@ export function GovernsTab({ canCallRows, pathRows, onPreview, onNavigate }) {
             <GovernsRow key={row.address} row={row} onPreview={onPreview} onNavigate={onNavigate} />
           ))}
         </section>
+      )}
+
+      {frontierCount > 0 && (
+        <div className="ps-governs-ndcount">
+          reach unconfirmed · {frontierCount} destination{frontierCount === 1 ? "" : "s"}
+        </div>
       )}
     </div>
   );

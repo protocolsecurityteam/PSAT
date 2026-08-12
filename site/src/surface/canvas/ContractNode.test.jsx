@@ -120,4 +120,36 @@ describe("ContractNode — reach chip", () => {
     expect(renderWith({}).querySelector(".ps-node-chip--reach")).toBeNull();
     expect(renderWith({}).querySelector(".ps-node").className).not.toContain("ps-node-reach");
   });
+
+  const ND_TITLE = "reach unconfirmed · gate does not confer this scope";
+
+  it("renders the hedged unconfirmed chip with the reason-token title", () => {
+    const c = renderWith({ reachNdChip: ND_TITLE });
+    const chip = c.querySelector(".ps-node-chip--reach-nd");
+    expect(chip.textContent).toBe("reach unconfirmed");
+    expect(chip.getAttribute("title")).toBe(ND_TITLE);
+    // The card wears the frontier locator, never the walked one.
+    expect(c.querySelector(".ps-node").className).toContain("ps-node-reach-nd");
+    expect(c.querySelector(".ps-node-chip--reach")).toBeNull();
+  });
+
+  it("lets the walked chip win when a payload carries both states", () => {
+    // Reached wins upstream; defensively the card never hedges a walked claim.
+    const c = renderWith({ reachChip: "reach · 2 hops", reachNdChip: ND_TITLE });
+    expect(c.querySelector(".ps-node-chip--reach")).toBeTruthy();
+    expect(c.querySelector(".ps-node-chip--reach-nd")).toBeNull();
+    expect(c.querySelector(".ps-node").className).not.toContain("ps-node-reach-nd");
+  });
+
+  it("stacks the unconfirmed chip clear of an out chip in the same slot", () => {
+    const stacked = renderWith({ reachNdChip: ND_TITLE, selectionChip: { out: "pause" } });
+    expect(stacked.querySelector(".ps-node-chip--reach-nd").className).toContain("ps-node-chip--stacked");
+    const alone = renderWith({ reachNdChip: ND_TITLE });
+    expect(alone.querySelector(".ps-node-chip--reach-nd").className).not.toContain("ps-node-chip--stacked");
+  });
+
+  it("renders no unconfirmed chip for a node outside the frontier", () => {
+    expect(renderWith({}).querySelector(".ps-node-chip--reach-nd")).toBeNull();
+    expect(renderWith({}).querySelector(".ps-node").className).not.toContain("ps-node-reach-nd");
+  });
 });

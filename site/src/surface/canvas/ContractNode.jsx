@@ -24,7 +24,7 @@ export function ContractNode({ data }) {
   return (
     <div
       className={`ps-node${data.selected ? " ps-node-selected" : ""}${data.focused ? " ps-node-focused" : ""}${
-        data.reachChip ? " ps-node-reach" : ""
+        data.reachChip ? " ps-node-reach" : data.reachNdChip ? " ps-node-reach-nd" : ""
       }`}
       style={{ borderLeftColor: accent }}
       onClick={data.onSelect}
@@ -38,6 +38,18 @@ export function ContractNode({ data }) {
           title="reached from the selected entity through the control graph"
         >
           {data.reachChip}
+        </div>
+      )}
+      {/* not_determined frontier (dashed violet): the server walk was refused
+          a hop short of this contract, so its reach is unconfirmed — a hedged
+          claim, never the walked one. The title carries the refusal reason
+          token. A reached node never wears this (reached wins upstream). */}
+      {!data.reachChip && data.reachNdChip && (
+        <div
+          className={`ps-node-chip ps-node-chip--reach-nd${reachStacked ? " ps-node-chip--stacked" : ""}`}
+          title={data.reachNdChip}
+        >
+          reach unconfirmed
         </div>
       )}
       {/* Browse-fallback note (gold, above the card): who the browsed

@@ -42,10 +42,10 @@ export function buildControlsDetailMap(rows, chain) {
 // sends value / owns / proxies-to); the chip text spells out which
 // specifically.
 //
-// The third row appears only when the selection HAS transitive reach: a legend
-// entry for a chip nothing on the canvas is wearing would name a relationship
-// this selection does not have.
-export function SelectionLegend({ onClear, hasReach = false }) {
+// The reach rows appear only when the state they explain is on the canvas: a
+// legend entry for a chip nothing on the canvas is wearing would name a
+// relationship this selection does not have.
+export function SelectionLegend({ onClear, hasReach = false, hasReachNd = false }) {
   return (
     <div className="ps-selection-legend">
       <div className="ps-selection-legend-row">
@@ -60,6 +60,12 @@ export function SelectionLegend({ onClear, hasReach = false }) {
         <div className="ps-selection-legend-row">
           <span className="ps-selection-legend-swatch ps-selection-legend-swatch--reach" />
           <span>selected reaches this contract</span>
+        </div>
+      )}
+      {hasReachNd && (
+        <div className="ps-selection-legend-row">
+          <span className="ps-selection-legend-swatch ps-selection-legend-swatch--reach-nd" />
+          <span>reach to this contract unconfirmed</span>
         </div>
       )}
       {/* Explicit deselect — the pane-click clear exists but is invisible;
@@ -82,9 +88,22 @@ export function reachChipText(hop) {
   return `reach · ${hop} hops`;
 }
 
+// Title of the hedged `reach unconfirmed` chip: the scorer's refusal reason
+// token, projected mechanically (underscores → spaces) — token-templated,
+// never composed prose. An entry without a reason keeps the bare chip claim.
+export function reachNdTitle(reason) {
+  const token = String(reason || "").trim();
+  return token ? `reach unconfirmed · ${token.replaceAll("_", " ")}` : "reach unconfirmed";
+}
+
 // Violet of the reach chips (--ps-node-chip--reach border / legend swatch), so a
 // highlighted route and the chips it ends at read as one overlay.
 const REACH_EDGE_STROKE = "#a78bfa";
+
+// Muted violet of the not_determined frontier edges — same family as the
+// walked route so the two read as one overlay, but dashed and dimmer: a
+// refused hop is a hedge, never the walked claim.
+const REACH_ND_EDGE_STROKE = "#8b80ba";
 
 // Whether a drawn edge carries one of the reach-route pairs in `pathEdges`
 // (a Set of "from>to", lowercased). Cross-group edges are aggregated into
@@ -110,9 +129,14 @@ export function edgeOnReachPath(edge, pathEdges) {
 // collision-free by construction: two chains never share this dataset. The
 // entity-identity lookups (principal resolution, per-entity detail maps) key by
 // (chain, address) via entityKey so they carry chain explicitly regardless.
-export function SurfaceCanvas({ machines, fundFlows, principals, chain = "ethereum", selectedAddress, focusAddress, focusedAddress, highlightedAddresses, reachDistances, reachPathEdges, onSelectMachine, onSelectPrincipal }) {
+export function SurfaceCanvas({ machines, fundFlows, principals, chain = "ethereum", selectedAddress, focusAddress, focusedAddress, highlightedAddresses, reachDistances, reachPathEdges, reachFrontier, reachFrontierPairs, onSelectMachine, onSelectPrincipal }) {
   const [initNodes, setInitNodes] = useState([]);
   const [initEdges, setInitEdges] = useState([]);
+  // Whether any not_determined frontier destination owns a node on THIS canvas
+  // — gates the legend's unconfirmed row, which must not name a chip nothing
+  // is wearing. Written by the selection effect below (it is where node
+  // presence is known).
+  const [ndOnCanvas, setNdOnCanvas] = useState(false);
 
   // Measured header-band height per group (keyed by group id). It feeds
   // elkLayout so each group reserves exactly the space its colored bar +
@@ -432,21 +456,45 @@ export function SurfaceCanvas({ machines, fundFlows, principals, chain = "ethere
     // Suppressed entirely under an audit/agent highlight overlay — that set is
     // the answer to a different question and already owns the dim.
     const reachActive = !hiActive && sel && reachDistances && reachDistances.size > 0;
+    // The not_determined frontier is the overlay's third state: a destination
+    // the scorer refused a hop short of wears the hedged `reach unconfirmed`
+    // chip (title = the refusal reason token) at a mid dim — legible, but
+    // never walked-bright — and no other treatment of its own.
+    const reachNdActive = !hiActive && sel && reachFrontier && reachFrontier.size > 0;
     const reachChips = new Map();
+    const reachNdChips = new Map();
     const reachBright = new Set();
-    if (reachActive) {
+    const reachNdMuted = new Set();
+    if (reachActive || reachNdActive) {
       const parentOf = new Map(initNodes.map((n) => [n.id?.toLowerCase(), n.parentId?.toLowerCase() || null]));
-      for (const [addr, hop] of reachDistances) {
-        if (!parentOf.has(addr)) continue;
-        reachBright.add(addr);
-        const text = reachChipText(hop);
-        if (text) reachChips.set(addr, text);
+      if (reachActive) {
+        for (const [addr, hop] of reachDistances) {
+          if (!parentOf.has(addr)) continue;
+          reachBright.add(addr);
+          const text = reachChipText(hop);
+          if (text) reachChips.set(addr, text);
+        }
+        for (const addr of [...reachBright]) {
+          const parent = parentOf.get(addr);
+          if (parent) reachBright.add(parent);
+        }
       }
-      for (const addr of [...reachBright]) {
-        const parent = parentOf.get(addr);
-        if (parent) reachBright.add(parent);
+      if (reachNdActive) {
+        for (const [addr, entry] of reachFrontier) {
+          // Reached wins upstream; re-checked so no node can carry both states.
+          if (!parentOf.has(addr) || reachBright.has(addr)) continue;
+          reachNdChips.set(addr, reachNdTitle(entry.reason));
+        }
+        // Mid-dim the group boxes holding an unconfirmed destination too, so
+        // the chip isn't floating over a fully dimmed container.
+        for (const addr of reachNdChips.keys()) {
+          reachNdMuted.add(addr);
+          const parent = parentOf.get(addr);
+          if (parent) reachNdMuted.add(parent);
+        }
       }
     }
+    setNdOnCanvas(reachNdChips.size > 0);
 
     // Reach ROUTES: the drawn edges lying on the closure's BFS tree, so each hop
     // chip has a visible line back to the selection instead of a bare number.
@@ -462,6 +510,19 @@ export function SurfaceCanvas({ machines, fundFlows, principals, chain = "ethere
         const [from, to] = pair.split(">");
         reachPathSources.add(from);
         reachPathTargets.add(to);
+      }
+    }
+    // Frontier pairs style the same way, but dashed: the refused hop is drawn
+    // so the unconfirmed chip has a visible line back to the walk, without the
+    // solid stroke of a route the scorer vouched for.
+    const ndPathActive = Boolean(reachNdActive && reachFrontierPairs && reachFrontierPairs.size);
+    const ndPathSources = new Set();
+    const ndPathTargets = new Set();
+    if (ndPathActive) {
+      for (const pair of reachFrontierPairs) {
+        const [from, to] = pair.split(">");
+        ndPathSources.add(from);
+        ndPathTargets.add(to);
       }
     }
 
@@ -492,8 +553,10 @@ export function SurfaceCanvas({ machines, fundFlows, principals, chain = "ethere
         // ELK-computed width/height in n.style and we'd otherwise blow
         // them away each time selection changes.
         const baseStyle = n.style || {};
+        // An unconfirmed destination sits between bright and dimmed: legible
+        // enough to read its hedged chip, never as crisp as a walked node.
         const style = dimmed
-          ? { ...baseStyle, opacity: 0.2 }
+          ? { ...baseStyle, opacity: reachNdMuted.has(nid) ? 0.55 : 0.2 }
           : inAudit
           ? { ...baseStyle, boxShadow: "0 0 0 2px #22c55e, 0 0 12px rgba(34,197,94,0.55)", borderRadius: 6 }
           : baseStyle;
@@ -505,6 +568,7 @@ export function SurfaceCanvas({ machines, fundFlows, principals, chain = "ethere
             selected: nid === selLc,
             focused,
             reachChip: reachChips.get(nid) || null,
+            reachNdChip: reachNdChips.get(nid) || null,
             selectionChip: selectionChips.get(nid) || null,
             browseChip: browseChips?.get(nid) || null,
             // Dispatch by node kind: contract nodes carry .machine,
@@ -564,6 +628,13 @@ export function SurfaceCanvas({ machines, fundFlows, principals, chain = "ethere
         (e.data.inbound ? reachPathTargets.has(stubContractEnd) : reachPathSources.has(stubContractEnd));
       const onReachPath =
         reachPathActive && (stubOnReachPath || edgeOnReachPath(e, reachPathEdges));
+      // Same role-matched rule for the frontier's refused hops.
+      const stubOnNdPath =
+        ndPathActive &&
+        stubContractEnd != null &&
+        (e.data.inbound ? ndPathTargets.has(stubContractEnd) : ndPathSources.has(stubContractEnd));
+      const onNdPath =
+        ndPathActive && (stubOnNdPath || edgeOnReachPath(e, reachFrontierPairs));
       // Edges the existing selection treatment already owns (directly connected,
       // the selected contract's own bundles, its stubs) keep it: a hop-1 edge is
       // stated by the acts-on chips, and restyling it violet would demote the
@@ -571,8 +642,11 @@ export function SurfaceCanvas({ machines, fundFlows, principals, chain = "ethere
       const selectionOwned = directlyConnected || relatedEdgeIds.has(e.id) || stubRelated;
       const related = hiActive
         ? edgeInAudit
-        : (!sel || selectionOwned || onReachPath || (connectedNodes.has(src) && connectedNodes.has(tgt)));
+        : (!sel || selectionOwned || onReachPath || onNdPath || (connectedNodes.has(src) && connectedNodes.has(tgt)));
       const reachStyled = !hiActive && onReachPath && !selectionOwned;
+      // The walked route outranks the frontier on a shared bundle — the
+      // stronger claim keeps its solid line.
+      const ndStyled = !hiActive && onNdPath && !selectionOwned && !reachStyled;
       const baseWidth = e.style?.strokeWidth || 1;
       return {
         ...e,
@@ -580,8 +654,11 @@ export function SurfaceCanvas({ machines, fundFlows, principals, chain = "ethere
           ...e.style,
           opacity: related ? 1 : 0.08,
           ...(reachStyled ? { stroke: REACH_EDGE_STROKE } : null),
+          ...(ndStyled ? { stroke: REACH_ND_EDGE_STROKE, strokeDasharray: "7 5" } : null),
           strokeWidth: reachStyled
             ? Math.max(2.5, baseWidth)
+            : ndStyled
+            ? Math.max(2, baseWidth)
             : related && sel
             ? 2
             : baseWidth,
@@ -591,7 +668,7 @@ export function SurfaceCanvas({ machines, fundFlows, principals, chain = "ethere
     });
 
     setEdges(nextEdges);
-  }, [initNodes, initEdges, principals, chain, selectedAddress, focusedAddress, highlightedAddresses, reachDistances, reachPathEdges, onSelectMachine, onSelectPrincipal, selectController, measureBand]);
+  }, [initNodes, initEdges, principals, chain, selectedAddress, focusedAddress, highlightedAddresses, reachDistances, reachPathEdges, reachFrontier, reachFrontierPairs, onSelectMachine, onSelectPrincipal, selectController, measureBand]);
 
   return (
     <div className="ps-canvas-wrap">
@@ -616,6 +693,7 @@ export function SurfaceCanvas({ machines, fundFlows, principals, chain = "ethere
             <SelectionLegend
               onClear={() => onSelectMachine(null)}
               hasReach={Boolean(reachDistances && [...reachDistances.values()].some((hop) => reachChipText(hop)))}
+              hasReachNd={ndOnCanvas}
             />
           </Panel>
         )}

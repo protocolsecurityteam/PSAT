@@ -4,7 +4,7 @@ import { chainColor, chainLabel } from "../chainMeta.js";
 import { formatDelay, formatUsd, principalLabel, shortAddr } from "../format.js";
 import { machineFunctions, tabForLane } from "../lane.js";
 import { LANE_META, MACHINE_TABS, ROLE_META, TYPE_META } from "../meta.js";
-import { dedupeAndTagRows, governancePathTargets } from "../layout/governancePath.js";
+import { dedupeAndTagRows } from "../layout/governancePath.js";
 import { BalanceTable, isAirdropDelivered } from "./BalanceTable.jsx";
 import { DependsOnTab } from "./DependsOnTab.jsx";
 import { GovernsTab } from "./GovernsTab.jsx";
@@ -27,8 +27,8 @@ export function EntityCard({
   highlightedFunctionKey,
   highlightedCaller = null,
   governsIndex,
-  controlAdjacency,
-  agencyIndex = null,
+  reachDistances = null,
+  reachFrontierCount = 0,
   reachPath = null,
   machines = [],
   chain = "ethereum",
@@ -67,23 +67,21 @@ export function EntityCard({
     return dedupeAndTagRows(rows);
   }, [governsIndex, address, machineByAddr]);
 
-  // Governance-path rows: server reachability for a principal facet, else the
-  // client-side agency-gated control walk for a machine-only authority — the
-  // same walk the canvas reach overlay draws, so the two never disagree.
-  // Filtered to known machines (so we can name + focus them), deduped,
-  // proxy/impl-tagged.
+  // Governance-path rows: the SERVER's reached set for this entity — the same
+  // record the canvas reach chips render, so tab and canvas cannot disagree.
+  // No record means no rows (fail closed: absence of the witness is not
+  // reach); the not_determined frontier is never mixed in — it surfaces as
+  // the count line GovernsTab renders from reachFrontierCount. Filtered to
+  // known machines (so we can name + focus them), deduped, proxy/impl-tagged.
   const pathRows = useMemo(() => {
-    const source = principal?.controls?.length
-      ? principal.controls
-      : governancePathTargets(address, controlAdjacency, agencyIndex);
     const rows = [];
-    for (const addr of source) {
-      const m = machineByAddr.get(String(addr).toLowerCase());
+    for (const addr of reachDistances ? reachDistances.keys() : []) {
+      const m = machineByAddr.get(addr);
       if (!m) continue;
       rows.push({ address: m.address, name: m.name, is_proxy: Boolean(m.is_proxy), total_usd: m.total_usd || 0 });
     }
     return dedupeAndTagRows(rows);
-  }, [principal, address, controlAdjacency, agencyIndex, machineByAddr]);
+  }, [reachDistances, machineByAddr]);
 
   const highlightedFunction = useMemo(
     () => (isMachine ? machineFunctions(machine).find((fnView) => fnView.key === highlightedFunctionKey) || null : null),
@@ -288,6 +286,7 @@ export function EntityCard({
         <GovernsTab
           canCallRows={canCallRows}
           pathRows={pathRows}
+          frontierCount={reachFrontierCount}
           onPreview={onPreview}
           onNavigate={onNavigate}
         />

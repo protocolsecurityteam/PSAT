@@ -30,10 +30,11 @@ vi.mock("@xyflow/react", async (importOriginal) => {
 const A = "0x" + "a1".repeat(20); // selected
 const B = "0x" + "b2".repeat(20); // hop 1
 const C = "0x" + "c3".repeat(20); // hop 2
-const D = "0x" + "d4".repeat(20); // off the walk
+const D = "0x" + "d4".repeat(20); // frontier destination / off the walk
 const E = "0x" + "e5".repeat(20); // off the walk
 
 const REACH_VIOLET = "#a78bfa";
+const REACH_ND_VIOLET = "#8b80ba";
 const RESTING_GREY = "#94a3b8";
 
 function machine(address, name) {
@@ -48,10 +49,12 @@ const MACHINES = [
   machine(E, "AlsoUnrelated"),
 ];
 
-// A→B→C is the spine; D→E shares nothing with it.
+// A→B→C is the spine; C→D is the refused continuation; D→E shares nothing
+// with the walk.
 const FLOWS = [
   { from: A, to: B, type: "controls" },
   { from: B, to: C, type: "controls" },
+  { from: C, to: D, type: "controls" },
   { from: D, to: E, type: "controls" },
 ];
 
@@ -63,6 +66,18 @@ const PATH_EDGES = new Set([
   `${A.toLowerCase()}>${B.toLowerCase()}`,
   `${B.toLowerCase()}>${C.toLowerCase()}`,
 ]);
+
+// The scorer refused the C→D hop: D is a not_determined frontier destination.
+const ND_TITLE = "reach unconfirmed · gate does not confer this scope";
+const FRONTIER = new Map([
+  [D.toLowerCase(), {
+    from: C.toLowerCase(),
+    to: D.toLowerCase(),
+    reason: "gate_does_not_confer_this_scope",
+    basis: "conferral",
+  }],
+]);
+const FRONTIER_PAIRS = new Set([`${C.toLowerCase()}>${D.toLowerCase()}`]);
 
 function renderCanvas(props) {
   return render(
@@ -85,6 +100,10 @@ function edgeFor(from, to) {
       e.source?.toLowerCase() === from.toLowerCase() &&
       e.target?.toLowerCase() === to.toLowerCase(),
   );
+}
+
+function nodeFor(addr) {
+  return (captured.nodes || []).find((n) => n.id?.toLowerCase() === addr.toLowerCase());
 }
 
 async function settle() {
@@ -160,8 +179,8 @@ describe("SurfaceCanvas — reach-route edges", () => {
     const cleared = edgeFor(B, C);
     expect(cleared.style.strokeWidth).toBe(1);
     expect(cleared.style.opacity).toBe(1);
-    // No node wears a reach chip any more either.
-    expect((captured.nodes || []).every((n) => !n.data.reachChip)).toBe(true);
+    // No node wears a reach chip — walked or unconfirmed — any more either.
+    expect((captured.nodes || []).every((n) => !n.data.reachChip && !n.data.reachNdChip)).toBe(true);
   });
 
   it("suppresses the route styling under an audit/agent highlight overlay", async () => {
@@ -174,6 +193,98 @@ describe("SurfaceCanvas — reach-route edges", () => {
     });
     await settle();
     expect(edgeFor(B, C).style.stroke).toBe(RESTING_GREY);
+  });
+});
+
+describe("SurfaceCanvas — not_determined frontier (three-state overlay)", () => {
+  beforeEach(() => {
+    captured.edges = null;
+    captured.nodes = null;
+  });
+
+  function renderThreeState(extra = {}) {
+    return renderCanvas({
+      selectedAddress: A,
+      reachDistances: REACH_DISTANCES,
+      reachPathEdges: PATH_EDGES,
+      reachFrontier: FRONTIER,
+      reachFrontierPairs: FRONTIER_PAIRS,
+      ...extra,
+    });
+  }
+
+  it("chips the frontier destination `reach unconfirmed` with the reason-token title, at mid dim", async () => {
+    renderThreeState();
+    await settle();
+
+    const nd = nodeFor(D);
+    expect(nd.data.reachNdChip).toBe(ND_TITLE);
+    expect(nd.data.reachChip).toBeNull();
+    // Between walked-bright and dimmed-out: legible, never a walked claim.
+    expect(nd.style.opacity).toBe(0.55);
+
+    // The walked node keeps its bright treatment and only its own chip.
+    const walked = nodeFor(C);
+    expect(walked.data.reachChip).toBe("reach · 2 hops");
+    expect(walked.data.reachNdChip).toBeNull();
+    expect(walked.style.opacity).toBeUndefined();
+
+    // Absent state: neither walked nor frontier — dim, no chip of either kind.
+    const absent = nodeFor(E);
+    expect(absent.data.reachChip).toBeNull();
+    expect(absent.data.reachNdChip).toBeNull();
+    expect(absent.style.opacity).toBe(0.2);
+  });
+
+  it("draws the refused hop dashed and muted while walked hops stay solid violet", async () => {
+    renderThreeState();
+    await settle();
+
+    const refused = edgeFor(C, D);
+    expect(refused.style.stroke).toBe(REACH_ND_VIOLET);
+    expect(refused.style.strokeDasharray).toBe("7 5");
+    expect(refused.style.opacity).toBe(1);
+
+    const walked = edgeFor(B, C);
+    expect(walked.style.stroke).toBe(REACH_VIOLET);
+    expect(walked.style.strokeDasharray).toBeUndefined();
+
+    // Off both routes: grey and dimmed as before.
+    const other = edgeFor(D, E);
+    expect(other.style.stroke).toBe(RESTING_GREY);
+    expect(other.style.opacity).toBe(0.08);
+  });
+
+  it("never hedges a walked destination — reached wins over a colliding frontier entry", async () => {
+    renderThreeState({
+      reachFrontier: new Map([
+        [C.toLowerCase(), { from: B.toLowerCase(), to: C.toLowerCase(), reason: "gate_scope_not_determined", basis: "conferral" }],
+      ]),
+      reachFrontierPairs: new Set([`${B.toLowerCase()}>${C.toLowerCase()}`]),
+    });
+    await settle();
+    const walked = nodeFor(C);
+    expect(walked.data.reachChip).toBe("reach · 2 hops");
+    expect(walked.data.reachNdChip).toBeNull();
+  });
+
+  it("chips nothing for a frontier destination with no node on this canvas", async () => {
+    const offCanvas = "0x" + "f6".repeat(20);
+    renderThreeState({
+      reachFrontier: new Map([
+        [offCanvas, { from: C.toLowerCase(), to: offCanvas, reason: "gate_scope_not_determined", basis: "conferral" }],
+      ]),
+      reachFrontierPairs: new Set([`${C.toLowerCase()}>${offCanvas}`]),
+    });
+    await settle();
+    expect((captured.nodes || []).every((n) => !n.data.reachNdChip)).toBe(true);
+  });
+
+  it("suppresses the frontier styling under an audit/agent highlight overlay", async () => {
+    renderThreeState({ highlightedAddresses: new Set([A.toLowerCase(), E.toLowerCase()]) });
+    await settle();
+    expect((captured.nodes || []).every((n) => !n.data.reachNdChip)).toBe(true);
+    expect(edgeFor(C, D).style.strokeDasharray).toBeUndefined();
   });
 });
 

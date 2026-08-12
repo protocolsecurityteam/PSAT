@@ -219,6 +219,35 @@ export const ETHERFI_COMPANY_RICH = {
   fund_flows: [
     { from: VAULT_ADDR, to: POOL_ADDR, label: "rebalance", usd: 1000000 },
   ],
+  // Server-computed reach (SURFACE_REACH_UNIFICATION_SPEC payload schema):
+  // the safe's walk reaches the Vault at hop 1 and the LiquidityPool at hop 2
+  // through it, and was refused continuing from the pool to the EOA — a
+  // not_determined frontier entry, distinct from both reached and absent.
+  // Entities without a record here (the timelock, every contract) get NO
+  // overlay: absence of the witness is not reach.
+  reach: {
+    model: "scorer_closure_v1",
+    entities: {
+      [`ethereum::${SAFE_ADDR}`]: {
+        reached: {
+          [`ethereum::${VAULT_ADDR}`]: { hop: 1, basis: "signal_seed" },
+          [`ethereum::${POOL_ADDR}`]: { hop: 2, basis: "walked_hop" },
+        },
+        parents: {
+          [`ethereum::${VAULT_ADDR}`]: `ethereum::${SAFE_ADDR}`,
+          [`ethereum::${POOL_ADDR}`]: `ethereum::${VAULT_ADDR}`,
+        },
+        frontier: [
+          {
+            from: `ethereum::${POOL_ADDR}`,
+            to: `ethereum::${EOA_ADDR}`,
+            reason: "gate_does_not_confer_this_scope",
+            basis: "conferral",
+          },
+        ],
+      },
+    },
+  },
   resolved_principals: [
     {
       address: SAFE_ADDR,

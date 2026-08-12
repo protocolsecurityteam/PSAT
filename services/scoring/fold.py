@@ -42,6 +42,14 @@ from sqlalchemy.orm import Session
 from services.scoring import constants as K
 from services.scoring import planes as P
 from services.scoring.population import current_signals_with_faults
+from services.scoring.reach import (
+    HOP_REFUSED_CONDITION,
+    HOP_REFUSED_CONFERRAL,
+    HOP_REFUSED_SCOPE,
+)
+from services.scoring.reach import (
+    hop_bound as _hop_bound,
+)
 from services.scoring.schema import (
     NOT_DETERMINED,
     FunctionSignal,
@@ -5771,10 +5779,6 @@ def _unbounded_reading(state: str) -> str:
 # question was never asked here — and named separately for exactly that reason.
 ACT_AS_CALLER_UNREACHED = "caller_not_reachable_from_the_seized_node"
 
-HOP_REFUSED_SCOPE = "gate_scope_not_determined"
-HOP_REFUSED_CONFERRAL = "gate_does_not_confer_this_scope"
-HOP_REFUSED_CONDITION = "caller_condition_not_satisfiable"
-
 # Every gate-control capability, each asking the conferral question with its own
 # witness. The census has no signal instance to ask, so it asks the class-wide
 # union — an upper bound on what any one instance's walk can confer, and labelled
@@ -5927,68 +5931,6 @@ def _hop_census(closure: P.ControlClosure, conditions: P.ConditionPlane, conferr
         "runs on — which replaced the label-presence test that walked any labelled edge"
     )
     return census
-
-
-def _hop_bound(
-    edge: P.ControlEdge, conditions: P.ConditionPlane, *, grant: P.GateGrant | None
-) -> dict[str, Any] | None:
-    """Why this hop is NOT walked as proven, or ``None`` when it is.
-
-    Two bounds, in the order that costs least to decide. The SCOPE bound is
-    gate-control's alone — ``grant`` is the gate asking, and ``None`` is code
-    control, which does not ask: controlling the code exercises everything the
-    code is authorized to exercise, whatever the label happened to record.
-
-    For a gate the question is CONFERRAL, not label presence: a ``roles N`` edge
-    is walked where the role -> selector join names functions role N licenses at
-    the destination, and a ``state_var`` edge where the gate's own witness is
-    observed to rewrite a variable of that name. A label naming a scope the gate
-    is not witnessed to seize (`hook`, `vault`, `roleRegistry`) is no longer
-    enough, and neither is a label naming nothing at all — 55 of the role edges
-    restate their own relation and name no role.
-
-    The CONDITION bound is shared: the destination's own guards may pin their
-    caller to the destination itself, and no authority relation makes one
-    address another.
-
-    A refused hop is a published ``not_determined``, never a silent drop and
-    never a proven negative.
-    """
-    if grant is not None:
-        verdict = grant.confers(edge.scope, edge.anchor)
-        if not verdict.conferred:
-            return {
-                "caller": edge.principal,
-                "destination": edge.anchor,
-                # The unlabelled edges keep their own reason: "the label named
-                # nothing" and "the label named something this gate does not
-                # seize" are different shortfalls and only the first is a
-                # pipeline gap.
-                "reason": (
-                    HOP_REFUSED_SCOPE if verdict.outcome == P.CONFERRAL_SCOPE_NOT_DETERMINED else HOP_REFUSED_CONFERRAL
-                ),
-                "conferral": verdict.outcome,
-                "capability": grant.capability,
-                "relation": edge.relation,
-                "witness": edge.witness,
-                "edge_label": edge.scope.label,
-                "basis": verdict.basis,
-            }
-    hop = conditions.hop(edge.principal, edge.anchor)
-    if hop.state == P.HOP_WALKED:
-        return None
-    return {
-        "caller": edge.principal,
-        "destination": edge.anchor,
-        "reason": HOP_REFUSED_CONDITION,
-        "relation": edge.relation,
-        "witness": edge.witness,
-        "edge_label": edge.scope.label,
-        "basis": hop.basis,
-        "surface": hop.surface,
-        "functions_consulted": hop.functions_consulted,
-        "disproving_conditions": list(hop.disproving),
-    }
 
 
 def _behind_the_frontier(
