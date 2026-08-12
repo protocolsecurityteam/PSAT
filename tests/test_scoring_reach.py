@@ -216,6 +216,46 @@ PROXY = "0x" + "e" * 40
 KEY_PROXY = entity_key("ethereum", PROXY)
 
 
+def test_seed_standpoint_carries_the_walk_the_fold_ran_from_it():
+    """The finding row names the seed as the walk's origin ("AtomicSolverV3 ->
+    reaches BoringVault"), so selecting the seed shows the same walked hops and
+    the same refusals — hop-numbered from the standpoint, not the principal."""
+    closure = P.ControlClosure(
+        edges=(edge(KEY_ANCHOR, KEY_VAULT, label="owner"), edge(KEY_VAULT, KEY_DEEP, label="owner"))
+    )
+    signal = reach_signal("ownership.transfer", KEY_ANCHOR)
+    record = R.entity_reach(
+        KEY_ANCHOR,
+        closure,
+        P.ConditionPlane(),
+        _StubConferral(rewrites=("owner",)),
+        {},
+        None,
+        {KEY_ANCHOR: (signal,)},
+    )
+    # VAULT's hop-1 entry keeps whichever witness landed first (the entity's
+    # own closure edge ties with the walk at hop 1); the claim pinned here is
+    # the WALKED continuation past it, which only the standpoint arm proves.
+    assert record["reached"][KEY_VAULT]["hop"] == 1
+    assert record["reached"][KEY_DEEP] == {"hop": 2, "basis": R.BASIS_WALKED_HOP}
+    assert record["parents"] == {KEY_VAULT: KEY_ANCHOR, KEY_DEEP: KEY_VAULT}
+
+    # A refusal on the standpoint's walk lands on its frontier with the
+    # scorer's token, displacing the blanket authority-exercise entry.
+    hook = P.ControlClosure(edges=(edge(KEY_ANCHOR, KEY_VAULT, label="owner"), edge(KEY_VAULT, KEY_DEEP, label="hook")))
+    record = R.entity_reach(
+        KEY_ANCHOR,
+        hook,
+        P.ConditionPlane(),
+        _StubConferral(rewrites=("owner",)),
+        {},
+        None,
+        {KEY_ANCHOR: (signal,)},
+    )
+    (entry,) = record["frontier"]
+    assert (entry["from"], entry["to"], entry["reason"]) == (KEY_VAULT, KEY_DEEP, R.HOP_REFUSED_CONFERRAL)
+
+
 def test_reached_keys_fold_onto_the_proxy():
     """The walk speaks in raw anchors; everything PUBLISHES at the canonical
     key — the fold's own rule — or a consumer keying nodes by the proxy would

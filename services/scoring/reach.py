@@ -161,10 +161,11 @@ def entity_reach(
     conferral: P.ConferralPlane,
     signals_by_principal: Mapping[str, Sequence[FunctionSignal]],
     canonical: Callable[[str], str] | None = None,
+    signals_by_seed: Mapping[str, Sequence[FunctionSignal]] | None = None,
 ) -> dict[str, Any]:
     """What ``entity`` provably reaches, and every path that is not_determined.
 
-    Three evidence sources, merged with ``reached`` winning over the frontier:
+    Four evidence sources, merged with ``reached`` winning over the frontier:
 
     1. ``entity``'s own closure edges. The anchor is reached at hop 1. A column
        witness (``relation is None``: ``contracts.admin`` / ``contracts.beacon``)
@@ -178,7 +179,14 @@ def entity_reach(
        (``None`` for code control, ``grant_for`` for a gate — the fold's exact
        inputs). Non-transitive capabilities stop at their seeds with NO
        frontier: non-transitivity is a proven boundary, not a gap.
-    3. Merge: min hop wins and ``parents`` records the hop that proved it; a
+    3. Transitive proven-reach signals SEEDED at ``entity`` (``signals_by_
+       seed``). The fold's walk for such a row starts standing here — the
+       score page names this entity as the walk's origin — so its walked
+       hops and its refusals belong on this standpoint's record too, not
+       only on the holding principal's. Without this arm, the finding row
+       says "AtomicSolverV3 -> reaches BoringVault" while selecting
+       AtomicSolverV3 shows that same path as unwitnessed.
+    4. Merge: min hop wins and ``parents`` records the hop that proved it; a
        frontier entry whose destination is reached anyway is dropped, and a
        hop-verdict entry displaces the less specific authority-exercise one.
 
@@ -214,11 +222,11 @@ def entity_reach(
         if standing is None or standing["reason"] == AUTHORITY_EXERCISE_NOT_WITNESSED:
             frontier[pair] = {**entry, "from": pair[0], "to": pair[1]}
 
-    def merge_walk(seeds: set[str], grant: P.GateGrant | None) -> None:
+    def merge_walk(seeds: set[str], grant: P.GateGrant | None, hop_offset: int = 0) -> None:
         dist, parent, gaps = _bfs(seeds, closure, conditions, grant)
         for key, hop in sorted(dist.items()):
             if hop >= 2:
-                admit(key, hop, BASIS_WALKED_HOP, parent[key])
+                admit(key, hop + hop_offset, BASIS_WALKED_HOP, parent[key])
         for bound in gaps:
             refuse(
                 {
@@ -228,6 +236,16 @@ def entity_reach(
                     "basis": str(bound["basis"]),
                 }
             )
+
+    def signal_grant(signal: FunctionSignal) -> P.GateGrant | None:
+        if signal.claim_id in K.CODE_CONTROL_CAPABILITIES:
+            return None
+        return conferral.grant_for(
+            signal.claim_id,
+            signal.function_id,
+            entity=entity_key(signal.chain, signal.deployment_address),
+            selector=signal.selector,
+        )
 
     code_seeds: set[str] = set()
     for edge in closure.edges_from(entity):
@@ -259,17 +277,14 @@ def entity_reach(
             admit(key, 1, BASIS_SIGNAL_SEED, entity)
         if signal.claim_id not in K.TRANSITIVE_CAPABILITIES:
             continue
-        grant = (
-            None
-            if signal.claim_id in K.CODE_CONTROL_CAPABILITIES
-            else conferral.grant_for(
-                signal.claim_id,
-                signal.function_id,
-                entity=entity_key(signal.chain, signal.deployment_address),
-                selector=signal.selector,
-            )
-        )
-        merge_walk(seeds, grant)
+        merge_walk(seeds, signal_grant(signal))
+
+    # Standpoint arm: the fold's walk for a row seeded here starts at THIS
+    # entity, so its hops are numbered from it (dist 1 is the standpoint
+    # itself, hence the -1). Only transitive proven-reach rows appear in the
+    # map — a value seed is where reached VALUE sits, not a standpoint.
+    for signal in (signals_by_seed or {}).get(entity, ()):
+        merge_walk({entity}, signal_grant(signal), hop_offset=-1)
 
     _relax(reached, parents, self_keys)
     return {
@@ -347,15 +362,25 @@ def load_protocol_reach(session: Session, protocol_id: int) -> dict[str, dict[st
         return alias.get(key, key)
 
     signals_by_principal: dict[str, list[FunctionSignal]] = {}
+    signals_by_seed: dict[str, list[FunctionSignal]] = {}
     for signal in signals:
         if signal.value_state != VALUE_STATE_PROVEN_REACH:
             continue
         for key in sorted({ref.key for ref in signal.principal_refs}):
             signals_by_principal.setdefault(key, []).append(signal)
+        if signal.claim_id not in K.TRANSITIVE_CAPABILITIES:
+            continue
+        for key in sorted(set(signal.value_entity_keys)):
+            if not P.is_zero_key(key):
+                signals_by_seed.setdefault(key, []).append(signal)
 
-    entities = sorted(set(closure.principals()) | set(signals_by_principal))
+    entities = sorted(set(closure.principals()) | set(signals_by_principal) | set(signals_by_seed))
     return merge_reach(
-        {canonical(entity): entity_reach(entity, closure, conditions, conferral, signals_by_principal, canonical)}
+        {
+            canonical(entity): entity_reach(
+                entity, closure, conditions, conferral, signals_by_principal, canonical, signals_by_seed
+            )
+        }
         for entity in entities
         if not P.is_zero_key(entity)
     )
