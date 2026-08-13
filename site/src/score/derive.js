@@ -76,6 +76,12 @@ export function principalChip(finding) {
   if (kind === "eoa") return { kind, label: "EOA" };
   if (kind === "anyone") return { kind, label: "Anyone" };
   if (kind === "safe") {
+    // A merged unit's display string names one member and that member's k/n —
+    // a chip built from it would attribute the whole unit's power to one Safe.
+    const members = principalAddresses(finding);
+    if (members.length > 1) {
+      return { kind, label: `${members.length} Safes · shared keys`, merged: true };
+    }
     const shape = safeShape(finding);
     return { kind, label: shape ? `Safe ${shape.k}/${shape.n}` : "Safe" };
   }
@@ -285,6 +291,59 @@ export function undeterminedTargets(finding, index) {
   );
 }
 
+// ── merged principal units ──────────────────────────────────────────────────
+
+// The coalition fact behind a multi-member row, from the published overlap
+// table. Figures are carried only when exactly one merged overlap record joins
+// the row's members: with more members than one record covers, no single
+// witnessed (shared, coalition) pair describes the whole unit, and the note
+// falls back to the memberships alone.
+export function mergedCoalition(doc, finding) {
+  const members = principalAddresses(finding);
+  if (members.length < 2) return null;
+  const keys = new Set(members.map((a) => entityKey(finding?.chain, a)));
+  const pairs = (doc?.provenance?.safe_keyset_overlaps || []).filter(
+    (o) => o?.merged && keys.has(o.a) && keys.has(o.b),
+  );
+  const pair = pairs.length === 1 ? pairs[0] : null;
+  const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+  return {
+    members,
+    sharedOwners: pair ? num(pair.shared_owners) : null,
+    coalition: pair ? num(pair.min_coalition_to_act_as_both) : null,
+  };
+}
+
+function bareName(signature) {
+  return String(signature || "").split("(")[0];
+}
+
+// host entity → the unit member witnessed as that host's gate, read off the
+// surface functions payload (the same caller lists the cards render). An entry
+// is published only when the payload names exactly one member for the row's
+// example function on that host — several or none is not_determined and stays
+// absent rather than guessing.
+export function hostGates(finding, functionsByEntity) {
+  const members = principalAddresses(finding);
+  const example = (finding?.example_functions || [])[0];
+  if (!example || members.length < 2 || !functionsByEntity) return {};
+  const out = {};
+  for (const entity of finding?.host_entities || []) {
+    const gates = new Set();
+    for (const fn of functionsByEntity[entity] || []) {
+      if (bareName(fn?.function) !== example) continue;
+      for (const controller of fn?.controllers || []) {
+        for (const principal of controller?.principals || []) {
+          const address = String(principal?.address || "").toLowerCase();
+          if (members.includes(address)) gates.add(address);
+        }
+      }
+    }
+    if (gates.size === 1) out[entity] = [...gates][0];
+  }
+  return out;
+}
+
 // ── deduction rows ──────────────────────────────────────────────────────────
 
 // spec §3.2 pins the row's points to −net_points_lambda. The re-fold reproduces
@@ -297,7 +356,7 @@ function publishedNet(finding, refolded) {
   return typeof published === "number" && Number.isFinite(published) ? published : null;
 }
 
-export function deductionRows(doc, index) {
+export function deductionRows(doc, index, functions = null) {
   const findings = doc?.findings || [];
   const ranked = rankedFindings(findings);
   const maxRaw = ranked.reduce((max, r) => (r.raw === null ? max : Math.max(max, r.raw)), 0);
@@ -326,6 +385,13 @@ export function deductionRows(doc, index) {
       chip: principalChip(finding),
       capability: finding?.capability || "",
       controller: controllerAddress(finding),
+      // Every member of the (possibly merged) unit — principal_addresses[] is
+      // the witnessed list; the display string carries only one of them, and a
+      // row shown under that one address alone attributes the other members'
+      // gates to it.
+      controllers: principalAddresses(finding),
+      coalition: mergedCoalition(doc, finding),
+      hostGates: hostGates(finding, functions),
       functions: functionsLabel(finding),
       exampleFunction: (finding?.example_functions || [])[0] || null,
       value: valueCell(finding),
@@ -493,6 +559,7 @@ export function fixFirst(doc, rows) {
     // contract — the displayed example function is then unambiguously on it.
     host: group.rows[0].hosts?.length === 1 ? group.rows[0].hosts[0] : null,
     controller: group.rows[0].controller || null,
+    controllers: group.rows[0].controllers || [],
   };
 }
 
@@ -729,9 +796,9 @@ export function confidenceChannels(doc) {
 
 // ── the whole projection ────────────────────────────────────────────────────
 
-export function projectScore(doc, contracts) {
+export function projectScore(doc, contracts, functions = null) {
   const index = buildContractIndex(contracts);
-  const rows = deductionRows(doc, index);
+  const rows = deductionRows(doc, index, functions);
   // A withheld grade is the producer refusing to publish λ. Reconstructing it
   // from the raw points would republish the exact quantity that was withheld,
   // so in that state the page holds no λ and nothing derived from one — no

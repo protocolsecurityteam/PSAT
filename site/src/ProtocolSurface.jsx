@@ -539,7 +539,21 @@ function ProtocolSurface({
     // is called — it only says what to mark once the card is up, and every part
     // of it has to survive a lookup against that card's own lanes to be marked.
     const hint = example?.highlight || null;
-    const hintedController = String(hint?.controller || "").toLowerCase() || null;
+    // One controller or several: a merged-unit row names every member, and
+    // which member gates THIS card's function is the card's own fact — the
+    // caller list decides, never the hint's ordering.
+    const hintedControllers = (
+      Array.isArray(hint?.controllers) ? hint.controllers : hint?.controller ? [hint.controller] : []
+    )
+      .map((address) => String(address || "").toLowerCase())
+      .filter(Boolean);
+    const findHintedCaller = (fnView) => {
+      for (const controller of hintedControllers) {
+        const hit = findCaller(fnView, controller);
+        if (hit) return hit;
+      }
+      return null;
+    };
     // Where the request says this entity was REACHED FROM (a score-page click on
     // a transitive target names the host the controller acts on directly). Like
     // the hint it never changes which entity is selected or what the outcome is
@@ -551,7 +565,7 @@ function ProtocolSurface({
         ? {
             highlight: {
               function: fnView ? "marked" : unpaired ? "unpaired" : "not-on-card",
-              controller: caller ? "marked" : hintedController ? "not-a-caller" : "none",
+              controller: caller ? "marked" : hintedControllers.length ? "not-a-caller" : "none",
             },
           }
         : {};
@@ -598,14 +612,14 @@ function ProtocolSurface({
       // name, the one whose function this controller can actually call IS the
       // action the score row charged — same-named functions under someone
       // else's gate are different actions and never candidates.
-      const paired = hintedController ? matches.filter((m) => findCaller(m.fnView, hintedController)) : [];
+      const paired = hintedControllers.length ? matches.filter((m) => findHintedCaller(m.fnView)) : [];
       const pool = paired.length ? paired : matches;
       if (pool.length > 1) {
         const hosts = new Set(pool.map((m) => String(m.machine?.address || "").toLowerCase()));
         return { ok: false, kind: "ambiguous-function", count: pool.length, hosts: hosts.size };
       }
       const only = pool[0];
-      const matchedCaller = findCaller(only.fnView, hintedController);
+      const matchedCaller = findHintedCaller(only.fnView);
       selectMachineExample(only.machine, only.fnView, matchedCaller, reachedFrom);
       return { ok: true, kind: "function", ...hintOutcome(only.fnView, matchedCaller) };
     }
@@ -629,11 +643,11 @@ function ProtocolSurface({
     // are marked together or not at all — an unmarkable hint opens the card
     // with nothing marked, and the caller's `unpaired` outcome says why.
     let marked = fnView;
-    let matchedCaller = findCaller(marked, hintedController);
+    let matchedCaller = findHintedCaller(marked);
     let unpaired = false;
     if (!fnView && hint?.functionSignature) {
       const hinted = findFunctionView(machine, { functionSignature: hint.functionSignature });
-      const hintedCaller = findCaller(hinted, hintedController);
+      const hintedCaller = findHintedCaller(hinted);
       if (hinted && hintedCaller) {
         marked = hinted;
         matchedCaller = hintedCaller;

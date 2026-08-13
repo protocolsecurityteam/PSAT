@@ -7,17 +7,20 @@
 import { Fragment, useState } from "react";
 
 import EntityButton from "./EntityButton.jsx";
+import { shortAddress } from "./format.js";
 
 export const TARGETS_SHORT = 3;
 
 // What this row is ABOUT, carried alongside the entity a click asks for: the
 // example function the row DISPLAYS (never the other n−1 it counts — the user
-// read this one) and the controller it names. The surface marks that pair on
-// the card it opens, or marks less; nothing here asserts the pair is on any
-// particular contract.
+// read this one) and the controllers it names — every member of a merged unit,
+// because which member gates a given host is the card's fact, not this row's.
+// The surface marks the pair its own caller list witnesses, or marks less;
+// nothing here asserts any pair is on any particular contract.
 export function highlightHint(row) {
-  if (!row.exampleFunction && !row.controller) return undefined;
-  return { functionSignature: row.exampleFunction || "", controller: row.controller || "" };
+  const controllers = row.controllers?.length ? row.controllers : row.controller ? [row.controller] : [];
+  if (!row.exampleFunction && !controllers.length) return undefined;
+  return { functionSignature: row.exampleFunction || "", controllers };
 }
 
 // The row's action line: the example function, the count of the ones it stands
@@ -94,6 +97,10 @@ export function TargetList({ row, onSelect }) {
           relationship that must not read as more direct calls. */}
       {shownHosts.map((host, i) => {
         const label = host.name || host.short;
+        // On a merged-unit row each host names its own witnessed gate member
+        // (from the surface caller lists) — without it the row's controllers
+        // read as if every member gated every host. Absent = not determined.
+        const gate = (row.controllers?.length || 0) > 1 ? row.hostGates?.[host.entity] : null;
         return (
           <span key={host.canonical} className="sc-host">
             {i > 0 && " · "}
@@ -104,6 +111,7 @@ export function TargetList({ row, onSelect }) {
             >
               {host.name ? <b>{host.name}</b> : null} {host.short}
             </EntityButton>
+            {gate && <span className="sc-gate"> (gate {shortAddress(gate)})</span>}
           </span>
         );
       })}

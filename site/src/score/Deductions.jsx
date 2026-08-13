@@ -22,6 +22,22 @@ function SheetDispositionBadge({ disposition }) {
   );
 }
 
+// Why several Safes share one row: the overlap table proved a shared-key
+// coalition can act as each of them, so splitting them would present as
+// independent the gates the merge proved are one power. Figures render only
+// when a single witnessed overlap record carries them.
+function CoalitionNote({ coalition }) {
+  if (!coalition) return null;
+  const { members, sharedOwners, coalition: acting } = coalition;
+  return (
+    <div className="sc-coalition">
+      {sharedOwners !== null && acting !== null
+        ? `${members.length} Safes merged: share ${sharedOwners} owner keys — ${acting} of them can act as both · scored as one power`
+        : `${members.length} Safes merged: shared owner keys · scored as one power`}
+    </div>
+  );
+}
+
 function DeductionRow({ row, onSelect }) {
   const { chip, value } = row;
   return (
@@ -41,10 +57,11 @@ function DeductionRow({ row, onSelect }) {
           <CapabilityTag capability={row.capability} />
           <ActorLine
             row={row}
-            controllers={row.controller ? [row.controller] : []}
+            controllers={row.controllers?.length ? row.controllers : row.controller ? [row.controller] : []}
             onSelect={onSelect}
           />
         </div>
+        <CoalitionNote coalition={row.coalition} />
         <div className="sc-fbar">
           <div className="sc-track" style={{ width: `${row.trackPct}%` }} />
           <div className="sc-fill" style={{ width: `${row.fillPct}%` }} />
@@ -100,8 +117,8 @@ function FixFirst({ fix, onSelect }) {
                     ...(fix.host ? { address: fix.host.address } : {}),
                     functionSignature: fix.exampleFunction,
                     label: fix.exampleFunction,
-                    ...(fix.controller
-                      ? { highlight: { functionSignature: fix.exampleFunction, controller: fix.controller } }
+                    ...(fix.controllers?.length
+                      ? { highlight: { functionSignature: fix.exampleFunction, controllers: fix.controllers } }
                       : {}),
                   }}
                   title={`Show ${fix.exampleFunction} on the control surface`}

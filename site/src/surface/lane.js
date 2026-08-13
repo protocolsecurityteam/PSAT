@@ -151,6 +151,13 @@ function matchesByName(fnView, signature) {
   return String(fnView.name || "").toLowerCase() === signature;
 }
 
+// One deployed function's identity on its card. A split proxy materializes the
+// same selector once per implementation, so a card can carry two rows for one
+// function — same identity, and never an overload.
+function fnIdentity(fnView) {
+  return String(fnView.signature || fnView.key || "").toLowerCase();
+}
+
 export function findFunctionView(machine, target = {}) {
   const { signature, selector } = normalizeFunctionTarget(target);
   if (!signature && !selector) return null;
@@ -160,10 +167,12 @@ export function findFunctionView(machine, target = {}) {
   // The scorer names example functions by bare name ("pause"), never by
   // signature. A bare name resolves only when it names exactly one function on
   // the machine: with overloads present, picking one would point the user at a
-  // call site the caller never named.
+  // call site the caller never named. Distinct identities, not distinct rows —
+  // duplicate rows of one function must not read as overloads.
   if (!isBareName(signature)) return null;
   const byName = fns.filter((fnView) => matchesByName(fnView, signature));
-  return byName.length === 1 ? byName[0] : null;
+  const identities = new Set(byName.map(fnIdentity));
+  return identities.size === 1 ? byName[0] : null;
 }
 
 // The caller chip a score row's controller names on an already-resolved
@@ -195,10 +204,21 @@ export function findFunctionMatches(machines, target = {}) {
   if (!signature && !selector) return [];
   const exact = [];
   const named = [];
+  // Deduped on (host, identity): a duplicate row of one deployed function must
+  // not turn a unique name into an "ambiguous" refusal. The key's address
+  // prefix scopes the identity, so a shared name on two hosts stays two.
+  const seen = new Set();
   for (const machine of machines || []) {
     for (const fnView of machineFunctions(machine)) {
-      if (matchesExactly(fnView, signature, selector)) exact.push({ machine, fnView });
-      else if (isBareName(signature) && matchesByName(fnView, signature)) named.push({ machine, fnView });
+      const id = `${String(fnView.key || "").split(":")[0]}|${fnIdentity(fnView)}`;
+      if (seen.has(id)) continue;
+      if (matchesExactly(fnView, signature, selector)) {
+        seen.add(id);
+        exact.push({ machine, fnView });
+      } else if (isBareName(signature) && matchesByName(fnView, signature)) {
+        seen.add(id);
+        named.push({ machine, fnView });
+      }
     }
   }
   return exact.length ? exact : named;

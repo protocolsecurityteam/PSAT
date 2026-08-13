@@ -80,8 +80,59 @@ describe("ScoreBand — computed grade", () => {
     // kept + 6 deduction segments + the sub-0.4pt tail
     expect(container.querySelectorAll(".sc-ledger-seg")).toHaveLength(8);
     expect(container.querySelector(".sc-ledger-seg.sc-ded").getAttribute("title")).toBe(
-      "Safe 4/8 · upgrade.implementation · −10.50",
+      "2 Safes · shared keys · upgrade.implementation · −10.50",
     );
+  });
+
+  it("presents a merged unit as the coalition, never as one member", async () => {
+    // Finding 0 folds two Safes a shared-key coalition can act as. The row must
+    // show both members and say why they share a row — rendered under one
+    // member's address, the other member's gates read as that member's power.
+    const members = ETHERFI.findings[0].principal_addresses;
+    expect(members).toHaveLength(2);
+    const { container } = renderBand({ score: ETHERFI, onSelectEntity: vi.fn() });
+    await openBreakdown();
+    const row = container.querySelectorAll(".sc-frow")[0];
+    for (const member of members) {
+      expect(
+        within(row).getByRole("button", { name: `${member.slice(0, 6)}…${member.slice(-4)}` }),
+      ).toBeTruthy();
+    }
+    expect(row.querySelector(".sc-coalition").textContent).toBe(
+      "2 Safes merged: share 5 owner keys — 4 of them can act as both · scored as one power",
+    );
+    // No coalition line on a single-member row.
+    expect(container.querySelectorAll(".sc-frow")[6].querySelector(".sc-coalition")).toBeNull();
+  });
+
+  it("annotates each host with its witnessed gate member when the caller lists are supplied", async () => {
+    const members = ETHERFI.findings[0].principal_addresses;
+    const hosts = ETHERFI.findings[0].host_entities;
+    const functions = {
+      [hosts[0]]: [
+        {
+          function: "upgradeToAndCall(address,bytes)",
+          controllers: [{ principals: [{ address: members[1] }] }],
+        },
+      ],
+      [hosts[1]]: [
+        {
+          function: "upgradeToAndCall(address,bytes)",
+          controllers: [{ principals: [{ address: members[0] }] }],
+        },
+      ],
+    };
+    const { container } = renderBand({ score: ETHERFI, functions });
+    await openBreakdown();
+    const targets = container.querySelectorAll(".sc-frow")[0].querySelector(".sc-targets");
+    const gates = [...targets.querySelectorAll(".sc-gate")].map((el) => el.textContent);
+    expect(gates).toEqual([
+      ` (gate ${members[1].slice(0, 6)}…${members[1].slice(-4)})`,
+      ` (gate ${members[0].slice(0, 6)}…${members[0].slice(-4)})`,
+    ]);
+    // The third host's gate was not witnessed by the payload — not determined
+    // stays absent rather than defaulting to any member.
+    expect(targets.querySelectorAll(".sc-host")).toHaveLength(3);
   });
 
   it("keeps the breakdown collapsed until asked", async () => {
@@ -509,7 +560,7 @@ describe("ScoreBand — entities select on the surface", () => {
       label: "setAuthority",
       // The controller rides along as a highlight hint so the resolved row can
       // mark the caller chip the row named — it is not a second entity request.
-      highlight: { functionSignature: "setAuthority", controller: CONTROLLER },
+      highlight: { functionSignature: "setAuthority", controllers: [CONTROLLER] },
     });
     expect(HOST).not.toBe(FIRST_TARGET);
   });
@@ -537,7 +588,7 @@ describe("ScoreBand — entities select on the surface", () => {
       label: "BoringVault",
       // The contract is what is asked for; the pair the row was about rides
       // along for the card to mark if it carries it.
-      highlight: { functionSignature: "setAuthority", controller: CONTROLLER },
+      highlight: { functionSignature: "setAuthority", controllers: [CONTROLLER] },
       // …and so does the host the reach STARTED at, so the surface can show the
       // route to a contract the controller never touches directly.
       reachedFrom: [HOST],
@@ -587,7 +638,7 @@ describe("ScoreBand — entities select on the surface", () => {
         chain: "ethereum",
         highlight: {
           functionSignature: "upgradeToAndCall",
-          controller: ETHERFI.findings[0].principal.match(/0x[0-9a-f]{40}/)[0],
+          controllers: ETHERFI.findings[0].principal_addresses,
         },
       }),
     );
@@ -607,7 +658,7 @@ describe("ScoreBand — entities select on the surface", () => {
     await userEvent.setup().click(within(targets).getAllByRole("button")[0]);
     const { highlight } = onSelectEntity.mock.calls[0][0];
     expect(highlight.functionSignature).toBe("upgradeToAndCall");
-    expect(highlight.controller).toBe(ETHERFI.findings[0].principal.match(/0x[0-9a-f]{40}/)[0]);
+    expect(highlight.controllers).toEqual(ETHERFI.findings[0].principal_addresses);
   });
 
   it("activates from the keyboard, as the role it carries promises", async () => {

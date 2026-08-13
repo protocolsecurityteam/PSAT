@@ -48,9 +48,18 @@ describe("derive — principals", () => {
   it("parses the principal shape into a chip", () => {
     expect(principalChip(F[2])).toEqual({ kind: "eoa", label: "EOA" });
     expect(principalChip(F[8])).toEqual({ kind: "timelock", label: "Timelock 2d" });
-    expect(principalChip(F[0])).toEqual({ kind: "safe", label: "Safe 4/8" });
     expect(principalChip(F[3])).toEqual({ kind: "timelock", label: "Timelock 10d" });
     expect(principalChip(F[26])).toEqual({ kind: "anyone", label: "Anyone" });
+    // A single-member Safe still wears its own k/n.
+    expect(principalChip(F[1])).toEqual({ kind: "safe", label: "Safe 4/6" });
+  });
+
+  it("chips a merged unit as the unit, never as one member's k/n", () => {
+    // finding 0's display string says "Safe 4/8" but principal_addresses lists
+    // two Safes (the other is 3/7) — a k/n chip would attribute the whole
+    // unit's power to whichever member the string happened to name.
+    expect(F[0].principal_addresses).toHaveLength(2);
+    expect(principalChip(F[0])).toEqual({ kind: "safe", label: "2 Safes · shared keys", merged: true });
   });
 
   it("names the coalition from k/n, not from the weakness rung", () => {
@@ -67,6 +76,65 @@ describe("derive — principals", () => {
   it("distinguishes a routed timelock from an unproven proposer set", () => {
     expect(timelockProposer(F[3])).toEqual({ text: "via Safe 6/10", proven: true });
     expect(timelockProposer(F[8])).toEqual({ text: "proposer unproven", proven: false });
+  });
+});
+
+describe("derive — merged principal units", () => {
+  const MEMBERS = F[0].principal_addresses;
+
+  it("carries every unit member on the row, not just the displayed one", () => {
+    const row = view.rows.find((r) => r.index === 0);
+    expect(row.controllers).toEqual(MEMBERS);
+    // A single-member row still carries its one controller.
+    const single = view.rows.find((r) => r.index === 6);
+    expect(single.controllers).toEqual([single.controller]);
+  });
+
+  it("reads the coalition figures off the one overlap record that merged the pair", () => {
+    const row = view.rows.find((r) => r.index === 0);
+    expect(row.coalition).toEqual({ members: MEMBERS, sharedOwners: 5, coalition: 4 });
+    // No coalition claim on a single-member row.
+    expect(view.rows.find((r) => r.index === 6).coalition).toBeNull();
+  });
+
+  it("publishes no figures when no single overlap record covers the members", () => {
+    const doc = {
+      ...ETHERFI,
+      provenance: { ...ETHERFI.provenance, safe_keyset_overlaps: [] },
+    };
+    const rows = deductionRows(doc, buildContractIndex([]));
+    expect(rows.find((r) => r.index === 0).coalition).toEqual({
+      members: MEMBERS,
+      sharedOwners: null,
+      coalition: null,
+    });
+  });
+
+  it("names each host's gate member only where the caller lists witness exactly one", () => {
+    const [hostA, hostB, hostC] = F[0].host_entities;
+    const gate = (address) => [
+      { function: "upgradeToAndCall(address,bytes)", controllers: [{ principals: [{ address }] }] },
+    ];
+    const functions = {
+      [hostA]: gate(MEMBERS[1]),
+      [hostB]: gate(MEMBERS[0]),
+      // hostC: two members both listed — ambiguous, so nothing is published.
+      [hostC]: [
+        {
+          function: "upgradeToAndCall(address,bytes)",
+          controllers: [{ principals: [{ address: MEMBERS[0] }, { address: MEMBERS[1] }] }],
+        },
+      ],
+    };
+    const rows = deductionRows(ETHERFI, buildContractIndex([]), functions);
+    expect(rows.find((r) => r.index === 0).hostGates).toEqual({
+      [hostA]: MEMBERS[1],
+      [hostB]: MEMBERS[0],
+    });
+  });
+
+  it("names no gates at all without the functions payload", () => {
+    expect(view.rows.find((r) => r.index === 0).hostGates).toEqual({});
   });
 });
 
@@ -230,7 +298,7 @@ describe("derive — rows and ledger", () => {
     expect(segments).toHaveLength(7);
     expect(segments.at(-1).id).toBe("tail");
     expect(segments.at(-1).title).toBe("22 more findings · −0.65");
-    expect(segments[0].title).toBe("Safe 4/8 · upgrade.implementation · −10.50");
+    expect(segments[0].title).toBe("2 Safes · shared keys · upgrade.implementation · −10.50");
     // Every segment plus the kept share accounts for the whole 100.
     const total = kept + segments.reduce((sum, s) => sum + s.basis, 0);
     expect(total).toBeCloseTo(100, 2);

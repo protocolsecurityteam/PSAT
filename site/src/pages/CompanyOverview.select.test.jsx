@@ -112,7 +112,7 @@ describe("CompanyOverview — score entities select on the embedded surface", ()
       chain: "ethereum",
       contractAddress: HOST,
       functionSignature: "setAuthority",
-      highlight: { functionSignature: "setAuthority", controller: CONTROLLER },
+      highlight: { functionSignature: "setAuthority", controllers: [CONTROLLER] },
     });
     expect(scrollIntoView).toHaveBeenCalledWith({ behavior: "smooth", block: "start" });
     expect(scrollIntoView.mock.instances[0]).toBe(document.querySelector(".company-surface-band"));
@@ -142,7 +142,7 @@ describe("CompanyOverview — score entities select on the embedded surface", ()
       chain: "ethereum",
       contractAddress: FIRST_TARGET,
       functionSignature: "",
-      highlight: { functionSignature: "setAuthority", controller: CONTROLLER },
+      highlight: { functionSignature: "setAuthority", controllers: [CONTROLLER] },
       // A transitive target also names where the reach started, so the surface
       // can walk (and show) the route the deduction only implies.
       reachedFrom: [HOST],

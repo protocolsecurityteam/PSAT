@@ -248,12 +248,13 @@ describe("ConfidenceZone — the table", () => {
     expect(grouped.textContent).not.toContain("removeAsset");
     expect(grouped.textContent).not.toContain("0xa4c5…6bb4");
 
-    // …and the three Safes are not published as EOAs.
-    const safes = rows.filter((r) => /^Safe /.test(r.querySelector(".sc-kchip").textContent));
+    // …and the three Safes are not published as EOAs. The last one is a merged
+    // unit (two principal_addresses), so its chip is the unit, not one k/n.
+    const safes = rows.filter((r) => /Safe/.test(r.querySelector(".sc-kchip").textContent));
     expect(safes.map((r) => r.querySelector(".sc-kchip").textContent)).toEqual([
       "Safe 2/5",
       "Safe 2/7",
-      "Safe 2/4",
+      "2 Safes · shared keys",
     ]);
     for (const safe of safes) expect(safe.querySelector(".scz-nprin")).toBeNull();
 
@@ -307,7 +308,7 @@ describe("ConfidenceZone — the proven half is the deductions row", () => {
         label: "setAuthority",
         highlight: {
           functionSignature: "setAuthority",
-          controller: "0xf8553c8552f906c19286f21711721e206ee4909e",
+          controllers: ["0xf8553c8552f906c19286f21711721e206ee4909e"],
         },
       }),
     );
