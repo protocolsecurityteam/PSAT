@@ -318,7 +318,13 @@ export function SurfaceCanvas({ machines, fundFlows, principals, chain = "ethere
       // deliberately draw NO edges: the cross-group dashed lines read as the
       // fanout spaghetti the owner-grouping removed, and the highlight alone
       // conveys the reach.
+      // primary_for is included because a grouped_with relocation can place a
+      // primary-owned contract in ANOTHER principal's box: its parentId no
+      // longer matches the owner, and passthrough-won contracts appear in
+      // primary_for without a direct `controls` row — without this the owner's
+      // own contract would neither chip nor un-dim.
       const reach = [
+        ...(Array.isArray(selPrincipal?.primary_for) ? selPrincipal.primary_for : []),
         ...(Array.isArray(selPrincipal?.controls) ? selPrincipal.controls : []),
         ...(Array.isArray(selPrincipal?.co_controls) ? selPrincipal.co_controls : []),
       ];

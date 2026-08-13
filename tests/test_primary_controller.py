@@ -335,6 +335,114 @@ def test_veto_only_caller_does_not_inherit_through_mediator():
     assert result[canceller] == []
 
 
+def test_partial_claim_coverage_does_not_read_as_veto_only():
+    """Review finding: the veto test must be per-function, not per-claim-union.
+    A caller holding cancel PLUS a claim-less privileged function on the
+    mediator is not proven veto-only — the unclaimed function's power is not
+    determined, so it keeps the legacy expansion."""
+    vault, tl = "0xc1", "0xtl"
+    canceller, prop = "0xbbb", "0xaaa"  # prop lex-smaller irrelevant; gating is the test
+    fp = {vault: {tl}, tl: {canceller, prop}}
+    detail = {
+        vault: [_fn({tl}, claims=["upgrade.implementation"])],
+        tl: [
+            _fn({canceller, prop}, claims=["timelock.cancel"]),
+            _fn({prop}, {"role_management"}),  # claim-less privileged row
+        ],
+    }
+    result = assign_primary_controllers(
+        [_p(canceller, "safe"), _p(prop, "safe")],
+        fp,
+        governance_passthrough={tl},
+        fp_function_detail_by_contract=detail,
+    )
+    assert sorted(result[prop]) == [vault, tl]
+    assert result[canceller] == []
+
+
+def test_proven_non_driver_does_not_inherit():
+    """Review finding: inheritance needs a positive driving witness, not just
+    'not cancel-only'. A caller whose complete claim coverage shows only
+    timelock.set_delay can tune the mediator but never make it act — it must
+    not inherit the mediator's governing tier."""
+    vault, tl = "0xc1", "0xtl"
+    delay_setter, driver = "0xaaa", "0xzzz"  # delay setter lex-smaller: gating must do the work
+    fp = {vault: {tl}, tl: {delay_setter, driver}}
+    detail = {
+        vault: [_fn({tl}, claims=["upgrade.implementation"])],
+        tl: [
+            _fn({delay_setter}, claims=["timelock.set_delay"]),
+            _fn({driver}, claims=["timelock.schedule", "timelock.execute"]),
+        ],
+    }
+    result = assign_primary_controllers(
+        [_p(delay_setter, "safe"), _p(driver, "safe")],
+        fp,
+        governance_passthrough={tl},
+        fp_function_detail_by_contract=detail,
+    )
+    assert sorted(result[driver]) == [vault, tl]
+    assert result[delay_setter] == []
+
+
+def test_whitelist_callers_do_not_inherit_through_mediator():
+    """Review finding: significance gating must hold one hop out. A mediator
+    whose own functions are a broad unprivileged whitelist anchors no primary
+    claim for its callers on the contracts it governs — otherwise the
+    lex-smallest whitelist member wins the vault the mediator can upgrade."""
+    vault, tl = "0xd1", "0xtl"
+    bidders = {f"0xb{i}" for i in range(6)}
+    fp = {vault: {tl}, tl: set(bidders)}
+    detail = {
+        vault: [_fn({tl}, claims=["upgrade.implementation"])],
+        tl: [_fn(bidders, {"external_contract_call"})],
+    }
+    result = assign_primary_controllers(
+        [_p(b, "safe") for b in bidders],
+        fp,
+        governance_passthrough={tl},
+        fp_function_detail_by_contract=detail,
+    )
+    assert all(result[b] == [] for b in bidders)
+
+
+def test_delegatecall_is_governing_tier():
+    """Review finding: delegatecall executes arbitrary code in the contract's
+    own storage context — it must rank governs (tier 3), above a role
+    granter."""
+    dc, granter = "0xzzz", "0xaaa"  # delegatecall holder lex-larger: tier must decide
+    fp = {"0xc1": {dc, granter}}
+    detail = {
+        "0xc1": [
+            _fn({dc}, {"delegatecall_execution"}),
+            _fn({granter}, claims=["roles.grant"]),
+        ]
+    }
+    result = assign_primary_controllers(
+        [_p(dc, "safe"), _p(granter, "safe")],
+        fp,
+        fp_function_detail_by_contract=detail,
+    )
+    assert result[dc] == ["0xc1"]
+    assert result[granter] == []
+
+
+def test_composite_detail_caller_tokens_still_gate():
+    """Review finding: the evidence fold must accept composite
+    ``<chain>::<address>`` caller tokens in the detail map — a keyspace
+    mismatch silently disabling the gates would let a whitelist bidder win."""
+    bidders = {f"eth::0xb{i}" for i in range(6)}
+    auction = "eth::0xauction"
+    fp = {auction: set(bidders)}
+    detail = {auction: [_fn(bidders, {"external_contract_call"})]}
+    result = assign_primary_controllers(
+        [_p(b.split("::")[1], "safe") for b in bidders],
+        fp,
+        fp_function_detail_by_contract=detail,
+    )
+    assert all(v == [] for v in result.values())
+
+
 def test_claimless_mediator_caller_still_inherits():
     """Veto gating needs a positive cancel-only witness. A mediator caller with
     no claim rows at all (stale data / degraded artifact) keeps the legacy

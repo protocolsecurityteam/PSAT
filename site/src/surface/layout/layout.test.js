@@ -330,6 +330,47 @@ describe("buildGraphLayout", () => {
     expect(group.data.headerHeight).toBe(groupHeaderHeight(controllers.length));
   });
 
+  it("lists a relocated member's true controller as a controller row in the operand box", () => {
+    // The grouped_with shape: ops Safe primary-owns ONLY the timelock, which
+    // renders inside gov's box via grouped_with. The accordion of gov's box
+    // must name the ops Safe (its only canvas footprint), scoped to the
+    // timelock, even though the timelock is in nobody-in-this-box's
+    // co_controls.
+    const gov = "0x" + "a1".repeat(20);
+    const ops = "0x" + "b2".repeat(20);
+    const tl = "0x" + "c3".repeat(20);
+    const core = "0x" + "d4".repeat(20);
+    const relMachines = [
+      { address: core, name: "Core", totalFunctions: 2 },
+      { address: tl, name: "OpsTimelock", totalFunctions: 1, grouped_with: gov },
+    ];
+    const relPrincipals = [
+      {
+        address: gov,
+        type: "safe",
+        primary_for: [core],
+        co_controls: [],
+        controls_detail: [{ address: core, functions: ["upgradeTo"], capabilities: ["upgrade"] }],
+      },
+      {
+        address: ops,
+        type: "safe",
+        primary_for: [tl],
+        co_controls: [],
+        controls_detail: [{ address: tl, functions: ["schedule", "execute"], capabilities: ["timelock"] }],
+      },
+    ];
+    const { nodes } = buildGraphLayout(relMachines, [], relPrincipals);
+    const group = nodes.find((n) => n.type === "group" && n.id === gov);
+    expect(group).toBeTruthy();
+    const opsRow = group.data.controllers.find((c) => c.address.toLowerCase() === ops);
+    expect(opsRow).toBeTruthy();
+    expect(opsRow.isPrimary).toBe(false);
+    expect(opsRow.governs).toHaveLength(1);
+    expect(opsRow.governs[0].address).toBe(tl);
+    expect(opsRow.governs[0].functions).toEqual(["schedule", "execute"]);
+  });
+
   it("reserves each group's measured band height verbatim so cards start below it", () => {
     const principals = ETHERFI_COMPANY_RICH.resolved_principals.map((p) => ({
       address: p.address,

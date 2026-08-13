@@ -85,4 +85,55 @@ describe("SurfaceCanvas — principal selection claims only real authority", () 
     expect(placed.style?.opacity).toBe(0.2);
     expect(nodeFor(OUTSIDE).style?.opacity).toBe(0.2);
   });
+
+  it("still chips a primary-owned contract relocated into another principal's box", async () => {
+    // Inverse of the placement case: OWNED is in the EOA's primary_for but a
+    // grouped_with override renders it inside G2's box. Selecting the EOA
+    // must still chip and un-dim it — primary_for IS authority, wherever the
+    // contract renders.
+    const G2 = "0x" + "5e".repeat(20);
+    const relocatedMachines = [
+      machine(OWNED, "Solver", { grouped_with: G2 }),
+      machine(PLACED, "QueueMate"),
+      machine(OUTSIDE, "Unrelated"),
+    ];
+    const relocatedPrincipals = [
+      {
+        address: EOA,
+        type: "eoa",
+        primary_for: [OWNED],
+        controls: [],
+        co_controls: [],
+        controls_detail: [{ address: OWNED, chain: "ethereum", functions: ["solve"], capabilities: [] }],
+      },
+      {
+        address: G2,
+        type: "safe",
+        primary_for: [PLACED],
+        controls: [PLACED],
+        co_controls: [],
+        controls_detail: [],
+      },
+    ];
+    render(
+      <SurfaceCanvas
+        machines={relocatedMachines}
+        fundFlows={[]}
+        principals={relocatedPrincipals}
+        chain="ethereum"
+        selectedAddress={EOA}
+        onSelectMachine={() => {}}
+        onSelectPrincipal={() => {}}
+      />,
+    );
+    await waitFor(() => expect(nodeFor(OWNED)).toBeTruthy());
+
+    const owned = nodeFor(OWNED);
+    // Renders inside G2's box, not the EOA's…
+    expect(owned.parentId?.toLowerCase()).toBe(G2.toLowerCase());
+    // …but selecting the EOA still claims it: chipped, not dimmed.
+    expect(owned.data.selectionChip?.out).toBeTruthy();
+    expect(owned.style?.opacity).not.toBe(0.2);
+    expect(nodeFor(OUTSIDE).style?.opacity).toBe(0.2);
+  });
 });

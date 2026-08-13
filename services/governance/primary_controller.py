@@ -120,23 +120,16 @@ def function_capabilities(labels: Iterable[str], claim_ids: Iterable[str]) -> se
 
 
 # Authority tiers for the primary contest. Tier 3 ("governs"): can replace the
-# contract's code or reassign who controls it — upgrade / ownership / authority
-# capabilities, or driving a timelock (schedule/execute claims: the driver of a
-# timelock exercises everything the timelock owns). Tier 2 ("grants"): can
-# grant or revoke access. Tier 1 ("operates"): everything else — pause,
-# fund recovery, whitelists, parameter setters. An operational Safe with rights
-# on many contracts must never outrank the contract's actual owner, which is
-# what the old portfolio-count tiebreak allowed.
-_GOVERNING_CAPS: frozenset[str] = frozenset({"upgrade", "ownership", "authority", "arbitrary-call"})
+# contract's code or reassign who controls it — upgrade / ownership / authority /
+# delegatecall capabilities, or driving a timelock (schedule/execute claims: the
+# driver of a timelock exercises everything the timelock owns). Tier 2
+# ("grants"): can grant or revoke access. Tier 1 ("operates"): everything else —
+# pause, fund recovery, whitelists, parameter setters. An operational Safe with
+# rights on many contracts must never outrank the contract's actual owner, which
+# is what the old portfolio-count tiebreak allowed.
+_GOVERNING_CAPS: frozenset[str] = frozenset({"upgrade", "ownership", "authority", "arbitrary-call", "delegatecall"})
 _GRANTING_CAPS: frozenset[str] = frozenset({"roles"})
 _GOVERNING_CLAIMS: frozenset[str] = frozenset({"timelock.schedule", "timelock.execute"})
-
-# A caller whose proven claims on a governance mediator are cancel-only holds a
-# veto, not control: it cannot make the mediator act, so it must not inherit the
-# mediator's authority over the contracts the mediator governs. Exclusion needs
-# this positive witness — a caller with no claim data keeps the legacy
-# expansion, because absence of claims is not proof of veto-only.
-_VETO_ONLY_CLAIMS: frozenset[str] = frozenset({"timelock.cancel"})
 
 
 def _authority_tier(caps: set[str], claim_ids: set[str]) -> int:
@@ -197,8 +190,11 @@ def assign_primary_controllers(
     *fp_function_detail_by_contract* — per contract key (same keyspace as
     *fp_addrs_by_contract*), the per-function ``{"callers": set, "labels": set,
     "claims": [claim_id, ...]}`` rows (the ``fp_function_detail`` projection).
-    Supplies the evidence for two rank refinements; ``None`` degrades both to
-    the evidence-free default:
+    Caller values may be bare addresses (what the projection emits) or
+    composite entity tokens — both are normalized to bare for the evidence
+    lookups, so either convention matches the FP graph's caller tokens.
+    Supplies the evidence for the rank refinements below; ``None`` degrades
+    all of them to the evidence-free default:
 
     * **Authority tier.** Each eligible principal is ranked by the strongest
       capability it provably holds on the contested contract
@@ -208,16 +204,22 @@ def assign_primary_controllers(
       paths wins. No detail ⇒ every candidate ranks tier 1 — absence of a
       proven capability is not proof of one, so nothing outranks anything.
 
-    * **Veto gating.** A mediator caller whose claims on the mediator are
-      cancel-only (:data:`_VETO_ONLY_CLAIMS`) can only block the mediator, not
-      drive it, so the walk does not expand through the mediator to it. The
-      exclusion requires that positive witness: a caller with no claim rows on
-      the mediator expands as before.
+    * **Driver gating.** The walk expands through a mediator only to callers
+      that can make it act (:func:`_can_inherit_through`): a proven driving
+      function — timelock schedule/execute claims, or a governing/granting
+      capability on the mediator — or a claim-less function whose power is
+      not determined. A caller every one of whose mediator functions is
+      proven non-driving (a cancel-only veto, a delay setter) can block the
+      mediator but never wield what it owns, so it inherits nothing. Callers
+      with no rows at all expand as before — absence of evidence excludes
+      nothing.
 
     * **Significance gating.** A caller whose proven functions on a contract
       are all insignificant — not privileged and shared wider than the
       co-controller gate threshold (a broad whitelist like ``createBid``) —
-      is not primary-eligible for that contract at all. Same two-arm test as
+      is not primary-eligible for that contract at all, and the same bar
+      applies to inheriting through a mediator (a whitelist on the mediator
+      anchors nothing one hop out either). Same two-arm test as
       :func:`assign_co_controllers`, so primary eligibility is a subset of
       real-authority. Callers with no detail rows stay eligible.
 
@@ -243,27 +245,46 @@ def assign_primary_controllers(
     passthrough = {(a or "").lower() for a in (governance_passthrough or ())}
 
     # Per (contract_lc, caller_addr_lc): the capabilities and claim ids the
-    # caller holds across that contract's functions (the tier/veto evidence),
-    # plus whether any of those functions is *significant* — privileged or
-    # tightly gated, the same two arms :func:`assign_co_controllers` uses. A
-    # caller whose proven functions on a contract are all insignificant (a
-    # broad whitelist like ``createBid``) holds no governance there and must
-    # not be primary-eligible: with the portfolio-count tiebreak gone, an
-    # arbitrary lex-smallest bidder would otherwise win the box.
+    # caller holds across that contract's functions (the tier evidence), plus
+    # two per-pair facts the gates below read. Caller keys are normalized
+    # through ``_addr_of`` so composite ``<chain>::<address>`` caller tokens in
+    # the detail map key identically to the bare addresses the projection
+    # emits today — a keyspace mismatch must not silently disable the gates.
+    #
+    # *significant_on* — the caller holds at least one significant function:
+    # privileged or tightly gated, the same two arms
+    # :func:`assign_co_controllers` uses. A caller whose proven functions on a
+    # contract are all insignificant (a broad whitelist like ``createBid``)
+    # holds no governance there and must not be primary-eligible: with the
+    # portfolio-count tiebreak gone, an arbitrary lex-smallest bidder would
+    # otherwise win the box.
+    #
+    # *driver_on* — the caller can provably MAKE the contract act (a
+    # timelock.schedule/execute claim, or a governing/granting capability), or
+    # holds a claim-less function whose power is therefore not determined.
+    # What stays out is a caller every one of whose functions is proven
+    # non-driving — cancel-only vetoes, delay setters — which can block or
+    # tune a mediator but never wield what it owns.
     caps_on: dict[tuple[str, str], set[str]] = {}
     claims_on: dict[tuple[str, str], set[str]] = {}
     with_rows: set[tuple[str, str]] = set()
     significant_on: set[tuple[str, str]] = set()
+    driver_on: set[tuple[str, str]] = set()
     for contract_addr, functions in (fp_function_detail_by_contract or {}).items():
         c_lc = contract_addr.lower()
         for fn in functions:
             fn_claims = {c for c in fn.get("claims") or () if isinstance(c, str) and c}
             labels_lc = {(label or "").lower() for label in fn.get("labels") or ()}
             fn_caps = function_capabilities(labels_lc, fn_claims)
-            callers = {(a or "").lower() for a in fn.get("callers", ())} - {""}
+            callers = {_addr_of((a or "").lower()) for a in fn.get("callers", ())} - {""}
             significant = (
                 _function_is_privileged(list(fn_claims), labels_lc, PRIVILEGED_EFFECT_LABELS)
                 or len(callers) <= _MAX_GATE_CALLERS
+            )
+            drives = (
+                not fn_claims  # claim-less row: driving power not determined
+                or bool(fn_claims & _GOVERNING_CLAIMS)
+                or bool(fn_caps & (_GOVERNING_CAPS | _GRANTING_CAPS))
             )
             for la in callers:
                 caps_on.setdefault((c_lc, la), set()).update(fn_caps)
@@ -271,6 +292,8 @@ def assign_primary_controllers(
                 with_rows.add((c_lc, la))
                 if significant:
                     significant_on.add((c_lc, la))
+                if drives:
+                    driver_on.add((c_lc, la))
 
     def _tier_on(contract_lc: str, caller_token: str) -> int:
         key = (contract_lc, _addr_of(caller_token))
@@ -284,18 +307,29 @@ def assign_primary_controllers(
         key = (contract_lc, _addr_of(caller_token))
         return key in significant_on or key not in with_rows
 
-    def _vetoed(mediator_lc: str, caller_token: str) -> bool:
-        claims = claims_on.get((mediator_lc, _addr_of(caller_token)), set())
-        return bool(claims) and claims <= _VETO_ONLY_CLAIMS
+    def _can_inherit_through(mediator_lc: str, caller_token: str) -> bool:
+        """Whether the caller inherits the mediator's authority over what the
+        mediator governs. Needs the same significance a direct primary claim
+        needs (a broad whitelist on the mediator anchors nothing one hop out
+        either), plus driving evidence: a proven driver function, or a
+        claim-less one whose power is not determined. A caller whose every
+        function on the mediator is proven non-driving (cancel-only veto,
+        delay setter) can block the mediator, never act through it. No rows
+        at all ⇒ legacy expansion — absence of evidence excludes nothing."""
+        key = (mediator_lc, _addr_of(caller_token))
+        if key not in with_rows:
+            return True
+        return key in significant_on and key in driver_on
 
     def _effective_controllers(contract_lc: str) -> dict[str, int]:
         """Terminal controllers of *contract_lc* with the best authority tier
         each holds there: direct FP callers at their own tier, and — for any
         caller that is itself a ``passthrough`` governance contract — its
-        non-vetoed callers at the *mediator's* tier (the mediator is the thing
-        acting on the contract; its driver wields that same authority).
-        Depth-bounded; re-visiting only on a strictly better tier both breaks
-        cycles and keeps the best tier across multiple governance paths."""
+        inheriting callers (see :func:`_can_inherit_through`) at the
+        *mediator's* tier (the mediator is the thing acting on the contract;
+        its driver wields that same authority). Depth-bounded; re-visiting
+        only on a strictly better tier both breaks cycles and keeps the best
+        tier across multiple governance paths."""
         best: dict[str, int] = {}
         stack: list[tuple[str, int, int]] = [
             (a, _tier_on(contract_lc, a), 1)
@@ -311,7 +345,7 @@ def assign_primary_controllers(
                 stack.extend(
                     (nxt, tier, depth + 1)
                     for nxt in fp_graph.get(addr, ())
-                    if best.get(nxt, 0) < tier and not _vetoed(addr, nxt)
+                    if best.get(nxt, 0) < tier and _can_inherit_through(addr, nxt)
                 )
         return best
 
@@ -391,10 +425,11 @@ def assign_operand_render_groups(
       few operands live elsewhere. A tie emits nothing.
 
     ``primary_for`` itself is untouched: the controller keeps the contract for
-    enrollment, the Controllers accordion, and every authority claim — inside
-    the operand group it simply reads as a co-controller row, which is what it
-    is. Operand homes are taken from ``primary_for`` alone (never from other
-    overrides), so placement is single-pass and order-independent.
+    enrollment and every authority claim, and the operand group's Controllers
+    accordion lists it as a controller row (the frontend's group-controller
+    fold reads ``primary_for`` as well as ``co_controls`` for exactly this
+    case). Operand homes are taken from ``primary_for`` alone (never from
+    other overrides), so placement is single-pass and order-independent.
 
     All inputs share one keyspace (bare or composite entity keys, as in
     :func:`assign_primary_controllers`). *contract_keys* is the set of

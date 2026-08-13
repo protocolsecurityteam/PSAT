@@ -293,9 +293,18 @@ function buildGroupControllers(primary, kids, principalList, nameByAddr, chain =
     const qLc = q.address?.toLowerCase();
     if (!qLc || qLc === primaryAddrLc) continue;
     const co = Array.isArray(q.co_controls) ? q.co_controls : [];
-    if (!co.some((c) => childSet.has(c?.toLowerCase()))) continue;
+    // primary_for counts too: a grouped_with machinery contract renders in
+    // this box while ANOTHER principal primary-controls it — that controller
+    // must appear as a controller row here (it may have no other canvas
+    // footprint at all when this was its only owned contract).
+    const owns = Array.isArray(q.primary_for) ? q.primary_for : [];
+    if (
+      !co.some((c) => childSet.has(c?.toLowerCase())) &&
+      !owns.some((c) => childSet.has(c?.toLowerCase()))
+    )
+      continue;
     const row = rowFor(q, false);
-    // co_controls says it has authority here; if we have no verified
+    // The authority list says it has rights here; if we have no verified
     // function detail for any of this group's contracts there's nothing to
     // show, so skip the empty row rather than render "governs 0".
     if (row.governs.length === 0) continue;
