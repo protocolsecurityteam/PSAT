@@ -54,11 +54,19 @@ describe("derive — principals", () => {
     expect(principalChip(F[1])).toEqual({ kind: "safe", label: "Safe 4/6" });
   });
 
-  it("chips a merged unit as the unit, never as one member's k/n", () => {
+  it("chips a merged unit with every member's own k/n, never one member's alone", () => {
     // finding 0's display string says "Safe 4/8" but principal_addresses lists
-    // two Safes (the other is 3/7) — a k/n chip would attribute the whole
-    // unit's power to whichever member the string happened to name.
+    // two Safes (the other is 3/7) — a single k/n chip would attribute the
+    // whole unit's power to whichever member the string happened to name. The
+    // member shapes come off the overlap table, in principal_addresses order.
     expect(F[0].principal_addresses).toHaveLength(2);
+    expect(principalChip(F[0], ETHERFI)).toEqual({
+      kind: "safe",
+      label: "Safes 3/7 + 4/8 · shared keys",
+      merged: true,
+    });
+    // With no document (so no overlap table) the chip counts members rather
+    // than dropping the merge or guessing a shape.
     expect(principalChip(F[0])).toEqual({ kind: "safe", label: "2 Safes · shared keys", merged: true });
   });
 
@@ -298,7 +306,7 @@ describe("derive — rows and ledger", () => {
     expect(segments).toHaveLength(7);
     expect(segments.at(-1).id).toBe("tail");
     expect(segments.at(-1).title).toBe("22 more findings · −0.65");
-    expect(segments[0].title).toBe("2 Safes · shared keys · upgrade.implementation · −10.50");
+    expect(segments[0].title).toBe("Safes 3/7 + 4/8 · shared keys · upgrade.implementation · −10.50");
     // Every segment plus the kept share accounts for the whole 100.
     const total = kept + segments.reduce((sum, s) => sum + s.basis, 0);
     expect(total).toBeCloseTo(100, 2);

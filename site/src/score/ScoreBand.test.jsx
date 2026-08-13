@@ -80,7 +80,7 @@ describe("ScoreBand — computed grade", () => {
     // kept + 6 deduction segments + the sub-0.4pt tail
     expect(container.querySelectorAll(".sc-ledger-seg")).toHaveLength(8);
     expect(container.querySelector(".sc-ledger-seg.sc-ded").getAttribute("title")).toBe(
-      "2 Safes · shared keys · upgrade.implementation · −10.50",
+      "Safes 3/7 + 4/8 · shared keys · upgrade.implementation · −10.50",
     );
   });
 
@@ -99,7 +99,7 @@ describe("ScoreBand — computed grade", () => {
       ).toBeTruthy();
     }
     expect(row.querySelector(".sc-coalition").textContent).toBe(
-      "2 Safes merged: share 5 owner keys — 4 of them can act as both · scored as one power",
+      "share 5 owner keys — 4 of them can act as both",
     );
     // No coalition line on a single-member row.
     expect(container.querySelectorAll(".sc-frow")[6].querySelector(".sc-coalition")).toBeNull();
@@ -653,7 +653,6 @@ describe("ScoreBand — entities select on the surface", () => {
     const { container } = renderBand({ score: ETHERFI, onSelectEntity });
     await openBreakdown();
     const row = container.querySelectorAll(".sc-frow")[0];
-    expect(row.textContent).toContain("3 functions");
     const targets = row.querySelector(".sc-targets");
     await userEvent.setup().click(within(targets).getAllByRole("button")[0]);
     const { highlight } = onSelectEntity.mock.calls[0][0];

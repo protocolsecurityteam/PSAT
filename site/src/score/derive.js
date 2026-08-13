@@ -68,19 +68,40 @@ export function timelockProposer(finding) {
   return null;
 }
 
+// Each merged member's own k/n, read off the overlap table — the display
+// string carries only one member's shape. null when any member's shape is not
+// witnessed there; the chip then counts members instead of guessing one.
+function memberShapes(doc, finding, members) {
+  const shapes = new Map();
+  for (const overlap of doc?.provenance?.safe_keyset_overlaps || []) {
+    if (overlap?.a && overlap?.a_k_of_n) shapes.set(overlap.a, overlap.a_k_of_n);
+    if (overlap?.b && overlap?.b_k_of_n) shapes.set(overlap.b, overlap.b_k_of_n);
+  }
+  const out = members.map((member) => shapes.get(entityKey(finding?.chain, member)));
+  return out.every(Boolean) ? out : null;
+}
+
 // Short chip: the shape of the principal, parsed from the display string.
 // (A structured principal_shape on the document would remove the regex; it
 // does not exist yet, and the string is the only witness of k/n and delay.)
-export function principalChip(finding) {
+export function principalChip(finding, doc = null) {
   const kind = finding?.principal_kind || "";
   if (kind === "eoa") return { kind, label: "EOA" };
   if (kind === "anyone") return { kind, label: "Anyone" };
   if (kind === "safe") {
     // A merged unit's display string names one member and that member's k/n —
     // a chip built from it would attribute the whole unit's power to one Safe.
+    // Every member keeps its signer shape, in principal_addresses order.
     const members = principalAddresses(finding);
     if (members.length > 1) {
-      return { kind, label: `${members.length} Safes · shared keys`, merged: true };
+      const shapes = doc ? memberShapes(doc, finding, members) : null;
+      return {
+        kind,
+        label: shapes
+          ? `Safes ${shapes.join(" + ")} · shared keys`
+          : `${members.length} Safes · shared keys`,
+        merged: true,
+      };
     }
     const shape = safeShape(finding);
     return { kind, label: shape ? `Safe ${shape.k}/${shape.n}` : "Safe" };
@@ -222,13 +243,12 @@ export function sheetDisposition(finding) {
 
 // ── functions / targets ─────────────────────────────────────────────────────
 
+// The example function alone. The row's n_functions count used to render
+// beside it ("upgradeToAndCall · 3 functions") and was cut for space — the
+// count survives on the finding for any consumer that needs it.
 export function functionsLabel(finding) {
-  const parts = [];
   const example = (finding?.example_functions || [])[0];
-  if (example) parts.push(example);
-  const n = Number(finding?.n_functions);
-  if (Number.isFinite(n) && n > 1) parts.push(`${n} functions`);
-  return parts;
+  return example ? [example] : [];
 }
 
 // entity → contract, plus the implementation→proxy alias. A finding can reach a
@@ -382,7 +402,7 @@ export function deductionRows(doc, index, functions = null) {
       finding,
       raw: entry.raw,
       net,
-      chip: principalChip(finding),
+      chip: principalChip(finding, doc),
       capability: finding?.capability || "",
       controller: controllerAddress(finding),
       // Every member of the (possibly merged) unit — principal_addresses[] is
@@ -678,7 +698,7 @@ export function protectionRows(doc, limit = PROTECTION_ROWS) {
       finding,
       delta,
       net: netByIndex.get(index) ?? 0,
-      chip: principalChip(finding),
+      chip: principalChip(finding, doc),
       // The principal's own address, so the row's kind chip selects the Safe or
       // timelock it names on the surface — the same pathway the deduction rows'
       // controller chips use.

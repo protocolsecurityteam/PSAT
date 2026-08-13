@@ -254,7 +254,7 @@ describe("ConfidenceZone — the table", () => {
     expect(safes.map((r) => r.querySelector(".sc-kchip").textContent)).toEqual([
       "Safe 2/5",
       "Safe 2/7",
-      "2 Safes · shared keys",
+      "Safes 2/4 + 2/4 · shared keys",
     ]);
     for (const safe of safes) expect(safe.querySelector(".scz-nprin")).toBeNull();
 

@@ -22,18 +22,14 @@ function SheetDispositionBadge({ disposition }) {
   );
 }
 
-// Why several Safes share one row: the overlap table proved a shared-key
-// coalition can act as each of them, so splitting them would present as
-// independent the gates the merge proved are one power. Figures render only
-// when a single witnessed overlap record carries them.
+// The key-sharing figures behind a merged row's chip, rendered only when a
+// single witnessed overlap record carries them — the chip already says the
+// Safes share keys, so an unfigured note would just repeat it.
 function CoalitionNote({ coalition }) {
-  if (!coalition) return null;
-  const { members, sharedOwners, coalition: acting } = coalition;
+  if (!coalition || coalition.sharedOwners === null || coalition.coalition === null) return null;
   return (
     <div className="sc-coalition">
-      {sharedOwners !== null && acting !== null
-        ? `${members.length} Safes merged: share ${sharedOwners} owner keys — ${acting} of them can act as both · scored as one power`
-        : `${members.length} Safes merged: shared owner keys · scored as one power`}
+      share {coalition.sharedOwners} owner keys — {coalition.coalition} of them can act as both
     </div>
   );
 }
