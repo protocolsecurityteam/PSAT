@@ -97,33 +97,6 @@ describe("derive — merged principal units", () => {
     const single = view.rows.find((r) => r.index === 6);
     expect(single.controllers).toEqual([single.controller]);
   });
-
-  it("names each host's gate member only where the caller lists witness exactly one", () => {
-    const [hostA, hostB, hostC] = F[0].host_entities;
-    const gate = (address) => [
-      { function: "upgradeToAndCall(address,bytes)", controllers: [{ principals: [{ address }] }] },
-    ];
-    const functions = {
-      [hostA]: gate(MEMBERS[1]),
-      [hostB]: gate(MEMBERS[0]),
-      // hostC: two members both listed — ambiguous, so nothing is published.
-      [hostC]: [
-        {
-          function: "upgradeToAndCall(address,bytes)",
-          controllers: [{ principals: [{ address: MEMBERS[0] }, { address: MEMBERS[1] }] }],
-        },
-      ],
-    };
-    const rows = deductionRows(ETHERFI, buildContractIndex([]), functions);
-    expect(rows.find((r) => r.index === 0).hostGates).toEqual({
-      [hostA]: MEMBERS[1],
-      [hostB]: MEMBERS[0],
-    });
-  });
-
-  it("names no gates at all without the functions payload", () => {
-    expect(view.rows.find((r) => r.index === 0).hostGates).toEqual({});
-  });
 });
 
 describe("derive — value cell", () => {

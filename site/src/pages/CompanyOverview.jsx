@@ -232,7 +232,6 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
         contracts={contracts}
         score={score}
         error={scoreError}
-        functions={functionData}
         onSelectEntity={handleSelectEntity}
       />
 

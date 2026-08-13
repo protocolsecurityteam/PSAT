@@ -348,12 +348,10 @@ h2.sc-band-title {
 .sc-cap-pop b { color: var(--ink); font-weight: 600; }
 .sc-who .sc-addr { color: var(--faint); font-size: 11px; overflow: hidden; text-overflow: ellipsis; }
 
-/* The controllers line under the actor row, and the per-host gate suffix in
-   the target list: quiet like the not-determined prose, but not italic — these
-   are witnessed facts, not absences. */
+/* The controllers line under the actor row: quiet like the not-determined
+   prose, but not italic — these are witnessed facts, not absences. */
 .sc-controllers { margin-top: 2px; font-size: 11px; color: var(--faint); }
 .sc-controllers-label { color: var(--muted); }
-.sc-targets .sc-gate { color: var(--faint); font-size: 11px; }
 
 .sc-fbar { height: 8px; position: relative; margin-top: 4px; }
 

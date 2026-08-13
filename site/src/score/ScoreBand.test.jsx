@@ -105,36 +105,6 @@ describe("ScoreBand — computed grade", () => {
     expect(single.querySelector(".sc-controllers-label").textContent).toBe("controller:");
   });
 
-  it("annotates each host with its witnessed gate member when the caller lists are supplied", async () => {
-    const members = ETHERFI.findings[0].principal_addresses;
-    const hosts = ETHERFI.findings[0].host_entities;
-    const functions = {
-      [hosts[0]]: [
-        {
-          function: "upgradeToAndCall(address,bytes)",
-          controllers: [{ principals: [{ address: members[1] }] }],
-        },
-      ],
-      [hosts[1]]: [
-        {
-          function: "upgradeToAndCall(address,bytes)",
-          controllers: [{ principals: [{ address: members[0] }] }],
-        },
-      ],
-    };
-    const { container } = renderBand({ score: ETHERFI, functions });
-    await openBreakdown();
-    const targets = container.querySelectorAll(".sc-frow")[0].querySelector(".sc-targets");
-    const gates = [...targets.querySelectorAll(".sc-gate")].map((el) => el.textContent);
-    expect(gates).toEqual([
-      ` (gate ${members[1].slice(0, 6)}…${members[1].slice(-4)})`,
-      ` (gate ${members[0].slice(0, 6)}…${members[0].slice(-4)})`,
-    ]);
-    // The third host's gate was not witnessed by the payload — not determined
-    // stays absent rather than defaulting to any member.
-    expect(targets.querySelectorAll(".sc-host")).toHaveLength(3);
-  });
-
   it("keeps the breakdown collapsed until asked", async () => {
     const { container } = renderBand({ score: ETHERFI });
     expect(container.querySelector(".score-breakdown")).toBeNull();

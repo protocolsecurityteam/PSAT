@@ -311,38 +311,6 @@ export function undeterminedTargets(finding, index) {
   );
 }
 
-// ── merged principal units ──────────────────────────────────────────────────
-
-function bareName(signature) {
-  return String(signature || "").split("(")[0];
-}
-
-// host entity → the unit member witnessed as that host's gate, read off the
-// surface functions payload (the same caller lists the cards render). An entry
-// is published only when the payload names exactly one member for the row's
-// example function on that host — several or none is not_determined and stays
-// absent rather than guessing.
-export function hostGates(finding, functionsByEntity) {
-  const members = principalAddresses(finding);
-  const example = (finding?.example_functions || [])[0];
-  if (!example || members.length < 2 || !functionsByEntity) return {};
-  const out = {};
-  for (const entity of finding?.host_entities || []) {
-    const gates = new Set();
-    for (const fn of functionsByEntity[entity] || []) {
-      if (bareName(fn?.function) !== example) continue;
-      for (const controller of fn?.controllers || []) {
-        for (const principal of controller?.principals || []) {
-          const address = String(principal?.address || "").toLowerCase();
-          if (members.includes(address)) gates.add(address);
-        }
-      }
-    }
-    if (gates.size === 1) out[entity] = [...gates][0];
-  }
-  return out;
-}
-
 // ── deduction rows ──────────────────────────────────────────────────────────
 
 // spec §3.2 pins the row's points to −net_points_lambda. The re-fold reproduces
@@ -355,7 +323,7 @@ function publishedNet(finding, refolded) {
   return typeof published === "number" && Number.isFinite(published) ? published : null;
 }
 
-export function deductionRows(doc, index, functions = null) {
+export function deductionRows(doc, index) {
   const findings = doc?.findings || [];
   const ranked = rankedFindings(findings);
   const maxRaw = ranked.reduce((max, r) => (r.raw === null ? max : Math.max(max, r.raw)), 0);
@@ -389,7 +357,6 @@ export function deductionRows(doc, index, functions = null) {
       // row shown under that one address alone attributes the other members'
       // gates to it.
       controllers: principalAddresses(finding),
-      hostGates: hostGates(finding, functions),
       functions: functionsLabel(finding),
       exampleFunction: (finding?.example_functions || [])[0] || null,
       value: valueCell(finding),
@@ -794,9 +761,9 @@ export function confidenceChannels(doc) {
 
 // ── the whole projection ────────────────────────────────────────────────────
 
-export function projectScore(doc, contracts, functions = null) {
+export function projectScore(doc, contracts) {
   const index = buildContractIndex(contracts);
-  const rows = deductionRows(doc, index, functions);
+  const rows = deductionRows(doc, index);
   // A withheld grade is the producer refusing to publish λ. Reconstructing it
   // from the raw points would republish the exact quantity that was withheld,
   // so in that state the page holds no λ and nothing derived from one — no

@@ -7,7 +7,6 @@
 import { Fragment, useState } from "react";
 
 import EntityButton from "./EntityButton.jsx";
-import { shortAddress } from "./format.js";
 
 export const TARGETS_SHORT = 3;
 
@@ -120,10 +119,6 @@ export function TargetList({ row, onSelect }) {
           relationship that must not read as more direct calls. */}
       {shownHosts.map((host, i) => {
         const label = host.name || host.short;
-        // On a merged-unit row each host names its own witnessed gate member
-        // (from the surface caller lists) — without it the row's controllers
-        // read as if every member gated every host. Absent = not determined.
-        const gate = (row.controllers?.length || 0) > 1 ? row.hostGates?.[host.entity] : null;
         return (
           <span key={host.canonical} className="sc-host">
             {i > 0 && " · "}
@@ -134,7 +129,6 @@ export function TargetList({ row, onSelect }) {
             >
               {host.name ? <b>{host.name}</b> : null} {host.short}
             </EntityButton>
-            {gate && <span className="sc-gate"> (gate {shortAddress(gate)})</span>}
           </span>
         );
       })}

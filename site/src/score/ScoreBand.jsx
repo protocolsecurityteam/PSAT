@@ -76,18 +76,16 @@ function WithheldBanner({ doc }) {
   );
 }
 
-export default function ScoreBand({ companyName, contracts, score, error, functions = null, onSelectEntity }) {
+export default function ScoreBand({ companyName, contracts, score, error, onSelectEntity }) {
   const [open, setOpen] = useState(false);
   const bandRef = useRef(null);
   // Branch on grade_state before any grade field is read: in the withheld state
   // grade_lambda / grade_exposure / confidence_pct are null and the findings do
   // not carry net_points_lambda at all.
   const state = error ? "error" : !score ? "loading" : score.grade_state || "absent";
-  // `functions` (the surface's own caller lists) lets a merged-unit row name
-  // each host's witnessed gate member; absent, those annotations stay off.
   const view = useMemo(
-    () => (score && score.findings ? projectScore(score, contracts, functions) : null),
-    [score, contracts, functions],
+    () => (score && score.findings ? projectScore(score, contracts) : null),
+    [score, contracts],
   );
 
   // A `#score` hash is a request to land ON the breakdown, open — the surface
