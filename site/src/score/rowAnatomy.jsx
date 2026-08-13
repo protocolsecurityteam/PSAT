@@ -1,8 +1,9 @@
 // The anatomy of a score-page row: who acts, on what, and how far it reaches.
-// Lifted out of Deductions.jsx so the confidence zone's "proven" cell is the
-// SAME components rather than a second reading of the same fields — an entity
-// click has to mean one thing on this page, and a row that renders its targets
-// twice will eventually render them two different ways.
+// Lifted out of Deductions.jsx so the protections panel and the confidence
+// zone's "proven" cell are the SAME components rather than second readings of
+// the same fields — an entity click has to mean one thing on this page, and a
+// row that renders its targets twice will eventually render them two
+// different ways.
 
 import { Fragment, useState } from "react";
 
@@ -38,11 +39,17 @@ export function KindChip({ chip, chain, controller, onSelect }) {
       </span>
     );
   }
-  const props = entityProps({
-    onSelect,
-    target: { chain, address: controller, label: chip.label },
-    title: controller ? `Show ${shortAddress(controller)} on the control surface` : undefined,
-  });
+  // A merged chip whose member shapes are unwitnessed has no honest single
+  // target: the one address on hand is an arbitrary member, and clicking it
+  // under the unit's label would attribute the whole unit's power to one Safe
+  // — the exact misattribution the member handles exist to prevent.
+  const props = chip.merged
+    ? null
+    : entityProps({
+        onSelect,
+        target: { chain, address: controller, label: chip.label },
+        title: controller ? `Show ${shortAddress(controller)} on the control surface` : undefined,
+      });
   return (
     <span className={`sc-kchip sc-kchip-${chip.kind}${props ? " sc-lnk" : ""}`} {...(props || {})}>
       {chip.label}
@@ -62,38 +69,36 @@ export function highlightHint(row) {
   return { functionSignature: row.exampleFunction || "", controllers };
 }
 
-// The row's action line: the example function, the count of the ones it stands
-// for, and the address(es) holding the permission. `controllers` is a list
-// because one row can speak for several holders of an identical gap; on a
-// single-holder row it is the one controller the principal string names.
+// The row's action line: the example function and, on rows that aggregate
+// several holders of one identical gap (the possible-deductions table), the
+// addresses holding the permission.
 export function ActorLine({ row, controllers = [], onSelect }) {
   // The function click names its host when the document does: a single-host
   // row selects that contract and marks the function/controller pair on it.
   // A multi-host row's displayed example could live on any of them, so the
   // click stays name-only and the surface graph resolves or declines.
   const host = row.hosts.length === 1 ? row.hosts[0] : null;
-  const detail = row.functions.map((part) =>
-    part === row.exampleFunction ? (
+  const detail = [];
+  if (row.exampleFunction) {
+    detail.push(
       <EntityButton
-        key={part}
+        key={row.exampleFunction}
         onSelect={onSelect}
         target={{
           chain: host?.chain || row.finding?.chain,
           ...(host ? { address: host.address } : {}),
-          functionSignature: part,
-          label: part,
+          functionSignature: row.exampleFunction,
+          label: row.exampleFunction,
           // The controller rides along so the resolved row can mark the caller
           // chip too — the row names an action AND who can take it.
           highlight: highlightHint(row),
         }}
-        title={`Show ${part} on the control surface`}
+        title={`Show ${row.exampleFunction} on the control surface`}
       >
-        {part}
-      </EntityButton>
-    ) : (
-      <span key={part}>{part}</span>
-    ),
-  );
+        {row.exampleFunction}
+      </EntityButton>,
+    );
+  }
   for (const controller of controllers) {
     detail.push(
       <EntityButton

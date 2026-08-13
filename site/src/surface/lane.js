@@ -210,7 +210,7 @@ export function findFunctionMatches(machines, target = {}) {
   const seen = new Set();
   for (const machine of machines || []) {
     for (const fnView of machineFunctions(machine)) {
-      const id = `${String(fnView.key || "").split(":")[0]}|${fnIdentity(fnView)}`;
+      const id = `${String(fnView.key || "").split(":")[0].toLowerCase()}|${fnIdentity(fnView)}`;
       if (seen.has(id)) continue;
       if (matchesExactly(fnView, signature, selector)) {
         seen.add(id);

@@ -69,9 +69,10 @@ function memberShapes(doc, finding, members) {
   return out.every(Boolean) ? out : null;
 }
 
-// Short chip: the shape of the principal, parsed from the display string.
-// (A structured principal_shape on the document would remove the regex; it
-// does not exist yet, and the string is the only witness of k/n and delay.)
+// Short chip: the shape of the principal. A single member's k/n and a
+// timelock's delay are parsed from the display string (a structured
+// principal_shape on the document would remove the regex; it does not exist
+// yet); a merged unit's member shapes come from the overlap table instead.
 export function principalChip(finding, doc = null) {
   const kind = finding?.principal_kind || "";
   if (kind === "eoa") return { kind, label: "EOA" };

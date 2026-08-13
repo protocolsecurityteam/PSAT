@@ -348,7 +348,6 @@ h2.sc-band-title {
 .sc-cap-pop b { color: var(--ink); font-weight: 600; }
 .sc-who .sc-addr { color: var(--faint); font-size: 11px; overflow: hidden; text-overflow: ellipsis; }
 
-
 .sc-fbar { height: 8px; position: relative; margin-top: 4px; }
 
 .sc-fbar .sc-track {

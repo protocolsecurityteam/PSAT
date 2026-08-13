@@ -161,8 +161,10 @@ export default function Protections({ doc, view, note, onSelect }) {
           </div>
           {/* The same finding's deduction-row anatomy, through the same
               components: the protected action and the contracts it lives on
-              read identically on both sides of the page. */}
-          {row.anatomy && (
+              read identically on both sides of the page. Gated on the content,
+              not the join — an anatomy with no example function has no action
+              line to draw. */}
+          {row.anatomy?.exampleFunction && (
             <div className="sc-who">
               <ActorLine row={row.anatomy} onSelect={onSelect} />
             </div>
@@ -176,13 +178,12 @@ export default function Protections({ doc, view, note, onSelect }) {
         </div>
       ))}
       {rows.length > PROTECTION_ROWS && (
+        // The label carries no combined figure: each delta is a counterfactual
+        // against the SAME current λ, so a sum of them is a quantity nothing
+        // modeled — the deduction tail may sum because published nets are
+        // additive by construction, and these are the opposite case.
         <TailToggle flush open={tailOpen} onToggle={() => setTailOpen((was) => !was)}>
-          + {rows.length - PROTECTION_ROWS} more · +
-          {rows
-            .slice(PROTECTION_ROWS)
-            .reduce((sum, r) => sum + r.delta, 0)
-            .toFixed(1)}{" "}
-          combined
+          + {rows.length - PROTECTION_ROWS} more
         </TailToggle>
       )}
 

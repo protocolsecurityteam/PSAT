@@ -755,6 +755,37 @@ describe("ScoreBand — entities select on the surface", () => {
     });
   });
 
+  it("expands the protections tail without publishing a sum nothing modeled", async () => {
+    // Each delta is a counterfactual against the SAME current λ — the visible
+    // four already "sum" past 100 — so unlike the deduction tail (whose nets
+    // are additive by construction) this label carries no combined figure.
+    const { container } = renderBand({ score: ETHERFI });
+    await openBreakdown();
+    expect(container.querySelectorAll(".sc-prot")).toHaveLength(4);
+    const tail = container.querySelector(".sc-tail-flush");
+    expect(tail.textContent).toContain("+ 9 more");
+    expect(tail.textContent).not.toContain("combined");
+    await userEvent.setup().click(tail);
+    expect(container.querySelectorAll(".sc-prot")).toHaveLength(13);
+  });
+
+  it("keeps a merged chip inert when the member shapes are unwitnessed", async () => {
+    // Without the overlap table there is no honest per-member handle, and the
+    // one address on hand is an arbitrary member — a whole-chip click would
+    // attribute the unit's power to it under the unit's own label.
+    const unwitnessed = {
+      ...ETHERFI,
+      provenance: { ...ETHERFI.provenance, safe_keyset_overlaps: [] },
+    };
+    const onSelectEntity = vi.fn();
+    const { container } = renderBand({ score: unwitnessed, onSelectEntity });
+    await openBreakdown();
+    const chip = container.querySelectorAll(".sc-frow")[0].querySelector(".sc-kchip");
+    expect(chip.textContent).toBe("2 Safes · shared keys");
+    expect(chip.getAttribute("role")).toBeNull();
+    expect(chip.querySelector('[role="button"]')).toBeNull();
+  });
+
   it("hands each merged-unit member its own handle on the protections chip too", async () => {
     const members = ETHERFI.findings[0].principal_addresses;
     const onSelectEntity = vi.fn();

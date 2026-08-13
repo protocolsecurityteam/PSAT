@@ -17,7 +17,6 @@ import {
   projectScore,
   protectionRows,
   resolveTargets,
-  safeShape,
   timelockProposer,
   undeterminedTargets,
   ceilingReasonLabel,
