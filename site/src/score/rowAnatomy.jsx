@@ -6,9 +6,49 @@
 
 import { Fragment, useState } from "react";
 
-import EntityButton from "./EntityButton.jsx";
+import EntityButton, { entityProps } from "./EntityButton.jsx";
+import { shortAddress } from "./format.js";
 
 export const TARGETS_SHORT = 3;
+
+// The kind chip is a row's handle on WHO ACTS, on every panel that renders
+// one. A merged chip splits into one handle per member: each k/n selects its
+// own Safe, so no click has to pick a member for the user. A single-member
+// chip selects its controller whole — the interactive props go onto the chip
+// span itself rather than a wrapper, which would become the flex item and
+// change what the row lays out. A principal with no address stays plain.
+export function KindChip({ chip, chain, controller, onSelect }) {
+  if (chip.members?.length) {
+    return (
+      <span className={`sc-kchip sc-kchip-${chip.kind}`}>
+        {"Safes "}
+        {chip.members.map((member, i) => (
+          <Fragment key={member.address}>
+            {i > 0 && " + "}
+            <EntityButton
+              onSelect={onSelect}
+              target={{ chain, address: member.address, label: `Safe ${member.shape}` }}
+              title={`Show Safe ${member.shape} (${shortAddress(member.address)}) on the control surface`}
+            >
+              {member.shape}
+            </EntityButton>
+          </Fragment>
+        ))}
+        {" · shared keys"}
+      </span>
+    );
+  }
+  const props = entityProps({
+    onSelect,
+    target: { chain, address: controller, label: chip.label },
+    title: controller ? `Show ${shortAddress(controller)} on the control surface` : undefined,
+  });
+  return (
+    <span className={`sc-kchip sc-kchip-${chip.kind}${props ? " sc-lnk" : ""}`} {...(props || {})}>
+      {chip.label}
+    </span>
+  );
+}
 
 // What this row is ABOUT, carried alongside the entity a click asks for: the
 // example function the row DISPLAYS (never the other n−1 it counts — the user
@@ -80,7 +120,7 @@ export function ActorLine({ row, controllers = [], onSelect }) {
 
 export function TargetList({ row, onSelect }) {
   const [open, setOpen] = useState(false);
-  const { hosts, targets, reachWitnessed, undeterminedCount } = row;
+  const { hosts, targets, reachWitnessed } = row;
   if (!hosts.length && !targets.length) return null;
   const hint = highlightHint(row);
   // Hosts and reach share the collapsed line's budget, hosts first — a row
@@ -90,6 +130,11 @@ export function TargetList({ row, onSelect }) {
   const hiddenCount = hosts.length - shownHosts.length + targets.length - shown.length;
   return (
     <div className={`sc-targets${open ? " sc-open" : ""}`}>
+      {/* The entity line ellipsises on its own, INSIDE this child — the
+          expander button is a sibling the flex row never shrinks, so a run of
+          long names can eat the line but never the control that reveals the
+          rest. */}
+      <span className="sc-targets-line">
       {/* The hosts come first and apart: they are the contracts the function
           is ON — where the named controller acts directly. Everything after
           the arrow is reach through the control graph, a different (weaker)
@@ -109,7 +154,7 @@ export function TargetList({ row, onSelect }) {
           </span>
         );
       })}
-      {hosts.length > 0 && (targets.length > 0 || undeterminedCount > 0 || !reachWitnessed) && " "}
+      {hosts.length > 0 && (targets.length > 0 || !reachWitnessed) && " "}
       {/* The not-witnessed note survives an empty list: hosts are where the
           function IS, which says nothing about what it reaches. */}
       {reachWitnessed && shown.length > 0 && (
@@ -154,6 +199,7 @@ export function TargetList({ row, onSelect }) {
           </span>
         );
       })}
+      </span>
       {hiddenCount > 0 && (
         <>
           {" "}
@@ -169,9 +215,6 @@ export function TargetList({ row, onSelect }) {
             less
           </button>
         </>
-      )}
-      {reachWitnessed && undeterminedCount > 0 && (
-        <span className="sc-ndp"> · +{undeterminedCount} not determined</span>
       )}
     </div>
   );

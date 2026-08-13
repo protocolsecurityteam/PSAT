@@ -126,9 +126,7 @@ describe("ScoreBand — computed grade", () => {
     expect(container.querySelectorAll(".sc-frow")).toHaveLength(8);
     const tail = screen.getByRole("button", { name: /20 more/ });
     expect(tail.textContent).toContain("−0.19 combined");
-    // 16 of the 20 tail rows answer "how much" with nothing at all. The count
-    // tracks the document rather than a pinned constant.
-    expect(tail.textContent).toContain("16 with value not determined");
+    expect(tail.textContent).not.toContain("value not determined");
     await userEvent.setup().click(tail);
     expect(container.querySelectorAll(".sc-frow")).toHaveLength(28);
   });
@@ -215,7 +213,9 @@ describe("ScoreBand — computed grade", () => {
     const cells = [...container.querySelectorAll(".sc-val")];
     expect(cells.some((c) => within(c).queryByText("floor"))).toBe(false);
     const priced = cells.find((c) => c.textContent.startsWith("$1M-$10M"));
-    expect(within(priced).getByText("bound not determined")).toBeInTheDocument();
+    // An undetermined direction wears NO badge — the open question lives in
+    // the possible-deductions table, not beside every figure.
+    expect(within(priced).queryByText("bound not determined")).toBeNull();
     const nd = cells.filter((c) => c.querySelector(".sc-nd"));
     // 19 of the 28 rows: this corpus prices nine and leaves the rest with no
     // band at all, and a band nobody measured is a blank cell's own state.
@@ -254,13 +254,12 @@ describe("ScoreBand — computed grade", () => {
       expect(cell.textContent).not.toContain("<=");
       return cell.querySelector(".sc-fl")?.textContent ?? null;
     });
-    // Four cells, not three: row 7 is banded $1M-$10M in the shipped document
-    // and the case does not touch it, so it keeps whatever the producer
-    // published — which is the fall-through badge.
-    expect(badges.sort()).toEqual([
-      "bound not determined",
-      "bound not determined",
+    // Four cells: only the PROVEN direction wears a badge; an undetermined
+    // one and an absent field alike wear none.
+    expect(badges.sort((a, b) => String(a).localeCompare(String(b)))).toEqual([
       "ceiling",
+      null,
+      null,
       null,
     ]);
   });
@@ -309,14 +308,37 @@ describe("ScoreBand — computed grade", () => {
   it("renders the protections column and the audit posture verbatim", async () => {
     const { container } = renderBand({ score: ETHERFI });
     await openBreakdown();
-    expect(screen.getByText(/each dollar weighted by how dangerous/)).toBeInTheDocument();
+    expect(screen.getByText(/The score weighted by value/)).toBeInTheDocument();
     const saved = [...container.querySelectorAll(".sc-prot-saved")].map((n) => n.textContent);
     expect(saved).toEqual(["+51.4", "+32.8", "+21.4", "+19.5"]);
     expect(screen.getByText("4 reports on file")).toBeInTheDocument();
-    expect(screen.getByText(/15 witnessed upgrades bypassed this timelock/)).toBeInTheDocument();
+    // Cautions are no longer printed on the rows — the chip click reaches the
+    // principal card where the key-set and bypass facts live.
+    expect(screen.queryByText(/bypassed this timelock/)).toBeNull();
+    expect(screen.queryByText(/not an independent key set/)).toBeNull();
     const byContract = screen.getByText(/contracts matched to an audit/);
     expect(byContract.textContent).toContain("2 / 250");
     expect(byContract.textContent).toContain("0 proven on-chain");
+  });
+
+  it("shows the tracked value beside the exposure grade, and nothing when unpublished", async () => {
+    const { container } = renderBand({ score: ETHERFI });
+    await openBreakdown();
+    const shield = container.querySelector(".sc-shield");
+    expect(shield.textContent).toContain("exposure grade");
+    expect(shield.querySelector(".sc-shield-tracked").textContent).toBe("$4.26B");
+    expect(shield.textContent).toContain("value tracked");
+    container.remove();
+
+    // An absent figure stays absent — never $0.
+    const untracked = {
+      ...ETHERFI,
+      provenance: { ...ETHERFI.provenance, value: { ...ETHERFI.provenance.value, tracked_total_usd: null } },
+    };
+    const { container: bare } = renderBand({ score: untracked });
+    await openBreakdown();
+    expect(bare.querySelector(".sc-shield-tracked")).toBeNull();
+    expect(bare.querySelector(".sc-shield").textContent).not.toContain("value tracked");
   });
 
   it("publishes no provably-differs warning, whatever the count says", async () => {
@@ -687,14 +709,19 @@ describe("ScoreBand — entities select on the surface", () => {
   // these cases are about, not which rows the full ranking puts where.
   const KEYSET = { ...ETHERFI, findings: [ETHERFI.findings[0], ETHERFI.findings[2]] };
 
-  it("makes every protection principal and every Safe named in a caution selectable", async () => {
+  it("makes every protection principal selectable", async () => {
     const onSelectEntity = vi.fn();
     const { container } = renderBand({ score: ETHERFI, onSelectEntity });
     await openBreakdown();
     const rows = [...container.querySelectorAll(".sc-prot")];
     expect(rows.length).toBeGreaterThan(0);
     for (const row of rows) {
-      expect(row.querySelector(".sc-kchip")).toHaveAttribute("role", "button");
+      // A single-member chip is the button; a merged chip carries one button
+      // per member instead of pretending to be one principal.
+      const chip = row.querySelector(".sc-kchip");
+      const handles =
+        chip.getAttribute("role") === "button" ? 1 : chip.querySelectorAll('[role="button"]').length;
+      expect(handles).toBeGreaterThan(0);
     }
     await userEvent.setup().click(rows[0].querySelector(".sc-kchip"));
     // The strongest protection on this document is the 10-day timelock, and the
@@ -705,22 +732,44 @@ describe("ScoreBand — entities select on the surface", () => {
       address: "0x9f26d4c958fd811a1f59b01b86be7dffc9d20761",
       label: "Timelock 10d",
     });
-    container.remove();
+  });
 
-    const keyset = renderBand({ score: KEYSET, onSelectEntity });
+  it("renders each protection's function and hosts through the deduction row's own anatomy", async () => {
+    const onSelectEntity = vi.fn();
+    const { container } = renderBand({ score: ETHERFI, onSelectEntity });
     await openBreakdown();
-    const caution = [...keyset.container.querySelectorAll(".sc-caut")].find((el) =>
-      el.textContent.includes("not an independent key set"),
+    const merged = [...container.querySelectorAll(".sc-prot")].find((el) =>
+      el.textContent.includes("shared keys"),
     );
+    // The protected action is the same clickable example function the
+    // deduction row shows, and the hosts under it are the same contracts.
+    const fn = within(merged).getByRole("button", { name: "upgradeToAndCall" });
+    await userEvent.setup().click(fn);
+    expect(onSelectEntity.mock.calls[0][0]).toMatchObject({ functionSignature: "upgradeToAndCall" });
+    const hosts = [...merged.querySelectorAll(".sc-targets .sc-host")];
+    expect(hosts.length).toBe(3);
     onSelectEntity.mockClear();
-    await userEvent.setup().click(within(caution).getByRole("button"));
-    expect(onSelectEntity).toHaveBeenCalledWith(
-      expect.objectContaining({ address: "0x5ec5e6b4eb6827914ca8bc3ae02c39417242adde" }),
+    await userEvent.setup().click(within(hosts[0]).getByRole("button"));
+    expect(onSelectEntity.mock.calls[0][0]).toMatchObject({
+      address: ETHERFI.findings[0].host_entities[0].split("::")[1],
+    });
+  });
+
+  it("hands each merged-unit member its own handle on the protections chip too", async () => {
+    const members = ETHERFI.findings[0].principal_addresses;
+    const onSelectEntity = vi.fn();
+    const { container } = renderBand({ score: ETHERFI, onSelectEntity });
+    await openBreakdown();
+    const chip = [...container.querySelectorAll(".sc-prot .sc-kchip")].find((el) =>
+      el.textContent.includes("shared keys"),
     );
-    // The sentence is unchanged — the control wraps text that was already there.
-    expect(caution.textContent).toBe(
-      "⚠ shares 7 owners with Safe 0x5ec5…adde — not an independent key set",
-    );
+    expect(chip.textContent).toBe("Safes 3/7 + 4/8 · shared keys");
+    await userEvent.setup().click(within(chip).getByRole("button", { name: "3/7" }));
+    expect(onSelectEntity).toHaveBeenLastCalledWith({
+      chain: "ethereum",
+      address: members[0],
+      label: "Safe 3/7",
+    });
   });
 
   it("leaves the protections column inert with no handler wired", async () => {
@@ -729,14 +778,8 @@ describe("ScoreBand — entities select on the surface", () => {
     for (const chip of container.querySelectorAll(".sc-prot .sc-kchip")) {
       expect(chip).not.toHaveAttribute("role");
       expect(chip.className).not.toContain("sc-lnk");
+      expect(chip.querySelector('[role="button"]')).toBeNull();
     }
-    const caution = [...container.querySelectorAll(".sc-caut")].find((el) =>
-      el.textContent.includes("not an independent key set"),
-    );
-    expect(caution.querySelector('[role="button"]')).toBeNull();
-    expect(caution.textContent).toBe(
-      "⚠ shares 7 owners with Safe 0x5ec5…adde — not an independent key set",
-    );
   });
 
   it("renders the same text as plain elements with no handler wired", async () => {
@@ -827,7 +870,9 @@ describe("ScoreBand — protections publish the band's direction", () => {
     await openBreakdown();
     const heads = [...container.querySelectorAll(".sc-prot-head")];
     expect(heads).toHaveLength(4);
-    for (const head of heads) {
+    const badged = heads.filter((head) => head.querySelector(".sc-fl"));
+    expect(badged).toHaveLength(4);
+    for (const head of badged) {
       const badge = head.querySelector(".sc-fl");
       expect(badge.textContent).toBe("ceiling");
       expect(badge.title).toMatch(/^at most this much/);
@@ -838,13 +883,12 @@ describe("ScoreBand — protections publish the band's direction", () => {
     }
   });
 
-  it("says the direction was never proven when the producer proved none", async () => {
-    // Every finding in the corpus is at bound_direction not_determined, so all
-    // four protection rows wear the refusal chip.
+  it("wears no direction badge when the producer proved none", async () => {
+    // Every finding in the corpus is at bound_direction not_determined; an
+    // unproven direction earns no badge anywhere on the page.
     const { container } = renderBand({ score: ETHERFI });
     await openBreakdown();
-    const badges = [...container.querySelectorAll(".sc-prot-head .sc-fl")].map((n) => n.textContent);
-    expect(badges).toEqual(Array(4).fill("bound not determined"));
+    expect(container.querySelectorAll(".sc-prot-head .sc-fl")).toHaveLength(0);
   });
 
   it("keeps an earned negative apart from an unmeasured band", async () => {

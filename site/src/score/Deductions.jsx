@@ -1,11 +1,10 @@
-import { Fragment, useState } from "react";
+import { useState } from "react";
 
 import BoundBadge from "./BoundBadge.jsx";
 import CapabilityTag from "./CapabilityTag.jsx";
-import EntityButton, { entityProps } from "./EntityButton.jsx";
+import EntityButton from "./EntityButton.jsx";
 import TailToggle from "./TailToggle.jsx";
-import { shortAddress } from "./format.js";
-import { ActorLine, TargetList } from "./rowAnatomy.jsx";
+import { ActorLine, KindChip, TargetList } from "./rowAnatomy.jsx";
 
 const VISIBLE_ROWS = 8;
 
@@ -19,46 +18,6 @@ function SheetDispositionBadge({ disposition }) {
   return (
     <span className="sc-fl" title={disposition.reason}>
       {disposition.usdText || "not determined"} · {disposition.label}
-    </span>
-  );
-}
-
-// The kind chip is the row's handle on who acts — clickable exactly like the
-// protections side's chip. A merged chip splits into one handle per member:
-// each k/n selects its own Safe, so no click has to pick a member for the
-// user. On the single-member kinds the whole chip selects the controller; a
-// principal with no address (Anyone) stays a plain chip.
-function KindChip({ row, onSelect }) {
-  const { chip } = row;
-  const chain = row.finding?.chain;
-  if (chip.members?.length) {
-    return (
-      <span className={`sc-kchip sc-kchip-${chip.kind}`}>
-        {"Safes "}
-        {chip.members.map((member, i) => (
-          <Fragment key={member.address}>
-            {i > 0 && " + "}
-            <EntityButton
-              onSelect={onSelect}
-              target={{ chain, address: member.address, label: `Safe ${member.shape}` }}
-              title={`Show Safe ${member.shape} (${shortAddress(member.address)}) on the control surface`}
-            >
-              {member.shape}
-            </EntityButton>
-          </Fragment>
-        ))}
-        {" · shared keys"}
-      </span>
-    );
-  }
-  const props = entityProps({
-    onSelect,
-    target: { chain, address: row.controller, label: chip.label },
-    title: row.controller ? `Show ${shortAddress(row.controller)} on the control surface` : undefined,
-  });
-  return (
-    <span className={`sc-kchip sc-kchip-${chip.kind}${props ? " sc-lnk" : ""}`} {...(props || {})}>
-      {chip.label}
     </span>
   );
 }
@@ -78,7 +37,7 @@ function DeductionRow({ row, onSelect }) {
       </span>
       <div>
         <div className="sc-who">
-          <KindChip row={row} onSelect={onSelect} />
+          <KindChip chip={row.chip} chain={row.finding?.chain} controller={row.controller} onSelect={onSelect} />
           <CapabilityTag capability={row.capability} />
           <ActorLine row={row} onSelect={onSelect} />
         </div>
@@ -87,6 +46,7 @@ function DeductionRow({ row, onSelect }) {
           <div className="sc-fill" style={{ width: `${row.fillPct}%` }} />
         </div>
         <TargetList row={row} onSelect={onSelect} />
+        {row.finding?.chain && <div className="sc-chain">{row.finding.chain}</div>}
       </div>
       <span className="sc-val">
         {value.determined ? (
@@ -169,7 +129,6 @@ export default function Deductions({ view, onSelect }) {
   const tailSum = tailSummable
     ? Math.round(tail.reduce((sum, r) => sum + r.net, 0) * 100) / 100
     : null;
-  const tailNd = tail.filter((r) => !r.value.determined && !r.provenNoReach).length;
 
   return (
     <div>
@@ -185,12 +144,6 @@ export default function Deductions({ view, onSelect }) {
             <i className="sc-nd">combined points not determined</i>
           ) : (
             `−${tailSum.toFixed(2)} combined`
-          )}
-          {tailNd > 0 && (
-            <>
-              {" "}
-              · {tailNd} with <i>value not determined</i>
-            </>
           )}
         </TailToggle>
       )}

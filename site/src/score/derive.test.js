@@ -6,17 +6,13 @@ import {
   auditPosture,
   buildContractIndex,
   calloutsFor,
-  cautionsFor,
-  coalitionWord,
   confidenceChannels,
   controllerAddress,
   deductionRows,
   fixFirst,
   groupRows,
   isProvenNoReach,
-  keysetOverlapsFor,
   ledgerSegments,
-  principalAddresses,
   principalChip,
   projectScore,
   protectionRows,
@@ -27,7 +23,6 @@ import {
   ceilingReasonLabel,
   sheetDisposition,
   sheetStateLabel,
-  upgradeBypassCount,
   valueCell,
 } from "./derive.js";
 import { lambdaOf, recoveryFrom } from "./fold.js";
@@ -74,17 +69,6 @@ describe("derive — principals", () => {
     // With no document (so no overlap table) the chip counts members rather
     // than dropping the merge or guessing a shape.
     expect(principalChip(F[0])).toEqual({ kind: "safe", label: "2 Safes · shared keys", merged: true });
-  });
-
-  it("names the coalition from k/n, not from the weakness rung", () => {
-    // 0.35 is safe_majority on the ladder and 4/8 is not a majority — exactly
-    // one signer short. Inverting the rung would have to guess, and here it
-    // would guess wrong.
-    expect(coalitionWord(safeShape(F[1]))).toBe("majority"); // 4/6
-    expect(coalitionWord(safeShape(F[0]))).toBe("minority"); // 4/8
-    expect(coalitionWord({ k: 1, n: 5 })).toBe("single signer");
-    expect(coalitionWord({ k: 5, n: 7 })).toBe("supermajority");
-    expect(coalitionWord(null)).toBeNull();
   });
 
   it("distinguishes a routed timelock from an unproven proposer set", () => {
@@ -446,8 +430,11 @@ describe("derive — the withheld projection", () => {
 describe("derive — protections", () => {
   it("ranks by λ-delta, not by the finding's own net", () => {
     const rows = protectionRows(ETHERFI);
-    expect(rows.map((r) => r.index)).toEqual([3, 1, 7, 0]);
-    expect(rows.map((r) => r.delta)).toEqual([51.3656, 32.76, 21.4015, 19.5]);
+    // Every qualifying row comes back — the panel's visible cut is the
+    // component's, not the derivation's.
+    expect(rows).toHaveLength(13);
+    expect(rows.slice(0, 4).map((r) => r.index)).toEqual([3, 1, 7, 0]);
+    expect(rows.slice(0, 4).map((r) => r.delta)).toEqual([51.3656, 32.76, 21.4015, 19.5]);
     // finding 3 charges a point and a third and protects fifty-one: the 10-day
     // timelock is what stands between a $4.16B ceiling and its holder, and the
     // ranking has to read the delta rather than the charge to see that — by the
@@ -458,9 +445,8 @@ describe("derive — protections", () => {
     expect(rows[1].widthPct).toBeCloseTo(71.68, 1);
   });
 
-  it("describes who holds each protection", () => {
+  it("describes what each protection holds back", () => {
     const rows = protectionRows(ETHERFI);
-    expect(rows.map((r) => r.who)).toEqual(["via Safe 6/10", "majority", "majority", "minority"]);
     expect(rows[0].what).toBe("upgrade.implementation on >$1B");
   });
 
@@ -487,72 +473,6 @@ describe("derive — protections", () => {
     }
     expect(rows.some((r) => r.index === 2)).toBe(false); // EOA
     expect(rows.some((r) => r.index === 26)).toBe(false); // anyone
-  });
-});
-
-describe("derive — cautions", () => {
-  it("names a shared key set from the overlap table", () => {
-    const cautions = cautionsFor(ETHERFI, F[0]);
-    expect(cautions[0].text).toBe(
-      "shares 7 owners with Safe 0x5ec5…adde — not an independent key set",
-    );
-  });
-
-  it("matches every address the principal acts through, not just the displayed one", () => {
-    // finding 0's principal string carries 0xf46d…e2b5; its other address
-    // 0xa000…cd52 is witnessed only in principal_addresses[], and the overlap
-    // 0xa000…cd52 ↔ 0xf46d…e2b5 names neither the displayed address nor the
-    // principal_unit. Parsing the string alone drops it.
-    expect(principalAddresses(F[0])).toEqual([
-      "0xa000244b4a36d57ea1ecb39b5f02f255e4c8cd52",
-      "0xf46d3734564ef9a5a16fc3b1216831a28f78e2b5",
-    ]);
-    const overlaps = keysetOverlapsFor(ETHERFI, F[0]);
-    expect(overlaps.map((o) => [o.other, o.sharedOwners])).toEqual([
-      ["ethereum::0x5ec5e6b4eb6827914ca8bc3ae02c39417242adde", 7],
-      ["ethereum::0x5ec5e6b4eb6827914ca8bc3ae02c39417242adde", 5],
-      ["ethereum::0xa000244b4a36d57ea1ecb39b5f02f255e4c8cd52", 5],
-    ]);
-    expect(cautionsFor(ETHERFI, F[0])[1].text).toBe(
-      "shares 5 owners with Safe 0x5ec5…adde — not an independent key set",
-    );
-  });
-
-  it("falls back to the principal string when no address list was published", () => {
-    const { principal_addresses, ...noList } = F[0];
-    expect(principal_addresses).toHaveLength(2);
-    expect(principalAddresses(noList)).toEqual(["0xf46d3734564ef9a5a16fc3b1216831a28f78e2b5"]);
-    expect(principalAddresses({ principal: "ANYONE anyone" })).toEqual([]);
-  });
-
-  it("counts the upgrades that went round a timelock", () => {
-    // 15: the upgrade-history fold counts one more safe_direct execution than
-    // the 1.4.0 document did, over the same per-contract witnesses.
-    expect(upgradeBypassCount(ETHERFI)).toBe(15);
-    const cautions = cautionsFor(ETHERFI, F[3]);
-    expect(cautions.map((c) => c.text)).toContain(
-      "15 witnessed upgrades bypassed this timelock (executed directly by a Safe)",
-    );
-  });
-
-  it("surfaces the registry self-grant and the unproven proposer set", () => {
-    expect(cautionsFor(ETHERFI, F[1]).map((c) => c.text)).toContain(
-      "this owner can grant itself any role on the registry it governs",
-    );
-    const timelock = cautionsFor(ETHERFI, F[8]);
-    expect(timelock.find((c) => c.tone === "attr").text).toBe(
-      "no delay credit — the proposer set is unproven",
-    );
-  });
-
-  it("says nothing about a key set the document did not witness as shared", () => {
-    // The timelock at 0x80ce… appears in no overlap row that proves a shared
-    // coalition can act as both; absence of a witness is not a caution.
-    expect(cautionsFor(ETHERFI, F[8]).some((c) => c.text.includes("independent key set"))).toBe(false);
-    // …while a Safe that IS witnessed as sharing its whole key set gets one.
-    expect(cautionsFor(ETHERFI, F[0])[2].text).toBe(
-      "shares 5 owners with Safe 0xa000…cd52 — not an independent key set",
-    );
   });
 });
 
