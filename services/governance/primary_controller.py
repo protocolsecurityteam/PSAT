@@ -361,6 +361,89 @@ def assign_primary_controllers(
     return primary_for
 
 
+def assign_operand_render_groups(
+    fp_addrs_by_contract: Mapping[str, set[str]],
+    contract_keys: set[str],
+    governance_passthrough: set[str],
+    primary_for: Mapping[str, list[str]],
+) -> dict[str, str]:
+    """Rendering home for machinery contracts whose operand unit lives in
+    another principal's group.
+
+    An in-protocol contract that holds FP authority on other contracts is
+    *machinery*: it acts on its operands on behalf of whoever controls it —
+    a passthrough timelock executing governance calls, a Pauser fanning out
+    ``pauseAll``, an L1 bridge receiver feeding one sync pool. The primary
+    contest correctly assigns such a contract to its own controller, but when
+    everything it operates on was won by a different principal, rendering it
+    inside its controller's box separates it from the unit it exists to serve.
+    This computes, per machinery contract, the operand group it belongs with.
+    The placement witness is the contract's own FP rows on that group's
+    members, never a name or a guess. Two arms:
+
+    * **Any contract — unanimity.** Every operand is owned, and all by the
+      same principal. One split operand (or one unowned one) is evidence the
+      machinery serves more than one unit, so it stays with its controller.
+
+    * **Passthrough mediator — strict plurality.** Timelocks / ProxyAdmins
+      exist only to mediate governance, so the bar is lower: the group owning
+      strictly more of its operands than any other is its home even when a
+      few operands live elsewhere. A tie emits nothing.
+
+    ``primary_for`` itself is untouched: the controller keeps the contract for
+    enrollment, the Controllers accordion, and every authority claim — inside
+    the operand group it simply reads as a co-controller row, which is what it
+    is. Operand homes are taken from ``primary_for`` alone (never from other
+    overrides), so placement is single-pass and order-independent.
+
+    All inputs share one keyspace (bare or composite entity keys, as in
+    :func:`assign_primary_controllers`). *contract_keys* is the set of
+    rendered contract entities — only members of it are re-homed, so a
+    principal appearing as an FP caller can never be pulled into a box.
+    Returns ``{contract_key: principal_address_lc}`` only where the operand
+    home differs from the contract's own primary controller.
+    """
+    primary_of: dict[str, str] = {}
+    for paddr, owned in primary_for.items():
+        for c in owned:
+            primary_of[(c or "").lower()] = (paddr or "").lower()
+
+    contract_keys_lc = {(c or "").lower() for c in contract_keys}
+    passthrough_lc = {(m or "").lower() for m in governance_passthrough}
+
+    # operand_homes[x] = {owner_addr_or_None: count} over x's operands; None
+    # counts operands nobody won (they block the unanimity arm but stay out of
+    # the mediator plurality, which only weighs proven homes).
+    operand_homes: dict[str, dict[str | None, int]] = {}
+    for contract_addr, callers in fp_addrs_by_contract.items():
+        c_lc = contract_addr.lower()
+        winner = primary_of.get(c_lc)
+        for tok in callers:
+            x_lc = (tok or "").lower()
+            if x_lc == c_lc or x_lc not in contract_keys_lc:
+                continue
+            counts = operand_homes.setdefault(x_lc, {})
+            counts[winner] = counts.get(winner, 0) + 1
+
+    out: dict[str, str] = {}
+    for x_lc, counts in operand_homes.items():
+        own = primary_of.get(x_lc)
+        homes = [h for h in counts if h is not None]
+        if len(counts) == 1 and homes:
+            # Unanimous: every operand owned by the same principal.
+            target = homes[0]
+        elif x_lc in passthrough_lc and homes:
+            ranked = sorted(((h, counts[h]) for h in homes), key=lambda kv: (-kv[1], kv[0]))
+            if len(ranked) > 1 and ranked[1][1] == ranked[0][1]:
+                continue
+            target = ranked[0][0]
+        else:
+            continue
+        if target != own:
+            out[x_lc] = target
+    return out
+
+
 # Effect labels that mark a function as a governance/admin power on their own.
 # Holding authority on one is enough to treat a non-primary FP caller as a real
 # co-controller worth surfacing/monitoring, no matter how many callers share

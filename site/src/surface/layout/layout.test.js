@@ -222,6 +222,45 @@ describe("buildGraphLayout", () => {
     }
   });
 
+  it("honors grouped_with: a mediator renders with its operand group, not its driver's", () => {
+    // The etherfi 2d-operating-timelock shape: the ops Safe primary-owns the
+    // timelock (true authority, kept in primary_for), but the server marked it
+    // grouped_with the gov Safe whose box holds the contracts it operates on.
+    const gov = "0x" + "a1".repeat(20);
+    const ops = "0x" + "b2".repeat(20);
+    const tl = "0x" + "c3".repeat(20);
+    const mediatorMachines = [
+      { address: "0x" + "d4".repeat(20), totalFunctions: 3 },
+      { address: "0x" + "d5".repeat(20), totalFunctions: 2 },
+      { address: tl, totalFunctions: 1, grouped_with: gov },
+      { address: "0x" + "d6".repeat(20), totalFunctions: 1 },
+      { address: "0x" + "d7".repeat(20), totalFunctions: 1 },
+    ];
+    const mediatorPrincipals = [
+      { address: gov, type: "safe", primary_for: ["0x" + "d4".repeat(20), "0x" + "d5".repeat(20)] },
+      { address: ops, type: "safe", primary_for: [tl, "0x" + "d6".repeat(20), "0x" + "d7".repeat(20)] },
+    ];
+    const { groupChildren, contractToGroup } = assignGroups(mediatorMachines, mediatorPrincipals);
+    expect(contractToGroup.get(tl)).toBe(gov);
+    expect(groupChildren.get(gov)).toContain(tl);
+    expect(groupChildren.get(ops) || []).not.toContain(tl);
+  });
+
+  it("ignores grouped_with pointing at an unknown principal", () => {
+    const gov = "0x" + "a1".repeat(20);
+    const tl = "0x" + "c3".repeat(20);
+    const mediatorMachines = [
+      { address: tl, totalFunctions: 1, grouped_with: "0x" + "99".repeat(20) },
+      { address: "0x" + "d6".repeat(20), totalFunctions: 1 },
+    ];
+    const mediatorPrincipals = [
+      { address: gov, type: "safe", primary_for: [tl, "0x" + "d6".repeat(20)] },
+    ];
+    const { contractToGroup } = assignGroups(mediatorMachines, mediatorPrincipals);
+    // Falls back to the primary_for placement.
+    expect(contractToGroup.get(tl)).toBe(gov);
+  });
+
   it("attaches a Controllers list to each group: primary first, then co-controllers scoped to the group", () => {
     // The Safe primary-owns both contracts (→ one group container). The
     // Timelock and an operator EOA each co-control machines[0] (VAULT) without

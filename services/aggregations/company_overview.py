@@ -58,6 +58,7 @@ from db.models import (
 from services.effects.selection import disposed_from_holdings, load_protocol_reference_shapes
 from services.governance.primary_controller import (
     assign_co_controllers,
+    assign_operand_render_groups,
     assign_primary_controllers,
 )
 from services.governance.primary_controller import (
@@ -1863,6 +1864,26 @@ def build_governance_view(
     # because a bigger governance Safe won the same contracts. See
     # ``services.governance.primary_controller.assign_co_controllers``.
     co_controls = assign_co_controllers(principals, fp_function_detail_by_entity, primary_for)
+
+    # Rendering home for machinery contracts whose operand unit lives in
+    # another principal's group — passthrough timelocks (etherfi's 2d operating
+    # timelock: driven by the ops Safe, acting entirely on the core-governance
+    # box), Pauser fan-outs, single-target bridge receivers. Published as
+    # ``grouped_with`` on the machinery's contract entry; the frontend group
+    # assignment honors it as a placement override while ``primary_for`` —
+    # enrollment, accordion, every authority claim — still names the true
+    # controller. See ``assign_operand_render_groups``.
+    render_groups = assign_operand_render_groups(
+        fp_addrs_by_contract_entity,
+        {_entity_key(c.get("chain"), c["address"]) for c in contracts if c.get("address")},
+        governance_passthrough,
+        primary_for,
+    )
+    if render_groups:
+        for entry in contracts:
+            gw = render_groups.get(_entity_key(entry.get("chain"), entry.get("address") or ""))
+            if gw:
+                entry["grouped_with"] = gw
 
     principal_meta = {(p.get("address") or "").lower(): p for p in principals if p.get("address")}
 

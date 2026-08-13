@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from services.governance.primary_controller import (
     assign_co_controllers,
+    assign_operand_render_groups,
     assign_primary_controllers,
 )
 
@@ -382,6 +383,128 @@ def test_assignment_stable_as_coverage_grows():
     big = assign_primary_controllers([_p(a, "safe"), _p(b, "safe")], fp_big, fp_function_detail_by_contract=detail)
     assert small[a] == ["0xc1"]
     assert big[a] == ["0xc1"], "coverage growth must never flip an existing assignment"
+
+
+# --- assign_operand_render_groups ------------------------------------------
+#
+# Machinery contracts render with the unit they operate on: a passthrough
+# timelock driven by the ops Safe but acting entirely on the core box, a
+# Pauser fanning out pauseAll over one unit's contracts, an L1 bridge receiver
+# feeding one sync pool. The render-group override places them with their
+# operand unit; primary_for is untouched, so their controller reads as a
+# co-controller row inside that box.
+
+
+def _all_contracts(fp: dict) -> set:
+    return set(fp.keys())
+
+
+def test_mediator_render_group_follows_operand_unit():
+    """Mediator driven by the ops Safe, operating contracts won by the gov
+    Safe → rendered with the gov Safe's group. The gov timelock, whose driver
+    won both it and its operands, needs no override."""
+    tl_ops, tl_gov = "0xtlops", "0xtlgov"
+    primary_for = {"0xgov": ["0xc1", "0xc2", "0xc3", tl_gov], "0xops": [tl_ops]}
+    fp = {
+        "0xc1": {tl_gov, tl_ops},
+        "0xc2": {tl_gov, tl_ops},
+        "0xc3": {tl_gov, tl_ops},
+        tl_gov: {"0xgov"},
+        tl_ops: {"0xops"},
+    }
+    result = assign_operand_render_groups(fp, _all_contracts(fp), {tl_ops, tl_gov}, primary_for)
+    assert result == {tl_ops: "0xgov"}
+
+
+def test_unowned_mediator_joins_operand_unit():
+    """A mediator nobody primary-controls (its own callers unresolved) still
+    joins the group of the unit it operates — machinery belongs with its unit
+    even when its driver is unknown."""
+    tl = "0xtl"
+    primary_for = {"0xgov": ["0xc1", "0xc2"]}
+    fp = {"0xc1": {tl}, "0xc2": {tl}, tl: set()}
+    assert assign_operand_render_groups(fp, _all_contracts(fp), {tl}, primary_for) == {tl: "0xgov"}
+
+
+def test_render_group_noop_when_already_home():
+    """A mediator whose driver also won its operand contracts (the 10d
+    timelock shape) needs no override."""
+    tl = "0xtl"
+    primary_for = {"0xgov": ["0xc1", "0xc2", tl]}
+    fp = {"0xc1": {tl}, "0xc2": {tl}, tl: {"0xgov"}}
+    assert assign_operand_render_groups(fp, _all_contracts(fp), {tl}, primary_for) == {}
+
+
+def test_mediator_render_group_tie_is_split_evidence():
+    """A mediator's operand contracts split evenly between two groups: no
+    single home is witnessed, so it stays with its driver."""
+    tl = "0xtl"
+    primary_for = {"0xgov1": ["0xc1"], "0xgov2": ["0xc2"], "0xops": [tl]}
+    fp = {"0xc1": {tl}, "0xc2": {tl}, tl: {"0xops"}}
+    assert assign_operand_render_groups(fp, _all_contracts(fp), {tl}, primary_for) == {}
+
+
+def test_mediator_render_group_ignores_unowned_operands():
+    """Operand contracts nobody won contribute no plurality evidence for a
+    mediator (and with none owned at all, there is no home to move to)."""
+    tl = "0xtl"
+    primary_for = {"0xops": [tl]}
+    fp = {"0xc1": {tl}, "0xc2": {tl}, tl: {"0xops"}}
+    assert assign_operand_render_groups(fp, _all_contracts(fp), {tl}, primary_for) == {}
+
+
+def test_mediator_plurality_tolerates_stray_operands():
+    """The mediator arm is plurality, not unanimity: a timelock acting mostly
+    on one unit joins it even with one operand elsewhere."""
+    tl = "0xtl"
+    primary_for = {"0xgov": ["0xc1", "0xc2"], "0xother": ["0xc3"], "0xops": [tl]}
+    fp = {"0xc1": {tl}, "0xc2": {tl}, "0xc3": {tl}, tl: {"0xops"}}
+    result = assign_operand_render_groups(fp, _all_contracts(fp), {tl}, primary_for)
+    assert result == {tl: "0xgov"}
+
+
+def test_ordinary_machinery_moves_only_on_unanimity():
+    """The etherfi Pauser / L1-receiver shape: an ordinary contract (not a
+    passthrough mediator) joins its operand group only when EVERY operand is
+    owned by that one principal. One stray operand keeps it home."""
+    pauser, receiver = "0xpauser", "0xreceiver"
+    primary_for = {
+        "0xliquid": ["0xv1", "0xv2", "0xv3"],
+        "0xcore": ["0xsyncpool"],
+        "0xother": ["0xstray", pauser, receiver],
+    }
+    fp = {
+        "0xv1": {pauser},
+        "0xv2": {pauser},
+        "0xv3": {pauser},
+        "0xsyncpool": {receiver},
+        "0xstray": {receiver},  # receiver also acts outside 0xcore's unit
+        pauser: {"0xother"},
+        receiver: {"0xother"},
+    }
+    result = assign_operand_render_groups(fp, _all_contracts(fp), set(), primary_for)
+    # Pauser: unanimous over 0xliquid's unit → moves. Receiver: split → stays.
+    assert result == {pauser: "0xliquid"}
+
+
+def test_ordinary_machinery_blocked_by_unowned_operand():
+    """Unanimity requires every operand OWNED: an unowned operand is not
+    evidence for any home, so the contract stays with its controller (unlike
+    the mediator arm, which weighs only the proven homes)."""
+    pauser = "0xpauser"
+    primary_for = {"0xliquid": ["0xv1"], "0xother": [pauser]}
+    fp = {"0xv1": {pauser}, "0xv2": {pauser}, pauser: {"0xother"}}  # 0xv2 unowned
+    assert assign_operand_render_groups(fp, _all_contracts(fp), set(), primary_for) == {}
+
+
+def test_principals_never_rehomed():
+    """A Safe appearing as an FP caller is not a contract — it must never get
+    a render-group entry, no matter how unanimous its 'operands' are."""
+    safe = "0xsafe"
+    primary_for = {safe: ["0xc1", "0xc2"]}
+    fp = {"0xc1": {safe}, "0xc2": {safe}}
+    # contract_keys excludes the safe: only c1/c2 are rendered contracts.
+    assert assign_operand_render_groups(fp, {"0xc1", "0xc2"}, set(), primary_for) == {}
 
 
 # --- assign_co_controllers -------------------------------------------------
