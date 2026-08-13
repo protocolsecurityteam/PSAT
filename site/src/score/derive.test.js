@@ -98,26 +98,6 @@ describe("derive — merged principal units", () => {
     expect(single.controllers).toEqual([single.controller]);
   });
 
-  it("reads the coalition figures off the one overlap record that merged the pair", () => {
-    const row = view.rows.find((r) => r.index === 0);
-    expect(row.coalition).toEqual({ members: MEMBERS, sharedOwners: 5, coalition: 4 });
-    // No coalition claim on a single-member row.
-    expect(view.rows.find((r) => r.index === 6).coalition).toBeNull();
-  });
-
-  it("publishes no figures when no single overlap record covers the members", () => {
-    const doc = {
-      ...ETHERFI,
-      provenance: { ...ETHERFI.provenance, safe_keyset_overlaps: [] },
-    };
-    const rows = deductionRows(doc, buildContractIndex([]));
-    expect(rows.find((r) => r.index === 0).coalition).toEqual({
-      members: MEMBERS,
-      sharedOwners: null,
-      coalition: null,
-    });
-  });
-
   it("names each host's gate member only where the caller lists witness exactly one", () => {
     const [hostA, hostB, hostC] = F[0].host_entities;
     const gate = (address) => [

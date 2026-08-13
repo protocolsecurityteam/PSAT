@@ -313,27 +313,6 @@ export function undeterminedTargets(finding, index) {
 
 // ── merged principal units ──────────────────────────────────────────────────
 
-// The coalition fact behind a multi-member row, from the published overlap
-// table. Figures are carried only when exactly one merged overlap record joins
-// the row's members: with more members than one record covers, no single
-// witnessed (shared, coalition) pair describes the whole unit, and the note
-// falls back to the memberships alone.
-export function mergedCoalition(doc, finding) {
-  const members = principalAddresses(finding);
-  if (members.length < 2) return null;
-  const keys = new Set(members.map((a) => entityKey(finding?.chain, a)));
-  const pairs = (doc?.provenance?.safe_keyset_overlaps || []).filter(
-    (o) => o?.merged && keys.has(o.a) && keys.has(o.b),
-  );
-  const pair = pairs.length === 1 ? pairs[0] : null;
-  const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
-  return {
-    members,
-    sharedOwners: pair ? num(pair.shared_owners) : null,
-    coalition: pair ? num(pair.min_coalition_to_act_as_both) : null,
-  };
-}
-
 function bareName(signature) {
   return String(signature || "").split("(")[0];
 }
@@ -410,7 +389,6 @@ export function deductionRows(doc, index, functions = null) {
       // row shown under that one address alone attributes the other members'
       // gates to it.
       controllers: principalAddresses(finding),
-      coalition: mergedCoalition(doc, finding),
       hostGates: hostGates(finding, functions),
       functions: functionsLabel(finding),
       exampleFunction: (finding?.example_functions || [])[0] || null,

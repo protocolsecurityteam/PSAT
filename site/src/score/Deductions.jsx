@@ -4,7 +4,7 @@ import BoundBadge from "./BoundBadge.jsx";
 import CapabilityTag from "./CapabilityTag.jsx";
 import EntityButton from "./EntityButton.jsx";
 import TailToggle from "./TailToggle.jsx";
-import { ActorLine, TargetList } from "./rowAnatomy.jsx";
+import { ActorLine, ControllersLine, TargetList } from "./rowAnatomy.jsx";
 
 const VISIBLE_ROWS = 8;
 
@@ -19,18 +19,6 @@ function SheetDispositionBadge({ disposition }) {
     <span className="sc-fl" title={disposition.reason}>
       {disposition.usdText || "not determined"} · {disposition.label}
     </span>
-  );
-}
-
-// The key-sharing figures behind a merged row's chip, rendered only when a
-// single witnessed overlap record carries them — the chip already says the
-// Safes share keys, so an unfigured note would just repeat it.
-function CoalitionNote({ coalition }) {
-  if (!coalition || coalition.sharedOwners === null || coalition.coalition === null) return null;
-  return (
-    <div className="sc-coalition">
-      share {coalition.sharedOwners} owner keys — {coalition.coalition} of them can act as both
-    </div>
   );
 }
 
@@ -51,13 +39,13 @@ function DeductionRow({ row, onSelect }) {
         <div className="sc-who">
           <span className={`sc-kchip sc-kchip-${chip.kind}`}>{chip.label}</span>
           <CapabilityTag capability={row.capability} />
-          <ActorLine
-            row={row}
-            controllers={row.controllers?.length ? row.controllers : row.controller ? [row.controller] : []}
-            onSelect={onSelect}
-          />
+          <ActorLine row={row} onSelect={onSelect} />
         </div>
-        <CoalitionNote coalition={row.coalition} />
+        <ControllersLine
+          row={row}
+          controllers={row.controllers?.length ? row.controllers : row.controller ? [row.controller] : []}
+          onSelect={onSelect}
+        />
         <div className="sc-fbar">
           <div className="sc-track" style={{ width: `${row.trackPct}%` }} />
           <div className="sc-fill" style={{ width: `${row.fillPct}%` }} />

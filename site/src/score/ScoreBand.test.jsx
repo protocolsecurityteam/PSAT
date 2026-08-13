@@ -84,25 +84,25 @@ describe("ScoreBand — computed grade", () => {
     );
   });
 
-  it("presents a merged unit as the coalition, never as one member", async () => {
+  it("lists every merged-unit member on the controllers line, never one member alone", async () => {
     // Finding 0 folds two Safes a shared-key coalition can act as. The row must
-    // show both members and say why they share a row — rendered under one
-    // member's address, the other member's gates read as that member's power.
+    // name both members as its controllers — rendered under one member's
+    // address, the other member's gates read as that member's power.
     const members = ETHERFI.findings[0].principal_addresses;
     expect(members).toHaveLength(2);
     const { container } = renderBand({ score: ETHERFI, onSelectEntity: vi.fn() });
     await openBreakdown();
     const row = container.querySelectorAll(".sc-frow")[0];
+    const line = row.querySelector(".sc-controllers");
+    expect(line.querySelector(".sc-controllers-label").textContent).toBe("controllers:");
     for (const member of members) {
       expect(
-        within(row).getByRole("button", { name: `${member.slice(0, 6)}…${member.slice(-4)}` }),
+        within(line).getByRole("button", { name: `${member.slice(0, 6)}…${member.slice(-4)}` }),
       ).toBeTruthy();
     }
-    expect(row.querySelector(".sc-coalition").textContent).toBe(
-      "share 5 owner keys — 4 of them can act as both",
-    );
-    // No coalition line on a single-member row.
-    expect(container.querySelectorAll(".sc-frow")[6].querySelector(".sc-coalition")).toBeNull();
+    // A single-member row gets the same line, labelled for its one holder.
+    const single = container.querySelectorAll(".sc-frow")[6];
+    expect(single.querySelector(".sc-controllers-label").textContent).toBe("controller:");
   });
 
   it("annotates each host with its witnessed gate member when the caller lists are supplied", async () => {
@@ -767,7 +767,8 @@ describe("ScoreBand — entities select on the surface", () => {
     const { container } = renderBand({ score: ETHERFI });
     await openBreakdown();
     const row = container.querySelectorAll(".sc-frow")[ROW];
-    expect(row.querySelector(".sc-addr").textContent).toBe("setAuthority · 0xf855…909e");
+    expect(row.querySelector(".sc-addr").textContent).toBe("setAuthority");
+    expect(row.querySelector(".sc-controllers").textContent).toBe("controller: 0xf855…909e");
     // Only controls that can act are buttons: the capability's glossary "?"
     // and the target expander. Entity references degrade to plain spans.
     const buttons = [...row.querySelectorAll("button")].map((b) => b.textContent);
