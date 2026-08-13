@@ -178,6 +178,22 @@ export function assignGroups(machines, principals) {
     if (m.address) contractAddrs.add(m.address.toLowerCase());
   }
 
+  const principalAddrs = new Set(
+    (principals || []).map((p) => p?.address?.toLowerCase()).filter(Boolean),
+  );
+  // Server-published placement override for governance mediators (contract
+  // .grouped_with): a passthrough timelock/proxy-admin renders inside the
+  // group holding the contracts it operates on, not its driver's group —
+  // primary_for still names the driver, so the Controllers accordion and
+  // every authority claim stay truthful. Honored only when the target is a
+  // known principal; otherwise the primary_for placement stands.
+  const groupedWith = new Map();
+  for (const m of machines) {
+    const lc = m.address?.toLowerCase();
+    const gw = typeof m.grouped_with === "string" ? m.grouped_with.toLowerCase() : null;
+    if (lc && gw && gw !== lc && principalAddrs.has(gw)) groupedWith.set(lc, gw);
+  }
+
   const contractToGroup = new Map();
   const groupChildren = new Map();
 
@@ -190,8 +206,16 @@ export function assignGroups(machines, principals) {
       const lc = c?.toLowerCase();
       if (!lc || lc === principalAddr) continue;
       if (!contractAddrs.has(lc)) continue;
+      // Overridden mediators join their operand group below instead.
+      if (groupedWith.has(lc) && groupedWith.get(lc) !== principalAddr) continue;
       // A contract should only ever appear in one principal's primary_for
       // (server enforces this), but defensively skip duplicates.
+      if (contractToGroup.has(lc)) continue;
+      contractToGroup.set(lc, principalAddr);
+      owned.push(lc);
+    }
+    for (const [lc, gw] of groupedWith) {
+      if (gw !== principalAddr || !contractAddrs.has(lc)) continue;
       if (contractToGroup.has(lc)) continue;
       contractToGroup.set(lc, principalAddr);
       owned.push(lc);
@@ -269,9 +293,18 @@ function buildGroupControllers(primary, kids, principalList, nameByAddr, chain =
     const qLc = q.address?.toLowerCase();
     if (!qLc || qLc === primaryAddrLc) continue;
     const co = Array.isArray(q.co_controls) ? q.co_controls : [];
-    if (!co.some((c) => childSet.has(c?.toLowerCase()))) continue;
+    // primary_for counts too: a grouped_with machinery contract renders in
+    // this box while ANOTHER principal primary-controls it — that controller
+    // must appear as a controller row here (it may have no other canvas
+    // footprint at all when this was its only owned contract).
+    const owns = Array.isArray(q.primary_for) ? q.primary_for : [];
+    if (
+      !co.some((c) => childSet.has(c?.toLowerCase())) &&
+      !owns.some((c) => childSet.has(c?.toLowerCase()))
+    )
+      continue;
     const row = rowFor(q, false);
-    // co_controls says it has authority here; if we have no verified
+    // The authority list says it has rights here; if we have no verified
     // function detail for any of this group's contracts there's nothing to
     // show, so skip the empty row rather than render "governs 0".
     if (row.governs.length === 0) continue;

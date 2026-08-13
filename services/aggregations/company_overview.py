@@ -56,7 +56,14 @@ from db.models import (
     derive_job_chain_id,
 )
 from services.effects.selection import disposed_from_holdings, load_protocol_reference_shapes
-from services.governance.primary_controller import assign_co_controllers, assign_primary_controllers
+from services.governance.primary_controller import (
+    assign_co_controllers,
+    assign_operand_render_groups,
+    assign_primary_controllers,
+)
+from services.governance.primary_controller import (
+    function_capabilities as _function_capabilities,
+)
 from services.governance.principals import _build_company_function_entry
 from services.monitoring.delivery_evidence import load_delivery_evidence
 from services.scoring.planes import CONTROL_RELATIONS as SCORER_REACH_RELATIONS
@@ -1201,67 +1208,6 @@ def _principal_lookup_meta(
     }
 
 
-# THE single capability vocabulary, shared by both the per-contract
-# ``capabilities`` field (the contract card / contract-click chips) and the
-# per-(controller, contract) detail (guardian / co-controller chips, sidebar
-# "Can Call"). One map means the same power reads the same word no matter what
-# you click — a Safe's "fund-out" on EETH matches the chip you'd see clicking
-# EETH itself.
-#
-# ``_CLAIM_CAPABILITY`` is the Plane-1 vocabulary, authoritative per function.
-# It adds the ``timelock`` / ``safe`` chips (no legacy label ever mapped to
-# them) and finally produces ``arbitrary-call`` (its ``arbitrary_external_call``
-# legacy source was corpus-dead). The hook/external exclusion is now structural:
-# ``external_contract_call`` isn't representable as a claim at all, and
-# ``callee_pointer.rotate`` (the precise hook-pointer rotation) is deliberately
-# unmapped, so those functions are still shown by name.
-_CLAIM_CAPABILITY: dict[str, str] = {
-    "pause.set": "pause",
-    "pause.unset": "pause",
-    "ownership.transfer": "ownership",
-    "ownership.renounce": "ownership",
-    "ownership.accept": "ownership",
-    "authorized_caller.rotate": "authority",
-    "authority.replace": "authority",
-    "roles.grant": "roles",
-    "roles.revoke": "roles",
-    "roles.configure": "roles",
-    "upgrade.implementation": "upgrade",
-    "proxy.admin_change": "upgrade",
-    "timelock.schedule": "timelock",
-    "timelock.execute": "timelock",
-    "timelock.cancel": "timelock",
-    "timelock.set_delay": "timelock",
-    "safe.signer_mgmt": "safe",
-    "safe.module_mgmt": "safe",
-    "safe.set_guard": "safe",
-    "flow.out": "fund-out",
-    "flow.in": "fund-in",
-    "supply.mint": "mint",
-    "supply.burn": "burn",
-    "exec.arbitrary": "arbitrary-call",
-    "contract_deployment": "deploy",
-}
-
-# Legacy effect_labels → chip, the fallback for claim-less rows (stale data /
-# degraded artifact). ``delegatecall_execution`` is a Plane-0 fact with no claim
-# projection, so it only ever surfaces a chip through this path.
-_EFFECT_CAPABILITY: dict[str, str] = {
-    "pause_toggle": "pause",
-    "ownership_transfer": "ownership",
-    "role_management": "roles",
-    "implementation_update": "upgrade",
-    "asset_send": "fund-out",
-    "asset_pull": "fund-in",
-    "mint": "mint",
-    "burn": "burn",
-    "delegatecall_execution": "delegatecall",
-    "authority_update": "authority",
-    "contract_deployment": "deploy",
-    "arbitrary_external_call": "arbitrary-call",
-}
-
-
 def _claim_ids_list(claims: Any) -> list[str]:
     """``claim_id`` strings from a stored ``EffectiveFunction.claims`` JSONB list
     (``[{claim_id, tier, witness}, ...]``); anything else reads as empty."""
@@ -1274,17 +1220,6 @@ def _claim_ids_list(claims: Any) -> list[str]:
             if isinstance(cid, str) and cid:
                 out.append(cid)
     return out
-
-
-def _function_capabilities(labels: Iterable[str], claim_ids: Iterable[str]) -> set[str]:
-    """Capability chips for ONE function. Plane-1 claims are authoritative when
-    present; a claim-less function falls back to the legacy effect_labels map.
-    Coarse effects with no clean chip drop out — their functions are shown by
-    name instead."""
-    claim_id_set = set(claim_ids)
-    if claim_id_set:
-        return {_CLAIM_CAPABILITY[cid] for cid in claim_id_set if cid in _CLAIM_CAPABILITY}
-    return {_EFFECT_CAPABILITY[label] for label in labels if label in _EFFECT_CAPABILITY}
 
 
 def build_governance_view(
@@ -1904,27 +1839,51 @@ def build_governance_view(
     # caller keys stay bare addresses.
     governance_passthrough_addrs = {_entity_addr(e) for e in governance_passthrough}
 
-    primary_for = assign_primary_controllers(
-        principals,
-        fp_addrs_by_contract_entity,
-        governance_passthrough=governance_passthrough,
-    )
-
-    # Co-controllers: principals holding real (privileged or tightly-gated)
-    # authority on a contract they lost the primary contest for. Surfaced as
-    # their own guardian-rail nodes (not group containers) and enrolled in
-    # monitoring, so a pause / fund-recovery guardian Safe isn't invisible just
-    # because a bigger governance Safe won the same contracts. Built from
-    # per-function caller sets + effect labels keyed to the rendered (proxy)
-    # address — same keying as ``primary_for``; see
-    # ``services.governance.primary_controller.assign_co_controllers``.
+    # Per-function caller/labels/claims rows keyed to the rendered (proxy)
+    # address — same keying as the FP graph above. Feeds the primary contest
+    # (authority-tier ranking + veto gating), the co-controller rule, and the
+    # per-(controller, contract) capability detail below.
     fp_function_detail_by_entity: dict[str, list[dict[str, Any]]] = {}
     for cid, functions in fp_function_detail_by_cid.items():
         rendered = _rendered_entity(cid)
         if not rendered:
             continue
         fp_function_detail_by_entity.setdefault(rendered, []).extend(functions)
+
+    primary_for = assign_primary_controllers(
+        principals,
+        fp_addrs_by_contract_entity,
+        governance_passthrough=governance_passthrough,
+        fp_function_detail_by_contract=fp_function_detail_by_entity,
+    )
+
+    # Co-controllers: principals holding real (privileged or tightly-gated)
+    # authority on a contract they lost the primary contest for. Surfaced as
+    # their own guardian-rail nodes (not group containers) and enrolled in
+    # monitoring, so a pause / fund-recovery guardian Safe isn't invisible just
+    # because a bigger governance Safe won the same contracts. See
+    # ``services.governance.primary_controller.assign_co_controllers``.
     co_controls = assign_co_controllers(principals, fp_function_detail_by_entity, primary_for)
+
+    # Rendering home for machinery contracts whose operand unit lives in
+    # another principal's group — passthrough timelocks (etherfi's 2d operating
+    # timelock: driven by the ops Safe, acting entirely on the core-governance
+    # box), Pauser fan-outs, single-target bridge receivers. Published as
+    # ``grouped_with`` on the machinery's contract entry; the frontend group
+    # assignment honors it as a placement override while ``primary_for`` —
+    # enrollment, accordion, every authority claim — still names the true
+    # controller. See ``assign_operand_render_groups``.
+    render_groups = assign_operand_render_groups(
+        fp_addrs_by_contract_entity,
+        {_entity_key(c.get("chain"), c["address"]) for c in contracts if c.get("address")},
+        governance_passthrough,
+        primary_for,
+    )
+    if render_groups:
+        for entry in contracts:
+            gw = render_groups.get(_entity_key(entry.get("chain"), entry.get("address") or ""))
+            if gw:
+                entry["grouped_with"] = gw
 
     principal_meta = {(p.get("address") or "").lower(): p for p in principals if p.get("address")}
 

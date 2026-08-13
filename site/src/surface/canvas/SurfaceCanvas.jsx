@@ -281,10 +281,25 @@ export function SurfaceCanvas({ machines, fundFlows, principals, chain = "ethere
           ? fns.slice(0, 3).join(", ") + (fns.length > 3 ? ` +${fns.length - 3}` : "")
           : `${selPrincipal?.type || "principal"}-controlled`;
       };
+      // Box membership alone is NOT authority: a grouped_with machinery
+      // contract lives in this principal's box because of what IT operates,
+      // so the box owner gets no chip and no highlight on it unless
+      // primary_for / co_controls / controls actually name it. Left dimmed,
+      // the placement-only member reads as exactly what it is: in the box,
+      // not under this controller.
+      const authorityAddrs = new Set(
+        [
+          ...(Array.isArray(selPrincipal?.primary_for) ? selPrincipal.primary_for : []),
+          ...(Array.isArray(selPrincipal?.co_controls) ? selPrincipal.co_controls : []),
+          ...(Array.isArray(selPrincipal?.controls) ? selPrincipal.controls : []),
+        ]
+          .map((a) => a?.toLowerCase())
+          .filter(Boolean),
+      );
       for (const n of initNodes) {
         const nid = n.id?.toLowerCase();
         const pid = n.parentId?.toLowerCase();
-        if (pid === sel) {
+        if (pid === sel && (!selPrincipal || authorityAddrs.has(nid))) {
           connectedNodes.add(nid);
           if (selPrincipal) {
             addChip(nid, capsTextFor(nid), "out");
@@ -303,7 +318,13 @@ export function SurfaceCanvas({ machines, fundFlows, principals, chain = "ethere
       // deliberately draw NO edges: the cross-group dashed lines read as the
       // fanout spaghetti the owner-grouping removed, and the highlight alone
       // conveys the reach.
+      // primary_for is included because a grouped_with relocation can place a
+      // primary-owned contract in ANOTHER principal's box: its parentId no
+      // longer matches the owner, and passthrough-won contracts appear in
+      // primary_for without a direct `controls` row — without this the owner's
+      // own contract would neither chip nor un-dim.
       const reach = [
+        ...(Array.isArray(selPrincipal?.primary_for) ? selPrincipal.primary_for : []),
         ...(Array.isArray(selPrincipal?.controls) ? selPrincipal.controls : []),
         ...(Array.isArray(selPrincipal?.co_controls) ? selPrincipal.co_controls : []),
       ];

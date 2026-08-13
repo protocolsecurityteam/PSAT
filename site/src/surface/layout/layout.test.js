@@ -222,6 +222,45 @@ describe("buildGraphLayout", () => {
     }
   });
 
+  it("honors grouped_with: a mediator renders with its operand group, not its driver's", () => {
+    // The etherfi 2d-operating-timelock shape: the ops Safe primary-owns the
+    // timelock (true authority, kept in primary_for), but the server marked it
+    // grouped_with the gov Safe whose box holds the contracts it operates on.
+    const gov = "0x" + "a1".repeat(20);
+    const ops = "0x" + "b2".repeat(20);
+    const tl = "0x" + "c3".repeat(20);
+    const mediatorMachines = [
+      { address: "0x" + "d4".repeat(20), totalFunctions: 3 },
+      { address: "0x" + "d5".repeat(20), totalFunctions: 2 },
+      { address: tl, totalFunctions: 1, grouped_with: gov },
+      { address: "0x" + "d6".repeat(20), totalFunctions: 1 },
+      { address: "0x" + "d7".repeat(20), totalFunctions: 1 },
+    ];
+    const mediatorPrincipals = [
+      { address: gov, type: "safe", primary_for: ["0x" + "d4".repeat(20), "0x" + "d5".repeat(20)] },
+      { address: ops, type: "safe", primary_for: [tl, "0x" + "d6".repeat(20), "0x" + "d7".repeat(20)] },
+    ];
+    const { groupChildren, contractToGroup } = assignGroups(mediatorMachines, mediatorPrincipals);
+    expect(contractToGroup.get(tl)).toBe(gov);
+    expect(groupChildren.get(gov)).toContain(tl);
+    expect(groupChildren.get(ops) || []).not.toContain(tl);
+  });
+
+  it("ignores grouped_with pointing at an unknown principal", () => {
+    const gov = "0x" + "a1".repeat(20);
+    const tl = "0x" + "c3".repeat(20);
+    const mediatorMachines = [
+      { address: tl, totalFunctions: 1, grouped_with: "0x" + "99".repeat(20) },
+      { address: "0x" + "d6".repeat(20), totalFunctions: 1 },
+    ];
+    const mediatorPrincipals = [
+      { address: gov, type: "safe", primary_for: [tl, "0x" + "d6".repeat(20)] },
+    ];
+    const { contractToGroup } = assignGroups(mediatorMachines, mediatorPrincipals);
+    // Falls back to the primary_for placement.
+    expect(contractToGroup.get(tl)).toBe(gov);
+  });
+
   it("attaches a Controllers list to each group: primary first, then co-controllers scoped to the group", () => {
     // The Safe primary-owns both contracts (→ one group container). The
     // Timelock and an operator EOA each co-control machines[0] (VAULT) without
@@ -289,6 +328,47 @@ describe("buildGraphLayout", () => {
     expect(eoa.capabilities).toEqual(["fund-out"]);
     // The header height grows with the number of controller rows.
     expect(group.data.headerHeight).toBe(groupHeaderHeight(controllers.length));
+  });
+
+  it("lists a relocated member's true controller as a controller row in the operand box", () => {
+    // The grouped_with shape: ops Safe primary-owns ONLY the timelock, which
+    // renders inside gov's box via grouped_with. The accordion of gov's box
+    // must name the ops Safe (its only canvas footprint), scoped to the
+    // timelock, even though the timelock is in nobody-in-this-box's
+    // co_controls.
+    const gov = "0x" + "a1".repeat(20);
+    const ops = "0x" + "b2".repeat(20);
+    const tl = "0x" + "c3".repeat(20);
+    const core = "0x" + "d4".repeat(20);
+    const relMachines = [
+      { address: core, name: "Core", totalFunctions: 2 },
+      { address: tl, name: "OpsTimelock", totalFunctions: 1, grouped_with: gov },
+    ];
+    const relPrincipals = [
+      {
+        address: gov,
+        type: "safe",
+        primary_for: [core],
+        co_controls: [],
+        controls_detail: [{ address: core, functions: ["upgradeTo"], capabilities: ["upgrade"] }],
+      },
+      {
+        address: ops,
+        type: "safe",
+        primary_for: [tl],
+        co_controls: [],
+        controls_detail: [{ address: tl, functions: ["schedule", "execute"], capabilities: ["timelock"] }],
+      },
+    ];
+    const { nodes } = buildGraphLayout(relMachines, [], relPrincipals);
+    const group = nodes.find((n) => n.type === "group" && n.id === gov);
+    expect(group).toBeTruthy();
+    const opsRow = group.data.controllers.find((c) => c.address.toLowerCase() === ops);
+    expect(opsRow).toBeTruthy();
+    expect(opsRow.isPrimary).toBe(false);
+    expect(opsRow.governs).toHaveLength(1);
+    expect(opsRow.governs[0].address).toBe(tl);
+    expect(opsRow.governs[0].functions).toEqual(["schedule", "execute"]);
   });
 
   it("reserves each group's measured band height verbatim so cards start below it", () => {
