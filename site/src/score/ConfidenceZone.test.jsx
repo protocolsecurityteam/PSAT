@@ -52,10 +52,10 @@ describe("ConfidenceZone — the table", () => {
       "not yet verified",
       "dollar ceiling",
     ]);
-    expect(
-      screen.getByText(/Each row is a proven permission whose consequence has not been verified/),
-    ).toBeInTheDocument();
-    expect(screen.getByText(/rows sharing one pool are never added together/)).toBeInTheDocument();
+    const intro = screen.getByText(/Each row is a proven permission whose consequence has not been verified/);
+    expect(intro.textContent.trim()).toBe(
+      "Each row is a proven permission whose consequence has not been verified. Nothing here is charged to the score.",
+    );
   });
 
   it("says nothing here is charged", () => {
@@ -242,18 +242,20 @@ describe("ConfidenceZone — the table", () => {
     }
 
     // 0xa4c5… holds removeAsset and stands alone rather than being spoken for.
+    // Its address rides on the chip (the single-holder handle), not the line.
     const removeRow = rows.find((r) => r.textContent.includes("removeAsset"));
     expect(removeRow.querySelector(".scz-nprin")).toBeNull();
-    expect(removeRow.querySelector(".sc-addr").textContent).toContain("0xa4c5…6bb4");
+    expect(removeRow.querySelector(".sc-addr").textContent).not.toContain("0xa4c5…6bb4");
     expect(grouped.textContent).not.toContain("removeAsset");
     expect(grouped.textContent).not.toContain("0xa4c5…6bb4");
 
-    // …and the three Safes are not published as EOAs.
-    const safes = rows.filter((r) => /^Safe /.test(r.querySelector(".sc-kchip").textContent));
+    // …and the three Safes are not published as EOAs. The last one is a merged
+    // unit (two principal_addresses), so its chip is the unit, not one k/n.
+    const safes = rows.filter((r) => /Safe/.test(r.querySelector(".sc-kchip").textContent));
     expect(safes.map((r) => r.querySelector(".sc-kchip").textContent)).toEqual([
       "Safe 2/5",
       "Safe 2/7",
-      "Safe 2/4",
+      "Safes 2/4 + 2/4 · shared keys",
     ]);
     for (const safe of safes) expect(safe.querySelector(".scz-nprin")).toBeNull();
 
@@ -289,11 +291,42 @@ describe("ConfidenceZone — the proven half is the deductions row", () => {
     const row = container.querySelectorAll(".scz-trow")[1];
     expect(row.querySelector(".sc-kchip").textContent).toBe("EOA");
     expect(row.querySelector(".sc-cap").textContent).toBe("authority.replace?");
-    expect(row.querySelector(".sc-addr").textContent).toBe("setAuthority · 0xf855…909e");
+    // The holder's address is the chip's target now, not part of the line.
+    expect(row.querySelector(".sc-addr").textContent).toBe("setAuthority");
     const targets = row.querySelector(".sc-targets");
     expect(targets.querySelector(".sc-arr").textContent).toBe("→ reaches");
     expect(targets.querySelector(".sc-host")).toBeTruthy();
     expect(row.querySelector(".scz-chain").textContent).toBe("ethereum");
+  });
+
+  it("selects a single holder from its kind chip, like the deductions rows", async () => {
+    const onSelect = vi.fn();
+    const { container } = renderZone(ETHERFI, onSelect);
+    const row = container.querySelectorAll(".scz-trow")[1];
+    await userEvent.setup().click(within(row).getByRole("button", { name: "EOA" }));
+    expect(onSelect).toHaveBeenCalledWith({
+      chain: "ethereum",
+      address: "0xf8553c8552f906c19286f21711721e206ee4909e",
+      label: "EOA",
+    });
+  });
+
+  it("hands each merged-unit member its own handle on the chip", async () => {
+    const onSelect = vi.fn();
+    const { container } = renderZone(ETHERFI, onSelect);
+    await userEvent.setup().click(screen.getByRole("button", { name: /14 more/ }));
+    const chip = [...container.querySelectorAll(".scz-trow .sc-kchip")].find((el) =>
+      el.textContent.includes("shared keys"),
+    );
+    expect(chip.textContent).toBe("Safes 2/4 + 2/4 · shared keys");
+    // Same shape twice, so the two handles share a name — order is the
+    // principal_addresses order.
+    const handles = within(chip).getAllByRole("button", { name: "2/4" });
+    expect(handles).toHaveLength(2);
+    await userEvent.setup().click(handles[0]);
+    expect(onSelect).toHaveBeenLastCalledWith(
+      expect.objectContaining({ address: "0x41dfc53b13932a2690c9790527c1967d8579a6ae", label: "Safe 2/4" }),
+    );
   });
 
   it("selects entities through the same pathway the deductions tab uses", async () => {
@@ -307,18 +340,10 @@ describe("ConfidenceZone — the proven half is the deductions row", () => {
         label: "setAuthority",
         highlight: {
           functionSignature: "setAuthority",
-          controller: "0xf8553c8552f906c19286f21711721e206ee4909e",
+          controllers: ["0xf8553c8552f906c19286f21711721e206ee4909e"],
         },
       }),
     );
-  });
-
-  it("names the unproven proposer set rather than leaving the row silent", () => {
-    const { container } = renderZone();
-    const timelock = [...container.querySelectorAll(".scz-trow")].find((r) =>
-      r.textContent.includes("Timelock 2d"),
-    );
-    expect(timelock.querySelector(".scz-nd-line").textContent).toBe("proposer not determined");
   });
 
   it("degrades to plain text with no handler wired", () => {

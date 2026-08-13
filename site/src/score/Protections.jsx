@@ -1,10 +1,14 @@
+import { useState } from "react";
+
 import BoundBadge from "./BoundBadge.jsx";
 import CapabilityTag from "./CapabilityTag.jsx";
-import EntityButton, { entityProps } from "./EntityButton.jsx";
-import { shortAddress, usdCompact } from "./format.js";
+import TailToggle from "./TailToggle.jsx";
+import { PROTECTION_ROWS } from "./derive.js";
+import { usdCompact } from "./format.js";
+import { ActorLine, KindChip, TargetList } from "./rowAnatomy.jsx";
 
 const EXPOSURE_EXPLAINER =
-  "How well the protocol's value is defended — each dollar weighted by how dangerous the control paths that can reach it are. Higher is better.";
+  "The score weighted by value. Higher means more of the protocol's dollars sit behind safe controls.";
 
 function Nd({ children }) {
   return <span className="sc-nd">{children || "not determined"}</span>;
@@ -94,47 +98,12 @@ function AuditCoverage({ posture, earnedNegatives }) {
   );
 }
 
-// The caution's own sentence, with the Safe it names made selectable in place.
-// The text is sliced around the token that is already in it, so the rendered
-// characters are byte-identical to the plain form and the line cannot shift.
-function CautionBody({ caution, onSelect }) {
-  const { text, link } = caution;
-  const at = link ? text.indexOf(link.token) : -1;
-  if (!link || at < 0) return text;
-  return (
-    <>
-      {text.slice(0, at)}
-      <EntityButton
-        onSelect={onSelect}
-        target={link}
-        title={`Show ${link.label} on the control surface`}
-      >
-        {link.token}
-      </EntityButton>
-      {text.slice(at + link.token.length)}
-    </>
-  );
-}
-
-// The kind chip IS the principal on a protection row — it is the only place the
-// row names who holds the power — so the interactive props go onto the chip
-// itself rather than a wrapper: a wrapper would become the flex item and
-// change what this row lays out.
-function ProtectionChip({ row, onSelect }) {
-  const props = entityProps({
-    onSelect,
-    target: { chain: row.chain, address: row.address, label: row.chip.label },
-    title: row.address ? `Show ${shortAddress(row.address)} on the control surface` : undefined,
-  });
-  return (
-    <span className={`sc-kchip sc-kchip-${row.chip.kind}${props ? " sc-lnk" : ""}`} {...(props || {})}>
-      {row.chip.label}
-    </span>
-  );
-}
-
 export default function Protections({ doc, view, note, onSelect }) {
+  const [tailOpen, setTailOpen] = useState(false);
   const exposure = doc.grade_exposure;
+  // The pot the grade is weighted over. Published only as the number the
+  // document carries — absent stays absent, never $0.
+  const tracked = doc?.provenance?.value?.tracked_total_usd;
   const rows = view.protections;
   return (
     <div>
@@ -149,6 +118,12 @@ export default function Protections({ doc, view, note, onSelect }) {
               <span className="sc-shield-of"> / 100</span>
             </span>
             <span className="sc-shield-s">exposure grade</span>
+            {typeof tracked === "number" && Number.isFinite(tracked) && (
+              <>
+                <span className="sc-shield-v sc-shield-tracked">{usdCompact(tracked)}</span>
+                <span className="sc-shield-s">value tracked</span>
+              </>
+            )}
           </div>
           <div className="sc-split-bar">
             <div className="sc-split-a" style={{ flexBasis: `${exposure}%` }} title={`exposure grade ${exposure.toFixed(1)}`} />
@@ -162,11 +137,10 @@ export default function Protections({ doc, view, note, onSelect }) {
         </>
       )}
 
-      {rows.map((row) => (
+      {(tailOpen ? rows : rows.slice(0, PROTECTION_ROWS)).map((row) => (
         <div className="sc-prot" key={row.index}>
           <div className="sc-prot-head">
-            <ProtectionChip row={row} onSelect={onSelect} />
-            {row.who && <span className="sc-prot-who">{row.who}</span>}
+            <KindChip chip={row.chip} chain={row.chain} controller={row.address} onSelect={onSelect} />
             <span className="sc-prot-what">
               <CapabilityTag capability={row.capability} />
               {row.valueText ? ` on ${row.valueText}` : ""}
@@ -185,18 +159,33 @@ export default function Protections({ doc, view, note, onSelect }) {
             )}
             <span className="sc-prot-saved">+{row.delta.toFixed(1)}</span>
           </div>
+          {/* The same finding's deduction-row anatomy, through the same
+              components: the protected action and the contracts it lives on
+              read identically on both sides of the page. Gated on the content,
+              not the join — an anatomy with no example function has no action
+              line to draw. */}
+          {row.anatomy?.exampleFunction && (
+            <div className="sc-who">
+              <ActorLine row={row.anatomy} onSelect={onSelect} />
+            </div>
+          )}
           <div className="sc-pbar" style={{ width: `${row.widthPct}%` }}>
             <div className="sc-avoided" style={{ flexBasis: `${row.avoidedPct}%` }} />
             <div className="sc-charged" style={{ flexBasis: `${row.chargedPct}%` }} />
           </div>
-          {row.cautions.map((caution) => (
-            <div key={caution.text} className={caution.tone === "warn" ? "sc-caut" : "sc-attr"}>
-              {caution.tone === "warn" ? "⚠ " : null}
-              <CautionBody caution={caution} onSelect={onSelect} />
-            </div>
-          ))}
+          {row.anatomy && <TargetList row={row.anatomy} onSelect={onSelect} />}
+          {row.chain && <div className="sc-chain">{row.chain}</div>}
         </div>
       ))}
+      {rows.length > PROTECTION_ROWS && (
+        // The label carries no combined figure: each delta is a counterfactual
+        // against the SAME current λ, so a sum of them is a quantity nothing
+        // modeled — the deduction tail may sum because published nets are
+        // additive by construction, and these are the opposite case.
+        <TailToggle flush open={tailOpen} onToggle={() => setTailOpen((was) => !was)}>
+          + {rows.length - PROTECTION_ROWS} more
+        </TailToggle>
+      )}
 
       {rows.length > 0 && (
         <div className="sc-ledger-foot sc-prot-foot">

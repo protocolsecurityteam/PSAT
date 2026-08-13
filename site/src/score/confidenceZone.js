@@ -155,13 +155,17 @@ function stableString(value) {
   return JSON.stringify(value === undefined ? null : value);
 }
 
-// The kind chip a row wears, and whether its principal routes through a
-// proposer set nobody proved. Both are read here as well as rendered, so the
-// grouping and the row can never disagree about what the row says.
+// The kind chip a row wears — read here as well as rendered, so the grouping
+// and the row can never disagree about what the row says. The row's own chip
+// is preferred: it was derived with the document in hand, so a merged unit's
+// member shapes survive; re-deriving from the finding alone would drop them.
 export function leverChip(lever, row) {
-  return principalChip(row?.finding || { principal_kind: "", principal: lever?.principal });
+  return row?.chip || principalChip(row?.finding || { principal_kind: "", principal: lever?.principal });
 }
 
+// No longer printed on the row — the chip click reaches the principal card
+// where the proposer state lives — but still part of the group key: rows that
+// answered the proposer question differently never merge.
 export function proposerUnproven(row) {
   return row?.finding ? timelockProposer(row.finding)?.proven === false : false;
 }

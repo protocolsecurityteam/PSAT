@@ -1633,6 +1633,69 @@ describe("ProtocolSurface — a score arrival marks the function/caller pair", (
     expectNoCrash();
   });
 
+  it("marks the member the card's own caller list witnesses, never the hint's ordering", async () => {
+    // A merged-unit row names every member. The Timelock comes first in the
+    // hint and cannot call pause here; the Safe can — the caller list decides.
+    const { result } = await arrive({
+      contractAddress: VAULT.address,
+      highlight: { functionSignature: "pause", controllers: [TIMELOCK, SAFE] },
+    });
+    expect(result).toEqual({
+      ok: true,
+      kind: "contract",
+      functionMissing: false,
+      highlight: { function: "marked", controller: "marked" },
+    });
+    await waitFor(() => expect(markedRow()).toBeTruthy());
+    const chips = markedChips();
+    expect(chips).toHaveLength(1);
+    expect(chips[0]).toHaveTextContent("Safe");
+    expectNoCrash();
+  });
+
+  it("stays unpaired when no member of the unit is the function's caller", async () => {
+    const { result } = await arrive({
+      contractAddress: VAULT.address,
+      highlight: { functionSignature: "pause", controllers: [TIMELOCK, EOA] },
+    });
+    expect(result.highlight).toEqual({ function: "unpaired", controller: "not-a-caller" });
+    await waitFor(() => {
+      expect(document.querySelector(".ps-sidebar-content .ps-machine-name")).toHaveTextContent("Vault");
+    });
+    expect(markedRow()).toBeNull();
+    expect(markedChips()).toHaveLength(0);
+    expectNoCrash();
+  });
+
+  it("resolves a bare name through duplicate rows of the same function", async () => {
+    // A split proxy materializes one selector once per implementation, so the
+    // card can carry the same function twice. Two rows of one function are not
+    // overloads and must not turn the hint into a not-on-card refusal.
+    const doubled = structuredClone(ETHERFI_COMPANY_RICH);
+    const vault = doubled.contracts.find((c) => c.name === "Vault");
+    const pause = vault.functions.find((f) => f.function === "pause");
+    vault.functions.push(structuredClone(pause));
+
+    const ref = React.createRef();
+    render(<ProtocolSurface ref={ref} companyName="etherfi" initialData={doubled} embedded />);
+    await waitFor(() => expect(ref.current).toBeTruthy());
+    let result;
+    await act(async () => {
+      result = ref.current.selectExample({
+        contractAddress: vault.address,
+        highlight: { functionSignature: "pause", controller: SAFE },
+      });
+    });
+    expect(result).toEqual({
+      ok: true,
+      kind: "contract",
+      functionMissing: false,
+      highlight: { function: "marked", controller: "marked" },
+    });
+    await waitFor(() => expect(markedRow()).toBeTruthy());
+    expectNoCrash();
+  });
+
   it("drops the chip mark with the row mark on the next selection", async () => {
     await arrive({
       contractAddress: VAULT.address,

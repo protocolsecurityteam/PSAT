@@ -1,57 +1,104 @@
 // The anatomy of a score-page row: who acts, on what, and how far it reaches.
-// Lifted out of Deductions.jsx so the confidence zone's "proven" cell is the
-// SAME components rather than a second reading of the same fields — an entity
-// click has to mean one thing on this page, and a row that renders its targets
-// twice will eventually render them two different ways.
+// Lifted out of Deductions.jsx so the protections panel and the confidence
+// zone's "proven" cell are the SAME components rather than second readings of
+// the same fields — an entity click has to mean one thing on this page, and a
+// row that renders its targets twice will eventually render them two
+// different ways.
 
 import { Fragment, useState } from "react";
 
-import EntityButton from "./EntityButton.jsx";
+import EntityButton, { entityProps } from "./EntityButton.jsx";
+import { shortAddress } from "./format.js";
 
 export const TARGETS_SHORT = 3;
 
-// What this row is ABOUT, carried alongside the entity a click asks for: the
-// example function the row DISPLAYS (never the other n−1 it counts — the user
-// read this one) and the controller it names. The surface marks that pair on
-// the card it opens, or marks less; nothing here asserts the pair is on any
-// particular contract.
-export function highlightHint(row) {
-  if (!row.exampleFunction && !row.controller) return undefined;
-  return { functionSignature: row.exampleFunction || "", controller: row.controller || "" };
+// The kind chip is a row's handle on WHO ACTS, on every panel that renders
+// one. A merged chip splits into one handle per member: each k/n selects its
+// own Safe, so no click has to pick a member for the user. A single-member
+// chip selects its controller whole — the interactive props go onto the chip
+// span itself rather than a wrapper, which would become the flex item and
+// change what the row lays out. A principal with no address stays plain.
+export function KindChip({ chip, chain, controller, onSelect }) {
+  if (chip.members?.length) {
+    return (
+      <span className={`sc-kchip sc-kchip-${chip.kind}`}>
+        {"Safes "}
+        {chip.members.map((member, i) => (
+          <Fragment key={member.address}>
+            {i > 0 && " + "}
+            <EntityButton
+              onSelect={onSelect}
+              target={{ chain, address: member.address, label: `Safe ${member.shape}` }}
+              title={`Show Safe ${member.shape} (${shortAddress(member.address)}) on the control surface`}
+            >
+              {member.shape}
+            </EntityButton>
+          </Fragment>
+        ))}
+        {" · shared keys"}
+      </span>
+    );
+  }
+  // A merged chip whose member shapes are unwitnessed has no honest single
+  // target: the one address on hand is an arbitrary member, and clicking it
+  // under the unit's label would attribute the whole unit's power to one Safe
+  // — the exact misattribution the member handles exist to prevent.
+  const props = chip.merged
+    ? null
+    : entityProps({
+        onSelect,
+        target: { chain, address: controller, label: chip.label },
+        title: controller ? `Show ${shortAddress(controller)} on the control surface` : undefined,
+      });
+  return (
+    <span className={`sc-kchip sc-kchip-${chip.kind}${props ? " sc-lnk" : ""}`} {...(props || {})}>
+      {chip.label}
+    </span>
+  );
 }
 
-// The row's action line: the example function, the count of the ones it stands
-// for, and the address(es) holding the permission. `controllers` is a list
-// because one row can speak for several holders of an identical gap; on a
-// single-holder row it is the one controller the principal string names.
+// What this row is ABOUT, carried alongside the entity a click asks for: the
+// example function the row DISPLAYS (never the other n−1 it counts — the user
+// read this one) and the controllers it names — every member of a merged unit,
+// because which member gates a given host is the card's fact, not this row's.
+// The surface marks the pair its own caller list witnesses, or marks less;
+// nothing here asserts any pair is on any particular contract.
+export function highlightHint(row) {
+  const controllers = row.controllers?.length ? row.controllers : row.controller ? [row.controller] : [];
+  if (!row.exampleFunction && !controllers.length) return undefined;
+  return { functionSignature: row.exampleFunction || "", controllers };
+}
+
+// The row's action line: the example function and, on rows that aggregate
+// several holders of one identical gap (the possible-deductions table), the
+// addresses holding the permission.
 export function ActorLine({ row, controllers = [], onSelect }) {
   // The function click names its host when the document does: a single-host
   // row selects that contract and marks the function/controller pair on it.
   // A multi-host row's displayed example could live on any of them, so the
   // click stays name-only and the surface graph resolves or declines.
   const host = row.hosts.length === 1 ? row.hosts[0] : null;
-  const detail = row.functions.map((part) =>
-    part === row.exampleFunction ? (
+  const detail = [];
+  if (row.exampleFunction) {
+    detail.push(
       <EntityButton
-        key={part}
+        key={row.exampleFunction}
         onSelect={onSelect}
         target={{
           chain: host?.chain || row.finding?.chain,
           ...(host ? { address: host.address } : {}),
-          functionSignature: part,
-          label: part,
+          functionSignature: row.exampleFunction,
+          label: row.exampleFunction,
           // The controller rides along so the resolved row can mark the caller
           // chip too — the row names an action AND who can take it.
           highlight: highlightHint(row),
         }}
-        title={`Show ${part} on the control surface`}
+        title={`Show ${row.exampleFunction} on the control surface`}
       >
-        {part}
-      </EntityButton>
-    ) : (
-      <span key={part}>{part}</span>
-    ),
-  );
+        {row.exampleFunction}
+      </EntityButton>,
+    );
+  }
   for (const controller of controllers) {
     detail.push(
       <EntityButton
@@ -78,7 +125,7 @@ export function ActorLine({ row, controllers = [], onSelect }) {
 
 export function TargetList({ row, onSelect }) {
   const [open, setOpen] = useState(false);
-  const { hosts, targets, reachWitnessed, undeterminedCount } = row;
+  const { hosts, targets, reachWitnessed } = row;
   if (!hosts.length && !targets.length) return null;
   const hint = highlightHint(row);
   // Hosts and reach share the collapsed line's budget, hosts first — a row
@@ -88,6 +135,11 @@ export function TargetList({ row, onSelect }) {
   const hiddenCount = hosts.length - shownHosts.length + targets.length - shown.length;
   return (
     <div className={`sc-targets${open ? " sc-open" : ""}`}>
+      {/* The entity line ellipsises on its own, INSIDE this child — the
+          expander button is a sibling the flex row never shrinks, so a run of
+          long names can eat the line but never the control that reveals the
+          rest. */}
+      <span className="sc-targets-line">
       {/* The hosts come first and apart: they are the contracts the function
           is ON — where the named controller acts directly. Everything after
           the arrow is reach through the control graph, a different (weaker)
@@ -107,7 +159,7 @@ export function TargetList({ row, onSelect }) {
           </span>
         );
       })}
-      {hosts.length > 0 && (targets.length > 0 || undeterminedCount > 0 || !reachWitnessed) && " "}
+      {hosts.length > 0 && (targets.length > 0 || !reachWitnessed) && " "}
       {/* The not-witnessed note survives an empty list: hosts are where the
           function IS, which says nothing about what it reaches. */}
       {reachWitnessed && shown.length > 0 && (
@@ -152,6 +204,7 @@ export function TargetList({ row, onSelect }) {
           </span>
         );
       })}
+      </span>
       {hiddenCount > 0 && (
         <>
           {" "}
@@ -167,9 +220,6 @@ export function TargetList({ row, onSelect }) {
             less
           </button>
         </>
-      )}
-      {reachWitnessed && undeterminedCount > 0 && (
-        <span className="sc-ndp"> · +{undeterminedCount} not determined</span>
       )}
     </div>
   );

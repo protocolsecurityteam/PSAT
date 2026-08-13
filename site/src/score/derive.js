@@ -40,18 +40,6 @@ export function safeShape(finding) {
   return { k, n };
 }
 
-// The coalition word beside a Safe protection. Read off k/n rather than the
-// weakness rung: two rungs share the value 0.55, so inverting the ladder would
-// have to guess which one produced it.
-export function coalitionWord(shape) {
-  if (!shape) return null;
-  if (shape.k <= 1) return "single signer";
-  const ratio = shape.k / shape.n;
-  if (ratio >= 0.67) return "supermajority";
-  if (ratio > 0.5) return "majority";
-  return "minority";
-}
-
 export function timelockDelayLabel(finding) {
   const match = TIMELOCK_DELAY_RE.exec(String(finding?.principal || ""));
   return match ? match[1].replace(/\s+/g, "") : null;
@@ -68,14 +56,46 @@ export function timelockProposer(finding) {
   return null;
 }
 
-// Short chip: the shape of the principal, parsed from the display string.
-// (A structured principal_shape on the document would remove the regex; it
-// does not exist yet, and the string is the only witness of k/n and delay.)
-export function principalChip(finding) {
+// Each merged member's own k/n, read off the overlap table — the display
+// string carries only one member's shape. null when any member's shape is not
+// witnessed there; the chip then counts members instead of guessing one.
+function memberShapes(doc, finding, members) {
+  const shapes = new Map();
+  for (const overlap of doc?.provenance?.safe_keyset_overlaps || []) {
+    if (overlap?.a && overlap?.a_k_of_n) shapes.set(overlap.a, overlap.a_k_of_n);
+    if (overlap?.b && overlap?.b_k_of_n) shapes.set(overlap.b, overlap.b_k_of_n);
+  }
+  const out = members.map((member) => shapes.get(entityKey(finding?.chain, member)));
+  return out.every(Boolean) ? out : null;
+}
+
+// Short chip: the shape of the principal. A single member's k/n and a
+// timelock's delay are parsed from the display string (a structured
+// principal_shape on the document would remove the regex; it does not exist
+// yet); a merged unit's member shapes come from the overlap table instead.
+export function principalChip(finding, doc = null) {
   const kind = finding?.principal_kind || "";
   if (kind === "eoa") return { kind, label: "EOA" };
   if (kind === "anyone") return { kind, label: "Anyone" };
   if (kind === "safe") {
+    // A merged unit's display string names one member and that member's k/n —
+    // a chip built from it would attribute the whole unit's power to one Safe.
+    // Every member keeps its signer shape, in principal_addresses order.
+    const members = principalAddresses(finding);
+    if (members.length > 1) {
+      const shapes = doc ? memberShapes(doc, finding, members) : null;
+      return {
+        kind,
+        label: shapes
+          ? `Safes ${shapes.join(" + ")} · shared keys`
+          : `${members.length} Safes · shared keys`,
+        merged: true,
+        // Each member beside its own shape, so a consumer can hand every Safe
+        // its own click target. Absent when the shapes are unwitnessed — a
+        // handle labelled with a guessed shape would be worse than none.
+        ...(shapes ? { members: members.map((address, i) => ({ address, shape: shapes[i] })) } : {}),
+      };
+    }
     const shape = safeShape(finding);
     return { kind, label: shape ? `Safe ${shape.k}/${shape.n}` : "Safe" };
   }
@@ -216,13 +236,12 @@ export function sheetDisposition(finding) {
 
 // ── functions / targets ─────────────────────────────────────────────────────
 
+// The example function alone. The row's n_functions count used to render
+// beside it ("upgradeToAndCall · 3 functions") and was cut for space — the
+// count survives on the finding for any consumer that needs it.
 export function functionsLabel(finding) {
-  const parts = [];
   const example = (finding?.example_functions || [])[0];
-  if (example) parts.push(example);
-  const n = Number(finding?.n_functions);
-  if (Number.isFinite(n) && n > 1) parts.push(`${n} functions`);
-  return parts;
+  return example ? [example] : [];
 }
 
 // entity → contract, plus the implementation→proxy alias. A finding can reach a
@@ -323,9 +342,14 @@ export function deductionRows(doc, index) {
       finding,
       raw: entry.raw,
       net,
-      chip: principalChip(finding),
+      chip: principalChip(finding, doc),
       capability: finding?.capability || "",
       controller: controllerAddress(finding),
+      // Every member of the (possibly merged) unit — principal_addresses[] is
+      // the witnessed list; the display string carries only one of them, and a
+      // row shown under that one address alone attributes the other members'
+      // gates to it.
+      controllers: principalAddresses(finding),
       functions: functionsLabel(finding),
       exampleFunction: (finding?.example_functions || [])[0] || null,
       value: valueCell(finding),
@@ -493,23 +517,11 @@ export function fixFirst(doc, rows) {
     // contract — the displayed example function is then unambiguously on it.
     host: group.rows[0].hosts?.length === 1 ? group.rows[0].hosts[0] : null,
     controller: group.rows[0].controller || null,
+    controllers: group.rows[0].controllers || [],
   };
 }
 
 // ── protections ─────────────────────────────────────────────────────────────
-
-const SELF_GRANT_NOTE = "owner_may_grant_itself_any_role_on_this_registry";
-const NO_DELAY_CREDIT_NOTE = "timelock_proposer_not_determined:no_delay_credit";
-
-export function upgradeBypassCount(doc) {
-  const perContract = doc?.provenance?.upgrade_history?.per_contract || {};
-  let total = 0;
-  for (const entry of Object.values(perContract)) {
-    const direct = Number(entry?.executor_kinds?.safe_direct);
-    if (Number.isFinite(direct)) total += direct;
-  }
-  return total;
-}
 
 // Every address this principal acts through. `principal_addresses[]` is the
 // witnessed list; the display string carries only one of them, so matching on
@@ -523,77 +535,15 @@ export function principalAddresses(finding) {
   return single ? [single] : [];
 }
 
-export function keysetOverlapsFor(doc, finding) {
-  const keys = new Set(principalAddresses(finding).map((a) => entityKey(finding?.chain, a)));
-  if (!keys.size) return [];
-  const controller = controllerAddress(finding);
-  const self = controller ? entityKey(finding?.chain, controller) : null;
-  const out = [];
-  for (const overlap of doc?.provenance?.safe_keyset_overlaps || []) {
-    if (!overlap?.shared_can_act_as_both) continue;
-    const isA = keys.has(overlap.a);
-    const isB = keys.has(overlap.b);
-    if (!isA && !isB) continue;
-    // Which side is "the other Safe": the one this principal is not. When both
-    // sides are its own addresses the row is an overlap inside the principal's
-    // own unit — the displayed side stays self so the caution never names the
-    // principal as its own counterparty.
-    const bothOwn = isA && isB;
-    const other = bothOwn ? (overlap.b === self ? overlap.a : overlap.b) : isA ? overlap.b : overlap.a;
-    out.push({
-      other,
-      otherShort: shortAddress(splitEntity(other).address),
-      sharedOwners: overlap.shared_owners,
-    });
-  }
-  return out;
-}
-
-// ⚠ notes attached to a protection: what weakens the strength being credited.
-export function cautionsFor(doc, finding) {
-  const notes = finding?.witness_notes || [];
-  const out = [];
-  for (const overlap of keysetOverlapsFor(doc, finding)) {
-    const other = splitEntity(overlap.other);
-    out.push({
-      tone: "warn",
-      text: `shares ${overlap.sharedOwners} owners with Safe ${overlap.otherShort} — not an independent key set`,
-      // The Safe named in the sentence is an entity like any other on this
-      // page. `token` is the substring the caution renders it as, so the
-      // control wraps text that already exists rather than adding any.
-      link: {
-        token: overlap.otherShort,
-        chain: other.chain,
-        address: other.address,
-        label: `Safe ${overlap.otherShort}`,
-      },
-    });
-  }
-  if (finding?.principal_kind === "timelock" && finding?.capability === "upgrade.implementation") {
-    const bypassed = upgradeBypassCount(doc);
-    if (bypassed > 0) {
-      out.push({
-        tone: "warn",
-        text: `${bypassed} witnessed upgrades bypassed this timelock (executed directly by a Safe)`,
-      });
-    }
-  }
-  if (notes.includes(SELF_GRANT_NOTE)) {
-    out.push({ tone: "warn", text: "this owner can grant itself any role on the registry it governs" });
-  }
-  if (notes.includes(NO_DELAY_CREDIT_NOTE)) {
-    out.push({ tone: "attr", text: "no delay credit — the proposer set is unproven" });
-  }
-  return out;
-}
-
 export const PROTECTION_WEAKNESS_CEILING = 0.9;
+// How many rows the panel shows before the tail toggle, not a cap on the
+// derivation: every qualifying row is returned, ranked by λ-delta.
 export const PROTECTION_ROWS = 4;
 
 // Coordination that is modeled to be holding points on. Ranked by λ-delta —
 // what the grade would lose if the principal were unconditional — not by the
 // finding's own net, which measures the opposite thing.
-export function protectionRows(doc, limit = PROTECTION_ROWS) {
+export function protectionRows(doc, limit = Infinity, rowsByIndex = null) {
   const findings = doc?.findings || [];
   const ranked = rankedFindings(findings);
   const netByIndex = new Map(ranked.map((r) => [r.index, r.net]));
@@ -603,21 +553,22 @@ export function protectionRows(doc, limit = PROTECTION_ROWS) {
     if (!(Number(finding?.weakness) < PROTECTION_WEAKNESS_CEILING)) return;
     const delta = protectionDelta(findings, index);
     if (delta === null || !(delta > 0)) return;
-    const shape = safeShape(finding);
-    const proposer = timelockProposer(finding);
     const value = valueCell(finding);
     rows.push({
       index,
       finding,
       delta,
+      // The same finding's deduction row, so the panel renders the function
+      // and target anatomy through the SAME components — one derivation, like
+      // the possible-deductions table's join. null without the map.
+      anatomy: rowsByIndex?.get(index) || null,
       net: netByIndex.get(index) ?? 0,
-      chip: principalChip(finding),
+      chip: principalChip(finding, doc),
       // The principal's own address, so the row's kind chip selects the Safe or
       // timelock it names on the surface — the same pathway the deduction rows'
       // controller chips use.
       chain: finding.chain || null,
       address: controllerAddress(finding),
-      who: finding.principal_kind === "safe" ? coalitionWord(shape) : proposer?.text || null,
       what: value.determined ? `${finding.capability} on ${value.text}` : finding.capability,
       // The same reading split apart, for consumers that wrap the capability
       // in its own control (the glossary tag) — one derivation, two shapes.
@@ -631,7 +582,6 @@ export function protectionRows(doc, limit = PROTECTION_ROWS) {
       // and the deduction row already tells them apart — a protection row that
       // could not would contradict the same finding one column over.
       provenNoReach: isProvenNoReach(finding),
-      cautions: cautionsFor(doc, finding),
     });
   });
   rows.sort((a, b) => b.delta - a.delta || a.index - b.index);
@@ -683,26 +633,28 @@ export function auditPosture(doc) {
 
 // ── confidence ──────────────────────────────────────────────────────────────
 
+// Every channel is value-weighted, so the copy says "of the protocol's value"
+// rather than repeating the weighting mechanics on each line.
 export const CONFIDENCE_CHANNELS = [
   {
     id: "capability_scored_pct",
     name: "Capability scored",
-    desc: "Value-weighted share of the protocol's contracts whose privileged functions we could grade for what they can do.",
+    desc: "How much of the protocol's value had its privileged functions graded.",
   },
   {
     id: "reachability_answered_pct",
     name: "Reachability",
-    desc: 'How much of that surface has a proven answer to "who can actually call this?"',
+    desc: "How much of that surface has a proven answer to who can call it.",
   },
   {
     id: "value_priced_pct",
     name: "Value priced",
-    desc: "Value-weighted share of the protocol's contracts holding any priced balance at all.",
+    desc: "How much of the protocol's value we could price.",
   },
   {
     id: "reach_magnitude_witnessed_pct",
     name: "Reach magnitude witnessed",
-    desc: "Value-weighted share of the perimeter where the magnitude question is answered or vacuous (an entity proven codeless has none).",
+    desc: "How much of the protocol's value has a measured limit on what a permission can move.",
   },
 ];
 
@@ -749,7 +701,7 @@ export function projectScore(doc, contracts) {
     ledger: ledgerSegments(rows, lambda),
     callouts: calloutsFor(rows, lambda),
     fix: withheld ? null : fixFirst(doc, rows),
-    protections: protectionRows(doc),
+    protections: protectionRows(doc, Infinity, new Map(rows.map((r) => [r.index, r]))),
     posture: auditPosture(doc),
     confidence: confidenceChannels(doc),
   };

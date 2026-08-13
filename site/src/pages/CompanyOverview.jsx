@@ -99,7 +99,7 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
         : result.kind === "contract" && result.functionMissing
           ? `${label} is not among that contract's functions on the surface — the contract is selected instead.`
           : result.highlight?.function === "unpaired" && hintedFn
-            ? `${hintedFn} on this contract is gated by a different controller than the deduction names — this contract is reached through the control graph; nothing on its card is the deduced action.`
+            ? `${hintedFn} on this contract is gated by a different controller than the deduction names — nothing on its card is the deduced action.`
             : null,
     );
     surfaceBandRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });

@@ -320,7 +320,8 @@ describe("confidence zone — rows", () => {
       "EOA",
       "Safe 2/5",
       "Safe 2/7",
-      "Safe 2/4",
+      // A merged unit (two principal_addresses) wears the unit's chip.
+      "Safes 2/4 + 2/4 · shared keys",
     ]);
     expect(merged.map((r) => r.lever.points_ceiling)).toEqual([6.75, 6.75, 4.125, 4.125, 2.625]);
   });

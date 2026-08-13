@@ -112,7 +112,7 @@ describe("CompanyOverview — score entities select on the embedded surface", ()
       chain: "ethereum",
       contractAddress: HOST,
       functionSignature: "setAuthority",
-      highlight: { functionSignature: "setAuthority", controller: CONTROLLER },
+      highlight: { functionSignature: "setAuthority", controllers: [CONTROLLER] },
     });
     expect(scrollIntoView).toHaveBeenCalledWith({ behavior: "smooth", block: "start" });
     expect(scrollIntoView.mock.instances[0]).toBe(document.querySelector(".company-surface-band"));
@@ -122,7 +122,7 @@ describe("CompanyOverview — score entities select on the embedded surface", ()
     const user = userEvent.setup();
     render(<CompanyOverview companyName="etherfi" onNavigateToSurface={() => {}} />);
     await openBreakdown(user);
-    await user.click(within(firstRow()).getByRole("button", { name: /0xf855…909e/ }));
+    await user.click(within(firstRow()).getByRole("button", { name: "EOA" }));
     expect(selectExample).toHaveBeenCalledWith({
       chain: "ethereum",
       contractAddress: CONTROLLER,
@@ -142,7 +142,7 @@ describe("CompanyOverview — score entities select on the embedded surface", ()
       chain: "ethereum",
       contractAddress: FIRST_TARGET,
       functionSignature: "",
-      highlight: { functionSignature: "setAuthority", controller: CONTROLLER },
+      highlight: { functionSignature: "setAuthority", controllers: [CONTROLLER] },
       // A transitive target also names where the reach started, so the surface
       // can walk (and show) the route the deduction only implies.
       reachedFrom: [HOST],
@@ -153,7 +153,7 @@ describe("CompanyOverview — score entities select on the embedded surface", ()
     const user = userEvent.setup();
     render(<CompanyOverview companyName="etherfi" onNavigateToSurface={() => {}} />);
     await openBreakdown(user);
-    await user.click(within(firstRow()).getByRole("button", { name: /0xf855…909e/ }));
+    await user.click(within(firstRow()).getByRole("button", { name: "EOA" }));
     // The principal card is the whole answer to "who is this" — there is no
     // function row on it to pair with.
     expect(selectExample.mock.calls[0][0]).not.toHaveProperty("highlight");

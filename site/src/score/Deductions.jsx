@@ -4,7 +4,7 @@ import BoundBadge from "./BoundBadge.jsx";
 import CapabilityTag from "./CapabilityTag.jsx";
 import EntityButton from "./EntityButton.jsx";
 import TailToggle from "./TailToggle.jsx";
-import { ActorLine, TargetList } from "./rowAnatomy.jsx";
+import { ActorLine, KindChip, TargetList } from "./rowAnatomy.jsx";
 
 const VISIBLE_ROWS = 8;
 
@@ -23,7 +23,7 @@ function SheetDispositionBadge({ disposition }) {
 }
 
 function DeductionRow({ row, onSelect }) {
-  const { chip, value } = row;
+  const { value } = row;
   return (
     <div className="sc-frow">
       <span className="sc-pts">
@@ -37,19 +37,16 @@ function DeductionRow({ row, onSelect }) {
       </span>
       <div>
         <div className="sc-who">
-          <span className={`sc-kchip sc-kchip-${chip.kind}`}>{chip.label}</span>
+          <KindChip chip={row.chip} chain={row.finding?.chain} controller={row.controller} onSelect={onSelect} />
           <CapabilityTag capability={row.capability} />
-          <ActorLine
-            row={row}
-            controllers={row.controller ? [row.controller] : []}
-            onSelect={onSelect}
-          />
+          <ActorLine row={row} onSelect={onSelect} />
         </div>
         <div className="sc-fbar">
           <div className="sc-track" style={{ width: `${row.trackPct}%` }} />
           <div className="sc-fill" style={{ width: `${row.fillPct}%` }} />
         </div>
         <TargetList row={row} onSelect={onSelect} />
+        {row.finding?.chain && <div className="sc-chain">{row.finding.chain}</div>}
       </div>
       <span className="sc-val">
         {value.determined ? (
@@ -100,8 +97,8 @@ function FixFirst({ fix, onSelect }) {
                     ...(fix.host ? { address: fix.host.address } : {}),
                     functionSignature: fix.exampleFunction,
                     label: fix.exampleFunction,
-                    ...(fix.controller
-                      ? { highlight: { functionSignature: fix.exampleFunction, controller: fix.controller } }
+                    ...(fix.controllers?.length
+                      ? { highlight: { functionSignature: fix.exampleFunction, controllers: fix.controllers } }
                       : {}),
                   }}
                   title={`Show ${fix.exampleFunction} on the control surface`}
@@ -125,14 +122,6 @@ export default function Deductions({ view, onSelect }) {
   const rows = view.rows;
   const head = rows.slice(0, VISIBLE_ROWS);
   const tail = rows.slice(VISIBLE_ROWS);
-  // A total over rows whose nets were never published is not a total. Summing
-  // them as zeroes would render "−0.00 combined" — a measured-looking figure
-  // for a quantity the document withheld.
-  const tailSummable = tail.every((r) => r.net !== null);
-  const tailSum = tailSummable
-    ? Math.round(tail.reduce((sum, r) => sum + r.net, 0) * 100) / 100
-    : null;
-  const tailNd = tail.filter((r) => !r.value.determined && !r.provenNoReach).length;
 
   return (
     <div>
@@ -143,18 +132,7 @@ export default function Deductions({ view, onSelect }) {
       {tailOpen && tail.map((row) => <DeductionRow key={row.index} row={row} onSelect={onSelect} />)}
       {tail.length > 0 && (
         <TailToggle open={tailOpen} onToggle={() => setTailOpen((was) => !was)}>
-          + {tail.length} more ·{" "}
-          {tailSum === null ? (
-            <i className="sc-nd">combined points not determined</i>
-          ) : (
-            `−${tailSum.toFixed(2)} combined`
-          )}
-          {tailNd > 0 && (
-            <>
-              {" "}
-              · {tailNd} with <i>value not determined</i>
-            </>
-          )}
+          + {tail.length} more
         </TailToggle>
       )}
       <FixFirst fix={view.fix} onSelect={onSelect} />

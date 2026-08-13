@@ -3,9 +3,9 @@ import { Fragment, useState } from "react";
 import CapabilityTag from "./CapabilityTag.jsx";
 import HelpTag from "./HelpTag.jsx";
 import TailToggle from "./TailToggle.jsx";
-import { categoryById, confidenceZone, leverChip, proposerUnproven } from "./confidenceZone.js";
+import { categoryById, confidenceZone, leverChip } from "./confidenceZone.js";
 import { ceilingText, countWord, pointsText } from "./format.js";
-import { ActorLine, TargetList } from "./rowAnatomy.jsx";
+import { ActorLine, KindChip, TargetList } from "./rowAnatomy.jsx";
 
 function ConfidenceMeter({ channel }) {
   return (
@@ -42,8 +42,8 @@ function ConfidenceColumn({ confidencePct, channels }) {
           )}
         </span>
         <span className="scz-big-sub">
-          the lowest of the {countWord(channels.length)} — how much of the protocol the grade is
-          built on, not how correct it is
+          the lowest of the {countWord(channels.length)}: how much of the protocol the grade is
+          built on
         </span>
       </div>
       <div className="scz-grid">
@@ -160,8 +160,11 @@ function LeverRow({ entry, onSelect }) {
   // Read through the same helpers the grouping reads: the row may only say
   // what the group key proved every holder shares.
   const chip = leverChip(lever, row);
-  const unprovenProposer = proposerUnproven(row);
   const points = pointsText(lever.points_ceiling);
+  // A single holder's address rides on the chip, like the deductions rows. A
+  // grouped row's holders are distinct principals no one chip can carry, so
+  // they stay listed — the addresses are the only thing telling them apart.
+  const grouped = entry.controllers.length > 1 ? entry.controllers : [];
   return (
     <div className="scz-trow">
       <span className="scz-pc">
@@ -170,15 +173,19 @@ function LeverRow({ entry, onSelect }) {
       </span>
       <div>
         <div className="sc-who">
-          <span className={`sc-kchip sc-kchip-${chip.kind}`}>{chip.label}</span>
+          <KindChip
+            chip={chip}
+            chain={lever.chain || row?.finding?.chain}
+            controller={entry.controllers.length === 1 ? entry.controllers[0] : null}
+            onSelect={onSelect}
+          />
           {levers.length > 1 && <span className="scz-nprin">× {levers.length} holders</span>}
           <CapabilityTag capability={lever.capability} />
           {row ? (
-            <ActorLine row={row} controllers={entry.controllers} onSelect={onSelect} />
-          ) : (
-            <span className="sc-addr">{entry.controllers.join(" · ")}</span>
-          )}
-          {unprovenProposer && <span className="scz-nd-line">proposer not determined</span>}
+            <ActorLine row={row} controllers={grouped} onSelect={onSelect} />
+          ) : grouped.length ? (
+            <span className="sc-addr">{grouped.join(" · ")}</span>
+          ) : null}
         </div>
         {row && <TargetList row={row} onSelect={onSelect} />}
         <div className="scz-chain">{lever.chain}</div>
@@ -209,9 +216,7 @@ export default function ConfidenceZone({ doc, view, onSelect, withheld = false }
         </h2>
         <div className="sc-fact-line scz-intro">
           Each row is a proven permission whose consequence has not been verified. Nothing here is
-          charged to the score. The label names the missing verification, the dollar figure is an
-          upper bound on what resolving it could put at stake, and rows sharing one pool are never
-          added together.
+          charged to the score.
         </div>
         {!zone.published ? (
           <p className="scz-empty sc-nd">
