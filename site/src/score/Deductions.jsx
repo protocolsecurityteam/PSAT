@@ -1,10 +1,11 @@
-import { useState } from "react";
+import { Fragment, useState } from "react";
 
 import BoundBadge from "./BoundBadge.jsx";
 import CapabilityTag from "./CapabilityTag.jsx";
-import EntityButton from "./EntityButton.jsx";
+import EntityButton, { entityProps } from "./EntityButton.jsx";
 import TailToggle from "./TailToggle.jsx";
-import { ActorLine, ControllersLine, TargetList } from "./rowAnatomy.jsx";
+import { shortAddress } from "./format.js";
+import { ActorLine, TargetList } from "./rowAnatomy.jsx";
 
 const VISIBLE_ROWS = 8;
 
@@ -22,8 +23,48 @@ function SheetDispositionBadge({ disposition }) {
   );
 }
 
+// The kind chip is the row's handle on who acts — clickable exactly like the
+// protections side's chip. A merged chip splits into one handle per member:
+// each k/n selects its own Safe, so no click has to pick a member for the
+// user. On the single-member kinds the whole chip selects the controller; a
+// principal with no address (Anyone) stays a plain chip.
+function KindChip({ row, onSelect }) {
+  const { chip } = row;
+  const chain = row.finding?.chain;
+  if (chip.members?.length) {
+    return (
+      <span className={`sc-kchip sc-kchip-${chip.kind}`}>
+        {"Safes "}
+        {chip.members.map((member, i) => (
+          <Fragment key={member.address}>
+            {i > 0 && " + "}
+            <EntityButton
+              onSelect={onSelect}
+              target={{ chain, address: member.address, label: `Safe ${member.shape}` }}
+              title={`Show Safe ${member.shape} (${shortAddress(member.address)}) on the control surface`}
+            >
+              {member.shape}
+            </EntityButton>
+          </Fragment>
+        ))}
+        {" · shared keys"}
+      </span>
+    );
+  }
+  const props = entityProps({
+    onSelect,
+    target: { chain, address: row.controller, label: chip.label },
+    title: row.controller ? `Show ${shortAddress(row.controller)} on the control surface` : undefined,
+  });
+  return (
+    <span className={`sc-kchip sc-kchip-${chip.kind}${props ? " sc-lnk" : ""}`} {...(props || {})}>
+      {chip.label}
+    </span>
+  );
+}
+
 function DeductionRow({ row, onSelect }) {
-  const { chip, value } = row;
+  const { value } = row;
   return (
     <div className="sc-frow">
       <span className="sc-pts">
@@ -37,15 +78,10 @@ function DeductionRow({ row, onSelect }) {
       </span>
       <div>
         <div className="sc-who">
-          <span className={`sc-kchip sc-kchip-${chip.kind}`}>{chip.label}</span>
+          <KindChip row={row} onSelect={onSelect} />
           <CapabilityTag capability={row.capability} />
           <ActorLine row={row} onSelect={onSelect} />
         </div>
-        <ControllersLine
-          row={row}
-          controllers={row.controllers?.length ? row.controllers : row.controller ? [row.controller] : []}
-          onSelect={onSelect}
-        />
         <div className="sc-fbar">
           <div className="sc-track" style={{ width: `${row.trackPct}%` }} />
           <div className="sc-fill" style={{ width: `${row.fillPct}%` }} />

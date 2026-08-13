@@ -101,6 +101,10 @@ export function principalChip(finding, doc = null) {
           ? `Safes ${shapes.join(" + ")} · shared keys`
           : `${members.length} Safes · shared keys`,
         merged: true,
+        // Each member beside its own shape, so a consumer can hand every Safe
+        // its own click target. Absent when the shapes are unwitnessed — a
+        // handle labelled with a guessed shape would be worse than none.
+        ...(shapes ? { members: members.map((address, i) => ({ address, shape: shapes[i] })) } : {}),
       };
     }
     const shape = safeShape(finding);

@@ -84,25 +84,31 @@ describe("ScoreBand — computed grade", () => {
     );
   });
 
-  it("lists every merged-unit member on the controllers line, never one member alone", async () => {
-    // Finding 0 folds two Safes a shared-key coalition can act as. The row must
-    // name both members as its controllers — rendered under one member's
-    // address, the other member's gates read as that member's power.
+  it("hands each merged-unit member its own handle on the kind chip", async () => {
+    // Finding 0 folds two Safes a shared-key coalition can act as. Each k/n on
+    // the chip selects its own Safe — one button would have to pick a member
+    // for the user, and rendering one member alone would attribute the other
+    // member's gates to it.
     const members = ETHERFI.findings[0].principal_addresses;
     expect(members).toHaveLength(2);
-    const { container } = renderBand({ score: ETHERFI, onSelectEntity: vi.fn() });
+    const onSelectEntity = vi.fn();
+    const { container } = renderBand({ score: ETHERFI, onSelectEntity });
     await openBreakdown();
-    const row = container.querySelectorAll(".sc-frow")[0];
-    const line = row.querySelector(".sc-controllers");
-    expect(line.querySelector(".sc-controllers-label").textContent).toBe("controllers:");
-    for (const member of members) {
-      expect(
-        within(line).getByRole("button", { name: `${member.slice(0, 6)}…${member.slice(-4)}` }),
-      ).toBeTruthy();
-    }
-    // A single-member row gets the same line, labelled for its one holder.
-    const single = container.querySelectorAll(".sc-frow")[6];
-    expect(single.querySelector(".sc-controllers-label").textContent).toBe("controller:");
+    const chip = container.querySelectorAll(".sc-frow")[0].querySelector(".sc-kchip");
+    expect(chip.textContent).toBe("Safes 3/7 + 4/8 · shared keys");
+    const user = userEvent.setup();
+    await user.click(within(chip).getByRole("button", { name: "3/7" }));
+    expect(onSelectEntity).toHaveBeenLastCalledWith({
+      chain: "ethereum",
+      address: members[0],
+      label: "Safe 3/7",
+    });
+    await user.click(within(chip).getByRole("button", { name: "4/8" }));
+    expect(onSelectEntity).toHaveBeenLastCalledWith({
+      chain: "ethereum",
+      address: members[1],
+      label: "Safe 4/8",
+    });
   });
 
   it("keeps the breakdown collapsed until asked", async () => {
@@ -535,14 +541,14 @@ describe("ScoreBand — entities select on the surface", () => {
     expect(HOST).not.toBe(FIRST_TARGET);
   });
 
-  it("selects the controller named in the principal string, not a unit member", async () => {
+  it("selects the controller from the kind chip, like the protections side", async () => {
     const onSelectEntity = vi.fn();
     const row = await openRowZero(onSelectEntity);
-    await userEvent.setup().click(within(row).getByRole("button", { name: /0xf855…909e/ }));
+    await userEvent.setup().click(within(row).getByRole("button", { name: "EOA" }));
     expect(onSelectEntity).toHaveBeenCalledWith({
       chain: "ethereum",
       address: CONTROLLER,
-      label: CONTROLLER,
+      label: "EOA",
     });
     expect(ETHERFI.findings[ROW].principal).toContain(CONTROLLER);
   });
@@ -738,7 +744,8 @@ describe("ScoreBand — entities select on the surface", () => {
     await openBreakdown();
     const row = container.querySelectorAll(".sc-frow")[ROW];
     expect(row.querySelector(".sc-addr").textContent).toBe("setAuthority");
-    expect(row.querySelector(".sc-controllers").textContent).toBe("controller: 0xf855…909e");
+    // The unwired chip is a plain span, not a dead button.
+    expect(row.querySelector(".sc-kchip").getAttribute("role")).toBeNull();
     // Only controls that can act are buttons: the capability's glossary "?"
     // and the target expander. Entity references degrade to plain spans.
     const buttons = [...row.querySelectorAll("button")].map((b) => b.textContent);

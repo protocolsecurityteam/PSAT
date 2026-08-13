@@ -64,6 +64,12 @@ describe("derive — principals", () => {
       kind: "safe",
       label: "Safes 3/7 + 4/8 · shared keys",
       merged: true,
+      // Each member beside its shape, so the chip can hand every Safe its own
+      // click target.
+      members: [
+        { address: F[0].principal_addresses[0], shape: "3/7" },
+        { address: F[0].principal_addresses[1], shape: "4/8" },
+      ],
     });
     // With no document (so no overlap table) the chip counts members rather
     // than dropping the merge or guessing a shape.

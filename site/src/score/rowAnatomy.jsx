@@ -22,29 +22,6 @@ export function highlightHint(row) {
   return { functionSignature: row.exampleFunction || "", controllers };
 }
 
-// The addresses holding the row's permission, on their own labelled line so
-// they read as who-can-act rather than as more entities in the action line.
-export function ControllersLine({ row, controllers = [], onSelect }) {
-  if (!controllers.length) return null;
-  return (
-    <div className="sc-controllers">
-      <span className="sc-controllers-label">controller{controllers.length === 1 ? "" : "s"}:</span>{" "}
-      {controllers.map((controller, i) => (
-        <Fragment key={controller}>
-          {i > 0 && " · "}
-          <EntityButton
-            onSelect={onSelect}
-            target={{ chain: row.finding?.chain, address: controller, label: controller }}
-            title="Show this controller on the control surface"
-          >
-            {`${controller.slice(0, 6)}…${controller.slice(-4)}`}
-          </EntityButton>
-        </Fragment>
-      ))}
-    </div>
-  );
-}
-
 // The row's action line: the example function, the count of the ones it stands
 // for, and the address(es) holding the permission. `controllers` is a list
 // because one row can speak for several holders of an identical gap; on a

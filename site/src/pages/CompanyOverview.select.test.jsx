@@ -122,7 +122,7 @@ describe("CompanyOverview — score entities select on the embedded surface", ()
     const user = userEvent.setup();
     render(<CompanyOverview companyName="etherfi" onNavigateToSurface={() => {}} />);
     await openBreakdown(user);
-    await user.click(within(firstRow()).getByRole("button", { name: /0xf855…909e/ }));
+    await user.click(within(firstRow()).getByRole("button", { name: "EOA" }));
     expect(selectExample).toHaveBeenCalledWith({
       chain: "ethereum",
       contractAddress: CONTROLLER,
@@ -153,7 +153,7 @@ describe("CompanyOverview — score entities select on the embedded surface", ()
     const user = userEvent.setup();
     render(<CompanyOverview companyName="etherfi" onNavigateToSurface={() => {}} />);
     await openBreakdown(user);
-    await user.click(within(firstRow()).getByRole("button", { name: /0xf855…909e/ }));
+    await user.click(within(firstRow()).getByRole("button", { name: "EOA" }));
     // The principal card is the whole answer to "who is this" — there is no
     // function row on it to pair with.
     expect(selectExample.mock.calls[0][0]).not.toHaveProperty("highlight");
