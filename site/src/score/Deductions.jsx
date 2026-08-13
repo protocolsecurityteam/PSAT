@@ -122,13 +122,6 @@ export default function Deductions({ view, onSelect }) {
   const rows = view.rows;
   const head = rows.slice(0, VISIBLE_ROWS);
   const tail = rows.slice(VISIBLE_ROWS);
-  // A total over rows whose nets were never published is not a total. Summing
-  // them as zeroes would render "−0.00 combined" — a measured-looking figure
-  // for a quantity the document withheld.
-  const tailSummable = tail.every((r) => r.net !== null);
-  const tailSum = tailSummable
-    ? Math.round(tail.reduce((sum, r) => sum + r.net, 0) * 100) / 100
-    : null;
 
   return (
     <div>
@@ -139,12 +132,7 @@ export default function Deductions({ view, onSelect }) {
       {tailOpen && tail.map((row) => <DeductionRow key={row.index} row={row} onSelect={onSelect} />)}
       {tail.length > 0 && (
         <TailToggle open={tailOpen} onToggle={() => setTailOpen((was) => !was)}>
-          + {tail.length} more ·{" "}
-          {tailSum === null ? (
-            <i className="sc-nd">combined points not determined</i>
-          ) : (
-            `−${tailSum.toFixed(2)} combined`
-          )}
+          + {tail.length} more
         </TailToggle>
       )}
       <FixFirst fix={view.fix} onSelect={onSelect} />

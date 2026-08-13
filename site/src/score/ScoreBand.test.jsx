@@ -125,7 +125,8 @@ describe("ScoreBand — computed grade", () => {
     await openBreakdown();
     expect(container.querySelectorAll(".sc-frow")).toHaveLength(8);
     const tail = screen.getByRole("button", { name: /20 more/ });
-    expect(tail.textContent).toContain("−0.19 combined");
+    // The tail label counts the hidden rows and claims nothing else.
+    expect(tail.textContent).not.toContain("combined");
     expect(tail.textContent).not.toContain("value not determined");
     await userEvent.setup().click(tail);
     expect(container.querySelectorAll(".sc-frow")).toHaveLength(28);
@@ -489,11 +490,11 @@ describe("ScoreBand — withheld grade", () => {
     expect(breakdown.textContent).not.toContain("64.3");
   });
 
-  it("summarises the tail as not-determined rather than −0.00 combined", async () => {
+  it("claims no figure on the tail label in the withheld state either", async () => {
     renderBand({ score: WITHHELD });
     await openBreakdown();
     const tail = screen.getByRole("button", { name: /20 more/ });
-    expect(tail.textContent).toContain("combined points not determined");
+    expect(tail.textContent).not.toContain("combined");
     expect(tail.textContent).not.toContain("0.00");
     expect(tail.textContent).not.toContain("−");
   });
