@@ -85,19 +85,25 @@ def test_priority_tiebreaker():
     assert result["0xtl"] == []
 
 
-def test_size_tiebreaker():
-    """Same type → bigger owner wins."""
+def test_portfolio_size_does_not_decide():
+    """Same type, same authority tier → lex order decides, NOT how many other
+    contracts each principal holds. The old "owns more overall" tiebreak was a
+    count over whatever subset happened to be analyzed, so box identity flipped
+    between runs as coverage grew (the etherfi 0x2aca-vs-timelock regression).
+    Here the lex-smaller ``0xaaa`` wins the contested ``0xc1`` even though
+    ``0xzzzbig`` holds three other contracts."""
     fp = {
-        "0xc1": {"0xbig", "0xsmall"},
-        "0xc2": {"0xbig"},
-        "0xc3": {"0xbig"},
+        "0xc1": {"0xzzzbig", "0xaaa"},
+        "0xc2": {"0xzzzbig"},
+        "0xc3": {"0xzzzbig"},
+        "0xc4": {"0xzzzbig"},
     }
     result = assign_primary_controllers(
-        [_p("0xbig", "safe"), _p("0xsmall", "safe")],
+        [_p("0xzzzbig", "safe"), _p("0xaaa", "safe")],
         fp,
     )
-    assert sorted(result["0xbig"]) == ["0xc1", "0xc2", "0xc3"]
-    assert result["0xsmall"] == []
+    assert result["0xaaa"] == ["0xc1"]
+    assert sorted(result["0xzzzbig"]) == ["0xc2", "0xc3", "0xc4"]
 
 
 def test_lex_address_tiebreaker():
@@ -216,6 +222,166 @@ def test_governance_passthrough_does_not_recurse_through_non_governance():
     # manager is NOT passed through → safe only owns manager, not vault.
     result = assign_primary_controllers([_p(safe, "safe")], fp, governance_passthrough=set())
     assert result[safe] == [manager]
+
+
+# --- authority-tier ranking + veto gating ----------------------------------
+#
+# The contest key is (authority tier on THIS contract, principal type, lex
+# address) — per-contract facts only, so assignments cannot flip as coverage
+# grows. Tier evidence comes from the optional fp_function_detail map.
+
+
+def test_owner_tier_beats_operational_tier_regardless_of_portfolio():
+    """The Base etherfi shape: 0x183f holds transferOwnership/setAuthority on
+    the shared contracts while 0x607d (lex-smaller AND holding many more
+    contracts elsewhere) holds only operational rights. The owner must win the
+    shared contracts; the operator keeps only what nobody governs."""
+    owner, ops = "0xffff", "0x0001"  # ops is lex-smaller: tier must dominate
+    shared = ["0xc1", "0xc2"]
+    fp = {"0xc1": {owner, ops}, "0xc2": {owner, ops}, "0xc3": {ops}, "0xc4": {ops}, "0xc5": {ops}}
+    detail = {
+        "0xc1": [
+            _fn({owner}, claims=["ownership.transfer", "authority.replace"]),
+            _fn({ops}, claims=["pause.set"]),
+        ],
+        "0xc2": [
+            _fn({owner}, claims=["ownership.transfer"]),
+            _fn({ops}, claims=["flow.out"]),
+        ],
+        "0xc3": [_fn({ops}, claims=["pause.set"])],
+        "0xc4": [_fn({ops}, claims=["pause.set"])],
+        "0xc5": [_fn({ops}, claims=["pause.set"])],
+    }
+    result = assign_primary_controllers(
+        [_p(owner, "safe"), _p(ops, "safe")],
+        fp,
+        fp_function_detail_by_contract=detail,
+    )
+    assert sorted(result[owner]) == shared
+    assert sorted(result[ops]) == ["0xc3", "0xc4", "0xc5"]
+
+
+def test_tier_beats_type_priority():
+    """An EOA that provably owns the contract outranks a Safe that can only
+    pause it — evidence over identity."""
+    eoa, safe = "0xeoa", "0xsafe"
+    fp = {"0xc1": {eoa, safe}}
+    detail = {
+        "0xc1": [
+            _fn({eoa}, claims=["ownership.transfer"]),
+            _fn({safe}, claims=["pause.set"]),
+        ]
+    }
+    result = assign_primary_controllers(
+        [_p(eoa, "eoa"), _p(safe, "safe")],
+        fp,
+        fp_function_detail_by_contract=detail,
+    )
+    assert result[eoa] == ["0xc1"]
+    assert result[safe] == []
+
+
+def test_mediated_governing_tier_beats_direct_operational_tier():
+    """The Ethereum etherfi shape: the timelock holds upgradeTo on the vault
+    (governing tier), the ops Safe holds direct pause (operational). The Safe
+    driving the timelock inherits the timelock's tier on the vault and wins,
+    even though the ops Safe's authority is more direct."""
+    vault, tl, driver, ops = "0xc1", "0xtl", "0xdriver", "0xaops"  # ops lex-smaller
+    fp = {vault: {tl, ops}, tl: {driver}}
+    detail = {
+        vault: [
+            _fn({tl}, claims=["upgrade.implementation"]),
+            _fn({ops}, claims=["pause.set"]),
+        ],
+        tl: [_fn({driver}, claims=["timelock.schedule", "timelock.execute"])],
+    }
+    result = assign_primary_controllers(
+        [_p(driver, "safe"), _p(ops, "safe")],
+        fp,
+        governance_passthrough={tl},
+        fp_function_detail_by_contract=detail,
+    )
+    # Driver wins the vault (inherited governing tier) AND the timelock itself
+    # (timelock.schedule/execute are governing claims on the mediator), so the
+    # whole governance unit lands in one group.
+    assert sorted(result[driver]) == [vault, tl]
+    assert result[ops] == []
+
+
+def test_veto_only_caller_does_not_inherit_through_mediator():
+    """The 0x055a8b-vs-0xcdd57d shape: both Safes appear as FP callers of the
+    timelock, but one can only ``cancel`` (a veto) while the other holds
+    schedule/execute. The veto holder must not inherit the timelock's authority
+    over the contracts it governs — even when it is lex-smaller — and the
+    driver becomes primary for the whole unit."""
+    vault, tl = "0xc1", "0xtl"
+    canceller, driver = "0xaaa", "0xbbb"  # canceller lex-smaller: gating must do the work
+    fp = {vault: {tl}, tl: {canceller, driver}}
+    detail = {
+        vault: [_fn({tl}, claims=["upgrade.implementation"])],
+        tl: [
+            _fn({canceller, driver}, claims=["timelock.cancel"]),
+            _fn({driver}, claims=["timelock.schedule", "timelock.execute"]),
+        ],
+    }
+    result = assign_primary_controllers(
+        [_p(canceller, "safe"), _p(driver, "safe")],
+        fp,
+        governance_passthrough={tl},
+        fp_function_detail_by_contract=detail,
+    )
+    assert sorted(result[driver]) == [vault, tl]
+    assert result[canceller] == []
+
+
+def test_claimless_mediator_caller_still_inherits():
+    """Veto gating needs a positive cancel-only witness. A mediator caller with
+    no claim rows at all (stale data / degraded artifact) keeps the legacy
+    passthrough expansion — absence of claims is not proof of veto-only."""
+    vault, tl, safe = "0xc1", "0xtl", "0xsafe"
+    fp = {vault: {tl}, tl: {safe}}
+    detail = {vault: [_fn({tl}, claims=["upgrade.implementation"])]}  # no rows for tl's callers
+    result = assign_primary_controllers(
+        [_p(safe, "safe")],
+        fp,
+        governance_passthrough={tl},
+        fp_function_detail_by_contract=detail,
+    )
+    assert sorted(result[safe]) == [vault, tl]
+
+
+def test_broad_whitelist_callers_not_primary_eligible():
+    """With the portfolio-count tiebreak gone, the lex-smallest of ~33 bidders
+    sharing ``createBid`` must not win the AuctionManager's box: a caller whose
+    only proven functions on a contract are insignificant (no privileged
+    label/claim, wider than the gate threshold) is not primary-eligible there.
+    Nobody governs the auction here, so it simply has no primary."""
+    bidders = {f"0xbidder{i}" for i in range(6)}
+    auction = "0xauction"
+    fp = {auction: set(bidders)}
+    detail = {auction: [_fn(bidders, {"external_contract_call"})]}
+    result = assign_primary_controllers(
+        [_p(b, "safe") for b in bidders],
+        fp,
+        fp_function_detail_by_contract=detail,
+    )
+    assert all(result[b] == [] for b in bidders)
+
+
+def test_assignment_stable_as_coverage_grows():
+    """Population-insensitivity, the property the old count tiebreak lacked:
+    re-running with extra unrelated contracts analyzed must not change who wins
+    the original contract."""
+    a, b = "0xaaa", "0xbbb"
+    fp_small = {"0xc1": {a, b}}
+    detail = {"0xc1": [_fn({a}, claims=["ownership.transfer"]), _fn({b}, claims=["pause.set"])]}
+    small = assign_primary_controllers([_p(a, "safe"), _p(b, "safe")], fp_small, fp_function_detail_by_contract=detail)
+    fp_big = dict(fp_small)
+    for i in range(10):  # b picks up ten more contracts as analysis progresses
+        fp_big[f"0xd{i}"] = {b}
+    big = assign_primary_controllers([_p(a, "safe"), _p(b, "safe")], fp_big, fp_function_detail_by_contract=detail)
+    assert small[a] == ["0xc1"]
+    assert big[a] == ["0xc1"], "coverage growth must never flip an existing assignment"
 
 
 # --- assign_co_controllers -------------------------------------------------
