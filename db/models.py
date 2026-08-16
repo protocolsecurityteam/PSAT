@@ -3339,6 +3339,13 @@ class TokenDeliveryEvidence(Base):
     above it, so a delivery at or below it is already counted and needs no stored
     entry to be recognised as a repeat.
 
+    **The extent MAY LAG the chain head, and the row is the claim's extent.** A
+    range-capped chain is scanned a slice per cycle, so a row can be written from
+    a window that stopped short of the tip; ``caught_up`` is what says so, and a
+    consumer reads the verdict over ``scanned_from_block..measured_through_block``
+    and never over "up to now". A pair that was only sliced must never read as a
+    pair that was scanned to the head and found nothing.
+
     The published claim is delivery SHAPE and nothing else — see
     ``utils.balance_status.DELIVERY_SHAPES``. It never says a token is worthless.
     Every fan-out on this row is a count of same-token transfer LOGS, an upper
@@ -3381,6 +3388,17 @@ class TokenDeliveryEvidence(Base):
     delivery_shape: Mapped[str] = mapped_column(
         String(32), nullable=False, server_default=DELIVERY_SHAPE_NOT_DETERMINED
     )
+    # The holder's raw balance of this token as the cycle that last SCANNED the
+    # pair read it. It is a SKIP key and never evidence: an unmoved balance is
+    # what lets the next cycle leave the extent where it is, because a new
+    # delivery necessarily moves it. NULL is not "unchanged" — it is a pair
+    # nobody stamped, and it is scanned.
+    observed_balance_raw: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # False when the pass that wrote the row stopped at a slice boundary below
+    # the chain head. Such a row is scanned forward every cycle whatever its
+    # balance does, because the balance argument for skipping only holds over
+    # blocks that were already read.
+    caught_up: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     # The sentence the published claim derives its scope from — the filter, the
     # block range, the request counts — never re-authored downstream.
     basis: Mapped[str] = mapped_column(Text, nullable=False)

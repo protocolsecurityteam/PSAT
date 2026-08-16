@@ -42,6 +42,14 @@ THE THREE PLACES THIS FAILS CLOSED.
   ``not_determined``, which is the honest answer.
 * a holder the request budget did not reach writes nothing. A partial delivery
   set is not a smaller measurement, it is a different claim.
+
+A SLICE IS NOT A SHORTFALL, and it is the one bounded thing here that DOES
+publish. On a range-capped chain a cycle reads a bounded number of windows and
+records what it proved over them: the row's extent stops at the slice boundary
+and ``caught_up`` says so. That is a whole claim over a smaller range rather than
+a partial claim over a larger one — the row IS its extent — and the next cycle
+resumes above the cursor. Without it the budget died mid-discovery every hour and
+the chain wrote nothing at all, forever.
 """
 
 from __future__ import annotations
@@ -82,6 +90,7 @@ from utils.balance_status import (
     ASSET_SET_STATUS_AT_PAGE_CAP,
     DELIVERY_FAN_OUT_BASIS_RECEIPT,
     DELIVERY_FAN_OUT_BASIS_UNREADABLE,
+    DELIVERY_SHAPE_HAS_DIRECT_DELIVERY,
     TOKEN_REFERENCE_ABSENT_FROM_UNIVERSE,
     TOKEN_REFERENCE_IN_UNIVERSE,
     TOKEN_REFERENCE_NOT_DETERMINED,
@@ -104,6 +113,23 @@ DISPOSITION_REQUEST_BUDGET = int(os.getenv("PSAT_DISPOSITION_REQUEST_BUDGET", "5
 # single pair rather than the windows of every pair in it.
 DISPOSITION_TOKEN_BATCH = 40
 DISPOSITION_HOLDER_BATCH = 40
+
+# Windows one cycle will page through before it stops and RECORDS what it proved.
+#
+# Without it a range-capped chain never converges. Optimism serves 10,000 blocks
+# per ``eth_getLogs``, so creation-to-head is thousands of pages: the measured
+# run spent 4,974 requests there, hit the budget during DISCOVERY — before any
+# row was written — and the next hourly cycle repeated it identically, forever.
+# A cycle that stops at a slice boundary instead writes rows with
+# ``measured_through_block = scan_to`` and ``caught_up = false``, and the next
+# one resumes above that cursor. Bounded forward progress replaces an hourly
+# no-op.
+#
+# 2000 windows is 20M blocks per cycle on optimism, which fits the request
+# budget with room for the receipts that follow discovery. On a chain whose
+# window is 1e9 blocks (ethereum, base) the slice covers every block there is,
+# so those chains are untouched.
+DISPOSITION_SLICE_WINDOWS = int(os.getenv("PSAT_DISPOSITION_SLICE_WINDOWS", "2000"))
 
 # Client-side ceiling for this phase's reads. The module default
 # (``JSON_RPC_TIMEOUT_SECONDS``, 10 s) is sized for per-address calls; a
@@ -203,6 +229,18 @@ class DispositionRequest:
 
     ``typed_tokens`` is the subset that a typed (ERC-721/1155) receipt was seen
     for. It selects the second recipient-topic pass; it never narrows the first.
+
+    ``balances`` carries the raw quantity each token was read at THIS cycle, as
+    ``(token, raw)`` pairs. It is the scan's skip key and never its evidence: a
+    quantity equal to the one the pair was last stamped at is what lets the cycle
+    leave the extent alone, because a new delivery necessarily moves it. A token
+    absent from the map is a token this cycle read no quantity for, and it is
+    scanned rather than skipped.
+
+    ``priced_dust_tokens`` are the tokens carrying a real price BELOW the crumb
+    threshold. They order the catch-up queue and nothing else — a priced crumb is
+    a holding somebody quoted, so it is more likely to be a token the protocol
+    means to hold than one no price source has ever named.
     """
 
     contract_id: int
@@ -210,6 +248,8 @@ class DispositionRequest:
     holder_address: str
     tokens: tuple[str, ...]
     typed_tokens: tuple[str, ...] = ()
+    balances: tuple[tuple[str, str], ...] = ()
+    priced_dust_tokens: tuple[str, ...] = ()
 
 
 class DispositionBudgetExceeded(RuntimeError):
@@ -239,9 +279,21 @@ class _Measured:
     ``aborted`` is set when a window covering the pair could not be proven
     whole. It is not the same as "no deliveries": one publishes nothing, the
     other publishes ``not_determined``.
+
+    ``measured_through`` is the extent this pass may claim for the pair, and it
+    is per pair rather than per chain: a scanned pair claims the slice that was
+    read, a CARRIED one claims exactly what it already claimed. Advancing a
+    carried pair's cursor to the head would widen a published all-quantifier over
+    blocks this cycle never read.
+
+    ``caught_up`` is ``None`` for a carried pair — no scan happened, so the
+    stored answer stands.
     """
 
     scanned_from_block: int
+    measured_through: int
+    caught_up: bool | None = None
+    observed_balance_raw: str | None = None
     deliveries: dict[tuple[str, int | None], dict[str, Any]] = field(default_factory=dict)
     aborted: bool = False
 
@@ -311,6 +363,40 @@ def creation_block(holder_address: str, *, chain_id: int, cost: DispositionCost)
     with _CREATION_BLOCK_LOCK:
         _CREATION_BLOCK_CACHE[key] = block
     return 0 if block is None else max(0, int(block))
+
+
+def raw_balance_text(value: Any) -> str | None:
+    """A quantity in the one spelling the skip key compares in, or ``None``.
+
+    Canonicalised through ``int`` so ``"1000"`` and ``1000`` are the same stamp
+    and a re-spelling of an unmoved balance does not read as a delivery. A value
+    that will not parse is kept verbatim rather than dropped: it still compares
+    equal to itself, which is all the key needs, and dropping it would make an
+    unreadable quantity look like a quantity nobody read.
+    """
+    if value is None:
+        return None
+    try:
+        return str(int(Decimal(str(value))))
+    except (ArithmeticError, TypeError, ValueError):
+        text = str(value).strip()
+        return text or None
+
+
+def _is_priced_dust(usd_value: Any) -> bool:
+    """A real quote below the crumb threshold — priced, and too small to act on.
+
+    Distinct from ``usd_value is None`` and from the stored 0 the writers use for
+    "no price known": both of those are absent prices. Only a positive figure
+    under the threshold is a crumb somebody actually quoted.
+    """
+    if usd_value is None:
+        return False
+    try:
+        priced = Decimal(str(usd_value))
+    except (ArithmeticError, TypeError, ValueError):
+        return False
+    return Decimal(0) < priced < USD_CRUMB_THRESHOLD
 
 
 def clear_creation_block_cache() -> None:
@@ -408,12 +494,19 @@ def disposition_requests(
 
     tokens: dict[tuple[int, str], set[str]] = {}
     typed: dict[tuple[int, str], set[str]] = {}
+    dust: dict[tuple[int, str], set[str]] = {}
+    balances: dict[tuple[int, str], dict[str, str]] = {}
     contract_for: dict[tuple[int, str], int] = {}
 
     for request in discovered:
         key = (int(request.chain_id), request.holder_address.lower())
         tokens.setdefault(key, set()).update(t.lower() for t in request.tokens)
         typed.setdefault(key, set()).update(t.lower() for t in request.typed_tokens)
+        dust.setdefault(key, set()).update(t.lower() for t in request.priced_dust_tokens)
+        # This cycle's own reading of the account, so it wins over the stored row
+        # it is about to replace.
+        for token, raw in request.balances:
+            balances.setdefault(key, {})[token.lower()] = raw
         contract_for[key] = min(contract_for.get(key, request.contract_id), request.contract_id)
 
     capped = _at_page_cap_contract_ids(session, protocol_id=protocol_id, contract_ids=contract_ids)
@@ -463,6 +556,11 @@ def disposition_requests(
             continue
         key = (chain_id_for(chain), account)
         tokens.setdefault(key, set()).add(token)
+        stamp = raw_balance_text(raw_balance)
+        if stamp is not None:
+            balances.setdefault(key, {}).setdefault(token, stamp)
+        if _is_priced_dust(usd_value):
+            dust.setdefault(key, set()).add(token)
         contract_for[key] = min(contract_for.get(key, int(contract_id)), int(contract_id))
         # A typed (ERC-721/1155) holding is the one the sweep writes at 0
         # decimals, because its quantity is a COUNT of items. That is what
@@ -479,6 +577,8 @@ def disposition_requests(
             holder_address=key[1],
             tokens=tuple(sorted(account_tokens)),
             typed_tokens=tuple(sorted(typed.get(key, set()))),
+            balances=tuple(sorted(balances.get(key, {}).items())),
+            priced_dust_tokens=tuple(sorted(dust.get(key, set()) & account_tokens)),
         )
         for key, account_tokens in sorted(tokens.items())
         if account_tokens
@@ -539,10 +639,17 @@ def discovered_request(
     account = holder_address.lower()
     tokens: set[str] = set()
     typed: set[str] = set()
+    dust: set[str] = set()
+    balances: dict[str, str] = {}
     for row in getattr(page, "rows", None) or []:
         token = (row.get("token_address") or "").lower()
         if token and is_unpriced(row.get("usd_value"), row.get("balance")):
             tokens.add(token)
+            stamp = raw_balance_text(row.get("balance"))
+            if stamp is not None:
+                balances[token] = stamp
+            if _is_priced_dust(row.get("usd_value")):
+                dust.add(token)
     if sweep is not None and sweep.status == asset_sweep.SWEEP_COMPLETED:
         # Every sweep-discovered holding is published unpriced by construction —
         # no price source reaches a log-derived asset — so the whole set is in
@@ -551,10 +658,12 @@ def discovered_request(
         for asset in sweep.assets:
             if asset.raw_balance is not None and asset.raw_balance > 0:
                 tokens.add(asset.token_address.lower())
+                balances[asset.token_address.lower()] = str(int(asset.raw_balance))
         for asset in sweep.typed_assets:
             if asset.raw_balance is not None and asset.raw_balance > 0:
                 tokens.add(asset.token_address.lower())
                 typed.add(asset.token_address.lower())
+                balances[asset.token_address.lower()] = str(int(asset.raw_balance))
     if not tokens:
         return None
     return DispositionRequest(
@@ -563,6 +672,8 @@ def discovered_request(
         holder_address=account,
         tokens=tuple(sorted(tokens)),
         typed_tokens=tuple(sorted(typed)),
+        balances=tuple(sorted((token, raw) for token, raw in balances.items() if token in tokens)),
+        priced_dust_tokens=tuple(sorted(dust)),
     )
 
 
@@ -572,6 +683,7 @@ def scan_delivery_shape(
     *,
     rpc_url_for: Callable[[int], str | None],
     cost: DispositionCost | None = None,
+    protocol_id: int | None = None,
 ) -> DispositionCost:
     """Measure delivery shape for every requested pair and record what was read.
 
@@ -579,9 +691,14 @@ def scan_delivery_shape(
     the producer owns the transaction, so the evidence and the balance row it was
     measured beside land or roll back together.
 
-    A pair with stored evidence is scanned FORWARD from its cursor only, which
-    is what makes the full-history pass a once-per-pair cost and every later
-    cycle a steady-state one.
+    A pair with stored evidence is scanned FORWARD from its cursor only, and
+    only when something says there is anything to find (see :func:`_scan_chain`),
+    which is what makes the full-history pass a once-per-pair cost and every
+    later cycle a steady-state one.
+
+    ``protocol_id`` orders the catch-up queue against
+    ``token_protocol_reference`` and nothing else; omitting it costs ordering,
+    never a verdict.
     """
     cost = cost or DispositionCost()
     if not requests:
@@ -623,6 +740,7 @@ def scan_delivery_shape(
                 requests=chain_requests,
                 stored=stored,
                 cost=cost,
+                protocol_id=protocol_id,
             )
         except DispositionBudgetExceeded as exc:
             logger.warning(
@@ -971,7 +1089,7 @@ def run_disposition(
         else:
             logger.info("disposition: protocol reference recorded for %d token(s)", written)
     try:
-        scan_delivery_shape(session, requests, rpc_url_for=rpc_url_for, cost=cost)
+        scan_delivery_shape(session, requests, rpc_url_for=rpc_url_for, cost=cost, protocol_id=protocol_id)
     except Exception as exc:
         logger.warning(
             "disposition scan failed after %d getLogs + %d receipts + %d head + %d creation lookup(s); "
@@ -1011,17 +1129,48 @@ def _scan_chain(
     requests: Sequence[DispositionRequest],
     stored: Mapping[tuple[int, str, str], Any],
     cost: DispositionCost,
+    protocol_id: int | None = None,
 ) -> None:
+    """Decide what this cycle scans, scan a bounded slice of it, and record.
+
+    THE QUEUE IS DELTA-GATED, and the gate is a balance rather than a clock.
+    Head advances every cycle, so "resume below head" made every stored pair a
+    forward scan forever and a converged corpus kept paying getLogs for verdicts
+    that could not move. What can move a verdict is a NEW DELIVERY, and a new
+    delivery necessarily moves the holder's balance — which the monitor already
+    reads by multicall, at no extra request. So an unchanged balance over an
+    extent that reached the head is the witness that there is nothing to scan.
+
+    The gate is only ever allowed to skip, never to conclude: a skipped pair
+    keeps the verdict and the extent it already earned, and nothing about it is
+    published as newer than it is. The four arms, in order:
+
+    * no row — a FRESH pair, scanned from the holder's creation block.
+    * ``has_direct_delivery`` — settled and never scanned again. The verdict is
+      an earned negative and ``min_fan_out`` only falls, so no later delivery can
+      lift it back to the positive.
+    * ``caught_up`` false — the extent stops at a slice boundary, so the balance
+      argument does not apply to the blocks above it. Scanned forward regardless
+      of the balance.
+    * otherwise — scanned forward iff the balance moved, where a NULL stamp
+      counts as moved so a row from before the stamp existed is scanned once
+      more.
+
+    A pair the gate holds back is still PRESENTED to the writer at its own stored
+    extent: the basis is re-derived from the row's extent columns on every pass,
+    so a row authored under an older rule is repaired by an ordinary cycle, and
+    presenting it cannot advance the cursor because the extent it presents is the
+    one it already claimed.
+    """
     fresh: list[_Pair] = []
     forward: list[_Pair] = []
-    # Pairs whose cursor already covers everything there is to read. They are
-    # scanned by nothing and cost no request, and they are still PRESENTED to the
-    # writer: the basis is re-derived from the row's own extent columns on every
-    # pass, so a row is repaired by an ordinary cycle rather than by hand.
     carried: list[_Pair] = []
+    balance_of: dict[tuple[str, str], str | None] = {}
     for request in requests:
         typed_set = {t.lower() for t in request.typed_tokens}
+        balances = {token.lower(): raw for token, raw in request.balances}
         for token in {t.lower() for t in request.tokens}:
+            balance_of.setdefault((request.holder_address, token), raw_balance_text(balances.get(token)))
             fact = stored.get((chain_id, request.holder_address, token))
             if fact is None:
                 fresh.append(
@@ -1035,7 +1184,7 @@ def _scan_chain(
                 continue
             resume = int(fact.measured_through_block) + 1
             pair = _Pair(holder=request.holder_address, token=token, from_block=resume, typed=token in typed_set)
-            if resume > head:
+            if _is_settled(fact) or not _worth_scanning(fact, balances.get(token)):
                 carried.append(pair)
                 continue
             forward.append(pair)
@@ -1049,28 +1198,136 @@ def _scan_chain(
         max_block_range=max_block_range,
         min_bisect_span=min_bisect_span,
     )
+    priority = _token_priority(session, chain_id=chain_id, requests=requests, protocol_id=protocol_id)
 
     measured: dict[tuple[str, str], _Measured] = {}
     for group in (fresh, forward):
-        if group:
-            _discover(fetcher, group, chain_id=chain_id, head=head, measured=measured)
+        if not group:
+            continue
+        # The window start is the EARLIEST start any pair in the group needs.
+        # Starting a pair earlier than it asked for is safe in one direction
+        # only, and it is this one: it can only add deliveries, and an added
+        # delivery can only withdraw a positive verdict.
+        group_from = min(pair.from_block for pair in group)
+        scan_to = min(head, group_from + DISPOSITION_SLICE_WINDOWS * max_block_range)
+        in_slice = [pair for pair in group if pair.from_block <= scan_to]
+        for pair in group:
+            if pair.from_block > scan_to:
+                # Above this cycle's slice. A pair with a row keeps its extent
+                # and is carried for basis repair; one WITHOUT a row is deferred
+                # whole — writing nothing, because the absence of a row already
+                # reads not_determined everywhere and a partial delivery set is a
+                # different claim rather than a smaller one.
+                if stored.get((chain_id, pair.holder, pair.token)) is not None:
+                    carried.append(pair)
+        if not in_slice:
+            continue
+        for pair in in_slice:
+            measured[(pair.holder, pair.token)] = _Measured(
+                scanned_from_block=group_from,
+                measured_through=scan_to,
+                caught_up=scan_to >= head,
+                observed_balance_raw=balance_of.get((pair.holder, pair.token)),
+            )
+        _discover(
+            fetcher,
+            in_slice,
+            chain_id=chain_id,
+            from_block=group_from,
+            to_block=scan_to,
+            measured=measured,
+            priority=priority,
+        )
     for pair in carried:
         fact = stored.get((chain_id, pair.holder, pair.token))
+        if fact is None:
+            continue
         measured.setdefault(
             (pair.holder, pair.token),
-            _Measured(scanned_from_block=int(fact.scanned_from_block) if fact is not None else pair.from_block),
+            _Measured(
+                scanned_from_block=int(fact.scanned_from_block),
+                # Its own stored extent, so the writer's cursor rule is a no-op.
+                # A carried pair was not scanned; claiming the head for it would
+                # widen a published all-quantifier over unread blocks.
+                measured_through=int(fact.measured_through_block),
+            ),
         )
 
     _resolve_fan_out(
         session,
         chain_id=chain_id,
         rpc_url=rpc_url,
-        head=head,
         measured=measured,
         stored=stored,
         max_block_range=max_block_range,
         cost=cost,
+        priority=priority,
     )
+
+
+def _is_settled(fact: Any) -> bool:
+    """``has_direct_delivery`` is an earned negative and it never moves again.
+
+    ``min_fan_out`` only falls, so a delivery found later can only confirm the
+    negative. Scanning the pair again could not change what it publishes.
+    """
+    return str(getattr(fact, "shape", "")) == DELIVERY_SHAPE_HAS_DIRECT_DELIVERY
+
+
+def _worth_scanning(fact: Any, balance: str | None) -> bool:
+    """Whether anything says a forward scan of this pair could find a delivery.
+
+    ``True`` on every doubt: a row whose extent stops below the head has blocks
+    the balance argument says nothing about, and a NULL stamp is a pair nobody
+    ever compared — neither is a witness that there is nothing to find, so both
+    are scanned. Only an unchanged balance over an extent that reached the head
+    earns the skip.
+    """
+    if not bool(getattr(fact, "caught_up", True)):
+        return True
+    stamped = getattr(fact, "observed_balance_raw", None)
+    if stamped is None:
+        return True
+    return raw_balance_text(balance) != str(stamped)
+
+
+def _token_priority(
+    session: Session,
+    *,
+    chain_id: int,
+    requests: Sequence[DispositionRequest],
+    protocol_id: int | None,
+) -> dict[str, int]:
+    """Catch-up ORDER, and nothing else: no token is dropped, no verdict moves.
+
+    A budget or a slice boundary cuts the queue somewhere, and where it cuts
+    decides which pairs get a verdict this cycle. Order by how likely the token
+    is to be one the protocol means to hold: first the tokens this protocol's own
+    discovery names (``token_protocol_reference``, refreshed by
+    :func:`record_protocol_reference` earlier in this same session), then the
+    crumbs a price source did quote, then everything else.
+    """
+    tokens = sorted({token.lower() for request in requests for token in request.tokens})
+    if not tokens:
+        return {}
+    dust = {token.lower() for request in requests for token in request.priced_dust_tokens}
+    referenced: set[str] = set()
+    if protocol_id is not None:
+        from db.models import TokenProtocolReference
+
+        for start in range(0, len(tokens), 500):
+            rows = (
+                session.query(TokenProtocolReference.token_address)
+                .filter(
+                    TokenProtocolReference.protocol_id == int(protocol_id),
+                    TokenProtocolReference.chain_id == chain_id,
+                    TokenProtocolReference.reference_shape == TOKEN_REFERENCE_IN_UNIVERSE,
+                    TokenProtocolReference.token_address.in_(tokens[start : start + 500]),
+                )
+                .all()
+            )
+            referenced.update(str(row[0]).lower() for row in rows)
+    return {token: (0 if token in referenced else 1 if token in dust else 2) for token in tokens}
 
 
 def _discover(
@@ -1078,24 +1335,23 @@ def _discover(
     pairs: Sequence[_Pair],
     *,
     chain_id: int,
-    head: int,
+    from_block: int,
+    to_block: int,
     measured: dict[tuple[str, str], _Measured],
+    priority: Mapping[str, int],
 ) -> None:
     """Fill *measured* with every delivery the requested pairs received.
 
-    The window start is the EARLIEST start any pair in the batch needs. Starting
-    a pair earlier than it asked for is safe in one direction only, and it is
-    this one: it can only add deliveries, and an added delivery can only
-    withdraw a positive verdict.
+    The window is the caller's — it owns both the earliest start the group needs
+    and the slice boundary this cycle stops at. Tokens are batched in
+    ``priority`` order, so when a budget cuts the queue the tokens most likely to
+    be real are the ones already on the far side of the cut.
     """
     wanted = {(p.holder, p.token) for p in pairs}
-    from_block = min(p.from_block for p in pairs)
-    for pair in pairs:
-        measured.setdefault((pair.holder, pair.token), _Measured(scanned_from_block=from_block))
 
     holders = sorted({p.holder for p in pairs})
-    tokens = sorted({p.token for p in pairs})
-    typed_tokens = sorted({p.token for p in pairs if p.typed})
+    tokens = _ordered(sorted({p.token for p in pairs}), priority)
+    typed_tokens = _ordered(sorted({p.token for p in pairs if p.typed}), priority)
 
     for holder_batch in _chunks(holders, DISPOSITION_HOLDER_BATCH):
         padded = [_pad32(h) for h in holder_batch]
@@ -1106,7 +1362,7 @@ def _discover(
                 topics=[[TRANSFER_TOPIC0], None, padded],
                 recipient_topic=_RECIPIENT_TOPIC_ERC20,
                 from_block=from_block,
-                to_block=head,
+                to_block=to_block,
                 wanted=wanted,
                 holder_batch=holder_batch,
                 token_batch=token_batch,
@@ -1124,7 +1380,7 @@ def _discover(
                 topics=[list(_ERC1155_TOPIC0S), None, None, padded],
                 recipient_topic=_RECIPIENT_TOPIC_ERC1155,
                 from_block=from_block,
-                to_block=head,
+                to_block=to_block,
                 wanted=wanted,
                 holder_batch=holder_batch,
                 token_batch=token_batch,
@@ -1210,16 +1466,21 @@ def _attribute(
     }
 
 
+def _ordered(tokens: Sequence[str], priority: Mapping[str, int]) -> list[str]:
+    """Tokens in catch-up order. A total order, so a cut point is reproducible."""
+    return sorted(tokens, key=lambda token: (priority.get(token, 2), token))
+
+
 def _resolve_fan_out(
     session: Session,
     *,
     chain_id: int,
     rpc_url: str,
-    head: int,
     measured: Mapping[tuple[str, str], _Measured],
     stored: Mapping[tuple[int, str, str], Any],
     max_block_range: int,
     cost: DispositionCost,
+    priority: Mapping[str, int],
 ) -> None:
     """Meter each delivery, then record the pairs that were measured END TO END.
 
@@ -1247,10 +1508,18 @@ def _resolve_fan_out(
     Deliveries at or below a stored row's cursor are dropped before any of this:
     a previous pass proved that extent whole, so they are already in the row's
     tally, and re-metering them would spend receipts to double-count evidence.
+
+    Pairs are metered in the queue's own ``priority`` order, so the receipts a
+    budget does buy are spent on the tokens most likely to be real. Each pair is
+    recorded at ITS OWN extent (``_Measured.measured_through``), which is the
+    slice a scan proved or, for a carried pair, exactly the extent it already
+    had — never a chain head nobody read up to.
     """
     receipts: dict[str, dict | None] = {}
     exhausted = False
-    for (holder, token), entry in sorted(measured.items()):
+    for (holder, token), entry in sorted(
+        measured.items(), key=lambda item: (priority.get(item[0][1], 2), item[0][0], item[0][1])
+    ):
         if entry.aborted:
             continue
         deliveries: list[dict[str, Any]] = []
@@ -1303,10 +1572,12 @@ def _resolve_fan_out(
             holder_address=holder,
             token_address=token,
             scanned_from_block=entry.scanned_from_block,
-            measured_through_block=head,
+            measured_through_block=entry.measured_through,
             deliveries=deliveries,
             unmetered_elided=elided,
             scan_basis=_scan_basis(chain_id=chain_id, max_block_range=max_block_range),
+            observed_balance_raw=entry.observed_balance_raw,
+            caught_up=entry.caught_up,
         )
     if exhausted:
         raise DispositionBudgetExceeded(f"disposition request budget of {DISPOSITION_REQUEST_BUDGET} reached")
@@ -1386,6 +1657,7 @@ __all__ = [
     "DISPOSITION_REQUEST_BUDGET",
     "DISPOSITION_RESULT_CAP",
     "DISPOSITION_SCAN_TIMEOUT_SECONDS",
+    "DISPOSITION_SLICE_WINDOWS",
     "DISPOSITION_TOKEN_BATCH",
     "DispositionBudgetExceeded",
     "DispositionCost",
@@ -1397,6 +1669,7 @@ __all__ = [
     "disposition_cost_note",
     "disposition_requests",
     "is_unpriced",
+    "raw_balance_text",
     "record_protocol_reference",
     "run_disposition",
     "scan_delivery_shape",

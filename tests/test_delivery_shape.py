@@ -203,13 +203,17 @@ def _rpc_url_for(_chain_id: int) -> str:
     return "http://stub.invalid"
 
 
-def _request(tokens=(), *, chain_id: int = CHAIN, holder: str = HOLDER, typed=()) -> DispositionRequest:
+def _request(
+    tokens=(), *, chain_id: int = CHAIN, holder: str = HOLDER, typed=(), balances=(), dust=()
+) -> DispositionRequest:
     return DispositionRequest(
         contract_id=1,
         chain_id=chain_id,
         holder_address=holder,
         tokens=tuple(tokens) or (TOKEN,),
         typed_tokens=tuple(typed),
+        balances=tuple(balances),
+        priced_dust_tokens=tuple(dust),
     )
 
 
@@ -393,6 +397,151 @@ def test_a_cursored_pair_costs_nothing_on_the_next_cycle(db_session, wire):
     assert second.receipts == 0
     assert second.creation_lookups == 0
     assert second.head_reads == 1
+
+
+# --- the delta gate --------------------------------------------------------
+
+
+def _first_pass(wire, db_session, *, fan_out: int = 700, balance: str = "1000") -> None:
+    """One settled pair, stamped at *balance*, its extent at the head."""
+    wire.logs = [_log(token=TOKEN, holder=HOLDER, tx=1, block=910_000, log_index=1)]
+    wire.receipts = {_tx(1): _receipt(token=TOKEN, same_token_transfers=fan_out)}
+    scan_delivery_shape(db_session, [_request(balances=((TOKEN, balance),))], rpc_url_for=_rpc_url_for)
+    db_session.flush()
+
+
+def test_an_unmoved_balance_over_a_caught_up_extent_costs_no_getlogs(db_session, wire):
+    """The whole point of the gate: a converged pair stops paying hourly.
+
+    Head advances every cycle, so "resume below head" made every stored pair a
+    forward scan forever. What can move the verdict is a new delivery, and a new
+    delivery necessarily moves the balance — so an unmoved balance over an extent
+    that reached the head is the witness that there is nothing to read.
+    """
+    _first_pass(wire, db_session)
+    assert _facts(db_session)[(HOLDER, TOKEN)].caught_up is True
+
+    wire.head = HEAD + 500_000
+    second = scan_delivery_shape(db_session, [_request(balances=((TOKEN, "1000"),))], rpc_url_for=_rpc_url_for)
+    db_session.flush()
+
+    assert second.get_logs == 0 and second.receipts == 0
+    # The skip does not publish a wider claim than the one that was earned: the
+    # extent stays where the last scan actually reached.
+    row = _facts(db_session)[(HOLDER, TOKEN)]
+    assert row.measured_through_block == HEAD
+    assert f"blocks {CREATION}..{HEAD}" in row.basis
+
+
+def test_a_moved_balance_reopens_the_pair_from_its_cursor_and_no_earlier(db_session, wire):
+    _first_pass(wire, db_session)
+
+    wire.head = HEAD + 500_000
+    wire.logs.append(_log(token=TOKEN, holder=HOLDER, tx=2, block=HEAD + 10, log_index=4))
+    wire.receipts[_tx(2)] = _receipt(token=TOKEN, same_token_transfers=900)
+    second = scan_delivery_shape(db_session, [_request(balances=((TOKEN, "2000"),))], rpc_url_for=_rpc_url_for)
+    db_session.flush()
+
+    assert second.get_logs == 1
+    assert int(wire.get_logs_calls[-1]["fromBlock"], 16) == HEAD + 1
+    row = _facts(db_session)[(HOLDER, TOKEN)]
+    assert row.delivery_count == 2
+    assert row.measured_through_block == HEAD + 500_000
+    assert row.observed_balance_raw == "2000"
+
+
+def test_a_settled_negative_is_never_scanned_again_however_the_balance_moves(db_session, wire):
+    """``has_direct_delivery`` is earned and monotone; no later delivery lifts it.
+
+    ``min_fan_out`` only falls, so a scan of this pair could confirm the negative
+    and could never withdraw it. Spending requests on it buys nothing.
+    """
+    _first_pass(wire, db_session, fan_out=1)
+    assert _facts(db_session)[(HOLDER, TOKEN)].delivery_shape == DELIVERY_SHAPE_HAS_DIRECT_DELIVERY
+
+    wire.head = HEAD + 500_000
+    wire.logs.append(_log(token=TOKEN, holder=HOLDER, tx=2, block=HEAD + 10, log_index=4))
+    wire.receipts[_tx(2)] = _receipt(token=TOKEN, same_token_transfers=900)
+    second = scan_delivery_shape(db_session, [_request(balances=((TOKEN, "9999"),))], rpc_url_for=_rpc_url_for)
+    db_session.flush()
+
+    assert second.get_logs == 0 and second.receipts == 0
+    row = _facts(db_session)[(HOLDER, TOKEN)]
+    assert row.delivery_shape == DELIVERY_SHAPE_HAS_DIRECT_DELIVERY
+    assert row.measured_through_block == HEAD
+
+
+# --- the per-cycle slice ----------------------------------------------------
+
+
+def test_a_range_capped_chain_records_the_slice_it_proved_and_resumes_above_it(db_session, wire, monkeypatch):
+    """Bounded forward progress, where the alternative was an hourly no-op.
+
+    Optimism serves 10,000 blocks per ``eth_getLogs``, so creation-to-head is
+    thousands of pages: the measured run exhausted the budget during DISCOVERY,
+    wrote nothing, and repeated identically every hour. Stopping at a slice
+    boundary and RECORDING what was proven is what converges — the row's extent
+    is the slice, ``caught_up`` says it is not the head, and the next cycle
+    resumes strictly above the cursor.
+    """
+    monkeypatch.setattr(delivery_shape, "DISPOSITION_SLICE_WINDOWS", 2)
+    slice_end = CREATION + 2 * 10_000
+    wire.logs = [_log(token=TOKEN, holder=HOLDER, tx=1, block=910_000, log_index=1)]
+    wire.receipts = {_tx(1): _receipt(token=TOKEN, same_token_transfers=900)}
+
+    scan_delivery_shape(db_session, [_request(chain_id=OPTIMISM)], rpc_url_for=_rpc_url_for)
+    db_session.flush()
+
+    row = _facts(db_session)[(HOLDER, TOKEN)]
+    assert row.measured_through_block == slice_end
+    assert row.caught_up is False
+    # The claim is whole over the slice, and the basis names the slice — not the
+    # head the cycle never reached.
+    assert f"blocks {CREATION}..{slice_end}" in row.basis
+    assert max(int(call["toBlock"], 16) for call in wire.get_logs_calls) == slice_end
+
+    wire.get_logs_calls.clear()
+    scan_delivery_shape(db_session, [_request(chain_id=OPTIMISM)], rpc_url_for=_rpc_url_for)
+    db_session.flush()
+
+    assert min(int(call["fromBlock"], 16) for call in wire.get_logs_calls) == slice_end + 1
+    assert _facts(db_session)[(HOLDER, TOKEN)].measured_through_block == slice_end + 1 + 2 * 10_000
+
+
+# --- catch-up order ---------------------------------------------------------
+
+
+def test_the_tokens_the_protocol_names_are_batched_first(db_session, wire, monkeypatch):
+    """Order decides who gets a verdict when the budget cuts the queue.
+
+    Referenced first, then the crumbs a price source did quote, then the rest.
+    The addresses here sort in the OPPOSITE order, so what is asserted is the
+    priority and not the alphabet.
+    """
+    monkeypatch.setattr(delivery_shape, "DISPOSITION_TOKEN_BATCH", 1)
+    referenced, dust, rest = _addr("70ce9"), _addr("70ce7"), TOKEN
+    proto = _protocol(db_session, "priority")
+    for token, shape in ((referenced, TOKEN_REFERENCE_IN_UNIVERSE), (dust, TOKEN_REFERENCE_ABSENT_FROM_UNIVERSE)):
+        db_session.add(
+            TokenProtocolReference(
+                protocol_id=proto.id,
+                chain_id=CHAIN,
+                token_address=token,
+                reference_shape=shape,
+                universe_addresses=5,
+                basis="test",
+            )
+        )
+    db_session.flush()
+
+    scan_delivery_shape(
+        db_session,
+        [_request(tokens=(rest, dust, referenced), dust=(dust,))],
+        rpc_url_for=_rpc_url_for,
+        protocol_id=proto.id,
+    )
+
+    assert [call["address"] for call in wire.get_logs_calls] == [[referenced], [dust], [rest]]
 
 
 # --- budget ----------------------------------------------------------------

@@ -112,6 +112,11 @@ class DeliveryFact:
 
     ``min_fan_out`` is a count of same-token transfer LOGS, never of distinct
     recipients: see :data:`FAN_OUT_THRESHOLD_K`.
+
+    ``caught_up`` and ``observed_balance_raw`` are the SCANNER's bookkeeping and
+    no part of the claim: they say whether the extent reached the head and what
+    balance the pair was last stamped at, which is what the next cycle decides to
+    re-scan on. No verdict reads either.
     """
 
     chain_id: int
@@ -125,6 +130,8 @@ class DeliveryFact:
     scanned_from_block: int
     measured_through_block: int
     basis: str
+    caught_up: bool = True
+    observed_balance_raw: str | None = None
 
     @property
     def is_airdrop_only(self) -> bool:
@@ -289,6 +296,8 @@ def record_delivery_evidence(
     scan_basis: str,
     unmetered_elided: int = 0,
     k: int = FAN_OUT_THRESHOLD_K,
+    observed_balance_raw: str | None = None,
+    caught_up: bool | None = None,
 ) -> None:
     """Accrete one pair's evidence. THE TRUE INVARIANT, stated exactly.
 
@@ -318,6 +327,14 @@ def record_delivery_evidence(
     its full delivery count that way instead of materialising hundreds of
     thousands of entries. They are folded in as unreadable, which is the truth
     and which forces ``not_determined``.
+
+    ``caught_up`` and ``observed_balance_raw`` are the SKIP keys, and neither is
+    evidence — no verdict reads them. ``caught_up`` is False when
+    ``measured_through_block`` is a slice boundary rather than the head; ``None``
+    means this call did not scan (a pair presented only so its basis is
+    re-derived) and the stored answer stands. ``observed_balance_raw`` is
+    stamped only where the row is being rewritten anyway, because a stamp is not
+    worth an UPDATE of its own over the whole unpriced population.
     """
     from db.models import TokenDeliveryEvidence
 
@@ -350,6 +367,8 @@ def record_delivery_evidence(
                 min_fan_out=tally.min_fan_out,
                 fan_out_threshold_k=int(k),
                 delivery_shape=_shape_for(tally, int(k)),
+                observed_balance_raw=observed_balance_raw,
+                caught_up=True if caught_up is None else bool(caught_up),
                 basis=compose_basis(
                     scan_basis=scan_basis, scanned_from_block=from_block, measured_through_block=through
                 ),
@@ -389,6 +408,8 @@ def record_delivery_evidence(
     _set(row, "min_fan_out", tally.min_fan_out)
     _set(row, "delivery_shape", _shape_for(tally, row_k))
     _set(row, "measured_through_block", through)
+    if caught_up is not None:
+        _set(row, "caught_up", bool(caught_up))
     # Re-derived every pass, from the row's own columns as they now stand.
     _set(
         row,
@@ -402,6 +423,12 @@ def record_delivery_evidence(
         # list predates the retention bound — the second arm is what shrinks the
         # rows an unbounded write left behind, through this path and no other.
         row.deliveries = _retained(existing + added)
+    if observed_balance_raw is not None and session.is_modified(row):
+        # Stamped only onto a row this pass was rewriting anyway. The stamp is a
+        # skip key rather than a fact anything publishes, and buying it with an
+        # UPDATE per cycle over every unpriced pair the protocol holds is the
+        # cost the skip exists to remove.
+        _set(row, "observed_balance_raw", observed_balance_raw)
     if added or elided.count or through > cursor:
         from sqlalchemy import func as _sql_func
 
@@ -450,6 +477,8 @@ def load_delivery_evidence(
                     TokenDeliveryEvidence.scanned_from_block,
                     TokenDeliveryEvidence.measured_through_block,
                     TokenDeliveryEvidence.basis,
+                    TokenDeliveryEvidence.caught_up,
+                    TokenDeliveryEvidence.observed_balance_raw,
                 )
             )
             .filter(tuple_(TokenDeliveryEvidence.chain_id, TokenDeliveryEvidence.holder_address).in_(chunk))
@@ -469,6 +498,8 @@ def load_delivery_evidence(
                 scanned_from_block=int(row.scanned_from_block),
                 measured_through_block=int(row.measured_through_block),
                 basis=str(row.basis or ""),
+                caught_up=bool(row.caught_up),
+                observed_balance_raw=(None if row.observed_balance_raw is None else str(row.observed_balance_raw)),
             )
     return out
 
