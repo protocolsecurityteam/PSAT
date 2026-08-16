@@ -32,6 +32,7 @@ from sqlalchemy import func, select, update  # noqa: E402
 
 import services.resolution.repos.event_logs_rpc as event_logs_rpc  # noqa: E402
 from services.resolution.repos.event_logs_rpc import FetchedEventLog, RpcEventLogFetcher  # noqa: E402
+from utils.rpc import RpcClientTimeout  # noqa: E402
 from workers.event_log_indexer import enroll_event_cursor, scan_enrolled_events  # noqa: E402
 
 _DB_URL: str = os.environ.get("TEST_DATABASE_URL", os.environ.get("DATABASE_URL", "")) or ""
@@ -444,3 +445,86 @@ def test_rpc_fetcher_bisect_floor_propagates_the_error(monkeypatch):
 
     # 20k failed → two 10k halves; the first floor-sized failure propagates.
     assert calls == [20_000, 10_000]
+
+
+def test_client_timeout_retries_the_same_window_before_bisecting(monkeypatch):
+    """A client timeout is this process's wait ending, not the upstream refusing
+    the window — so it earns ONE retry of the identical window. Bisecting a
+    window that was merely slow hands each half the same stall and fans one
+    request out into hundreds (measured: 756 getLogs for ~12 windows' work)."""
+    calls: list[tuple[int, int]] = []
+
+    def fake_rpc(url, method, params, *, chain_id=None):
+        from_block = int(params[0]["fromBlock"], 16)
+        to_block = int(params[0]["toBlock"], 16)
+        calls.append((from_block, to_block))
+        # The retry succeeds: the window was slow, not unservable.
+        if calls.count((from_block, to_block)) == 1:
+            raise RpcClientTimeout("RPC request failed for <redacted>: read timed out")
+        return [_raw_log(_TOPIC_A, from_block)]
+
+    monkeypatch.setattr(event_logs_rpc, "rpc_request", fake_rpc)
+    monkeypatch.setattr(event_logs_rpc.time, "sleep", lambda _s: None)
+    fetcher = RpcEventLogFetcher("http://unit.test", max_block_range=1_000_000, min_bisect_span=10_000)
+    logs = fetcher.fetch_logs(event_address=_ADDRESS, topics=[_TOPIC_A], from_block=0, to_block=399_999)
+
+    # Two requests for one window, never a narrower one: no bisect happened.
+    assert calls == [(0, 399_999), (0, 399_999)]
+    assert [log.block_number for log in logs] == [0]
+
+
+def test_second_client_timeout_falls_through_to_the_bisect(monkeypatch):
+    """The retry is one extra attempt, not a loop: a window that times out twice
+    is treated exactly as today's reject and bisects."""
+    calls: list[tuple[int, int]] = []
+
+    def fake_rpc(url, method, params, *, chain_id=None):
+        from_block = int(params[0]["fromBlock"], 16)
+        to_block = int(params[0]["toBlock"], 16)
+        calls.append((from_block, to_block))
+        if to_block - from_block + 1 > 100_000:
+            raise RpcClientTimeout("RPC request failed for <redacted>: read timed out")
+        return [_raw_log(_TOPIC_A, from_block)]
+
+    monkeypatch.setattr(event_logs_rpc, "rpc_request", fake_rpc)
+    monkeypatch.setattr(event_logs_rpc.time, "sleep", lambda _s: None)
+    fetcher = RpcEventLogFetcher("http://unit.test", max_block_range=1_000_000, min_bisect_span=10_000)
+    logs = fetcher.fetch_logs(event_address=_ADDRESS, topics=[_TOPIC_A], from_block=0, to_block=399_999)
+
+    # Each timing-out window is tried twice, then split — the same halves the
+    # error path has always produced.
+    assert calls[:2] == [(0, 399_999), (0, 399_999)]
+    assert calls[2:4] == [(0, 199_999), (0, 199_999)]
+    assert [log.block_number for log in logs] == [0, 100_000, 200_000, 300_000]
+
+
+def test_upstream_reject_bisects_immediately_without_a_retry(monkeypatch):
+    """Every other RpcEventLogFetcher user (asset sweep, indexer, watcher) must
+    see exactly one behaviour change: the extra attempt on a CLIENT timeout. An
+    upstream reject is a verdict on the query and still bisects on first sight —
+    retrying it would only spend budget to be refused again."""
+    calls: list[tuple[int, int]] = []
+
+    def fake_rpc(url, method, params, *, chain_id=None):
+        from_block = int(params[0]["fromBlock"], 16)
+        to_block = int(params[0]["toBlock"], 16)
+        calls.append((from_block, to_block))
+        if to_block - from_block + 1 > 100_000:
+            raise RuntimeError("{'code': -32005, 'message': 'Limit exceeded: More than 50000 logs returned'}")
+        return [_raw_log(_TOPIC_A, from_block)]
+
+    monkeypatch.setattr(event_logs_rpc, "rpc_request", fake_rpc)
+    fetcher = RpcEventLogFetcher("http://unit.test", max_block_range=1_000_000, min_bisect_span=10_000)
+    logs = fetcher.fetch_logs(event_address=_ADDRESS, topics=[_TOPIC_A], from_block=0, to_block=399_999)
+
+    # The pre-existing 7-request shape, byte for byte: no window is repeated.
+    assert calls == [
+        (0, 399_999),
+        (0, 199_999),
+        (0, 99_999),
+        (100_000, 199_999),
+        (200_000, 399_999),
+        (200_000, 299_999),
+        (300_000, 399_999),
+    ]
+    assert [log.block_number for log in logs] == [0, 100_000, 200_000, 300_000]

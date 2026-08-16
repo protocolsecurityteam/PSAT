@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from dataclasses import dataclass, field
 from typing import Any, Sequence
 
-from utils.rpc import rpc_request
+from utils.rpc import RpcClientTimeout, rpc_request
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,11 @@ logger = logging.getLogger(__name__)
 # ``_fetch_range`` bisects on error down to MIN_BISECT_SPAN before giving up.
 MAX_BLOCK_RANGE = 1_000_000
 MIN_BISECT_SPAN = 10_000
+
+# Pause before the one same-window retry a client timeout earns. Short on
+# purpose: it exists to let a transient stall clear, not to wait out an
+# upstream, and it is paid at most once per window.
+TIMEOUT_RETRY_BACKOFF_SECONDS = 0.5
 
 # Result cap the upstream is believed to enforce by SILENTLY returning a short
 # 200-OK page. A page whose length reaches it is treated as a reject and
@@ -160,11 +166,11 @@ class RpcEventLogFetcher:
         self.chain_id = chain_id
         # None = the module default in ``rpc_request``, which is what every
         # landed caller gets. A caller whose windows are wide enough that an
-        # honest answer outlasts that default passes its own ceiling: a client
-        # timeout arrives here as a RuntimeError, the bisect path reads it as an
-        # upstream reject, and a window that was merely SLOW would be halved
-        # until the floor and then raised as unprovable. The extent of a scan is
-        # a claim about the chain, never about how long this process waited.
+        # honest answer outlasts that default passes its own ceiling. Timeouts
+        # that still happen arrive typed (``RpcClientTimeout``) and buy one
+        # same-window retry before the bisect path treats them as a reject: the
+        # extent of a scan is a claim about the chain, never about how long this
+        # process waited.
         self.timeout = timeout
 
     def fetch_logs(
@@ -243,34 +249,20 @@ class RpcEventLogFetcher:
             log_filter["address"] = event_address
         params = [log_filter]
         try:
-            # Two branches rather than one call passing ``timeout=None``: a
-            # fetcher that declared no ceiling issues the SAME call it always
-            # has, argument for argument, so nothing about the landed callers'
-            # request changes here.
-            if self.timeout is None:
-                raw_logs = rpc_request(self.rpc_url, "eth_getLogs", params, chain_id=self.chain_id)
-            else:
-                raw_logs = rpc_request(
-                    self.rpc_url, "eth_getLogs", params, chain_id=self.chain_id, timeout=self.timeout
-                )
+            raw_logs = self._request_logs(params)
+        except RpcClientTimeout:
+            # A client timeout is this process's wait ending, not the upstream
+            # rejecting the window, so bisecting on it splits a window that was
+            # only SLOW — and each half inherits the same stall, fanning one
+            # window out into hundreds of leaf requests. Retry the same window
+            # once; only a second failure is read as a reject.
+            time.sleep(TIMEOUT_RETRY_BACKOFF_SECONDS)
+            try:
+                raw_logs = self._request_logs(params)
+            except RuntimeError as exc:
+                return self._reject_window(event_address, topics, from_block, to_block, exc, window_stats)
         except RuntimeError as exc:
-            # Result-cap / range-cap / query-timeout from the upstream. Halve and
-            # recurse; a span at the floor is a real error, not a sizing problem.
-            span = to_block - from_block + 1
-            if span <= self.min_bisect_span:
-                raise
-            # Per-window detail (the parent scan logs the aggregate) — DEBUG.
-            logger.debug(
-                "eth_getLogs window rejected; bisecting",
-                extra={
-                    "event_address": event_address,
-                    "from_block": from_block,
-                    "to_block": to_block,
-                    "span": span,
-                    "exc_type": type(exc).__name__,
-                },
-            )
-            return self._bisect_halves(event_address, topics, from_block, to_block, span, window_stats)
+            return self._reject_window(event_address, topics, from_block, to_block, exc, window_stats)
         # A page whose length reaches the cap is indistinguishable from a page the
         # upstream truncated to the cap, so it is a REJECT, not a result: take the
         # same bisect the error path takes. Without this the window loop advances
@@ -315,6 +307,41 @@ class RpcEventLogFetcher:
                 if decoded is not None:
                     out.append(decoded)
         return out
+
+    def _request_logs(self, params: list[Any]) -> Any:
+        # Two branches rather than one call passing ``timeout=None``: a fetcher
+        # that declared no ceiling issues the SAME call it always has, argument
+        # for argument, so nothing about the landed callers' request changes.
+        if self.timeout is None:
+            return rpc_request(self.rpc_url, "eth_getLogs", params, chain_id=self.chain_id)
+        return rpc_request(self.rpc_url, "eth_getLogs", params, chain_id=self.chain_id, timeout=self.timeout)
+
+    def _reject_window(
+        self,
+        event_address: str | list[str] | None,
+        topics: list[list[str] | None],
+        from_block: int,
+        to_block: int,
+        exc: RuntimeError,
+        window_stats: list[FetchWindowStat] | None,
+    ) -> list[FetchedEventLog]:
+        # Result-cap / range-cap / query-timeout from the upstream. Halve and
+        # recurse; a span at the floor is a real error, not a sizing problem.
+        span = to_block - from_block + 1
+        if span <= self.min_bisect_span:
+            raise exc
+        # Per-window detail (the parent scan logs the aggregate) — DEBUG.
+        logger.debug(
+            "eth_getLogs window rejected; bisecting",
+            extra={
+                "event_address": event_address,
+                "from_block": from_block,
+                "to_block": to_block,
+                "span": span,
+                "exc_type": type(exc).__name__,
+            },
+        )
+        return self._bisect_halves(event_address, topics, from_block, to_block, span, window_stats)
 
     def _bisect_halves(
         self,

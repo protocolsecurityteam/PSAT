@@ -82,6 +82,31 @@ def test_rpc_request_connection_error_message_is_sanitized(monkeypatch):
     assert "<redacted>" in msg
 
 
+@pytest.mark.parametrize(
+    "exc,expect_timeout",
+    [
+        (requests.Timeout("read timed out"), True),
+        (requests.exceptions.ReadTimeout("read timed out"), True),
+        (requests.ConnectionError("connection reset by peer"), False),
+    ],
+)
+def test_client_timeouts_surface_as_a_typed_subclass(monkeypatch, exc, expect_timeout):
+    """A timeout says this client stopped waiting; a connection error says the
+    transport failed. Callers that size their own windows need to tell them
+    apart, and the type — never the message — is what carries that. Both remain
+    RuntimeError so no existing handler changes."""
+    session = MagicMock()
+    session.post.side_effect = exc
+    monkeypatch.setattr(rpc_mod, "_get_session", lambda: session)
+    monkeypatch.setattr(rpc_mod.time, "sleep", lambda _s: None)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        rpc_mod.rpc_request(_ALCHEMY, "eth_blockNumber", [], retries=0)
+
+    assert isinstance(excinfo.value, rpc_mod.RpcClientTimeout) is expect_timeout
+    assert "FAKE_ALCHEMY_KEY_FOR_TESTS" not in str(excinfo.value)
+
+
 # ---------------------------------------------------------------------------
 # rpc_batch_request: HTTPError + transport-error branches
 # ---------------------------------------------------------------------------
