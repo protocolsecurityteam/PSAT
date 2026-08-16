@@ -3397,7 +3397,12 @@ class TokenDeliveryEvidence(Base):
     # False when the pass that wrote the row stopped at a slice boundary below
     # the chain head. Such a row is scanned forward every cycle whatever its
     # balance does, because the balance argument for skipping only holds over
-    # blocks that were already read.
+    # blocks that were already read — and its ``fan_out_all`` is NOT dispositive
+    # while it stands (``delivery_evidence.DeliveryFact.is_airdrop_only``): the
+    # verdict is true of the slice, and the blocks above it are where a
+    # settlement would refute it. A settled ``has_direct_delivery`` written at a
+    # partial extent keeps this false forever — catch-up short-circuits on the
+    # earned negative — which is why only the POSITIVE is gated on it.
     caught_up: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     # The sentence the published claim derives its scope from — the filter, the
     # block range, the request counts — never re-authored downstream.

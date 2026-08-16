@@ -370,17 +370,23 @@ def raw_balance_text(value: Any) -> str | None:
 
     Canonicalised through ``int`` so ``"1000"`` and ``1000`` are the same stamp
     and a re-spelling of an unmoved balance does not read as a delivery. A value
-    that will not parse is kept verbatim rather than dropped: it still compares
-    equal to itself, which is all the key needs, and dropping it would make an
-    unreadable quantity look like a quantity nobody read.
+    that will not parse — or that is not a whole quantity, which an ERC-20 raw
+    balance never is — is kept verbatim rather than dropped or truncated: it
+    still compares equal to itself, which is all the key needs, while truncating
+    would collapse two different balances onto one stamp and suppress the scan
+    the difference between them should have earned.
     """
     if value is None:
         return None
     try:
-        return str(int(Decimal(str(value))))
+        exact = Decimal(str(value))
+        whole = int(exact)
     except (ArithmeticError, TypeError, ValueError):
-        text = str(value).strip()
-        return text or None
+        whole = None
+    if whole is not None and exact == whole:
+        return str(whole)
+    text = str(value).strip()
+    return text or None
 
 
 def _is_priced_dust(usd_value: Any) -> bool:
@@ -1201,15 +1207,16 @@ def _scan_chain(
     priority = _token_priority(session, chain_id=chain_id, requests=requests, protocol_id=protocol_id)
 
     measured: dict[tuple[str, str], _Measured] = {}
+    starved = False
     for group in (fresh, forward):
-        if not group:
+        if not group or starved:
             continue
         # The window start is the EARLIEST start any pair in the group needs.
         # Starting a pair earlier than it asked for is safe in one direction
         # only, and it is this one: it can only add deliveries, and an added
         # delivery can only withdraw a positive verdict.
         group_from = min(pair.from_block for pair in group)
-        scan_to = min(head, group_from + DISPOSITION_SLICE_WINDOWS * max_block_range)
+        scan_to = min(head, group_from + _slice_windows(group, cost=cost) * max_block_range)
         in_slice = [pair for pair in group if pair.from_block <= scan_to]
         for pair in group:
             if pair.from_block > scan_to:
@@ -1229,7 +1236,7 @@ def _scan_chain(
                 caught_up=scan_to >= head,
                 observed_balance_raw=balance_of.get((pair.holder, pair.token)),
             )
-        _discover(
+        starved = _discover(
             fetcher,
             in_slice,
             chain_id=chain_id,
@@ -1253,6 +1260,10 @@ def _scan_chain(
             ),
         )
 
+    # Runs even when discovery starved, and that ordering is the fix: every pair
+    # whose windows were proven whole reaches the writer before the budget error
+    # leaves this function, so a cycle that ran out of requests still made
+    # forward progress instead of repeating itself next hour.
     _resolve_fan_out(
         session,
         chain_id=chain_id,
@@ -1263,6 +1274,38 @@ def _scan_chain(
         cost=cost,
         priority=priority,
     )
+    if starved:
+        raise DispositionBudgetExceeded(f"disposition request budget of {DISPOSITION_REQUEST_BUDGET} reached")
+
+
+def _slice_windows(pairs: Sequence[_Pair], *, cost: DispositionCost) -> int:
+    """Windows this group may page, narrowed to what the budget can still pay.
+
+    The slice alone bounds pages per BATCH, not per cycle, and a group is as many
+    batches as it has holder chunks times token chunks — so a wide holder can
+    still spend the whole ceiling inside discovery, and a chain scanned late pays
+    for the chains ahead of it (the measured failure was optimism, chain 10,
+    after ethereum). Dividing what is LEFT among the passes still to come keeps
+    the group's discovery inside the budget.
+
+    A narrowing, not a guarantee: the fetcher bisects, so one window can cost
+    more than one request. :func:`_discover` is what makes the invariant true —
+    this only makes reaching it rare.
+
+    Never below one window. A cycle with nothing left should refuse at the
+    fetcher, where the refusal is counted and logged, rather than quietly scan a
+    range of nothing.
+    """
+    holders = _chunk_count(len({p.holder for p in pairs}), DISPOSITION_HOLDER_BATCH)
+    tokens = _chunk_count(len({p.token for p in pairs}), DISPOSITION_TOKEN_BATCH)
+    typed = _chunk_count(len({p.token for p in pairs if p.typed}), DISPOSITION_TOKEN_BATCH)
+    passes = max(1, holders * (tokens + typed))
+    remaining = max(0, DISPOSITION_REQUEST_BUDGET - cost.total)
+    return max(1, min(DISPOSITION_SLICE_WINDOWS, remaining // passes))
+
+
+def _chunk_count(items: int, size: int) -> int:
+    return -(-items // size)
 
 
 def _is_settled(fact: Any) -> bool:
@@ -1270,6 +1313,13 @@ def _is_settled(fact: Any) -> bool:
 
     ``min_fan_out`` only falls, so a delivery found later can only confirm the
     negative. Scanning the pair again could not change what it publishes.
+
+    One consequence, deliberate: a row settled at a PARTIAL extent keeps
+    ``caught_up`` false forever, because catch-up short-circuits here. Harmless
+    for what it publishes — the negative was earned inside the extent the row
+    names — but it is why only the POSITIVE is gated on ``caught_up``
+    (``delivery_evidence.DeliveryFact.is_airdrop_only``) and why a consumer must
+    not read that flag as "this pair is behind".
     """
     return str(getattr(fact, "shape", "")) == DELIVERY_SHAPE_HAS_DIRECT_DELIVERY
 
@@ -1339,13 +1389,22 @@ def _discover(
     to_block: int,
     measured: dict[tuple[str, str], _Measured],
     priority: Mapping[str, int],
-) -> None:
+) -> bool:
     """Fill *measured* with every delivery the requested pairs received.
 
     The window is the caller's — it owns both the earliest start the group needs
     and the slice boundary this cycle stops at. Tokens are batched in
     ``priority`` order, so when a budget cuts the queue the tokens most likely to
     be real are the ones already on the far side of the cut.
+
+    Returns whether the budget died here. IT IS NOT RAISED, and that is the
+    point: a budget death used to propagate out of the whole chain scan before
+    any evidence was written, so a chain that could not finish discovery in one
+    cycle wrote NOTHING and the next cycle repeated it identically — measured on
+    optimism, 4,974 requests an hour, forever. A pair is a claim on its own, and
+    the pairs whose windows WERE proven whole are recorded. What the death costs
+    is exactly the pairs it touched: the in-flight window's, and every window
+    that never ran, all marked aborted so they publish nothing.
     """
     wanted = {(p.holder, p.token) for p in pairs}
 
@@ -1353,32 +1412,32 @@ def _discover(
     tokens = _ordered(sorted({p.token for p in pairs}), priority)
     typed_tokens = _ordered(sorted({p.token for p in pairs if p.typed}), priority)
 
+    passes: list[tuple[list[str], list[str], list[Any], int]] = []
     for holder_batch in _chunks(holders, DISPOSITION_HOLDER_BATCH):
         padded = [_pad32(h) for h in holder_batch]
         for token_batch in _chunks(tokens, DISPOSITION_TOKEN_BATCH):
-            _run_pass(
-                fetcher,
-                event_address=token_batch,
-                topics=[[TRANSFER_TOPIC0], None, padded],
-                recipient_topic=_RECIPIENT_TOPIC_ERC20,
-                from_block=from_block,
-                to_block=to_block,
-                wanted=wanted,
-                holder_batch=holder_batch,
-                token_batch=token_batch,
-                measured=measured,
-                chain_id=chain_id,
-            )
+            passes.append((holder_batch, token_batch, [[TRANSFER_TOPIC0], None, padded], _RECIPIENT_TOPIC_ERC20))
         # ERC-1155's recipient sits in topic 3, so it needs its own pass or the
         # scan sees 1155 sends and misses 1155 RECEIPTS. Inert on today's
         # population (no typed receipt in it), and implemented anyway so a
         # future one is measured rather than silently unmeasured.
         for token_batch in _chunks(typed_tokens, DISPOSITION_TOKEN_BATCH):
+            passes.append(
+                (
+                    holder_batch,
+                    token_batch,
+                    [list(_ERC1155_TOPIC0S), None, None, padded],
+                    _RECIPIENT_TOPIC_ERC1155,
+                )
+            )
+
+    for index, (holder_batch, token_batch, topics, recipient_topic) in enumerate(passes):
+        try:
             _run_pass(
                 fetcher,
                 event_address=token_batch,
-                topics=[list(_ERC1155_TOPIC0S), None, None, padded],
-                recipient_topic=_RECIPIENT_TOPIC_ERC1155,
+                topics=topics,
+                recipient_topic=recipient_topic,
                 from_block=from_block,
                 to_block=to_block,
                 wanted=wanted,
@@ -1387,6 +1446,34 @@ def _discover(
                 measured=measured,
                 chain_id=chain_id,
             )
+        except DispositionBudgetExceeded as exc:
+            logger.warning(
+                "disposition: request budget died mid-discovery on chain %s in window %d-%d (%s); "
+                "%d of %d batch pass(es) had completed and their pairs are recorded, the rest are aborted",
+                chain_id,
+                from_block,
+                to_block,
+                exc,
+                index,
+                len(passes),
+            )
+            # A pair covered by a pass that never ran has a delivery set nobody
+            # enumerated, which is a different claim rather than a smaller one.
+            for pending_holders, pending_tokens, _, _ in passes[index:]:
+                _abort(pending_holders, pending_tokens, measured)
+            return True
+    return False
+
+
+def _abort(
+    holder_batch: Sequence[str], token_batch: Sequence[str], measured: Mapping[tuple[str, str], _Measured]
+) -> None:
+    """Mark every pair a window covered unproven, so it publishes nothing."""
+    for holder in holder_batch:
+        for token in token_batch:
+            entry = measured.get((holder, token))
+            if entry is not None:
+                entry.aborted = True
 
 
 def _run_pass(
@@ -1425,11 +1512,7 @@ def _run_pass(
             len(token_batch),
             exc,
         )
-        for holder in holder_batch:
-            for token in token_batch:
-                entry = measured.get((holder, token))
-                if entry is not None:
-                    entry.aborted = True
+        _abort(holder_batch, token_batch, measured)
         return
     for log in logs:
         _attribute(log, recipient_topic=recipient_topic, wanted=wanted, measured=measured)

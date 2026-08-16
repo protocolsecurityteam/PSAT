@@ -508,6 +508,76 @@ def test_a_range_capped_chain_records_the_slice_it_proved_and_resumes_above_it(d
     assert _facts(db_session)[(HOLDER, TOKEN)].measured_through_block == slice_end + 1 + 2 * 10_000
 
 
+def test_a_partial_extent_is_not_disposable_until_catch_up_completes(db_session, wire, monkeypatch):
+    """The slice is honest about itself, and a consumer must not over-read it.
+
+    ``fan_out_all`` over a slice is true OF THE SLICE, and the row says so. But
+    the question a consumer disposes a holding on is about the HOLDING, and the
+    millions of blocks above the cursor are exactly where a settlement would
+    refute it. So the positive is not dispositive while the extent is short, and
+    it turns dispositive by itself once catch-up reaches the head — nothing is
+    withdrawn and nothing is re-measured.
+    """
+    monkeypatch.setattr(delivery_shape, "DISPOSITION_SLICE_WINDOWS", 2)
+    wire.logs = [_log(token=TOKEN, holder=HOLDER, tx=1, block=910_000, log_index=1)]
+    wire.receipts = {_tx(1): _receipt(token=TOKEN, same_token_transfers=900)}
+    scan_delivery_shape(db_session, [_request(chain_id=OPTIMISM)], rpc_url_for=_rpc_url_for)
+    db_session.flush()
+
+    partial = load_delivery_evidence(db_session, [(OPTIMISM, HOLDER)])[(OPTIMISM, HOLDER, TOKEN)]
+    assert partial.shape == DELIVERY_SHAPE_FAN_OUT_ALL
+    assert partial.caught_up is False
+    assert partial.is_airdrop_only is False
+
+    # Catch-up completes. Same evidence, same verdict — now over the whole chain.
+    monkeypatch.setattr(delivery_shape, "DISPOSITION_SLICE_WINDOWS", 100_000)
+    scan_delivery_shape(db_session, [_request(chain_id=OPTIMISM)], rpc_url_for=_rpc_url_for)
+    db_session.flush()
+
+    whole = load_delivery_evidence(db_session, [(OPTIMISM, HOLDER)])[(OPTIMISM, HOLDER, TOKEN)]
+    assert whole.measured_through_block == HEAD
+    assert whole.caught_up is True
+    assert whole.is_airdrop_only is True
+
+
+def test_a_budget_death_in_discovery_still_records_the_pairs_it_proved(db_session, wire, monkeypatch):
+    """Forward progress survives the ceiling, which is what stops the hourly loop.
+
+    The budget used to propagate out of the whole chain scan before anything was
+    written, so a chain that could not finish discovery in one cycle wrote
+    NOTHING and the next cycle repeated it identically. A pair is a claim on its
+    own: the one whose window was proven whole is recorded and its cursor
+    advances, and only the pairs the death actually touched go unwritten.
+    """
+    monkeypatch.setattr(delivery_shape, "DISPOSITION_TOKEN_BATCH", 1)
+    # head (1) + creation (1) + the first token's window (1) reaches the ceiling,
+    # so the second token's window is refused before it is issued.
+    monkeypatch.setattr(delivery_shape, "DISPOSITION_REQUEST_BUDGET", 3)
+    first, second = TOKEN, OTHER_TOKEN
+
+    cost = scan_delivery_shape(db_session, [_request(tokens=(first, second))], rpc_url_for=_rpc_url_for)
+    db_session.flush()
+
+    facts = _facts(db_session)
+    assert (HOLDER, first) in facts
+    # The refused pair writes nothing at all: a delivery set nobody enumerated is
+    # a different claim, not a smaller one, and its absence reads not_determined.
+    assert (HOLDER, second) not in facts
+    assert facts[(HOLDER, first)].measured_through_block == HEAD
+    assert cost.get_logs == 1
+
+    monkeypatch.setattr(delivery_shape, "DISPOSITION_REQUEST_BUDGET", 5_000)
+    wire.head = HEAD + 200
+    wire.get_logs_calls.clear()
+    scan_delivery_shape(db_session, [_request(tokens=(first, second))], rpc_url_for=_rpc_url_for)
+    db_session.flush()
+
+    resumed = {call["address"][0]: int(call["fromBlock"], 16) for call in wire.get_logs_calls}
+    assert resumed[first] == HEAD + 1, "the recorded pair resumes above its cursor rather than re-reading"
+    assert resumed[second] == CREATION, "the pair the budget refused starts where it always would have"
+    assert _facts(db_session)[(HOLDER, second)].measured_through_block == HEAD + 200
+
+
 # --- catch-up order ---------------------------------------------------------
 
 

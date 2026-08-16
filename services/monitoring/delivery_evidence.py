@@ -113,10 +113,12 @@ class DeliveryFact:
     ``min_fan_out`` is a count of same-token transfer LOGS, never of distinct
     recipients: see :data:`FAN_OUT_THRESHOLD_K`.
 
-    ``caught_up`` and ``observed_balance_raw`` are the SCANNER's bookkeeping and
-    no part of the claim: they say whether the extent reached the head and what
-    balance the pair was last stamped at, which is what the next cycle decides to
-    re-scan on. No verdict reads either.
+    ``observed_balance_raw`` is the SCANNER's bookkeeping and no part of any
+    claim: it is the balance the pair was last stamped at, which is what the next
+    cycle decides whether to re-scan on. No verdict reads it.
+
+    ``caught_up`` is NOT bookkeeping. It says whether the extent reached the
+    chain head, and the positive is gated on it — see :meth:`is_airdrop_only`.
     """
 
     chain_id: int
@@ -141,8 +143,21 @@ class DeliveryFact:
         ``not_determined`` both answer ``False`` here, and they are kept apart on
         the row itself: the first is settled and the second is a gap a readable
         receipt would close.
+
+        **AND ONLY OVER AN EXTENT THAT REACHED THE HEAD.** This is what a
+        consumer DISPOSES a holding on, and a row mid-catch-up carries
+        ``fan_out_all`` over a slice with millions of unexamined blocks above it.
+        The verdict is true of the slice — the row is honest — but the question
+        this property answers is about the holding, and the blocks nobody has
+        read yet are exactly where a settlement would refute it. So a partial
+        extent answers ``False`` here and turns ``True`` by itself once catch-up
+        completes; nothing withdraws and nothing is re-measured.
+
+        The gate is inside the positive arm ONLY. ``has_direct_delivery`` needs
+        no such guard — it is an earned negative that one delivery below K
+        already settles, and widening its extent could only confirm it.
         """
-        return self.shape == DELIVERY_SHAPE_FAN_OUT_ALL
+        return self.shape == DELIVERY_SHAPE_FAN_OUT_ALL and self.caught_up
 
 
 @dataclass(frozen=True)
