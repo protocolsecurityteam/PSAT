@@ -16,6 +16,7 @@ Two layers:
 from __future__ import annotations
 
 import importlib
+import pathlib
 import sys
 import threading
 import time
@@ -280,6 +281,37 @@ def test_default_mode_spawns_exactly_six_named_threads():
         assert len(sup._threads) == 6
     finally:
         sup.join()
+
+
+def _monitor_launch_flags(script: str) -> list[str]:
+    """Every ``workers.protocol_monitor`` launch in a start script, by mode."""
+    flags = []
+    for line in script.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#") or "-m workers.protocol_monitor" not in stripped:
+            continue
+        _, _, tail = stripped.partition("-m workers.protocol_monitor")
+        mode = [tok for tok in tail.split() if tok.startswith("--")]
+        flags.append(mode[0] if mode else "default")
+    return flags
+
+
+def test_start_local_launches_each_monitor_loop_exactly_once():
+    """Flag modes run a loop ALONE; co-launching one beside default mode doubles it.
+
+    The Aug-10 local run started default mode *and* ``--poll`` *and* ``--tvl``,
+    so the poller and TVL loops each had two live instances — the TVL loop has no
+    daemon lease, so both instances ran the full scan.
+    """
+    root = pathlib.Path(__file__).resolve().parents[1]
+    launched = _monitor_launch_flags((root / "start_local.sh").read_text())
+
+    assert launched == ["default"], f"start_local.sh must launch default mode alone, got {launched}"
+
+    # The reconciler is not a default-mode loop, so it needs its own process —
+    # and start_workers.sh, which start_local.sh runs, is the one that owns it.
+    workers_launched = _monitor_launch_flags((root / "start_workers.sh").read_text())
+    assert workers_launched == ["--reconcile"], workers_launched
 
 
 @pytest.mark.parametrize(

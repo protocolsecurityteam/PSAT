@@ -21,10 +21,7 @@ WORKER_PATTERN='workers\.(discovery|static_worker|resolution_worker|policy_worke
 API_PID=""
 WORKERS_PID=""
 BROWSER_PID=""
-PROXY_SCANNER_PID=""
-PROXY_POLLER_PID=""
-TVL_TRACKER_PID=""
-RECONCILE_PID=""
+MONITOR_PID=""
 
 # Check required env vars
 missing=()
@@ -136,21 +133,9 @@ cleanup() {
     kill "$BROWSER_PID" 2>/dev/null || true
     wait "$BROWSER_PID" 2>/dev/null || true
   fi
-  if [ -n "$PROXY_SCANNER_PID" ]; then
-    kill "$PROXY_SCANNER_PID" 2>/dev/null || true
-    wait "$PROXY_SCANNER_PID" 2>/dev/null || true
-  fi
-  if [ -n "$PROXY_POLLER_PID" ]; then
-    kill "$PROXY_POLLER_PID" 2>/dev/null || true
-    wait "$PROXY_POLLER_PID" 2>/dev/null || true
-  fi
-  if [ -n "$TVL_TRACKER_PID" ]; then
-    kill "$TVL_TRACKER_PID" 2>/dev/null || true
-    wait "$TVL_TRACKER_PID" 2>/dev/null || true
-  fi
-  if [ -n "$RECONCILE_PID" ]; then
-    kill "$RECONCILE_PID" 2>/dev/null || true
-    wait "$RECONCILE_PID" 2>/dev/null || true
+  if [ -n "$MONITOR_PID" ]; then
+    kill "$MONITOR_PID" 2>/dev/null || true
+    wait "$MONITOR_PID" 2>/dev/null || true
   fi
   echo "Done."
 }
@@ -181,19 +166,15 @@ echo "Starting dapp crawl worker (browser)..."
 uv run python -m workers.dapp_crawl_worker >>"$LOG_FILE" 2>&1 &
 BROWSER_PID=$!
 
-# Start protocol monitor (unified event scanner + storage poller)
+# Start protocol monitor. Default mode is the whole monitor: scanner, poller,
+# TVL, restaking, role-holder and score run as supervised threads in this one
+# process. The --poll/--tvl flag modes are rollback levers for running a single
+# loop ALONE — launching them alongside default mode gives every one of those
+# loops two live instances. The enrollment reconciler is not a default-mode
+# loop; start_workers.sh (started above) is what runs it.
 echo "Starting protocol monitor..."
 uv run python -m workers.protocol_monitor >>"$LOG_FILE" 2>&1 &
-PROXY_SCANNER_PID=$!
-uv run python -m workers.protocol_monitor --poll >>"$LOG_FILE" 2>&1 &
-PROXY_POLLER_PID=$!
-uv run python -m workers.protocol_monitor --tvl >>"$LOG_FILE" 2>&1 &
-TVL_TRACKER_PID=$!
-# Enrollment reconciler (mirrors start_monitor.sh) — converges monitored_contracts,
-# notably the controller Safes/Timelocks the per-job enroll hint skips; without it
-# they never land in monitoring locally. Idempotent upserts, safe as a co-process.
-uv run python -m workers.protocol_monitor --reconcile >>"$LOG_FILE" 2>&1 &
-RECONCILE_PID=$!
+MONITOR_PID=$!
 
 echo ""
 echo "=== PSAT running ==="
