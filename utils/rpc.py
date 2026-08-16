@@ -500,6 +500,18 @@ def normalize_address(address: str) -> str:
     return "0x" + address.lower().replace("0x", "", 1)
 
 
+class RpcClientTimeout(RuntimeError):
+    """This process stopped waiting. The upstream answered neither way.
+
+    Distinct from the ``RuntimeError`` raised for an upstream error response
+    because the two license different responses: a reject is a fact about the
+    QUERY (narrow it), while a timeout is a fact about how long this caller
+    waited and witnesses nothing about whether the same query would succeed.
+    Subclasses ``RuntimeError`` so every existing ``except RuntimeError`` call
+    site keeps its behaviour unchanged.
+    """
+
+
 def rpc_request(
     rpc_url: str,
     method: str,
@@ -514,10 +526,14 @@ def rpc_request(
 
     The override exists because the module default is sized for the hot
     per-address reads, and a read whose honest service time exceeds it comes
-    back as a ``requests.Timeout`` — indistinguishable, at the call site, from an
-    upstream that had nothing to return. A caller whose query is legitimately
-    slow (a wide multi-address ``eth_getLogs``) passes its own ceiling so a
-    long answer stays an answer instead of arriving as a failure.
+    back as a ``requests.Timeout``. A caller whose query is legitimately slow (a
+    wide multi-address ``eth_getLogs``) passes its own ceiling so a long answer
+    stays an answer instead of arriving as a failure.
+
+    Transport failures raise ``RuntimeError``; the timeout subset raises
+    :class:`RpcClientTimeout`, so a caller can tell "we stopped waiting" apart
+    from "the upstream refused" instead of treating a slow window as a rejected
+    one.
     """
     _assert_url_chain_id(rpc_url, chain_id)
     session = _get_session()
@@ -552,7 +568,12 @@ def rpc_request(
                 continue
             from utils.secrets import sanitize_string, sanitize_url
 
-            raise RuntimeError(f"RPC request failed for {sanitize_url(rpc_url)}: {sanitize_string(str(exc))}") from exc
+            detail = f"RPC request failed for {sanitize_url(rpc_url)}: {sanitize_string(str(exc))}"
+            # ``requests.Timeout`` covers connect and read timeouts alike; both
+            # are this client's ceiling, not an upstream verdict on the query.
+            if isinstance(exc, requests.Timeout):
+                raise RpcClientTimeout(detail) from exc
+            raise RuntimeError(detail) from exc
     from utils.secrets import sanitize_url
 
     raise RuntimeError(f"RPC request failed for {sanitize_url(rpc_url)}: all {retries + 1} attempts exhausted")
