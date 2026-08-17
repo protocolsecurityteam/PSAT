@@ -37,6 +37,7 @@ from typing import Any
 
 from eth_utils.crypto import keccak
 
+from services.monitoring import warn_degraded_once
 from services.resolution.repos.event_logs_rpc import (
     MAX_BLOCK_RANGE,
     MIN_BISECT_SPAN,
@@ -231,6 +232,12 @@ class SweepCost:
     multicall: int = 0
     head_reads: int = 0
     windows: list[tuple[int, int, int]] = field(default_factory=list)
+    # Degraded external calls this cycle, by kind. Not a request count and
+    # deliberately outside ``total``: the budget meters what was SPENT, this
+    # meters what came back wrong. It is the cycle's substitute for
+    # ``record_degraded`` (a no-op outside ``BaseWorker``) and the carrier for
+    # the warn-once-then-DEBUG rule in ``warn_degraded_once``.
+    degraded: dict[str, int] = field(default_factory=dict)
 
     @property
     def total(self) -> int:
@@ -361,7 +368,15 @@ def sweep_head_block(rpc_url: str, *, chain_id: int, cost: SweepCost) -> int | N
         raw = rpc_request(rpc_url, "eth_blockNumber", [], retries=1, chain_id=chain_id)
         head = int(raw, 16)
     except Exception as exc:
-        logger.info("asset sweep: head read failed on chain %s: %s", chain_id, exc)
+        warn_degraded_once(
+            logger,
+            cost.degraded,
+            "head_read_failed",
+            "asset sweep: head read failed; every holder on this chain records a failed scan",
+            chain_id=chain_id,
+            exc_type=type(exc).__name__,
+            error=str(exc),
+        )
         return None
     return max(0, head - SWEEP_FINALITY_MARGIN)
 
@@ -405,6 +420,23 @@ def discover_recipient_assets(
                 to_block=to_block,
             )
         except SweepBudgetExceeded as exc:
+            # Once per cycle: the ceiling trips on one window and every holder
+            # behind it then fails instantly, so the repeats are the SAME event
+            # and are logged as such. Mirrors the disposition phase's budget
+            # line (``delivery_shape``), whose cost breakdown this copies.
+            warn_degraded_once(
+                logger,
+                cost.degraded,
+                "sweep_budget_exceeded",
+                "asset sweep: request budget exhausted mid-scan; the remaining holders record a failed scan",
+                chain_id=chain_id,
+                budget=SWEEP_REQUEST_BUDGET,
+                get_logs=cost.get_logs,
+                multicall=cost.multicall,
+                head_reads=cost.head_reads,
+                topic_position=position,
+                error=str(exc),
+            )
             return erc20, typed, f"scan abandoned at topic position {position}: {exc}"
         except RuntimeError as exc:
             # The fetcher bisects on reject and on a page that reaches the cap;
@@ -561,7 +593,17 @@ def read_balances(
     try:
         results = multicall3_aggregate3(rpc_url, calls, hex(block), chain_id=chain_id)
     except Exception as exc:
-        logger.info("asset sweep: balanceOf batch failed for %s on chain %s: %s", holder, chain_id, exc)
+        warn_degraded_once(
+            logger,
+            cost.degraded,
+            "balance_batch_failed",
+            "asset sweep: balanceOf batch did not answer; the holder's scan aborts",
+            holder=holder,
+            chain_id=chain_id,
+            tokens=len(tokens),
+            exc_type=type(exc).__name__,
+            error=str(exc),
+        )
         return {}, True
     out: dict[str, tuple[int | None, int | None]] = {}
     for index, token in enumerate(tokens):
@@ -732,7 +774,17 @@ def _read_typed_round(
     try:
         results = multicall3_aggregate3(rpc_url, calls, hex(block), chain_id=chain_id)
     except Exception as exc:
-        logger.info("asset sweep: per-id typed read (%s) failed on chain %s: %s", basis, chain_id, exc)
+        warn_degraded_once(
+            logger,
+            cost.degraded,
+            "typed_id_read_failed",
+            "asset sweep: per-id typed read did not answer; those receipts stay unresolved",
+            basis=basis,
+            chain_id=chain_id,
+            receipts=len(plan),
+            exc_type=type(exc).__name__,
+            error=str(exc),
+        )
         return {}
 
     out: dict[tuple[str, str], tuple[tuple[TypedItem, ...], str]] = {}

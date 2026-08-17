@@ -306,6 +306,11 @@ def enroll_protocol_contracts(
     enrolled: list[MonitoredContract] = []
     # Rows this pass could not create because a chain head was not determined.
     deferred = 0
+    # Contracts enrolled on the baseline registry alone, by the token naming why
+    # their analysis plan could not be read. Counted rather than logged per
+    # contract — the outcome is the same line every time and the population is
+    # every contract of every protocol on every pass.
+    plan_not_determined_counts: dict[str, int] = {}
 
     for contract in contracts:
         contract_chain = contract.chain or chain
@@ -349,6 +354,8 @@ def enroll_protocol_contracts(
         # ``build_polling_plan`` which projects pollable getters /
         # storage slots from the analyzer's tracked_controllers.
         tracked_topics, tracking_plan, plan_not_determined = _load_tracking_plan_artifacts(session, contract)
+        if plan_not_determined:
+            plan_not_determined_counts[plan_not_determined] = plan_not_determined_counts.get(plan_not_determined, 0) + 1
 
         polling_plan = build_polling_plan(
             contract_type=contract_type,
@@ -577,6 +584,16 @@ def enroll_protocol_contracts(
         "Enrolled %d contracts for protocol %s",
         len(enrolled),
         protocol_id,
+        extra={
+            "protocol_id": protocol_id,
+            "enrolled": len(enrolled),
+            "deactivated": len(stale),
+            "deferred_rows": deferred,
+            # The per-cycle collapse of the old per-contract line: how many rows
+            # are watching the baseline registry only, and on what grounds.
+            "baseline_only": sum(plan_not_determined_counts.values()),
+            "plan_not_determined": plan_not_determined_counts,
+        },
     )
     return enrolled
 
@@ -667,9 +684,13 @@ def _load_tracking_plan_artifacts(
         # than serving a stale bundle"). None of the three is "we found out
         # what the plan says", so none of them may be persisted as an empty
         # tracked_topics — that reads as a finding about the contract.
-        logger.info(
-            "no current tracking_plan materialization for %s; enrolling from the baseline registry only",
-            contract.address,
+        # Per-contract at DEBUG, counted per cycle by the caller: this is the
+        # ordinary state of a contract whose analysis has not been materialized
+        # yet, and one INFO per contract per pass was 26% of a pipeline run's
+        # log volume while saying the same thing every time.
+        logger.debug(
+            "no current tracking_plan materialization; enrolling from the baseline registry only",
+            extra={"address": contract.address, "chain": contract.chain},
         )
         return [], None, NO_CURRENT_MATERIALIZATION
 
@@ -684,11 +705,16 @@ def _load_tracking_plan_artifacts(
         # says it does not hold will read the same on every retry; a bucket that
         # could not be asked may answer next time.
         token = PLAN_OBJECT_ABSENT if isinstance(exc, StorageContentAbsent) else PLAN_NOT_READABLE
-        logger.error(
-            "tracking_plan for %s is not determined (%s); enrolling from the baseline registry only",
-            contract.address,
-            exc,
-            extra={"exc_type": type(exc).__name__, "token": token},
+        # Degraded, not failing: enrollment continues on the baseline registry
+        # and this handler returns rather than raising.
+        logger.warning(
+            "tracking_plan is not determined; enrolling from the baseline registry only",
+            extra={
+                "address": contract.address,
+                "exc_type": type(exc).__name__,
+                "error": str(exc),
+                "token": token,
+            },
         )
         return [], None, token
     except Exception as exc:

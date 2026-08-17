@@ -127,3 +127,152 @@ def test_tvl_refresh_all_protocols_emits_cycle_on_empty():
     assert kwargs["status"] == "running"
     assert kwargs["detail"]["events_found"] == 0
     assert kwargs["detail"]["partial"] is False
+    # The cycle now says what it could not observe, even when that is nothing.
+    assert kwargs["detail"]["protocols_failed"] == 0
+    assert kwargs["detail"]["protocols_partial"] == 0
+
+
+# --- the silent-collapse class: one alarm per cycle, then a count -------------
+
+
+def test_warn_degraded_once_warns_first_then_debugs(caplog):
+    counts: dict[str, int] = {}
+    with caplog.at_level(logging.DEBUG, logger="services.monitoring"):
+        for _ in range(4):
+            monitoring.warn_degraded_once(
+                monitoring.logger, counts, "balance_batch_failed", "batch did not answer", chain_id=1
+            )
+
+    records = [r for r in caplog.records if r.message == "batch did not answer"]
+    assert [r.levelno for r in records] == [logging.WARNING, logging.DEBUG, logging.DEBUG, logging.DEBUG]
+    # The count is what the cycle summary publishes; the level is only the alarm.
+    assert counts["balance_batch_failed"] == 4
+    assert records[0].degraded_kind == "balance_batch_failed"
+    assert records[-1].degraded_seen == 4
+
+
+def test_sweep_budget_exceeded_is_logged_with_its_cost(caplog):
+    """It used to become a per-holder failure string and nothing else."""
+    from services.monitoring import asset_sweep
+
+    cost = asset_sweep.SweepCost(get_logs=1500)
+
+    class _Blown:
+        def fetch_logs(self, **_kwargs):
+            raise asset_sweep.SweepBudgetExceeded("sweep request budget of 1500 reached")
+
+    with caplog.at_level(logging.WARNING, logger="services.monitoring.asset_sweep"):
+        _erc20, _typed, failure = asset_sweep.discover_recipient_assets(
+            ["0x" + "a" * 40],
+            rpc_url="http://stub",
+            chain_id=1,
+            from_block=0,
+            to_block=100,
+            cost=cost,
+            fetcher=_Blown(),  # type: ignore[arg-type]
+        )
+
+    assert failure is not None
+    rec = next(r for r in caplog.records if r.levelno == logging.WARNING)
+    assert rec.degraded_kind == "sweep_budget_exceeded"
+    assert rec.get_logs == 1500
+    assert cost.degraded["sweep_budget_exceeded"] == 1
+
+
+def test_sweep_give_up_transition_warns_once_per_subject(caplog):
+    """The bounded-out state holds forever; only the crossing is an event."""
+    from services.monitoring import balance_observation as bo
+    from services.monitoring.balance_reads import ObservationSubject
+
+    bo._GIVE_UP_ANNOUNCED.clear()
+    subject = ObservationSubject.of_entity("ethereum", "0x" + "b" * 40)
+    with caplog.at_level(logging.WARNING, logger="services.monitoring.balance_observation"):
+        for _ in range(3):
+            bo._announce_give_up("sweep", subject, "escalation stopped", failures=3)
+
+    records = [r for r in caplog.records if r.message == "escalation stopped"]
+    assert len(records) == 1
+    assert records[0].give_up == "sweep"
+    assert records[0].address == subject.address
+
+
+# --- disposition: the per-cycle outcome summary ------------------------------
+
+
+def test_run_disposition_summary_carries_the_cycle_outcome(caplog):
+    """A converging corpus and a stalled one used to log identically."""
+    import services.monitoring.delivery_shape as ds
+
+    request = ds.DispositionRequest(
+        contract_id=1, chain_id=1, holder_address="0x" + "c" * 40, tokens=("0x" + "d" * 40,)
+    )
+
+    def _fake_scan(_session, _requests, *, rpc_url_for, cost, protocol_id=None):
+        cost.get_logs += 2
+        cost.count("pairs_considered", 5)
+        cost.count("pairs_settled_skipped", 3)
+        cost.count("pairs_scanned", 2)
+        cost.count("receipts_unreadable")
+        cost.count("verdict_has_direct_delivery", 2)
+        return cost
+
+    with patch.object(ds, "scan_delivery_shape", _fake_scan):
+        with caplog.at_level(logging.INFO, logger="services.monitoring.delivery_shape"):
+            cost = ds.run_disposition(MagicMock(), [request], rpc_url_for=lambda _cid: "http://stub")
+
+    assert cost.counts["pairs_settled_skipped"] == 3
+    rec = next(r for r in caplog.records if getattr(r, "phase", None) == "disposition")
+    assert rec.levelno == logging.INFO
+    assert rec.holders == 1
+    assert rec.pairs_scanned == 2
+    assert rec.pairs_settled_skipped == 3
+    assert rec.receipts_unreadable == 1
+    assert rec.verdict_has_direct_delivery == 2
+    assert isinstance(rec.duration_ms, int)
+
+
+# --- proxy watcher: a transport failure is not a revert ----------------------
+
+
+def test_proxy_watcher_unanswered_probe_warns_once_per_resolution(caplog):
+    from services.monitoring import proxy_watcher
+
+    def _dead(*_args, **_kwargs):
+        raise RuntimeError("RPC request failed for http://stub: connection refused")
+
+    with patch.object(proxy_watcher, "rpc_request", _dead):
+        with caplog.at_level(logging.WARNING, logger="services.monitoring.proxy_watcher"):
+            assert proxy_watcher.resolve_current_implementation("0x" + "e" * 40, "http://stub") is None
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1  # one per resolution, not one per probe
+    assert warnings[0].probes_unanswered == warnings[0].probes
+
+
+def test_proxy_watcher_reverting_getter_is_not_a_transport_failure(caplog):
+    from services.monitoring import proxy_watcher
+
+    def _reverts(_url, method, _params, **_kwargs):
+        if method == "eth_getStorageAt":
+            return "0x" + "0" * 64
+        raise RuntimeError("execution reverted")
+
+    with patch.object(proxy_watcher, "rpc_request", _reverts):
+        with caplog.at_level(logging.WARNING, logger="services.monitoring.proxy_watcher"):
+            assert proxy_watcher.resolve_current_implementation("0x" + "e" * 40, "http://stub") is None
+
+    # Every probe ANSWERED; "no implementation here" is a finding, not a fault.
+    assert [r for r in caplog.records if r.levelno == logging.WARNING] == []
+
+
+# --- notifier: a rejected post is not a sent one -----------------------------
+
+
+def test_send_discord_reports_a_rejected_post():
+    from services.monitoring import notifier
+
+    with patch.object(notifier.requests, "post") as post:
+        post.return_value = MagicMock(ok=False, status_code=401, text="unauthorized")
+        assert notifier._send_discord("http://hook", {"title": "x"}) is False
+        post.return_value = MagicMock(ok=True, status_code=204, text="")
+        assert notifier._send_discord("http://hook", {"title": "x"}) is True

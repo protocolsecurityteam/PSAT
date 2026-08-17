@@ -27,6 +27,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from contextlib import suppress
 from datetime import datetime, timezone
 from typing import Any
@@ -67,6 +68,15 @@ _VERIFICATION_GAP_KEY = "verification_read_gaps"
 
 # Log-only for the same reason — see :func:`collect_materialization_backlog`.
 _MATERIALIZATION_BACKLOG_KEY = "materialization_backlog"
+
+
+# When this process started watching. A heartbeat older than this cannot have
+# gone stale on our watch, which is what tells a cold start apart from a death.
+_STARTED_MONOTONIC = time.monotonic()
+
+
+def _uptime_s() -> float:
+    return time.monotonic() - _STARTED_MONOTONIC
 
 
 def _interval_s() -> int:
@@ -403,12 +413,26 @@ def _emit_down(problem: dict[str, Any], *, webhook_url: str | None) -> None:
         ]
         title = f"Monitoring behind: {daemon}"
     else:
-        logger.error(
+        beat_age = problem["beat_age_s"]
+        # A staleness older than this watchdog's own uptime happened while
+        # nothing was running to see it — the routine cold-start condition (ten
+        # daemons "down" the moment the stack comes up), not an incident. The
+        # ERROR is the Loki alert hook and is reserved for a daemon that dies
+        # while we are watching; the cold start still says so, at WARNING, and
+        # still posts.
+        cold_start = beat_age is None or beat_age > _uptime_s()
+        logger.log(
+            logging.WARNING if cold_start else logging.ERROR,
             "ops: daemon %s is down",
             daemon,
-            extra={"daemon": daemon, "beat_age_s": problem["beat_age_s"], "status": problem["status"]},
+            extra={
+                "daemon": daemon,
+                "beat_age_s": beat_age,
+                "status": problem["status"],
+                "cold_start": cold_start,
+                "watchdog_uptime_s": round(_uptime_s(), 1),
+            },
         )
-        beat_age = problem["beat_age_s"]
         fields = [
             {"name": "Daemon", "value": daemon, "inline": True},
             {"name": "Status", "value": problem["status"], "inline": True},

@@ -115,6 +115,37 @@ SWEEP_POPULATION_NOTE = (
     "swept population: the protocol's contracts plus its proven-codeless EOA principals, each read at its own address"
 )
 
+# Subjects already announced as bounded out, so the WARNING marks the CROSSING
+# and not every cycle after it. The bounded-out state is self-sustaining by
+# construction — a subject that stops being escalated writes no new sweep rows,
+# so the run these predicates read never changes again — which is exactly why a
+# per-cycle log of it would be a permanent storm rather than a signal. Process-
+# local: a restart re-announces once, which is the cheap direction, and nothing
+# published depends on it.
+_GIVE_UP_ANNOUNCED: set[tuple[str, ObservationSubject]] = set()
+_GIVE_UP_ANNOUNCED_MAX = 4096
+
+
+def _announce_give_up(kind: str, subject: ObservationSubject, message: str, **fields: object) -> None:
+    key = (kind, subject)
+    if key in _GIVE_UP_ANNOUNCED:
+        return
+    if len(_GIVE_UP_ANNOUNCED) >= _GIVE_UP_ANNOUNCED_MAX:
+        # Bounded rather than grown: the set is a de-dupe cursor, not a record,
+        # so the worst a reset costs is one repeated announcement.
+        _GIVE_UP_ANNOUNCED.clear()
+    _GIVE_UP_ANNOUNCED.add(key)
+    logger.warning(
+        message,
+        extra={
+            "address": subject.address,
+            "chain": subject.chain,
+            "contract_id": subject.contract_id,
+            "give_up": kind,
+            **fields,
+        },
+    )
+
 
 @dataclass(frozen=True)
 class NativeReading:
@@ -350,7 +381,15 @@ def id_rescan_keeps_failing(session: Session, *, subject: ObservationSubject) ->
         .scalars()
         .all()
     )
-    return len(recent) >= ID_RESCAN_RUN and not any(_entries_are_id_complete(entries) for entries in recent)
+    bounded = len(recent) >= ID_RESCAN_RUN and not any(_entries_are_id_complete(entries) for entries in recent)
+    if bounded:
+        _announce_give_up(
+            "id_rescan",
+            subject,
+            "asset sweep: full-history re-scans stopped for this holder; its typed id inventory stays unsettled",
+            rescans=ID_RESCAN_RUN,
+        )
+    return bounded
 
 
 def known_swept_assets(session: Session, *, subject: ObservationSubject) -> tuple[str, ...]:
@@ -522,7 +561,15 @@ def sweep_keeps_failing(session: Session, *, subject: ObservationSubject) -> boo
         .scalars()
         .all()
     )
-    return len(recent) >= SWEEP_FAILURE_RUN and all(status == SWEEP_STATUS_FAILED for status in recent)
+    bounded = len(recent) >= SWEEP_FAILURE_RUN and all(status == SWEEP_STATUS_FAILED for status in recent)
+    if bounded:
+        _announce_give_up(
+            "sweep",
+            subject,
+            "asset sweep: escalation stopped for this holder; its sheet publishes no completeness from now on",
+            failures=SWEEP_FAILURE_RUN,
+        )
+    return bounded
 
 
 def run_sweeps(

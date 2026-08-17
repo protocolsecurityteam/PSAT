@@ -67,7 +67,7 @@ from sqlalchemy import func as _sql_func
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
-from services.monitoring import asset_sweep
+from services.monitoring import asset_sweep, warn_degraded_once
 from services.monitoring.asset_sweep import (
     TRANSFER_BATCH_TOPIC0,
     TRANSFER_SINGLE_TOPIC0,
@@ -96,6 +96,7 @@ from utils.balance_status import (
     TOKEN_REFERENCE_NOT_DETERMINED,
     USD_CRUMB_THRESHOLD,
 )
+from utils.logging import log_timed_phase
 from utils.rpc import get_transaction_receipt
 
 logger = logging.getLogger(__name__)
@@ -213,10 +214,22 @@ class DispositionCost:
     receipts: int = 0
     head_reads: int = 0
     creation_lookups: int = 0
+    # What the cycle DID, beside what it spent. Whether the corpus is converging
+    # is the question this phase exists to answer and a request count cannot:
+    # a pass that skipped every pair because nothing moved and a pass that
+    # scanned every pair and found nothing cost about the same. Deliberately
+    # outside ``total`` — these are outcomes, not requests.
+    counts: dict[str, int] = field(default_factory=dict)
+    # Degraded external calls, by kind; also the warn-once-then-DEBUG cursor
+    # (``warn_degraded_once``) for the failures that repeat per holder.
+    degraded: dict[str, int] = field(default_factory=dict)
 
     @property
     def total(self) -> int:
         return self.get_logs + self.receipts + self.head_reads + self.creation_lookups
+
+    def count(self, key: str, n: int = 1) -> None:
+        self.counts[key] = self.counts.get(key, 0) + n
 
 
 @dataclass(frozen=True)
@@ -358,7 +371,19 @@ def creation_block(holder_address: str, *, chain_id: int, cost: DispositionCost)
     try:
         block = get_contract_creation_block(holder_address, chain_id=chain_id)
     except Exception as exc:
-        logger.info("disposition: creation block lookup failed for %s on chain %s: %s", holder_address, chain_id, exc)
+        # Degrades the scan to genesis, which on a range-capped chain is ~25x
+        # the request cost — so the miss is a WARNING, once per cycle, and the
+        # per-holder repeats ride the count.
+        warn_degraded_once(
+            logger,
+            cost.degraded,
+            "creation_block_unknown",
+            "disposition: creation block lookup failed; the holder is scanned from genesis instead",
+            holder_address=holder_address,
+            chain_id=chain_id,
+            exc_type=type(exc).__name__,
+            error=str(exc),
+        )
         block = None
     with _CREATION_BLOCK_LOCK:
         _CREATION_BLOCK_CACHE[key] = block
@@ -727,15 +752,21 @@ def scan_delivery_shape(
         chain_requests = by_chain[chain_id]
         rpc_url = rpc_url_for(chain_id)
         if not rpc_url:
-            logger.info("disposition: no RPC URL for chain %s; %d holder(s) not scanned", chain_id, len(chain_requests))
+            logger.warning(
+                "disposition: no RPC URL for chain; the chain's holders are not scanned",
+                extra={"chain_id": chain_id, "holders": len(chain_requests)},
+            )
+            cost.count("chains_unscanned")
             continue
         head_cost = SweepCost()
         head = asset_sweep.sweep_head_block(rpc_url, chain_id=chain_id, cost=head_cost)
         cost.head_reads += head_cost.head_reads
         if head is None:
-            logger.info(
-                "disposition: head unknown on chain %s; %d holder(s) not scanned", chain_id, len(chain_requests)
+            logger.warning(
+                "disposition: head unknown; the chain's holders are not scanned",
+                extra={"chain_id": chain_id, "holders": len(chain_requests)},
             )
+            cost.count("chains_unscanned")
             continue
         try:
             _scan_chain(
@@ -916,7 +947,12 @@ def _protocol_universe(session: Session, protocol_id: int) -> _MemoUniverse | No
             )
         previous = entry.addresses if entry is not None else frozenset()
 
-    universe = distill.load_protocol_universe(session, protocol_id)
+    # Timed: a measured 26.5s object-storage assembly is the single largest
+    # unattributed block of a disposition cycle, and the memo above means a
+    # cycle that pays it and one that does not otherwise look identical.
+    with log_timed_phase(logger, "protocol_universe", protocol_id=protocol_id) as phase:
+        universe = distill.load_protocol_universe(session, protocol_id)
+        phase["universe_addresses"] = None if universe is None else len(universe.addresses)
     if universe is None:
         return None
 
@@ -1083,38 +1119,46 @@ def run_disposition(
     cost = DispositionCost()
     if not requests:
         return cost
-    if protocol_id is not None:
+    # One timed phase, and its completion line IS the cycle summary: whether the
+    # corpus is converging cannot be read off a request count, so the outcome
+    # tally (`DispositionCost.counts`) rides the same line as the cost.
+    with log_timed_phase(logger, "disposition", holders=len(requests)) as phase:
+        if protocol_id is not None:
+            try:
+                written = record_protocol_reference(session, protocol_id=protocol_id, requests=requests)
+            except Exception as exc:
+                logger.warning(
+                    "disposition: protocol reference pass failed; every token stays not_determined",
+                    extra={"protocol_id": protocol_id, "exc_type": type(exc).__name__, "error": str(exc)},
+                )
+                cost.count("reference_pass_failed")
+            else:
+                cost.count("reference_tokens_recorded", written)
         try:
-            written = record_protocol_reference(session, protocol_id=protocol_id, requests=requests)
+            scan_delivery_shape(session, requests, rpc_url_for=rpc_url_for, cost=cost, protocol_id=protocol_id)
         except Exception as exc:
             logger.warning(
-                "disposition: protocol reference pass failed for protocol %s; every token stays not_determined: %s",
-                protocol_id,
-                exc,
+                "disposition scan failed; balances are unaffected and the pairs stay not_determined",
+                extra={
+                    "exc_type": type(exc).__name__,
+                    "error": str(exc),
+                    "get_logs": cost.get_logs,
+                    "receipts": cost.receipts,
+                    "head_reads": cost.head_reads,
+                    "creation_lookups": cost.creation_lookups,
+                },
             )
-        else:
-            logger.info("disposition: protocol reference recorded for %d token(s)", written)
-    try:
-        scan_delivery_shape(session, requests, rpc_url_for=rpc_url_for, cost=cost, protocol_id=protocol_id)
-    except Exception as exc:
-        logger.warning(
-            "disposition scan failed after %d getLogs + %d receipts + %d head + %d creation lookup(s); "
-            "balances are unaffected and the pairs stay not_determined: %s",
-            cost.get_logs,
-            cost.receipts,
-            cost.head_reads,
-            cost.creation_lookups,
-            exc,
+            cost.count("scan_failed")
+        phase.update(
+            {
+                "get_logs": cost.get_logs,
+                "receipts": cost.receipts,
+                "head_reads": cost.head_reads,
+                "creation_lookups": cost.creation_lookups,
+                "degraded": dict(cost.degraded),
+                **cost.counts,
+            }
         )
-        return cost
-    logger.info(
-        "disposition scan: %d holder account(s), %d getLogs + %d receipts + %d head + %d creation lookup(s)",
-        len(requests),
-        cost.get_logs,
-        cost.receipts,
-        cost.head_reads,
-        cost.creation_lookups,
-    )
     return cost
 
 
@@ -1177,8 +1221,10 @@ def _scan_chain(
         balances = {token.lower(): raw for token, raw in request.balances}
         for token in {t.lower() for t in request.tokens}:
             balance_of.setdefault((request.holder_address, token), raw_balance_text(balances.get(token)))
+            cost.count("pairs_considered")
             fact = stored.get((chain_id, request.holder_address, token))
             if fact is None:
+                cost.count("pairs_fresh")
                 fresh.append(
                     _Pair(
                         holder=request.holder_address,
@@ -1190,9 +1236,18 @@ def _scan_chain(
                 continue
             resume = int(fact.measured_through_block) + 1
             pair = _Pair(holder=request.holder_address, token=token, from_block=resume, typed=token in typed_set)
-            if _is_settled(fact) or not _worth_scanning(fact, balances.get(token)):
+            # The two hold-backs are counted apart because they mean opposite
+            # things about convergence: settled is a pair that will never be
+            # scanned again, gate-skipped is one this cycle had no reason to.
+            if _is_settled(fact):
+                cost.count("pairs_settled_skipped")
                 carried.append(pair)
                 continue
+            if not _worth_scanning(fact, balances.get(token)):
+                cost.count("pairs_gate_skipped")
+                carried.append(pair)
+                continue
+            cost.count("pairs_forward")
             forward.append(pair)
 
     max_block_range, min_bisect_span = _CHAIN_SCAN_WINDOW.get(chain_id, _DEFAULT_SCAN_WINDOW)
@@ -1225,10 +1280,12 @@ def _scan_chain(
                 # whole — writing nothing, because the absence of a row already
                 # reads not_determined everywhere and a partial delivery set is a
                 # different claim rather than a smaller one.
+                cost.count("pairs_above_slice")
                 if stored.get((chain_id, pair.holder, pair.token)) is not None:
                     carried.append(pair)
         if not in_slice:
             continue
+        cost.count("pairs_scanned", len(in_slice))
         for pair in in_slice:
             measured[(pair.holder, pair.token)] = _Measured(
                 scanned_from_block=group_from,
@@ -1244,11 +1301,13 @@ def _scan_chain(
             to_block=scan_to,
             measured=measured,
             priority=priority,
+            cost=cost,
         )
     for pair in carried:
         fact = stored.get((chain_id, pair.holder, pair.token))
         if fact is None:
             continue
+        cost.count("pairs_carried")
         measured.setdefault(
             (pair.holder, pair.token),
             _Measured(
@@ -1389,6 +1448,7 @@ def _discover(
     to_block: int,
     measured: dict[tuple[str, str], _Measured],
     priority: Mapping[str, int],
+    cost: DispositionCost,
 ) -> bool:
     """Fill *measured* with every delivery the requested pairs received.
 
@@ -1445,35 +1505,43 @@ def _discover(
                 token_batch=token_batch,
                 measured=measured,
                 chain_id=chain_id,
+                cost=cost,
             )
         except DispositionBudgetExceeded as exc:
             logger.warning(
-                "disposition: request budget died mid-discovery on chain %s in window %d-%d (%s); "
-                "%d of %d batch pass(es) had completed and their pairs are recorded, the rest are aborted",
-                chain_id,
-                from_block,
-                to_block,
-                exc,
-                index,
-                len(passes),
+                "disposition: request budget died mid-discovery; the passes that had completed are recorded, "
+                "the rest are aborted",
+                extra={
+                    "chain_id": chain_id,
+                    "from_block": from_block,
+                    "to_block": to_block,
+                    "passes_completed": index,
+                    "passes": len(passes),
+                    "error": str(exc),
+                },
             )
             # A pair covered by a pass that never ran has a delivery set nobody
             # enumerated, which is a different claim rather than a smaller one.
             for pending_holders, pending_tokens, _, _ in passes[index:]:
-                _abort(pending_holders, pending_tokens, measured)
+                _abort(pending_holders, pending_tokens, measured, cost=cost)
             return True
     return False
 
 
 def _abort(
-    holder_batch: Sequence[str], token_batch: Sequence[str], measured: Mapping[tuple[str, str], _Measured]
+    holder_batch: Sequence[str],
+    token_batch: Sequence[str],
+    measured: Mapping[tuple[str, str], _Measured],
+    *,
+    cost: DispositionCost,
 ) -> None:
     """Mark every pair a window covered unproven, so it publishes nothing."""
     for holder in holder_batch:
         for token in token_batch:
             entry = measured.get((holder, token))
-            if entry is not None:
+            if entry is not None and not entry.aborted:
                 entry.aborted = True
+                cost.count("pairs_aborted")
 
 
 def _run_pass(
@@ -1489,6 +1557,7 @@ def _run_pass(
     token_batch: Sequence[str],
     measured: dict[tuple[str, str], _Measured],
     chain_id: int,
+    cost: DispositionCost,
 ) -> None:
     if not event_address:
         return
@@ -1503,16 +1572,19 @@ def _run_pass(
         # reaching here means it hit the bisect floor and could not prove the
         # window whole. Every pair the window covered is aborted, because the
         # logs that DID come back cannot be given a completeness they lack.
-        logger.info(
-            "disposition: window %d-%d on chain %s could not be proven whole; %d holder(s) x %d token(s) aborted: %s",
-            from_block,
-            to_block,
-            chain_id,
-            len(holder_batch),
-            len(token_batch),
-            exc,
+        logger.warning(
+            "disposition: window could not be proven whole; its pairs publish nothing this cycle",
+            extra={
+                "chain_id": chain_id,
+                "from_block": from_block,
+                "to_block": to_block,
+                "holders": len(holder_batch),
+                "tokens": len(token_batch),
+                "exc_type": type(exc).__name__,
+                "error": str(exc),
+            },
         )
-        _abort(holder_batch, token_batch, measured)
+        _abort(holder_batch, token_batch, measured, cost=cost)
         return
     for log in logs:
         _attribute(log, recipient_topic=recipient_topic, wanted=wanted, measured=measured)
@@ -1622,6 +1694,20 @@ def _resolve_fan_out(
             # metered, which is what keeps the verdict not_determined.
             keep = min(DELIVERY_ENTRIES_RETAINED, len(ordered))
             elided = len(ordered) - keep
+            # One line per pair, and it is not noise: the row this writes can
+            # never be disposed, so this is the only announcement that a pair
+            # left the convergent population for good.
+            logger.info(
+                "disposition: pair abandoned as too heavy to meter; it stays not_determined permanently",
+                extra={
+                    "chain_id": chain_id,
+                    "holder_address": holder,
+                    "token_address": token,
+                    "deliveries": len(ordered),
+                    "max_deliveries_per_pair": DISPOSITION_MAX_DELIVERIES_PER_PAIR,
+                },
+            )
+            cost.count("pairs_too_heavy")
             ordered = ordered[:keep]
         for record in ordered:
             if too_heavy:
@@ -1639,6 +1725,12 @@ def _resolve_fan_out(
                 receipts[tx] = get_transaction_receipt(
                     rpc_url, tx, chain_id=chain_id, timeout=DISPOSITION_SCAN_TIMEOUT_SECONDS
                 )
+                if receipts[tx] is None:
+                    # ``get_transaction_receipt`` logs the per-call failure at
+                    # DEBUG (hot path). The cycle counts it, because an unread
+                    # receipt is an unmetered delivery and a flood of them is a
+                    # flood of not_determined verdicts with no other trace.
+                    cost.count("receipts_unreadable")
             fan_out = _fan_out(receipts[tx], token=token)
             deliveries.append(
                 _delivery_entry(
@@ -1649,7 +1741,7 @@ def _resolve_fan_out(
             )
         if exhausted:
             break
-        record_delivery_evidence(
+        shape = record_delivery_evidence(
             session,
             chain_id=chain_id,
             holder_address=holder,
@@ -1662,6 +1754,8 @@ def _resolve_fan_out(
             observed_balance_raw=entry.observed_balance_raw,
             caught_up=entry.caught_up,
         )
+        cost.count("pairs_recorded")
+        cost.count(f"verdict_{shape}")
     if exhausted:
         raise DispositionBudgetExceeded(f"disposition request budget of {DISPOSITION_REQUEST_BUDGET} reached")
 

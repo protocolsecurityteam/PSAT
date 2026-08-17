@@ -24,6 +24,7 @@ Every fan-out here is a count of same-token transfer LOGS. See
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
@@ -38,6 +39,8 @@ from utils.balance_status import (
     DELIVERY_SHAPE_HAS_DIRECT_DELIVERY,
     DELIVERY_SHAPE_NOT_DETERMINED,
 )
+
+logger = logging.getLogger(__name__)
 
 # --- K, the published model parameter ----------------------------------------
 # The same-token transfer-LOG count above which one delivering transaction is a
@@ -313,8 +316,13 @@ def record_delivery_evidence(
     k: int = FAN_OUT_THRESHOLD_K,
     observed_balance_raw: str | None = None,
     caught_up: bool | None = None,
-) -> None:
-    """Accrete one pair's evidence. THE TRUE INVARIANT, stated exactly.
+) -> str:
+    """Accrete one pair's evidence. Returns the shape the row now publishes.
+
+    The return value is for the caller's per-cycle verdict distribution and
+    nothing else — the row is the record.
+
+    THE TRUE INVARIANT, stated exactly.
 
     What ACCRETES and is never taken back: the evidence itself — the tally of
     deliveries seen, the tally of deliveries nobody could meter, the smallest
@@ -369,6 +377,7 @@ def record_delivery_evidence(
         from_block = int(scanned_from_block)
         through = max(int(measured_through_block), from_block)
         tally = _fold(_tally_of(deliveries), elided)
+        shape = _shape_for(tally, int(k))
         session.add(
             TokenDeliveryEvidence(
                 chain_id=chain_id,
@@ -381,7 +390,7 @@ def record_delivery_evidence(
                 unreadable_deliveries=tally.unreadable,
                 min_fan_out=tally.min_fan_out,
                 fan_out_threshold_k=int(k),
-                delivery_shape=_shape_for(tally, int(k)),
+                delivery_shape=shape,
                 observed_balance_raw=observed_balance_raw,
                 caught_up=True if caught_up is None else bool(caught_up),
                 basis=compose_basis(
@@ -389,7 +398,7 @@ def record_delivery_evidence(
                 ),
             )
         )
-        return
+        return shape
 
     row_k = int(row.fan_out_threshold_k)
     cursor = int(row.measured_through_block)
@@ -421,7 +430,26 @@ def record_delivery_evidence(
     _set(row, "delivery_count", tally.count)
     _set(row, "unreadable_deliveries", tally.unreadable)
     _set(row, "min_fan_out", tally.min_fan_out)
-    _set(row, "delivery_shape", _shape_for(tally, row_k))
+    shape = _shape_for(tally, row_k)
+    previous_shape = str(row.delivery_shape)
+    if shape != previous_shape:
+        # A published verdict changed. It is legitimate — new evidence only ever
+        # withdraws a positive — but it is the one thing this writer does that
+        # moves a number a consumer already read, so it says so.
+        logger.warning(
+            "delivery evidence: published verdict changed for this pair",
+            extra={
+                "chain_id": chain_id,
+                "holder_address": holder,
+                "token_address": token,
+                "previous_shape": previous_shape,
+                "shape": shape,
+                "delivery_count": tally.count,
+                "unreadable_deliveries": tally.unreadable,
+                "min_fan_out": tally.min_fan_out,
+            },
+        )
+    _set(row, "delivery_shape", shape)
     _set(row, "measured_through_block", through)
     if caught_up is not None:
         _set(row, "caught_up", bool(caught_up))
@@ -450,6 +478,7 @@ def record_delivery_evidence(
         # Stamped only when a MEASUREMENT moved. Re-deriving a sentence is not a
         # new observation, and dating it as one would age every untouched row.
         row.measured_at = _sql_func.now()
+    return shape
 
 
 def load_delivery_evidence(

@@ -1394,9 +1394,9 @@ class TestEntityCohortInTheCycle:
         contract_sweeps: list[int] = []
         real_contract_refresh = tvl_module.refresh_contract_balances
 
-        def _counting_contract_refresh(session, protocol_id):
+        def _counting_contract_refresh(session, protocol_id, **kwargs):
             contract_sweeps.append(protocol_id)
-            return real_contract_refresh(session, protocol_id)
+            return real_contract_refresh(session, protocol_id, **kwargs)
 
         monkeypatch.setattr("services.monitoring.tvl.refresh_contract_balances", _counting_contract_refresh)
         monkeypatch.setattr("services.monitoring.tvl.run_sweeps", lambda requests, **kw: ({}, SweepCost()))

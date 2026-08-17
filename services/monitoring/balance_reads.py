@@ -159,7 +159,17 @@ def pinned_native_balances(
     try:
         head = int(rpc_request(url, "eth_blockNumber", [], retries=1, chain_id=chain_id), 16)
     except Exception as exc:
-        logger.info("pinned native balance: head read failed on chain %s: %s", chain_id, exc)
+        # One per chain per cycle, so the level is affordable — and a chain whose
+        # head cannot be read publishes no pinned zero for any holder on it.
+        logger.warning(
+            "pinned native balance: head read failed; the chain's holders fall back to the unpinned path",
+            extra={
+                "chain_id": chain_id,
+                "addresses": len(addresses),
+                "exc_type": type(exc).__name__,
+                "error": str(exc),
+            },
+        )
         return None, {}
     block = max(1, head - PINNED_FINALITY_MARGIN)
     # Derived, never hardcoded, for the reason ``multicall3_aggregate3`` states:
@@ -170,7 +180,16 @@ def pinned_native_balances(
     try:
         results = multicall3_aggregate3(url, calls, hex(block), chain_id=chain_id)
     except Exception as exc:
-        logger.info("pinned native balance: aggregate3 failed on chain %s at %d: %s", chain_id, block, exc)
+        logger.warning(
+            "pinned native balance: aggregate3 did not answer; the chain's holders fall back to the unpinned path",
+            extra={
+                "chain_id": chain_id,
+                "block_number": block,
+                "addresses": len(addresses),
+                "exc_type": type(exc).__name__,
+                "error": str(exc),
+            },
+        )
         return None, {}
     out: dict[str, int] = {}
     for address, (ok, data) in zip(ordered, results):
