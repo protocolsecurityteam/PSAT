@@ -459,9 +459,10 @@ class _Counters:
     withheld: int = 0
     residue_observations: int = 0
     contracts_planned_empty: int = 0
-    # The pre-candidate funnel from ``select_candidates`` (rows_in,
-    # skipped_already_explained, cap_dropped, selected), already carrying the
-    # ``selection_`` prefix every sink publishes it under.
+    # The pre-candidate funnel from ``select_candidates`` (bare rows_in,
+    # skipped_already_explained, cap_dropped, selected keys);
+    # ``selection_fields()`` adds the ``selection_`` prefix every sink
+    # publishes it under.
     selection_funnel: dict[str, Any] = field(default_factory=dict)
     # Input-asset seeding spend/yield for the job (see ``SeedBudget.metrics``).
     seed_metrics: dict[str, int] = field(default_factory=dict)

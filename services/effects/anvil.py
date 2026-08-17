@@ -821,12 +821,13 @@ class SubprocessAnvil:
                     continue
                 self._output_tail.append(line)
                 logger.log(logging.DEBUG, "%s", line, extra={"source": "anvil"})
-        except BaseException:
+        except BaseException as exc:
             # Either ``close`` pulled the fd (the normal end) or the read failed
             # for a reason we did not anticipate. Either way nothing will drain
             # this pipe again, so the stream is closed rather than left half-read:
             # anvil's next write then fails loudly instead of blocking forever on
             # a full buffer with the port still held.
+            logger.debug("anvil drain stopped", extra={"source": "anvil", "exc_type": type(exc).__name__})
             try:
                 stream.close()
             except Exception:
