@@ -103,10 +103,15 @@ def _should_fetch_html(url: str) -> bool:
 
 
 def _fetch_html(url: str, debug: bool = False) -> str | None:
+    from utils.egress import UnsafeUrlError, safe_get
+
     if not _should_fetch_html(url):
         return None
     try:
-        resp = requests.get(url, timeout=8, headers={"User-Agent": "PSAT/0.1"})
+        resp = safe_get(url, timeout=8, headers={"User-Agent": "PSAT/0.1"})
+    except UnsafeUrlError as exc:
+        _debug_log(debug, f"Audit enrichment fetch refused for {url}: {exc}")
+        return None
     except requests.RequestException as exc:
         _debug_log(debug, f"Audit enrichment fetch failed for {url}: {exc!r}")
         return None
