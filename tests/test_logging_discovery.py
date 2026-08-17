@@ -178,6 +178,47 @@ def test_chain_probe_error_fills_warn_even_when_the_batch_returns(monkeypatch, c
     assert degraded[0].context["probe_failed"] == 2
 
 
+def test_chain_probe_counts_per_item_rpc_errors(monkeypatch, caplog):
+    """A batch item carrying ``error`` and no ``result`` lands in the map as
+    ``"0x"`` — the same shape as a real no-code answer, so it has to be counted
+    as an error-fill where it happens."""
+    import json
+
+    from services.discovery import chain_resolver
+
+    monkeypatch.setattr(chain_resolver, "_erpc_url_for_chain", lambda _chain: "http://stub")
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self) -> bytes:
+            return json.dumps(
+                [
+                    {"jsonrpc": "2.0", "id": 0, "error": {"code": -32000, "message": "execution reverted"}},
+                    {"jsonrpc": "2.0", "id": 1, "result": "0x"},
+                ]
+            ).encode("utf-8")
+
+    monkeypatch.setattr(chain_resolver.urllib.request, "urlopen", lambda *_a, **_kw: _Response())
+
+    with _job_context() as (_metrics, errors):
+        with caplog.at_level(logging.WARNING, logger="services.discovery.chain_resolver"):
+            hits = chain_resolver._probe_chain_batch(["0x" + "11" * 20, "0x" + "22" * 20], "base")
+
+    assert hits == set()
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    # Only the erroring item counts; the second address genuinely answered "0x".
+    assert warnings[0].probe_failed == 1
+    assert warnings[0].exc_type is None
+    # No exception to attach, so nothing lands in stage_errors for this shape.
+    assert [e for e in errors if e.phase == "chain_probe"] == []
+
+
 def test_chain_probe_stays_silent_when_every_address_answers(monkeypatch, caplog):
     """A real "no code on this chain" answer must not warn — the WARNING has to
     stay a signal, not fire on every clean probe."""

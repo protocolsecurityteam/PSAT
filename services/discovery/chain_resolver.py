@@ -26,6 +26,7 @@ import os
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -48,21 +49,39 @@ load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 _RPC_RATE_LIMIT = int(os.getenv("RPC_RATE_LIMIT", "15"))
 _FALLBACK_WORKERS = 4
 
-# Error-fills recorded by the read helpers for the probe currently in flight: a
-# ``"0x"`` written because a read failed or went unanswered, not because the
-# address has no code there. A ContextVar rather than a parameter so the
-# helpers keep their existing signatures (the fallback fan-out copies the
-# context, and the list object is shared through the copy). ``None`` outside a
-# probe makes recording a no-op.
-_probe_error_fills: contextvars.ContextVar[list[BaseException | None] | None] = contextvars.ContextVar(
+
+@dataclass
+class _ErrorFills:
+    """Error-fills for one chain probe: a ``"0x"`` written because a read failed
+    or went unanswered, not because the address has no code there.
+
+    Only a count and the last exception are kept — a live exception per address
+    would pin its traceback frames (and the response bodies in them) for the
+    whole pass.
+    """
+
+    count: int = 0
+    last_exc: BaseException | None = None
+    exc_types: set[str] = field(default_factory=set)
+
+
+# Sink for the probe currently in flight. A ContextVar rather than a parameter
+# so the read helpers keep their existing signatures (the fallback fan-out
+# copies the context, and the object is shared through the copy). ``None``
+# outside a probe makes recording a no-op.
+_probe_error_fills: contextvars.ContextVar[_ErrorFills | None] = contextvars.ContextVar(
     "psat_chain_probe_error_fills", default=None
 )
 
 
 def _record_error_fill(exc: BaseException | None) -> None:
     sink = _probe_error_fills.get()
-    if sink is not None:
-        sink.append(exc)
+    if sink is None:
+        return
+    sink.count += 1
+    if exc is not None:
+        sink.last_exc = exc
+        sink.exc_types.add(type(exc).__name__)
 
 
 def _erpc_url_for_chain(chain_name: str) -> str | None:
@@ -138,6 +157,10 @@ def _batch_get_code(rpc_url: str, addresses: list[str]) -> dict[str, str]:
         for item in body:
             idx = item.get("id")
             if idx is not None and 0 <= idx < len(batch):
+                # A per-item JSON-RPC error still lands as "0x" below, and the
+                # address IS in ``results`` so the fill loop never sees it.
+                if item.get("error") is not None or "result" not in item:
+                    _record_error_fill(None)
                 code = item.get("result") or "0x"
                 results[batch[idx]] = code if isinstance(code, str) and code.startswith("0x") else "0x"
         # Fill in any missing addresses (e.g. from errors in individual items).
@@ -161,7 +184,7 @@ def _probe_chain_batch(
         _debug_log(debug, f"  {chain_name}: no eRPC route configured, skipping")
         return set()
 
-    error_fills: list[BaseException | None] = []
+    error_fills = _ErrorFills()
     token = _probe_error_fills.set(error_fills)
     try:
         code_map = _batch_get_code(rpc_url, addresses)
@@ -186,28 +209,29 @@ def _probe_chain_batch(
     finally:
         _probe_error_fills.reset(token)
 
-    if error_fills:
+    if error_fills.count:
         # ``_batch_get_code`` swallows transport errors internally and answers
         # "0x", so a chain-wide outage returns *successfully* with every address
         # reading as no-code. This count is the only signal that the empty
         # membership was a read failure rather than an answer.
-        last_exc = next((e for e in reversed(error_fills) if e is not None), None)
+        last_exc = error_fills.last_exc
         if last_exc is not None:
             record_degraded(
                 phase="chain_probe",
                 exc=last_exc,
-                context={"chain": chain_name, "probe_failed": len(error_fills), "addresses": len(addresses)},
+                context={"chain": chain_name, "probe_failed": error_fills.count, "addresses": len(addresses)},
             )
         logger.warning(
             "Chain probe could not read %d of %d address(es) on %s; those read as no-code",
-            len(error_fills),
+            error_fills.count,
             len(addresses),
             chain_name,
             extra={
                 "chain": chain_name,
-                "probe_failed": len(error_fills),
+                "probe_failed": error_fills.count,
                 "addresses": len(addresses),
                 "exc_type": type(last_exc).__name__ if last_exc is not None else None,
+                "exc_types": sorted(error_fills.exc_types),
             },
         )
 

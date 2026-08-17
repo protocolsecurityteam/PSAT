@@ -128,7 +128,12 @@ def enrich_with_activity(
     # Explorer failures are counted and reported once per pass rather than per
     # contract: an outage hits every address in the inventory, and the fact
     # worth surfacing is how much of the ranking ran on the neutral score.
-    fetch_failures: list[BaseException] = []
+    # Only the last exception is held — keeping one per contract would pin every
+    # failed call's traceback frames (and the response bodies inside them) for
+    # the whole pass.
+    fetch_failures = 0
+    last_failure: BaseException | None = None
+    failure_types: set[str] = set()
 
     for contract in contracts:
         address = contract["address"]
@@ -142,7 +147,9 @@ def enrich_with_activity(
         else:
             last_ts, exc = _fetch_last_active_ts(address, chain_id=CHAIN_IDS[chain], debug=debug)
             if exc is not None:
-                fetch_failures.append(exc)
+                fetch_failures += 1
+                last_failure = exc
+                failure_types.add(type(exc).__name__)
             score = _activity_score(last_ts)
 
         contract["activity"] = {
@@ -158,22 +165,22 @@ def enrich_with_activity(
             4,
         )
 
-    if fetch_failures:
+    if last_failure is not None:
         # The last failure carries the provider's own error text into the
         # StageError; the count says how much of the ranking it moved.
         record_degraded(
             phase="activity_enrichment",
-            exc=fetch_failures[-1],
-            context={"failed": len(fetch_failures), "contracts": len(contracts)},
+            exc=last_failure,
+            context={"failed": fetch_failures, "contracts": len(contracts)},
         )
         logger.warning(
             "Activity lookup failed for %d of %d contract(s); those rank on the neutral score",
-            len(fetch_failures),
+            fetch_failures,
             len(contracts),
             extra={
-                "failed": len(fetch_failures),
+                "failed": fetch_failures,
                 "contracts": len(contracts),
-                "exc_types": sorted({type(e).__name__ for e in fetch_failures}),
+                "exc_types": sorted(failure_types),
             },
         )
 
