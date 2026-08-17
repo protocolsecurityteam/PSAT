@@ -1,10 +1,12 @@
 """Shared SSRF egress guard for outbound HTTP to attacker-influenced URLs.
 
 Invariant: a URL is only fetched when every address its hostname resolves to
-is a public, routable unicast address. Private/loopback/link-local/reserved/
-multicast/unspecified/unique-local targets — and the cloud metadata IP — are
-refused, so a crawler- or LLM-sourced URL cannot be turned into a read of an
-internal service.
+is a globally-routable public unicast address. Classification is an allowlist
+(``ip.is_global``), which refuses private/loopback/link-local/reserved/
+multicast/unspecified/unique-local ranges AND non-global unicast the denylist
+form would miss — RFC 6598 CGNAT (100.64.0.0/10, e.g. Alibaba metadata and k8s
+NAT fabrics). The cloud metadata IP keeps an explicit guard as belt-and-suspenders.
+So a crawler- or LLM-sourced URL cannot be turned into a read of an internal service.
 
 Residual: ``assert_public_http_url`` validates the name it resolves, but the
 socket the subsequent request opens re-resolves independently — a DNS-rebinding
@@ -27,6 +29,7 @@ IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
 _ALLOWED_SCHEMES = frozenset({"http", "https"})
 _METADATA_IP = ipaddress.ip_address("169.254.169.254")
 _MAX_REDIRECT_HOPS = 5
+_REDIRECT_STATUS = frozenset({301, 302, 303, 307, 308})
 
 
 class UnsafeUrlError(ValueError):
@@ -48,10 +51,10 @@ def _is_forbidden(ip: IPAddress) -> bool:
     ip = _unwrap_ipv6(ip)
     if ip == _METADATA_IP:
         return True
-    if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast or ip.is_unspecified:
-        return True
-    # is_private already covers IPv6 unique-local (fc00::/7); named for intent.
-    return bool(getattr(ip, "is_site_local", False))
+    # Allowlist: only globally-routable unicast passes. Subsumes private,
+    # loopback, link-local, CGNAT (100.64/10), reserved, multicast, ULA, and
+    # any future non-global range a denylist would forget.
+    return not ip.is_global
 
 
 def assert_public_http_url(url: str) -> str:
@@ -82,22 +85,35 @@ def assert_public_http_url(url: str) -> str:
     return url
 
 
-def safe_get(url: str, *, timeout, **kw) -> requests.Response:
+def safe_get(
+    url: str,
+    *,
+    timeout,
+    session: requests.Session | None = None,
+    **kw,
+) -> requests.Response:
     """``requests.get`` that validates the target — and every redirect hop —
     against ``assert_public_http_url`` before connecting.
 
     Redirects are followed manually (``allow_redirects=False``) so the
     ``Location`` of each hop is re-validated; this closes redirect-to-internal
-    (DNS-rebinding-via-redirect), which delegating to requests would not.
+    (DNS-rebinding-via-redirect), which delegating to requests would not. Any
+    ``**kw`` (e.g. ``stream=True``, ``headers=...``) and a tuple ``timeout``
+    pass straight through, so streamed downloads route through here too.
+
+    An optional ``session`` reuses a caller's connection pool; the returned
+    (final, non-redirect) response is unread when ``stream=True``.
     """
+    getter = session.get if session is not None else requests.get
     kw.pop("allow_redirects", None)
     current = assert_public_http_url(url)
     for _ in range(_MAX_REDIRECT_HOPS + 1):
-        resp = requests.get(current, allow_redirects=False, timeout=timeout, **kw)
-        if not resp.is_redirect and not resp.is_permanent_redirect:
+        resp = getter(current, allow_redirects=False, timeout=timeout, **kw)
+        if resp.status_code not in _REDIRECT_STATUS:
             return resp
         location = resp.headers.get("Location")
         if not location:
             return resp
+        resp.close()  # release the intermediate hop before following
         current = assert_public_http_url(urljoin(current, location))
     raise UnsafeUrlError(f"too many redirects (>{_MAX_REDIRECT_HOPS})")

@@ -23,7 +23,7 @@ from urllib.parse import urlparse
 import requests
 
 from db.storage import StorageUnavailable, get_storage_client
-from utils.egress import UnsafeUrlError, assert_public_http_url
+from utils.egress import UnsafeUrlError, safe_get
 from utils.github_urls import github_blob_to_raw
 
 logger = logging.getLogger(__name__)
@@ -186,26 +186,24 @@ def download_audit_body(
     backoff. 4xx other than 408/429 and content-type mismatches are fatal
     — refetching won't change a 404 or a login-wall HTML page.
     """
-    # SSRF guard: the URL is discovery-sourced, so reject non-public targets
-    # before opening the stream.
-    try:
-        assert_public_http_url(url)
-    except UnsafeUrlError as exc:
-        raise PdfDownloadError(f"refused non-public URL: {exc}") from exc
-
-    sess = session or requests
     backoff = _RETRY_INITIAL_BACKOFF
 
     for attempt in range(_RETRY_ATTEMPTS):
         last_attempt = attempt == _RETRY_ATTEMPTS - 1
         try:
-            resp = sess.get(
+            # SSRF guard: safe_get re-validates the target and every redirect
+            # hop, so a discovery-sourced URL that 302s to an internal address
+            # is refused rather than followed. Fatal — a bad URL/redirect won't
+            # improve on retry.
+            resp = safe_get(
                 url,
                 timeout=(_CONNECT_TIMEOUT, _READ_TIMEOUT),
+                session=session,
                 stream=True,
                 headers={"User-Agent": "PSAT-audit-text-extractor/0.1"},
-                allow_redirects=True,
             )
+        except UnsafeUrlError as exc:
+            raise PdfDownloadError(f"refused non-public URL: {exc}") from exc
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
             if last_attempt:
                 raise PdfDownloadError(f"fetch error: {exc}") from exc

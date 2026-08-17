@@ -7,7 +7,7 @@ is touched and resolution is deterministic.
 from __future__ import annotations
 
 import socket
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -31,12 +31,34 @@ def _addrinfo(ip: str):
         ("http://mapped/", "::ffff:127.0.0.1"),
         ("http://mapped2/", "::ffff:10.0.0.5"),
         ("http://uniquelocal/", "fd00::1"),
+        # RFC 6598 CGNAT (100.64.0.0/10): Alibaba metadata, k8s NAT fabrics.
+        # Python tags it neither is_private nor is_global, so the is_global
+        # allowlist is what refuses it.
+        ("http://cgnat-metadata/", "100.100.100.200"),
+        ("http://cgnat-low/", "100.64.0.1"),
     ],
 )
 def test_rejects_non_public_addresses(url, ip):
     with patch("socket.getaddrinfo", return_value=_addrinfo(ip)):
         with pytest.raises(UnsafeUrlError):
             assert_public_http_url(url)
+
+
+@pytest.mark.parametrize(
+    "host,resolved",
+    [
+        # Decimal (2130706433) and hex (0x7f000001) integer spellings of
+        # 127.0.0.1: the guard classifies on the RESOLVED address, so however
+        # the literal is spelled it resolves to loopback and is refused. Pins
+        # that a refactor can't start deciding on the textual host instead.
+        ("2130706433", "127.0.0.1"),
+        ("0x7f000001", "127.0.0.1"),
+    ],
+)
+def test_rejects_alternate_ip_literal_encodings(host, resolved):
+    with patch("socket.getaddrinfo", return_value=_addrinfo(resolved)):
+        with pytest.raises(UnsafeUrlError):
+            assert_public_http_url(f"http://{host}/")
 
 
 @pytest.mark.parametrize("url", ["file:///etc/passwd", "gopher://x/", "javascript:alert(1)", "ftp://host/"])
@@ -68,13 +90,8 @@ class _FakeResp:
         self.status_code = status_code
         self.headers = headers or {}
 
-    @property
-    def is_redirect(self):
-        return self.status_code in (301, 302, 303, 307)
-
-    @property
-    def is_permanent_redirect(self):
-        return self.status_code in (301, 308)
+    def close(self):
+        self.closed = True
 
 
 def test_safe_get_returns_non_redirect():
@@ -115,3 +132,39 @@ def test_safe_get_follows_public_redirect():
         with patch("requests.get", side_effect=responses):
             resp = safe_get("https://example.com/", timeout=5)
     assert resp.status_code == 200
+
+
+def test_safe_get_uses_injected_session_and_refuses_redirect():
+    # An injected session is used for the connection, and a redirect to an
+    # internal host is still re-validated and refused rather than followed.
+    resolutions = {"example.com": "93.184.216.34", "internal.local": "169.254.169.254"}
+
+    def fake_getaddrinfo(host, *a, **k):
+        return _addrinfo(resolutions[host])
+
+    session = MagicMock()
+    session.get.return_value = _FakeResp(302, {"Location": "http://internal.local/steal"})
+    with patch("socket.getaddrinfo", side_effect=fake_getaddrinfo):
+        with pytest.raises(UnsafeUrlError):
+            safe_get("https://example.com/", timeout=5, session=session)
+    # Only the first (public) hop was fetched; the internal target never was.
+    assert session.get.call_count == 1
+
+
+def test_download_audit_body_refuses_redirect_to_internal():
+    # End-to-end on the text-extraction path: a discovery-sourced URL that
+    # 302s to the metadata IP must be refused, not stored/served.
+    from services.audits.text_extraction import PdfDownloadError, download_audit_body
+
+    resolutions = {"example.com": "93.184.216.34", "internal.local": "169.254.169.254"}
+
+    def fake_getaddrinfo(host, *a, **k):
+        return _addrinfo(resolutions[host])
+
+    session = MagicMock()
+    session.get.return_value = _FakeResp(302, {"Location": "http://internal.local/latest/meta-data/"})
+    with patch("socket.getaddrinfo", side_effect=fake_getaddrinfo):
+        with pytest.raises(PdfDownloadError, match="non-public"):
+            download_audit_body("https://example.com/audit.md", session=session, kind="text")
+    # The internal redirect target was never fetched for its body.
+    assert session.get.call_count == 1
