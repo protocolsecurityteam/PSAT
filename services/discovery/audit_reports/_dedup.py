@@ -22,6 +22,7 @@ from typing import Any
 from urllib.parse import unquote, urlparse
 
 from utils import llm
+from utils.logging import record_degraded
 
 from ..inventory_domain import _debug_log
 
@@ -235,6 +236,11 @@ def _llm_validate_and_cluster(
     except Exception as exc:
         # Returning None drops the run back to the heuristic mirror collapse —
         # a quieter, worse dedup that otherwise leaves no trace above DEBUG.
+        record_degraded(
+            phase="audit_validate_cluster",
+            exc=exc,
+            context={"company": company, "reports": len(reports)},
+        )
         logger.warning(
             "Validate+cluster LLM call failed for %s; falling back to heuristic dedup over %d report(s)",
             company,

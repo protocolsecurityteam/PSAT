@@ -15,6 +15,7 @@ import re
 from typing import Any
 
 from utils import llm
+from utils.logging import record_degraded
 
 from .inventory_domain import _debug_log
 
@@ -223,6 +224,11 @@ def generate_followup_query(
             return query
         _debug_log(debug, f"LLM follow-up query unusable: {response!r}")
     except Exception as exc:
+        record_degraded(
+            phase="audit_followup_query",
+            exc=exc,
+            context={"company": company},
+        )
         logger.warning(
             "Follow-up query generation failed for %s; the second search pass is skipped",
             company,
@@ -271,7 +277,13 @@ def classify_search_results(
     except Exception as exc:
         # An empty classification is indistinguishable from "none of these are
         # audits" downstream; a provider-wide failure here is what both prior
-        # audit-discovery collapses looked like from the outside.
+        # audit-discovery collapses looked like from the outside. The
+        # StageError carries the provider's own text (402 vs 401 vs timeout).
+        record_degraded(
+            phase="audit_classification",
+            exc=exc,
+            context={"company": company, "results": len(results)},
+        )
         logger.warning(
             "Audit classification LLM call failed for %s; %d search result(s) unclassified",
             company,
@@ -353,6 +365,11 @@ def _extract_one_chunk(
             temperature=0.0,
         )
     except Exception as exc:
+        record_degraded(
+            phase="audit_extraction",
+            exc=exc,
+            context={"url": url, "company": company},
+        )
         logger.warning(
             "Audit extraction LLM call failed for %s; chunk contributes no report metadata",
             url,

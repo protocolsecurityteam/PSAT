@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json
 import logging
@@ -42,6 +43,13 @@ from utils.rpc import default_rpc_url, normalize_hex  # used for address compari
 from workers.base import BaseWorker, JobHandledDirectly
 
 logger = logging.getLogger("workers.static_worker")
+
+# Unknown chain_ids already reported for the job running on this context.
+# ``BaseWorker`` dispatches each job under its own ``copy_context().run(...)``,
+# so a fresh set per job comes for free and nothing has to reset it.
+_unknown_chain_reported: contextvars.ContextVar[set[int] | None] = contextvars.ContextVar(
+    "psat_static_unknown_chain_reported", default=None
+)
 
 # ---------------------------------------------------------------------------
 # Error logging template
@@ -111,17 +119,25 @@ def _parent_chain_name(job: Job) -> str:
         # The fallback keeps the spawn path alive, but stamping "ethereum" onto a
         # child whose parent lives on an unregistered chain is a wrong answer, not
         # a missing one — surface it rather than let the default pass for a lookup.
-        record_degraded(
-            phase="parent_chain_name",
-            exc=exc,
-            context={"job_id": str(getattr(job, "id", "")), "chain_id": chain_id},
-        )
-        logger.warning(
-            "Unknown chain_id %s on job %s; falling back to ethereum for the spawned child",
-            chain_id,
-            getattr(job, "id", None),
-            extra={"exc_type": type(exc).__name__, "chain_id": chain_id},
-        )
+        # ``process()`` calls this ~10× per job, so report each unknown chain_id
+        # once: one data bug is one line, not ten.
+        seen = _unknown_chain_reported.get()
+        if seen is None:
+            seen = set()
+            _unknown_chain_reported.set(seen)
+        if chain_id not in seen:
+            seen.add(chain_id)
+            record_degraded(
+                phase="parent_chain_name",
+                exc=exc,
+                context={"job_id": str(getattr(job, "id", "")), "chain_id": chain_id},
+            )
+            logger.warning(
+                "Unknown chain_id %s on job %s; falling back to ethereum for the spawned child",
+                chain_id,
+                getattr(job, "id", None),
+                extra={"exc_type": type(exc).__name__, "chain_id": chain_id},
+            )
         return "ethereum"
 
 

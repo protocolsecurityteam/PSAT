@@ -210,9 +210,13 @@ def main(argv: list[str] | None = None) -> int:
                     session.rollback()
                     continue
                 except Exception as exc:
+                    # Unlike the StorageError arm this one has no known shape, so
+                    # the traceback rides along — at WARNING, since the run
+                    # continues and the summary below is what fails it.
                     logger.warning(
                         "backfill: row %s unexpected error",
                         row_id,
+                        exc_info=exc,
                         extra={"exc_type": type(exc).__name__, "row_id": row_id},
                     )
                     failed_rows.append(row_id)

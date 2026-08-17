@@ -125,14 +125,74 @@ def test_chain_probe_failure_warns_instead_of_reading_as_no_code(monkeypatch, ca
 
     monkeypatch.setattr(chain_resolver, "_batch_get_code", _boom)
 
-    with caplog.at_level(logging.WARNING, logger="services.discovery.chain_resolver"):
-        hits = chain_resolver._probe_chain_batch(["0x" + "11" * 20], "base")
+    with _job_context() as (_metrics, errors):
+        with caplog.at_level(logging.WARNING, logger="services.discovery.chain_resolver"):
+            hits = chain_resolver._probe_chain_batch(["0x" + "11" * 20], "base")
 
     assert hits == set()
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 1
     assert warnings[0].chain == "base"
     assert warnings[0].exc_type == "TimeoutError"
+
+    degraded = [e for e in errors if e.phase == "chain_probe"]
+    assert len(degraded) == 1
+    # The provider's own text is what separates a 402 from a 401 from a timeout.
+    assert "probe timed out" in degraded[0].message
+
+
+def test_chain_probe_error_fills_warn_even_when_the_batch_returns(monkeypatch, caplog):
+    """D3, the live path: ``_batch_get_code`` swallows transport errors and
+    answers ``"0x"``, so a chain-wide outage *returns successfully* with every
+    address reading as no-code. The error-fill count is the only signal."""
+    import urllib.error
+
+    from services.discovery import chain_resolver, static_dependencies
+
+    monkeypatch.setattr(chain_resolver, "_erpc_url_for_chain", lambda _chain: "http://stub")
+
+    def _no_batch(*_a, **_kw):
+        raise urllib.error.URLError("connection refused")
+
+    def _no_code(*_a, **_kw):
+        raise RuntimeError("rpc 500")
+
+    # Batch rejected -> individual fallback; every individual read fails too.
+    monkeypatch.setattr(chain_resolver.urllib.request, "urlopen", _no_batch)
+    monkeypatch.setattr(static_dependencies, "get_code", _no_code)
+
+    addresses = ["0x" + "11" * 20, "0x" + "22" * 20]
+    with _job_context() as (_metrics, errors):
+        with caplog.at_level(logging.WARNING, logger="services.discovery.chain_resolver"):
+            hits = chain_resolver._probe_chain_batch(addresses, "base")
+
+    assert hits == set()
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert warnings[0].probe_failed == 2
+    assert warnings[0].chain == "base"
+    assert warnings[0].exc_type == "RuntimeError"
+
+    degraded = [e for e in errors if e.phase == "chain_probe"]
+    assert len(degraded) == 1
+    assert degraded[0].context["probe_failed"] == 2
+
+
+def test_chain_probe_stays_silent_when_every_address_answers(monkeypatch, caplog):
+    """A real "no code on this chain" answer must not warn — the WARNING has to
+    stay a signal, not fire on every clean probe."""
+    from services.discovery import chain_resolver
+
+    monkeypatch.setattr(chain_resolver, "_erpc_url_for_chain", lambda _chain: "http://stub")
+    monkeypatch.setattr(chain_resolver, "_batch_get_code", lambda _url, addrs: {a: "0x" for a in addrs})
+
+    with _job_context() as (_metrics, errors):
+        with caplog.at_level(logging.WARNING, logger="services.discovery.chain_resolver"):
+            hits = chain_resolver._probe_chain_batch(["0x" + "11" * 20], "base")
+
+    assert hits == set()
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+    assert errors == []
 
 
 def test_audit_classification_llm_failure_warns(monkeypatch, caplog):
@@ -145,16 +205,22 @@ def test_audit_classification_llm_failure_warns(monkeypatch, caplog):
 
     monkeypatch.setattr(audit_reports_llm.llm, "chat", _boom)
 
-    with caplog.at_level(logging.WARNING, logger="services.discovery.audit_reports_llm"):
-        out = audit_reports_llm.classify_search_results(
-            [{"title": "Acme audit", "url": "https://example.com/a.pdf"}], "acme"
-        )
+    with _job_context() as (_metrics, errors):
+        with caplog.at_level(logging.WARNING, logger="services.discovery.audit_reports_llm"):
+            out = audit_reports_llm.classify_search_results(
+                [{"title": "Acme audit", "url": "https://example.com/a.pdf"}], "acme"
+            )
 
     assert out == []
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 1
     assert warnings[0].exc_type == "RuntimeError"
     assert warnings[0].company == "acme"
+
+    degraded = [e for e in errors if e.phase == "audit_classification"]
+    assert len(degraded) == 1
+    # exc_type alone renders a 402, a 401 and a timeout identically.
+    assert "402 payment required" in degraded[0].message
 
 
 def test_activity_fetch_failures_summarized_once_per_pass(monkeypatch, caplog):
@@ -169,12 +235,17 @@ def test_activity_fetch_failures_summarized_once_per_pass(monkeypatch, caplog):
 
     contracts = [{"address": "0x" + f"{i:040x}", "chains": ["ethereum"]} for i in range(3)]
 
-    with caplog.at_level(logging.WARNING, logger="services.discovery.activity"):
-        activity.enrich_with_activity(contracts)
+    with _job_context() as (_metrics, errors):
+        with caplog.at_level(logging.WARNING, logger="services.discovery.activity"):
+            activity.enrich_with_activity(contracts)
 
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 1
     assert warnings[0].failed == 3
     assert warnings[0].exc_types == ["RuntimeError"]
+
+    degraded = [e for e in errors if e.phase == "activity_enrichment"]
+    assert len(degraded) == 1
+    assert "etherscan down" in degraded[0].message
     # The neutral score is still published — the log is what says it was a guess.
     assert all(c["activity"]["score"] == 0.5 for c in contracts)

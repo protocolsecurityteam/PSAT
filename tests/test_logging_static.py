@@ -135,3 +135,47 @@ def test_core_predicate_emit_failure_records_degraded_not_exception(monkeypatch,
     assert analysis["analysis_status"]["static_analysis_completed"] is True
     assert metrics["secondary_impl_pointers"] == 0
     assert any(k.startswith("phase_ms_") for k in metrics)
+
+
+def test_unknown_parent_chain_reports_once_per_job(caplog):
+    """The ``"ethereum"`` fallback is a wrong answer, not a missing one, so it
+    warns + records degraded — once per job, though ``process()`` asks for the
+    parent chain name from ~10 places."""
+    import contextvars
+    import logging
+    from typing import Any, cast
+
+    from workers import static_worker
+
+    job = cast(Any, SimpleNamespace(id="job-x", chain_id=987654, address="0x" + "11" * 20, request={}))
+
+    accumulator: list = []
+
+    def _run() -> list[str]:
+        deg_token = degraded_errors_var.set(accumulator)
+        try:
+            with bind_trace_context(trace_id="t", job_id="job-x", stage="static", worker_id="StaticWorker-1"):
+                with caplog.at_level(logging.WARNING, logger="workers.static_worker"):
+                    return [static_worker._parent_chain_name(job) for _ in range(3)]
+        finally:
+            degraded_errors_var.reset(deg_token)
+
+    # BaseWorker dispatches each job under its own copied context; mirror that
+    # so the once-per-job dedup is exercised the way it runs in production.
+    names = contextvars.copy_context().run(_run)
+
+    assert names == ["ethereum", "ethereum", "ethereum"]
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING and "Unknown chain_id" in r.getMessage()]
+    assert len(warnings) == 1
+    assert getattr(warnings[0], "chain_id", None) == 987654
+
+    entries = [e for e in accumulator if e.phase == "parent_chain_name"]
+    assert len(entries) == 1
+    assert entries[0].severity == "degraded"
+
+    # A second job (fresh context) reports the same chain_id again.
+    caplog.clear()
+    accumulator.clear()
+    contextvars.copy_context().run(_run)
+    assert len([r for r in caplog.records if "Unknown chain_id" in r.getMessage()]) == 1

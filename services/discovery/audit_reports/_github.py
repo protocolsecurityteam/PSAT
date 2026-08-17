@@ -357,7 +357,13 @@ def _llm_extract_filename_metadata(
         except Exception as exc:
             # Provider-wide failures (402, expired token) surface here one batch
             # at a time; at DEBUG the whole discovery run collapses to "no audits
-            # found" with nothing above INFO to triage on.
+            # found" with nothing above INFO to triage on. The StageError carries
+            # the provider's own text, which is what distinguishes them.
+            record_degraded(
+                phase="audit_filename_metadata",
+                exc=exc,
+                context={"company": company, "batch_start": start, "batch_size": len(batch)},
+            )
             logger.warning(
                 "GitHub filename-metadata LLM batch %s failed for %s; %d filename(s) unclassified",
                 start,

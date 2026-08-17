@@ -29,6 +29,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from utils import etherscan
+from utils.logging import record_degraded
 
 from .inventory_domain import CHAIN_IDS, CHAIN_SORT_ORDER, _debug_log
 
@@ -54,12 +55,12 @@ def _fetch_last_active_ts(
     address: str,
     chain_id: int,
     debug: bool = False,
-) -> tuple[float | None, str | None]:
-    """Return ``(timestamp, exc_type)`` for the most recent transaction.
+) -> tuple[float | None, BaseException | None]:
+    """Return ``(timestamp, exc)`` for the most recent transaction.
 
-    ``exc_type`` is the explorer failure's type name and is ``None`` when the
-    call succeeded — a miss and an outage both yield a ``None`` timestamp, and
-    only the caller can tell them apart with this second value.
+    ``exc`` is the explorer failure and is ``None`` when the call succeeded — a
+    miss and an outage both yield a ``None`` timestamp, and only the caller can
+    tell them apart with this second value.
     """
     try:
         data = etherscan.get(
@@ -80,7 +81,7 @@ def _fetch_last_active_ts(
                 return float(ts), None
     except Exception as exc:
         _debug_log(debug, f"Activity fetch failed for {address}: {exc}")
-        return None, type(exc).__name__
+        return None, exc
     return None, None
 
 
@@ -127,8 +128,7 @@ def enrich_with_activity(
     # Explorer failures are counted and reported once per pass rather than per
     # contract: an outage hits every address in the inventory, and the fact
     # worth surfacing is how much of the ranking ran on the neutral score.
-    fetch_failures = 0
-    failure_types: set[str] = set()
+    fetch_failures: list[BaseException] = []
 
     for contract in contracts:
         address = contract["address"]
@@ -140,10 +140,9 @@ def enrich_with_activity(
             last_ts = None
             score = 0.0
         else:
-            last_ts, exc_type = _fetch_last_active_ts(address, chain_id=CHAIN_IDS[chain], debug=debug)
-            if exc_type is not None:
-                fetch_failures += 1
-                failure_types.add(exc_type)
+            last_ts, exc = _fetch_last_active_ts(address, chain_id=CHAIN_IDS[chain], debug=debug)
+            if exc is not None:
+                fetch_failures.append(exc)
             score = _activity_score(last_ts)
 
         contract["activity"] = {
@@ -160,14 +159,21 @@ def enrich_with_activity(
         )
 
     if fetch_failures:
+        # The last failure carries the provider's own error text into the
+        # StageError; the count says how much of the ranking it moved.
+        record_degraded(
+            phase="activity_enrichment",
+            exc=fetch_failures[-1],
+            context={"failed": len(fetch_failures), "contracts": len(contracts)},
+        )
         logger.warning(
             "Activity lookup failed for %d of %d contract(s); those rank on the neutral score",
-            fetch_failures,
+            len(fetch_failures),
             len(contracts),
             extra={
-                "failed": fetch_failures,
+                "failed": len(fetch_failures),
                 "contracts": len(contracts),
-                "exc_types": sorted(failure_types),
+                "exc_types": sorted({type(e).__name__ for e in fetch_failures}),
             },
         )
 
