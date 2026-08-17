@@ -24,12 +24,15 @@ activity dominate the ordering so the most-used contracts surface first.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Any
 
 from utils import etherscan
 
 from .inventory_domain import CHAIN_IDS, CHAIN_SORT_ORDER, _debug_log
+
+logger = logging.getLogger(__name__)
 
 # Half-life in days for the activity decay function.
 _HALF_LIFE_DAYS = 30
@@ -51,8 +54,13 @@ def _fetch_last_active_ts(
     address: str,
     chain_id: int,
     debug: bool = False,
-) -> float | None:
-    """Return the Unix timestamp of the most recent transaction, or None."""
+) -> tuple[float | None, str | None]:
+    """Return ``(timestamp, exc_type)`` for the most recent transaction.
+
+    ``exc_type`` is the explorer failure's type name and is ``None`` when the
+    call succeeded — a miss and an outage both yield a ``None`` timestamp, and
+    only the caller can tell them apart with this second value.
+    """
     try:
         data = etherscan.get(
             "account",
@@ -69,10 +77,11 @@ def _fetch_last_active_ts(
         if isinstance(results, list) and results:
             ts = results[0].get("timeStamp")
             if ts:
-                return float(ts)
+                return float(ts), None
     except Exception as exc:
         _debug_log(debug, f"Activity fetch failed for {address}: {exc}")
-    return None
+        return None, type(exc).__name__
+    return None, None
 
 
 def _activity_score(last_active_ts: float | None) -> float:
@@ -115,6 +124,12 @@ def enrich_with_activity(
 
     _debug_log(debug, f"Fetching on-chain activity for {len(contracts)} contract(s)")
 
+    # Explorer failures are counted and reported once per pass rather than per
+    # contract: an outage hits every address in the inventory, and the fact
+    # worth surfacing is how much of the ranking ran on the neutral score.
+    fetch_failures = 0
+    failure_types: set[str] = set()
+
     for contract in contracts:
         address = contract["address"]
         chain = _primary_chain(contract)
@@ -125,7 +140,10 @@ def enrich_with_activity(
             last_ts = None
             score = 0.0
         else:
-            last_ts = _fetch_last_active_ts(address, chain_id=CHAIN_IDS[chain], debug=debug)
+            last_ts, exc_type = _fetch_last_active_ts(address, chain_id=CHAIN_IDS[chain], debug=debug)
+            if exc_type is not None:
+                fetch_failures += 1
+                failure_types.add(exc_type)
             score = _activity_score(last_ts)
 
         contract["activity"] = {
@@ -139,6 +157,18 @@ def enrich_with_activity(
         contract["rank_score"] = round(
             confidence * _W_CONFIDENCE + score * _W_ACTIVITY,
             4,
+        )
+
+    if fetch_failures:
+        logger.warning(
+            "Activity lookup failed for %d of %d contract(s); those rank on the neutral score",
+            fetch_failures,
+            len(contracts),
+            extra={
+                "failed": fetch_failures,
+                "contracts": len(contracts),
+                "exc_types": sorted(failure_types),
+            },
         )
 
     _debug_log(debug, "Activity enrichment complete")

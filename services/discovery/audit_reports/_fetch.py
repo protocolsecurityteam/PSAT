@@ -7,6 +7,7 @@ GitHub API for structured data; everything else goes through an HTML fetch
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
 
@@ -25,6 +26,8 @@ from ._github import (
     _parse_github_url,
 )
 from ._urls import _is_pdf_url
+
+logger = logging.getLogger(__name__)
 
 _MAX_DOWNLOAD_BYTES = 512_000
 _BINARY_CONTENT_TYPES = frozenset({"application/pdf", "application/octet-stream", "image/"})
@@ -93,6 +96,11 @@ def _fetch_html_page(url: str, debug: bool = False) -> str | None:
             phase="audit_report_html_fetch",
             exc=exc,
             context={"url": url},
+        )
+        logger.warning(
+            "Audit page fetch failed for %s; page contributes no reports",
+            url,
+            extra={"exc_type": type(exc).__name__, "url": url},
         )
         _debug_log(debug, f"Fetch {url} failed: {exc!r}")
         return None

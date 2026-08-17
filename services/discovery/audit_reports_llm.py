@@ -10,12 +10,15 @@ audit metadata AND discover links to additional audit reports on the page.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import Any
 
 from utils import llm
 
 from .inventory_domain import _debug_log
+
+logger = logging.getLogger(__name__)
 
 _JSON_ARRAY_RE = re.compile(r"\[.*\]", re.DOTALL)
 _JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
@@ -220,6 +223,11 @@ def generate_followup_query(
             return query
         _debug_log(debug, f"LLM follow-up query unusable: {response!r}")
     except Exception as exc:
+        logger.warning(
+            "Follow-up query generation failed for %s; the second search pass is skipped",
+            company,
+            extra={"exc_type": type(exc).__name__, "company": company},
+        )
         _debug_log(debug, f"LLM follow-up query generation failed: {exc!r}")
 
     return None
@@ -261,6 +269,15 @@ def classify_search_results(
             temperature=0.0,
         )
     except Exception as exc:
+        # An empty classification is indistinguishable from "none of these are
+        # audits" downstream; a provider-wide failure here is what both prior
+        # audit-discovery collapses looked like from the outside.
+        logger.warning(
+            "Audit classification LLM call failed for %s; %d search result(s) unclassified",
+            company,
+            len(results),
+            extra={"exc_type": type(exc).__name__, "company": company, "results": len(results)},
+        )
         _debug_log(debug, f"Audit classification LLM call failed: {exc!r}")
         return []
 
@@ -336,6 +353,11 @@ def _extract_one_chunk(
             temperature=0.0,
         )
     except Exception as exc:
+        logger.warning(
+            "Audit extraction LLM call failed for %s; chunk contributes no report metadata",
+            url,
+            extra={"exc_type": type(exc).__name__, "url": url, "company": company},
+        )
         _debug_log(debug, f"Audit extraction LLM call failed for {url}: {exc!r}")
         return None
 

@@ -30,6 +30,7 @@ downstream
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Mapping
 from dataclasses import is_dataclass
 from typing import Any
@@ -48,6 +49,9 @@ from services.policy.capability_surface import (
 from services.policy.effective_permissions import MUTABILITY_FIELDS
 from services.resolution.capabilities import CapabilityExpr
 from services.resolution.capability_resolver import capability_to_dict
+from utils.logging import record_degraded
+
+logger = logging.getLogger(__name__)
 
 
 def _to_dict(cap: CapabilityExpr | dict[str, Any] | None) -> dict[str, Any] | None:
@@ -88,17 +92,22 @@ def _classify_principal(
     address: str,
     resolver: Callable[[str], tuple[str | None, dict[str, Any] | None]],
     memo: dict[str, tuple[str | None, dict[str, Any] | None]],
+    failures: list[BaseException] | None = None,
 ) -> tuple[str | None, dict[str, Any] | None]:
     """Resolve one principal address to ``(resolved_type, details)`` via
     *resolver*, memoized per writer call so an address shared across functions
     is classified once. A resolver failure leaves the row untyped rather than
-    aborting the whole contract's FunctionPrincipal write."""
+    aborting the whole contract's FunctionPrincipal write; it is appended to
+    *failures* so the caller can report the batch once per contract instead of
+    once per principal."""
     key = (address or "").lower()
     if key not in memo:
         try:
             memo[key] = resolver(address)
-        except Exception:
+        except Exception as exc:
             memo[key] = (None, None)
+            if failures is not None:
+                failures.append(exc)
     return memo[key]
 
 
@@ -280,6 +289,7 @@ def write_effective_function_rows(
     # Per-call address→(type, details) memo so a caller shared across many
     # functions is classified once.
     type_memo: dict[str, tuple[str | None, dict[str, Any] | None]] = {}
+    classify_failures: list[BaseException] = []
     for fn in function_records:
         fn_signature = str(fn.get("function") or fn.get("abi_signature") or "")
         function_name = fn_signature.split("(")[0] if "(" in fn_signature else fn_signature
@@ -441,7 +451,7 @@ def write_effective_function_rows(
                     and (not resolved_type or resolved_type == "unknown")
                 ):
                     classified_type, classified_details = _classify_principal(
-                        row["address"], resolve_principal_type, type_memo
+                        row["address"], resolve_principal_type, type_memo, failures=classify_failures
                     )
                     if classified_type:
                         resolved_type = classified_type
@@ -461,5 +471,25 @@ def write_effective_function_rows(
                     )
                 )
                 added_principals += 1
+
+    if classify_failures:
+        # One line per contract, not per principal: a resolver outage fails
+        # every address, and the untyped rows it leaves behind are read
+        # downstream as "not a Safe/Timelock" rather than "never classified".
+        record_degraded(
+            phase="principal_classification",
+            exc=classify_failures[0],
+            context={"contract_id": contract_id, "failed_addresses": len(classify_failures)},
+        )
+        logger.warning(
+            "Principal classification failed for %d address(es) on contract %s; those rows publish resolved_type NULL",
+            len(classify_failures),
+            contract_id,
+            extra={
+                "exc_type": type(classify_failures[0]).__name__,
+                "contract_id": contract_id,
+                "failed_addresses": len(classify_failures),
+            },
+        )
 
     return added_principals

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import contextvars
 import json
+import logging
 import os
 import urllib.error
 import urllib.request
@@ -35,6 +36,8 @@ from utils.rpc import erpc_url_for_chain_id, rpc_headers
 
 from .inventory_domain import CHAIN_IDS, RateLimiter, _debug_log
 from .static_dependencies import RPC_TIMEOUT_SECONDS, has_deployed_code
+
+logger = logging.getLogger(__name__)
 
 # Max addresses per JSON-RPC batch request.
 _BATCH_RPC_SIZE = 100
@@ -142,6 +145,15 @@ def _probe_chain_batch(
         code_map = _batch_get_code(rpc_url, addresses)
         return {addr for addr, code in code_map.items() if has_deployed_code(code)}
     except Exception as exc:
+        # The empty set is indistinguishable from "no address has code here", so
+        # the log line is the only place the difference survives: without it a
+        # chain-wide probe outage silently shrinks multichain membership.
+        logger.warning(
+            "Chain probe failed for %s (%d address(es)); chain contributes no membership evidence",
+            chain_name,
+            len(addresses),
+            extra={"chain": chain_name, "exc_type": type(exc).__name__, "addresses": len(addresses)},
+        )
         _debug_log(debug, f"  {chain_name}: probe failed: {exc!r}")
         return set()
 
@@ -168,6 +180,11 @@ def _probe_chains(
                     matched[addr].append(chain_name)
                 _debug_log(debug, f"  {chain_name}: {len(hits)} hit(s)")
             except Exception as exc:
+                logger.warning(
+                    "Chain probe raised for %s; chain contributes no membership evidence",
+                    chain_name,
+                    extra={"chain": chain_name, "exc_type": type(exc).__name__},
+                )
                 _debug_log(debug, f"  {chain_name}: probe failed: {exc!r}")
 
 

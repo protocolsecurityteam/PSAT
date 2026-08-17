@@ -318,7 +318,23 @@ def _load_nested_artifacts(session: Session, job_id, *, chain: str) -> dict[str,
     for address, bundle in bundles.items():
         try:
             mrow = cm.find_by_address(session, chain=chain, address=address)
-        except Exception:
+        except Exception as exc:
+            # A failed query leaves the session pending-rollback; roll back before
+            # the next address's lookup so one DB hiccup doesn't drop every
+            # remaining bundle. The bundle is dropped either way, but a row miss
+            # is an expected outcome (silent, above) and a DB error is not.
+            session.rollback()
+            record_degraded(
+                phase="nested_artifact_hydration",
+                exc=exc,
+                context={"job_id": str(job_id), "address": address, "chain": chain},
+            )
+            logger.warning(
+                "Materialization hydration failed for %s on %s; bundle dropped from policy analysis",
+                address,
+                chain,
+                extra={"exc_type": type(exc).__name__, "address": address, "chain": chain},
+            )
             mrow = None
         if mrow is None:
             continue

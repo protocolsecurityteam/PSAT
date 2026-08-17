@@ -16,6 +16,7 @@ Three passes in total:
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
 from urllib.parse import unquote, urlparse
@@ -23,6 +24,8 @@ from urllib.parse import unquote, urlparse
 from utils import llm
 
 from ..inventory_domain import _debug_log
+
+logger = logging.getLogger(__name__)
 
 _GENERIC_TITLE_TOKENS = frozenset(
     {
@@ -230,6 +233,14 @@ def _llm_validate_and_cluster(
             temperature=0.0,
         )
     except Exception as exc:
+        # Returning None drops the run back to the heuristic mirror collapse —
+        # a quieter, worse dedup that otherwise leaves no trace above DEBUG.
+        logger.warning(
+            "Validate+cluster LLM call failed for %s; falling back to heuristic dedup over %d report(s)",
+            company,
+            len(reports),
+            extra={"exc_type": type(exc).__name__, "company": company, "reports": len(reports)},
+        )
         _debug_log(debug, f"Validate+cluster LLM call failed: {exc!r}")
         return None
 

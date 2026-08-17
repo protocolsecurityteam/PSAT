@@ -355,6 +355,22 @@ def _llm_extract_filename_metadata(
                 temperature=0.0,
             )
         except Exception as exc:
+            # Provider-wide failures (402, expired token) surface here one batch
+            # at a time; at DEBUG the whole discovery run collapses to "no audits
+            # found" with nothing above INFO to triage on.
+            logger.warning(
+                "GitHub filename-metadata LLM batch %s failed for %s; %d filename(s) unclassified",
+                start,
+                company,
+                len(batch),
+                extra={
+                    "exc_type": type(exc).__name__,
+                    "company": company,
+                    "folder_context": folder_context,
+                    "batch_start": start,
+                    "batch_size": len(batch),
+                },
+            )
             _debug_log(debug, f"GitHub tree LLM batch failed ({start}): {exc!r}")
             continue
 

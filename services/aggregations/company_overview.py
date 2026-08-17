@@ -23,6 +23,7 @@ Stages (each returns plain Python data, not ORM rows that pin a session):
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import os
 import time
@@ -949,7 +950,9 @@ def _prefetch_child_tables(
 
     parallel_wall_start = time.monotonic()
     with ThreadPoolExecutor(max_workers=max(1, max_workers)) as ex:
-        futures = [ex.submit(_run_stage, tk, ok, fn) for tk, ok, fn in parallel_stages]
+        # Per-submission context copy so each prefetch stage's log lines carry
+        # the caller's trace_id instead of running under an empty context.
+        futures = [ex.submit(contextvars.copy_context().run, _run_stage, tk, ok, fn) for tk, ok, fn in parallel_stages]
         for fut in as_completed(futures):
             timing_key, out_key, data, rows, ms = fut.result()
             out[out_key] = data

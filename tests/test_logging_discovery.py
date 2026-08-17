@@ -8,13 +8,17 @@ Locks in the new emission behavior added for the logging/observability wave:
     (search/research calls, estimated cost) into stage metrics and times its
     audit/address sub-phases via ``log_timed_phase`` (Backlog #16);
   * the inventory deployer-expansion swallow records a degraded breadcrumb
-    instead of only appending to the artifact ``notes`` (Backlog #8).
+    instead of only appending to the artifact ``notes`` (Backlog #8);
+  * the DEBUG-only swallows that hid both prior audit-discovery collapses —
+    chain probes, audit-classification LLM calls, explorer activity lookups —
+    now emit WARNING with the chain/company and ``exc_type``.
 
 All stubbed at the wire — no live network/RPC.
 """
 
 from __future__ import annotations
 
+import logging
 from contextlib import contextmanager
 
 from utils.logging import (
@@ -107,3 +111,70 @@ def test_run_discovery_folds_budget_metrics(monkeypatch):
     # log_timed_phase folded per-phase timings for the wrapped sub-phases.
     assert "phase_ms_discovery_audits" in metrics
     assert "phase_ms_discovery_addresses" in metrics
+
+
+def test_chain_probe_failure_warns_instead_of_reading_as_no_code(monkeypatch, caplog):
+    """D3: an empty probe result is indistinguishable from "no code here", so
+    the failure has to survive as a WARNING."""
+    from services.discovery import chain_resolver
+
+    monkeypatch.setattr(chain_resolver, "_erpc_url_for_chain", lambda _chain: "http://stub")
+
+    def _boom(_url, _addresses):
+        raise TimeoutError("probe timed out")
+
+    monkeypatch.setattr(chain_resolver, "_batch_get_code", _boom)
+
+    with caplog.at_level(logging.WARNING, logger="services.discovery.chain_resolver"):
+        hits = chain_resolver._probe_chain_batch(["0x" + "11" * 20], "base")
+
+    assert hits == set()
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert warnings[0].chain == "base"
+    assert warnings[0].exc_type == "TimeoutError"
+
+
+def test_audit_classification_llm_failure_warns(monkeypatch, caplog):
+    """D2: the shape behind both prior audit-discovery collapses — an empty
+    classification must not be the only trace of a provider outage."""
+    from services.discovery import audit_reports_llm
+
+    def _boom(*_a, **_kw):
+        raise RuntimeError("402 payment required")
+
+    monkeypatch.setattr(audit_reports_llm.llm, "chat", _boom)
+
+    with caplog.at_level(logging.WARNING, logger="services.discovery.audit_reports_llm"):
+        out = audit_reports_llm.classify_search_results(
+            [{"title": "Acme audit", "url": "https://example.com/a.pdf"}], "acme"
+        )
+
+    assert out == []
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert warnings[0].exc_type == "RuntimeError"
+    assert warnings[0].company == "acme"
+
+
+def test_activity_fetch_failures_summarized_once_per_pass(monkeypatch, caplog):
+    """D2: per-contract explorer failures collapse into one line carrying how
+    much of the ranking ran on the neutral score."""
+    from services.discovery import activity
+
+    def _boom(*_a, **_kw):
+        raise RuntimeError("etherscan down")
+
+    monkeypatch.setattr(activity.etherscan, "get", _boom)
+
+    contracts = [{"address": "0x" + f"{i:040x}", "chains": ["ethereum"]} for i in range(3)]
+
+    with caplog.at_level(logging.WARNING, logger="services.discovery.activity"):
+        activity.enrich_with_activity(contracts)
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert warnings[0].failed == 3
+    assert warnings[0].exc_types == ["RuntimeError"]
+    # The neutral score is still published — the log is what says it was a guess.
+    assert all(c["activity"]["score"] == 0.5 for c in contracts)
