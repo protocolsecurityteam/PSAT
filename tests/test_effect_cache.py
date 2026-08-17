@@ -265,6 +265,64 @@ def test_record_effect_verdict_stale_function_id_writes_null(clean_effects):
 
 
 @requires_postgres
+def test_fk_vanish_fallback_warns_and_records_degraded(clean_effects, caplog):
+    """The row vanishing INSIDE the check→insert window (the FK-violation
+    fallback, not the pre-check) publishes an unlinked verdict — a known
+    orphaned-row bug class, so it must land in ``stage_errors`` and the log."""
+    import logging
+
+    from sqlalchemy import delete
+
+    from utils.logging import degraded_errors_var
+
+    session = clean_effects
+    address = "0x" + "55" * 20
+    fn_id = _seed_function_row(session, address, "0x8456cb59")
+    session.commit()
+
+    # Fire the delete right after the existence-check SELECT answers "present",
+    # so the insert below is the thing that discovers the row is gone.
+    injected = {"done": False}
+    orig_execute = session.execute
+
+    def execute_then_delete(statement, *args, **kwargs):
+        result = orig_execute(statement, *args, **kwargs)
+        if not injected["done"] and "effective_functions" in str(statement).lower():
+            injected["done"] = True
+            orig_execute(delete(EffectiveFunction).where(EffectiveFunction.id == fn_id))
+        return result
+
+    accumulator: list = []
+    token = degraded_errors_var.set(accumulator)
+    session.execute = execute_then_delete  # type: ignore[method-assign]
+    try:
+        with caplog.at_level(logging.WARNING, logger="db.effect_cache"):
+            record_effect_verdict(
+                session,
+                chain_id=1,
+                contract_address=address,
+                selector="0x8456cb59",
+                effect_class="freeze_pause",
+                verdict="proven",
+                tier="tier2",
+                function_id=fn_id,
+            )
+    finally:
+        del session.execute
+        degraded_errors_var.reset(token)
+    session.commit()
+
+    assert injected["done"], "FK-vanish injection never fired — the test would be vacuous"
+    row = session.query(EffectVerdict).one()
+    assert row.function_id is None and row.verdict == "proven"
+    rec = next(r for r in caplog.records if r.name == "db.effect_cache")
+    assert rec.levelno == logging.WARNING
+    assert rec.function_id == fn_id
+    assert rec.contract_address == address
+    assert [e.phase for e in accumulator] == ["effect_verdict_unlink"]
+
+
+@requires_postgres
 def test_stale_function_id_does_not_poison_sibling_verdicts(clean_effects):
     """One stale id in a job's worklist must not lose the other candidates'
     verdicts — the whole-job session stays writable and commits both rows."""

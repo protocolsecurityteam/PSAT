@@ -109,6 +109,10 @@ _PUBLIC_ADMISSION_CLAIM_IDS = ("flow.out", "supply.mint")
 # enough to leave room for the getter-named assets, which are stronger evidence.
 _MAX_TOKEN_ARG_CANDIDATES = 2
 
+# How many cap-dropped candidates the drop WARNING names individually. The count
+# is always exact; this only bounds the sample (mirrors seeding's ``_SKIP_SAMPLE``).
+_DROPPED_SAMPLE = 8
+
 
 _ZERO_USD = Decimal(0)
 
@@ -1033,8 +1037,15 @@ def _resolve_stored_statuses(keys_to_types: dict[str, str | None]) -> dict[str, 
             continue
         try:
             out[key] = _recorded_stage_status(deserialize_artifact(body, content_type))
-        except Exception:
-            logger.warning("effects selection: undecodable stage-timing body %s", key, exc_info=True)
+        except Exception as exc:
+            # Same safe direction and same accounting as the read failure above:
+            # the contract re-sweeps, and the extra planning work has to be
+            # attributable to a recorded degradation.
+            record_degraded(phase="effects_selection_stage_status", exc=exc, context={"key": key})
+            logger.warning(
+                "effects selection: undecodable stage-timing body",
+                extra={"key": key, "exc_type": type(exc).__name__},
+            )
     return out
 
 
@@ -1525,8 +1536,16 @@ def select_candidates(
     *,
     resource_cap: int | None = None,
     scope: JobScope | None = None,
+    funnel: dict[str, int] | None = None,
 ) -> list[Candidate]:
     """Return the blank-gated simulation set, ordered by transitive value.
+
+    ``funnel``, when passed, is filled with the counts this function alone can
+    reconcile — ``rows_in`` from the cascade query, ``skipped_already_explained``
+    (a claim-carrying row with no family left to re-probe), ``cap_dropped``, and
+    the ``selected`` total. The caller publishes them; without it the difference
+    between "the cascade found nothing" and "everything it found was dropped
+    here" is invisible downstream.
 
     ``resource_cap`` is the ONLY permissible cutoff: a hard
     safety-valve for a pathological protocol. When it fires it drops the
@@ -1540,6 +1559,11 @@ def select_candidates(
     blast radius.
     """
     rows = _cascade_rows(session, protocol_id, scope)
+    if funnel is not None:
+        funnel["rows_in"] = len(rows)
+        funnel["skipped_already_explained"] = 0
+        funnel["cap_dropped"] = 0
+        funnel["selected"] = 0
     function_ids = [r[0] for r in rows]
     principals = _principals_by_function(session, function_ids)
     graph = build_authority_graph(session, protocol_id)
@@ -1580,6 +1604,8 @@ def select_candidates(
         families = _enrolled_families(claims)
         # Claim-carrying but no flow/supply family to re-probe → already explained.
         if families is not None and not families:
+            if funnel is not None:
+                funnel["skipped_already_explained"] += 1
             continue
         addr = _addr(address) or ""
         prins = principals.get(fid, [])
@@ -1617,8 +1643,13 @@ def select_candidates(
     if resource_cap is not None and len(candidates) > resource_cap:
         kept, dropped = candidates[:resource_cap], candidates[resource_cap:]
         _log_dropped(protocol_id, resource_cap, dropped)
+        if funnel is not None:
+            funnel["cap_dropped"] = len(dropped)
+            funnel["selected"] = len(kept)
         return kept
 
+    if funnel is not None:
+        funnel["selected"] = len(candidates)
     return candidates
 
 
@@ -1666,16 +1697,29 @@ def record_empty_planning(
 
 
 def _log_dropped(protocol_id: int, resource_cap: int, dropped: list[Candidate]) -> None:
-    """Name every dropped candidate — no silent truncation."""
-    manifest = ", ".join(
-        f"fn={c.function_id}({c.selector or c.function_name}) on {c.contract_address}"
-        f" value=${c.value_at_stake_usd:,.0f}"
-        for c in dropped
-    )
+    """Account for every dropped candidate — no silent truncation.
+
+    The COUNT is the fact (nothing is dropped without it being logged); the
+    manifest is a bounded sample, because a pathological protocol is exactly the
+    case that trips the cap and a full manifest there is a single log line
+    thousands of entries long."""
+    manifest = [
+        {
+            "function_id": c.function_id,
+            "selector": c.selector or c.function_name,
+            "contract_address": c.contract_address,
+            "value_at_stake_usd": round(c.value_at_stake_usd, 2),
+        }
+        for c in dropped[:_DROPPED_SAMPLE]
+    ]
     logger.warning(
-        "effects selection resource cap hit for protocol_id=%s: cap=%d dropped %d candidate(s): %s",
-        protocol_id,
-        resource_cap,
+        "effects selection resource cap hit: dropped %d candidate(s) below the cap",
         len(dropped),
-        manifest,
+        extra={
+            "protocol_id": protocol_id,
+            "resource_cap": resource_cap,
+            "dropped": len(dropped),
+            "dropped_sample": manifest,
+            "dropped_sample_truncated": len(dropped) > _DROPPED_SAMPLE,
+        },
     )

@@ -38,6 +38,7 @@ import json
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -70,6 +71,7 @@ from services.effects.config import (
     VERDICT_UNKNOWN,
 )
 from services.effects.discrepancies import authority_contradiction, file_new_idiom_candidate, route_discrepancy
+from services.effects.exceptions import BehaviorHashUnavailable
 from services.effects.harness import Discrepancy, ObservedEffect
 from services.effects.orchestrator import (
     HashResolver,
@@ -425,7 +427,6 @@ class _Item:
 @dataclass
 class _Counters:
     candidates_in: int = 0
-    candidates_after_cascade: int = 0
     cache_hits_kernel: int = 0
     cache_hits_projection: int = 0
     cache_misses: int = 0
@@ -435,8 +436,16 @@ class _Counters:
     upstream_requests: int = 0
     peak_anvil_rss_mb: int = 0
     skipped: int = 0
+    # A cache-missing item whose probe produced nothing: it publishes a
+    # fail-closed ``unknown`` and is NOT cached, so it is neither a hit nor a
+    # miss. Counted so the worklist reconciles as hits + misses + skipped +
+    # failed instead of losing these to arithmetic.
+    probes_failed: int = 0
     residue_observations: int = 0
     contracts_planned_empty: int = 0
+    # The pre-candidate funnel from ``select_candidates`` (rows_in,
+    # skipped_already_explained, cap_dropped, selected).
+    selection_funnel: dict[str, int] = field(default_factory=dict)
     # Input-asset seeding spend/yield for the job (see ``SeedBudget.metrics``).
     seed_metrics: dict[str, int] = field(default_factory=dict)
 
@@ -471,6 +480,8 @@ class EffectsWorker(BaseWorker):
         # Per-job input-asset seeder, rebuilt in ``_probe_context`` so its budget
         # counters start at zero for every job.
         self._seeder: SimulateSeeder | None = None
+        # One RSS-sample failure line per job, reset with the fork.
+        self._rss_sample_failed = False
 
     # -- seam construction (lazy; real I/O only here) ----------------------
 
@@ -538,6 +549,7 @@ class EffectsWorker(BaseWorker):
         from utils.rpc import rpc_headers
 
         hardfork = _CHAIN_HARDFORK.get(chain_id, "prague")
+        port = _anvil_port()
 
         def factory():
             if self._anvil_error is not None:
@@ -548,7 +560,7 @@ class EffectsWorker(BaseWorker):
                 # rpc_headers is the single source of truth for eRPC auth — a local
                 # or explicit fork URL correctly gets no secret.
                 self._anvil = SubprocessAnvil(
-                    port=_anvil_port(),
+                    port=port,
                     hardfork_name=hardfork,
                     fork_url=rpc_url,
                     fork_headers=rpc_headers(rpc_url),
@@ -561,7 +573,18 @@ class EffectsWorker(BaseWorker):
             except Exception as exc:
                 self._anvil_error = exc if isinstance(exc, AnvilSpawnError) else AnvilSpawnError(str(exc))
                 raise self._anvil_error from exc
-            logger.info("effects fork ready: chain_id=%s hardfork=%s", chain_id, hardfork)
+            # ``fork_block`` is read back off the spawned fork, not off the pin
+            # asked for: a rejected pin leaves it None, and that is the height the
+            # Tier-2 witnesses will publish.
+            fork_block = self._anvil.fork_block_number()
+            logger.info(
+                "effects fork ready: chain_id=%s hardfork=%s fork_block=%s port=%s",
+                chain_id,
+                hardfork,
+                fork_block,
+                port,
+                extra={"chain_id": chain_id, "hardfork": hardfork, "fork_block": fork_block, "port": port},
+            )
             return self._anvil
 
         return factory
@@ -573,6 +596,7 @@ class EffectsWorker(BaseWorker):
         self._anvil = None
         self._anvil_error = None
         self._fork_block_pin = None
+        self._rss_sample_failed = False
         if anvil is None:
             return
         try:
@@ -616,10 +640,10 @@ class EffectsWorker(BaseWorker):
 
         # Selection FIRST (before any wire): a zero-candidate job must touch no RPC.
         with log_timed_phase(logger, "selection", durations_ms=durations_ms) as ph:
-            candidates = self._select(session, job)
+            candidates = self._select(session, job, funnel=counters.selection_funnel)
             ph["candidate_count"] = len(candidates)
+            ph.update(counters.selection_funnel)
         counters.candidates_in = len(candidates)
-        counters.candidates_after_cascade = len(candidates)
 
         if not candidates:
             # Inert, wire-free: emit the remaining phase spans for a complete
@@ -636,7 +660,10 @@ class EffectsWorker(BaseWorker):
             logger.info(
                 "Effects stage complete for job %s: 0 candidates (no-op)",
                 job.id,
-                extra={"durations_ms": durations_ms},
+                extra={
+                    "durations_ms": durations_ms,
+                    **{f"selection_{k}": v for k, v in counters.selection_funnel.items()},
+                },
             )
             return
 
@@ -672,7 +699,8 @@ class EffectsWorker(BaseWorker):
         self._record_metrics(counters)
         logger.info(
             "Effects stage complete for job %s: %d candidates, %d verdicts, "
-            "%d hits (%dk/%dp), %d misses, %d discrepancies, %d new-idiom candidates",
+            "%d hits (%dk/%dp), %d misses, %d skipped, %d failed probes, "
+            "%d discrepancies, %d new-idiom candidates",
             job.id,
             len(candidates),
             counters.verdicts_written,
@@ -680,14 +708,21 @@ class EffectsWorker(BaseWorker):
             counters.cache_hits_kernel,
             counters.cache_hits_projection,
             counters.cache_misses,
+            counters.skipped,
+            counters.probes_failed,
             counters.discrepancies_filed,
             counters.new_idiom_candidates,
-            extra={"durations_ms": durations_ms},
+            extra={
+                "durations_ms": durations_ms,
+                "skipped": counters.skipped,
+                "probes_failed": counters.probes_failed,
+                **{f"selection_{k}": v for k, v in counters.selection_funnel.items()},
+            },
         )
 
     # -- phase helpers -----------------------------------------------------
 
-    def _select(self, session: Session, job: Job) -> list[Candidate]:
+    def _select(self, session: Session, job: Job, *, funnel: dict[str, int] | None = None) -> list[Candidate]:
         protocol_id = getattr(job, "protocol_id", None)
         if not isinstance(protocol_id, int):
             # A contract job with no protocol has nothing to simulate against the
@@ -709,7 +744,7 @@ class EffectsWorker(BaseWorker):
         # No address ⇒ a company/root job, which owns no contract of its own; it
         # falls back to protocol-wide selection so such a job still covers the
         # protocol rather than planning nothing.
-        return select_candidates(session, protocol_id, resource_cap=_resource_cap(), scope=scope)
+        return select_candidates(session, protocol_id, resource_cap=_resource_cap(), scope=scope, funnel=funnel)
 
     def _preflight(self, seams: _Seams, durations_ms: dict[str, int]) -> tuple[bool, int]:
         """Capability probe + the ONE ``eth_blockNumber`` that pins every Tier-1
@@ -836,8 +871,27 @@ class EffectsWorker(BaseWorker):
                     unclean_contracts.add(cand.contract_id)
                     continue
                 if resolved is None:
-                    # No behavioral hash (no cached bytecode) — withhold rather
-                    # than guess (per-behavior fail-forward).
+                    # No behavioral hash (no cached bytecode, or a proxy row whose
+                    # implementation is unresolved) — withhold rather than guess
+                    # (per-behavior fail-forward). Recorded like its two raising
+                    # siblings: the candidate silently vanishing from the worklist
+                    # is what makes a bytecode-cache outage read as "nothing to do".
+                    context = {
+                        "function_id": cand.function_id,
+                        "contract_id": cand.contract_id,
+                        "contract_address": cand.contract_address,
+                    }
+                    record_degraded(
+                        phase="effects_hash",
+                        exc=BehaviorHashUnavailable(
+                            f"no behavioral hash for function {cand.function_id} on {cand.contract_address}"
+                        ),
+                        context=context,
+                    )
+                    # DEBUG per candidate (a cold bytecode cache would flood the
+                    # log at WARNING); the job-level total rides the summary INFO
+                    # as ``skipped`` and the stage metric of the same name.
+                    logger.debug("effects: candidate skipped, no behavioral hash resolved", extra=context)
                     counters.skipped += 1
                     unclean_contracts.add(cand.contract_id)
                     continue
@@ -1006,8 +1060,15 @@ class EffectsWorker(BaseWorker):
             return
         try:
             counters.peak_anvil_rss_mb = max(counters.peak_anvil_rss_mb, int(sample()))
-        except Exception:
-            pass
+        except Exception as exc:
+            # Once per job: a published ``peak_anvil_rss_mb=0`` otherwise reads as
+            # "the fork used no memory" when it means "we never measured it".
+            if not self._rss_sample_failed:
+                self._rss_sample_failed = True
+                logger.debug(
+                    "effects: anvil RSS sample failed; peak_anvil_rss_mb is unmeasured, not zero",
+                    extra={"exc_type": type(exc).__name__},
+                )
 
     def _probe_one(self, it: _Item, counters: _Counters) -> None:
         try:
@@ -1130,6 +1191,18 @@ class EffectsWorker(BaseWorker):
         anyway. Hoisted, a host-work failure raises as itself and everything the
         handlers below report is genuinely this hook's.
         """
+        # Timed as a stage METRIC only, never a ``log_timed_phase`` span: the
+        # caller keeps this outside the timeline on purpose (it writes no verdict
+        # and must add no /monitor stage), but its cost still has to be
+        # attributable rather than hiding inside the job's residual elapsed time.
+        started = time.monotonic()
+        try:
+            self._distill_score_signals_inner(session, job)
+        finally:
+            record_stage_metric("phase_ms_distill", int((time.monotonic() - started) * 1000))
+
+    def _distill_score_signals_inner(self, session: Session, job: Job) -> None:
+        """The distillation itself; see :meth:`_distill_score_signals`."""
         from services.scoring.dirty import SCORE_DIRTY_EFFECTS, mark_protocol_score_dirty
         from services.scoring.distill import distill_job_signals
         from services.scoring.population import replace_contract_signals
@@ -1256,7 +1329,9 @@ class EffectsWorker(BaseWorker):
             eff = it.probed
             if eff is None:
                 # Probe failed (degraded already recorded) → fail-closed unknown,
-                # NOT cached (a flake must not poison the shared cache).
+                # NOT cached (a flake must not poison the shared cache). Counted
+                # so this outcome is neither a hit nor a miss in the accounting.
+                counters.probes_failed += 1
                 return VERDICT_UNKNOWN, TIER_CALL, None, None, None, None, False
             counters.cache_misses += 1
             if _is_cacheable(eff):
@@ -1470,10 +1545,12 @@ class EffectsWorker(BaseWorker):
 
     def _record_metrics(self, counters: _Counters) -> None:
         record_stage_metric("candidates_in", counters.candidates_in)
-        record_stage_metric("candidates_after_cascade", counters.candidates_after_cascade)
         record_stage_metric("cache_hits_kernel", counters.cache_hits_kernel)
         record_stage_metric("cache_hits_projection", counters.cache_hits_projection)
         record_stage_metric("cache_misses", counters.cache_misses)
+        # Every candidate is accounted for: hits + misses + skipped + failed.
+        record_stage_metric("skipped", counters.skipped)
+        record_stage_metric("probes_failed", counters.probes_failed)
         record_stage_metric("verdicts_written", counters.verdicts_written)
         record_stage_metric("discrepancies_filed", counters.discrepancies_filed)
         record_stage_metric("new_idiom_candidates", counters.new_idiom_candidates)
@@ -1481,6 +1558,10 @@ class EffectsWorker(BaseWorker):
         record_stage_metric("peak_anvil_rss_mb", counters.peak_anvil_rss_mb)
         record_stage_metric("residue_observations", counters.residue_observations)
         record_stage_metric("contracts_planned_empty", counters.contracts_planned_empty)
+        # The pre-candidate funnel: what the cascade returned and what selection
+        # itself removed before any candidate existed.
+        for name, value in counters.selection_funnel.items():
+            record_stage_metric(f"selection_{name}", value)
         for name, value in counters.seed_metrics.items():
             record_stage_metric(name, value)
 

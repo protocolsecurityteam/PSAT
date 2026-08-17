@@ -41,6 +41,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from db.models import EffectBehaviorCache, EffectiveFunction, EffectVerdict
+from utils.logging import record_degraded
 
 logger = logging.getLogger(__name__)
 
@@ -1189,6 +1190,20 @@ def record_effect_verdict(
         # savepoint keeps the job session writable; retry unlinked.
         if "effect_verdicts_function_id_fkey" not in str(exc.orig):
             raise
+        context = {
+            "chain_id": chain_id,
+            "contract_address": contract_address.lower(),
+            "selector": selector or "",
+            "effect_class": effect_class,
+            "function_id": function_id,
+        }
+        record_degraded(phase="effect_verdict_unlink", exc=exc, context=context)
+        # The verdict still lands, but with no function row to hang off: the
+        # frontend cannot attribute it to a function until a later pass relinks.
+        logger.warning(
+            "effect verdict written unlinked: function row vanished mid-job",
+            extra=context,
+        )
         with session.begin_nested():
             session.execute(_upsert(None))
     session.flush()
