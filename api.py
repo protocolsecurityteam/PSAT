@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import time
 import uuid
 from contextlib import asynccontextmanager, suppress
@@ -35,14 +36,146 @@ from routers import (
     spa,
 )
 from utils.logging import bind_trace_context, configure_logging, trace_id_var
+from utils.ratelimit import SlidingWindowRateLimiter, client_ip
 
 logger = logging.getLogger(__name__)
 
 TRACE_ID_HEADER = "X-PSAT-Trace-Id"
 
+# Job.trace_id is String(32); the id is reflected in a response header and
+# injected into log fields, so a client-supplied value must be a bounded,
+# character-safe token or it is discarded and a fresh id minted.
+_TRACE_ID_RE = re.compile(r"[A-Za-z0-9-]{1,32}")
+
 # A request slower than this is logged at WARNING even on a 2xx — a slow
 # endpoint is degraded service worth surfacing without a separate alert rule.
 _SLOW_REQUEST_MS = 1000
+
+# Reject a request whose declared Content-Length exceeds this ceiling before
+# it is read into memory. PSAT_MAX_BODY_BYTES overrides (bytes).
+_MAX_BODY_BYTES = int(os.environ.get("PSAT_MAX_BODY_BYTES", str(4 * 1024 * 1024)))
+
+# Fleet-wide per-IP request cap. Generous by default so the SPA's burst of
+# API calls per page is unaffected; a scraper/abuser is throttled.
+# PSAT_GLOBAL_RATE_LIMIT / _WINDOW_S override; 0 disables.
+_GLOBAL_RATE_LIMIT = int(os.environ.get("PSAT_GLOBAL_RATE_LIMIT", "300"))
+_GLOBAL_RATE_WINDOW_S = float(os.environ.get("PSAT_GLOBAL_RATE_WINDOW_S", "60"))
+_global_limiter = SlidingWindowRateLimiter(_GLOBAL_RATE_LIMIT, _GLOBAL_RATE_WINDOW_S)
+
+# script-src stays 'self' (no inline scripts in the built SPA); style-src keeps
+# 'unsafe-inline' for the styled-component / inline-style surface and allows the
+# Google Fonts stylesheet host. connect-src adds the CoinGecko logo API the SPA
+# fetches directly; img-src is pinned to the two CoinGecko asset hosts the logo
+# URLs resolve to (plus 'self'/data:) rather than a blanket https: sink.
+# frame-ancestors 'self' keeps the same-origin audit-pdf iframe working while
+# blocking cross-site framing.
+_CSP = (
+    "default-src 'self'; "
+    "script-src 'self'; "
+    "object-src 'none'; "
+    "base-uri 'self'; "
+    "frame-ancestors 'self'; "
+    "img-src 'self' data: https://assets.coingecko.com https://coin-images.coingecko.com; "
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+    "font-src 'self' https://fonts.gstatic.com; "
+    "connect-src 'self' https://api.coingecko.com"
+)
+_SECURITY_HEADERS = {
+    "Content-Security-Policy": _CSP,
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "SAMEORIGIN",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+}
+
+
+def _security_headers_response(
+    status_code: int, detail: str, extra_headers: dict[str, str] | None = None
+) -> JSONResponse:
+    resp = JSONResponse(status_code=status_code, content={"detail": detail})
+    for name, value in _SECURITY_HEADERS.items():
+        resp.headers[name] = value
+    for name, value in (extra_headers or {}).items():
+        resp.headers[name] = value
+    return resp
+
+
+class BodySizeLimitMiddleware:
+    """Reject request bodies larger than the configured cap with 413.
+
+    A declared ``Content-Length`` is rejected up-front (the honest common
+    case, and the server holds the peer to that length). A
+    ``Transfer-Encoding: chunked`` request carries no length, so the received
+    stream is counted and the request rejected the moment its cumulative body
+    crosses the cap — closing the unbounded-buffering bypass. The cap is read
+    live from ``_MAX_BODY_BYTES`` so an env/test override takes effect without
+    reconstructing the app.
+    """
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        from starlette.datastructures import Headers
+
+        max_bytes = _MAX_BODY_BYTES
+        headers = Headers(scope=scope)
+        declared = headers.get("content-length")
+        if declared is not None:
+            try:
+                length = int(declared)
+            except ValueError:
+                length = -1
+            if length < 0 or length > max_bytes:
+                await self._reject(scope, send, max_bytes)
+                return
+            # Server enforces the declared length: the body can't exceed it.
+            await self.app(scope, receive, send)
+            return
+
+        # No Content-Length (chunked): buffer-and-count before invoking the app
+        # so an over-cap body is rejected without any downstream send having
+        # started (no response-conflict), then replay the body downstream.
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                chunks = []
+                break
+            if message["type"] != "http.request":
+                break
+            chunk = message.get("body", b"")
+            total += len(chunk)
+            if total > max_bytes:
+                await self._reject(scope, send, max_bytes)
+                return
+            chunks.append(chunk)
+            if not message.get("more_body", False):
+                break
+
+        body = b"".join(chunks)
+        replayed = False
+
+        async def replay_receive():
+            nonlocal replayed
+            if not replayed:
+                replayed = True
+                return {"type": "http.request", "body": body, "more_body": False}
+            return {"type": "http.disconnect"}
+
+        await self.app(scope, replay_receive, send)
+
+    async def _reject(self, scope, send, max_bytes: int) -> None:
+        response = _security_headers_response(413, f"Request body exceeds the {max_bytes}-byte limit")
+
+        async def _noop_receive():
+            return {"type": "http.disconnect"}
+
+        await response(scope, _noop_receive, send)
 
 
 @asynccontextmanager
@@ -163,7 +296,10 @@ async def trace_id_middleware(request: Request, call_next):
     of the stack regardless of where the others land.
     """
     incoming = request.headers.get(TRACE_ID_HEADER)
-    trace_id = incoming if incoming else uuid.uuid4().hex[:16]
+    # A client-supplied id is trusted only when it is a bounded, char-safe
+    # token; anything else is discarded and a fresh id minted, so the value
+    # reflected back and stored on Job.trace_id is always well-formed.
+    trace_id = incoming if incoming and _TRACE_ID_RE.fullmatch(incoming) else uuid.uuid4().hex[:16]
     started = time.monotonic()
     with bind_trace_context(trace_id=trace_id):
         response = await call_next(request)
@@ -192,6 +328,38 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "X-PSAT-Admin-Key"],
 )
+
+
+def _apply_security_headers(response):
+    for name, value in _SECURITY_HEADERS.items():
+        response.headers[name] = value
+    return response
+
+
+@app.middleware("http")
+async def edge_guard_middleware(request: Request, call_next):
+    """Per-IP rate limit + security headers on every response.
+
+    The body-size cap runs in ``BodySizeLimitMiddleware`` (registered below,
+    outermost); this guard adds the global rate limit and stamps the security
+    headers, including on its own 429.
+    """
+    retry_after = _global_limiter.hit(client_ip(request))
+    if retry_after is not None:
+        return _security_headers_response(
+            429,
+            f"Rate limit exceeded ({_GLOBAL_RATE_LIMIT} requests / {int(_GLOBAL_RATE_WINDOW_S)}s).",
+            {"Retry-After": str(retry_after)},
+        )
+
+    response = await call_next(request)
+    return _apply_security_headers(response)
+
+
+# Outermost: the body-size cap must see the raw request stream before any other
+# middleware buffers it. Registered last so it wraps the whole stack.
+app.add_middleware(BodySizeLimitMiddleware)
+
 
 spa.mount_static_assets(app)
 
