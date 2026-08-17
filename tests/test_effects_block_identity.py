@@ -139,6 +139,7 @@ def test_a_forking_spawn_pins_the_block_on_the_command_line():
         "8546",
         "--hardfork",
         "prague",
+        "--silent",
         "--fork-url",
         "http://upstream",
         "--fork-block-number",
@@ -157,6 +158,7 @@ def test_the_pin_survives_the_authenticated_upstream_form():
         "8600",
         "--hardfork",
         "prague",
+        "--silent",
         "--fork-url",
         "https://erpc/main/evm/1",
         "--fork-block-number",
@@ -172,7 +174,7 @@ def test_an_unpinnable_head_forks_unpinned_rather_than_at_genesis(unpinnable):
     0 and then RECORD 0 as the observation height — a wrong answer with a real
     height's shape. The flag is omitted instead."""
     cmd = _build_anvil_cmd("anvil", 8546, "prague", "http://upstream", None, unpinnable)
-    assert cmd == ["anvil", "--port", "8546", "--hardfork", "prague", "--fork-url", "http://upstream"]
+    assert cmd == ["anvil", "--port", "8546", "--hardfork", "prague", "--silent", "--fork-url", "http://upstream"]
 
 
 def test_a_non_forking_spawn_never_pins():
@@ -184,6 +186,7 @@ def test_a_non_forking_spawn_never_pins():
         "8546",
         "--hardfork",
         "prague",
+        "--silent",
     ]
 
 

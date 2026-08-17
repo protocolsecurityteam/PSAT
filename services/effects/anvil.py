@@ -715,10 +715,13 @@ def _build_anvil_cmd(
     fork_headers: Mapping[str, str] | None,
     fork_block_number: int | None = None,
 ) -> list[str]:
-    # No ``--silent``: anvil's own stdout/stderr is the ONLY account of why a fork
-    # died (bad fork URL, upstream auth reject, rate limit, OOM). It is drained
-    # into the logger at DEBUG by :class:`SubprocessAnvil`, never inherited raw.
-    cmd = [anvil_bin, "--port", str(port), "--hardfork", hardfork_name]
+    # ``--silent`` stays: measured on anvil 1.5.1 it suppresses the startup banner
+    # and the per-RPC line, NOT the fatal startup errors (a bad fork URL and a
+    # taken port both print verbatim under it). So the failure account this
+    # subprocess is piped for survives, while the tail keeps naming the cause
+    # instead of 40 ``eth_call`` lines — and the banner's dev private keys +
+    # mnemonic never reach a log line or an exception message.
+    cmd = [anvil_bin, "--port", str(port), "--hardfork", hardfork_name, "--silent"]
     if fork_url is not None:
         cmd += ["--fork-url", fork_url]
         # Unpinned, anvil forks at whatever head the upstream serves AT SPAWN, so
@@ -773,14 +776,23 @@ class SubprocessAnvil:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
+                # One undecodable byte must not kill the drain: ``text=True``
+                # defaults to strict, and a dead drain leaves the pipe unread
+                # until anvil blocks writing into a full 64K buffer — holding the
+                # port with a process nothing is reading.
+                errors="replace",
                 bufsize=1,
             )
         except (OSError, ValueError) as exc:
             raise AnvilSpawnError(f"failed to spawn anvil: {exc}") from exc
-        self._drain = threading.Thread(target=self._drain_output, name="anvil-log-drain", daemon=True)
-        self._drain.start()
-        self._foundry_version = _anvil_version(anvil_bin)
+        # Everything from here on can leave a live process behind, so it all sits
+        # under the cleanup guard: a failed ``Thread.start`` would leave the pipe
+        # undrained (the backpressure deadlock above), and ``_anvil_version`` does
+        # its own subprocess work that can raise.
         try:
+            self._drain = threading.Thread(target=self._drain_output, name="anvil-log-drain", daemon=True)
+            self._drain.start()
+            self._foundry_version = _anvil_version(anvil_bin)
             self._wait_ready(startup_timeout)
         except BaseException:
             # A fork that never became usable must not leave its process (and the
@@ -809,8 +821,16 @@ class SubprocessAnvil:
                     continue
                 self._output_tail.append(line)
                 logger.log(logging.DEBUG, "%s", line, extra={"source": "anvil"})
-        except (ValueError, OSError):  # pragma: no cover - pipe closed under us by close()
-            return
+        except BaseException:
+            # Either ``close`` pulled the fd (the normal end) or the read failed
+            # for a reason we did not anticipate. Either way nothing will drain
+            # this pipe again, so the stream is closed rather than left half-read:
+            # anvil's next write then fails loudly instead of blocking forever on
+            # a full buffer with the port still held.
+            try:
+                stream.close()
+            except Exception:
+                pass
 
     def output_tail(self) -> list[str]:
         """The most recent drained output lines (bounded); empty before any output."""
@@ -822,12 +842,25 @@ class SubprocessAnvil:
             try:
                 self._proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
+                # Deliberately NOT paired with ``record_degraded``: fork-close
+                # cleanup is a resource side-effect (port/memory), not a
+                # degradation of the stage's verdict output — the same exemption
+                # class as ``effects_worker``'s allow-listed close handler.
                 logger.warning(
                     "anvil did not exit on SIGTERM; escalating to SIGKILL",
                     extra={"source": "anvil", "pid": self._proc.pid, "terminate_timeout_s": 5},
                 )
                 self._proc.kill()
-                self._proc.wait(timeout=5)
+                try:
+                    self._proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    # An unreapable process is the caller's problem to notice via
+                    # the port, not a reason for ``close`` itself to raise into a
+                    # finally block.
+                    logger.warning(
+                        "anvil still present after SIGKILL",
+                        extra={"source": "anvil", "pid": self._proc.pid},
+                    )
         # The pipe hits EOF once the process is gone, so the drain thread ends on
         # its own; joining bounded (and closing the fd) keeps many open/close
         # cycles per job from accumulating threads or descriptors.

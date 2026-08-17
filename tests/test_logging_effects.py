@@ -2,8 +2,9 @@
 
 Covers the dark edges the audit named: anvil output is drained into the logger
 and its tail survives into the spawn error, the degraded skip/swallow paths pair
-a log with ``record_degraded``, and the worker's counters reconcile
-(``candidates_in == hits + misses + skipped + probes_failed``) in both the stage
+a log with ``record_degraded`` (bounded, so a cold cache cannot flood the
+artifact), and every worklist item lands in exactly one counter
+(``items == hits + misses + probes_failed + withheld``) in both the stage
 metrics and the completion summary.
 
 No DB / network: every case drives a pure helper, a fake subprocess, or a fake
@@ -26,7 +27,7 @@ from services.effects import anvil as anvil_mod  # noqa: E402
 from services.effects import calldata as calldata_mod  # noqa: E402
 from services.effects import orchestrator as orch_mod  # noqa: E402
 from services.effects import selection as selection_mod  # noqa: E402
-from services.effects.anvil import SubprocessAnvil  # noqa: E402
+from services.effects.anvil import _OUTPUT_TAIL_LINES, SubprocessAnvil  # noqa: E402
 from services.effects.exceptions import AnvilSpawnError  # noqa: E402
 from services.effects.selection import Candidate  # noqa: E402
 from utils.logging import degraded_errors_var, stage_metrics_var  # noqa: E402
@@ -50,8 +51,11 @@ def _fake_anvil_bin(tmp_path: Path, body: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def test_anvil_command_line_no_longer_silences_the_process():
-    assert "--silent" not in anvil_mod._build_anvil_cmd("anvil", 8546, "prague", None, None)
+def test_anvil_stays_silent_while_its_output_is_piped():
+    """``--silent`` suppresses the banner (whose tail is dev keys + a mnemonic)
+    and the per-RPC line, not the fatal startup errors — so the pipe still
+    carries the failure account and the tail never carries a secret."""
+    assert "--silent" in anvil_mod._build_anvil_cmd("anvil", 8546, "prague", None, None)
 
 
 def test_spawn_failure_carries_returncode_and_output_tail(tmp_path, caplog):
@@ -79,10 +83,18 @@ def test_spawn_failure_carries_returncode_and_output_tail(tmp_path, caplog):
 
 
 def test_output_tail_is_bounded(tmp_path):
-    """A long-lived chatty fork must not grow the job's memory line by line."""
-    binary = _fake_anvil_bin(tmp_path, 'i=0\nwhile [ $i -lt 200 ]; do echo "line $i"; i=$((i+1)); done\nexit 1\n')
-    with pytest.raises(AnvilSpawnError):
+    """A long-lived chatty fork must not grow the job's memory line by line, and
+    the tail it hands the exception is bounded with it."""
+    lines = _OUTPUT_TAIL_LINES * 5
+    binary = _fake_anvil_bin(tmp_path, f'i=0\nwhile [ $i -lt {lines} ]; do echo "line $i"; i=$((i+1)); done\nexit 1\n')
+    with pytest.raises(AnvilSpawnError) as excinfo:
         SubprocessAnvil(port=8598, hardfork_name="prague", anvil_bin=binary, startup_timeout=5.0)
+
+    quoted = str(excinfo.value).split(": ", 1)[1]
+    assert len(quoted.split(" | ")) <= _OUTPUT_TAIL_LINES
+    # And it is the END of the output that survives — the lines nearest the death.
+    assert f"line {lines - 1}" in quoted
+    assert "line 0" not in quoted
 
 
 def test_close_warns_when_sigterm_is_escalated_to_sigkill(caplog):
@@ -309,17 +321,142 @@ def test_dropped_manifest_is_capped_with_the_full_count(caplog):
     assert rec.protocol_id == 9
 
 
-def test_metrics_publish_the_full_candidate_accounting():
+class _FlushOnlySession:
+    """Enough Session for the cache-hit bookkeeping (``bump_hit`` mutates the row
+    object and flushes); no DB is touched by the paths under test."""
+
+    def flush(self) -> None:
+        pass
+
+
+def _cached_row():
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        verdict="proven",
+        tier="tier1",
+        transcript_ptr=None,
+        details={"supply_delta_sign": "mint"},
+        hit_count=0,
+        audit_status=None,
+    )
+
+
+def _item(*, cached=None, needs_audit=False, probed=None, scope=None):
+    from services.effects.config import SCOPE_KERNEL
+    from workers.effects_worker import _Item
+
+    return _Item(
+        candidate=_candidate(1, 0),
+        effect_class="supply",
+        scope=scope or SCOPE_KERNEL,
+        gate_ref="",
+        behavior_hash="bh",
+        surface_hash="",
+        run=lambda: None,
+        cached=cached,
+        needs_audit=needs_audit,
+        probed=probed,
+    )
+
+
+def test_every_worklist_item_lands_in_exactly_one_counter():
+    """Drive the four real outcomes through ``_resolve_item`` and assert the
+    identity in ITEM units — hits + misses + failed probes + withheld. Deleting
+    any one of those increments breaks this test."""
+    from services.effects.config import TIER_HISTORICAL, VERDICT_PROVEN
+    from services.effects.harness import ObservedEffect
+    from workers.effects_worker import EffectsWorker, _Counters
+
+    worker = EffectsWorker.__new__(EffectsWorker)
+    session = _FlushOnlySession()
+    counters = _Counters()
+    # Not cacheable (tier-0), so the miss path writes nothing to the cache.
+    probe = ObservedEffect(effect_class="supply", verdict=VERDICT_PROVEN, tier=TIER_HISTORICAL)
+    items = [
+        _item(cached=None, probed=None),  # probe failed
+        _item(cached=None, probed=probe),  # miss
+        _item(cached=_cached_row()),  # plain hit
+        _item(cached=_cached_row(), needs_audit=True, probed=None),  # withheld
+    ]
+    for it in items:
+        worker._resolve_item(session, it, counters)  # type: ignore[arg-type]
+
+    assert (counters.probes_failed, counters.cache_misses, counters.cache_hits_kernel, counters.withheld) == (
+        1,
+        1,
+        1,
+        1,
+    )
+    assert (
+        len(items)
+        == counters.cache_hits_kernel
+        + counters.cache_hits_projection
+        + counters.cache_misses
+        + counters.probes_failed
+        + counters.withheld
+    )
+
+    metrics: dict = {}
+    token = stage_metrics_var.set(metrics)
+    try:
+        worker._record_metrics(counters)
+    finally:
+        stage_metrics_var.reset(token)
+
+    # The published metrics carry the same identity, and the retired dead one is gone.
+    assert "candidates_after_cascade" not in metrics
+    assert (
+        len(items)
+        == metrics["cache_hits_kernel"]
+        + metrics["cache_hits_projection"]
+        + metrics["cache_misses"]
+        + metrics["probes_failed"]
+        + metrics["withheld"]
+    )
+    # ``skipped`` is a CANDIDATE-unit count and stays out of that identity.
+    assert metrics["skipped"] == counters.skipped
+
+
+def test_hashless_candidates_record_a_capped_sample_plus_the_exact_total(monkeypatch):
+    """A cold bytecode cache refuses every candidate; the stage_errors artifact is
+    uncapped and rewritten per retry, so the per-candidate records are bounded and
+    the exact shortfall rides one summary record."""
+    from types import SimpleNamespace
+
+    from workers.effects_worker import _NO_HASH_SAMPLE, EffectsWorker, _Counters
+
+    monkeypatch.setenv("PSAT_EFFECTS_BATCH_PLAN", "0")
+    worker = EffectsWorker.__new__(EffectsWorker)
+    candidates = [_candidate(i, 0) for i in range(_NO_HASH_SAMPLE * 3)]
+    counters = _Counters()
+    accumulator: list = []
+    token = degraded_errors_var.set(accumulator)
+    try:
+        items = worker._plan(
+            None,  # type: ignore[arg-type]
+            candidates,
+            SimpleNamespace(chain_id=1),  # type: ignore[arg-type]
+            lambda _s, _c: None,
+            counters,
+        )
+    finally:
+        degraded_errors_var.reset(token)
+
+    assert items == []
+    assert counters.skipped == len(candidates)
+    # One record per candidate would be len(candidates); it is the cap plus the summary.
+    assert len(accumulator) == _NO_HASH_SAMPLE + 1
+    summary = accumulator[-1]
+    assert summary.context["candidates_without_hash"] == len(candidates)
+    assert len(summary.context["function_ids_sample"]) == _NO_HASH_SAMPLE
+
+
+def test_selection_funnel_reaches_the_metrics_under_one_key_spelling():
     from workers.effects_worker import EffectsWorker, _Counters
 
     counters = _Counters(
-        candidates_in=10,
-        cache_hits_kernel=2,
-        cache_hits_projection=1,
-        cache_misses=4,
-        skipped=2,
-        probes_failed=1,
-        selection_funnel={"rows_in": 14, "skipped_already_explained": 3, "cap_dropped": 1, "selected": 10},
+        selection_funnel={"rows_in": 14, "skipped_already_explained": 3, "cap_dropped": 1, "selected": 10}
     )
     metrics: dict = {}
     token = stage_metrics_var.set(metrics)
@@ -328,23 +465,28 @@ def test_metrics_publish_the_full_candidate_accounting():
     finally:
         stage_metrics_var.reset(token)
 
-    assert metrics["skipped"] == 2
-    assert metrics["probes_failed"] == 1
-    assert "candidates_after_cascade" not in metrics
     assert metrics["selection_rows_in"] == 14
     assert metrics["selection_cap_dropped"] == 1
-    # The whole point: the candidate set reconciles.
-    assert (
-        metrics["candidates_in"]
-        == metrics["cache_hits_kernel"]
-        + metrics["cache_hits_projection"]
-        + metrics["cache_misses"]
-        + metrics["skipped"]
-        + metrics["probes_failed"]
-    )
+    assert metrics["selection_selected"] == 10
+    assert not [k for k in metrics if k in counters.selection_funnel], "unprefixed funnel key leaked"
 
 
-def test_rss_sample_failure_is_logged_once_per_job(caplog):
+def test_selectionless_job_still_reports_a_defined_funnel():
+    """ "selection never ran" must be readable as such, not as an absent funnel."""
+    from workers.effects_worker import EffectsWorker
+
+    class _Job:
+        protocol_id = None
+
+    funnel: dict = {}
+    assert EffectsWorker.__new__(EffectsWorker)._select(None, _Job(), funnel=funnel) == []  # type: ignore[arg-type]
+    assert funnel["rows_in"] == 0 and funnel["selected"] == 0
+    assert funnel["not_run_reason"] == "job_has_no_protocol"
+
+
+def test_unmeasured_rss_is_never_published_as_zero(caplog):
+    """A failed sample must not publish ``peak_anvil_rss_mb=0`` — that is a
+    fallback standing in for a witness."""
     from workers.effects_worker import EffectsWorker, _Counters
 
     class _Anvil:
@@ -355,12 +497,55 @@ def test_rss_sample_failure_is_logged_once_per_job(caplog):
     worker._anvil = _Anvil()
     worker._rss_sample_failed = False
     counters = _Counters()
-    with caplog.at_level(logging.DEBUG, logger=WORKER_LOGGER):
-        worker._sample_anvil_rss(counters)
-        worker._sample_anvil_rss(counters)
+    accumulator: list = []
+    token = degraded_errors_var.set(accumulator)
+    try:
+        with caplog.at_level(logging.DEBUG, logger=WORKER_LOGGER):
+            worker._sample_anvil_rss(counters)
+            worker._sample_anvil_rss(counters)
+    finally:
+        degraded_errors_var.reset(token)
 
     records = [r for r in caplog.records if r.name == WORKER_LOGGER]
-    assert len(records) == 1
+    assert len(records) == 1, "the once-per-job guard did not hold"
+    assert records[0].levelno == logging.WARNING
     assert records[0].exc_type == "OSError"
-    # The counter stays at its unmeasured default — the log is what says so.
-    assert counters.peak_anvil_rss_mb == 0
+    assert [e.phase for e in accumulator] == ["effects_rss_sample"]
+    assert counters.peak_anvil_rss_mb is None
+
+    metrics: dict = {}
+    mtoken = stage_metrics_var.set(metrics)
+    try:
+        worker._record_metrics(counters)
+    finally:
+        stage_metrics_var.reset(mtoken)
+    assert metrics["peak_anvil_rss_measured"] is False
+    assert "peak_anvil_rss_mb" not in metrics
+
+
+def test_measured_rss_publishes_the_peak():
+    from workers.effects_worker import EffectsWorker, _Counters
+
+    class _Anvil:
+        def __init__(self) -> None:
+            self._samples = iter([41, 137, 12])
+
+        def rss_mb(self):
+            return next(self._samples)
+
+    worker = EffectsWorker.__new__(EffectsWorker)
+    worker._anvil = _Anvil()
+    worker._rss_sample_failed = False
+    counters = _Counters()
+    for _ in range(3):
+        worker._sample_anvil_rss(counters)
+
+    assert counters.peak_anvil_rss_mb == 137
+    metrics: dict = {}
+    token = stage_metrics_var.set(metrics)
+    try:
+        worker._record_metrics(counters)
+    finally:
+        stage_metrics_var.reset(token)
+    assert metrics["peak_anvil_rss_measured"] is True
+    assert metrics["peak_anvil_rss_mb"] == 137

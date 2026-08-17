@@ -1536,7 +1536,7 @@ def select_candidates(
     *,
     resource_cap: int | None = None,
     scope: JobScope | None = None,
-    funnel: dict[str, int] | None = None,
+    funnel: dict[str, Any] | None = None,
 ) -> list[Candidate]:
     """Return the blank-gated simulation set, ordered by transitive value.
 

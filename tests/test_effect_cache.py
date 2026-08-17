@@ -320,6 +320,9 @@ def test_fk_vanish_fallback_warns_and_records_degraded(clean_effects, caplog):
     assert rec.function_id == fn_id
     assert rec.contract_address == address
     assert [e.phase for e in accumulator] == ["effect_verdict_unlink"]
+    # A purpose-named exception, not the IntegrityError whose str() is the upsert SQL.
+    assert accumulator[0].exc_type.endswith(".EffectVerdictUnlinked")
+    assert "vanished" in accumulator[0].message and "INSERT" not in accumulator[0].message
 
 
 @requires_postgres

@@ -45,6 +45,15 @@ from utils.logging import record_degraded
 
 logger = logging.getLogger(__name__)
 
+
+class EffectVerdictUnlinked(Exception):
+    """A verdict was persisted with no ``function_id`` because the function row
+    vanished between the existence check and the insert. Constructed for
+    ``record_degraded`` (so the record's ``exc_type`` names the condition rather
+    than quoting the upsert SQL an ``IntegrityError`` carries); never raised —
+    the write itself succeeded, unlinked."""
+
+
 # Bump to invalidate every stored verdict when the recipe/verdict output shape
 # changes. Deliberately independent of a git SHA (mirrors
 # ``ANALYSIS_SCHEMA_VERSION``): an unrelated deploy must not cold-miss the whole
@@ -1190,6 +1199,11 @@ def record_effect_verdict(
         # savepoint keeps the job session writable; retry unlinked.
         if "effect_verdicts_function_id_fkey" not in str(exc.orig):
             raise
+        with session.begin_nested():
+            session.execute(_upsert(None))
+        # Reported only once the unlinked write has actually landed: a failing
+        # re-upsert propagates to the job-failing handler, and a "written
+        # unlinked" record for a write that never happened would be a false fact.
         context = {
             "chain_id": chain_id,
             "contract_address": contract_address.lower(),
@@ -1197,13 +1211,15 @@ def record_effect_verdict(
             "effect_class": effect_class,
             "function_id": function_id,
         }
-        record_degraded(phase="effect_verdict_unlink", exc=exc, context=context)
-        # The verdict still lands, but with no function row to hang off: the
-        # frontend cannot attribute it to a function until a later pass relinks.
+        record_degraded(
+            phase="effect_verdict_unlink",
+            exc=EffectVerdictUnlinked("function row vanished between the existence check and the insert"),
+            context=context,
+        )
+        # The verdict landed, but with no function row to hang off: the frontend
+        # cannot attribute it to a function until a later pass relinks it.
         logger.warning(
             "effect verdict written unlinked: function row vanished mid-job",
             extra=context,
         )
-        with session.begin_nested():
-            session.execute(_upsert(None))
     session.flush()
