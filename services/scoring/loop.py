@@ -52,9 +52,11 @@ from sqlalchemy.orm import Session
 from db.queue import HEARTBEAT_PROTOCOL_SCORE, record_heartbeat
 from services.monitoring import emit_monitor_cycle
 from services.scoring.dirty import SCORE_DIRTY_STALENESS_SWEEP
-from services.scoring.distill import load_protocol_universe
+from services.scoring.distill import ProtocolUniverse, load_protocol_universe
 from services.scoring.fold import compute_protocol_score
 from services.scoring.persist import persist_score_document
+from services.scoring.schema import ScoreDocument
+from utils.logging import log_timed_phase
 from utils.scoring_status import SCORE_TRIGGER_DIRTY_LOOP, SCORE_TRIGGER_STALENESS_SWEEP
 
 logger = logging.getLogger(__name__)
@@ -300,6 +302,78 @@ def _record_failure(session: Session, due: DueProtocol, *, warn_after: int) -> N
         )
 
 
+def _confidence_detail(document: ScoreDocument) -> dict[str, Any]:
+    detail = document.model_parameters.get("confidence_detail")
+    return detail if isinstance(detail, dict) else {}
+
+
+def document_summary(document: ScoreDocument, universe: ProtocolUniverse | None) -> dict[str, Any]:
+    """The fields the one summary INFO carries, all read off the finished document.
+
+    Nothing is recomputed here: the fold's own counters are the record, and a
+    number this loop derived a second way would be a second answer to a question
+    the document already answered. Every field is read defensively — a summary
+    that raises would fail a fold that succeeded.
+    """
+    population = document.provenance.get("population")
+    population = population if isinstance(population, dict) else {}
+    coverage = document.provenance.get("exposure_coverage")
+    coverage = coverage if isinstance(coverage, dict) else {}
+    confidence = _confidence_detail(document)
+
+    warnings_by_kind: dict[str, int] = {}
+    for warning in document.warnings:
+        kind = str(warning.get("kind")) if isinstance(warning, dict) else "?"
+        warnings_by_kind[kind] = warnings_by_kind.get(kind, 0) + 1
+
+    undetermined = sum(len(finding.get("undetermined_instances") or []) for finding in document.findings)
+
+    # ``flow_pricing_decidable`` is per entity ``[decidable, seen]``; the pair is
+    # what makes a pricing regression a visible step change between two folds.
+    pricing = confidence.get("flow_pricing_decidable")
+    priced_decidable = priced_seen = 0
+    if isinstance(pricing, dict):
+        for pair in pricing.values():
+            if isinstance(pair, (list, tuple)) and len(pair) == 2:
+                priced_decidable += int(pair[0])
+                priced_seen += int(pair[1])
+
+    faults = document.execution_evidence_faults
+    return {
+        "protocol_id": document.protocol_id,
+        "model_version": document.model_version,
+        "trigger": document.trigger,
+        "grade_state": document.grade_state,
+        "perimeter_state": document.perimeter_state,
+        "grade_lambda": document.grade_lambda,
+        "grade_exposure": document.grade_exposure,
+        "confidence_pct": document.confidence_pct,
+        "confidence_reachability_pct": confidence.get("reachability_answered_pct"),
+        "confidence_capability_pct": confidence.get("capability_scored_pct"),
+        "confidence_value_priced_pct": confidence.get("value_priced_pct"),
+        "confidence_reach_magnitude_pct": confidence.get("reach_magnitude_witnessed_pct"),
+        "population_disposition": population.get("disposition"),
+        "signals": population.get("signals"),
+        "signals_entering_grade": population.get("signals_entering_grade"),
+        "findings": len(document.findings),
+        "subsumed_rows": population.get("subsumed_rows"),
+        "rows_withheld_malformed": population.get("rows_withheld_malformed"),
+        "warnings": len(document.warnings),
+        "warnings_by_kind": warnings_by_kind,
+        "undetermined_instances": undetermined,
+        "flow_pricing_decidable": priced_decidable,
+        "flow_pricing_seen": priced_seen,
+        "tracked_total_usd": coverage.get("tracked_total_usd"),
+        # ``None`` is the fail-closed universe and disposes nothing; the count is
+        # what separates it from a universe that is merely small.
+        "universe_addresses": len(universe.addresses) if universe is not None else None,
+        # An absent census is the earned zero at this model version (see
+        # ``ScoreDocument.execution_evidence_faults``), and this document was just
+        # folded by this build — so the census provably ran.
+        "execution_records_faulted": int(faults.get("records_faulted") or 0) if isinstance(faults, dict) else 0,
+    }
+
+
 def score_protocol(session: Session, due: DueProtocol) -> Any:
     """Fold, persist, and clear the mark this fold consumed. Commits.
 
@@ -310,18 +384,46 @@ def score_protocol(session: Session, due: DueProtocol) -> Any:
     supplied here.
     """
     computed_at = session.execute(select(func.clock_timestamp())).scalar_one()
+    durations: dict[str, int] = {}
     # Assembled before the fold because it reads object storage and the fold's
     # planes may not. ``None`` is the fail-closed answer to an unreadable source
     # artifact and disposes nothing.
-    universe = load_protocol_universe(session, due.protocol_id)
-    document = compute_protocol_score(
-        session,
-        due.protocol_id,
-        trigger=due.trigger,
-        computed_at=computed_at,
-        universe=universe,
-    )
-    row = persist_score_document(session, document)
+    with log_timed_phase(logger, "universe_load", durations_ms=durations, protocol_id=due.protocol_id) as phase:
+        universe = load_protocol_universe(session, due.protocol_id)
+        phase["universe_addresses"] = len(universe.addresses) if universe is not None else None
+    if universe is None:
+        logger.warning(
+            "protocol score universe is not_determined: every disposition refuses",
+            extra={"protocol_id": due.protocol_id, "trigger": due.trigger},
+        )
+    with log_timed_phase(logger, "fold", durations_ms=durations, protocol_id=due.protocol_id):
+        document = compute_protocol_score(
+            session,
+            due.protocol_id,
+            trigger=due.trigger,
+            computed_at=computed_at,
+            universe=universe,
+        )
+    faults = document.execution_evidence_faults
+    if faults is not None:
+        # The census moves the grade — a store that stops answering looks exactly
+        # like a code regression — and it lives only in the document.
+        logger.warning(
+            "protocol score execution evidence faulted for %s of %s records",
+            faults.get("records_faulted"),
+            faults.get("execution_records_examined"),
+            extra={
+                "protocol_id": due.protocol_id,
+                "trigger": due.trigger,
+                "records_faulted": faults.get("records_faulted"),
+                "execution_records_examined": faults.get("execution_records_examined"),
+                "faulted_by_reason": faults.get("faulted_by_reason"),
+                "faulted_by_population": faults.get("faulted_by_population"),
+                "grade_qualifier": faults.get("grade_qualifier"),
+            },
+        )
+    with log_timed_phase(logger, "persist", durations_ms=durations, protocol_id=due.protocol_id):
+        row = persist_score_document(session, document)
     cleared = _clear_mark(session, due)
     if not cleared:
         # A mark still standing after a SUCCESSFUL fold — either one that
@@ -350,8 +452,13 @@ def score_protocol(session: Session, due: DueProtocol) -> Any:
             "findings": len(document.findings),
             "marks_cleared": cleared,
             "spilled": row.storage_key is not None,
+            "durations_ms": dict(durations),
+            "duration_ms_total": sum(durations.values()),
         },
     )
+    # The index over the documents: a pricing regression is a step change between
+    # two of these lines rather than a document diff nobody runs.
+    logger.info("score document summary", extra=document_summary(document, universe))
     return row
 
 
@@ -430,7 +537,11 @@ def run_score_loop(interval: float = DEFAULT_SCORE_INTERVAL, stop_event: Event |
             with SessionLocal() as session:
                 score_due_protocols(session)
         except Exception as exc:
-            logger.warning("protocol score cycle failed: %s", exc, extra={"exc_type": type(exc).__name__})
+            logger.warning(
+                "protocol score cycle failed",
+                exc_info=True,
+                extra={"exc_type": type(exc).__name__},
+            )
             # The pass raised before it could emit its own summary — still beat,
             # so a wedged loop is visible on /api/fleet rather than silent.
             record_heartbeat(
@@ -449,6 +560,7 @@ __all__ = [
     "DEFAULT_RETRY_BACKOFF_S",
     "DEFAULT_SCORE_INTERVAL",
     "DueProtocol",
+    "document_summary",
     "PassCounters",
     "run_score_loop",
     "score_due_protocols",
