@@ -570,3 +570,36 @@ def test_an_unconfigured_object_store_builds_no_universe_and_condemns_nothing(db
 
     monkeypatch.setattr(Q, "get_source_files", _unconfigured)
     assert D.load_protocol_universe(db_session, protocol.id) is None
+
+
+@requires_postgres
+def test_the_fail_closed_universe_says_so_at_the_boundary(db_session, monkeypatch, caplog):
+    """Silence here moves published numbers: every downstream disposition turns
+    off and nothing else in the process reports it."""
+    import logging
+
+    from db import queue as Q
+    from db.models import Job
+    from services.scoring import distill as D
+    from tests.test_effects_selection import _protocol
+
+    protocol = _protocol(db_session, "dispo-universe-failclosed-logged")
+    db_session.add(Job(protocol_id=protocol.id))
+    db_session.flush()
+
+    def _unconfigured(session, job_id):
+        raise RuntimeError("storage_key but storage is not configured")
+
+    monkeypatch.setattr(Q, "get_source_files", _unconfigured)
+    with caplog.at_level(logging.WARNING, logger="services.scoring.distill"):
+        assert D.load_protocol_universe(db_session, protocol.id) is None
+
+    records = [r for r in caplog.records if r.name == "services.scoring.distill"]
+    assert len(records) == 1
+    assert records[0].levelno == logging.WARNING
+    assert "fail-closed" in records[0].message
+    assert records[0].protocol_id == protocol.id
+    assert records[0].exc_type == "RuntimeError"
+    # Never ``job_id``: the formatter keeps the ambient context's binding.
+    assert not hasattr(records[0], "job_id")
+    assert records[0].source_job_id
