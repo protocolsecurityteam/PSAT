@@ -2,6 +2,19 @@ import React, { useCallback, useEffect, useState } from "react";
 import { api } from "./api/client.js";
 import { useIsAdmin } from "./api/useIsAdmin.js";
 
+// A link href is only safe to hand to the browser when it is http(s); a
+// `javascript:`/`data:` value would execute on click. Returns the URL when it
+// is safe to link, otherwise null so the caller renders it as inert text.
+export function safeHttpUrl(value) {
+  if (typeof value !== "string" || value.length === 0) return null;
+  try {
+    const scheme = new URL(value, window.location.origin).protocol;
+    return scheme === "http:" || scheme === "https:" ? value : null;
+  } catch {
+    return null;
+  }
+}
+
 // Admin-only audits manager. Lists every AuditReport for a company,
 // shows extraction + scope state at a glance, and provides three
 // admin actions per row: re-extract scope, refresh coverage (protocol-
@@ -242,14 +255,22 @@ export default function AuditsAdminModal({ companyName, onClose }) {
                         {a.title}
                       </div>
                       <div style={{ fontSize: 10, marginTop: 3 }}>
-                        <a
-                          href={a.pdf_url || a.url}
-                          target="_blank"
-                          rel="noreferrer"
-                          style={{ color: "#2dd4bf" }}
-                        >
-                          {a.pdf_url || a.url}
-                        </a>
+                        {(() => {
+                          const raw = a.pdf_url || a.url;
+                          const href = safeHttpUrl(raw);
+                          return href ? (
+                            <a
+                              href={href}
+                              target="_blank"
+                              rel="noreferrer"
+                              style={{ color: "#2dd4bf" }}
+                            >
+                              {raw}
+                            </a>
+                          ) : (
+                            <span style={{ color: "#94a3b8" }}>{raw}</span>
+                          );
+                        })()}
                       </div>
                     </td>
                     <td style={{ fontSize: 11, color: "#94a3b8" }}>{a.date || "—"}</td>
