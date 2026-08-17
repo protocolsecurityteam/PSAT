@@ -9,20 +9,24 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, select
 
 from db.models import Job, JobStatus, Protocol
 from utils.chains import require_chain
+from utils.ratelimit import SlidingWindowRateLimiter, client_ip
 
 from . import deps
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+_ADDRESS_RE = re.compile(r"0x[a-fA-F0-9]{40}")
 
 
 # ---------------------------------------------------------------------------
@@ -36,15 +40,18 @@ router = APIRouter()
 
 _PROBE_RATE_LIMIT = int(os.environ.get("PSAT_PROBE_RATE_LIMIT", "10"))
 _PROBE_RATE_WINDOW_S = float(os.environ.get("PSAT_PROBE_RATE_WINDOW_S", "60"))
-_probe_rate_state: dict[tuple[str, str, int], Any] = {}
+_probe_limiter = SlidingWindowRateLimiter(_PROBE_RATE_LIMIT, _PROBE_RATE_WINDOW_S)
+# The probe bucket key is still ``(admin_key, address, chain_id)``; this alias
+# keeps that per-key window observable under the pre-refactor name.
+_probe_rate_state = _probe_limiter._buckets
 
-
-def _prune_probe_rate_state(now: float) -> None:
-    for key, state in list(_probe_rate_state.items()):
-        while state and state[0] + _PROBE_RATE_WINDOW_S < now:
-            state.popleft()
-        if not state:
-            _probe_rate_state.pop(key, None)
+# The two public capability reads run the AdapterRegistry over each
+# contract's predicate trees + repo lookups (tens of ms per contract), so a
+# tighter per-IP window fronts them independently of the fleet-wide cap in
+# api.py. PSAT_CAPABILITIES_RATE_LIMIT / _WINDOW_S override; 0 disables.
+_CAP_RATE_LIMIT = int(os.environ.get("PSAT_CAPABILITIES_RATE_LIMIT", "30"))
+_CAP_RATE_WINDOW_S = float(os.environ.get("PSAT_CAPABILITIES_RATE_WINDOW_S", "60"))
+_capabilities_limiter = SlidingWindowRateLimiter(_CAP_RATE_LIMIT, _CAP_RATE_WINDOW_S)
 
 
 def _probe_rate_check(admin_key: str | None, address: str, chain_id: int) -> None:
@@ -55,20 +62,12 @@ def _probe_rate_check(admin_key: str | None, address: str, chain_id: int) -> Non
     The chain is part of the bucket key (inv. 12): the same address on two chains
     is two distinct contracts, so probing one must not consume the other's budget.
     Defaults to mainnet so a caller that omits it keeps the mainnet bucket."""
-    if _PROBE_RATE_LIMIT <= 0:
-        return
-    import collections as _collections
-    import time as _time
-
-    now = _time.time()
-    _prune_probe_rate_state(now)
-    key = (admin_key or "<no-key>", address.lower(), chain_id)
-    state = _probe_rate_state.get(key)
-    if state is None:
-        state = _collections.deque()
-        _probe_rate_state[key] = state
-    if len(state) >= _PROBE_RATE_LIMIT:
-        retry_after = max(0, int(state[0] + _PROBE_RATE_WINDOW_S - now)) + 1
+    # The module-level knobs stay authoritative (and monkeypatchable) so an env
+    # or test override of the limit/window takes effect without reconstructing.
+    _probe_limiter.limit = _PROBE_RATE_LIMIT
+    _probe_limiter.window_s = _PROBE_RATE_WINDOW_S
+    retry_after = _probe_limiter.hit((admin_key or "<no-key>", address.lower(), chain_id))
+    if retry_after is not None:
         raise HTTPException(
             status_code=429,
             detail=(
@@ -78,7 +77,20 @@ def _probe_rate_check(admin_key: str | None, address: str, chain_id: int) -> Non
             ),
             headers={"Retry-After": str(retry_after)},
         )
-    state.append(now)
+
+
+def _capabilities_rate_check(request: Request, route: str) -> None:
+    retry_after = _capabilities_limiter.hit((route, client_ip(request)))
+    if retry_after is not None:
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"Rate limit exceeded for {route} "
+                f"({_CAP_RATE_LIMIT} requests / {int(_CAP_RATE_WINDOW_S)}s). "
+                f"Retry in ~{retry_after}s."
+            ),
+            headers={"Retry-After": str(retry_after)},
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -132,8 +144,8 @@ class _ProbeMembershipRequest(BaseModel):
     @field_validator("member")
     @classmethod
     def _check_member_address(cls, v: str) -> str:
-        if not isinstance(v, str) or not v.startswith("0x") or len(v) != 42:
-            raise ValueError("member must be a 0x-prefixed 20-byte address")
+        if not isinstance(v, str) or not _ADDRESS_RE.fullmatch(v):
+            raise ValueError("member must be a 0x-prefixed 20-byte hex address")
         return v.lower()
 
 
@@ -154,8 +166,8 @@ class _ProbeSignatureRequest(BaseModel):
     @field_validator("recovered_signer")
     @classmethod
     def _check_signer_address(cls, v: str) -> str:
-        if not isinstance(v, str) or not v.startswith("0x") or len(v) != 42:
-            raise ValueError("recovered_signer must be a 0x-prefixed 20-byte address")
+        if not isinstance(v, str) or not _ADDRESS_RE.fullmatch(v):
+            raise ValueError("recovered_signer must be a 0x-prefixed 20-byte hex address")
         return v.lower()
 
 
@@ -369,6 +381,7 @@ def probe_contract_signature(
 
 @router.get("/api/contract/{address}/capabilities")
 def get_contract_capabilities(
+    request: Request,
     address: str,
     chain_id: int = 1,
     block: int | None = None,
@@ -402,6 +415,7 @@ def get_contract_capabilities(
     """
     from services.resolution.capability_resolver import resolve_contract_capabilities
 
+    _capabilities_rate_check(request, "/api/contract/{address}/capabilities")
     addr = deps._normalize_address_or_400(address)
     # Admin API edge (inv. 6): chain_id query param defaults to mainnet. Logged so
     # the mainnet assumption is visible for a chainless admin query.
@@ -472,7 +486,7 @@ def get_contract_capabilities(
 
 
 @router.get("/api/company/{company_name}/semantic_capabilities")
-def company_semantic_capabilities(company_name: str) -> dict[str, Any]:
+def company_semantic_capabilities(request: Request, company_name: str) -> dict[str, Any]:
     """Semantic capability map for every analyzed contract in a company.
 
     Returned as a separate endpoint (not embedded in the company-
@@ -512,6 +526,7 @@ def company_semantic_capabilities(company_name: str) -> dict[str, Any]:
     from services.aggregations.company_overview import _entity_addr, _entity_key, _job_chain_name
     from services.resolution.capability_resolver import resolve_contract_capabilities
 
+    _capabilities_rate_check(request, "/api/company/{company_name}/semantic_capabilities")
     with deps.SessionLocal() as session:
         protocol_row = session.execute(select(Protocol).where(Protocol.name == company_name)).scalar_one_or_none()
         if protocol_row is None:
