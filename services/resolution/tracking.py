@@ -115,6 +115,12 @@ def _classify_ttl(block_tag: str, details: dict[str, object]) -> float:
 # that stringifies past 66 digits.
 _CONTROLLER_VALUE_MAX_LEN = 66
 
+# How many reverted controller ids the per-snapshot summary WARNING names. The
+# count is the fact; the sample only makes the line actionable without a
+# stage_errors lookup, and a contract with 200 reverting controllers must not
+# put 200 ids in one log field.
+_REVERTED_SAMPLE_LIMIT = 10
+
 
 def _decode_controller_value(
     raw_value: Any,
@@ -1302,15 +1308,18 @@ def build_control_snapshot(
                     )
                     return controller_id, entry
             # Both the proxy read and the impl getter-fallback (if any) reverted —
-            # the controller value is recorded NULL. Surface it as a degraded
-            # breadcrumb + WARNING so the under-resolution is visible in
-            # stage_errors instead of being counted as a resolved controller.
+            # the controller value is recorded NULL. ``record_degraded`` stays
+            # per-occurrence: stage_errors is the durable, per-controller witness
+            # and nothing about it is aggregated away. The log line is DEBUG
+            # because the useful log fact is the per-snapshot count, emitted once
+            # after the fan-out below; per-occurrence it was 492 WARNINGs in one
+            # run, which reads as 492 incidents rather than one shape.
             record_degraded(
                 phase="controller_read",
                 exc=exc,
                 context={"controller_id": controller_id, "address": plan["contract_address"]},
             )
-            logger.warning(
+            logger.debug(
                 "controller read reverted; recording NULL value",
                 extra={
                     "controller_id": controller_id,
@@ -1348,6 +1357,27 @@ def build_control_snapshot(
         if provenance:
             entry["authority_provenance"] = provenance
         controller_values[cid] = entry
+
+    # One WARNING per snapshot instead of one per reverted controller. The
+    # partition is read back off the entries themselves rather than counted
+    # inside the fan-out: ``observed_via == "eth_call_error"`` is set on exactly
+    # the arm that recorded NULL, so no shared counter has to survive the eight
+    # worker threads. The sample is bounded — the census is the count, and a
+    # per-controller list is what stage_errors already holds.
+    reverted = [cid for cid, entry in controller_values.items() if entry.get("observed_via") == "eth_call_error"]
+    if reverted:
+        logger.warning(
+            "%d of %d tracked controller reads reverted; recorded NULL",
+            len(reverted),
+            len(controller_values),
+            extra={
+                "reverted_controllers": len(reverted),
+                "tracked_controllers": len(controller_values),
+                "address": plan["contract_address"],
+                "block_number": block_number,
+                "reverted_sample": sorted(reverted)[:_REVERTED_SAMPLE_LIMIT],
+            },
+        )
 
     if beacon_address:
         beacon_entry = _read_beacon_owner(rpc_url, beacon_address, block_tag, block_number, chain_id=chain_id)

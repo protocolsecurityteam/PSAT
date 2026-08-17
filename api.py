@@ -209,3 +209,45 @@ app.include_router(predicate_capabilities.router)
 # SPA catch-all MUST be last - its /{full_path:path} would otherwise
 # swallow any /api/* route registered after it.
 app.include_router(spa.router)
+
+
+def serve() -> None:
+    """Launch uvicorn with this project's logging wired in.
+
+    The uvicorn CLI can only accept a log config as a *file path*, so
+    ``uvicorn api:app`` has no way to reach :func:`uvicorn_log_config` and
+    every server line — including a bind failure like ``Address already in
+    use``, which is emitted before the app's own lifespan runs — lands as
+    plaintext outside the JSON stream. Launching programmatically is the one
+    mechanism that covers those lines, so this is the entrypoint every launch
+    script uses.
+
+    ``access_log=False`` retires uvicorn's access line outright rather than
+    reformatting it: ``trace_id_middleware`` already logs one line per served
+    request carrying ``trace_id``, ``duration_ms`` and a WARNING level for
+    5xx/slow — a strict superset. Keeping both logged every request twice.
+    ``uvicorn.error`` (startup, shutdown, bind failures) still routes through
+    ``JsonFormatter``.
+
+    Call it from ``serve.py``, never by running this file. ``uvicorn.run`` is
+    given the import string ``"api:app"``, so uvicorn imports this module —
+    ``python api.py`` would have already run the same file as ``__main__``, and
+    the body would execute twice (measured), building a second fully-wired app
+    that is then discarded.
+    """
+    import uvicorn
+
+    from utils.logging import uvicorn_log_config
+
+    limit_concurrency = os.environ.get("PSAT_API_LIMIT_CONCURRENCY")
+    uvicorn.run(
+        # Import string, not the ``app`` object: ``reload`` needs it, and it
+        # keeps the served app the same one under both settings.
+        "api:app",
+        host=os.environ.get("PSAT_API_HOST", "127.0.0.1"),
+        port=int(os.environ.get("PSAT_API_PORT", "8000")),
+        reload=os.environ.get("PSAT_API_RELOAD") == "1",
+        limit_concurrency=int(limit_concurrency) if limit_concurrency else None,
+        log_config=uvicorn_log_config(),
+        access_log=False,
+    )
