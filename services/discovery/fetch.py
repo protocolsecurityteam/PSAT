@@ -6,9 +6,85 @@ import hashlib
 import json
 import re
 import textwrap
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from utils.etherscan import get_source
+
+# EVMVersion comes from attacker-controlled Etherscan metadata and is
+# interpolated into foundry.toml; an off-allowlist value could inject TOML keys.
+# Canonical spellings solc/foundry accept, matched case-insensitively.
+_ALLOWED_EVM_VERSIONS = (
+    "homestead",
+    "tangerineWhistle",
+    "spuriousDragon",
+    "byzantium",
+    "constantinople",
+    "petersburg",
+    "istanbul",
+    "berlin",
+    "london",
+    "paris",
+    "shanghai",
+    "cancun",
+    "prague",
+)
+_EVM_VERSION_BY_KEY = {v.lower(): v for v in _ALLOWED_EVM_VERSIONS}
+_DEFAULT_EVM_VERSION = "shanghai"
+
+
+def sanitize_evm_version(raw: object) -> str:
+    """Return an allowlisted EVM version keyword, or the safe default."""
+    return _EVM_VERSION_BY_KEY.get(str(raw or "").strip().lower(), _DEFAULT_EVM_VERSION)
+
+
+def _normalize_source_path(filename: str) -> str:
+    """Confine a verified-source key to a project-relative path.
+
+    Invariant: a scaffolded source key stays inside the project dir. Etherscan
+    source keys are attacker-controlled, so an absolute path or any ``..``
+    segment is rejected rather than silently rewritten.
+    """
+    pure = PurePosixPath(filename)
+    if pure.is_absolute():
+        raise ValueError(f"Refusing absolute source path: {filename!r}")
+    parts = [p for p in pure.parts if p != "."]
+    if any(p == ".." for p in parts):
+        raise ValueError(f"Refusing source path with parent traversal: {filename!r}")
+    normalized = "/".join(parts)
+    if not normalized:
+        raise ValueError(f"Empty source path: {filename!r}")
+    return normalized
+
+
+def _confine(project_dir: Path, name: str) -> Path:
+    """Resolve ``name`` under ``project_dir`` and require it stay inside.
+
+    Invariant: no scaffolded file resolves outside the project dir, even via a
+    symlink — the resolved child must be relative to the resolved root.
+    """
+    root = project_dir.resolve()
+    full = (project_dir / name).resolve()
+    if not full.is_relative_to(root):
+        raise ValueError(f"Refusing path outside project dir: {name!r}")
+    return full
+
+
+def _remapping_target_is_safe(entry: str) -> bool:
+    """Whether a remapping's target stays inside the project tree.
+
+    Invariant: remapping targets are compile-time read roots for solc/Slither;
+    an absolute target or a ``..`` escape would let compilation read files
+    outside the scaffold.
+    """
+    if "=" not in entry:
+        return True
+    _prefix, target = entry.split("=", 1)
+    target = target.strip()
+    if not target:
+        return True
+    if target.startswith("~") or PurePosixPath(target).is_absolute():
+        return False
+    return not any(p == ".." for p in PurePosixPath(target).parts)
 
 
 def fetch(address: str, *, chain_id: int) -> dict:
@@ -98,7 +174,7 @@ def parse_sources(result: dict) -> dict[str, str]:
         sources = {}
         for filename, obj in bundle["sources"].items():
             content = obj["content"] if isinstance(obj, dict) else obj
-            normalized = filename.lstrip("./")
+            normalized = _normalize_source_path(filename)
             sources[normalized] = content
         return sources
 
@@ -112,7 +188,11 @@ def parse_remappings(result: dict) -> list[str]:
     bundle = parse_verification_bundle(result)
     settings = bundle.get("settings", {}) if bundle else {}
     remappings = settings.get("remappings", [])
-    return [entry.strip() for entry in remappings if isinstance(entry, str) and entry.strip()]
+    return [
+        entry.strip()
+        for entry in remappings
+        if isinstance(entry, str) and entry.strip() and _remapping_target_is_safe(entry.strip())
+    ]
 
 
 _MIN_SOLC = "0.8.24"  # 0.8.21-0.8.23 have Natspec.cpp internal compiler errors on some OZ contracts
@@ -177,8 +257,7 @@ def scaffold(address: str, result: dict, project_dir: Path) -> Path:
     language = "vyper" if is_vyper_result(result) else "solidity"
     solc_version = _detect_solc_version(sources)
     src_dir = _project_src_dir(sources)
-    raw_evm = result.get("EVMVersion", "") or ""
-    evm_version = raw_evm if raw_evm.lower() not in ("", "default") else "shanghai"
+    evm_version = sanitize_evm_version(result.get("EVMVersion", ""))
 
     project_dir.mkdir(parents=True, exist_ok=True)
 
@@ -208,7 +287,7 @@ def scaffold(address: str, result: dict, project_dir: Path) -> Path:
     # source files — relax exact pragmas so a single solc_version satisfies all
     sources = _relax_pragmas(sources)
     for filename, content in sources.items():
-        filepath = project_dir / filename
+        filepath = _confine(project_dir, filename)
         filepath.parent.mkdir(parents=True, exist_ok=True)
         filepath.write_text(content)
 
