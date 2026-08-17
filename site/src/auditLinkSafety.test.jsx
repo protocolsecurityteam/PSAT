@@ -21,6 +21,12 @@ describe("safeHttpUrl", () => {
     expect(safeHttpUrl("file:///etc/passwd")).toBeNull();
   });
 
+  it("returns null for scheme-smuggling variants", () => {
+    expect(safeHttpUrl("JavaScript:alert(1)")).toBeNull(); // case-insensitive scheme
+    expect(safeHttpUrl("  javascript:alert(1)")).toBeNull(); // leading whitespace
+    expect(safeHttpUrl("java\nscript:alert(1)")).toBeNull(); // embedded control char
+  });
+
   it("returns null for empty or non-string input", () => {
     expect(safeHttpUrl("")).toBeNull();
     expect(safeHttpUrl(null)).toBeNull();
@@ -29,8 +35,12 @@ describe("safeHttpUrl", () => {
 });
 
 describe("AuditsAdminModal audit link", () => {
-  it("does not emit a javascript: url as an href", async () => {
-    const evil = "javascript:alert(document.cookie)";
+  it.each([
+    ["plain", "javascript:alert(document.cookie)"],
+    ["case-variant", "JavaScript:alert(1)"],
+    ["leading-whitespace", "  javascript:alert(1)"],
+    ["embedded-newline", "java\nscript:alert(1)"],
+  ])("does not emit a %s script-scheme url as an href", async (_label, evil) => {
     setFetchHandler("/api/company/etherfi/audits", () => ({
       audits: [
         {
@@ -50,13 +60,14 @@ describe("AuditsAdminModal audit link", () => {
 
     render(<AuditsAdminModal companyName="etherfi" onClose={() => {}} />);
 
-    // The raw value is still shown (as inert text), so the row isn't dropped.
-    await waitFor(() => expect(screen.getByText(evil)).toBeInTheDocument());
+    // The row still renders (the value shows as inert text), so nothing is dropped.
+    await waitFor(() => expect(screen.getByText("ACME")).toBeInTheDocument());
 
-    // But no anchor carries it as an href.
-    const dangerous = Array.from(document.querySelectorAll("a[href]")).filter((el) =>
-      (el.getAttribute("href") || "").toLowerCase().startsWith("javascript:"),
-    );
+    // No anchor carries a script scheme, regardless of case/whitespace/control chars.
+    const dangerous = Array.from(document.querySelectorAll("a[href]")).filter((el) => {
+      const href = (el.getAttribute("href") || "").replace(/[\s]/g, "").toLowerCase();
+      return href.startsWith("javascript:");
+    });
     expect(dangerous).toHaveLength(0);
   });
 });

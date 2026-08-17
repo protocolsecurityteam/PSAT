@@ -35,6 +35,12 @@ def test_analyze_request_accepts_valid_address():
     assert req.address == _VALID_ADDR  # lowercase-normalized
 
 
+def test_analyze_request_rejects_address_with_trailing_newline():
+    # fullmatch anchoring: a trailing newline must not sneak past the hex check.
+    with pytest.raises(ValidationError):
+        AnalyzeRequest(address="0x" + "ab" * 20 + "\n")
+
+
 def test_analyze_request_dapp_urls_rejects_non_http():
     with pytest.raises(ValidationError):
         AnalyzeRequest(dapp_urls=["javascript:alert(1)"])
@@ -50,7 +56,17 @@ def test_analyze_request_dapp_urls_accepts_http():
     assert req.dapp_urls == ["https://example.com", "http://foo.test"]
 
 
-@pytest.mark.parametrize("bad_url", ["javascript:alert(1)", "data:text/html,<script>", "file:///etc/passwd"])
+@pytest.mark.parametrize(
+    "bad_url",
+    [
+        "javascript:alert(1)",
+        "data:text/html,<script>",
+        "file:///etc/passwd",
+        "JavaScript:alert(1)",  # scheme is case-insensitive
+        " javascript:alert(1)",  # leading whitespace must not smuggle a scheme
+        "java\nscript:alert(1)",  # embedded control char must not smuggle a scheme
+    ],
+)
 def test_add_audit_request_rejects_dangerous_scheme(bad_url):
     with pytest.raises(ValidationError):
         AddAuditRequest(url=bad_url, auditor="a", title="t")
@@ -74,6 +90,18 @@ def test_protocol_subscribe_rejects_non_discord_webhook():
 def test_protocol_subscribe_rejects_http_discord():
     with pytest.raises(ValidationError):
         ProtocolSubscribeRequest(discord_webhook_url="http://discord.com/api/webhooks/1/abc")
+
+
+@pytest.mark.parametrize(
+    "bypass_url",
+    [
+        "https://discord.com@evil.com/api/webhooks/1/abc",  # userinfo, real host is evil.com
+        "https://discord.com.evil.com/api/webhooks/1/abc",  # subdomain-suffix, host ends in evil.com
+    ],
+)
+def test_protocol_subscribe_rejects_host_bypass(bypass_url):
+    with pytest.raises(ValidationError):
+        ProtocolSubscribeRequest(discord_webhook_url=bypass_url)
 
 
 def test_protocol_subscribe_accepts_discord_host():
