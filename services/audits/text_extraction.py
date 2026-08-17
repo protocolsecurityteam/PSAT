@@ -23,6 +23,7 @@ from urllib.parse import urlparse
 import requests
 
 from db.storage import StorageUnavailable, get_storage_client
+from utils.egress import UnsafeUrlError, assert_public_http_url
 from utils.github_urls import github_blob_to_raw
 
 logger = logging.getLogger(__name__)
@@ -185,6 +186,13 @@ def download_audit_body(
     backoff. 4xx other than 408/429 and content-type mismatches are fatal
     — refetching won't change a 404 or a login-wall HTML page.
     """
+    # SSRF guard: the URL is discovery-sourced, so reject non-public targets
+    # before opening the stream.
+    try:
+        assert_public_http_url(url)
+    except UnsafeUrlError as exc:
+        raise PdfDownloadError(f"refused non-public URL: {exc}") from exc
+
     sess = session or requests
     backoff = _RETRY_INITIAL_BACKOFF
 

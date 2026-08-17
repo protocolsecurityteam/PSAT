@@ -466,11 +466,13 @@ class TestMaybeDomain:
 
 
 class TestFetchPage:
+    # ``_fetch_page`` fetches through the SSRF guard (``utils.egress.safe_get``),
+    # so these stub that rather than the raw ``requests`` call.
     def test_success(self, monkeypatch):
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.text = "<html>hello</html>"
-        monkeypatch.setattr("services.discovery.inventory_domain._requests.get", lambda *a, **kw: mock_resp)
+        monkeypatch.setattr("utils.egress.safe_get", lambda *a, **kw: mock_resp)
 
         result = _fetch_page("https://example.com")
         assert result == "<html>hello</html>"
@@ -478,7 +480,7 @@ class TestFetchPage:
     def test_non_200_returns_none(self, monkeypatch):
         mock_resp = MagicMock()
         mock_resp.status_code = 404
-        monkeypatch.setattr("services.discovery.inventory_domain._requests.get", lambda *a, **kw: mock_resp)
+        monkeypatch.setattr("utils.egress.safe_get", lambda *a, **kw: mock_resp)
 
         assert _fetch_page("https://example.com") is None
 
@@ -488,15 +490,25 @@ class TestFetchPage:
         def raise_exc(*a, **kw):
             raise requests.RequestException("network error")
 
-        monkeypatch.setattr("services.discovery.inventory_domain._requests.get", raise_exc)
+        monkeypatch.setattr("utils.egress.safe_get", raise_exc)
 
         assert _fetch_page("https://example.com") is None
+
+    def test_unsafe_url_returns_none(self, monkeypatch):
+        from utils.egress import UnsafeUrlError
+
+        def raise_unsafe(*a, **kw):
+            raise UnsafeUrlError("non-public address")
+
+        monkeypatch.setattr("utils.egress.safe_get", raise_unsafe)
+
+        assert _fetch_page("http://169.254.169.254/") is None
 
     def test_debug_logging_on_success(self, monkeypatch, capsys):
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.text = "content"
-        monkeypatch.setattr("services.discovery.inventory_domain._requests.get", lambda *a, **kw: mock_resp)
+        monkeypatch.setattr("utils.egress.safe_get", lambda *a, **kw: mock_resp)
 
         _fetch_page("https://example.com", debug=True)
         captured = capsys.readouterr()
@@ -505,7 +517,7 @@ class TestFetchPage:
     def test_debug_logging_on_failure(self, monkeypatch, capsys):
         mock_resp = MagicMock()
         mock_resp.status_code = 500
-        monkeypatch.setattr("services.discovery.inventory_domain._requests.get", lambda *a, **kw: mock_resp)
+        monkeypatch.setattr("utils.egress.safe_get", lambda *a, **kw: mock_resp)
 
         _fetch_page("https://example.com", debug=True)
         captured = capsys.readouterr()

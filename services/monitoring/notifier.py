@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from urllib.parse import urlparse
 
 import requests
 from sqlalchemy import select
@@ -32,8 +33,21 @@ logger = logging.getLogger(__name__)
 
 DISCORD_TIMEOUT = 10
 
+# Invariant: outbound webhook POSTs go only to Discord over https. A webhook
+# URL is user-supplied; without this gate it is an SSRF sink that posts our
+# embed body to any host.
+_DISCORD_WEBHOOK_HOSTS = frozenset({"discord.com", "discordapp.com", "canary.discord.com", "ptb.discord.com"})
+
+
+def _is_discord_webhook(webhook_url: str) -> bool:
+    parsed = urlparse(webhook_url)
+    return parsed.scheme == "https" and (parsed.hostname or "").lower() in _DISCORD_WEBHOOK_HOSTS
+
 
 def _send_discord(webhook_url: str, embed: dict) -> None:
+    if not _is_discord_webhook(webhook_url):
+        logger.warning("Skipping non-Discord webhook target: %s", urlparse(webhook_url).hostname)
+        return
     resp = requests.post(
         webhook_url,
         json={"embeds": [embed]},
