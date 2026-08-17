@@ -194,10 +194,15 @@ def _substituted_fold(monkeypatch):
     return state
 
 
+_LOOP_LOGGER = "services.scoring.loop"
+
+
 def _score(caplog):
-    with caplog.at_level(logging.INFO, logger="services.scoring.loop"):
+    """Every assertion below is scoped to the loop's own logger: a stray record
+    from any other one must not be able to move a count."""
+    with caplog.at_level(logging.INFO, logger=_LOOP_LOGGER):
         loop.score_protocol(_FakeSession(), loop.DueProtocol(7, SCORE_TRIGGER_DIRTY_LOOP))  # type: ignore[arg-type]
-    return caplog.records
+    return [r for r in caplog.records if r.name == _LOOP_LOGGER]
 
 
 def test_each_impure_step_is_timed_and_the_durations_reach_the_written_line(_substituted_fold, caplog):
@@ -221,7 +226,7 @@ def test_one_summary_line_per_fold_carries_the_document(_substituted_fold, caplo
 def test_a_fail_closed_universe_warns_at_the_boundary(_substituted_fold, caplog):
     _substituted_fold["universe"] = None
     records = _score(caplog)
-    warnings = [r for r in records if r.levelno == logging.WARNING]
+    warnings = [r for r in records if r.levelno == logging.WARNING and r.name == _LOOP_LOGGER]
     assert len(warnings) == 1
     assert "universe is not_determined" in warnings[0].message
     assert warnings[0].protocol_id == 7
@@ -236,14 +241,27 @@ def test_an_execution_evidence_fault_warns_with_its_reasons(_substituted_fold, c
         }
     )
     records = _score(caplog)
-    warnings = [r for r in records if r.levelno == logging.WARNING]
+    warnings = [r for r in records if r.levelno == logging.WARNING and r.name == _LOOP_LOGGER]
     assert len(warnings) == 1
     assert warnings[0].faulted_by_reason == {"fetch_failed": 2}
     assert warnings[0].records_faulted == 2
 
 
+def test_a_failing_summary_never_unmakes_a_committed_score(_substituted_fold, caplog, monkeypatch):
+    """The summary is emitted after the commit; letting it raise would arm the
+    backoff for a protocol whose score is already durable."""
+
+    def _boom(document, universe):
+        raise RuntimeError("summary is broken")
+
+    monkeypatch.setattr(loop, "document_summary", _boom)
+    records = _score(caplog)
+    warnings = [r for r in records if r.levelno == logging.WARNING and r.name == _LOOP_LOGGER]
+    assert [r.message for r in warnings] == ["score summary emit failed"]
+
+
 def test_a_clean_fold_raises_no_warning(_substituted_fold, caplog):
-    assert [r for r in _score(caplog) if r.levelno >= logging.WARNING] == []
+    assert [r for r in _score(caplog) if r.levelno >= logging.WARNING and r.name == _LOOP_LOGGER] == []
 
 
 # --------------------------------------------------- the W2 precondition's arms

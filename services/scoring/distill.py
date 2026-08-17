@@ -248,7 +248,6 @@ def distill_job_signals(session: Session, job: Any) -> dict[int, list[FunctionSi
             "score signals skipped for %d contract(s) with no protocol_id",
             len(orphaned),
             extra={
-                "job_id": str(job.id),
                 "contracts_skipped": len(orphaned),
                 "contracts_total": len(contracts),
                 "contract_ids": orphaned[:_ORPHAN_SAMPLE],
@@ -345,15 +344,17 @@ class _TranscriptReader:
         except Exception as exc:
             # A transport failure says nothing about the call, so it is its own
             # reason and invites a retry rather than asserting an absence.
+            # ``transcript_job_id`` rather than ``job_id``: the transcript's job
+            # is not always the job this read runs under, and the formatter
+            # would drop a ``job_id`` key the ambient context already bound.
             logger.warning(
                 "transcript body unreadable",
-                exc_info=True,
-                extra={"job_id": str(job_id), "artifact_name": name, "exc_type": type(exc).__name__},
+                extra={"transcript_job_id": str(job_id), "artifact_name": name, "exc_type": type(exc).__name__},
             )
             record_degraded(
                 phase="score_signal_transcript_read",
                 exc=exc,
-                context={"job_id": str(job_id), "artifact_name": name},
+                context={"transcript_job_id": str(job_id), "artifact_name": name},
             )
             body = EX.REASON_FETCH_FAILED
         _TRANSCRIPT_CACHE[parts] = body
@@ -2537,7 +2538,9 @@ def load_protocol_universe(session: Session, protocol_id: int) -> ProtocolUniver
                 "protocol universe fail-closed: source bodies unreadable, no universe built",
                 extra={
                     "protocol_id": protocol_id,
-                    "job_id": str(job_id),
+                    # Not ``job_id``: the formatter keeps the ambient job bound
+                    # by the context and would drop this one silently.
+                    "source_job_id": str(job_id),
                     "source_jobs": len(source_jobs),
                     "exc_type": type(exc).__name__,
                 },
@@ -2545,7 +2548,7 @@ def load_protocol_universe(session: Session, protocol_id: int) -> ProtocolUniver
             record_degraded(
                 phase="protocol_universe_source_read",
                 exc=exc,
-                context={"protocol_id": protocol_id, "job_id": str(job_id)},
+                context={"protocol_id": protocol_id, "source_job_id": str(job_id)},
             )
             return None
         for body in bodies.values():

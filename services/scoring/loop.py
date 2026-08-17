@@ -442,23 +442,30 @@ def score_protocol(session: Session, due: DueProtocol) -> Any:
                 extra={"protocol_id": due.protocol_id, "storage_key": row.storage_key},
             )
         raise
-    logger.info(
-        "protocol score written",
-        extra={
-            "protocol_id": due.protocol_id,
-            "trigger": due.trigger,
-            "grade_state": document.grade_state,
-            "perimeter_state": document.perimeter_state,
-            "findings": len(document.findings),
-            "marks_cleared": cleared,
-            "spilled": row.storage_key is not None,
-            "durations_ms": dict(durations),
-            "duration_ms_total": sum(durations.values()),
-        },
-    )
-    # The index over the documents: a pricing regression is a step change between
-    # two of these lines rather than a document diff nobody runs.
-    logger.info("score document summary", extra=document_summary(document, universe))
+    # Both lines are emitted AFTER the commit, so the score is already durable.
+    # A summary that raised would be caught by the pass as a fold failure and
+    # would arm the backoff for a protocol that succeeded — reporting is not
+    # allowed to unmake work.
+    try:
+        logger.info(
+            "protocol score written",
+            extra={
+                "protocol_id": due.protocol_id,
+                "trigger": due.trigger,
+                "grade_state": document.grade_state,
+                "perimeter_state": document.perimeter_state,
+                "findings": len(document.findings),
+                "marks_cleared": cleared,
+                "spilled": row.storage_key is not None,
+                "durations_ms": dict(durations),
+                "duration_ms_total": sum(durations.values()),
+            },
+        )
+        # The index over the documents: a pricing regression is a step change
+        # between two of these lines rather than a document diff nobody runs.
+        logger.info("score document summary", extra=document_summary(document, universe))
+    except Exception:
+        logger.warning("score summary emit failed", exc_info=True, extra={"protocol_id": due.protocol_id})
     return row
 
 

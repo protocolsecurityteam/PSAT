@@ -45,8 +45,9 @@ def distill_protocol_in_memory(session: Session, protocol_id: int) -> list[Funct
 
 
 def score(session: Session, protocol_id: int) -> ScoreDocument:
-    # Imported here rather than at module scope: the loop pulls the monitoring
-    # package and the queue in, and this CLI runs without either.
+    # Imported here rather than at module scope so that importing this module —
+    # the differential helpers are used as a library — does not drag in the
+    # monitoring package and the job queue the score loop needs.
     from services.scoring.loop import document_summary
 
     signals = distill_protocol_in_memory(session, protocol_id)

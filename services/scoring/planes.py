@@ -42,7 +42,10 @@ if TYPE_CHECKING:
 # Confined to the I/O-EDGE loaders in this module — the handlers that swallow a
 # database error while reading a plane. The resolution work itself publishes
 # every refusal into the document (inv. 11/12: the fold must replay from the
-# document alone), so nothing on a compute path logs.
+# document alone), so nothing on a compute path logs. These WARNINGs carry no
+# ``record_degraded`` because no accumulator is bound here today: the fold runs
+# on the score loop's monitor thread and under the offline CLI, and the call
+# would be a permanent no-op rather than a record of anything.
 logger = logging.getLogger(__name__)
 
 NATIVE_ASSET = "native"
@@ -2201,8 +2204,10 @@ def load_control_closure(session: Session, protocol_id: int) -> ControlClosure:
             refusals.append(
                 RefusedEdge(
                     rule=REFUSAL_MALFORMED_NODE_ID,
-                    principal=target or NOT_DETERMINED,
-                    anchor=source or NOT_DETERMINED,
+                    # Chain-scoped like every sibling refusal; the endpoint that
+                    # carried no address has no key to be scoped.
+                    principal=entity_key(chain, target) if target else NOT_DETERMINED,
+                    anchor=entity_key(chain, source) if source else NOT_DETERMINED,
                     relation=edge.relation,
                     witness=EDGE_WITNESS_CONTROL_GRAPH,
                     edge_id=edge.id,
