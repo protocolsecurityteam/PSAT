@@ -304,6 +304,51 @@ def test_run_loop_process_exception_calls_fail_job_terminal(mock_fail, mock_clai
 
 @patch("workers.base.signal.signal")
 @patch("workers.base.SessionLocal")
+@patch("workers.base.claim_job")
+@patch("workers.base.fail_job_terminal")
+def test_worker_failure_is_one_line_with_structured_fields(
+    mock_fail, mock_claim, mock_session_cls, mock_signal, caplog
+):
+    """The failure line used to be a multi-line ASCII banner + traceback inside
+    one JSON ``message`` — 27 unique blobs a run, none of which group by
+    template. Every fact is a field or a bound contextvar; the traceback rides
+    ``exc_info`` where the formatter gives it its own key."""
+    import logging
+
+    job = _make_job()
+    job.retry_count = 0
+    mock_session_cls.return_value = MagicMock()
+
+    call_count = 0
+
+    def _claim_side_effect(session, stage, worker_id):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return job
+        w._running = False
+        return None
+
+    mock_claim.side_effect = _claim_side_effect
+
+    w = _TestWorker()
+    w.process = MagicMock(side_effect=RuntimeError("boom"))
+    with caplog.at_level(logging.WARNING, logger="workers.base"):
+        w.run_loop()
+
+    record = next(r for r in caplog.records if r.getMessage().startswith("worker failure"))
+    assert "\n" not in record.getMessage()
+    assert record.levelno == logging.ERROR  # RuntimeError classifies terminal
+    assert record.outcome == "failed_terminal"
+    assert record.exc_type == "builtins.RuntimeError"
+    assert record.exc_message == "boom"
+    assert record.failure_kind == "terminal"
+    assert record.job_name == job.name
+    assert record.exc_info is not None
+
+
+@patch("workers.base.signal.signal")
+@patch("workers.base.SessionLocal")
 @patch("workers.base.claim_job", return_value=None)
 @patch("workers.base.time.sleep")
 def test_run_loop_no_job_sleeps(mock_sleep, mock_claim, mock_session_cls, mock_signal):

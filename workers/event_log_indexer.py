@@ -6,6 +6,7 @@ import inspect
 import logging
 import os
 import signal
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from threading import Event, Lock, Thread
@@ -47,11 +48,17 @@ from utils.chains import (
     supported_chain_ids,
 )
 from utils.etherscan import get_contract_creation_block
-from utils.logging import configure_logging, log_timed_phase
+from utils.logging import bind_trace_context, configure_logging, log_timed_phase
 from utils.rpc import require_rpc_url, rpc_request
 from utils.secrets import sanitize_string
 
 logger = logging.getLogger("workers.event_log_indexer")
+
+# Process identity for every line this daemon emits. ``BaseWorker`` mints the
+# same shape per process and binds it; the indexer is not a BaseWorker, so its
+# output was the one worker stream in the fleet with no ``worker_id`` to filter
+# or group by — and no way to tell two indexer processes apart.
+WORKER_ID = f"EventLogIndexer-{os.getpid()}-{uuid.uuid4().hex[:8]}"
 
 DEFAULT_INTERVAL_S = float(os.getenv("PSAT_EVENT_INDEXER_INTERVAL_S", "60"))
 DEFAULT_CONFIRMATION_DEPTH = int(os.getenv("PSAT_EVENT_INDEXER_FINALITY_DEPTH", "12"))
@@ -212,8 +219,21 @@ def _role_store_topic0s(
         return cache[key]
     try:
         code = resolve_probe_code(session, authority, chain_id)
-    except Exception:
+    except Exception as exc:
+        # Behaviour unchanged and deliberate: no code means no detection, which
+        # enrolls the UNION of all standards — the over-enrolling direction the
+        # docstring above argues for. What was missing is visibility: an RPC
+        # outage read exactly like a contract that declares no known standard.
         code = None
+        logger.warning(
+            "role-store probe code unreadable; enrolling the union of all standards",
+            extra={
+                "authority": authority,
+                "chain_id": chain_id,
+                "exc_type": type(exc).__name__,
+                "decision": "enroll_all_standards",
+            },
+        )
     detected = detect_standards(code)
     if detected:
         topics: set[str] = set()
@@ -1311,147 +1331,157 @@ def run_event_log_indexer_loop(
     long any scan pass takes. The thread publishes its last scan summary for the
     heartbeat to fold in.
     """
-    logger.info("starting event log indexer loop interval=%ss", interval)
-    stop_event = stop_event or Event()
+    # Bound here, not in ``main()``: a new thread starts with an empty
+    # context, so the backfill thread below binds it again for itself.
+    with bind_trace_context(worker_id=WORKER_ID):
+        logger.info("starting event log indexer loop interval=%ss", interval)
+        stop_event = stop_event or Event()
 
-    state_lock = Lock()
-    published: dict[str, Any] = {"summary": ScanSummary(), "enrolled": 0, "status": "running"}
+        state_lock = Lock()
+        published: dict[str, Any] = {"summary": ScanSummary(), "enrolled": 0, "status": "running"}
 
-    def backfill_loop() -> None:
-        while not stop_event.is_set():
-            enrolled = 0
-            summary = ScanSummary()
-            status = "running"
-            try:
-                with SessionLocal() as session:
-                    with log_timed_phase(logger, "indexer_enroll", record_metric=False) as ph:
-                        from_jobs = enroll_from_completed_jobs(session)
-                        # Bounded per pass: each new cursor is a cold backfill, so
-                        # a large tracking plan is drained over successive passes
-                        # rather than dumping every window into one.
-                        from_tracked = enroll_from_tracked_topics(session, limit=DEFAULT_TRACKED_TOPIC_ENROLL_LIMIT)
-                        enrolled = from_jobs + from_tracked
-                        ph["enrolled"] = enrolled
-                        ph["enrolled_from_jobs"] = from_jobs
-                        ph["enrolled_from_tracked_topics"] = from_tracked
-                    with log_timed_phase(logger, "indexer_scan", record_metric=False) as ph:
-                        summary = scan_enrolled_events(
-                            session,
-                            fetchers=fetchers,
-                            head_fetchers=head_fetchers,
-                            block_hash_fetchers=block_hash_fetchers,
-                        )
-                        ph["windows_scanned"] = summary.windows_scanned
-                        ph["inserted"] = summary.inserted
-            except Exception:
-                logger.exception("event log indexer backfill pass failed")
-                status = "error"
-            # One UNCONDITIONAL per-pass INFO carrying the cursor triad. The old
-            # line was gated on ``enrolled or inserted``, so it went silent during
-            # exactly the case that needs watching: a cold from-0 backfill grinding
-            # empty getLogs windows (0 inserted) while the heartbeat says "caught
-            # up". Emitting every pass makes that throughput stall visible.
-            status = _heartbeat_status_for_pass(status, summary)
-            logger.info(
-                "event log indexer pass complete",
-                extra={
-                    "enrolled": enrolled,
-                    "inserted": summary.inserted,
-                    "windows_scanned": summary.windows_scanned,
-                    "caught_up_cursors": summary.caught_up_cursors,
-                    "total_cursors": summary.total_cursors,
-                    "pending_cursors": max(0, summary.total_cursors - summary.caught_up_cursors),
-                    "budget_exhausted": summary.budget_exhausted,
-                    "failed_groups": summary.failed_groups,
-                    "status": status,
-                },
-            )
-            with state_lock:
-                published["summary"] = summary
-                published["enrolled"] = enrolled
-                published["status"] = status
-            # A budget-capped pass that hit its ceiling has more backfill pending:
-            # re-run after a short pause instead of the full interval so a cold
-            # fleet drains at throughput. min() so a sub-interval test cadence
-            # isn't slowed; the floor keeps a warm fleet from busy-spinning.
-            backfill_wait = min(interval, DEFAULT_BACKFILL_BUSY_INTERVAL_S) if summary.budget_exhausted else interval
-            stop_event.wait(backfill_wait)
-
-    backfill = Thread(target=backfill_loop, name="event-indexer-backfill", daemon=True)
-    backfill.start()
-
-    try:
-        while not stop_event.is_set():
-            reenqueued = 0
-            drift_reenqueued = 0
-            try:
-                with SessionLocal() as session:
-                    with log_timed_phase(logger, "indexer_reconcile", record_metric=False) as ph:
-                        # Reconcile once per chain the indexer serves — the
-                        # reconcilers filter authorities by chain_id, so the old
-                        # single implicit chain_id=1 call left every non-mainnet
-                        # chain's index-cold deferrals un-self-healed. The chain set
-                        # is the registry allowlist (inv. 10/14): mainnet-only
-                        # ({1}) by default, so mainnet behavior is unchanged.
-                        for reconcile_chain_id in sorted(supported_chain_ids()):
-                            reenqueued += reconcile_deferred_resolutions(session, chain_id=reconcile_chain_id)
-                            # Warm-drift arm: re-resolve completed jobs whose
-                            # enumerated role-store set has a grant/revoke indexed
-                            # past its frontier.
-                            drift_reenqueued += reconcile_role_set_drift(session, chain_id=reconcile_chain_id)
-                        ph["reenqueued"] = reenqueued
-                        ph["drift_reenqueued"] = drift_reenqueued
-                if reenqueued or drift_reenqueued:
+        def backfill_loop() -> None:
+            # Own bind: ``threading.Thread`` does not inherit the parent's
+            # context, so without this every backfill line loses ``worker_id``.
+            with bind_trace_context(worker_id=WORKER_ID):
+                while not stop_event.is_set():
+                    enrolled = 0
+                    summary = ScanSummary()
+                    status = "running"
+                    try:
+                        with SessionLocal() as session:
+                            with log_timed_phase(logger, "indexer_enroll", record_metric=False) as ph:
+                                from_jobs = enroll_from_completed_jobs(session)
+                                # Bounded per pass: each new cursor is a cold backfill, so
+                                # a large tracking plan is drained over successive passes
+                                # rather than dumping every window into one.
+                                from_tracked = enroll_from_tracked_topics(
+                                    session, limit=DEFAULT_TRACKED_TOPIC_ENROLL_LIMIT
+                                )
+                                enrolled = from_jobs + from_tracked
+                                ph["enrolled"] = enrolled
+                                ph["enrolled_from_jobs"] = from_jobs
+                                ph["enrolled_from_tracked_topics"] = from_tracked
+                            with log_timed_phase(logger, "indexer_scan", record_metric=False) as ph:
+                                summary = scan_enrolled_events(
+                                    session,
+                                    fetchers=fetchers,
+                                    head_fetchers=head_fetchers,
+                                    block_hash_fetchers=block_hash_fetchers,
+                                )
+                                ph["windows_scanned"] = summary.windows_scanned
+                                ph["inserted"] = summary.inserted
+                    except Exception:
+                        logger.exception("event log indexer backfill pass failed")
+                        status = "error"
+                    # One UNCONDITIONAL per-pass INFO carrying the cursor triad. The old
+                    # line was gated on ``enrolled or inserted``, so it went silent during
+                    # exactly the case that needs watching: a cold from-0 backfill grinding
+                    # empty getLogs windows (0 inserted) while the heartbeat says "caught
+                    # up". Emitting every pass makes that throughput stall visible.
+                    status = _heartbeat_status_for_pass(status, summary)
                     logger.info(
-                        "reconcilers re-enqueued %d job(s) (deferred=%d role_drift=%d)",
-                        reenqueued + drift_reenqueued,
-                        reenqueued,
-                        drift_reenqueued,
+                        "event log indexer pass complete",
+                        extra={
+                            "enrolled": enrolled,
+                            "inserted": summary.inserted,
+                            "windows_scanned": summary.windows_scanned,
+                            "caught_up_cursors": summary.caught_up_cursors,
+                            "total_cursors": summary.total_cursors,
+                            "pending_cursors": max(0, summary.total_cursors - summary.caught_up_cursors),
+                            "budget_exhausted": summary.budget_exhausted,
+                            "failed_groups": summary.failed_groups,
+                            "status": status,
+                        },
                     )
-            except Exception:
-                logger.exception("deferred-resolution reconcile pass failed")
-            # Read the cursor triad straight from the table, independent of the
-            # backfill thread. A long cold-start scan pass doesn't return for
-            # minutes, so the thread's published summary lags reality ("3 of 3
-            # caught up" while 10 cursors backfill). Isolated try + own session:
-            # a count failure must not blank the rest of the heartbeat.
-            caught_up_cursors = 0
-            total_cursors = 0
-            try:
-                with SessionLocal() as session:
-                    caught_up_cursors, total_cursors = _cursor_progress(session)
-            except Exception:
-                logger.exception("event log indexer cursor-progress count failed")
-            with state_lock:
-                summary = published["summary"]
-                enrolled = published["enrolled"]
-                status = published["status"]
-            # The backfill thread catches its own per-pass exceptions, so a dead
-            # thread means a fatal stall — surface it as an indexer error.
-            if not backfill.is_alive() and not stop_event.is_set():
-                status = "error"
-                logger.error("event log indexer backfill thread is not alive; indexing has stalled")
-            # The cursor triad comes from the live table (caught_up/total/pending),
-            # not the last-completed pass, so the fleet view tracks an in-progress
-            # backfill instead of a stale "all caught up". windows_scanned/inserted
-            # stay per-pass activity from the published summary.
-            record_heartbeat(
-                HEARTBEAT_EVENT_INDEXER,
-                status=status,
-                detail={
-                    "enrolled_last_pass": enrolled,
-                    "inserted_last_pass": summary.inserted,
-                    "windows_scanned": summary.windows_scanned,
-                    "caught_up_cursors": caught_up_cursors,
-                    "total_cursors": total_cursors,
-                    "pending_cursors": max(0, total_cursors - caught_up_cursors),
-                    "deferred_reenqueued_last_pass": reenqueued,
-                    "role_drift_reenqueued_last_pass": drift_reenqueued,
-                },
-            )
-            stop_event.wait(interval)
-    finally:
-        backfill.join(timeout=max(1.0, interval))
+                    with state_lock:
+                        published["summary"] = summary
+                        published["enrolled"] = enrolled
+                        published["status"] = status
+                    # A budget-capped pass that hit its ceiling has more backfill pending:
+                    # re-run after a short pause instead of the full interval so a cold
+                    # fleet drains at throughput. min() so a sub-interval test cadence
+                    # isn't slowed; the floor keeps a warm fleet from busy-spinning.
+                    backfill_wait = (
+                        min(interval, DEFAULT_BACKFILL_BUSY_INTERVAL_S) if summary.budget_exhausted else interval
+                    )
+                    stop_event.wait(backfill_wait)
+
+        backfill = Thread(target=backfill_loop, name="event-indexer-backfill", daemon=True)
+        backfill.start()
+
+        try:
+            while not stop_event.is_set():
+                reenqueued = 0
+                drift_reenqueued = 0
+                try:
+                    with SessionLocal() as session:
+                        with log_timed_phase(logger, "indexer_reconcile", record_metric=False) as ph:
+                            # Reconcile once per chain the indexer serves — the
+                            # reconcilers filter authorities by chain_id, so the old
+                            # single implicit chain_id=1 call left every non-mainnet
+                            # chain's index-cold deferrals un-self-healed. The chain set
+                            # is the registry allowlist (inv. 10/14): mainnet-only
+                            # ({1}) by default, so mainnet behavior is unchanged.
+                            for reconcile_chain_id in sorted(supported_chain_ids()):
+                                reenqueued += reconcile_deferred_resolutions(session, chain_id=reconcile_chain_id)
+                                # Warm-drift arm: re-resolve completed jobs whose
+                                # enumerated role-store set has a grant/revoke indexed
+                                # past its frontier.
+                                drift_reenqueued += reconcile_role_set_drift(session, chain_id=reconcile_chain_id)
+                            ph["reenqueued"] = reenqueued
+                            ph["drift_reenqueued"] = drift_reenqueued
+                    if reenqueued or drift_reenqueued:
+                        logger.info(
+                            "reconcilers re-enqueued %d job(s) (deferred=%d role_drift=%d)",
+                            reenqueued + drift_reenqueued,
+                            reenqueued,
+                            drift_reenqueued,
+                        )
+                except Exception:
+                    logger.exception("deferred-resolution reconcile pass failed")
+                # Read the cursor triad straight from the table, independent of the
+                # backfill thread. A long cold-start scan pass doesn't return for
+                # minutes, so the thread's published summary lags reality ("3 of 3
+                # caught up" while 10 cursors backfill). Isolated try + own session:
+                # a count failure must not blank the rest of the heartbeat.
+                caught_up_cursors = 0
+                total_cursors = 0
+                try:
+                    with SessionLocal() as session:
+                        caught_up_cursors, total_cursors = _cursor_progress(session)
+                except Exception:
+                    logger.exception("event log indexer cursor-progress count failed")
+                with state_lock:
+                    summary = published["summary"]
+                    enrolled = published["enrolled"]
+                    status = published["status"]
+                # The backfill thread catches its own per-pass exceptions, so a dead
+                # thread means a fatal stall — surface it as an indexer error.
+                if not backfill.is_alive() and not stop_event.is_set():
+                    status = "error"
+                    logger.error("event log indexer backfill thread is not alive; indexing has stalled")
+                # The cursor triad comes from the live table (caught_up/total/pending),
+                # not the last-completed pass, so the fleet view tracks an in-progress
+                # backfill instead of a stale "all caught up". windows_scanned/inserted
+                # stay per-pass activity from the published summary.
+                record_heartbeat(
+                    HEARTBEAT_EVENT_INDEXER,
+                    status=status,
+                    detail={
+                        "enrolled_last_pass": enrolled,
+                        "inserted_last_pass": summary.inserted,
+                        "windows_scanned": summary.windows_scanned,
+                        "caught_up_cursors": caught_up_cursors,
+                        "total_cursors": total_cursors,
+                        "pending_cursors": max(0, total_cursors - caught_up_cursors),
+                        "deferred_reenqueued_last_pass": reenqueued,
+                        "role_drift_reenqueued_last_pass": drift_reenqueued,
+                    },
+                )
+                stop_event.wait(interval)
+        finally:
+            backfill.join(timeout=max(1.0, interval))
 
 
 def _build_indexer_fetchers(
@@ -1507,7 +1537,15 @@ def main() -> None:
     stop_event = Event()
 
     def handle_signal(signum, _frame):
-        logger.info("received signal %s, shutting down", signum)
+        # The fleet stops as one, so every daemon logs this within the same
+        # second. Without the identity the lines are byte-identical and it is
+        # impossible to tell which process did (or did not) get the signal.
+        logger.info(
+            "worker %s received signal %s, shutting down",
+            WORKER_ID,
+            signum,
+            extra={"worker_id": WORKER_ID, "pid": os.getpid(), "signal": signum},
+        )
         stop_event.set()
 
     signal.signal(signal.SIGTERM, handle_signal)

@@ -525,34 +525,30 @@ class BaseWorker:
                     next_attempt_at = compute_next_attempt(prior_retry_count) if will_retry else None
                     outcome = "requeued" if will_retry else "failed_terminal"
                     exc_type_str = f"{type(exc).__module__}.{type(exc).__name__}"
-                    # Banner: WARNING for retry (the job will run again, so
-                    # it's not a failure); ERROR for terminal so ops alerts
-                    # still fire on real failures.
+                    # WARNING for retry (the job will run again, so it's not a
+                    # failure); ERROR for terminal so ops alerts still fire on
+                    # real failures. One line: worker/job/stage already ride the
+                    # bound contextvars and everything else is an ``extra``
+                    # field, so this groups by template instead of being 27
+                    # unique multi-line blobs a run. The traceback rides
+                    # ``exc_info`` where the formatter puts it in its own JSON
+                    # key rather than inside ``message``.
                     log_fn = logger.warning if will_retry else logger.error
                     log_fn(
-                        "\n=================== WORKER FAILURE ===================\n"
-                        "Worker:   %s\n"
-                        "Job:      %s\n"
-                        "Address:  %s\n"
-                        "Name:     %s\n"
-                        "Stage:    %s\n"
-                        "Outcome:  %s (retry_count=%d)\n"
-                        "-------------------------------------------------------\n"
-                        "%s"
-                        "=======================================================",
-                        self.worker_id,
+                        "worker failure: job %s %s (%s)",
                         job.id,
-                        getattr(job, "address", "?"),
-                        getattr(job, "name", "?"),
-                        self.stage.value,
                         outcome,
-                        new_retry_count if will_retry else prior_retry_count,
-                        error,
+                        exc_type_str,
+                        exc_info=exc,
                         extra={
                             "duration_ms": int(elapsed * 1000),
                             "phase": "job",
                             "outcome": outcome,
                             "exc_type": exc_type_str,
+                            "exc_message": exc_message,
+                            # ``worker_id``/``job_id``/``stage``/``address`` are
+                            # already bound contextvars; only the job's name is not.
+                            "job_name": getattr(job, "name", None),
                             "retry_count": new_retry_count if will_retry else prior_retry_count,
                             "next_attempt_at": next_attempt_at.isoformat() if next_attempt_at else None,
                             "failure_kind": kind,

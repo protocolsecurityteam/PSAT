@@ -97,6 +97,112 @@ def test_event_indexed_external_check_emits_decision_extra(caplog):
     assert rec.reason == "event_address_unresolved"
 
 
+def _reverting_plan(controller_ids: list[str]) -> dict:
+    address = "0x" + "11" * 20
+    return {
+        "schema_version": "0.1",
+        "contract_address": address,
+        "contract_name": "Mock",
+        "tracking_strategy": "event_first_with_polling_fallback",
+        "tracked_controllers": [
+            {
+                "controller_id": f"state_variable:{name}",
+                "label": name,
+                "source": name,
+                "kind": "state_variable",
+                "read_spec": None,
+                "tracking_mode": "event_plus_state",
+                "event_watch": None,
+                "polling_fallback": {
+                    "contract_address": address,
+                    "polling_sources": [name],
+                    "cadence": "state_only",
+                    "notes": [],
+                },
+                "notes": [],
+            }
+            for name in controller_ids
+        ],
+    }
+
+
+def test_reverting_controller_reads_collapse_to_one_summary_warning(monkeypatch, caplog):
+    """492 identical "controller read reverted" WARNINGs in one run read as 492
+    incidents. The per-occurrence line is DEBUG (its durable witness is the
+    per-controller ``record_degraded`` breadcrumb, unchanged); the per-snapshot
+    census — how many of how many — is the WARNING."""
+    from services.resolution import tracking
+
+    def fake_rpc(_rpc_url, method, _params, *, chain_id=None):
+        if method == "eth_blockNumber":
+            return "0x10"
+        if method == "eth_call":
+            raise RuntimeError("{'code': 3, 'message': 'execution reverted'}")
+        raise AssertionError(f"Unexpected RPC call: {method}")
+
+    monkeypatch.setattr(tracking, "_rpc_request", fake_rpc)
+    monkeypatch.setattr(tracking, "_SNAPSHOT_MULTICALL_ENABLED", False)
+
+    accumulator: list = []
+    token = degraded_errors_var.set(accumulator)
+    try:
+        with bind_trace_context(job_id="1", stage="resolution"):
+            with caplog.at_level(logging.DEBUG, logger="services.resolution.tracking"):
+                snapshot = tracking.build_control_snapshot(
+                    _reverting_plan(["owner", "authority", "admin"]),  # type: ignore[arg-type]
+                    "https://rpc.example",
+                )
+    finally:
+        degraded_errors_var.reset(token)
+
+    assert all(v["observed_via"] == "eth_call_error" for v in snapshot["controller_values"].values())
+    # Every occurrence still lands in stage_errors — nothing was aggregated away.
+    assert len(accumulator) == 3
+
+    records = [r for r in caplog.records if r.name == "services.resolution.tracking"]
+    per_occurrence = [r for r in records if "recording NULL value" in r.getMessage()]
+    assert len(per_occurrence) == 3
+    assert {r.levelno for r in per_occurrence} == {logging.DEBUG}
+
+    summaries = [r for r in records if r.levelno == logging.WARNING]
+    assert len(summaries) == 1
+    assert summaries[0].reverted_controllers == 3
+    assert summaries[0].tracked_controllers == 3
+    assert summaries[0].reverted_sample == [
+        "state_variable:admin",
+        "state_variable:authority",
+        "state_variable:owner",
+    ]
+
+
+def test_no_summary_warning_when_every_controller_read_succeeds(monkeypatch, caplog):
+    """The summary is a degradation report, not a per-snapshot heartbeat."""
+    from services.resolution import tracking
+
+    owner = "0x" + "22" * 20
+
+    def fake_rpc(_rpc_url, method, _params, *, chain_id=None):
+        if method == "eth_blockNumber":
+            return "0x10"
+        if method == "eth_call":
+            return "0x" + "00" * 12 + owner[2:]
+        if method == "eth_getCode":
+            return "0x"
+        raise AssertionError(f"Unexpected RPC call: {method}")
+
+    monkeypatch.setattr(tracking, "_rpc_request", fake_rpc)
+    monkeypatch.setattr(tracking, "_SNAPSHOT_MULTICALL_ENABLED", False)
+
+    with caplog.at_level(logging.DEBUG, logger="services.resolution.tracking"):
+        snapshot = tracking.build_control_snapshot(
+            _reverting_plan(["owner"]),  # type: ignore[arg-type]
+            "https://rpc.example",
+        )
+
+    assert snapshot["controller_values"]["state_variable:owner"]["observed_via"] == "eth_call"
+    assert not [r for r in caplog.records if r.name == "services.resolution.tracking" and r.levelno >= logging.WARNING]
+
+
 def test_predicate_evaluator_leaf_decision_extra(caplog):
     tree = {"op": "LEAF", "leaf": {"kind": "unsupported", "unsupported_reason": "x"}}
     with caplog.at_level(logging.DEBUG, logger="services.resolution.predicate_evaluator"):
