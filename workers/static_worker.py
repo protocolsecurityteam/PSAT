@@ -33,6 +33,7 @@ from services.discovery import (
     find_dynamic_dependencies,
 )
 from services.discovery.dynamic_dependencies import NoNewTransactionsError
+from services.discovery.fetch import _confine, _remapping_target_is_safe, sanitize_evm_version
 from services.monitoring.proxy_watcher import resolve_current_implementation
 from services.resolution.tracking_plan import build_control_tracking_plan
 from services.static.contract_analysis_pipeline import collect_contract_analysis_with_artifacts
@@ -684,6 +685,11 @@ def _prune_remappings(remappings: list[str], source_paths: set[str]) -> list[str
     kept: list[str] = []
     dropped: list[str] = []
     for entry in remappings:
+        # Targets that escape the project tree would let solc/Slither read
+        # outside the scaffold — drop before any existence check.
+        if not _remapping_target_is_safe(entry):
+            dropped.append(entry)
+            continue
         # Parse "prefix=target" (Foundry remapping format)
         if "=" not in entry:
             kept.append(entry)
@@ -1523,15 +1529,15 @@ class StaticWorker(BaseWorker):
         """Write source files, foundry.toml, remappings to the temp project."""
         sources = _relax_pragmas(sources)
         for filepath, content in sources.items():
-            full_path = project_dir / filepath
+            full_path = _confine(project_dir, filepath)
             full_path.parent.mkdir(parents=True, exist_ok=True)
             full_path.write_text(content)
 
         solc_version = _detect_solc_version(sources)
         src_dir = _detect_src_dir(sources)
-        evm_version = build_settings.get("evm_version", "shanghai")
-        optimizer = str(build_settings.get("optimization_used", True)).lower()
-        optimizer_runs = build_settings.get("runs", 200)
+        evm_version = sanitize_evm_version(build_settings.get("evm_version", "shanghai"))
+        optimizer = str(bool(build_settings.get("optimization_used", True))).lower()
+        optimizer_runs = int(build_settings.get("runs", 200) or 200)
 
         (project_dir / "foundry.toml").write_text(
             textwrap.dedent(
