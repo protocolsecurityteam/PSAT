@@ -1,8 +1,9 @@
 """Offline coverage for the Wave-0 shared logging primitives.
 
-Exercises only the two new dependency-light helpers in ``utils.logging``
-(subprocess-output capture + the uvicorn JSON ``dictConfig``). No DB, no
-network — both run purely against stdlib ``subprocess``/``logging``.
+Exercises the dependency-light helpers in ``utils.logging`` (subprocess-output
+capture, the uvicorn JSON ``dictConfig``, and the third-party stream hygiene
+``configure_logging`` installs). No DB, no network — all run purely against
+stdlib ``subprocess``/``logging``.
 """
 
 from __future__ import annotations
@@ -11,8 +12,17 @@ import json
 import logging
 import logging.config
 import sys
+import warnings
 
-from utils.logging import JsonFormatter, stream_subprocess, uvicorn_log_config
+import pytest
+
+from utils.logging import (
+    CryticCompileEchoDemoter,
+    JsonFormatter,
+    _install_third_party_log_hygiene,
+    stream_subprocess,
+    uvicorn_log_config,
+)
 
 
 def test_stream_subprocess_streams_lines_at_debug_with_source(caplog):
@@ -141,3 +151,145 @@ def test_jsonformatter_scrubs_secrets_in_message_extra_and_exc_info():
     exc_out = json.loads(fmt.format(exc_record))
     assert "exc_info" in exc_out
     assert "SUPERSECRETKEY123" not in json.dumps(exc_out)
+
+
+def _crytic_record(msg: str, *, args=(), exc_info=None) -> logging.LogRecord:
+    """A record shaped exactly like ``crytic_compile.utils.subprocess.run``'s."""
+    record = logging.LogRecord(
+        name="CryticCompile",
+        level=logging.ERROR,
+        pathname="/x/crytic_compile/utils/subprocess.py",
+        lineno=67,
+        msg=msg,
+        args=args,
+        exc_info=exc_info,
+    )
+    record.funcName = "run"
+    return record
+
+
+def test_crytic_stdout_echo_is_demoted_to_debug():
+    """A failed ``forge build``'s stdout is the compiler's ordinary progress
+    chatter ("Solc finished in 37ms"); at ERROR it poisons ERROR-rate triage."""
+    demoter = CryticCompileEchoDemoter()
+    record = _crytic_record("Compiling 45 files with Solc 0.7.0\nstdout: Solc 0.7.0 finished in 37.19ms")
+
+    emitted = demoter.filter(record)
+
+    assert record.levelno == logging.DEBUG
+    assert record.levelname == "DEBUG"
+    # Dropped at the default INFO root level, kept when DEBUG was asked for.
+    assert emitted is (logging.getLogger().getEffectiveLevel() <= logging.DEBUG)
+
+
+def test_crytic_unprovable_echo_stays_visible_at_warning():
+    """Single-line output carries no ``stdout:`` marker, so it is NOT provably
+    chatter — it may be the compiler naming the failure. Demote off ERROR, but
+    never below WARNING and never dropped."""
+    demoter = CryticCompileEchoDemoter()
+    record = _crytic_record("Error: Encountered invalid solc version in src/Foo.sol")
+
+    assert demoter.filter(record) is True
+    assert record.levelno == logging.WARNING
+
+
+def test_crytic_authored_diagnostics_keep_their_error_level():
+    """The exit-code line is the failure witness and carries format args; the
+    OSError branch carries ``exc_info``. Neither is a verbatim echo."""
+    demoter = CryticCompileEchoDemoter()
+    exit_code = _crytic_record("'%s' returned non-zero exit code %d", args=("forge", 1))
+    os_error = _crytic_record("OS error executing:", exc_info=(ValueError, ValueError("x"), None))
+
+    for record in (exit_code, os_error):
+        assert demoter.filter(record) is True
+        assert record.levelno == logging.ERROR
+
+
+def test_crytic_demoter_ignores_records_from_other_call_sites():
+    """The guards are structural: if upstream moves the echo, the filter stops
+    matching and the record keeps its level rather than being demoted blind."""
+    demoter = CryticCompileEchoDemoter()
+    record = _crytic_record("some future authored error")
+    record.funcName = "compile"
+
+    assert demoter.filter(record) is True
+    assert record.levelno == logging.ERROR
+
+
+def test_third_party_hygiene_is_idempotent_and_captures_warnings(caplog):
+    """``configure_logging`` routes crytic-compile through the demoter and the
+    ``warnings`` module into ``py.warnings`` — both process-global, so both must
+    survive repeated calls without stacking."""
+    crytic = logging.getLogger("CryticCompile")
+    before = [f for f in crytic.filters if isinstance(f, CryticCompileEchoDemoter)]
+    for stale in before:
+        crytic.removeFilter(stale)
+    try:
+        _install_third_party_log_hygiene()
+        _install_third_party_log_hygiene()
+        assert len([f for f in crytic.filters if isinstance(f, CryticCompileEchoDemoter)]) == 1
+
+        with caplog.at_level(logging.WARNING, logger="py.warnings"):
+            warnings.warn("captured into logging", UserWarning)
+        assert any(record.name == "py.warnings" for record in caplog.records)
+    finally:
+        for installed in [f for f in crytic.filters if isinstance(f, CryticCompileEchoDemoter)]:
+            crytic.removeFilter(installed)
+        for original in before:
+            crytic.addFilter(original)
+
+
+def test_serve_disables_uvicorn_access_log_and_passes_json_config(monkeypatch):
+    """The api middleware already logs every request with ``trace_id`` +
+    ``duration_ms``; uvicorn's access line was a strictly poorer duplicate of it.
+    The log config is the only way uvicorn's own lines reach ``JsonFormatter``,
+    and the CLI can only take it as a file — hence a programmatic launcher."""
+    import api
+
+    captured: dict[str, object] = {}
+
+    class _FakeUvicorn:
+        @staticmethod
+        def run(app, **kwargs):
+            captured["app"] = app
+            captured.update(kwargs)
+
+    monkeypatch.setitem(sys.modules, "uvicorn", _FakeUvicorn)
+    monkeypatch.setenv("PSAT_API_HOST", "0.0.0.0")
+    monkeypatch.setenv("PSAT_API_PORT", "8123")
+    monkeypatch.setenv("PSAT_API_LIMIT_CONCURRENCY", "200")
+    monkeypatch.delenv("PSAT_API_RELOAD", raising=False)
+
+    api.serve()
+
+    assert captured["app"] == "api:app"
+    assert captured["host"] == "0.0.0.0"
+    assert captured["port"] == 8123
+    assert captured["limit_concurrency"] == 200
+    assert captured["reload"] is False
+    assert captured["access_log"] is False
+    log_config = captured["log_config"]
+    assert isinstance(log_config, dict)
+    assert log_config["formatters"]["json"]["()"].endswith("JsonFormatter")
+    assert set(log_config["loggers"]) == {"uvicorn", "uvicorn.error", "uvicorn.access"}
+
+
+@pytest.mark.parametrize("reload_flag,expected", [("1", True), ("0", False)])
+def test_serve_reload_is_opt_in(monkeypatch, reload_flag, expected):
+    import api
+
+    captured: dict[str, object] = {}
+
+    class _FakeUvicorn:
+        @staticmethod
+        def run(app, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setitem(sys.modules, "uvicorn", _FakeUvicorn)
+    monkeypatch.setenv("PSAT_API_RELOAD", reload_flag)
+    monkeypatch.delenv("PSAT_API_LIMIT_CONCURRENCY", raising=False)
+
+    api.serve()
+
+    assert captured["reload"] is expected
+    assert captured["limit_concurrency"] is None

@@ -8,6 +8,27 @@ cd "$(dirname "$0")"
 
 export PYTHONUNBUFFERED=1
 
+# This script's stdout is redirected into the JSONL log stream (start_local.sh,
+# start_container.sh), so a bare `echo` lands there as a line no JSON reader can
+# parse. Emit the launcher's own lines in the same one-object-per-line shape the
+# Python processes use. Level is the first argument; the rest is the message.
+log_json() {
+  local level="$1"
+  shift
+  local msg="$*"
+  msg=${msg//\\/\\\\}
+  msg=${msg//\"/\\\"}
+  printf '{"timestamp":"%s","level":"%s","logger":"start_workers","message":"%s"}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" "$level" "$msg"
+}
+
+# The hypersync client is Rust; its env_logger writes plaintext straight to fd 2
+# (retry/429 lines), bypassing Python logging entirely. Pin the filter rather
+# than silence it: a retried 429 that still degrades a fold is already reported
+# on the Python side by `_note_partial_reason`, but an upstream default-level
+# change would otherwise dump Rust INFO/DEBUG into this JSONL file.
+export RUST_LOG="${RUST_LOG:-error}"
+
 # Cap glibc's per-thread malloc arenas so freed pages return to the kernel
 # instead of staying mapped in the process's address space. Default is
 # 8×CPU per process; with 12 Python procs × ~16 arenas each, freed-but-
@@ -61,11 +82,11 @@ elif command -v python3 >/dev/null 2>&1; then
 elif command -v python >/dev/null 2>&1; then
   PYTHON_CMD=(python)
 else
-  echo "ERROR: No Python interpreter found. Run 'uv sync' or activate the project virtualenv."
+  log_json ERROR "No Python interpreter found. Run 'uv sync' or activate the project virtualenv."
   exit 1
 fi
 
-echo "Starting PSAT workers with: ${PYTHON_CMD[*]}"
+log_json INFO "Starting PSAT workers with: ${PYTHON_CMD[*]}"
 
 # Worker counts are env-tunable so the bench harness can sweep them
 # without rebuilding the image. Defaults match the long-standing prod
@@ -77,9 +98,9 @@ echo "Starting PSAT workers with: ${PYTHON_CMD[*]}"
 STATIC_COUNT="${PSAT_STATIC_WORKERS:-2}"
 RESOLUTION_COUNT="${PSAT_RESOLUTION_WORKERS:-1}"
 POLICY_COUNT="${PSAT_POLICY_WORKERS:-1}"
-echo "  static workers:     $STATIC_COUNT (set PSAT_STATIC_WORKERS to override)"
-echo "  resolution workers: $RESOLUTION_COUNT (set PSAT_RESOLUTION_WORKERS to override)"
-echo "  policy workers:     $POLICY_COUNT (set PSAT_POLICY_WORKERS to override)"
+log_json INFO "static workers: $STATIC_COUNT (set PSAT_STATIC_WORKERS to override)"
+log_json INFO "resolution workers: $RESOLUTION_COUNT (set PSAT_RESOLUTION_WORKERS to override)"
+log_json INFO "policy workers: $POLICY_COUNT (set PSAT_POLICY_WORKERS to override)"
 
 "${PYTHON_CMD[@]}" -m workers.discovery &
 PIDS+=($!)
@@ -129,7 +150,7 @@ PIDS+=($!)
 "${PYTHON_CMD[@]}" -m workers.protocol_monitor --reconcile &
 PIDS+=($!)
 
-echo "All workers started: ${PIDS[*]}"
+log_json INFO "All workers started: ${PIDS[*]}"
 # Exit on first death — Fly restarts the machine so every worker
 # relaunches. Silent-dead-worker is worse than a 30s restart.
 wait -n

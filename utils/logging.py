@@ -23,9 +23,10 @@ Level contract:
                  in the same handler so the swallow shows up in the
                  ``stage_errors`` artifact (queryable via
                  ``GET /api/jobs/{id}/errors``). Enforced by
-                 ``tests/test_log_level_contract.py`` against the four
-                 main pipeline workers; intentional exemptions live in
-                 that test's allow-list.
+                 ``tests/test_log_level_contract.py`` against the
+                 pipeline workers it lists (``PIPELINE_WORKERS`` — six
+                 today, and it grows as BaseWorker subclasses land);
+                 intentional exemptions live in that test's allow-list.
     ``INFO``     Lifecycle: process boot, job claim, stage advance, job
                  completion, child-job spawn. One per real event, not
                  per loop iteration.
@@ -40,6 +41,16 @@ AND attaches a full traceback to a non-failure log line. The right
 substitute is ``logger.warning("...", extra={"exc_type": type(exc).__name__})``
 which keeps the exception type as a structured JSON field without
 pretending the job failed.
+
+One standing exemption: ``workers/base.py``'s ``logger.exception`` calls
+inside swallowed handlers stay as they are. They are the framework's own
+keep-alive paths (lease release, timing writes, the dispatcher's
+catch-all, the main loop) — a worker that must not die while something
+underneath it is broken. There is no job whose outcome they degrade, and
+the traceback is the only description of the framework fault, so it is
+kept deliberately. ``base.py`` is therefore not in the level-contract
+test's ``PIPELINE_WORKERS`` list; new *stage* code does not inherit this
+exemption.
 
 Threading note: ``contextvars`` are per-thread by default. When fanning
 out via :class:`concurrent.futures.ThreadPoolExecutor`, wrap every
@@ -202,7 +213,60 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(payload, default=str)
 
 
+class CryticCompileEchoDemoter(logging.Filter):
+    """Demote crytic-compile's verbatim subprocess-output echoes off ERROR.
+
+    ``crytic_compile.utils.subprocess.run`` logs a failed build's captured
+    stdout AND stderr at ERROR, next to its own ``"'forge' returned non-zero
+    exit code %d"`` line. That exit-code line is the failure witness; the two
+    echoes are the tool's own text, and a failed ``forge build`` still prints
+    its ordinary progress chatter there (``Compiling 45 files with Solc 0.7.0``
+    / ``Solc 0.7.0 finished in 37ms``) — ~30 ERROR records per pipeline run
+    that assert nothing failed, on top of the 60 that do.
+
+    The echoes are identified structurally, never by content: within that one
+    helper they are the only records carrying neither format args nor
+    ``exc_info``. What the payload *is* then decides how far it drops, and only
+    on proof: multi-line stdout carries the library's own ``"\\nstdout: "``
+    continuation prefix, so it is provably progress chatter and goes to DEBUG.
+    Every other echo may carry the compiler's diagnostics, so it drops only as
+    far as WARNING — visible, queryable, out of ERROR-rate triage. Nothing is
+    dropped on a content guess. If upstream moves these call sites the guards
+    stop matching and the records keep their original level.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno < logging.ERROR:
+            return True
+        if record.module != "subprocess" or record.funcName != "run":
+            return True
+        if record.args or record.exc_info:
+            return True
+        message = record.msg if isinstance(record.msg, str) else ""
+        demoted = logging.DEBUG if "\nstdout: " in message else logging.WARNING
+        record.levelno = demoted
+        record.levelname = logging.getLevelName(demoted)
+        # A logger-attached filter runs *after* the emitting logger's own level
+        # check, and handlers only compare against their own level — so without
+        # this a demoted record would still be emitted. Apply the gate the
+        # library would have hit had it logged at the demoted level.
+        return demoted >= logging.getLogger().getEffectiveLevel()
+
+
 _CONFIGURED_FLAG = "_psat_json_logging_configured"
+
+
+def _install_third_party_log_hygiene() -> None:
+    """Tame the third-party loggers that would otherwise mis-level our stream."""
+    crytic = logging.getLogger("CryticCompile")
+    if not any(isinstance(existing, CryticCompileEchoDemoter) for existing in crytic.filters):
+        crytic.addFilter(CryticCompileEchoDemoter())
+    # Route the ``warnings`` module through logging (``py.warnings``) so a
+    # DeprecationWarning / RequestsDependencyWarning becomes one JSON record
+    # instead of a two-line raw stderr write that bypasses the formatter (and
+    # the secret scrubber). Only covers warnings raised after this call — an
+    # import-time warning has already been written by then.
+    logging.captureWarnings(True)
 
 
 def configure_logging(level: int | str | None = None) -> None:
@@ -228,6 +292,7 @@ def configure_logging(level: int | str | None = None) -> None:
         root.removeHandler(existing)
     root.addHandler(handler)
     root.setLevel(level)
+    _install_third_party_log_hygiene()
     setattr(root, _CONFIGURED_FLAG, True)
 
 
@@ -453,8 +518,12 @@ def uvicorn_log_config(level: int | str | None = None) -> dict[str, Any]:
 
     ``disable_existing_loggers`` is ``False`` so applying this never silences
     the application's own loggers. Level defaults to ``PSAT_LOG_LEVEL`` (then
-    INFO) to match :func:`configure_logging`. Wiring it into the server is the
-    API agent's job — this helper only builds the config.
+    INFO) to match :func:`configure_logging`. ``api.serve()`` is the wiring:
+    the uvicorn CLI can only take a log config as a *file*, so the server is
+    launched programmatically. ``uvicorn.access`` is still declared here (a
+    caller that wants the access line gets it as JSON), but ``serve()`` passes
+    ``access_log=False`` — the ``api`` request middleware already emits the
+    same line with ``trace_id`` and ``duration_ms``.
     """
     if level is None:
         level = os.getenv("PSAT_LOG_LEVEL", "INFO").upper()
@@ -482,6 +551,7 @@ def uvicorn_log_config(level: int | str | None = None) -> dict[str, Any]:
 
 
 __all__ = [
+    "CryticCompileEchoDemoter",
     "JsonFormatter",
     "bind_trace_context",
     "configure_logging",
