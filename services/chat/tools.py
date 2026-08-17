@@ -74,7 +74,11 @@ def _source_row_content(row) -> str | None:
             body = client.get(row.storage_key)
             return body.decode("utf-8", errors="replace") if isinstance(body, bytes) else str(body)
         except Exception as exc:
-            logger.error("storage fetch failed for %s: %s", row.storage_key, exc)
+            logger.warning(
+                "storage fetch failed for %s; falling back to the explorer",
+                row.storage_key,
+                extra={"exc_type": type(exc).__name__, "storage_key": row.storage_key, "path": row.path},
+            )
             return None
     if row.content is None:
         return None

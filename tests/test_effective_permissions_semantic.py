@@ -939,3 +939,45 @@ def test_authority_roles_null_when_no_capability_resolved(db_session) -> None:
         capability_by_function=None,
     )
     assert _ef_row(db_session).authority_roles is None
+
+
+def test_resolver_crash_warns_once_per_contract_and_records_degraded(db_session, caplog) -> None:
+    """A principal resolver that crashes leaves every row's ``resolved_type``
+    NULL — downstream that reads as "not a Safe/Timelock", so the writer says
+    so once per contract."""
+    import logging
+
+    from utils.logging import degraded_errors_var
+
+    cap = CapabilityExpr.finite_set(["0x" + "a" * 40, "0x" + "b" * 40])
+
+    def _boom(_address: str):
+        raise RuntimeError("classify service down")
+
+    degraded: list = []
+    token = degraded_errors_var.set(degraded)
+    try:
+        with caplog.at_level(logging.WARNING, logger="services.policy.effective_permissions_writer"):
+            write_effective_function_rows(
+                db_session,
+                contract_id=1,
+                function_records=[_fn_record("a()"), _fn_record("b()")],
+                capability_by_function={"a()": cap, "b()": cap},
+                resolve_principal_type=_boom,
+            )
+    finally:
+        degraded_errors_var.reset(token)
+
+    # Two functions × two principals = four classify attempts, one line.
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert warnings[0].contract_id == 1
+    assert warnings[0].failed_addresses == 2
+    assert warnings[0].exc_type == "RuntimeError"
+
+    entries = [e for e in degraded if e.phase == "principal_classification"]
+    assert len(entries) == 1
+    # The resolver's own text is what tells a 402 from a timeout downstream.
+    assert "classify service down" in entries[0].message
+
+    assert all(row.resolved_type is None for row in _principals(db_session))

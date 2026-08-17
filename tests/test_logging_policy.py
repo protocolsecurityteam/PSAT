@@ -10,6 +10,9 @@ Covers the logging/observability behaviour added to ``workers/policy_worker.py``
   into ``extra={}`` and folds an ``authority_status`` stage metric.
 * The phase timers (formerly the bespoke ``_log_policy_phase``) fold
   ``phase_ms_<phase>`` metrics via the canonical ``log_timed_phase``.
+* Materialization hydration tells a DB error apart from a row miss: the error
+  path rolls the session back, warns, and records degraded; the miss stays
+  silent.
 
 Offline: ``process()`` is driven with all DB/RPC collaborators stubbed; the
 ``MagicMock`` session's ``scalar_one_or_none`` returns ``None`` so ``contract_row``
@@ -178,3 +181,82 @@ def test_authority_status_in_extra_and_metric(monkeypatch: pytest.MonkeyPatch) -
     # #16-policy: phase timers fold phase_ms_<phase> via log_timed_phase.
     assert "phase_ms_effective_permissions" in metrics
     assert "phase_ms_principal_labels" in metrics
+
+
+def _drive_hydration(monkeypatch: pytest.MonkeyPatch, *, raises: bool) -> tuple[Any, list, list[logging.LogRecord]]:
+    """Drive ``_load_nested_artifacts`` over one nested bundle whose
+    ``contract_materializations`` lookup either raises or misses."""
+    from unittest.mock import MagicMock
+
+    from db.nested_artifacts import artifact_key
+    from workers import policy_worker
+
+    row = SimpleNamespace(name=artifact_key(TARGET_ADDRESS, "snapshot"))
+    session = MagicMock()
+    session.execute.return_value.scalars.return_value.all.return_value = [row]
+
+    monkeypatch.setattr(policy_worker, "get_artifact", lambda *_a, **_kw: {"contract_address": TARGET_ADDRESS})
+
+    def _lookup(_session: Any, *, chain: str, address: str) -> Any:
+        if raises:
+            raise RuntimeError("connection reset")
+        return None
+
+    monkeypatch.setattr("db.contract_materializations.find_by_address", _lookup)
+
+    collector = _RecordCollector()
+    module_logger = logging.getLogger("workers.policy_worker")
+    module_logger.addHandler(collector)
+    degraded: list = []
+    dtoken = degraded_errors_var.set(degraded)
+    try:
+        with bind_trace_context(trace_id="t", job_id="j", stage="policy", worker_id="PolicyWorker-1"):
+            policy_worker._load_nested_artifacts(session, "job-1", chain="ethereum")
+    finally:
+        degraded_errors_var.reset(dtoken)
+        module_logger.removeHandler(collector)
+    return session, degraded, collector.records
+
+
+def test_hydration_db_error_warns_and_rolls_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    session, degraded, records = _drive_hydration(monkeypatch, raises=True)
+
+    warnings = [
+        r for r in records if r.levelno == logging.WARNING and "Materialization hydration failed" in r.getMessage()
+    ]
+    assert len(warnings) == 1
+    assert getattr(warnings[0], "exc_type", None) == "RuntimeError"
+    assert getattr(warnings[0], "address", None) == TARGET_ADDRESS
+
+    hydration = [e for e in degraded if e.phase == "nested_artifact_hydration"]
+    assert len(hydration) == 1
+    assert hydration[0].severity == "degraded"
+
+    # A failed query leaves the session pending-rollback; the handler clears it.
+    assert session.rollback.called
+
+
+def test_hydration_row_miss_stays_silent(monkeypatch: pytest.MonkeyPatch) -> None:
+    session, degraded, records = _drive_hydration(monkeypatch, raises=False)
+
+    assert [r for r in records if r.levelno >= logging.WARNING] == []
+    assert degraded == []
+    assert not session.rollback.called
+
+
+def test_principal_classification_failures_collect_per_contract() -> None:
+    """D5: resolver crashes are collected so the writer can report them once
+    per contract rather than once per principal."""
+    from services.policy import effective_permissions_writer as writer
+
+    memo: dict[str, Any] = {}
+    failures: list[BaseException] = []
+
+    def _boom(_address: str) -> Any:
+        raise RuntimeError("classifier down")
+
+    for addr in ("0xaaa", "0xbbb", "0xAAA"):
+        assert writer._classify_principal(addr, _boom, memo, failures=failures) == (None, None)
+
+    # The memo collapses the repeat: two distinct addresses, two failures.
+    assert len(failures) == 2

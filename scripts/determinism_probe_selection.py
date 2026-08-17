@@ -97,6 +97,13 @@ def main() -> int:
     parser.add_argument("--protocol-id", type=int, default=1)
     args = parser.parse_args()
 
+    from utils.logging import configure_logging
+
+    # The probe's own output is the print()s below; this is so the library
+    # code it drives logs through the house JSON handler instead of falling
+    # to lastResort (WARNING-only, unscrubbed).
+    configure_logging()
+
     from db.models import SessionLocal
     from services.effects.selection import build_authority_graph, select_candidates
 
