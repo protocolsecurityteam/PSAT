@@ -2509,6 +2509,10 @@ def test_anvil_factory_is_single_flight_and_closed(monkeypatch):
         def __init__(self, **kwargs):
             spawns.append(kwargs)
             self.closed = False
+            self._pin = kwargs.get("fork_block_number")
+
+        def fork_block_number(self):
+            return self._pin
 
         def close(self):
             self.closed = True

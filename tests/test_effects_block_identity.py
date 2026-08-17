@@ -198,6 +198,10 @@ def test_the_worker_spawns_its_fork_at_the_preflight_pin(monkeypatch):
     class _FakeAnvil:
         def __init__(self, **kwargs: Any) -> None:
             spawns.append(kwargs)
+            self._pin = kwargs.get("fork_block_number")
+
+        def fork_block_number(self) -> Any:
+            return self._pin
 
         def close(self) -> None:
             pass
@@ -235,6 +239,10 @@ def test_a_failed_head_pin_leaves_the_fork_unpinned(monkeypatch):
     class _FakeAnvil:
         def __init__(self, **kwargs: Any) -> None:
             spawns.append(kwargs)
+            self._pin = kwargs.get("fork_block_number")
+
+        def fork_block_number(self) -> Any:
+            return self._pin
 
         def close(self) -> None:
             pass

@@ -19,3 +19,15 @@ class AnvilSpawnError(EffectsProbeError):
 
 class ForkRpcTimeoutError(EffectsProbeError):
     """A fork-backing RPC round-trip timed out — transient."""
+
+
+class UnresolvedProxyImplementation(EffectsProbeError):
+    """A proxy contract row carries function rows but names no implementation, so
+    there is no code to hash. Constructed for ``record_degraded``, never raised:
+    the candidate is skipped (fail-forward), not failed."""
+
+
+class BehaviorHashUnavailable(EffectsProbeError):
+    """No behavioral hash could be resolved for a candidate (no cached bytecode,
+    or the proxy refusal above). Constructed for ``record_degraded``, never
+    raised — same fail-forward skip."""

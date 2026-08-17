@@ -22,7 +22,9 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import threading
 import time
+from collections import deque
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -54,6 +56,12 @@ from utils.memory import rss_bytes_for_pid
 from utils.rpc import EthCallResult
 
 logger = logging.getLogger(__name__)
+
+# How much of anvil's output a spawn/startup failure can quote back, and how long
+# ``close`` waits on the drain thread before giving up on it (the thread is a
+# daemon, so a wedged read can never hold the process open).
+_OUTPUT_TAIL_LINES = 40
+_DRAIN_JOIN_TIMEOUT_S = 2.0
 
 # Post-Cancun forks that carry EIP-6780 (and later) semantics. A fork pinned to
 # anything earlier can mint witnesses wrong for the live chain.
@@ -707,6 +715,12 @@ def _build_anvil_cmd(
     fork_headers: Mapping[str, str] | None,
     fork_block_number: int | None = None,
 ) -> list[str]:
+    # ``--silent`` stays: measured on anvil 1.5.1 it suppresses the startup banner
+    # and the per-RPC line, NOT the fatal startup errors (a bad fork URL and a
+    # taken port both print verbatim under it). So the failure account this
+    # subprocess is piped for survives, while the tail keeps naming the cause
+    # instead of 40 ``eth_call`` lines — and the banner's dev private keys +
+    # mnemonic never reach a log line or an exception message.
     cmd = [anvil_bin, "--port", str(port), "--hardfork", hardfork_name, "--silent"]
     if fork_url is not None:
         cmd += ["--fork-url", fork_url]
@@ -752,14 +766,75 @@ class SubprocessAnvil:
         # non-forking spawn and a rejected (non-positive) pin both leave this
         # ``None``, and ``fork_block_number()`` is what a recipe publishes from.
         self._fork_block: int | None = fork_block_number if "--fork-block-number" in cmd else None
+        # Bounded so a chatty long-lived fork cannot grow the job's memory; it
+        # holds only what a spawn/startup failure needs to be explainable.
+        self._output_tail: deque[str] = deque(maxlen=_OUTPUT_TAIL_LINES)
+        self._drain: threading.Thread | None = None
         try:
-            self._proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self._proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                # One undecodable byte must not kill the drain: ``text=True``
+                # defaults to strict, and a dead drain leaves the pipe unread
+                # until anvil blocks writing into a full 64K buffer — holding the
+                # port with a process nothing is reading.
+                errors="replace",
+                bufsize=1,
+            )
         except (OSError, ValueError) as exc:
             raise AnvilSpawnError(f"failed to spawn anvil: {exc}") from exc
-        self._foundry_version = _anvil_version(anvil_bin)
-        self._wait_ready(startup_timeout)
+        # Everything from here on can leave a live process behind, so it all sits
+        # under the cleanup guard: a failed ``Thread.start`` would leave the pipe
+        # undrained (the backpressure deadlock above), and ``_anvil_version`` does
+        # its own subprocess work that can raise.
+        try:
+            self._drain = threading.Thread(target=self._drain_output, name="anvil-log-drain", daemon=True)
+            self._drain.start()
+            self._foundry_version = _anvil_version(anvil_bin)
+            self._wait_ready(startup_timeout)
+        except BaseException:
+            # A fork that never became usable must not leave its process (and the
+            # drain thread reading it) behind for the rest of the job. A cleanup
+            # failure must not replace the startup failure — that one carries the
+            # returncode and the output tail the caller needs.
+            try:
+                self.close()
+            except Exception:
+                pass
+            raise
 
     # -- lifecycle ---------------------------------------------------------
+
+    def _drain_output(self) -> None:
+        """Read anvil's merged stdout+stderr to EOF, logging each line and keeping
+        the tail for error reporting. Runs for the life of the process: an
+        undrained pipe would block anvil once its 64K buffer filled."""
+        stream = self._proc.stdout
+        if stream is None:  # pragma: no cover - stdout is always a pipe here
+            return
+        try:
+            for raw in stream:
+                line = raw.rstrip("\n")
+                if not line:
+                    continue
+                self._output_tail.append(line)
+                logger.log(logging.DEBUG, "%s", line, extra={"source": "anvil"})
+        except BaseException:
+            # Either ``close`` pulled the fd (the normal end) or the read failed
+            # for a reason we did not anticipate. Either way nothing will drain
+            # this pipe again, so the stream is closed rather than left half-read:
+            # anvil's next write then fails loudly instead of blocking forever on
+            # a full buffer with the port still held.
+            try:
+                stream.close()
+            except Exception:
+                pass
+
+    def output_tail(self) -> list[str]:
+        """The most recent drained output lines (bounded); empty before any output."""
+        return list(self._output_tail)
 
     def close(self) -> None:
         if self._proc.poll() is None:
@@ -767,7 +842,37 @@ class SubprocessAnvil:
             try:
                 self._proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
+                # Deliberately NOT paired with ``record_degraded``: fork-close
+                # cleanup is a resource side-effect (port/memory), not a
+                # degradation of the stage's verdict output — the same exemption
+                # class as ``effects_worker``'s allow-listed close handler.
+                logger.warning(
+                    "anvil did not exit on SIGTERM; escalating to SIGKILL",
+                    extra={"source": "anvil", "pid": self._proc.pid, "terminate_timeout_s": 5},
+                )
                 self._proc.kill()
+                try:
+                    self._proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    # An unreapable process is the caller's problem to notice via
+                    # the port, not a reason for ``close`` itself to raise into a
+                    # finally block.
+                    logger.warning(
+                        "anvil still present after SIGKILL",
+                        extra={"source": "anvil", "pid": self._proc.pid},
+                    )
+        # The pipe hits EOF once the process is gone, so the drain thread ends on
+        # its own; joining bounded (and closing the fd) keeps many open/close
+        # cycles per job from accumulating threads or descriptors.
+        drain = self._drain
+        self._drain = None
+        if drain is not None:
+            drain.join(timeout=_DRAIN_JOIN_TIMEOUT_S)
+        if self._proc.stdout is not None:
+            try:
+                self._proc.stdout.close()
+            except (ValueError, OSError):  # pragma: no cover - already closed
+                pass
 
     def __enter__(self) -> SubprocessAnvil:
         return self
@@ -785,15 +890,44 @@ class SubprocessAnvil:
 
     def _wait_ready(self, timeout: float) -> None:
         deadline = time.monotonic() + timeout
+        last_probe_error: Exception | None = None
         while time.monotonic() < deadline:
             if self._proc.poll() is not None:
-                raise AnvilSpawnError("anvil exited during startup")
+                returncode = self._proc.returncode
+                # The drain thread may still be flushing the dying process's last
+                # lines — those are exactly the ones that name the cause.
+                drain = self._drain
+                if drain is not None:
+                    drain.join(timeout=_DRAIN_JOIN_TIMEOUT_S)
+                tail = self.output_tail()
+                logger.warning(
+                    "anvil exited during startup",
+                    extra={"source": "anvil", "returncode": returncode, "output_tail": tail},
+                )
+                raise AnvilSpawnError(
+                    f"anvil exited during startup (returncode={returncode}): {' | '.join(tail) or '<no output>'}"
+                ) from last_probe_error
             try:
                 self._rpc("web3_clientVersion", [])
                 return
-            except Exception:
+            except Exception as exc:
+                last_probe_error = exc
                 time.sleep(0.1)
-        raise ForkRpcTimeoutError("anvil did not become ready in time")
+        tail = self.output_tail()
+        logger.warning(
+            "anvil did not become ready in time",
+            extra={
+                "source": "anvil",
+                "startup_timeout_s": timeout,
+                "last_probe_error": type(last_probe_error).__name__ if last_probe_error is not None else None,
+                "output_tail": tail,
+            },
+        )
+        # The last probe error is the closest thing to a cause the startup loop
+        # holds; chaining it keeps it out of the discard pile.
+        raise ForkRpcTimeoutError(
+            f"anvil did not become ready in time: {' | '.join(tail) or '<no output>'}"
+        ) from last_probe_error
 
     # -- transport surface -------------------------------------------------
 
