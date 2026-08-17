@@ -7,8 +7,26 @@ request payloads, not the artifact-output JSON shape.
 from __future__ import annotations
 
 import re
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field, field_validator, model_validator
+
+#: A 20-byte lowercase-or-checksummed hex address. Shared by every request
+#: model so no ingest path accepts a 42-char string that is not actually hex.
+_HEX_ADDRESS_RE = re.compile(r"0x[a-fA-F0-9]{40}")
+
+#: The only hosts a Discord webhook can legitimately live on.
+_DISCORD_WEBHOOK_HOSTS = {"discord.com", "discordapp.com", "canary.discord.com", "ptb.discord.com"}
+
+_DAPP_URLS_MAX = 50
+
+
+def _require_http_url(value: str) -> str:
+    # A URL leaves this service as an href or an outbound fetch; only http(s)
+    # is inert to the click that ``javascript:``/``data:``/``file:`` schemes weaponize.
+    if urlparse(value).scheme.lower() not in ("http", "https"):
+        raise ValueError("URL must use the http or https scheme")
+    return value
 
 
 class AnalyzeRequest(BaseModel):
@@ -20,10 +38,26 @@ class AnalyzeRequest(BaseModel):
         # One canonical form in the DB: the job row and request are joined
         # case-insensitively everywhere else, but exact-match consumers (spawn
         # dedup, listing joins) must never see a checksummed variant.
-        return v.lower() if isinstance(v, str) else v
+        if not isinstance(v, str):
+            return v
+        v = v.lower()
+        if not _HEX_ADDRESS_RE.fullmatch(v):
+            raise ValueError("address must be a 20-byte hex address")
+        return v
 
     company: str | None = Field(default=None, min_length=1)
     dapp_urls: list[str] | None = None
+
+    @field_validator("dapp_urls")
+    @classmethod
+    def _validate_dapp_urls(cls, v: list[str] | None) -> list[str] | None:
+        if v is None:
+            return v
+        if len(v) > _DAPP_URLS_MAX:
+            raise ValueError(f"dapp_urls accepts at most {_DAPP_URLS_MAX} entries")
+        for url in v:
+            _require_http_url(url)
+        return v
     defillama_protocol: str | None = Field(default=None, min_length=1)
     name: str | None = None
     chain: str | None = None
@@ -51,6 +85,16 @@ class ProtocolSubscribeRequest(BaseModel):
     discord_webhook_url: str = Field(min_length=1, description="Discord webhook URL for protocol event notifications.")
     label: str | None = None
     event_filter: dict | None = Field(default=None, description='Optional filter: {"event_types": ["upgraded", ...]}')
+
+    @field_validator("discord_webhook_url")
+    @classmethod
+    def _validate_discord_webhook_url(cls, v: str) -> str:
+        # The monitor POSTs findings to this URL; it must be an https endpoint on
+        # a Discord host and nothing else — no arbitrary outbound target.
+        parsed = urlparse(v)
+        if parsed.scheme.lower() != "https" or (parsed.hostname or "").lower() not in _DISCORD_WEBHOOK_HOSTS:
+            raise ValueError("discord_webhook_url must be an https URL on a Discord host")
+        return v
 
     @field_validator("event_filter")
     @classmethod
@@ -165,7 +209,7 @@ class UpsertMonitoredContractRequest(BaseModel):
     @field_validator("address")
     @classmethod
     def validate_address(cls, value: str) -> str:
-        if not re.fullmatch(r"0x[a-fA-F0-9]{40}", value):
+        if not _HEX_ADDRESS_RE.fullmatch(value):
             raise ValueError("address must be a 20-byte hex address")
         return value.lower()
 
@@ -183,6 +227,15 @@ class AddAuditRequest(BaseModel):
     date: str | None = None
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     source_repo: str | None = None
+
+    @field_validator("url", "pdf_url")
+    @classmethod
+    def _validate_audit_url(cls, v: str | None) -> str | None:
+        # These are rendered as links on the admin surface; a non-http(s) scheme
+        # would become an executable href.
+        if v is None:
+            return v
+        return _require_http_url(v)
 
 
 class UpdateMonitoredContractRequest(BaseModel):
