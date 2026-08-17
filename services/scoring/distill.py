@@ -42,6 +42,7 @@ from services.scoring.schema import (
 )
 from utils import execution_record as EX
 from utils.execution_record import PROVING_EXECUTION_KEY
+from utils.logging import record_degraded, record_stage_metric
 from utils.scoring_status import (
     DESTINATION_FREE_CLAIMS,
     DESTINATION_SHAPE_NOT_APPLICABLE,
@@ -74,6 +75,35 @@ from utils.scoring_status import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Why the flow-asset plane produced no receiver map for a contract. A closed
+# vocabulary: the token is published on every refusal the empty map causes, so
+# "the producer stopped writing the artifact" and "the body is not the shape
+# this reader knows" stop spelling the same thing in the document.
+ASSET_IDENTITY_LOADED = "loaded"
+ASSET_IDENTITY_JOB_ABSENT = "job_absent"
+ASSET_IDENTITY_ARTIFACT_ABSENT = "artifact_absent"
+ASSET_IDENTITY_ARTIFACT_MALFORMED = "artifact_malformed"
+ASSET_IDENTITY_NO_RECEIVERS = "no_receivers"
+
+# The W2 precondition's refusal arms, each naming the conjunct that failed.
+# Ordered by how far the walk got, so a signal that reached the invariant check
+# reports that rather than the coarser miss some other entry took.
+W2_PLANE_ABSENT = "asset_identity_plane_absent"
+W2_NO_STATE_VAR_RECEIVER = "no_state_var_receiver"
+W2_SELECTOR_UNRESOLVED = "selector_unresolved"
+W2_STATUS_NOT_RESOLVED = "status_not_resolved"
+W2_INVARIANT_NOT_DETERMINED = "invariant_not_determined"
+_W2_ARM_RANK = (
+    W2_NO_STATE_VAR_RECEIVER,
+    W2_SELECTOR_UNRESOLVED,
+    W2_STATUS_NOT_RESOLVED,
+    W2_INVARIANT_NOT_DETERMINED,
+)
+
+# How many orphaned contract ids one WARNING carries. A job can hold thousands;
+# the count is the fact and the ids are the sample that makes it actionable.
+_ORPHAN_SAMPLE = 20
 
 # Gate envelopes every signal carries, so the fold can read them without a
 # ``dict.get`` default standing in for an unread witness.
@@ -176,6 +206,9 @@ class _ContractFacts:
     pause_unset_principals: list[dict[str, Any]] = field(default_factory=list)
     licensed_reach_entities: list[dict[str, Any]] = field(default_factory=list)
     asset_identity: dict[str, Any] = field(default_factory=dict)
+    # Why ``asset_identity`` is empty, from the closed vocabulary above. An empty
+    # map with no reason is the collapse this field exists to stop.
+    asset_identity_state: str = ASSET_IDENTITY_JOB_ABSENT
     # Every entity key this protocol's own ``contracts`` rows name, chain-scoped.
     # A reach key that names nothing in here names nothing this document can
     # answer for, and charging it would both invent reach and spend exposure room
@@ -200,10 +233,27 @@ def distill_job_signals(session: Session, job: Any) -> dict[int, list[FunctionSi
 
     contracts = session.query(Contract).filter(Contract.job_id == job.id).order_by(Contract.id).all()
     out: dict[int, list[FunctionSignal]] = {}
+    orphaned: list[int] = []
     for contract in contracts:
         if contract.protocol_id is None:
+            # A contract with no protocol has no document to be scored into. It
+            # is a known orphaning class rather than a routine skip, so it is
+            # counted where the job can see it instead of vanishing here.
+            orphaned.append(int(contract.id))
             continue
         out[contract.id] = distill_contract_signals(session, contract, job_id=job.id)
+    record_stage_metric("score_signal_contracts_skipped_null_protocol", len(orphaned))
+    if orphaned:
+        logger.warning(
+            "score signals skipped for %d contract(s) with no protocol_id",
+            len(orphaned),
+            extra={
+                "job_id": str(job.id),
+                "contracts_skipped": len(orphaned),
+                "contracts_total": len(contracts),
+                "contract_ids": orphaned[:_ORPHAN_SAMPLE],
+            },
+        )
     return out
 
 
@@ -292,10 +342,19 @@ class _TranscriptReader:
             body = EX.REASON_STORAGE_KEY_MISSING
         except StorageKeyMissing:
             body = EX.REASON_TRANSCRIPT_UNSTORED
-        except Exception:
+        except Exception as exc:
             # A transport failure says nothing about the call, so it is its own
             # reason and invites a retry rather than asserting an absence.
-            logger.warning("transcript body unreadable for %s::%s", job_id, name, exc_info=True)
+            logger.warning(
+                "transcript body unreadable",
+                exc_info=True,
+                extra={"job_id": str(job_id), "artifact_name": name, "exc_type": type(exc).__name__},
+            )
+            record_degraded(
+                phase="score_signal_transcript_read",
+                exc=exc,
+                context={"job_id": str(job_id), "artifact_name": name},
+            )
             body = EX.REASON_FETCH_FAILED
         _TRANSCRIPT_CACHE[parts] = body
         return body
@@ -389,7 +448,7 @@ def _load_contract_facts(session: Session, contract: Any, *, job_id: Any) -> _Co
         .all()
     )
     facts.licensed_reach_entities = _licensed_reach_entities(session, backlinks, address, chain)
-    facts.asset_identity = _asset_identity(session, job_id)
+    facts.asset_identity, facts.asset_identity_state = _asset_identity(session, job_id)
     return facts
 
 
@@ -500,31 +559,42 @@ def _licensed_reach_entities(session: Session, backlinks: list[Any], address: st
     return [out[k] for k in sorted(out)]
 
 
-def _asset_identity(session: Session, job_id: Any) -> dict[str, Any]:
-    """``flow_asset_addresses`` receivers, keyed by (deployment, selector).
+def _asset_identity(session: Session, job_id: Any) -> tuple[dict[str, Any], str]:
+    """``flow_asset_addresses`` receivers by selector, and WHY the map is empty.
 
     Absence means the plane did not run for this job — ``not_determined``, never
-    a proven-empty asset set.
+    a proven-empty asset set. The three ways an empty map arises are not one
+    fact: no job to read from, an artifact that was never written, and a body
+    whose shape this reader does not recognise are different questions to
+    whoever is deciding whether to look again. They are named apart and the
+    token travels onto every refusal the empty map causes.
     """
     if job_id is None:
-        return {}
+        return {}, ASSET_IDENTITY_JOB_ABSENT
     from db.queue import get_artifact
 
     payload = get_artifact(session, job_id, "flow_asset_addresses")
+    if payload is None:
+        return {}, ASSET_IDENTITY_ARTIFACT_ABSENT
     if not isinstance(payload, dict):
-        return {}
+        return {}, ASSET_IDENTITY_ARTIFACT_MALFORMED
     receivers = payload.get("receivers")
     if not isinstance(receivers, list):
-        return {}
+        return {}, ASSET_IDENTITY_ARTIFACT_MALFORMED
     out: dict[str, Any] = {}
+    malformed = 0
     for receiver in receivers:
         if not isinstance(receiver, dict):
+            malformed += 1
             continue
         selector = receiver.get("asset_getter_selector")
         if not selector:
+            malformed += 1
             continue
         out[str(selector)] = receiver
-    return out
+    if out:
+        return out, ASSET_IDENTITY_LOADED
+    return {}, ASSET_IDENTITY_ARTIFACT_MALFORMED if malformed else ASSET_IDENTITY_NO_RECEIVERS
 
 
 # ---------------------------------------------------------------- claim reads
@@ -1754,7 +1824,7 @@ def _build_signal(
 
     # --- claim-scoped gates -------------------------------------------------
     if claim_id == "flow.out":
-        gates.update(_flow_gates(facts, entries, all_claims))
+        gates.update(_flow_gates(facts, entries, all_claims, notes))
     if claim_id == "pause.set":
         gates.update(_pause_gates(facts, func, entries))
 
@@ -1918,12 +1988,23 @@ def _reach_rank(reach: _Reach) -> tuple[int, int]:
 
 
 def _flow_gates(
-    facts: _ContractFacts, entries: list[dict[str, Any]], all_claims: list[dict[str, Any]]
+    facts: _ContractFacts, entries: list[dict[str, Any]], all_claims: list[dict[str, Any]], notes: set[str]
 ) -> dict[str, Any]:
     amount_kinds = _amount_kinds(all_claims)
     asset_class = _flow_asset_class(all_claims)
     observed_blocks = [(e.get("witness") or {}).get("observed") or {} for e in entries]
-    identity = _token_identity(facts, entries)
+    identity, refusal = _token_identity(facts, entries)
+    identity_json = identity.to_json()
+    if refusal is not None:
+        # The arm travels twice on purpose: in the envelope, where the persisted
+        # signal carries it, and in the notes, which are the only path onto the
+        # document. The three-state itself is untouched — a named refusal is
+        # still a refusal.
+        identity_json["not_determined_reason"] = refusal
+        notes.add(refusal)
+        if refusal == W2_PLANE_ABSENT:
+            identity_json["asset_identity_plane_state"] = facts.asset_identity_state
+            notes.add(f"asset_identity_plane_{facts.asset_identity_state}")
     return {
         # ``token_identity`` proves exactly one NON-FUNGIBLE token moves, which
         # forbids pricing the row off a fungible balance sheet.
@@ -1944,45 +2025,61 @@ def _flow_gates(
         "amount_capped_by_balance": (
             Tri.proven("proven", True) if "capped_by_balance" in amount_kinds else Tri[bool].not_determined()
         ).to_json(),
-        "asset_identity": identity.to_json(),
+        "asset_identity": identity_json,
     }
 
 
-def _token_identity(facts: _ContractFacts, entries: list[dict[str, Any]]) -> Tri[dict[str, Any]]:
+def _token_identity(facts: _ContractFacts, entries: list[dict[str, Any]]) -> tuple[Tri[dict[str, Any]], str | None]:
     """The W2 pricing precondition: is the moved asset's identity decidable?
 
     Satisfied only by a state-variable receiver whose address RESOLVED with a
     non-``not_determined`` invariant. A caller-named receiver fails it — a
     demotion, in the honest direction — and an absent plane is ``not_determined``
     because the plane did not run, never "no asset".
+
+    Returns the answer AND, where it is ``not_determined``, the arm that refused
+    it: five distinct conjuncts reach the same third state, and a refusal that
+    does not name itself is one a reader cannot act on. The token is the arm the
+    walk got FURTHEST on across all entries — the entry that reached the
+    invariant check says so, rather than being reported as the coarser miss some
+    other entry took.
     """
     if not facts.asset_identity:
-        return Tri[dict[str, Any]].not_determined()
+        return Tri[dict[str, Any]].not_determined(), W2_PLANE_ABSENT
+    arms: set[str] = set()
     for entry in entries:
         witness = entry.get("witness") or {}
         for sink_id, receiver in sorted((witness.get("sink_receivers") or {}).items()):
             if not isinstance(receiver, dict):
                 continue
             if receiver.get("receiver_provenance") != "contract_state_unresolved":
+                arms.add(W2_NO_STATE_VAR_RECEIVER)
                 continue
             selector = receiver.get("auto_getter_selector")
             resolved = facts.asset_identity.get(str(selector)) if selector else None
             if not isinstance(resolved, dict):
+                arms.add(W2_SELECTOR_UNRESOLVED)
                 continue
             if resolved.get("asset_address_status") != "resolved":
+                arms.add(W2_STATUS_NOT_RESOLVED)
                 continue
             if resolved.get("asset_identity_invariant") in (None, NOT_DETERMINED):
+                arms.add(W2_INVARIANT_NOT_DETERMINED)
                 continue
-            return Tri.proven(
-                "resolved",
-                {
-                    "sink_id": sink_id,
-                    "asset_address": resolved.get("asset_address"),
-                    "observed_at_block": resolved.get("observed_at_block"),
-                    "asset_identity_invariant": resolved.get("asset_identity_invariant"),
-                },
+            return (
+                Tri.proven(
+                    "resolved",
+                    {
+                        "sink_id": sink_id,
+                        "asset_address": resolved.get("asset_address"),
+                        "observed_at_block": resolved.get("observed_at_block"),
+                        "asset_identity_invariant": resolved.get("asset_identity_invariant"),
+                    },
+                ),
+                None,
             )
-    return Tri[dict[str, Any]].not_determined()
+    furthest = next((arm for arm in reversed(_W2_ARM_RANK) if arm in arms), W2_NO_STATE_VAR_RECEIVER)
+    return Tri[dict[str, Any]].not_determined(), furthest
 
 
 def _pause_gates(facts: _ContractFacts, func: Any, entries: list[dict[str, Any]]) -> dict[str, Any]:
@@ -2419,7 +2516,7 @@ def load_protocol_universe(session: Session, protocol_id: int) -> ProtocolUniver
     for job_id in source_jobs:
         try:
             bodies = get_source_files(session, job_id)
-        except RuntimeError:
+        except RuntimeError as exc:
             # Fail closed, whole-universe. A partial read would build a SHORT
             # universe, and a short universe condemns MORE.
             #
@@ -2432,6 +2529,24 @@ def load_protocol_universe(session: Session, protocol_id: int) -> ProtocolUniver
             # escape and abort the score, which is the one direction this
             # function may not take: an unconfigured deployment must condemn
             # nothing, not fail the fold.
+            #
+            # Logged at the return because the whole universe is now ``None`` and
+            # every downstream disposition turns off — published numbers move,
+            # and nothing else in the process says so.
+            logger.warning(
+                "protocol universe fail-closed: source bodies unreadable, no universe built",
+                extra={
+                    "protocol_id": protocol_id,
+                    "job_id": str(job_id),
+                    "source_jobs": len(source_jobs),
+                    "exc_type": type(exc).__name__,
+                },
+            )
+            record_degraded(
+                phase="protocol_universe_source_read",
+                exc=exc,
+                context={"protocol_id": protocol_id, "job_id": str(job_id)},
+            )
             return None
         for body in bodies.values():
             literals |= _literal_addresses(body)

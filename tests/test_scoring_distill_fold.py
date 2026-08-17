@@ -46,6 +46,7 @@ from services.scoring.distill import (
 from services.scoring.fold import _NOTE_WARNINGS, compute_protocol_score
 from services.scoring.planes import (
     CONTROL_RELATIONS,
+    REFUSAL_MALFORMED_NODE_ID,
     REFUSAL_SELF_EDGE,
     REFUSAL_ZERO_ANCHOR,
     REFUSAL_ZERO_PRINCIPAL,
@@ -2047,6 +2048,7 @@ def test_the_zero_address_is_refused_at_both_ends_and_the_refusal_is_counted(cor
 
     closure = load_control_closure(db_session, corpus.protocol.id)
     assert closure.refusal_counts() == {
+        REFUSAL_MALFORMED_NODE_ID: 0,
         REFUSAL_SELF_EDGE: 0,
         REFUSAL_ZERO_ANCHOR: 1,
         REFUSAL_ZERO_PRINCIPAL: 1,
@@ -2055,6 +2057,29 @@ def test_the_zero_address_is_refused_at_both_ends_and_the_refusal_is_counted(cor
     assert closure.controlled_by(entity_key("ethereum", zero)) == ()
     # The one real edge survives: the rule removes reach, it does not empty the graph.
     assert closure.controlled_by(entity_key("ethereum", real)) == (entity_key("ethereum", anchor.address),)
+
+
+def test_an_edge_with_an_unkeyable_endpoint_is_refused_by_name_not_dropped(corpus, db_session):
+    """An uncounted drop reads as a protocol with less control in it."""
+    from db.models import ControlGraphEdge
+
+    anchor = corpus.contract("0x" + "f7" * 20)
+    real = "0x" + "ac" * 20
+    for from_node, to_node in ((anchor.address, ""), ("", real)):
+        db_session.add(
+            ControlGraphEdge(
+                contract_id=anchor.id,
+                from_node_id=f"address:{from_node}",
+                to_node_id=f"address:{to_node}",
+                relation="controller_value",
+                label="owner",
+            )
+        )
+    db_session.commit()
+
+    closure = load_control_closure(db_session, corpus.protocol.id)
+    assert closure.refusal_counts()[REFUSAL_MALFORMED_NODE_ID] == 2
+    assert closure.controlled_by(entity_key("ethereum", real)) == ()
 
 
 def test_a_controller_value_pointing_at_the_zero_address_is_an_earned_negative(corpus, db_session):

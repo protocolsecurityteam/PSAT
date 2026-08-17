@@ -9,6 +9,7 @@ is counted in the provenance block rather than defaulted to a number.
 
 from __future__ import annotations
 
+import logging
 import re
 from collections import defaultdict
 from collections.abc import Iterable
@@ -22,7 +23,7 @@ from sqlalchemy import func as sql_func
 from sqlalchemy import or_ as sql_or
 from sqlalchemy.orm import Session
 
-from services.scoring.schema import Tri, coalesce_chain, entity_key, is_entity_key
+from services.scoring.schema import NOT_DETERMINED, Tri, coalesce_chain, entity_key, is_entity_key
 from utils.balance_status import (
     ASSET_SET_SOURCE_CHAIN_LOG_SWEEP,
     ASSET_SET_STATUS_AT_PAGE_CAP,
@@ -37,6 +38,12 @@ from utils.scoring_status import (
 
 if TYPE_CHECKING:
     from services.scoring.distill import ProtocolUniverse
+
+# Confined to the I/O-EDGE loaders in this module — the handlers that swallow a
+# database error while reading a plane. The resolution work itself publishes
+# every refusal into the document (inv. 11/12: the fold must replay from the
+# document alone), so nothing on a compute path logs.
+logger = logging.getLogger(__name__)
 
 NATIVE_ASSET = "native"
 
@@ -1330,15 +1337,30 @@ def load_value_plane(session: Session, protocol_id: int, *, universe: ProtocolUn
     )
     unpriced: dict[str, dict[str, float]] = defaultdict(dict)
     residual_seen = False
+    # Every admission rule states where it fired. A position dropped uncounted is
+    # a quantity that leaves no trace of having existed, which reads downstream
+    # as a node that holds nothing rather than one this plane declined to fold.
+    dropped: dict[str, int] = {
+        "unknown_chain_id": 0,
+        "shares_basis_not_admissible": 0,
+        "shares_unreadable": 0,
+        "cross_read_inconsistent": 0,
+    }
     for position in positions:
         chain = _chain_name(position.chain_id)
         if chain is None:
+            dropped["unknown_chain_id"] += 1
             continue
         key = plane.canonical(entity_key(chain, position.node_address))
         shares = _float(position.eigenlayer_beacon_shares_wei)
-        if position.shares_basis not in ("eigenlayer_beacon_shares", "no_eigenpod_proven") or shares is None:
+        if position.shares_basis not in ("eigenlayer_beacon_shares", "no_eigenpod_proven"):
+            dropped["shares_basis_not_admissible"] += 1
+            continue
+        if shares is None:
+            dropped["shares_unreadable"] += 1
             continue
         if position.cross_read_agreement == "inconsistent":
+            dropped["cross_read_inconsistent"] += 1
             continue
         previous = unpriced[key].get("eigenlayer_beacon_shares_wei")
         if previous is None or shares > previous:
@@ -1353,6 +1375,8 @@ def load_value_plane(session: Session, protocol_id: int, *, universe: ProtocolUn
             {
                 "fact": "restaking positions folded as UNPRICED entity contributions",
                 "entities": len(plane.unpriced_positions),
+                "positions_read": len(positions),
+                "positions_dropped": dict(sorted(dropped.items())),
                 "note": (
                     "the plane carries no USD column and pricing it would need a "
                     "banned price source, so these quantities raise a confidence gap "
@@ -1823,9 +1847,17 @@ def load_role_holder_floors(session: Session, protocol_id: int) -> dict[tuple[st
         .order_by(RoleHolderPlane.chain_id, RoleHolderPlane.registry_address, RoleHolderPlane.role_hash)
         .all()
     )
+    # A row whose chain id maps to no chain is drift, not an admission rule
+    # firing: the registry it names may well be one a trace points at, and the
+    # floor it would have carried is lost. Counted apart from the rules below,
+    # which are this loader's own scoping and holders-basis tests.
+    unknown_chain = 0
     for row in rows:
         chain = _chain_name(row.chain_id)
-        if chain is None or (chain, _lower(row.registry_address)) not in named:
+        if chain is None:
+            unknown_chain += 1
+            continue
+        if (chain, _lower(row.registry_address)) not in named:
             continue
         if not isinstance(row.holders, list) or not row.holders:
             continue
@@ -1837,6 +1869,15 @@ def load_role_holder_floors(session: Session, protocol_id: int) -> dict[tuple[st
             "coverage": row.coverage,
             "holder_set_exhaustive": "not_determined",
         }
+    if unknown_chain:
+        # This loader's return shape is a floor lookup with nowhere to publish a
+        # census, so the drift is announced at the boundary instead of silently
+        # shortening the floors a unit resolves on.
+        logger.warning(
+            "role holder floors dropped %d row(s) whose chain id maps to no chain",
+            unknown_chain,
+            extra={"protocol_id": protocol_id, "rows_dropped": unknown_chain, "rows_read": len(rows)},
+        )
     return out
 
 
@@ -1955,6 +1996,10 @@ REFUSAL_ZERO_ANCHOR = "zero_address_anchor"
 # anyone — refused with a count rather than admitted as a self-loop the walk
 # silently absorbs.
 REFUSAL_SELF_EDGE = "self_referential_column"
+# A stored edge whose endpoint node id carries no address. It is a row this
+# loader cannot key, and dropping it uncounted would make a graph writer that
+# started emitting unusable ids read as a protocol with less control in it.
+REFUSAL_MALFORMED_NODE_ID = "malformed_node_id"
 
 
 @dataclass(frozen=True)
@@ -2030,7 +2075,12 @@ class ControlClosure:
 
     def refusal_counts(self) -> dict[str, int]:
         """Edges refused, per admission rule. A rule that never fired reports 0."""
-        counts = {REFUSAL_ZERO_PRINCIPAL: 0, REFUSAL_ZERO_ANCHOR: 0, REFUSAL_SELF_EDGE: 0}
+        counts = {
+            REFUSAL_ZERO_PRINCIPAL: 0,
+            REFUSAL_ZERO_ANCHOR: 0,
+            REFUSAL_SELF_EDGE: 0,
+            REFUSAL_MALFORMED_NODE_ID: 0,
+        }
         for refusal in self.refusals:
             counts[refusal.rule] = counts.get(refusal.rule, 0) + 1
         return dict(sorted(counts.items()))
@@ -2148,6 +2198,16 @@ def load_control_closure(session: Session, protocol_id: int) -> ControlClosure:
         source = _lower(str(edge.from_node_id or "").replace("address:", ""))
         target = _lower(str(edge.to_node_id or "").replace("address:", ""))
         if not source or not target:
+            refusals.append(
+                RefusedEdge(
+                    rule=REFUSAL_MALFORMED_NODE_ID,
+                    principal=target or NOT_DETERMINED,
+                    anchor=source or NOT_DETERMINED,
+                    relation=edge.relation,
+                    witness=EDGE_WITNESS_CONTROL_GRAPH,
+                    edge_id=edge.id,
+                )
+            )
             continue
         # Stored from=anchor, to=principal; the authority direction is the
         # reverse, so the principal is what controls the anchor.
@@ -4309,7 +4369,7 @@ def plane_row_counts(session: Session, protocol_id: int) -> dict[str, Any]:
         RoleHolderPlane,
     )
 
-    def _count(query: Any) -> int | None:
+    def _count(query: Any, plane: str) -> int | None:
         """A plane that cannot be read is ``None`` — not_determined, never 0.
 
         A missing table (a database this build's migration has not reached) and
@@ -4318,8 +4378,15 @@ def plane_row_counts(session: Session, protocol_id: int) -> dict[str, Any]:
         """
         try:
             return int(query.scalar() or 0)
-        except Exception:
+        except Exception as exc:
             session.rollback()
+            # The document says "not_determined"; only the exception type says
+            # WHY, and schema drift is the usual answer.
+            logger.warning(
+                "plane row count unreadable for %s",
+                plane,
+                extra={"protocol_id": protocol_id, "plane": plane, "exc_type": type(exc).__name__},
+            )
             return None
 
     contracts = session.query(sql_func.count(Contract.id)).filter(Contract.protocol_id == protocol_id)
@@ -4371,22 +4438,32 @@ def plane_row_counts(session: Session, protocol_id: int) -> dict[str, Any]:
             .filter(Contract.protocol_id == protocol_id)
             .scalar()
         )
-    except Exception:
+    except Exception as exc:
         session.rollback()
+        logger.warning(
+            "plane freshness unreadable for %s",
+            "max_effect_verdict_updated_at",
+            extra={
+                "protocol_id": protocol_id,
+                "plane": "max_effect_verdict_updated_at",
+                "exc_type": type(exc).__name__,
+            },
+        )
         max_verdict_updated = None
     return {
-        "contracts": _count(contracts),
-        "effective_functions": _count(functions),
-        "function_principals": _count(principals),
-        "effect_verdicts": _count(verdicts),
-        "contract_balances_latest": _count(balances),
-        "function_score_signals": _count(signals),
+        "contracts": _count(contracts, "contracts"),
+        "effective_functions": _count(functions, "effective_functions"),
+        "function_principals": _count(principals, "function_principals"),
+        "effect_verdicts": _count(verdicts, "effect_verdicts"),
+        "contract_balances_latest": _count(balances, "contract_balances_latest"),
+        "function_score_signals": _count(signals, "function_score_signals"),
         "restaking_positions_latest": _count(
             session.query(sql_func.count(RestakingPositionLatest.id)).filter(
                 RestakingPositionLatest.protocol_id == protocol_id
-            )
+            ),
+            "restaking_positions_latest",
         ),
-        "role_holder_planes": _count(session.query(sql_func.count(RoleHolderPlane.role_hash))),
+        "role_holder_planes": _count(session.query(sql_func.count(RoleHolderPlane.role_hash)), "role_holder_planes"),
         "max_effect_verdict_updated_at": max_verdict_updated.isoformat() if max_verdict_updated else None,
     }
 
@@ -5219,6 +5296,7 @@ __all__ = [
     "PREDICATES_COLUMN_HOLDS_NO_ARRAY",
     "PREDICATES_EXTRACTED",
     "PREDICATES_FUNCTION_NOT_LOCATED",
+    "REFUSAL_MALFORMED_NODE_ID",
     "REFUSAL_ZERO_ANCHOR",
     "REFUSAL_ZERO_PRINCIPAL",
     "SCOPE_NOT_DETERMINED",
