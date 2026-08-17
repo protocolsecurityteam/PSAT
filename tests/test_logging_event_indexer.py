@@ -167,7 +167,7 @@ def test_note_partial_reason_noop_without_job_context(reason):
     assert event_logs_pg._note_partial_reason(reason, event_address=_ADDR, repo="postgres") == 1
 
 
-def test_indexer_loop_binds_worker_id_on_both_threads(monkeypatch, caplog):
+def test_indexer_loop_binds_worker_id_on_both_threads(monkeypatch):
     """The daemon is not a BaseWorker, so nothing binds ``worker_id`` for it —
     its whole stream was the one worker output in the fleet with no identity to
     filter by. Both the reconcile loop AND the backfill thread must carry it
@@ -224,6 +224,12 @@ def test_shutdown_line_names_the_process(monkeypatch, caplog):
     monkeypatch.setenv("ERPC_BASE_URL", "https://erpc.example")
     monkeypatch.setattr(signal_mod, "signal", lambda num, fn: handlers.setdefault(num, fn))
     monkeypatch.setattr(indexer, "run_event_log_indexer_loop", lambda **_k: None)
+    # ``main()`` calls ``configure_logging()``, whose first-call path clears every
+    # root handler — including caplog's. Left in, this test passes only when some
+    # earlier test already configured logging, so it fails whenever xdist gives it
+    # a fresh process. ``test_main_installs_json_logging`` is what covers the real
+    # ``configure_logging`` call.
+    monkeypatch.setattr(indexer, "configure_logging", lambda *_a, **_k: None)
 
     indexer.main()
     with caplog.at_level(logging.INFO, logger="workers.event_log_indexer"):

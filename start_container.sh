@@ -17,5 +17,12 @@ echo "[entrypoint] Starting API on 0.0.0.0:8000..."
 # preforking shares the SQLAlchemy engine across children, and
 # psycopg2 sockets are not fork-safe — children crash on first DB
 # access.
-exec uv run --no-sync uvicorn api:app --host 0.0.0.0 --port 8000 \
-    --limit-concurrency 200
+#
+# This is the image's CMD. Fly's [processes] overrides it with start_web.sh, so
+# only a plain `docker run` lands here — which is exactly why it must use the
+# same launcher: on the uvicorn CLI there is no way to attach the JSON log
+# config, and every server line reverts to plaintext.
+export PSAT_API_HOST=0.0.0.0
+export PSAT_API_PORT=8000
+export PSAT_API_LIMIT_CONCURRENCY=200
+exec uv run --no-sync python serve.py

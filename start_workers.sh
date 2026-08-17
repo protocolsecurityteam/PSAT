@@ -22,12 +22,25 @@ log_json() {
     "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" "$level" "$msg"
 }
 
-# The hypersync client is Rust; its env_logger writes plaintext straight to fd 2
-# (retry/429 lines), bypassing Python logging entirely. Pin the filter rather
-# than silence it: a retried 429 that still degrades a fold is already reported
-# on the Python side by `_note_partial_reason`, but an upstream default-level
-# change would otherwise dump Rust INFO/DEBUG into this JSONL file.
+# The hypersync client is Rust; its env_logger writes plaintext straight to fd 2,
+# bypassing Python logging. This pin does NOT change today's output: env_logger's
+# default with RUST_LOG unset is already `error`, and the 429 retry lines are
+# ERROR — they still land in the log file as plaintext. It is only a guardrail
+# against an upstream default-level change dumping Rust INFO/DEBUG in here.
+# Actually capturing that stderr needs an fd-level pump, and the hypersync call
+# sites live in services/resolution/repos — both out of this lane; deferred. A
+# hypersync failure that degrades a fold is already reported on the Python side
+# by `_note_partial_reason`, so the JSON stream is not blind to the outcome.
 export RUST_LOG="${RUST_LOG:-error}"
+
+# requests warns about its urllib3/charset_normalizer version skew at IMPORT
+# time — before any process reaches configure_logging(), so captureWarnings
+# cannot reach it — costing ~46 raw plaintext lines per run, two per worker.
+# Scoped to warnings raised BY the requests module, not a blanket ignore: any
+# warning from anywhere else still surfaces. The skew it reports is real and
+# wants fixing at the dependency level; this only stops it re-announcing itself
+# once per process.
+export PYTHONWARNINGS="${PYTHONWARNINGS:-ignore::Warning:requests}"
 
 # Cap glibc's per-thread malloc arenas so freed pages return to the kernel
 # instead of staying mapped in the process's address space. Default is

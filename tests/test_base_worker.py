@@ -306,13 +306,20 @@ def test_run_loop_process_exception_calls_fail_job_terminal(mock_fail, mock_clai
 @patch("workers.base.SessionLocal")
 @patch("workers.base.claim_job")
 @patch("workers.base.fail_job_terminal")
+@patch("workers.base.configure_logging")
 def test_worker_failure_is_one_line_with_structured_fields(
-    mock_fail, mock_claim, mock_session_cls, mock_signal, caplog
+    mock_configure, mock_fail, mock_claim, mock_session_cls, mock_signal, caplog
 ):
     """The failure line used to be a multi-line ASCII banner + traceback inside
     one JSON ``message`` — 27 unique blobs a run, none of which group by
     template. Every fact is a field or a bound contextvar; the traceback rides
-    ``exc_info`` where the formatter gives it its own key."""
+    ``exc_info`` where the formatter gives it its own key.
+
+    ``configure_logging`` is patched out because ``BaseWorker.__init__`` calls it
+    and its first-call path clears every root handler — caplog's included — so
+    without this the test only passes when an earlier test in the same process
+    already configured logging.
+    """
     import logging
 
     job = _make_job()
@@ -344,7 +351,53 @@ def test_worker_failure_is_one_line_with_structured_fields(
     assert record.exc_message == "boom"
     assert record.failure_kind == "terminal"
     assert record.job_name == job.name
+    # Terminal: the job really failed, so the traceback belongs on the line.
     assert record.exc_info is not None
+
+
+@patch("workers.base.configure_logging")
+@patch("workers.base.signal.signal")
+@patch("workers.base.SessionLocal")
+@patch("workers.base.claim_job")
+@patch("workers.base.requeue_job")
+def test_requeued_failure_carries_no_traceback(
+    mock_requeue, mock_claim, mock_session_cls, mock_signal, mock_configure, caplog
+):
+    """A requeued job has not failed — it runs again. This file's own level
+    contract says attaching a traceback to a non-failure line mislevels it, so
+    ``exc_info`` is terminal-only; ``exc_type``/``exc_message`` still name the
+    cause and the StageError keeps the full traceback either way."""
+    import logging
+
+    import requests
+
+    job = _make_job()
+    job.retry_count = 0
+    mock_session_cls.return_value = MagicMock()
+
+    call_count = 0
+
+    def _claim_side_effect(session, stage, worker_id):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return job
+        w._running = False
+        return None
+
+    mock_claim.side_effect = _claim_side_effect
+
+    w = _TestWorker()
+    w.process = MagicMock(side_effect=requests.exceptions.ConnectionError("rpc down"))
+    with caplog.at_level(logging.WARNING, logger="workers.base"):
+        w.run_loop()
+
+    record = next(r for r in caplog.records if r.getMessage().startswith("worker failure"))
+    assert record.levelno == logging.WARNING
+    assert record.outcome == "requeued"
+    assert record.failure_kind == "transient"
+    assert record.exc_message == "rpc down"
+    assert record.exc_info is None
 
 
 @patch("workers.base.signal.signal")

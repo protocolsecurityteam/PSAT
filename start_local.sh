@@ -17,10 +17,15 @@ set +a
 # worker fleet; here it also covers the API, monitors, and dapp worker below.
 export PYTHONUNBUFFERED=1
 
-# hypersync's Rust env_logger writes plaintext straight to fd 2, which lands in
-# the JSONL file below. Pin its filter (see start_workers.sh) so an upstream
-# default change can't flood the stream; ERROR keeps the retry lines visible.
+# Guardrail only — `error` is already env_logger's default with RUST_LOG unset,
+# so hypersync's Rust 429 retry lines still reach the JSONL file below as
+# plaintext (see start_workers.sh; fd-level capture is deferred).
 export RUST_LOG="${RUST_LOG:-error}"
+
+# Silence requests' import-time dependency-skew warning, which fires before any
+# process can configure logging. Scoped to the requests module (see
+# start_workers.sh), not a blanket ignore.
+export PYTHONWARNINGS="${PYTHONWARNINGS:-ignore::Warning:requests}"
 
 WORKER_PATTERN='workers\.(discovery|static_worker|resolution_worker|policy_worker|effects_worker|coverage_worker|coverage_verify|selection_worker|dapp_crawl_worker|defillama_worker|audit_text_extraction|audit_scope_extraction|event_log_indexer|protocol_monitor)'
 API_PID=""
@@ -153,14 +158,14 @@ mkdir -p logs
 LOG_FILE="logs/local-$(date +%F-%H%M%S).jsonl"
 ln -sfn "$(basename "$LOG_FILE")" logs/local-latest.jsonl 2>/dev/null || true
 
-# Start API. `python api.py` (not `uvicorn api:app`): only the programmatic
+# Start API. `python serve.py` (not `uvicorn api:app`): only the programmatic
 # launcher can hand uvicorn a log config, so its own lines — including a bind
 # failure, which happens before the app's lifespan — land in this JSONL file as
 # JSON instead of plaintext. It also drops uvicorn's access line, which
 # duplicated the api middleware's richer one on every request.
 echo "Starting API on http://127.0.0.1:8000 ..."
 PSAT_API_HOST=127.0.0.1 PSAT_API_PORT=8000 PSAT_API_RELOAD=1 \
-  uv run python api.py >>"$LOG_FILE" 2>&1 &
+  uv run python serve.py >>"$LOG_FILE" 2>&1 &
 API_PID=$!
 sleep 2
 

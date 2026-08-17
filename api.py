@@ -228,6 +228,12 @@ def serve() -> None:
     5xx/slow — a strict superset. Keeping both logged every request twice.
     ``uvicorn.error`` (startup, shutdown, bind failures) still routes through
     ``JsonFormatter``.
+
+    Call it from ``serve.py``, never by running this file. ``uvicorn.run`` is
+    given the import string ``"api:app"``, so uvicorn imports this module —
+    ``python api.py`` would have already run the same file as ``__main__``, and
+    the body would execute twice (measured), building a second fully-wired app
+    that is then discarded.
     """
     import uvicorn
 
@@ -245,7 +251,3 @@ def serve() -> None:
         log_config=uvicorn_log_config(),
         access_log=False,
     )
-
-
-if __name__ == "__main__":
-    serve()

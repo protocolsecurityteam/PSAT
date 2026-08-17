@@ -532,14 +532,19 @@ class BaseWorker:
                     # field, so this groups by template instead of being 27
                     # unique multi-line blobs a run. The traceback rides
                     # ``exc_info`` where the formatter puts it in its own JSON
-                    # key rather than inside ``message``.
+                    # key rather than inside ``message`` — but only on the
+                    # terminal branch: this file's own level-contract note says a
+                    # traceback on a non-failure line mislevels the site, and a
+                    # requeued job has not failed. ``exc_type``/``exc_message``
+                    # still name the cause, and the full traceback is on the
+                    # StageError appended just below either way.
                     log_fn = logger.warning if will_retry else logger.error
                     log_fn(
                         "worker failure: job %s %s (%s)",
                         job.id,
                         outcome,
                         exc_type_str,
-                        exc_info=exc,
+                        exc_info=None if will_retry else exc,
                         extra={
                             "duration_ms": int(elapsed * 1000),
                             "phase": "job",

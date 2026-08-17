@@ -153,6 +153,29 @@ def test_jsonformatter_scrubs_secrets_in_message_extra_and_exc_info():
     assert "SUPERSECRETKEY123" not in json.dumps(exc_out)
 
 
+def test_formatter_drops_uvicorn_color_message_duplicate():
+    """uvicorn attaches an ANSI-coloured copy of the message via ``extra``. It
+    is the same string with escape codes, not a fact, so it must not ride along
+    as a second field on every uvicorn line."""
+    fmt = JsonFormatter()
+    record = logging.LogRecord(
+        name="uvicorn.error",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=1,
+        msg="Started server process [123]",
+        args=(),
+        exc_info=None,
+    )
+    record.color_message = "Started server process [\x1b[36m%d\x1b[0m]"
+
+    out = json.loads(fmt.format(record))
+
+    assert out["message"] == "Started server process [123]"
+    assert "color_message" not in out
+    assert "\x1b" not in json.dumps(out)
+
+
 def _crytic_record(msg: str, *, args=(), exc_info=None) -> logging.LogRecord:
     """A record shaped exactly like ``crytic_compile.utils.subprocess.run``'s."""
     record = logging.LogRecord(
@@ -225,18 +248,31 @@ def test_third_party_hygiene_is_idempotent_and_captures_warnings(caplog):
     for stale in before:
         crytic.removeFilter(stale)
     try:
-        _install_third_party_log_hygiene()
-        _install_third_party_log_hygiene()
-        assert len([f for f in crytic.filters if isinstance(f, CryticCompileEchoDemoter)]) == 1
+        with warnings.catch_warnings():
+            # Reset to a known-uncaptured state first, or this asserts nothing:
+            # ``logging.captureWarnings(True)`` is a no-op once already engaged,
+            # and pytest reassigns ``warnings.showwarning`` per test — so after
+            # any earlier test has configured logging, the reassignment sticks
+            # and the warning goes to pytest instead of ``py.warnings``.
+            logging.captureWarnings(False)
+            warnings.simplefilter("always")
 
-        with caplog.at_level(logging.WARNING, logger="py.warnings"):
-            warnings.warn("captured into logging", UserWarning)
-        assert any(record.name == "py.warnings" for record in caplog.records)
+            _install_third_party_log_hygiene()
+            _install_third_party_log_hygiene()
+            assert len([f for f in crytic.filters if isinstance(f, CryticCompileEchoDemoter)]) == 1
+
+            with caplog.at_level(logging.WARNING, logger="py.warnings"):
+                warnings.warn("captured into logging", UserWarning)
+            assert any(record.name == "py.warnings" for record in caplog.records)
     finally:
         for installed in [f for f in crytic.filters if isinstance(f, CryticCompileEchoDemoter)]:
             crytic.removeFilter(installed)
         for original in before:
             crytic.addFilter(original)
+        # Leave the process as ``configure_logging`` leaves it: re-engage against
+        # the ``showwarning`` that ``catch_warnings`` just restored.
+        logging.captureWarnings(False)
+        logging.captureWarnings(True)
 
 
 def test_serve_disables_uvicorn_access_log_and_passes_json_config(monkeypatch):

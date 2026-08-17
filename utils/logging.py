@@ -119,6 +119,10 @@ _RESERVED_RECORD_ATTRS = frozenset(
     {
         "args",
         "asctime",
+        # uvicorn passes its own ANSI-coloured copy of the message through
+        # ``extra``. It is not a fact — it is the same string with escape codes
+        # — so it would otherwise duplicate ``message`` on every uvicorn line.
+        "color_message",
         "created",
         "exc_info",
         "exc_text",
@@ -280,6 +284,11 @@ def configure_logging(level: int | str | None = None) -> None:
 
     Reads the level from ``PSAT_LOG_LEVEL`` (default INFO) when *level*
     is omitted.
+
+    Also installs the process-wide third-party stream hygiene (see
+    :func:`_install_third_party_log_hygiene`): the
+    :class:`CryticCompileEchoDemoter` filter, and ``logging.captureWarnings``
+    so the ``warnings`` module emits through logging instead of raw stderr.
     """
     root = logging.getLogger()
     if getattr(root, _CONFIGURED_FLAG, False):
