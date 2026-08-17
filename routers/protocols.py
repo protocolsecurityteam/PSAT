@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import case, func, select
 
 from db.models import (
@@ -156,8 +156,12 @@ def list_protocol_subscriptions(protocol_id: int) -> list[dict[str, Any]]:
 @router.delete("/api/protocol-subscriptions/{sub_id}", dependencies=[Depends(deps.require_admin_key)])
 def delete_protocol_subscription(sub_id: str) -> dict[str, str]:
     """Delete a ProtocolSubscription by id."""
+    try:
+        parsed = uuid.UUID(sub_id)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=404, detail="Subscription not found") from exc
     with deps.SessionLocal() as session:
-        sub = session.get(ProtocolSubscription, uuid.UUID(sub_id))
+        sub = session.get(ProtocolSubscription, parsed)
         if sub is None:
             raise HTTPException(status_code=404, detail="Subscription not found")
         session.delete(sub)
@@ -167,7 +171,9 @@ def delete_protocol_subscription(sub_id: str) -> dict[str, str]:
 
 
 @router.get("/api/protocols/{protocol_id}/events")
-def list_protocol_events(protocol_id: int, limit: int = 50, chain: str | None = None) -> list[dict[str, Any]]:
+def list_protocol_events(
+    protocol_id: int, limit: int = Query(default=50, ge=1, le=500), chain: str | None = None
+) -> list[dict[str, Any]]:
     """List MonitoredEvents for all contracts in a protocol.
 
     ``chain`` scopes the feed to one chain's monitored rows. The same address

@@ -53,7 +53,7 @@ def agent_chat(req: AgentChatRequest):
                 yield f"event: {name}\ndata: {payload}\n\n"
         except Exception as exc:
             logger.warning("agent stream failed: %s", exc, extra={"exc_type": type(exc).__name__})
-            err = json.dumps({"message": str(exc)})
+            err = json.dumps({"message": "Agent request failed."})
             yield f"event: error\ndata: {err}\n\n"
 
     return StreamingResponse(
