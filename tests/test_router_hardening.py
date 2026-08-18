@@ -11,6 +11,9 @@ import sys
 import uuid
 from pathlib import Path
 
+import pytest
+import requests
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tests.conftest import requires_postgres  # noqa: E402
@@ -175,3 +178,143 @@ def test_upgrade_history_stage_raised_reason_omits_class_name(api_client, db_ses
         db_session.delete(contract)
         db_session.delete(job)
         db_session.commit()
+
+
+# --- Unbounded PDF proxy response body (FINDING F4) -------------------------
+#
+# ``GET /api/audits/{audit_id}/pdf`` is a PUBLIC route whose upstream ``url`` is
+# crawler/LLM-sourced. It must stream with a content-type gate and a hard byte
+# cap so a seeded URL at a large or non-PDF public file can't OOM the web VM.
+
+
+class _FakeStreamResponse:
+    """Minimal stand-in for a streamed ``requests.Response``.
+
+    ``iter_content`` yields from a caller-supplied generator/iterable and
+    records how many chunks were actually consumed, so a test can prove the
+    route aborts a too-large body early instead of buffering the whole thing.
+    """
+
+    def __init__(self, *, content_type, chunks, status=200):
+        self.headers = {"content-type": content_type}
+        self.status_code = status
+        self._chunks = chunks
+        self.closed = False
+        self.consumed = 0
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise requests.HTTPError(f"HTTP {self.status_code}")
+
+    def iter_content(self, chunk_size=131_072):
+        for chunk in self._chunks:
+            self.consumed += 1
+            yield chunk
+
+    def close(self):
+        self.closed = True
+
+
+@pytest.fixture
+def audit_pdf_row(db_session):
+    """A committed ``AuditReport`` (+ owning ``Protocol``) with a public pdf_url.
+
+    Yields the audit id; deletes both rows on teardown so the route test is
+    hermetic and leaves no cross-test residue.
+    """
+    from db.models import AuditReport, Protocol
+
+    protocol = Protocol(name="__hardening_pdf_proxy__")
+    db_session.add(protocol)
+    db_session.flush()
+    ar = AuditReport(
+        protocol_id=protocol.id,
+        url="https://example.com/report",
+        pdf_url="https://example.com/report.pdf",
+        auditor="ACME",
+        title="Hardening PDF Proxy",
+    )
+    db_session.add(ar)
+    db_session.commit()
+    audit_id = ar.id
+    try:
+        yield audit_id
+    finally:
+        db_session.rollback()
+        db_session.delete(ar)
+        db_session.delete(protocol)
+        db_session.commit()
+
+
+def test_audit_pdf_small_pdf_is_served(api_client, audit_pdf_row, monkeypatch):
+    """A well-behaved small PDF returns 200 with ``application/pdf`` body."""
+    pdf_body = b"%PDF-1.4\n" + b"content" * 10
+
+    resp_obj = _FakeStreamResponse(content_type="application/pdf", chunks=[pdf_body])
+    monkeypatch.setattr("utils.egress.safe_get", lambda *a, **k: resp_obj)
+
+    resp = api_client.get(f"/api/audits/{audit_pdf_row}/pdf")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "application/pdf"
+    assert resp.content == pdf_body
+    assert resp_obj.closed is True
+
+
+def test_audit_pdf_non_pdf_content_type_is_rejected(api_client, audit_pdf_row, monkeypatch):
+    """A present-but-wrong content-type (HTML error page) is refused, and the
+    body is never returned to the client."""
+    html = b"<html><body>not a pdf</body></html>"
+    resp_obj = _FakeStreamResponse(content_type="text/html", chunks=[html])
+    monkeypatch.setattr("utils.egress.safe_get", lambda *a, **k: resp_obj)
+
+    resp = api_client.get(f"/api/audits/{audit_pdf_row}/pdf")
+    assert resp.status_code == 502
+    assert html not in resp.content
+    # Never streamed the body, and the connection was released.
+    assert resp_obj.consumed == 0
+    assert resp_obj.closed is True
+
+
+def test_audit_pdf_oversized_body_is_capped_not_buffered(api_client, audit_pdf_row, monkeypatch):
+    """A body exceeding the cap is aborted mid-stream: the route errors and does
+    NOT buffer/return the oversized content."""
+    # Shrink the shared cap so the test stays light; the route imports the
+    # constant at call time, so patching the source module is enough.
+    monkeypatch.setattr("services.audits.text_extraction._MAX_PDF_BYTES", 1000)
+
+    chunk = b"x" * 400
+
+    def _huge_chunks():
+        # Would yield 40KB if fully consumed; the route must stop well before.
+        for _ in range(100):
+            yield chunk
+
+    resp_obj = _FakeStreamResponse(content_type="application/pdf", chunks=_huge_chunks())
+    monkeypatch.setattr("utils.egress.safe_get", lambda *a, **k: resp_obj)
+
+    resp = api_client.get(f"/api/audits/{audit_pdf_row}/pdf")
+    assert resp.status_code == 502
+    assert len(resp.content) < 1000  # oversized body was not returned
+    # Aborted after crossing the cap (1000 / 400 -> 3 chunks), not after all 100.
+    assert resp_obj.consumed <= 4
+    assert resp_obj.closed is True
+
+
+def test_audit_pdf_error_does_not_leak_upstream_url_or_error(api_client, audit_pdf_row, monkeypatch):
+    """No error path echoes the upstream URL or raw exception text into the
+    response body (witness discipline / findings #14-15)."""
+    from utils.egress import UnsafeUrlError
+
+    secret_url = "https://example.com/report.pdf"
+
+    def _boom(*a, **k):
+        raise UnsafeUrlError(f"host resolves to non-public address for {secret_url}")
+
+    monkeypatch.setattr("utils.egress.safe_get", _boom)
+
+    resp = api_client.get(f"/api/audits/{audit_pdf_row}/pdf")
+    assert resp.status_code == 502
+    body = resp.text
+    assert secret_url not in body
+    assert "non-public" not in body
+    assert resp.json()["detail"] == "Failed to fetch PDF"

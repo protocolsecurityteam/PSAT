@@ -20,10 +20,23 @@ from services.monitoring.notifier import _is_discord_webhook, _send_discord
         ("https://evil.com/api/webhooks/1/abc", False),
         ("https://discord.com.evil.com/x", False),
         ("https://169.254.169.254/x", False),
+        # Parser-divergence bypasses: urlparse reads the host as discord.com, but
+        # urllib3 (the parser requests dials with) connects elsewhere. The gate must
+        # read the dialed host, so both are refused.
+        ("https://x\\@discord.com/api/webhooks/1/x", False),  # backslash-authority
+        ("https://discord.com@evil.com/api/webhooks/1/x", False),  # userinfo, real host evil.com
     ],
 )
 def test_is_discord_webhook(url, ok):
     assert _is_discord_webhook(url) is ok
+
+
+def test_send_discord_skips_backslash_authority_bypass():
+    # The gate must refuse before POSTing, even though urlparse would read the
+    # authority as discord.com.
+    with patch("services.monitoring.notifier.requests.post") as mock_post:
+        _send_discord("https://x\\@discord.com/api/webhooks/1/x", {"title": "x"})
+    mock_post.assert_not_called()
 
 
 def test_send_discord_skips_non_discord_host():

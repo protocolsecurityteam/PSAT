@@ -54,9 +54,17 @@ def _page_to_text(page_html: str) -> str:
 
 
 def _fetch_html_page(url: str, debug: bool = False) -> str | None:
-    """Fetch a page, reject binary content, cap at ``_MAX_DOWNLOAD_BYTES``."""
+    """Fetch a page, reject binary content, cap at ``_MAX_DOWNLOAD_BYTES``.
+
+    The candidate URL is attacker-seedable (Exa/Tavily results), so the
+    outbound request goes through the shared SSRF egress guard, which
+    re-validates the target and every redirect hop against
+    ``assert_public_http_url`` and follows redirects itself.
+    """
+    from utils.egress import UnsafeUrlError, safe_get
+
     try:
-        resp = _requests.get(
+        resp = safe_get(
             url,
             timeout=30,
             headers={"User-Agent": "PSAT/0.1"},
@@ -90,6 +98,25 @@ def _fetch_html_page(url: str, debug: bool = False) -> str | None:
 
         _debug_log(debug, f"Fetched {url} ({len(text)} chars)")
         return text
+
+    except UnsafeUrlError as exc:
+        # Refused egress target (non-public host or a redirect to one) is a
+        # coverage gap like an unreachable page: the candidate contributes no
+        # reports. Recorded as degraded to match the sibling handler below and
+        # keep the gap observable; the URL rides only the internal signal, never
+        # returned or stored (witness discipline — an SSRF probe leaves no trace
+        # in published output).
+        record_degraded(
+            phase="audit_report_html_fetch",
+            exc=exc,
+            context={"url": url},
+        )
+        logger.warning(
+            "Audit page fetch refused by egress guard; page contributes no reports",
+            extra={"exc_type": type(exc).__name__, "url": url},
+        )
+        _debug_log(debug, f"Fetch {url} refused: {exc}")
+        return None
 
     except _requests.RequestException as exc:
         record_degraded(

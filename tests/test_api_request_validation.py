@@ -97,6 +97,9 @@ def test_protocol_subscribe_rejects_http_discord():
     [
         "https://discord.com@evil.com/api/webhooks/1/abc",  # userinfo, real host is evil.com
         "https://discord.com.evil.com/api/webhooks/1/abc",  # subdomain-suffix, host ends in evil.com
+        # Backslash authority: urlparse reads discord.com, urllib3 (the client's
+        # parser) dials the pre-backslash host. The gate reads the dialed host.
+        "https://x\\@discord.com/api/webhooks/1/abc",
     ],
 )
 def test_protocol_subscribe_rejects_host_bypass(bypass_url):

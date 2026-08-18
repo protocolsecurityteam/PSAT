@@ -67,6 +67,38 @@ def test_rejects_non_http_schemes(url):
         assert_public_http_url(url)
 
 
+def test_rejects_backslash_authority_ssrf_bypass():
+    # urlparse reads the host as example.com (userinfo), but urllib3 — the parser
+    # requests connects with — dials 169.254.169.254. Deriving the guarded host
+    # from urlparse would validate a different host than the socket opens. Getaddrinfo
+    # is left to blow up (KeyError) if the guard ever reaches resolution: rejection
+    # must happen at authority parsing, before any host is resolved.
+    def unreached(host, *a, **k):
+        raise AssertionError(f"resolution reached for {host!r}; authority should reject first")
+
+    with patch("socket.getaddrinfo", side_effect=unreached):
+        with pytest.raises(UnsafeUrlError):
+            assert_public_http_url("http://169.254.169.254\\@example.com/latest/meta-data/")
+
+
+def test_rejects_userinfo_host_smuggle():
+    # https://real@evil.com/ connects to evil.com; the guard must classify evil.com,
+    # not the userinfo. Resolve evil.com to an internal IP so acceptance would be
+    # a metadata read.
+    with patch("socket.getaddrinfo", return_value=_addrinfo("169.254.169.254")):
+        with pytest.raises(UnsafeUrlError):
+            assert_public_http_url("http://public.example@evil.internal/")
+
+
+@pytest.mark.parametrize("url", ["http://host:99999/", "http://host:b/", "http://host:-1/"])
+def test_malformed_port_raises_unsafe_not_bare_valueerror(url):
+    # F6: a malformed port must surface as UnsafeUrlError. Callers catch only that;
+    # a bare ValueError ("Port out of range") from the parser would 500 instead.
+    with patch("socket.getaddrinfo", return_value=_addrinfo("93.184.216.34")):
+        with pytest.raises(UnsafeUrlError):
+            assert_public_http_url(url)
+
+
 def test_accepts_public_host():
     with patch("socket.getaddrinfo", return_value=_addrinfo("93.184.216.34")):
         assert assert_public_http_url("https://example.com/x.pdf") == "https://example.com/x.pdf"

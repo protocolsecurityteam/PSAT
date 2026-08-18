@@ -128,6 +128,38 @@ def test_remapping_target_is_safe():
     assert not fetch._remapping_target_is_safe("@x/=lib/../../../etc/")
 
 
+def test_remapping_target_rejects_embedded_newline():
+    # A single hostile entry with an embedded LF would split into two
+    # remappings.txt lines, the second an absolute read root — F2.
+    assert not fetch._remapping_target_is_safe("@a/=lib/\n@x/=/etc/")
+    assert not fetch._remapping_target_is_safe("@a/=lib/\r@x/=/etc/")
+    assert not fetch._remapping_target_is_safe("@a/=lib/\r\n@x/=/etc/")
+    # Legit single-line entries (relative, empty target) still pass.
+    assert fetch._remapping_target_is_safe("@openzeppelin/=lib/openzeppelin-contracts/")
+    assert fetch._remapping_target_is_safe("@a/=")
+
+
+def test_parse_remappings_drops_newline_injection():
+    result = _standard_json_result(
+        {"src/C.sol": {"content": "x"}},
+        remappings=["@a/=lib/\n@x/=/etc/", "@oz/=lib/openzeppelin/"],
+    )
+    assert fetch.parse_remappings(result) == ["@oz/=lib/openzeppelin/"]
+
+
+def test_scaffold_remappings_never_writes_absolute_line(tmp_path):
+    result = _standard_json_result(
+        {"src/C.sol": {"content": "pragma solidity 0.8.24;"}},
+        remappings=["@a/=lib/\n@x/=/etc/", "@oz/=lib/openzeppelin/"],
+    )
+    project = tmp_path / "proj"
+    fetch.scaffold("0xabc", result, project)
+    lines = (project / "remappings.txt").read_text().splitlines()
+    assert lines == ["@oz/=lib/openzeppelin/"]
+    # No line may point at an absolute read root.
+    assert not any(line.split("=", 1)[-1].startswith("/") for line in lines if line)
+
+
 def test_static_prune_remappings_applies_escape_filter():
     from workers.static_worker import _prune_remappings
 

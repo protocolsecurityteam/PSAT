@@ -361,3 +361,69 @@ def test_sliding_window_limiter_disabled_when_limit_zero():
     lim = SlidingWindowRateLimiter(limit=0, window_s=100)
     for i in range(50):
         assert lim.hit("k", now=float(i)) is None
+
+
+def test_sliding_window_admits_up_to_limit_rejects_then_readmits():
+    # Window semantics must survive the O(1) hot-path rewrite: admit exactly
+    # `limit`, reject inside the window, re-admit once the window slides.
+    from utils.ratelimit import SlidingWindowRateLimiter
+
+    lim = SlidingWindowRateLimiter(limit=3, window_s=100)
+    for i in range(3):
+        assert lim.hit("k", now=float(i)) is None
+    retry = lim.hit("k", now=3.0)
+    assert retry is not None and retry >= 1
+    # Over-limit hit is not recorded; still rejected just before expiry.
+    assert lim.hit("k", now=99.0) is not None
+    # First hit (t=0) ages out at t>100 -> one slot frees.
+    assert lim.hit("k", now=100.5) is None
+    # ...but only one: budget is full again immediately after.
+    assert lim.hit("k", now=100.6) is not None
+
+
+def test_sliding_window_bucket_cap_holds_under_many_keys():
+    # Memory bound: distinct keys can never grow the map past max_keys.
+    from utils.ratelimit import SlidingWindowRateLimiter
+
+    lim = SlidingWindowRateLimiter(limit=5, window_s=100, max_keys=50, sweep_every=8)
+    for i in range(5000):
+        lim.hit(("flood", i), now=1.0)
+    assert len(lim._buckets) <= 50
+
+
+def test_sliding_window_flood_cannot_evict_active_key():
+    # Security invariant: a flood of fresh keys must not displace a
+    # legitimate active client's window (which would reset its budget and let
+    # it bypass the limit). At cap the newcomers are rejected, not admitted by
+    # evicting the incumbent.
+    from utils.ratelimit import SlidingWindowRateLimiter
+
+    lim = SlidingWindowRateLimiter(limit=2, window_s=100, max_keys=10, sweep_every=4)
+    # Establish a legitimate client at its limit.
+    assert lim.hit("victim", now=1.0) is None
+    assert lim.hit("victim", now=1.0) is None
+    assert lim.hit("victim", now=1.0) is not None  # at limit
+    # Attacker sprays many distinct in-window keys, filling the cap.
+    rejected = 0
+    for i in range(1000):
+        if lim.hit(("spray", i), now=1.0) is not None:
+            rejected += 1
+    assert rejected > 0  # cap was reached and newcomers were turned away
+    assert "victim" in lim._buckets  # incumbent never evicted
+    # The victim is still limited within its window -> not reset/bypassable.
+    assert lim.hit("victim", now=1.0) is not None
+
+
+def test_sliding_window_full_sweep_is_amortized_not_per_hit():
+    # Cost invariant: the O(active keys) full sweep runs only on the interval,
+    # never once per hit. If the fix is reverted (prune-all every hit) the
+    # sweep count would equal the hit count and this fails.
+    from utils.ratelimit import SlidingWindowRateLimiter
+
+    lim = SlidingWindowRateLimiter(limit=5, window_s=100, max_keys=1_000_000, sweep_every=100)
+    hits = 1000
+    for i in range(hits):
+        lim.hit(("k", i), now=1.0)
+    # ~hits/sweep_every sweeps, with generous slack; must be << hits.
+    assert lim._full_sweeps <= hits // 100 + 2
+    assert lim._full_sweeps < hits

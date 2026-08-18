@@ -67,6 +67,7 @@ def get_audit_pdf(audit_id: int):
     """
     import requests
 
+    from services.audits.text_extraction import _ACCEPTED_CONTENT_TYPES, _MAX_PDF_BYTES
     from utils.egress import UnsafeUrlError, safe_get
     from utils.github_urls import github_blob_to_raw
 
@@ -80,9 +81,13 @@ def get_audit_pdf(audit_id: int):
         url = github_blob_to_raw(url)
         filename = f"audit-{audit_id}.pdf"
 
+    # This is a PUBLIC, unauthenticated route and ``url`` is crawler/LLM-sourced.
+    # Stream with a content-type gate + hard byte cap so a seeded URL pointing at
+    # a large or non-PDF public file can't buffer an unbounded body into the
+    # 512MB web VM. Mirrors the download discipline in
+    # ``services.audits.text_extraction.download_audit_body``.
     try:
-        resp = safe_get(url, timeout=30)
-        resp.raise_for_status()
+        resp = safe_get(url, timeout=30, stream=True)
     except UnsafeUrlError as exc:
         logger.warning("Refused audit PDF fetch for audit %s: %s", audit_id, exc)
         raise HTTPException(status_code=502, detail="Failed to fetch PDF") from exc
@@ -90,8 +95,44 @@ def get_audit_pdf(audit_id: int):
         logger.warning("Audit PDF fetch failed for audit %s: %s", audit_id, exc)
         raise HTTPException(status_code=502, detail="Failed to fetch PDF") from exc
 
+    try:
+        try:
+            resp.raise_for_status()
+        except requests.RequestException as exc:
+            logger.warning("Audit PDF fetch failed for audit %s: %s", audit_id, exc)
+            raise HTTPException(status_code=502, detail="Failed to fetch PDF") from exc
+
+        content_type = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
+        # Empty content-type is tolerated (some CDNs omit it); a present but
+        # non-PDF type means we were served an HTML error page or other body.
+        if content_type and content_type not in _ACCEPTED_CONTENT_TYPES:
+            logger.warning(
+                "Audit PDF fetch for audit %s returned unexpected content-type %r",
+                audit_id,
+                content_type,
+            )
+            raise HTTPException(status_code=502, detail="Audit source did not return a PDF")
+
+        chunks: list[bytes] = []
+        total = 0
+        for chunk in resp.iter_content(chunk_size=131_072):
+            if not chunk:
+                continue
+            total += len(chunk)
+            if total > _MAX_PDF_BYTES:
+                logger.warning(
+                    "Audit PDF for audit %s exceeded size cap %d bytes; aborting stream",
+                    audit_id,
+                    _MAX_PDF_BYTES,
+                )
+                raise HTTPException(status_code=502, detail="PDF exceeds the maximum allowed size")
+            chunks.append(chunk)
+        body = b"".join(chunks)
+    finally:
+        resp.close()
+
     return Response(
-        content=resp.content,
+        content=body,
         media_type="application/pdf",
         headers={
             "Content-Disposition": f'inline; filename="{filename}"',

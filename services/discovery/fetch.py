@@ -75,7 +75,14 @@ def _remapping_target_is_safe(entry: str) -> bool:
     Invariant: remapping targets are compile-time read roots for solc/Slither;
     an absolute target or a ``..`` escape would let compilation read files
     outside the scaffold.
+
+    A remapping is a single line by construction — ``scaffold`` writes entries
+    with ``"\n".join(...)``. An embedded CR/LF would split one hostile entry
+    into two ``remappings.txt`` lines, the second an unchecked read root, so any
+    entry carrying ``\r``/``\n`` is rejected before the ``=`` split.
     """
+    if "\n" in entry or "\r" in entry:
+        return False
     if "=" not in entry:
         return True
     _prefix, target = entry.split("=", 1)

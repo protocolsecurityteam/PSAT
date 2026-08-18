@@ -799,6 +799,11 @@ def test_probe_rate_limit_prunes_stale_buckets(monkeypatch):
     fresh_addr = "0x" + "bb" * 20
     monkeypatch.setattr(predicate_capabilities, "_PROBE_RATE_LIMIT", 3)
     monkeypatch.setattr(predicate_capabilities, "_PROBE_RATE_WINDOW_S", 60.0)
+    # Stale reclamation is now amortized into a full sweep rather than run on
+    # every hit (the per-hit all-buckets walk was the self-DoS this fix removed).
+    # Force the sweep to fire on the next hit so the test pins reclamation
+    # without the 4096-hit warm-up the default sweep interval would need.
+    monkeypatch.setattr(predicate_capabilities._probe_limiter, "_sweep_every", 1)
     predicate_capabilities._probe_rate_state.clear()
     predicate_capabilities._probe_rate_state[("old-key", stale_addr, 1)] = collections.deque([1.0])
 

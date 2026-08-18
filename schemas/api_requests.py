@@ -91,9 +91,20 @@ class ProtocolSubscribeRequest(BaseModel):
     @classmethod
     def _validate_discord_webhook_url(cls, v: str) -> str:
         # The monitor POSTs findings to this URL; it must be an https endpoint on
-        # a Discord host and nothing else — no arbitrary outbound target.
-        parsed = urlparse(v)
-        if parsed.scheme.lower() != "https" or (parsed.hostname or "").lower() not in _DISCORD_WEBHOOK_HOSTS:
+        # a Discord host and nothing else — no arbitrary outbound target. Host is
+        # derived via the shared egress helper (lazy-imported to keep the request
+        # schemas free of the outbound-HTTP stack) so this gate reads the same
+        # authority the client would dial — a backslash/userinfo host that
+        # ``urlparse`` reports as Discord but urllib3 dials elsewhere is rejected.
+        from utils.egress import UnsafeUrlError, connect_host
+
+        if urlparse(v).scheme.lower() != "https":
+            raise ValueError("discord_webhook_url must be an https URL on a Discord host")
+        try:
+            host = connect_host(v)
+        except UnsafeUrlError:
+            raise ValueError("discord_webhook_url must be an https URL on a Discord host") from None
+        if host.lower() not in _DISCORD_WEBHOOK_HOSTS:
             raise ValueError("discord_webhook_url must be an https URL on a Discord host")
         return v
 

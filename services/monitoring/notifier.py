@@ -28,6 +28,7 @@ from services.monitoring.salience import (
     SALIENCE_NOTABLE,
     SALIENCE_ROUTINE,
 )
+from utils.egress import UnsafeUrlError, connect_host
 
 logger = logging.getLogger(__name__)
 
@@ -40,8 +41,17 @@ _DISCORD_WEBHOOK_HOSTS = frozenset({"discord.com", "discordapp.com", "canary.dis
 
 
 def _is_discord_webhook(webhook_url: str) -> bool:
+    # Host derived via the shared egress helper (not urlparse) so this gate and
+    # the SSRF guard cannot disagree on the authority — the parser divergence a
+    # backslash/userinfo host exploits.
     parsed = urlparse(webhook_url)
-    return parsed.scheme == "https" and (parsed.hostname or "").lower() in _DISCORD_WEBHOOK_HOSTS
+    if parsed.scheme != "https":
+        return False
+    try:
+        host = connect_host(webhook_url)
+    except UnsafeUrlError:
+        return False
+    return host.lower() in _DISCORD_WEBHOOK_HOSTS
 
 
 def _send_discord(webhook_url: str, embed: dict) -> bool:

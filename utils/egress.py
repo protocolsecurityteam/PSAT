@@ -23,6 +23,7 @@ import socket
 from urllib.parse import urljoin, urlparse
 
 import requests
+from urllib3.util import parse_url
 
 IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
 
@@ -57,15 +58,42 @@ def _is_forbidden(ip: IPAddress) -> bool:
     return not ip.is_global
 
 
-def assert_public_http_url(url: str) -> str:
-    """Return *url* unchanged if it is an http(s) URL whose host resolves
-    exclusively to public unicast addresses; raise ``UnsafeUrlError`` otherwise."""
+def connect_host(url: str) -> str:
+    """The bare host the HTTP client will actually open a socket to.
+
+    ``urlparse`` and urllib3 disagree on where the authority ends — a backslash
+    is userinfo to ``urlparse`` but an authority terminator to urllib3, the parser
+    ``requests`` connects with. Deriving the guarded host from ``urlparse().hostname``
+    therefore validates a *different* host than the one dialed, an SSRF bypass
+    (``http://169.254.169.254\\@example.com/`` guards ``example.com``, dials the
+    metadata IP). Every host gate derives its host from here so all three agree
+    with the client. Raises ``UnsafeUrlError`` for a disallowed scheme, a backslash
+    in the authority, or an authority/port urllib3 cannot parse — the last so a
+    malformed port surfaces as ``UnsafeUrlError``, not a bare ``ValueError`` that
+    ``UnsafeUrlError``-only callers turn into a 500.
+    """
     parsed = urlparse(url)
     if parsed.scheme not in _ALLOWED_SCHEMES:
         raise UnsafeUrlError(f"scheme {parsed.scheme!r} not allowed")
-    host = parsed.hostname
+    if "\\" in parsed.netloc:
+        raise UnsafeUrlError("URL authority contains a backslash")
+    try:
+        host = parse_url(url).host
+    except ValueError as exc:  # LocationParseError (port out of range, bad authority) subclasses this
+        raise UnsafeUrlError(f"cannot parse URL authority: {exc}") from exc
     if not host:
         raise UnsafeUrlError("URL has no host")
+    # urllib3 keeps IPv6 literals bracketed; ``ipaddress.ip_address`` wants them bare.
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
+    return host
+
+
+def assert_public_http_url(url: str) -> str:
+    """Return *url* unchanged if it is an http(s) URL whose host resolves
+    exclusively to public unicast addresses; raise ``UnsafeUrlError`` otherwise."""
+    host = connect_host(url)
+    parsed = urlparse(url)
 
     try:
         infos = socket.getaddrinfo(host, parsed.port or None, proto=socket.IPPROTO_TCP)
