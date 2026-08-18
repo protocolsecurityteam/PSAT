@@ -79,7 +79,7 @@ ALLOW_LIST: dict[str, dict[int, str]] = {
         # doesn't change the job's stage output. record_degraded would
         # mislead callers of /api/jobs/{id}/errors into thinking the
         # reanalysis was degraded.
-        1090: "Notifier side-effect; reanalysis already completed before this fired.",
+        1093: "Notifier side-effect; reanalysis already completed before this fired.",
     },
     "workers/effects_worker.py": {
         # Fork-close cleanup: the anvil subprocess close failing is a resource
@@ -108,7 +108,7 @@ ALLOW_LIST: dict[str, dict[int, str]] = {
 def _attach_parents(tree: ast.AST) -> None:
     for node in ast.walk(tree):
         for child in ast.iter_child_nodes(node):
-            child.parent = node  # type: ignore[attr-defined]
+            child.parent = node  # pyright: ignore[reportAttributeAccessIssue]
 
 
 def _enclosing_handler(node: ast.AST) -> ast.ExceptHandler | None:

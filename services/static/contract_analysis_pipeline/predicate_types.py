@@ -14,7 +14,7 @@ the schema, and the resolver can import them without circular deps.
 
 from __future__ import annotations
 
-from typing import Any, Literal, TypedDict
+from typing import Any, Final, Literal, TypedDict, get_args
 
 from typing_extensions import NotRequired
 
@@ -34,6 +34,7 @@ OperandSource = Literal[
     "computed",  # arithmetic / hash / abi.encode result
     "block_context",  # block.timestamp / number / chainid / coinbase
     "signature_recovery",  # ecrecover / EIP-1271 isValidSignature output
+    "self_address",  # address(this) — published; resolution adapters match on it
     "top",  # provenance saturated (cycles, depth cap)
 ]
 
@@ -232,6 +233,10 @@ LeafOperator = Literal[
     "falsy",
 ]
 
+# The ordering subset of ``LeafOperator`` — the only operators a swap or a
+# ``ValuePredicate.op`` threshold form admits.
+ComparisonOperator = Literal["lt", "lte", "gt", "gte"]
+
 AuthorityRole = Literal[
     "caller_authority",
     "delegated_authority",
@@ -313,11 +318,23 @@ class PredicateTree(TypedDict, total=False):
     # ABSENCE must require this marker — see ``effects.calldata._absorption_recorded``
     # and the ``no_time_reference`` (proven-indefinite-freeze) state it gates.
     operand_absorption: NotRequired[str]
+    # ROOT-node-only: one-shot latch candidate found on a require-bearing
+    # modifier rather than a lowered leaf (the guard saturated in folding), so
+    # it cannot ride a LeafPredicate. Consumed by resolution's one-shot probe.
+    one_shot_candidate_latch: NotRequired[dict[str, Any]]
 
 
 # Value of ``PredicateTree.operand_absorption``. A single state, because the only
 # question a reader asks is "did the recorder run"; absence is the other answer.
-OPERAND_ABSORPTION_RECORDED = "recorded"
+OperandAbsorption = Literal["recorded"]
+OPERAND_ABSORPTION_RECORDED: Final[OperandAbsorption] = "recorded"
+
+# What an admin-set state variable's writer set proves about the target: minted
+# by the effects pass, matched by the scoring plane and the calldata prober.
+StateVarTargetKind = Literal["constant", "immutable", "storage_setter", "storage_no_setter"]
+TARGET_KIND_STORAGE_SETTER: Final[StateVarTargetKind] = "storage_setter"
+TARGET_KIND_STORAGE_NO_SETTER: Final[StateVarTargetKind] = "storage_no_setter"
+STATE_VAR_TARGET_KINDS: frozenset[str] = frozenset(get_args(StateVarTargetKind))
 
 
 def mark_operand_absorption_recorded(tree: PredicateTree | None) -> None:
@@ -350,13 +367,3 @@ def make_or_node(children: list[PredicateTree]) -> PredicateTree:
         return children[0]
     tree: PredicateTree = {"op": "OR", "children": children}
     return tree
-
-
-def operand(source: OperandSource, /, **kwargs: Any) -> Operand:
-    """Construct an Operand with sensible defaults. Kwargs are merged
-    into the typed dict; unknown keys raise (TypedDict total=False
-    accepts NotRequired keys, but typos slip through — keep keys
-    matching the type)."""
-    payload: Operand = {"source": source}  # type: ignore[typeddict-item]
-    payload.update(kwargs)  # type: ignore[typeddict-item]
-    return payload

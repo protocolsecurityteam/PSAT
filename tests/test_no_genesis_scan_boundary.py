@@ -65,11 +65,11 @@ def test_enumerators_raise_typeerror_when_from_block_omitted():
     # The omitted from_block is the point of the test; pyright correctly objects,
     # so silence it here — the runtime TypeError is what we assert.
     with pytest.raises(TypeError, match="from_block"):
-        asyncio.run(mapping_enumerator.enumerate_mapping_allowlist("0x" + "aa" * 20, [], bearer_token="t"))  # type: ignore[call-arg]
+        asyncio.run(mapping_enumerator.enumerate_mapping_allowlist("0x" + "aa" * 20, [], bearer_token="t"))  # pyright: ignore[reportCallIssue]
     with pytest.raises(TypeError, match="from_block"):
-        asyncio.run(mapping_enumerator.enumerate_mapping_values("0x" + "aa" * 20, [], bearer_token="t"))  # type: ignore[call-arg]
+        asyncio.run(mapping_enumerator.enumerate_mapping_values("0x" + "aa" * 20, [], bearer_token="t"))  # pyright: ignore[reportCallIssue]
     with pytest.raises(TypeError, match="from_block"):
-        HyperSyncEventLogRepo()  # type: ignore[call-arg]
+        HyperSyncEventLogRepo()  # pyright: ignore[reportCallIssue]
 
 
 # (b) completeness grep encoded as a source assertion ------------------------
@@ -522,7 +522,7 @@ def test_recursive_cold_no_floor_does_not_live_scan(monkeypatch):
     ]
     nodes: dict = {}
     edges: dict = {}
-    status = recursive._replay_mapping_principals(  # type: ignore[attr-defined]
+    status = recursive._replay_mapping_principals(
         address=address,
         mapping_specs=cast(Any, specs),
         contract_node_id="contract:" + address,
@@ -560,7 +560,7 @@ def test_recursive_known_floor_scans_from_floor_not_zero(monkeypatch):
             "indexed_positions": [0],
         }
     ]
-    recursive._replay_mapping_principals(  # type: ignore[attr-defined]
+    recursive._replay_mapping_principals(
         address=address,
         mapping_specs=cast(Any, specs),
         contract_node_id="contract:" + address,
@@ -740,7 +740,7 @@ def test_enumerator_constructs_client_through_the_bound():
     result = asyncio.run(
         mapping_enumerator.enumerate_mapping_allowlist(
             "0x" + "aa" * 20,
-            [spec],  # type: ignore[list-item]
+            [spec],  # pyright: ignore[reportArgumentType]
             from_block=5_000_000,
             bearer_token="tok",
             hypersync_module=_FakeModule(),

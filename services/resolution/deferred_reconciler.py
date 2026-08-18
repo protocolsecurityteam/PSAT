@@ -80,6 +80,7 @@ from db.models import (
 )
 from services.resolution.role_store_standards import all_topic0s
 from utils.chains import UnknownChainError, chain_by_id
+from utils.scoring_status import TRACE_STEP_ENUMERABLE_ROLE_STORE
 
 logger = logging.getLogger(__name__)
 
@@ -88,9 +89,6 @@ logger = logging.getLogger(__name__)
 # (a bare string) to avoid a worker→adapter import dependency.
 DEFERRED_MARKER = "deferred_pending_index"
 
-# The adapter's trace step (``adapters/enumerable_role_store.py``) whose fold the
-# role-drift arm watches — shared by value, same rationale as ``DEFERRED_MARKER``.
-ROLE_STORE_TRACE_STEP = "enumerable_role_store"
 _ROLE_STORE_TOPIC0S = [t.lower() for t in all_topic0s()]
 
 
@@ -421,7 +419,7 @@ def _iter_role_store_frontiers(node: Any) -> Iterator[tuple[str, int]]:
     if not isinstance(node, dict):
         return
     for step in node.get("trace") or []:
-        if not isinstance(step, dict) or step.get("step") != ROLE_STORE_TRACE_STEP:
+        if not isinstance(step, dict) or step.get("step") != TRACE_STEP_ENUMERABLE_ROLE_STORE:
             continue
         authority = step.get("authority")
         frontier = step.get("fold_frontier")
@@ -476,7 +474,7 @@ def reconcile_role_set_drift(session: Session, *, chain_id: int, limit: int = 20
         .where(Job.stage == JobStage.done)
         .where(Job.chain_id == chain_id)
         .where(jsonb_has_payload(EffectiveFunction.capability_expr))
-        .where(cast(EffectiveFunction.capability_expr, Text).ilike(f"%{ROLE_STORE_TRACE_STEP}%"))
+        .where(cast(EffectiveFunction.capability_expr, Text).ilike(f"%{TRACE_STEP_ENUMERABLE_ROLE_STORE}%"))
     ).all()
 
     # job_id -> (address, {authority: lowest folded frontier seen})

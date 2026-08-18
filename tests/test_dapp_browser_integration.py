@@ -161,7 +161,7 @@ window.__APP_DATA__ = {{
 class _FakeDappHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
-        body = self.server.site_map.get(parsed.path)  # type: ignore[attr-defined]
+        body = self.server.site_map.get(parsed.path)  # pyright: ignore[reportAttributeAccessIssue]
         if body is not None:
             content_type = "text/html; charset=utf-8"
             if parsed.path == "/bundle.js":
@@ -172,7 +172,7 @@ class _FakeDappHandler(BaseHTTPRequestHandler):
             return
         self._send(404, "text/plain; charset=utf-8", "not found")
 
-    def log_message(self, _format: str, *args) -> None:
+    def log_message(self, format: str, *args) -> None:
         return
 
     def _send(self, status: int, content_type: str, body: str) -> None:
@@ -199,7 +199,7 @@ def fake_dapp_site():
         "root_page": generated[8],
     }
     server = ThreadingHTTPServer(("127.0.0.1", 0), _FakeDappHandler)
-    server.site_map = _build_fake_site(addresses)  # type: ignore[attr-defined]
+    server.site_map = _build_fake_site(addresses)  # pyright: ignore[reportArgumentType, reportAttributeAccessIssue]
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -259,6 +259,6 @@ def test_crawler_captures_interactions_and_addresses_from_fake_dapp(tmp_path, fa
     assert "apiResponse" in interaction_types
     assert "jsBundle" in interaction_types
 
-    txs = log.get_transactions()
+    txs = [i for i in log.interactions if i.type == "sendTransaction"]
     assert len(txs) == 2
     assert {tx.to for tx in txs} == {addresses["deposit_tx"], addresses["stake_tx"]}

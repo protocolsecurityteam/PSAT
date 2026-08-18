@@ -340,7 +340,7 @@ class _DispositionFetcher(RpcEventLogFetcher):
         self._cost = cost
         self._budget = budget
 
-    def _fetch_range(self, event_address, topics, from_block, to_block, window_stats=None):  # type: ignore[no-untyped-def]
+    def _fetch_range(self, event_address, topics, from_block, to_block, window_stats=None):
         if self._cost.total >= self._budget:
             raise DispositionBudgetExceeded(f"disposition request budget of {self._budget} reached")
         self._cost.get_logs += 1
@@ -408,7 +408,7 @@ def raw_balance_text(value: Any) -> str | None:
         exact = Decimal(str(value))
         whole = int(exact)
     except (ArithmeticError, TypeError, ValueError):
-        whole = None
+        exact, whole = None, None
     if whole is not None and exact == whole:
         return str(whole)
     text = str(value).strip()

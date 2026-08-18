@@ -213,20 +213,6 @@ def renew_daemon_lease(
     return try_acquire_daemon_lease(session, name, holder, ttl_seconds)
 
 
-def release_daemon_lease(session: Session, name: str, holder: uuid.UUID) -> None:
-    """Release the lease iff the caller still holds it. Wrong holder no-ops.
-
-    The ``holder`` guard means a daemon that already lost its lease to a
-    competitor can't delete the competitor's row on the way out. Commits
-    internally, like the acquire path.
-    """
-    session.execute(
-        text("DELETE FROM daemon_leases WHERE name = :name AND holder = :holder"),
-        {"name": name, "holder": holder},
-    )
-    session.commit()
-
-
 class LeaseLost(RuntimeError):
     """Raised when a mutating queue write detects the caller no longer
     holds the row's lease.
@@ -1277,34 +1263,6 @@ def get_artifact(session: Session, job_id: Any, name: str) -> dict | list | str 
     return _artifact_row_to_value(artifact)
 
 
-def backfill_job_is_proxy_from_storage(session: Session) -> int:
-    """Flip ``Job.is_proxy`` for legacy storage-backed ``contract_flags`` rows the inline SQL backfill can't reach."""
-    if get_storage_client() is None:
-        return 0
-    rows = session.execute(
-        select(Artifact)
-        .join(Job, Artifact.job_id == Job.id)
-        .where(
-            Artifact.name == "contract_flags",
-            Artifact.storage_key.is_not(None),
-            Job.is_proxy.is_(False),
-        )
-    ).scalars()
-    updated = 0
-    for art in rows:
-        try:
-            value = _artifact_row_to_value(art)
-        except StorageError:
-            logger.warning("backfill: contract_flags storage read failed for job %s", art.job_id)
-            continue
-        if not isinstance(value, dict) or value.get("is_proxy") is not True:
-            continue
-        session.execute(sa_update(Job).where(Job.id == art.job_id, Job.is_proxy.is_(False)).values(is_proxy=True))
-        updated += 1
-    session.commit()
-    return updated
-
-
 def get_all_artifacts(session: Session, job_id: Any) -> dict[str, Any]:
     """Read all artifacts for a job. Returns {name: data_or_text}.
 
@@ -1446,7 +1404,7 @@ def store_source_files(session: Session, job_id: Any, files: dict[str, str]) -> 
             if failure is None:
                 failure = outcome
             continue
-        path, key = outcome  # type: ignore[misc]
+        path, key = outcome
         entries.append((path, key))
         uploaded_keys.append(key)
 
@@ -1563,7 +1521,7 @@ def get_source_files(session: Session, job_id: Any) -> dict[str, str]:
     for item, outcome in fetch_results:
         if isinstance(outcome, BaseException):
             raise outcome
-        path, content = outcome  # type: ignore[misc]
+        path, content = outcome
         if isinstance(content, StorageKeyMissing):
             proven_absent[path] = f"no object at any candidate for {item[1]}"
             continue
@@ -2087,7 +2045,7 @@ def copy_static_cache(session: Session, source_job_id: Any, target_job_id: Any) 
             store_artifact(session, target_job_id, art.name, data=art.data, text_data=art.text_data)
 
     session.commit()
-    return new_contract.id  # type: ignore[attr-defined]
+    return new_contract.id
 
 
 # Code-plane artifacts safe to reuse across a same-source deployment. Unlike the

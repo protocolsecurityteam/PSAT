@@ -151,7 +151,7 @@ def test_every_three_state_field_must_be_named():
     decided a state cannot construct the row at all.
     """
     with pytest.raises(TypeError):
-        FunctionSignal(  # type: ignore[call-arg]
+        FunctionSignal(  # pyright: ignore[reportCallIssue]
             job_id=uuid.uuid4(),
             protocol_id=1,
             contract_id=1,
@@ -178,7 +178,7 @@ def test_contract_id_is_required_because_it_is_identity():
         **not_determined_signal_defaults(),
     }
     with pytest.raises(TypeError, match="contract_id"):
-        FunctionSignal(**fields)  # type: ignore[call-arg]
+        FunctionSignal(**fields)
     assert FunctionSignal(contract_id=7, **fields).contract_id == 7
 
 

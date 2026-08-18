@@ -12,6 +12,13 @@ from sqlalchemy import select
 
 from db.models import AuditReport, Protocol
 from schemas.api_requests import AddAuditRequest
+from schemas.api_responses import (
+    AuditReportDict,
+    AuditScopeResponse,
+    DeleteAuditResponse,
+    ReextractScopeResponse,
+    RefreshCoverageResponse,
+)
 from services.aggregations import build_audits_pipeline, build_contract_audit_timeline
 from services.audits.serializers import _audit_report_to_dict
 
@@ -42,8 +49,8 @@ def audits_pipeline() -> dict[str, Any]:
         return build_audits_pipeline(session)
 
 
-@router.get("/api/audits/{audit_id}")
-def get_audit(audit_id: int) -> dict[str, Any]:
+@router.get("/api/audits/{audit_id}", response_model=None)
+def get_audit(audit_id: int) -> AuditReportDict:
     """Fetch a single audit report's metadata, including text-extraction state."""
     with deps.SessionLocal() as session:
         ar = session.get(AuditReport, audit_id)
@@ -186,8 +193,8 @@ def get_audit_text(audit_id: int) -> str:
     return body.decode("utf-8")
 
 
-@router.get("/api/audits/{audit_id}/scope")
-def get_audit_scope(audit_id: int) -> dict[str, Any]:
+@router.get("/api/audits/{audit_id}/scope", response_model=None)
+def get_audit_scope(audit_id: int) -> AuditScopeResponse:
     """Return the list of in-scope contracts + date for a completed audit.
 
     Reads from the denormalized ``scope_contracts`` column — the JSON
@@ -231,11 +238,12 @@ def contract_audit_timeline(contract_id: int) -> dict[str, Any]:
 @router.post(
     "/api/company/{company_name}/refresh_coverage",
     dependencies=[Depends(deps.require_admin_key)],
+    response_model=None,
 )
 def refresh_company_coverage(
     company_name: str,
     verify_source_equivalence: bool = True,
-) -> dict[str, Any]:
+) -> RefreshCoverageResponse:
     """Rebuild ``audit_contract_coverage`` rows for every scoped audit in a protocol.
 
     Idempotent backfill. Useful when inventory is updated after audits are
@@ -276,8 +284,9 @@ def refresh_company_coverage(
 @router.post(
     "/api/audits/{audit_id}/reextract_scope",
     dependencies=[Depends(deps.require_admin_key)],
+    response_model=None,
 )
-def reextract_audit_scope(audit_id: int) -> dict[str, Any]:
+def reextract_audit_scope(audit_id: int) -> ReextractScopeResponse:
     """Reset scope-extraction state so the worker picks the row up again.
 
     Requires that text extraction already succeeded — without the stored
@@ -305,8 +314,9 @@ def reextract_audit_scope(audit_id: int) -> dict[str, Any]:
 @router.post(
     "/api/company/{company_name}/audits",
     dependencies=[Depends(deps.require_admin_key)],
+    response_model=None,
 )
-def add_company_audit(company_name: str, req: AddAuditRequest) -> dict[str, Any]:
+def add_company_audit(company_name: str, req: AddAuditRequest) -> AuditReportDict:
     """Register a new audit report for a protocol.
 
     The row is inserted with NULL text/scope extraction status, so the
@@ -360,8 +370,9 @@ def add_company_audit(company_name: str, req: AddAuditRequest) -> dict[str, Any]
 @router.delete(
     "/api/audits/{audit_id}",
     dependencies=[Depends(deps.require_admin_key)],
+    response_model=None,
 )
-def delete_audit(audit_id: int) -> dict[str, Any]:
+def delete_audit(audit_id: int) -> DeleteAuditResponse:
     """Remove an audit report (cascades to coverage rows)."""
     with deps.SessionLocal() as session:
         ar = session.get(AuditReport, audit_id)

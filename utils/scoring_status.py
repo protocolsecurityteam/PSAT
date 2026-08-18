@@ -15,6 +15,10 @@ explicit member rather than leaving it to a NULL or an omission.
 
 from __future__ import annotations
 
+# The universal refusal token every vocabulary below embeds. One definition so
+# the modules that need only the bare token stop keeping private copies.
+NOT_DETERMINED = "not_determined"
+
 # --- severity --------------------------------------------------------------
 # There is deliberately no "proven_absent" arm. A proven zero severity is
 # ``proven`` carrying 0.0 (the ``pause.set`` build-up starts there), which is a
@@ -50,6 +54,7 @@ OPENNESS_OPEN = "open"
 OPENNESS_RESTRICTED = "restricted"
 OPENNESS_NOT_DETERMINED = "not_determined"
 OPENNESS_STATES = (OPENNESS_OPEN, OPENNESS_RESTRICTED, OPENNESS_NOT_DETERMINED)
+OPENNESS_VALUES = frozenset(OPENNESS_STATES)
 
 # --- principal enumeration -------------------------------------------------
 # ``enumerated`` is a PROVEN LOWER BOUND on the caller set and never a count:
@@ -248,6 +253,21 @@ SCORE_TRIGGERS = (
     SCORE_TRIGGER_STALENESS_SWEEP,
     SCORE_TRIGGER_MANUAL,
 )
+
+# --- self-service witness -------------------------------------------------
+# Minted by the claims matcher (``_facts``) and matched by the distiller; the
+# two disclosures ride EVERY proven verdict (SPEC §5 G7) so an excluded row
+# still carries them.
+SELF_SERVICE_STATE_PROVEN = "proven_self_service"
+SELF_SERVICE_BASIS_BOUNDED = "proven_self_service_bounded"
+SELF_SERVICE_DISCLOSE_UPGRADE = "self_service_bound_conditional_on_upgrade_authority"
+SELF_SERVICE_DISCLOSE_SIBLING = "self_service_sibling_function_residual_not_proven"
+
+# --- witnessing trace steps -------------------------------------------------
+# Step identifiers the resolution/policy producers stamp into witness traces and
+# the scoring gate matches against.
+TRACE_STEP_SOLMATE_ROLES_AUTHORITY = "solmate_roles_authority"
+TRACE_STEP_ENUMERABLE_ROLE_STORE = "enumerable_role_store"
 
 # The empty-string selector sentinel for fallback/receive entry points, which
 # have no selector. Same literal and same reason as ``effect_verdicts.selector``

@@ -35,6 +35,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Mapping
 
+from services.monitoring.event_topics import (
+    MEMBER_CHANGED_STEM,
+    SIGNAL_CLASS_CONFIG,
+    SIGNAL_CLASS_METRIC,
+    VALUE_CHANGED_STEM,
+)
+
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from sqlalchemy.orm import Session
 
@@ -158,10 +165,6 @@ DATA_KEY_SIGNAL_CLASS_BASIS = "signal_class_basis"
 DATA_KEY_SAFE_EXEC = "safe_exec"
 DATA_KEY_CORRELATED_EVENTS = "correlated_events"
 
-# ``signal_class`` values, produced by ``polling_plan.build_polling_plan`` and
-# stamped onto ``data`` at the poll / verification mint sites.
-SIGNAL_CLASS_CONFIG = "config"
-SIGNAL_CLASS_METRIC = "metric"
 
 # ``safe_exec.status`` values these rules discriminate on. The full set is
 # S2's to publish; these are the ones that change a level.
@@ -244,8 +247,6 @@ _SAFE_MODULE_EXEC_TYPE = "safe_module_executed"
 _INITIALIZED_TYPE = "initialized"
 _STATE_CHANGED_POLL_TYPE = "state_changed_poll"
 
-_VALUE_CHANGED_STEM = "value_changed"
-_MEMBER_CHANGED_STEM = "member_changed"
 _TRACKED_CONFIG_STEMS = ("state_changed", "controller_changed")
 
 
@@ -454,7 +455,7 @@ def _assign_first_match(
         # witnesses only the module's identity, and that alone earns it.
         return SALIENCE_ALERT, [BASIS_MODULE_BYPASS_EXECUTION]
 
-    if _has_stem(event_type, _MEMBER_CHANGED_STEM):
+    if _has_stem(event_type, MEMBER_CHANGED_STEM):
         return SALIENCE_ALERT, [BASIS_QUALIFIED_MEMBER_CHANGE]
 
     if event_type == _INITIALIZED_TYPE:
@@ -479,7 +480,7 @@ def _assign_first_match(
         return SALIENCE_NOT_DETERMINED, [BASIS_NO_RULE]
 
     # --- notable / routine field diffs ------------------------------------
-    if event_type == _STATE_CHANGED_POLL_TYPE or _has_stem(event_type, _VALUE_CHANGED_STEM):
+    if event_type == _STATE_CHANGED_POLL_TYPE or _has_stem(event_type, VALUE_CHANGED_STEM):
         decided = _field_diff_salience(data)
         if decided is not None:
             return decided

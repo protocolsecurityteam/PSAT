@@ -56,6 +56,8 @@ from db.models import (
     UpgradeEvent,
     derive_job_chain_id,
 )
+from schemas.api_responses import CompanyOverviewResponse, ReachBlock, TvlSummary
+from schemas.control_tracking import MonitoredContractType, ResolvedControllerType
 from services.effects.selection import disposed_from_holdings, load_protocol_reference_shapes
 from services.governance.primary_controller import (
     assign_co_controllers,
@@ -580,7 +582,7 @@ def _prefetch_child_tables(
             .join(FunctionPrincipal, FunctionPrincipal.function_id == EffectiveFunction.id)
             .where(
                 EffectiveFunction.contract_id.in_(id_list),
-                FunctionPrincipal.resolved_type.in_(("safe", "timelock", "eoa", "proxy_admin")),
+                FunctionPrincipal.resolved_type.in_(sorted(_SETTLED_CONTROLLER_TYPES)),
             )
         ).all():
             cid, address, resolved_type, details = row
@@ -978,8 +980,26 @@ def _prefetch_child_tables(
     return out
 
 
-_PRINCIPAL_TYPES = frozenset({"contract", "safe", "timelock", "eoa", "proxy_admin"})
-_PRINCIPAL_TYPES_SQL = ("contract", "safe", "timelock", "eoa", "proxy_admin")
+_PRINCIPAL_TYPES: frozenset[ResolvedControllerType] = frozenset({"contract", "safe", "timelock", "eoa", "proxy_admin"})
+_PRINCIPAL_TYPES_SQL = tuple(sorted(_PRINCIPAL_TYPES))
+
+# Settled controlling-key kinds: a concrete controller identity. Excludes
+# ``contract`` (a way-point whose ultimate key is unestablished) and the
+# not-determined arms.
+_SETTLED_CONTROLLER_TYPES: frozenset[ResolvedControllerType] = frozenset({"safe", "timelock", "eoa", "proxy_admin"})
+# Governance mechanisms that are themselves CONTRACTS. Excludes ``eoa``
+# deliberately: a bare key can control, but it is not an enrollable contract.
+# ``proxy_admin`` enrolls under the historical ``"proxy"`` contract_type.
+_MONITORED_TYPE_FOR_CONTROLLER: dict[ResolvedControllerType, MonitoredContractType] = {
+    "safe": "safe",
+    "timelock": "timelock",
+    "proxy_admin": "proxy",
+}
+# str-keyed view: governance principal dicts are untyped at this boundary.
+_MONITORED_TYPE_LOOKUP: dict[str, MonitoredContractType] = {k: v for k, v in _MONITORED_TYPE_FOR_CONTROLLER.items()}
+# Mechanisms that interpose on a governed call path (delay / admin hop) —
+# a passthrough entity is attributed to what sits behind it.
+_PASSTHROUGH_CONTROLLER_TYPES: frozenset[ResolvedControllerType] = frozenset({"timelock", "proxy_admin"})
 
 # ControllerValue.controller_id values that denote a contract's *active*
 # owner. The substring heuristic ``"owner" in controller_id.lower()`` used
@@ -1057,9 +1077,7 @@ def _has_timelock_delay(details: Any) -> bool:
 
 def _principal_lookup_type(resolved_type: str | None, details: Any) -> str | None:
     normalized = (resolved_type or "").lower()
-    if normalized == "gnosis_safe":
-        normalized = "safe"
-    if normalized in {"safe", "timelock", "eoa", "proxy_admin"}:
+    if normalized in _SETTLED_CONTROLLER_TYPES:
         return normalized
     if _has_timelock_delay(details):
         return "timelock"
@@ -1069,7 +1087,7 @@ def _principal_lookup_type(resolved_type: str | None, details: Any) -> str | Non
 
 
 def _principal_type_priority(resolved_type: str | None) -> int:
-    if resolved_type in {"safe", "timelock", "eoa", "proxy_admin"}:
+    if resolved_type in _SETTLED_CONTROLLER_TYPES:
         return 3
     if resolved_type == "contract":
         return 1
@@ -1248,7 +1266,7 @@ def build_governance_view(
     fp_function_detail_by_cid: dict[int, list[dict[str, Any]]] = children["fp_function_detail"]
     # Keyed by ADDRESS, unlike every sibling stage's contract_id map — the walk is a
     # fact about the address, not about the subject contract that recorded it.
-    terminal_walk_by_address: dict[str, dict[str, Any]] = children["terminal_walk"]  # type: ignore[assignment]
+    terminal_walk_by_address: dict[str, dict[str, Any]] = children["terminal_walk"]  # pyright: ignore[reportAssignmentType]
 
     # Delivery shape for every balance row in this view, read ONCE for the whole
     # request. The evidence plane is keyed by the account the read was issued
@@ -1836,7 +1854,7 @@ def build_governance_view(
     governance_passthrough = {
         entity
         for entity in fp_addrs_by_contract_entity
-        if principal_lookup.get(_entity_addr(entity), {}).get("resolved_type") in {"timelock", "proxy_admin"}
+        if principal_lookup.get(_entity_addr(entity), {}).get("resolved_type") in _PASSTHROUGH_CONTROLLER_TYPES
     }
     # Bare-address mirror for the caller_detail capability walk below, whose inner
     # caller keys stay bare addresses.
@@ -2356,7 +2374,7 @@ def _build_flows_and_principals(
                 continue
             lookup_meta = principal_lookup.get(node_addr, {})
             resolved_type = lookup_meta.get("resolved_type") or cgn.resolved_type
-            if resolved_type not in ("safe", "timelock", "proxy_admin", "eoa"):
+            if resolved_type not in _SETTLED_CONTROLLER_TYPES:
                 continue
             if node_addr == "0x0000000000000000000000000000000000000000":
                 continue
@@ -2437,7 +2455,7 @@ def _build_flows_and_principals(
             resolved_type = fp.get("resolved_type")
             if lookup_meta.get("resolved_type") and resolved_type in (None, "", "unknown", "contract"):
                 resolved_type = lookup_meta["resolved_type"]
-            if resolved_type not in ("safe", "timelock", "eoa", "proxy_admin"):
+            if resolved_type not in _SETTLED_CONTROLLER_TYPES:
                 continue
             if pa in contract_addrs:
                 continue
@@ -2745,7 +2763,7 @@ def all_addresses_for_protocol(
     )
 
 
-def _latest_tvl(session: Session, protocol_row: Protocol | None) -> dict[str, Any] | None:
+def _latest_tvl(session: Session, protocol_row: Protocol | None) -> TvlSummary | None:
     if protocol_row is None:
         return None
     latest_tvl = session.execute(
@@ -2764,7 +2782,7 @@ def _latest_tvl(session: Session, protocol_row: Protocol | None) -> dict[str, An
     }
 
 
-def _company_reach(session: Session, contracts_by_job_id: dict[Any, Contract]) -> dict[str, Any]:
+def _company_reach(session: Session, contracts_by_job_id: dict[Any, Contract]) -> ReachBlock:
     """The scorer-computed reach claims (services.scoring.reach) for the payload.
 
     Computed HERE and not in ``build_governance_view``: the governance view's
@@ -2786,8 +2804,8 @@ def assemble_company_payload(
     protocol_row: Protocol | None,
     jobs: list[Job],
     governance: GovernanceView,
-    reach: dict[str, Any],
-) -> dict[str, Any]:
+    reach: ReachBlock,
+) -> CompanyOverviewResponse:
     return {
         "company": name,
         "protocol_id": protocol_row.id if protocol_row else None,
@@ -2805,7 +2823,7 @@ def assemble_company_payload(
     }
 
 
-def build_company_overview(session: Session, name: str) -> dict[str, Any]:
+def build_company_overview(session: Session, name: str) -> CompanyOverviewResponse:
     timings_ms: dict[str, int] = {}
     start = time.monotonic()
 
@@ -2843,7 +2861,7 @@ def build_company_overview(session: Session, name: str) -> dict[str, Any]:
     return payload
 
 
-def controllers_for_protocol(session: Session, protocol_id: int) -> dict[tuple[str, str], str]:
+def controllers_for_protocol(session: Session, protocol_id: int) -> dict[tuple[str, str], MonitoredContractType]:
     """Map ``(principal_address_lc, chain) -> MonitoredContract.contract_type``
     for every principal that holds governing authority over at least one
     contract in the protocol — its **primary controllers union its privileged
@@ -2886,17 +2904,17 @@ def controllers_for_protocol(session: Session, protocol_id: int) -> dict[tuple[s
     impl_job_by_entity, contracts_by_job_id = resolve_implementation_contracts(session, jobs, contracts_by_job_id)
     governance = build_governance_view(session, jobs, contracts_by_job_id, impl_job_by_entity)
 
-    controllers: dict[tuple[str, str], str] = {}
+    controllers: dict[tuple[str, str], MonitoredContractType] = {}
     for principal in governance.principals:
         if not (principal.get("primary_for") or principal.get("co_controls")):
             continue
         ptype = principal.get("type")
-        if ptype not in ("safe", "timelock", "proxy_admin"):
+        monitored_type = _MONITORED_TYPE_LOOKUP.get(ptype) if isinstance(ptype, str) else None
+        if monitored_type is None:
             continue
         addr = (principal.get("address") or "").lower()
         if not addr:
             continue
-        monitored_type = "proxy" if ptype == "proxy_admin" else ptype
         for chain_token in principal.get("controls_chains") or [_coalesce_chain(None)]:
             controllers[(addr, chain_token)] = monitored_type
     return controllers

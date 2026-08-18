@@ -42,7 +42,7 @@ def test_incomplete_mapping_enumeration_degrades_and_counts(monkeypatch):
         with bind_trace_context(trace_id="t", job_id="j", stage="resolution", worker_id="w"):
             status = recursive._replay_mapping_principals(
                 address="0x" + "ab" * 20,
-                mapping_specs=[{"mapping_name": "allow"}],  # type: ignore[arg-type]
+                mapping_specs=[{"mapping_name": "allow"}],  # pyright: ignore[reportArgumentType]
                 contract_node_id="address:0x" + "ab" * 20,
                 depth=0,
                 nodes={},
@@ -90,7 +90,7 @@ def test_event_indexed_external_check_emits_decision_extra(caplog):
     descriptor = {"callee_selector": None}
     hint = {"topic0": "0x" + "11" * 32, "direction": "add"}
     with caplog.at_level(logging.DEBUG, logger="services.resolution.adapters.event_indexed"):
-        event_indexed.EventIndexedAdapter()._external_check(descriptor, hint, ctx, ["event_address_unresolved"])  # type: ignore[arg-type]
+        event_indexed.EventIndexedAdapter()._external_check(descriptor, hint, ctx, ["event_address_unresolved"])  # pyright: ignore[reportArgumentType]
 
     rec = next(r for r in caplog.records if getattr(r, "adapter", None) == "event_indexed")
     assert rec.decision == "external_check"
@@ -153,7 +153,7 @@ def test_reverting_controller_reads_collapse_to_one_summary_warning(monkeypatch,
         with bind_trace_context(job_id="1", stage="resolution", address="0x" + "99" * 20):
             with caplog.at_level(logging.DEBUG, logger="services.resolution.tracking"):
                 snapshot = tracking.build_control_snapshot(
-                    _reverting_plan(["owner", "authority", "admin"]),  # type: ignore[arg-type]
+                    _reverting_plan(["owner", "authority", "admin"]),  # pyright: ignore[reportArgumentType]
                     "https://rpc.example",
                 )
     finally:
@@ -202,7 +202,7 @@ def test_no_summary_warning_when_every_controller_read_succeeds(monkeypatch, cap
 
     with caplog.at_level(logging.DEBUG, logger="services.resolution.tracking"):
         snapshot = tracking.build_control_snapshot(
-            _reverting_plan(["owner"]),  # type: ignore[arg-type]
+            _reverting_plan(["owner"]),  # pyright: ignore[reportArgumentType]
             "https://rpc.example",
         )
 
@@ -213,7 +213,7 @@ def test_no_summary_warning_when_every_controller_read_succeeds(monkeypatch, cap
 def test_predicate_evaluator_leaf_decision_extra(caplog):
     tree = {"op": "LEAF", "leaf": {"kind": "unsupported", "unsupported_reason": "x"}}
     with caplog.at_level(logging.DEBUG, logger="services.resolution.predicate_evaluator"):
-        cap = evaluate_tree(tree, EvaluationContext())  # type: ignore[arg-type]
+        cap = evaluate_tree(tree, EvaluationContext())  # pyright: ignore[reportArgumentType]
 
     assert cap.kind == "unsupported"
     rec = next(r for r in caplog.records if getattr(r, "adapter", None) == "predicate_evaluator")

@@ -195,7 +195,7 @@ def test_no_rpc_leaves_the_placeholder_not_read() -> None:
     class _NoRpc(_Adapter):
         def __init__(self) -> None:
             super().__init__(None)
-            self._outer_ctx.rpc_url = None  # type: ignore[assignment]
+            self._outer_ctx.rpc_url = None  # pyright: ignore[reportAttributeAccessIssue]
 
     cap = evaluate_tree(
         _eq_tree({"source": "view_call", "callee_signature": "owner()"}),

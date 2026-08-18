@@ -63,7 +63,7 @@ def _to_dict(cap: CapabilityExpr | dict[str, Any] | None) -> dict[str, Any] | No
     if cap is None:
         return None
     if is_dataclass(cap):
-        return capability_to_dict(cap)  # type: ignore[arg-type]
+        return capability_to_dict(cap)
     if isinstance(cap, dict):
         return dict(cap)
     return None

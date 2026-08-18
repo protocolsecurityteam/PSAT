@@ -6,9 +6,12 @@ from typing import Any, Literal, TypedDict
 
 from typing_extensions import NotRequired
 
-ResolvedAddressType = Literal[
-    "zero", "eoa", "safe", "timelock", "proxy_admin", "contract", "unknown", "cross_chain_authority"
-]
+from .control_tracking import ResolvedControllerType
+
+# One vocabulary with ``schemas.control_tracking``: persisted rows carry
+# ``off_chain_witness`` (the PR #48 sink bridge wrote it), so the narrower
+# 8-member copy this alias used to be was a lie at the cast sites.
+ResolvedAddressType = ResolvedControllerType
 EffectiveFunctionStatus = Literal["public", "unsupported", "resolved_empty"]
 PrincipalResolutionStatus = Literal[
     "complete",

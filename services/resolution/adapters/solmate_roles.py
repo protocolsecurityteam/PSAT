@@ -25,6 +25,8 @@ from typing import Any, TypeGuard
 
 from eth_utils.crypto import keccak
 
+from utils.evm import CANCALL_SIGNATURE
+
 from ..capabilities import CapabilityExpr, Condition, ExternalCheck
 from . import EvaluationContext
 
@@ -40,7 +42,6 @@ PUBLIC_CAPABILITY_UPDATED = _t0("PublicCapabilityUpdated(address,bytes4,bool)")
 USER_ROLE_UPDATED = _t0("UserRoleUpdated(address,uint8,bool)")
 _ROLE_TOPICS = [ROLE_CAPABILITY_UPDATED, PUBLIC_CAPABILITY_UPDATED, USER_ROLE_UPDATED]
 
-CANCALL_SIGNATURE = "canCall(address,address,bytes4)"
 CANCALL_SELECTOR = "0x" + keccak(text=CANCALL_SIGNATURE).hex()[:8]
 
 

@@ -264,7 +264,7 @@ class _CountingFetcher(RpcEventLogFetcher):
         self._cost = cost
         self._budget = budget
 
-    def _fetch_range(self, event_address, topics, from_block, to_block, window_stats=None):  # type: ignore[no-untyped-def]
+    def _fetch_range(self, event_address, topics, from_block, to_block, window_stats=None):
         if self._cost.total >= self._budget:
             raise SweepBudgetExceeded(f"sweep request budget of {self._budget} reached")
         self._cost.get_logs += 1

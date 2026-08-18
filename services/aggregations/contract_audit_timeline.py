@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from db.models import AuditContractCoverage, AuditReport, Contract, UpgradeEvent
+from schemas.api_responses import AuditBrief
 from services.audits.serializers import _audit_brief
 from utils.chains import UnknownChainError, chain_by_name
 
@@ -150,7 +151,7 @@ def build_contract_audit_timeline(session: Session, contract_id: int) -> dict[st
         chain_id=anchor_chain_id,
     )
 
-    coverage_out: list[dict[str, Any]] = []
+    coverage_out: list[AuditBrief] = []
     for r in best_by_audit.values():
         audit = audits_by_id.get(r.audit_report_id)
         if not audit:

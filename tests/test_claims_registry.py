@@ -99,7 +99,7 @@ def test_registry_populated_by_autodiscovery():
 def test_registry_view_is_read_only():
     view = registry()
     with pytest.raises(TypeError):
-        view["x"] = object()  # type: ignore[index]
+        view["x"] = object()  # pyright: ignore[reportIndexIssue]
 
 
 def test_emit_claim_valid_copies_witness():
@@ -121,7 +121,7 @@ def test_emit_claim_rejects_unregistered_id():
 
 def test_emit_claim_rejects_non_literal_tier():
     with pytest.raises(ValueError, match="invalid claim tier"):
-        emit_claim("contract_deployment", "guess", {})  # type: ignore[arg-type]
+        emit_claim("contract_deployment", "guess", {})  # pyright: ignore[reportArgumentType]
 
 
 @pytest.mark.parametrize(
@@ -177,10 +177,6 @@ def test_claim_context_accessors():
     ctx = ClaimContext(contract=None, effects=_facts(), predicate_trees=trees)
     assert ctx.function_signatures() == ["deploy()", "ping()"]
     assert ctx.function_names() == {"deploy", "ping"}
-    assert ctx.has_functions("deploy", "ping")
-    assert not ctx.has_functions("deploy", "missing")
-    assert ctx.has_signature("deploy()")
-    assert ctx.has_sink("deploy()", "contract_creation")
     assert ctx.sink_ids("deploy()", "contract_creation") == ["deploy():sink0:contract_creation:Child"]
     assert ctx.sink_ids("ping()", "contract_creation") == []
     assert ctx.effect_labels("deploy()") == ["contract_deployment"]

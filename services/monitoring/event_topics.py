@@ -5,6 +5,7 @@ from __future__ import annotations
 from eth_utils.crypto import keccak
 from typing_extensions import TypeGuard
 
+from schemas.contract_analysis import ControllerProvenance
 from services.discovery.upgrade_history import (
     EVENT_TOPICS as PROXY_EVENT_TOPICS,
 )
@@ -13,6 +14,11 @@ from services.discovery.upgrade_history import (
     _hex_to_int,
     _topic_to_address,
     parse_upgrade_log,
+)
+from utils.scoring_status import (
+    OPENNESS_NOT_DETERMINED,
+    OPENNESS_RESTRICTED,
+    OPENNESS_VALUES,
 )
 
 # ---------------------------------------------------------------------------
@@ -470,8 +476,9 @@ def parse_any_log(log: dict) -> dict | None:
         # — importing the tag synthesizer there would create a circular
         # import. Attach tags here at the consolidated entry point so the
         # watcher always sees tagged events regardless of which decoder
-        # produced them.
-        return _attach_effect_tags(result)
+        # produced them. Rebuilt as a plain dict: the watcher pipeline mutates
+        # the event beyond the parse record's declared keys.
+        return _attach_effect_tags(dict(result))
     return parse_governance_log(log)
 
 
@@ -711,7 +718,7 @@ def _assign_semantic_keys(
 # ``call_target`` — "called, and no gate was proven" — is not that proof, and
 # an absent key is the third state, not determined. Only the proven value may
 # mint the ``controller_changed`` claim.
-_PROVEN_CONTROLLER_PROVENANCE = "caller_gate"
+_PROVEN_CONTROLLER_PROVENANCE: ControllerProvenance = "caller_gate"
 
 
 def _resolve_event_type(
@@ -793,13 +800,10 @@ WITNESS_TIER_HINT = "hint"
 WITNESS_TIER_ACTIVITY = "activity"
 WITNESS_TIERS = frozenset({WITNESS_TIER_SELF_DESCRIBING, WITNESS_TIER_HINT, WITNESS_TIER_ACTIVITY})
 
-# Openness of the functions that emit the event, as the analyzer proved it.
-# Absent is NOT ``open`` and NOT ``restricted`` — it is the third state, and it
-# only ever demotes a tier (invariant 4).
-WRITER_OPENNESS_RESTRICTED = "restricted"
-WRITER_OPENNESS_OPEN = "open"
-WRITER_OPENNESS_NOT_DETERMINED = "not_determined"
-WRITER_OPENNESS_VALUES = frozenset({WRITER_OPENNESS_RESTRICTED, WRITER_OPENNESS_OPEN, WRITER_OPENNESS_NOT_DETERMINED})
+# Openness of the functions that emit the event, as the analyzer proved it
+# (one shared vocabulary: utils.scoring_status). Absent is NOT ``open`` and NOT
+# ``restricted`` — it is the third state, and it only ever demotes a tier
+# (invariant 4).
 
 # ``monitored_events.event_type`` is varchar(100). A claim that cannot be
 # stored under its own identity is not a claim we can publish, so a spec whose
@@ -807,14 +811,19 @@ WRITER_OPENNESS_VALUES = frozenset({WRITER_OPENNESS_RESTRICTED, WRITER_OPENNESS_
 # controller id names a different slot.
 MAX_EVENT_TYPE_LENGTH = 100
 
-_VALUE_CHANGED_STEM = "value_changed"
-_MEMBER_CHANGED_STEM = "member_changed"
+VALUE_CHANGED_STEM = "value_changed"
+MEMBER_CHANGED_STEM = "member_changed"
+
+# Signal classes stamped into tracking plans and read back by salience and the
+# polling planner — one home so the classifier and its readers cannot drift.
+SIGNAL_CLASS_CONFIG = "config"
+SIGNAL_CLASS_METRIC = "metric"
 
 
 def value_changed_event_type(controller_id: str | None) -> str:
     """Event type for a read-verified old→new diff on *controller_id*."""
     cid = (controller_id or "").strip()
-    return f"{_VALUE_CHANGED_STEM}:{cid}" if cid else _VALUE_CHANGED_STEM
+    return f"{VALUE_CHANGED_STEM}:{cid}" if cid else VALUE_CHANGED_STEM
 
 
 def member_changed_event_type(mapping_var: str | None) -> str:
@@ -825,7 +834,7 @@ def member_changed_event_type(mapping_var: str | None) -> str:
     index.
     """
     var = (mapping_var or "").strip()
-    return f"{_MEMBER_CHANGED_STEM}:{var}" if var else _MEMBER_CHANGED_STEM
+    return f"{MEMBER_CHANGED_STEM}:{var}" if var else MEMBER_CHANGED_STEM
 
 
 # How much an occurrence of a spec is allowed to claim, as an order. Used to
@@ -864,7 +873,7 @@ def is_member_changed_event_type(event_type: object) -> bool:
     reflection, ``ControllerValue`` rows) must not read an entry's key or value
     as the slot's.
     """
-    return isinstance(event_type, str) and event_type.startswith(f"{_MEMBER_CHANGED_STEM}:")
+    return isinstance(event_type, str) and event_type.startswith(f"{MEMBER_CHANGED_STEM}:")
 
 
 def member_witness_mapping_var(raw: object) -> str:
@@ -886,9 +895,9 @@ def normalized_writer_openness(raw: object) -> str:
     Anything absent, misspelled or non-string is ``not_determined``: the
     absence of a proof is not the proof of an absence.
     """
-    if isinstance(raw, str) and raw.strip().lower() in WRITER_OPENNESS_VALUES:
+    if isinstance(raw, str) and raw.strip().lower() in OPENNESS_VALUES:
         return raw.strip().lower()
-    return WRITER_OPENNESS_NOT_DETERMINED
+    return OPENNESS_NOT_DETERMINED
 
 
 def is_member_witness(raw: object) -> TypeGuard[dict]:
@@ -1019,7 +1028,7 @@ def classify_witness_tier(
     only, and defaults to False so a caller that cannot prove it gets the
     refusal rather than the promotion.
     """
-    if is_member_witness(member_witness) and normalized_writer_openness(writer_openness) == WRITER_OPENNESS_RESTRICTED:
+    if is_member_witness(member_witness) and normalized_writer_openness(writer_openness) == OPENNESS_RESTRICTED:
         if len(event_type or "") <= MAX_EVENT_TYPE_LENGTH:
             return WITNESS_TIER_SELF_DESCRIBING
 
@@ -1113,7 +1122,7 @@ def extract_governance_topics(tracking_plan: dict | None) -> list[dict]:
             mapping_var = member_witness_mapping_var(member_witness)
             qualified = (
                 bool(mapping_var)
-                and writer_openness == WRITER_OPENNESS_RESTRICTED
+                and writer_openness == OPENNESS_RESTRICTED
                 and not _is_canonical_family(event_type)
                 and len(member_changed_event_type(mapping_var)) <= MAX_EVENT_TYPE_LENGTH
                 and _member_key_is_extractable(member_witness, inputs)
@@ -1302,7 +1311,7 @@ def _assign_member_witness_keys(event: dict, spec: dict, by_declaration: dict[in
     record proved the event states no value at all.
     """
     event_type = event.get("event_type")
-    if not isinstance(event_type, str) or not event_type.startswith(f"{_MEMBER_CHANGED_STEM}:"):
+    if not isinstance(event_type, str) or not event_type.startswith(f"{MEMBER_CHANGED_STEM}:"):
         return True
     witness = spec.get("member_witness")
     if not is_member_witness(witness):

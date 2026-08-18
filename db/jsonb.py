@@ -66,13 +66,3 @@ def jsonb_has_payload(col: Any) -> ColumnElement[bool]:
     both empty states, so it is a strictly narrower filter — never wider.
     """
     return jsonb_state(col).notin_(JSONB_EMPTY_STATES)
-
-
-def jsonb_written_null(col: Any) -> ColumnElement[bool]:
-    """True when a writer stored the jsonb scalar null (a recorded absence)."""
-    return func.jsonb_typeof(col) == JSONB_WRITTEN_NULL
-
-
-def jsonb_unset(col: Any) -> ColumnElement[bool]:
-    """True when the column was never written (SQL NULL)."""
-    return col.is_(None)

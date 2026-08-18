@@ -24,42 +24,6 @@ follow-ups (this commit lays the scaffold + the two most common kinds).
 
 from __future__ import annotations
 
-import os
-from typing import Any, cast
-
-from eth_utils.crypto import keccak
-
-from .shared import external_bool_leaf_is_gate_shape
-
-try:
-    from slither.core.declarations import SolidityVariable  # type: ignore[import]
-    from slither.core.variables.state_variable import StateVariable  # type: ignore[import]
-    from slither.core.variables.variable import Variable  # type: ignore[import]
-    from slither.slithir.operations import (  # type: ignore[import]
-        Assignment,
-        Binary,
-        Condition,
-        HighLevelCall,
-        Index,
-        InternalCall,
-        LibraryCall,
-        LowLevelCall,
-        Member,
-        Phi,
-        Return,
-        Send,
-        SolidityCall,
-        Transfer,
-        Unary,
-        UnaryType,
-        Unpack,
-    )
-    from slither.slithir.variables import Constant, ReferenceVariable  # type: ignore[import]
-
-    SLITHER_AVAILABLE = True
-except Exception:  # pragma: no cover
-    SLITHER_AVAILABLE = False
-
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -82,9 +46,14 @@ except Exception:  # pragma: no cover
 # the engine as before (correctness is identical either way; the
 # cache is a pure perf optimization).
 import contextvars as _contextvars  # noqa: E402
+import os
+from typing import Any, cast
+
+from eth_utils.crypto import keccak
 
 from .predicate_types import (
     AuthorityRole,
+    ComparisonOperator,
     Confidence,
     LeafKind,
     LeafOperator,
@@ -108,6 +77,32 @@ from .provenance import (
     is_top,
 )
 from .revert_detect import DEFAULT_INTERNAL_CALL_DEPTH, Polarity, RevertDetector, RevertGate
+from .shared import external_bool_leaf_is_gate_shape
+from .slither_compat import (
+    SLITHER_AVAILABLE,
+    Assignment,
+    Binary,
+    Condition,
+    Constant,
+    HighLevelCall,
+    Index,
+    InternalCall,
+    LibraryCall,
+    LowLevelCall,
+    Member,
+    Phi,
+    ReferenceVariable,
+    Return,
+    Send,
+    SolidityCall,
+    SolidityVariable,
+    StateVariable,
+    Transfer,
+    Unary,
+    UnaryType,
+    Unpack,
+    Variable,
+)
 
 _helper_engine_cache: _contextvars.ContextVar[dict | None] = _contextvars.ContextVar(
     "psat_predicate_helper_engine_cache", default=None
@@ -731,8 +726,8 @@ def _build_internal_call_or_and_subtree(ir: Any, prov: ProvenanceMap, gate: Reve
             return None
         # Slither types these as Optional but a well-formed Binary IR has both
         # operands present; if one is missing the helper isn't recognizable.
-        left = inner.variable_left  # type: ignore[union-attr]
-        right = inner.variable_right  # type: ignore[union-attr]
+        left = inner.variable_left
+        right = inner.variable_right
         if left is None or right is None:
             return None
         children = [
@@ -1748,7 +1743,7 @@ def _try_membership_via_value_compare(
     # ``value_predicate`` as "filter values where this op + RHS holds".
     allowed_op = "eq" if operator == "eq" else "ne"
     value_predicate: ValuePredicate = {
-        "op": allowed_op,  # type: ignore[typeddict-item]
+        "op": allowed_op,
         "rhs_values": [str(const_value)],
         "value_type": _value_type_of_index_ir(index_ir),
     }
@@ -1798,8 +1793,8 @@ def _find_index_value_pair(a: Any, b: Any, function: Any) -> tuple[Any | None, A
     if isinstance(defining, Binary):
         bt_name = getattr(getattr(defining, "type", None), "name", "").upper()
         if bt_name == "AND":  # bitwise & (Slither's BinaryType.AND); &&  is ANDAND
-            left = defining.variable_left  # type: ignore[union-attr]
-            right = defining.variable_right  # type: ignore[union-attr]
+            left = defining.variable_left
+            right = defining.variable_right
             # The "mask" side of `(value & MASK)` can be a literal
             # Constant OR a state-level `constant`/`immutable` value
             # (which Slither emits as a StateIRVariable). Either is
@@ -1899,7 +1894,7 @@ def _try_threshold_membership(
     # → operator="gte", rhs=["10"]; downstream backends apply the
     # predicate to latest-value-per-key without re-deriving polarity.
     threshold_value_predicate: ValuePredicate = {
-        "op": operator,  # type: ignore[typeddict-item]
+        "op": operator,
         "rhs_values": [str(threshold_value)],
         "value_type": _value_type_of_index_ir(index_ir),
     }
@@ -1921,10 +1916,18 @@ def _try_threshold_membership(
     return leaf
 
 
-def _swap_operator(op: LeafOperator) -> LeafOperator:
+_COMPARISON_SWAP: dict[ComparisonOperator, ComparisonOperator] = {
+    "gt": "lt",
+    "lt": "gt",
+    "gte": "lte",
+    "lte": "gte",
+}
+
+
+def _swap_operator(op: ComparisonOperator) -> ComparisonOperator:
     """Flip a comparison operator when its operands swap. e.g.
     ``a >= b`` ↔ ``b <= a``."""
-    return {"gt": "lt", "lt": "gt", "gte": "lte", "lte": "gte"}.get(op, op)  # type: ignore[return-value]
+    return _COMPARISON_SWAP[op]
 
 
 EIP_1271_MAGIC_VALUE = "0x1626ba7e"
@@ -2792,7 +2795,7 @@ def _derived_view_call_source(sources: SourceSet) -> Source | None:
 
 
 def _source_to_operand(source: Source, *, nested: bool = False) -> Operand:
-    op: Operand = {"source": source.kind}  # type: ignore[typeddict-item]
+    op: Operand = {"source": source.kind}
     if source.parameter_index is not None:
         op["parameter_index"] = source.parameter_index
     if source.parameter_name is not None:
@@ -3237,9 +3240,9 @@ def _apply_polarity(operator: str, polarity: str) -> LeafOperator:
     """If polarity is allowed_when_false (if-revert), invert the
     operator. The inversion table: eq↔ne, lt↔gte, lte↔gt."""
     if polarity == "allowed_when_true":
-        return operator  # type: ignore[return-value]
+        return operator  # pyright: ignore[reportReturnType]
     inv = {"eq": "ne", "ne": "eq", "lt": "gte", "gte": "lt", "lte": "gt", "gt": "lte"}
-    return inv.get(operator, operator)  # type: ignore[return-value]
+    return inv.get(operator, operator)  # pyright: ignore[reportReturnType]
 
 
 def _make_leaf(
@@ -3353,8 +3356,8 @@ def _reconstruct_index_chain(ir: Any, prov: ProvenanceMap, function: Any | None 
     visited: set[str] = set()
     current = ir
     while isinstance(current, Index):
-        keys.insert(0, _expand_key_operand(current.variable_right, prov, function))  # type: ignore[union-attr]
-        left = current.variable_left  # type: ignore[union-attr]
+        keys.insert(0, _expand_key_operand(current.variable_right, prov, function))
+        left = current.variable_left
         left_name = getattr(left, "name", None)
         if left_name in visited:
             break  # cycle guard

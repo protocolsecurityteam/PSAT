@@ -139,7 +139,7 @@ def test_event_call_name_as_constant_does_not_crash():
                     _index(wards, guy, index_lv),
                     _assignment(index_lv, _constant(1)),
                     # deliberately non-str: Slither types EventCall.name as ``str | Constant``
-                    _event_call(_ConstantName("Rely(address)"), [guy]),  # type: ignore[arg-type]
+                    _event_call(_ConstantName("Rely(address)"), [guy]),  # pyright: ignore[reportArgumentType]
                 ]
             )
         ],

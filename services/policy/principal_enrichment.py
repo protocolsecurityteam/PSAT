@@ -19,7 +19,8 @@ from db.models import (
     EffectiveFunction,
     FunctionPrincipal,
 )
-from schemas.principal_labels import PrincipalLabels, PrincipalPermission, PrincipalProfile
+from schemas.control_tracking import ResolvedControllerType, coerce_resolved_controller_type
+from schemas.principal_labels import LabelConfidence, PrincipalLabels, PrincipalPermission, PrincipalProfile
 from services.governance.principals import is_terminal_principal_type, resolve_terminal_principal
 from services.resolution.tracking import classify_resolved_address_with_status
 from utils.concurrency import parallel_map
@@ -495,13 +496,13 @@ def _graph_labels_for_node(
 
 def _display_name(
     address: str,
-    resolved_type: str,
+    resolved_type: ResolvedControllerType,
     labels: set[str],
     graph_context: list[str],
     permissions: list[PrincipalPermission],
     contract_name: str,
     node_name: str = "",
-) -> tuple[str, str]:
+) -> tuple[str, LabelConfidence]:
     contract_slug = _slug(contract_name)
     permission_effects = {effect for permission in permissions for effect in permission.get("effect_labels", [])}
     permission_controllers = sorted(
@@ -637,7 +638,7 @@ def build_principal_labels(
         if address == target_address:
             return None
         node = nodes_by_address.get(address)
-        resolved_type = str(node.get("resolved_type", "unknown")) if node else "unknown"
+        resolved_type = coerce_resolved_controller_type(node.get("resolved_type")) if node else "unknown"
         details = dict(node.get("details", {})) if node else {}
 
         # Cross-chain authority is recognised from the registry +
@@ -646,7 +647,8 @@ def build_principal_labels(
         if cross_chain_recognizer is not None:
             recognized = cross_chain_recognizer(address)
             if recognized is not None:
-                resolved_type, cc_details = recognized
+                recognized_type, cc_details = recognized
+                resolved_type = coerce_resolved_controller_type(recognized_type)
                 details = {**details, **cc_details}
 
         if resolved_type == "unknown" and rpc_url:
@@ -658,7 +660,9 @@ def build_principal_labels(
             if cached is not None:
                 with classify_cache_lock:
                     classify_stats["hits"] += 1
-                resolved_type, cached_details = cached
+                cached_type, cached_details = cached
+                # Pre-seeded from a persisted artifact — unproven until coerced.
+                resolved_type = coerce_resolved_controller_type(cached_type)
                 details = dict(cached_details)
             else:
                 with classify_cache_lock:
@@ -734,10 +738,10 @@ def build_principal_labels(
 
         return {
             "address": address,
-            "resolved_type": resolved_type,  # type: ignore[typeddict-item]
+            "resolved_type": resolved_type,
             "display_name": display_name,
             "labels": sorted(label for label in labels if label),
-            "confidence": confidence,  # type: ignore[typeddict-item]
+            "confidence": confidence,
             "details": details,
             "graph_context": graph_context,
             "controller_context": sorted(

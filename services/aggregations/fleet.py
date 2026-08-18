@@ -45,6 +45,7 @@ from db.queue import (
     HEARTBEAT_EVENT_INDEXER,
     HEARTBEAT_PROTOCOL_SCANNER,
 )
+from schemas.api_responses import FleetStatusResponse
 from services.monitoring.materialization_reconciler import materialization_backlog
 from services.monitoring.process_meta import PROCESS_META, stale_after_seconds
 from services.monitoring.tracking_plan_state import plan_coverage_counts
@@ -297,7 +298,7 @@ def _monitoring_by_chain(session: Session, now: datetime) -> list[dict[str, Any]
     return sorted(out, key=lambda d: (d["chain_id"] is None, d["chain_id"] or 0, d["chain"]))
 
 
-def build_fleet_status(session: Session, *, now: datetime | None = None) -> dict[str, Any]:
+def build_fleet_status(session: Session, *, now: datetime | None = None) -> FleetStatusResponse:
     """Liveness + work breakdown for every background process, for the
     monitor page's "all processes" view. ``now`` is injectable for tests."""
     now = now or datetime.now(timezone.utc)

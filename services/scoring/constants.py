@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from fractions import Fraction
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:  # typing-only: scoring reads static's persisted JSON, not its modules
+    from services.static.contract_analysis_pipeline.predicate_types import StateVarTargetKind
 
 from utils.scoring_status import MODEL_VERSION
 
@@ -175,8 +178,10 @@ PRODUCT_CLAIMS = frozenset(
 UNMODELLED_CLAIMS = frozenset({"value_router", "contract_deployment", "callee_pointer.rotate"})
 
 # --- static destination lattice --------------------------------------------
-FIXED_TARGET_KINDS = frozenset({"immutable", "constant", "storage_no_setter"})
-ADMIN_TARGET_KIND = "storage_setter"
+FIXED_TARGET_KINDS: frozenset[StateVarTargetKind] = frozenset({"immutable", "constant", "storage_no_setter"})
+# Annotated against the static plane's Literal (type-only import) so a
+# vocabulary drift is a pyright error without a runtime coupling.
+ADMIN_TARGET_KIND: "StateVarTargetKind" = "storage_setter"
 # Proven caller-relative destinations: priced from the authority witness,
 # never from the kind alone (``distill._caller_relative_destination``).
 CALLER_RELATIVE_TARGET_KINDS = frozenset({"msg_sender", "token_owner"})
@@ -187,7 +192,7 @@ TARGET_KIND_RANK: dict[str, int] = {
     "caller_controlled": 2,
     "token_owner": 3,
     "self": 4,
-    "storage_setter": 5,
+    ADMIN_TARGET_KIND: 5,
     "storage_no_setter": 6,
     "constant": 7,
     "immutable": 7,

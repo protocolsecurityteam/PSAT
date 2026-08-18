@@ -36,7 +36,6 @@ from services.monitoring.event_topics import (  # noqa: E402
     WITNESS_TIER_HINT,
     WITNESS_TIER_SELF_DESCRIBING,
     WITNESS_TIERS,
-    WRITER_OPENNESS_VALUES,
     extract_governance_topics,
     parse_tracked_log,
 )
@@ -59,6 +58,7 @@ from services.static.contract_analysis_pipeline.tracking import (  # noqa: E402
     _state_writers_from_effects,
     build_controller_tracking,
 )
+from utils.scoring_status import OPENNESS_VALUES  # noqa: E402
 
 CORPUS_SOURCE = """
 pragma solidity ^0.8.19;
@@ -251,7 +251,7 @@ def corpus(tmp_path_factory):
         "subject": {"address": "0x" + "11" * 20, "name": "WitnessCorpus"},
         "controller_tracking": targets,
     }
-    plan = build_control_tracking_plan(analysis)  # type: ignore[arg-type]
+    plan = build_control_tracking_plan(analysis)  # pyright: ignore[reportArgumentType]
     specs = extract_governance_topics(dict(plan))
     planned = {tc["controller_id"] for tc in plan["tracked_controllers"]}
     polling = build_polling_plan(contract_type="regular", tracking_plan=plan, tracked_topics=specs)
@@ -284,7 +284,7 @@ def test_every_spec_carries_the_taxonomy_fields(corpus):
     assert corpus["specs"], "corpus produced no tracked-topic specs at all"
     for spec in corpus["specs"].values():
         assert spec["witness_tier"] in WITNESS_TIERS
-        assert spec["writer_openness"] in WRITER_OPENNESS_VALUES
+        assert spec["writer_openness"] in OPENNESS_VALUES
 
 
 def test_corpus_covers_all_five_degenerate_shapes(corpus):
@@ -715,7 +715,7 @@ def opaque(tmp_path_factory):
             },
             "controller_tracking": targets,
         }
-        plan = build_control_tracking_plan(analysis)  # type: ignore[arg-type]
+        plan = build_control_tracking_plan(analysis)  # pyright: ignore[reportArgumentType]
         out[name] = {
             "contract": contract,
             "effects": effects,

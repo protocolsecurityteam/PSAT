@@ -17,6 +17,19 @@ import json
 import logging
 
 from services.discovery.static_dependencies import get_code, normalize_address, rpc_call
+from utils.evm import (
+    COMPTROLLER_IMPL_SELECTOR,
+    EIP1822_LOGIC_SLOT,
+    EIP1967_ADMIN_SLOT,
+    EIP1967_BEACON_SLOT,
+    EIP1967_IMPL_SLOT,
+    GNOSIS_SLOT0_PATTERN,
+    IMPLEMENTATION_SELECTOR,
+    MASTER_COPY_SELECTOR,
+    OWNER_SELECTOR,
+    OZ_LEGACY_IMPL_SLOT,
+    TARGET_SELECTOR,
+)
 from utils.logging import record_degraded, record_stage_metric
 from utils.rpc import rpc_batch_request_with_status
 
@@ -34,31 +47,11 @@ class ClassificationIncompleteError(RuntimeError):
 
 
 # ---------------------------------------------------------------------------
-# Storage slot constants
-# ---------------------------------------------------------------------------
-
-# EIP-1967 (keccak256 of label string minus 1)
-EIP1967_IMPL_SLOT = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc"
-EIP1967_BEACON_SLOT = "0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50"
-EIP1967_ADMIN_SLOT = "0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103"
-
-# EIP-1822 UUPS
-EIP1822_LOGIC_SLOT = "0xc5f16f0fcc639fa48a6947836d9850f504798523bf8c9a3a87d5876cf622bcf7"
-
-# OpenZeppelin legacy (keccak256("org.zeppelinos.proxy.implementation"))
-OZ_IMPL_SLOT = "0x7050c9e0f4ca769c69bd3a8ef740bc37934f8e2c036e5a723fd8ee048ed3f8c3"
-
-# ---------------------------------------------------------------------------
 # EIP-1167 minimal proxy bytecode markers
 # ---------------------------------------------------------------------------
 
 EIP1167_PREFIX = "363d3d373d3d3d363d73"
 EIP1167_SUFFIX = "5af43d82803e903d91602b57fd5bf3"
-
-# GnosisSafe proxy: PUSH20(address_mask) + PUSH1(0) + SLOAD + AND
-# Loads implementation from storage slot 0 and delegates — unique to
-# GnosisSafe/Safe proxy contracts (v1.0 through v1.3+).
-GNOSIS_SLOT0_PATTERN = "73" + "ff" * 20 + "60005416"
 
 # ---------------------------------------------------------------------------
 # Thresholds / selectors
@@ -77,12 +70,7 @@ SHORT_BYTECODE_THRESHOLD = 600
 GENERIC_IMPL_PROXY_MAX_BYTES = 8192
 
 # Function selectors
-IMPLEMENTATION_SELECTOR = "0x5c60da1b"  # implementation()
 FACET_ADDRESSES_SELECTOR = "0x52ef6b2c"  # facetAddresses() — EIP-2535
-MASTER_COPY_SELECTOR = "0xa619486e"  # masterCopy() — GnosisSafe
-COMPTROLLER_IMPL_SELECTOR = "0xbb82aa5e"  # comptrollerImplementation() — Compound
-TARGET_SELECTOR = "0xd4b83992"  # target() — Synthetix
-OWNER_SELECTOR = "0x8da5cb5b"  # owner()
 
 # Proxy types whose upgrade events the monitor recognises.  These get
 # needs_polling=False because the event scan loop detects their upgrades.
@@ -304,7 +292,7 @@ _PROXY_SLOT_BATCH = (
     EIP1967_BEACON_SLOT,
     EIP1967_ADMIN_SLOT,
     EIP1822_LOGIC_SLOT,
-    OZ_IMPL_SLOT,
+    OZ_LEGACY_IMPL_SLOT,
 )
 
 

@@ -37,6 +37,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from utils.scoring_status import DESTINATION_STATE_UNCONSTRAINED_PROVEN, NOT_DETERMINED
+
 # Exact producer constants (``summaries._action_summary``). Matched as strings
 # because what has to be classified is the SENTENCE THAT SHIPS, not a
 # re-derivation of the branch that made it; a reader comparing this module to the
@@ -44,11 +46,6 @@ from typing import Any
 VACUOUS_SUMMARY = "Performs a contract action."
 TARGET_LIST_PREFIX = "Writes or calls into:"
 ARBITRARY_SUMMARY = "Executes arbitrary external calldata from the contract."
-
-# A ``destination_constraint`` state that is neither a proof of freedom nor a
-# proof of a gate. Mirrors ``site/src/claimsVocab.js`` ``constraintText``.
-_NOT_DETERMINED = "not_determined"
-_UNCONSTRAINED = "unconstrained_proven"
 
 
 def _exec_arbitrary_claim(claims: Any) -> dict[str, Any] | None:
@@ -144,10 +141,10 @@ def _reconcile_arbitrary(claims: Any, effect_labels: Any) -> tuple[str, str | No
     verdict = witness.get("destination_constraint") if isinstance(witness, dict) else None
     state = verdict.get("state") if isinstance(verdict, dict) else None
 
-    if state == _UNCONSTRAINED:
+    if state == DESTINATION_STATE_UNCONSTRAINED_PROVEN:
         return ARBITRARY_SUMMARY, "Confirmed: the exec.arbitrary witness proves no mandatory gate pins the destination."
 
-    if isinstance(state, str) and state not in {_NOT_DETERMINED}:
+    if isinstance(state, str) and state not in {NOT_DETERMINED}:
         guard = verdict.get("guard") if isinstance(verdict, dict) else None
         gate = f" ({guard})" if isinstance(guard, str) and guard else ""
         return (

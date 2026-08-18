@@ -481,20 +481,6 @@ def rpc_headers(rpc_url: str, extra_headers: Mapping[str, str] | None = None) ->
     return headers
 
 
-def erpc_healthcheck_url(chain_id: int | str | None = None, *, eval_chain_id: bool = False) -> str | None:
-    """Build an eRPC healthcheck URL for deployment smoke checks."""
-    base = (os.getenv("ERPC_BASE_URL") or "").rstrip("/")
-    if not base:
-        return None
-    if chain_id is None:
-        return f"{base}/healthcheck"
-    rpc_url = erpc_url_for_chain_id(chain_id)
-    if rpc_url is None:
-        return None
-    healthcheck = f"{rpc_url}/healthcheck"
-    return f"{healthcheck}?eval=all:evm:eth_chainId" if eval_chain_id else healthcheck
-
-
 def normalize_address(address: str) -> str:
     """Normalize an Ethereum address to lowercase with a single 0x prefix."""
     return "0x" + address.lower().replace("0x", "", 1)

@@ -36,7 +36,7 @@ from services.static.claims.types import Claim  # noqa: E402
 
 
 def _static(claim_id: str, tier: str = "standard_exact", **witness: Any) -> Claim:
-    return {"claim_id": claim_id, "tier": tier, "witness": witness}  # type: ignore[typeddict-item]
+    return {"claim_id": claim_id, "tier": tier, "witness": witness}  # pyright: ignore[reportReturnType]
 
 
 def _verdict(

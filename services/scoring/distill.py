@@ -30,6 +30,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from schemas.contract_analysis import ControllerProvenance
 from services.scoring import constants as K
 from services.scoring.schema import (
     NOT_DETERMINED,
@@ -60,6 +61,10 @@ from utils.scoring_status import (
     PRINCIPAL_STATE_NOT_DETERMINED,
     REACH_GATE_LICENSED,
     REACH_GATE_NOT_DETERMINED,
+    SELF_SERVICE_BASIS_BOUNDED,
+    SELF_SERVICE_DISCLOSE_SIBLING,
+    SELF_SERVICE_DISCLOSE_UPGRADE,
+    SELF_SERVICE_STATE_PROVEN,
     SEVERITY_STATE_PROVEN,
     VALUE_BOUND_EXACT,
     VALUE_BOUND_FLOOR,
@@ -463,12 +468,12 @@ def _registry_owner(controller_values: list[Any]) -> dict[str, Any] | None:
     owner: dict[str, Any] | None = None
     for row in controller_values:
         provenance = getattr(row, "authority_provenance", None)
-        if row.source == "authority" and row.resolved_type == "zero" and provenance == "caller_gate":
+        if row.source == "authority" and row.resolved_type == "zero" and provenance == _PROVENANCE_CALLER_GATE:
             zero_authority = True
         if (
             row.source == "owner"
             and row.resolved_type in ("safe", "timelock")
-            and provenance == "caller_gate"
+            and provenance == _PROVENANCE_CALLER_GATE
             and getattr(row, "observed_via", None) == "eth_call"
         ):
             value = _lower(row.value)
@@ -852,15 +857,13 @@ def _msg_value_return(claims: list[dict[str, Any]]) -> _MsgValueReturn:
 # that order). U5 computed the conjunction; this replays it as a UNIVERSAL over
 # the function's out-flows and never re-derives the proof (inv. 9 — the scorer
 # consumes published witnesses, it does not recompute them).
-SELF_SERVICE_BASIS = "proven_self_service_bounded"
+SELF_SERVICE_BASIS = SELF_SERVICE_BASIS_BOUNDED
 SELF_SERVICE_UNCHARGED_NOTE = "self_service_uncharged_product_surface"
-# The two G7 disclosures (SPEC §7, authoritative over the annexes' variant): the
-# payout entities are UUPS proxies, so a proven bound is conditional on whatever
-# authority can replace the code; and the proof is same-function only — no
-# witness looked at what a sibling function does to the same record.
-SELF_SERVICE_DISCLOSE_UPGRADE = "self_service_bound_conditional_on_upgrade_authority"
-SELF_SERVICE_DISCLOSE_SIBLING = "self_service_sibling_function_residual_not_proven"
-_SELF_SERVICE_PROVEN_STATE = "proven_self_service"
+_SELF_SERVICE_PROVEN_STATE = SELF_SERVICE_STATE_PROVEN
+
+# The one provenance value that proves a caller gate (schema vocabulary; the
+# annotation pins the spelling).
+_PROVENANCE_CALLER_GATE: ControllerProvenance = "caller_gate"
 _SS_REFUSAL_PREFIX = "self_service_bound_refused"
 _SS_UNREAD_FLOW = "unread_out_flow"
 _SS_PAYEE_NOT_CALLER_RELATIVE = "payee_not_caller_relative"
@@ -1042,7 +1045,7 @@ def _exec_destination(claim_id: str, witness: dict[str, Any], fork_param: str | 
     state = constraint.get("state")
 
     if target_kind == "self":
-        if state == "unconstrained_proven":
+        if state == DESTINATION_STATE_UNCONSTRAINED_PROVEN:
             # Two witnesses that cannot both be true: a destination fixed at
             # ``address(this)`` and a destination proven unconstrained. A
             # contradiction is not evidence for either side, and resolving it to
@@ -1100,7 +1103,7 @@ def _exec_destination(claim_id: str, witness: dict[str, Any], fork_param: str | 
             severity=K.DEST_SEVERITY_CONSTRAINED_OTHER,
             basis=f"constrained:{guard or 'unspecified'}",
         )
-    if state == "unconstrained_proven":
+    if state == DESTINATION_STATE_UNCONSTRAINED_PROVEN:
         return _Destination(
             tri=Tri.proven(DESTINATION_STATE_UNCONSTRAINED_PROVEN, "unconstrained_proven"),
             severity=K.DEST_SEVERITY_UNCONSTRAINED,
@@ -1255,7 +1258,7 @@ def _flow_destination(claim: dict[str, Any], all_claims: list[dict[str, Any]], o
             severity=K.FLOW_SEVERITY_CALLER_ARBITRARY,
             basis=(
                 "caller_arbitrary+unconstrained_proven"
-                if constraint_state == "unconstrained_proven"
+                if constraint_state == DESTINATION_STATE_UNCONSTRAINED_PROVEN
                 else "caller_arbitrary_proven"
             ),
             notes=(f"target_constraint={constraint_state or 'absent'}",),

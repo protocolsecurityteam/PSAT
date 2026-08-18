@@ -271,7 +271,7 @@ function watcherSub(w) {
 // a backfill-lagging indexer + a stuck drainer + stale watchers. Stuck is a
 // stable, non-flapping signal (old age + 0 throughput), so it belongs in the
 // count; falling-behind is a transient trend and is intentionally left out.
-export function countUnhealthy(fleet) {
+function countUnhealthy(fleet) {
   const daemons = fleet?.daemons || [];
   let n = daemons.filter(
     (d) => d.status === "error" || d.stale || indexerLagging(d) || daemonStuck(d),

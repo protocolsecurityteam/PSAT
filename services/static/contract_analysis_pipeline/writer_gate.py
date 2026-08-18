@@ -33,21 +33,10 @@ the whole contract.
 
 from __future__ import annotations
 
-from typing import Any
-
-try:
-    from slither.slithir.operations import (  # type: ignore[import]
-        Assignment,
-        Binary,
-        Index,
-    )
-    from slither.slithir.variables import Constant  # type: ignore[import]
-
-    SLITHER_AVAILABLE = True
-except Exception:  # pragma: no cover
-    SLITHER_AVAILABLE = False
+from typing import Any, cast
 
 from .predicate_types import LeafPredicate, PredicateTree
+from .slither_compat import SLITHER_AVAILABLE, Assignment, Binary, Constant, Index
 
 
 def apply_writer_gate_pass(
@@ -205,6 +194,11 @@ def _maybe_promote_leaf(
 # ---------------------------------------------------------------------------
 
 
+def _index_ref_name(ir: Any) -> str:
+    # Slither declares ``lvalue`` optional on the Operation base; an Index always binds one.
+    return cast(str, ir.lvalue.name)
+
+
 def _classify_writers(
     storage_var: str,
     writers: list[Any],
@@ -267,7 +261,7 @@ def _classify_writer_keys(fn: Any, storage_var: str) -> list[str]:
                 base = ir.variable_left
                 base_name = getattr(base, "name", None)
                 if base_name == storage_var:
-                    indexes_by_ref[ir.lvalue.name] = ir
+                    indexes_by_ref[_index_ref_name(ir)] = ir
             elif isinstance(ir, Assignment):
                 lv_name = getattr(ir.lvalue, "name", None)
                 if lv_name in indexes_by_ref:
@@ -423,7 +417,7 @@ def _additive_write_sites(fn: Any, storage_var: str) -> list[Any]:
             if isinstance(ir, Index):
                 base = ir.variable_left
                 if getattr(base, "name", None) == storage_var:
-                    indexes_by_ref[ir.lvalue.name] = ir
+                    indexes_by_ref[_index_ref_name(ir)] = ir
             elif isinstance(ir, Binary):
                 lv = ir.lvalue
                 lv_name = getattr(lv, "name", None)
@@ -466,7 +460,7 @@ def _has_state_var_assignment(fn: Any, storage_var: str) -> bool:
             if isinstance(ir, Index):
                 base = ir.variable_left
                 if getattr(base, "name", None) == storage_var:
-                    indexes_by_ref[ir.lvalue.name] = ir
+                    indexes_by_ref[_index_ref_name(ir)] = ir
             elif isinstance(ir, Assignment):
                 lv_name = getattr(ir.lvalue, "name", None)
                 if lv_name in indexes_by_ref:

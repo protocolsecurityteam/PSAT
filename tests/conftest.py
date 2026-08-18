@@ -162,7 +162,7 @@ def _guarded_urlopen(url, *args, **kwargs):
 
 
 if not getattr(requests.adapters.HTTPAdapter.send, "_psat_offline_guard", False):
-    _guarded_http_send._psat_offline_guard = True
+    setattr(_guarded_http_send, "_psat_offline_guard", True)
     requests.adapters.HTTPAdapter.send = _guarded_http_send
     urllib.request.urlopen = _guarded_urlopen
 

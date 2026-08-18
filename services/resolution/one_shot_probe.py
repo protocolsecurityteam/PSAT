@@ -36,6 +36,13 @@ from typing import Any, Callable
 
 from eth_utils.crypto import keccak
 
+from utils.evm import (
+    EIP1967_ADMIN_SLOT,
+    EIP1967_BEACON_SLOT,
+    EIP1967_IMPL_SLOT,
+    IMPLEMENTATION_SELECTOR,
+    OZ_LEGACY_IMPL_SLOT,
+)
 from utils.rpc import rpc_request
 
 logger = logging.getLogger(__name__)
@@ -54,14 +61,10 @@ def _slot_hex(value: int) -> str:
     return "0x" + format(value, "064x")
 
 
-# Proxy-standard storage slots, computed from their canonical preimages.
-EIP1967_IMPL_SLOT = _slot_hex(int.from_bytes(keccak(text="eip1967.proxy.implementation"), "big") - 1)
-EIP1967_BEACON_SLOT = _slot_hex(int.from_bytes(keccak(text="eip1967.proxy.beacon"), "big") - 1)
-EIP1967_ADMIN_SLOT = _slot_hex(int.from_bytes(keccak(text="eip1967.proxy.admin"), "big") - 1)
-ZEPPELINOS_IMPL_SLOT = "0x" + keccak(text="org.zeppelinos.proxy.implementation").hex()
+# Proxy-standard storage slots; preimage derivations documented in utils.evm.
 ARAGON_KERNEL_SLOT = "0x" + keccak(text="aragonOS.appStorage.kernel").hex()
 
-_IMPLEMENTATION_SELECTOR = "0x" + keccak(text="implementation()").hex()[:8]
+_IMPLEMENTATION_SELECTOR = IMPLEMENTATION_SELECTOR
 _FACET_ADDRESSES_SELECTOR = "0x" + keccak(text="facetAddresses()").hex()[:8]
 
 # ``_disableInitializers()`` sentinels: type-max of the latch word — uint8
@@ -145,7 +148,7 @@ def detect_proxy_standard(
         ("eip1967", EIP1967_IMPL_SLOT),
         ("eip1967_beacon", EIP1967_BEACON_SLOT),
         ("eip1967_admin", EIP1967_ADMIN_SLOT),
-        ("zeppelinos", ZEPPELINOS_IMPL_SLOT),
+        ("zeppelinos", OZ_LEGACY_IMPL_SLOT),
         ("aragon_app", ARAGON_KERNEL_SLOT),
     ]
     reads: list[dict[str, Any]] = []

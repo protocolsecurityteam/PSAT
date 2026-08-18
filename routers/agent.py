@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -12,6 +11,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
 from db.models import Contract, EffectiveFunction, FunctionPrincipal, Protocol
+from schemas.api_responses import AddressTouchesResponse
 from services.chat.agent import AgentContext, run_agent_stream
 from utils.chains import UnknownChainError, chain_by_name
 
@@ -66,12 +66,12 @@ def agent_chat(req: AgentChatRequest):
     )
 
 
-@router.get("/api/agent/address-touches", dependencies=[Depends(deps.require_admin_key)])
+@router.get("/api/agent/address-touches", dependencies=[Depends(deps.require_admin_key)], response_model=None)
 def agent_address_touches(
     company: str,
     address: str,
     chain: str | None = Query(default=None),
-) -> dict[str, Any]:
+) -> AddressTouchesResponse:
     """Return contracts an address has function-level authority over.
 
     ``chain`` scopes the returned contracts to one deployment (inv. 12): the same

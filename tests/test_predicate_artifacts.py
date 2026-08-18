@@ -527,7 +527,7 @@ def test_non_address_constant_does_not_make_caller_authority():
         ],
     }
 
-    assert _classify_authority_equality(leaf, "equality") == "business"  # type: ignore[arg-type]
+    assert _classify_authority_equality(leaf, "equality") == "business"  # pyright: ignore[reportArgumentType]
 
 
 def test_struct_field_mapping_membership_gets_writer_event_hints(tmp_path):
@@ -660,7 +660,7 @@ def test_artifact_helper_engine_cache_skips_repeated_callees(tmp_path):
         return original_init(self, *args, **kwargs)
 
     try:
-        predicates.ProvenanceEngine.__init__ = _counting_init  # type: ignore[method-assign]
+        predicates.ProvenanceEngine.__init__ = _counting_init
         # With cache active (entered by build_predicate_artifacts).
         artifact = build_predicate_artifacts(contract)
         cached_count = len(instantiations)
@@ -686,7 +686,7 @@ def test_artifact_helper_engine_cache_skips_repeated_callees(tmp_path):
             _helper_engine_cache.reset(token)
         uncached_count = len(instantiations)
     finally:
-        predicates.ProvenanceEngine.__init__ = original_init  # type: ignore[method-assign]
+        predicates.ProvenanceEngine.__init__ = original_init
 
     # Cached path runs strictly fewer engines than uncached.
     assert cached_count < uncached_count, (

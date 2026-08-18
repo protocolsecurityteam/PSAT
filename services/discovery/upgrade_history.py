@@ -15,11 +15,23 @@ and returns results in <1s regardless of chain history length.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from collections.abc import Mapping, Sequence
+from typing import Any, cast
 
+from typing_extensions import NotRequired
+
+from schemas.control_tracking import RESOLVED_CONTROLLER_TYPES, ResolvedControllerType
+from schemas.upgrade_history import (
+    ImplementationRecord,
+    ProxyUpgradeHistory,
+    UpgradeEventRecord,
+    UpgradeEventType,
+    UpgradeHistoryOutput,
+)
 from services.discovery.static_dependencies import normalize_address
 from utils.chains import canonical_chain, require_chain
 from utils.logging import record_degraded
+from utils.scoring_status import NOT_DETERMINED
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +84,7 @@ UPGRADED_REVISION_TOPIC0 = "0x65a5e70879738a94a00f00947edae8111ae0aed9175ce342db
 # Diamond (EIP-2535) — DiamondCut((address,uint8,bytes4[])[],address,bytes)
 DIAMOND_CUT_TOPIC0 = "0x8faa70878671ccd212d20771b795c50af8fd3ff6cf27f4bde57e5d4de0aeb673"
 
-EVENT_TOPICS = {
+EVENT_TOPICS: dict[str, UpgradeEventType] = {
     UPGRADED_TOPIC0: "upgraded",
     ADMIN_CHANGED_TOPIC0: "admin_changed",
     BEACON_UPGRADED_TOPIC0: "beacon_upgraded",
@@ -113,8 +125,15 @@ def _data_to_addresses(data: str, count: int) -> list[str]:
     return addresses
 
 
-def parse_upgrade_log(log: dict) -> dict | None:
-    """Parse an Etherscan log entry into an UpgradeEvent dict."""
+class _ParsedUpgradeLog(UpgradeEventRecord):
+    """Transient parse shape: the published record plus the emitter used to
+    group events. ``_strip_internal`` removes the key before anything persists."""
+
+    _emitter: NotRequired[str]
+
+
+def parse_upgrade_log(log: dict) -> _ParsedUpgradeLog | None:
+    """Parse an Etherscan log entry into an upgrade-event record."""
     topics = log.get("topics", [])
     if not topics:
         return None
@@ -124,7 +143,7 @@ def parse_upgrade_log(log: dict) -> dict | None:
     if not event_type:
         return None
 
-    event: dict = {
+    event: _ParsedUpgradeLog = {
         "event_type": event_type,
         "block_number": _hex_to_int(log.get("blockNumber", "0x0")),
         "tx_hash": log.get("transactionHash"),
@@ -276,7 +295,7 @@ def _fetch_logs_etherscan(proxy_address: str, topic0: str, from_block: int = 0, 
         return []
 
 
-def fetch_upgrade_events(proxy_addresses: list[str], from_block: int = 0, chain_id: int = 1) -> list[dict]:
+def fetch_upgrade_events(proxy_addresses: list[str], from_block: int = 0, chain_id: int = 1) -> list[_ParsedUpgradeLog]:
     """Fetch all EIP-1967 upgrade events for proxy addresses via Etherscan.
 
     Queries each proxy for all three event types (Upgraded, AdminChanged,
@@ -290,7 +309,7 @@ def fetch_upgrade_events(proxy_addresses: list[str], from_block: int = 0, chain_
         chain_id: Chain the proxies live on; threaded to the Etherscan getLogs
             query so L2 upgrade events resolve against the right explorer.
     """
-    all_events: list[dict] = []
+    all_events: list[_ParsedUpgradeLog] = []
 
     # Flatten the address × topic matrix into one task list. Each
     # ``_fetch_logs_etherscan`` call goes through the global Etherscan rate
@@ -334,9 +353,9 @@ def fetch_upgrade_events(proxy_addresses: list[str], from_block: int = 0, chain_
 
 
 def _build_implementation_timeline(
-    events: list[dict],
+    events: Sequence[Mapping[str, Any]],
     current_impl: str | None,
-) -> list[dict]:
+) -> list[ImplementationRecord]:
     """Build an ordered list of ImplementationRecords from upgrade events."""
     upgrade_events = [e for e in events if e["event_type"] == "upgraded" and e.get("implementation")]
 
@@ -345,9 +364,9 @@ def _build_implementation_timeline(
             return [{"address": current_impl}]
         return []
 
-    records: list[dict] = []
+    records: list[ImplementationRecord] = []
     for i, event in enumerate(upgrade_events):
-        record: dict = {
+        record: ImplementationRecord = {
             "address": event["implementation"],
             "block_introduced": event["block_number"],
             "tx_hash": event["tx_hash"],
@@ -368,7 +387,9 @@ def _build_implementation_timeline(
 # ---------------------------------------------------------------------------
 
 
-def _enrich_implementations(implementations: list[dict], known_names: dict[str, str], *, chain_id: int) -> None:
+def _enrich_implementations(
+    implementations: list[ImplementationRecord], known_names: dict[str, str], *, chain_id: int
+) -> None:
     """Add contract names to historical implementations not already named in dependencies.json."""
     from utils.etherscan import get_contract_info, parallel_get
 
@@ -442,12 +463,17 @@ def _extract_proxies_from_dependencies(
 # ---------------------------------------------------------------------------
 
 
-def _strip_internal(event: dict) -> dict:
-    """Remove internal keys (prefixed with _) before serialization."""
-    return {k: v for k, v in event.items() if not k.startswith("_")}
+def _strip_internal(event: _ParsedUpgradeLog) -> UpgradeEventRecord:
+    """Remove the transient grouping key before serialization."""
+    out = event.copy()
+    if "_emitter" in out:
+        del out["_emitter"]
+    return out
 
 
-def build_upgrade_history(dependencies: dict, *, enrich: bool = True, from_block: int = 0, chain_id: int = 1) -> dict:
+def build_upgrade_history(
+    dependencies: dict, *, enrich: bool = True, from_block: int = 0, chain_id: int = 1
+) -> UpgradeHistoryOutput:
     """Build upgrade history for all proxy contracts in a unified deps dict.
 
     Args:
@@ -478,15 +504,15 @@ def build_upgrade_history(dependencies: dict, *, enrich: bool = True, from_block
     all_events = fetch_upgrade_events(list(proxy_meta.keys()), from_block=from_block, chain_id=chain_id)
 
     # Group events by emitting proxy address
-    events_by_proxy: dict[str, list[dict]] = {addr: [] for addr in proxy_meta}
+    events_by_proxy: dict[str, list[_ParsedUpgradeLog]] = {addr: [] for addr in proxy_meta}
     for event in all_events:
         emitter = event.get("_emitter")
         if emitter and emitter in events_by_proxy:
             events_by_proxy[emitter].append(event)
 
-    proxies: dict[str, dict] = {}
+    proxies: dict[str, ProxyUpgradeHistory] = {}
     total_upgrades = 0
-    all_implementations: list[dict] = []
+    all_implementations: list[ImplementationRecord] = []
 
     for addr, (proxy_type, current_impl) in proxy_meta.items():
         proxy_events = events_by_proxy.get(addr, [])
@@ -513,8 +539,9 @@ def build_upgrade_history(dependencies: dict, *, enrich: bool = True, from_block
     else:
         # Still apply names we already have — zero extra API calls
         for impl in all_implementations:
-            if impl["address"] in known_names:
-                impl["contract_name"] = known_names[impl["address"]]
+            known = known_names.get(impl.get("address", ""))
+            if known is not None:
+                impl["contract_name"] = known
 
     return {
         "schema_version": "0.1",
@@ -875,7 +902,7 @@ def backfill_historical_impl_contracts(
             )
 
 
-def synthesize_from_events(session, contract) -> dict | None:
+def synthesize_from_events(session, contract) -> UpgradeHistoryOutput | None:
     """Rebuild the ``upgrade_history`` artifact shape from ``UpgradeEvent`` rows.
 
     Used as a fallback when the artifact is missing or unreachable in object
@@ -900,7 +927,8 @@ def synthesize_from_events(session, contract) -> dict | None:
     if not rows:
         return None
 
-    events: list[dict] = []
+    events: list[UpgradeEventRecord] = []
+    last_impl: str | None = None
     for ev in rows:
         if not ev.new_impl:
             continue
@@ -909,19 +937,21 @@ def synthesize_from_events(session, contract) -> dict | None:
         # at the _hex_to_int(ts) call. The frontend formatTimestamp does
         # `new Date(ts * 1000)`, so anything else (ISO string) renders as
         # "Invalid Date". Match the canonical shape.
+        impl_lc: str = ev.new_impl.lower()
+        last_impl = impl_lc
         events.append(
             {
                 "event_type": "upgraded",
                 "block_number": ev.block_number,
                 "timestamp": int(ev.timestamp.timestamp()) if ev.timestamp else None,
                 "tx_hash": ev.tx_hash,
-                "implementation": ev.new_impl.lower(),
+                "implementation": impl_lc,
             }
         )
-    if not events:
+    if not events or last_impl is None:
         return None
 
-    current_impl = (contract.implementation or events[-1]["implementation"]).lower()
+    current_impl = (contract.implementation or last_impl).lower()
     implementations = _build_implementation_timeline(events, current_impl)
 
     impl_addrs = {impl["address"] for impl in implementations}
@@ -936,7 +966,7 @@ def synthesize_from_events(session, contract) -> dict | None:
                 impl["contract_name"] = n
 
     proxy_addr = (contract.address or "").lower()
-    proxy = {
+    proxy: ProxyUpgradeHistory = {
         "proxy_address": proxy_addr,
         "proxy_type": contract.proxy_type or "unknown",
         "current_implementation": current_impl,
@@ -979,10 +1009,8 @@ def synthesize_from_events(session, contract) -> dict | None:
 #     was msg.sender in the TOP-LEVEL frame; it does not prove it was
 #     msg.sender at the upgrade site (self-call, multicall entry point,
 #     ERC-2771 all break it) and says nothing about what the upgrade's guard
-#     reads. The narrower ``top_level_msg_sender`` is published instead.
+#     reads. Nothing is published for it.
 # ---------------------------------------------------------------------------
-
-NOT_DETERMINED = "not_determined"
 
 # Fixed inspection order over the persisted classification planes. This is an
 # order of RECORD, not of strength: planes that disagree yield not_determined
@@ -1081,7 +1109,9 @@ def _row_chain_id(chain_name: Any) -> int | None:
         return None
 
 
-def _classify_emitter(session, address: str, *, chain_id: int) -> tuple[str | None, str | None, int | None]:
+def _classify_emitter(
+    session, address: str, *, chain_id: int
+) -> tuple[ResolvedControllerType | None, str | None, int | None]:
     """Read the emitter's type off the PERSISTED classification planes, SCOPED
     to the chain the receipt was read on.
 
@@ -1154,6 +1184,10 @@ def _classify_emitter(session, address: str, *, chain_id: int) -> tuple[str | No
     if len(kinds) != 1:
         return None, None, None
     resolved_type = kinds.pop()
+    if resolved_type not in RESOLVED_CONTROLLER_TYPES:
+        # The planes agreed on a spelling outside the vocabulary: no verdict.
+        return None, None, None
+    typed_resolved = cast(ResolvedControllerType, resolved_type)
 
     plane = next(p for p in _CLASSIFICATION_PLANES if p in observed)
     block: int | None = None
@@ -1169,7 +1203,7 @@ def _classify_emitter(session, address: str, *, chain_id: int) -> tuple[str | No
         if isinstance(candidate, int) and not isinstance(candidate, bool):
             block = candidate
             break
-    return resolved_type, plane, block
+    return typed_resolved, plane, block
 
 
 def _fetch_receipt(rpc_url: str, tx_hash: str, *, chain_id: int) -> dict | None:
@@ -1593,37 +1627,6 @@ def fold_upgrade_transactions(
 # ---------------------------------------------------------------------------
 # Read side — derived per-(tx, proxy) facts and the action-count projection
 # ---------------------------------------------------------------------------
-
-
-def top_level_msg_sender(tx_row, proxy_address: str) -> str | None:
-    """``receipt.from`` — published ONLY where the transaction's top-level
-    target is this proxy, and never as "who authorised".
-
-    Where ``receipt.to == proxy`` the sender provably was ``msg.sender`` in the
-    top-level frame. That is the whole claim. It is not proof the sender was
-    msg.sender at the upgrade site, and it is not proof the upgrade's guard
-    reads msg.sender at all — that is an AST question a receipt cannot answer.
-    """
-    if tx_row is None or not proxy_address:
-        return None
-    if (tx_row.receipt_to or "") != proxy_address.lower():
-        return None
-    return tx_row.receipt_from
-
-
-def executor_call_targeted_proxy(tx_row, proxy_address: str) -> bool | None:
-    """Did the timelock's own ``CallExecuted`` name this proxy as its target?
-
-    ``None`` (not determined) whenever the transaction is not
-    ``timelock_routed`` — a ``ExecutionSuccess`` carries no target word, so for
-    a Safe-direct transaction the answer is unknown, not "no".
-    """
-    if tx_row is None or not proxy_address:
-        return None
-    targets = tx_row.executor_call_targets
-    if not isinstance(targets, list):
-        return None
-    return proxy_address.lower() in {str(t).lower() for t in targets}
 
 
 def event_is_deployment(tx_row, creation_row, *, proxy_address: str, event_block, pair_event_count: int) -> bool:

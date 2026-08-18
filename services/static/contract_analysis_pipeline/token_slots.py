@@ -35,26 +35,22 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from .slither_compat import (
+    SLITHER_AVAILABLE,
+    Assignment,
+    Binary,
+    BinaryType,
+    Index,
+    InternalCall,
+    LibraryCall,
+    MappingType,
+    Member,
+    Return,
+    StateVariable,
+    UserDefinedType,
+)
+
 logger = logging.getLogger(__name__)
-
-try:
-    from slither.core.solidity_types.mapping_type import MappingType  # type: ignore[import]
-    from slither.core.solidity_types.user_defined_type import UserDefinedType  # type: ignore[import]
-    from slither.core.variables.state_variable import StateVariable  # type: ignore[import]
-    from slither.slithir.operations import (  # type: ignore[import]
-        Assignment,
-        Binary,
-        Index,
-        InternalCall,
-        LibraryCall,
-        Member,
-        Return,
-    )
-    from slither.slithir.operations.binary import BinaryType  # type: ignore[import]
-
-    _SLITHER_AVAILABLE = True
-except Exception:  # pragma: no cover - import edge
-    _SLITHER_AVAILABLE = False
 
 
 # Family of semantic getters this pass anchors on, keyed by canonical signature.
@@ -80,7 +76,7 @@ _ADDRESS_TYPES = {"address", "address payable"}
 _NON_TRANSFORMING_BINARY: frozenset[Any] = frozenset(
     getattr(BinaryType, name)
     for name in ("EQUAL", "NOT_EQUAL", "LESS", "LESS_EQUAL", "GREATER", "GREATER_EQUAL", "ANDAND", "OROR")
-    if _SLITHER_AVAILABLE and hasattr(BinaryType, name)
+    if SLITHER_AVAILABLE and hasattr(BinaryType, name)
 )
 
 _MAX_TRACE_DEPTH = 3
@@ -92,7 +88,7 @@ def derive_token_slots(contract: Any) -> dict[str, Any] | None:
 
     Never raises: any Slither edge degrades to ``None`` (the key is then omitted
     and the effects stage keeps its current behaviour)."""
-    if not _SLITHER_AVAILABLE:
+    if not SLITHER_AVAILABLE:
         return None
     try:
         cu = getattr(contract, "compilation_unit", None)

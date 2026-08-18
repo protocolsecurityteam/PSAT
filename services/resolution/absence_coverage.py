@@ -48,8 +48,7 @@ from db.models import (
     enrollment_basis_permits_exactness,
 )
 from services.resolution.repos.event_logs_rpc import default_result_cap
-
-NOT_DETERMINED = "not_determined"
+from utils.scoring_status import NOT_DETERMINED
 
 # ``page_completeness`` domain.
 PAGES_COMPLETE = "complete"

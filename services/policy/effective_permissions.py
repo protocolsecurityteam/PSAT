@@ -17,7 +17,7 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from schemas.contract_analysis import ContractAnalysis
-from schemas.control_tracking import ControlSnapshot
+from schemas.control_tracking import ControlSnapshot, coerce_resolved_controller_type
 from schemas.effective_permissions import (
     AuthorityRoleGrant,
     EffectiveFunctionPermission,
@@ -223,7 +223,7 @@ def _known_principals(*snapshots: Mapping[str, Any] | None) -> dict[str, Resolve
             details = dict(details_raw) if isinstance(details_raw, dict) else {}
             known[address] = _resolved_principal(
                 address,
-                cast(ResolvedAddressType, str(value.get("resolved_type", "unknown"))),
+                coerce_resolved_controller_type(value.get("resolved_type")),
                 details,
                 source_contract=contract_name,
                 source_controller_id=controller_id,
@@ -279,7 +279,7 @@ def _controller_grants_for_refs(
                     principals.append(
                         _resolved_principal(
                             address,
-                            cast(ResolvedAddressType, str(principal.get("resolved_type", "unknown"))),
+                            coerce_resolved_controller_type(principal.get("resolved_type")),
                             principal_details,
                             source_controller_id=controller_id,
                         )
@@ -334,7 +334,7 @@ def _normalize_capability_output(
             try:
                 from services.resolution.capability_resolver import capability_to_dict
 
-                cap_dict = capability_to_dict(cap)  # type: ignore[arg-type]
+                cap_dict = capability_to_dict(cap)  # pyright: ignore[reportArgumentType]
                 if not isinstance(cap_dict.get("kind"), str):
                     cap_dict = _unsupported_capability("malformed_semantic_capability")
                 out[str(fn_signature)] = cap_dict

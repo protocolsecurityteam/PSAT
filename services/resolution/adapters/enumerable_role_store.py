@@ -39,8 +39,10 @@ from typing import Any, TypeGuard
 
 from eth_utils.crypto import keccak
 
+from services.resolution.caller_sources import CALLER_SOURCES as _CALLER_SOURCES
 from utils.logging import record_stage_metric
 from utils.rpc import encode_address_word, multicall3_aggregate3, rpc_request
+from utils.scoring_status import TRACE_STEP_ENUMERABLE_ROLE_STORE
 
 from ..capabilities import CapabilityExpr, ExternalCheck
 from ..role_store_standards import (
@@ -60,10 +62,9 @@ _ZERO_ADDRESS = "0x" + "0" * 40
 # fixed sentinel with no plausible role grant; never itself reported as a member.
 _NEGATIVE_CONTROL_ADDR = "0x" + "de1e7e" + "00" * 17
 
-_CALLER_SOURCES = {"msg_sender", "tx_origin", "signature_recovery", "root_caller"}
+
 _MATCH_SCORE = 90
 
-_TRACE_STEP = "enumerable_role_store"
 
 # Settled (non-deferring) adapter declines worth a metric — the persisted row's
 # basis is superseded by the :1976 guard downstream, so the adapter is the only
@@ -223,7 +224,7 @@ class EnumerableRoleStoreAdapter:
 
         trace = [
             {
-                "step": _TRACE_STEP,
+                "step": TRACE_STEP_ENUMERABLE_ROLE_STORE,
                 "authority": authority,
                 "standard": standard.name,
                 "callee_selector": callee_selector,
@@ -242,7 +243,7 @@ class EnumerableRoleStoreAdapter:
         logger.debug(
             "enumerable_role_store decision",
             extra={
-                "adapter": _TRACE_STEP,
+                "adapter": TRACE_STEP_ENUMERABLE_ROLE_STORE,
                 "address": authority,
                 "decision": "finite_set",
                 "reason": "gate_probe_confirmed",
@@ -477,7 +478,7 @@ def _registry_controller_context(ctx: EvaluationContext, authority: str) -> tupl
 
 
 def _check_only(authority: str | None, callee_selector: str | None, basis: list[str]) -> CapabilityExpr:
-    extra: dict[str, Any] = {"basis": basis, "adapter": _TRACE_STEP}
+    extra: dict[str, Any] = {"basis": basis, "adapter": TRACE_STEP_ENUMERABLE_ROLE_STORE}
     # Only the cold-index basis is *waiting on the durable index*; mark it so the
     # deferred-resolution reconciler re-resolves once the RoleSet backfill reaches
     # head. Every other basis is a settled answer (unresolved context, a warm store
@@ -492,7 +493,7 @@ def _check_only(authority: str | None, callee_selector: str | None, basis: list[
     logger.debug(
         "enumerable_role_store decision",
         extra={
-            "adapter": _TRACE_STEP,
+            "adapter": TRACE_STEP_ENUMERABLE_ROLE_STORE,
             "address": authority,
             "decision": "deferred" if "no_index_cursor" in basis else "external_check",
             "reason": ",".join(basis),

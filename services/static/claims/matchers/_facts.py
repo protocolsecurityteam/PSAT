@@ -14,6 +14,13 @@ import re
 from typing import Any
 from weakref import WeakKeyDictionary
 
+from utils.scoring_status import (
+    SELF_SERVICE_DISCLOSE_SIBLING,
+    SELF_SERVICE_DISCLOSE_UPGRADE,
+    SELF_SERVICE_STATE_PROVEN,
+)
+
+from ...contract_analysis_pipeline.record_ordering import W2_BASIS_CLEAR_DOMINATES_CALLS
 from ..context import ClaimContext, abi_selector, selector_of
 
 # Per-context memo tables (keyed by the ClaimContext instance, which lives only
@@ -758,22 +765,11 @@ _W1_RECORD_MISMATCH = "record_mismatch"
 _W1_KEY_INDEX_DISAGREEMENT = "key_index_disagreement"
 _W1_GUARD_NOT_MANDATORY = "guard_not_mandatory"
 
-# W2 bases, normalized off U3's ``clear_dominates_calls`` and U4's
-# ``w2_verified_guard`` so the payload names one vocabulary.
-_W2_CLEAR_DOMINATES_CALLS = "clear_dominates_calls"
+# W2 bases: U3's basis is imported from its producer so the payload names one
+# vocabulary; U4's ``verified_guard`` is normalized here.
 _W2_VERIFIED_GUARD = "verified_guard"
 
 _W2_GUARD_FUNCTION_NOT_ANALYZED = "function_not_analyzed"
-
-# Disclosures that ride EVERY proven verdict (SPEC §5 G7): the corpus's payout
-# entities are UUPS proxies, so a proven bound is conditional on whatever
-# authority can replace the code; and the proof is same-function only — no
-# witness looked at what a sibling function may do to the same record. They
-# travel WITH the verdict so an excluded row still carries them.
-_DISCLOSE_UPGRADE = "self_service_bound_conditional_on_upgrade_authority"
-_DISCLOSE_SIBLING = "self_service_sibling_function_residual_not_proven"
-
-_STATE_PROVEN_SELF_SERVICE = "proven_self_service"
 
 # The full closed vocabulary the fact publishes, for the reviewer and for a
 # consumer that wants to assert it never sees an unlisted token. W1 reasons,
@@ -931,7 +927,7 @@ def self_service_payout(ctx: ClaimContext, function: str, flow: dict[str, Any]) 
     }
 
     if ordering.get("state") == "proven_ordering":
-        w2_basis = _W2_CLEAR_DOMINATES_CALLS
+        w2_basis = W2_BASIS_CLEAR_DOMINATES_CALLS
         disclosures = [str(d) for d in (ordering.get("disclosures") or [])]
     elif guard.get("state") == "proven":
         w2_basis = _W2_VERIFIED_GUARD
@@ -943,13 +939,13 @@ def self_service_payout(ctx: ClaimContext, function: str, flow: dict[str, Any]) 
         return {"state": "not_determined", "reason": reason}
 
     return {
-        "state": _STATE_PROVEN_SELF_SERVICE,
+        "state": SELF_SERVICE_STATE_PROVEN,
         "w1_basis": w1["basis"],
         "w2_basis": w2_basis,
         "record": w1["record"],
         # The two G7 disclosures ride every proof; the loop residual rides only a
         # per-iteration ordering proof (U3's ``cross_iteration_ordering_not_proven``).
-        "disclosures": [_DISCLOSE_UPGRADE, _DISCLOSE_SIBLING, *disclosures],
+        "disclosures": [SELF_SERVICE_DISCLOSE_UPGRADE, SELF_SERVICE_DISCLOSE_SIBLING, *disclosures],
     }
 
 

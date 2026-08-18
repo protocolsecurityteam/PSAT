@@ -523,6 +523,7 @@ def test_self_audit_catches_hash_collision(clean_effects, monkeypatch):
     )
     all_errors = []
     hits = 0
+    metrics: dict = {}
     for job in jobs:
         errors, metrics = _run(worker, session, job)
         all_errors += errors

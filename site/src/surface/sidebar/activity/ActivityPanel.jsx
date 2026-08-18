@@ -20,17 +20,17 @@ const POLL_MS = 30_000;
 // `not_determined` (unrated) rows are behind the filter by default, and the
 // always-rendered hidden count plus one-click All is what keeps that from
 // being silent suppression.
-export const SALIENCE_MODES = [
+const SALIENCE_MODES = [
   { key: "routine", label: "All" },
   { key: "alert", label: "Alerts" },
 ];
 
-export const DEFAULT_MIN_SALIENCE = "alert";
+const DEFAULT_MIN_SALIENCE = "alert";
 
 // The hidden count is rendered unconditionally, including when it is zero:
 // a filter that silently withholds rows is the failure this axis exists to
 // prevent, and "0 hidden" is the statement that it is not doing so.
-export function SalienceControl({ value, onChange, hiddenCount }) {
+function SalienceControl({ value, onChange, hiddenCount }) {
   return (
     <div className="ps-activity-salience" role="group" aria-label="Salience filter">
       {SALIENCE_MODES.map((mode) => (

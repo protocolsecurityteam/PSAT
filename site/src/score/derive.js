@@ -30,7 +30,7 @@ export function controllerAddress(finding) {
   return match ? match[0].toLowerCase() : null;
 }
 
-export function safeShape(finding) {
+function safeShape(finding) {
   if (finding?.principal_kind !== "safe") return null;
   const match = SAFE_RE.exec(String(finding?.principal || ""));
   if (!match) return null;
@@ -40,7 +40,7 @@ export function safeShape(finding) {
   return { k, n };
 }
 
-export function timelockDelayLabel(finding) {
+function timelockDelayLabel(finding) {
   const match = TIMELOCK_DELAY_RE.exec(String(finding?.principal || ""));
   return match ? match[1].replace(/\s+/g, "") : null;
 }
@@ -113,7 +113,7 @@ const KIND_WORD = {
   timelock: "Timelock",
 };
 
-export function kindWord(kind) {
+function kindWord(kind) {
   return KIND_WORD[kind] || String(kind || "").toUpperCase();
 }
 
@@ -156,7 +156,7 @@ export function isProvenNoReach(finding) {
 // page cannot name is still a state the document published, and rendering it as
 // nothing would silently withdraw it. `sheetStateLabel` is where that
 // fall-through lives; every consumer goes through it.
-export const SHEET_STATE_LABELS = {
+const SHEET_STATE_LABELS = {
   priced: "priced",
   priced_below_resolution: "below resolution",
   unpriced: "unpriced",
@@ -168,7 +168,7 @@ export const SHEET_STATE_LABELS = {
   airdrop_determined: "airdrop-delivered",
 };
 
-export const CEILING_REASON_LABELS = {
+const CEILING_REASON_LABELS = {
   admitted: "admitted",
   proven_empty: "proven empty",
   no_rows: "nothing observed",
@@ -193,7 +193,7 @@ export function ceilingReasonLabel(reason) {
   return label(CEILING_REASON_LABELS, reason);
 }
 
-export const AIRDROP_DETERMINED = "airdrop_determined";
+const AIRDROP_DETERMINED = "airdrop_determined";
 
 // The backend's own claim, not a weaker paraphrase of it. The superseded
 // sentence said the holdings "are not presented as positions this protocol
@@ -239,7 +239,7 @@ export function sheetDisposition(finding) {
 // The example function alone. The row's n_functions count used to render
 // beside it ("upgradeToAndCall · 3 functions") and was cut for space — the
 // count survives on the finding for any consumer that needs it.
-export function functionsLabel(finding) {
+function functionsLabel(finding) {
   const example = (finding?.example_functions || [])[0];
   return example ? [example] : [];
 }
@@ -265,7 +265,7 @@ export function buildContractIndex(contracts) {
   return { byEntity, implToProxy };
 }
 
-export function contractName(contract) {
+function contractName(contract) {
   return contract?.name || contract?.contract_name || null;
 }
 
@@ -392,11 +392,11 @@ export function groupRows(rows) {
   return groups.map((g) => ({ ...g, sum: g.sum === null ? null : round4(g.sum) }));
 }
 
-export const CALLOUT_MIN_POINTS = 5;
+const CALLOUT_MIN_POINTS = 5;
 
 // The leading run of groups each carrying at least 5 points. The first group
 // that does not — including one whose sum was never published — ends the run.
-export function namedGroups(groups) {
+function namedGroups(groups) {
   const named = [];
   for (const group of groups) {
     if (!(group.sum >= CALLOUT_MIN_POINTS)) break;
@@ -442,7 +442,7 @@ export function calloutsFor(rows, lambda) {
 
 // ── ledger ──────────────────────────────────────────────────────────────────
 
-export const LEDGER_TAIL_FLOOR = 0.4;
+const LEDGER_TAIL_FLOOR = 0.4;
 
 export function ledgerSegments(rows, lambda) {
   const kept = typeof lambda === "number" ? lambda : 0;
@@ -526,7 +526,7 @@ export function fixFirst(doc, rows) {
 // Every address this principal acts through. `principal_addresses[]` is the
 // witnessed list; the display string carries only one of them, so matching on
 // the string alone silently drops any overlap that names one of the others.
-export function principalAddresses(finding) {
+function principalAddresses(finding) {
   const listed = (finding?.principal_addresses || [])
     .map((address) => String(address || "").toLowerCase())
     .filter((address) => ADDRESS_RE.test(address));
@@ -535,7 +535,7 @@ export function principalAddresses(finding) {
   return single ? [single] : [];
 }
 
-export const PROTECTION_WEAKNESS_CEILING = 0.9;
+const PROTECTION_WEAKNESS_CEILING = 0.9;
 // How many rows the panel shows before the tail toggle, not a cap on the
 // derivation: every qualifying row is returned, ranked by λ-delta.
 export const PROTECTION_ROWS = 4;
@@ -635,7 +635,7 @@ export function auditPosture(doc) {
 
 // Every channel is value-weighted, so the copy says "of the protocol's value"
 // rather than repeating the weighting mechanics on each line.
-export const CONFIDENCE_CHANNELS = [
+const CONFIDENCE_CHANNELS = [
   {
     id: "capability_scored_pct",
     name: "Capability scored",

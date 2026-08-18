@@ -230,8 +230,8 @@ def test_two_requires_combine_via_and(tmp_path):
     fn = _function(sl, "f")
     tree = build_predicate_tree(fn)
     assert tree is not None
-    assert tree["op"] == "AND"  # type: ignore[typeddict-item]
-    assert len(tree["children"]) == 2  # type: ignore[typeddict-item]
+    assert tree["op"] == "AND"  # pyright: ignore[reportTypedDictNotRequiredAccess]
+    assert len(tree["children"]) == 2  # pyright: ignore[reportTypedDictNotRequiredAccess]
     leaves = _all_leaves(tree)
     kinds = sorted(leaf["kind"] for leaf in leaves)
     assert kinds == ["comparison", "equality"]
@@ -315,7 +315,7 @@ def test_logical_or_splits_into_or_subtree(tmp_path):
     fn = _function(sl, "f")
     tree = build_predicate_tree(fn)
     assert tree is not None
-    assert tree["op"] == "OR", tree  # type: ignore[typeddict-item]
+    assert tree["op"] == "OR", tree  # pyright: ignore[reportTypedDictNotRequiredAccess]
     leaves = _all_leaves(tree)
     assert len(leaves) == 2
     kinds = sorted(leaf["kind"] for leaf in leaves)
@@ -736,7 +736,7 @@ def test_confidence_high_for_caller_equals_state_var(tmp_path):
     fn = _function(sl, "f")
     leaves = _all_leaves(build_predicate_tree(fn))
     assert leaves[0]["authority_role"] == "caller_authority"
-    assert leaves[0]["confidence"] == "high"  # type: ignore[typeddict-item]
+    assert leaves[0]["confidence"] == "high"  # pyright: ignore[reportTypedDictNotRequiredAccess]
 
 
 def test_confidence_high_for_multi_key_caller_membership(tmp_path):
@@ -758,7 +758,7 @@ def test_confidence_high_for_multi_key_caller_membership(tmp_path):
     fn = _function(sl, "f")
     leaves = _all_leaves(build_predicate_tree(fn))
     assert leaves[0]["authority_role"] == "caller_authority"
-    assert leaves[0]["confidence"] == "high"  # type: ignore[typeddict-item]
+    assert leaves[0]["confidence"] == "high"  # pyright: ignore[reportTypedDictNotRequiredAccess]
 
 
 def test_confidence_low_for_business_residual(tmp_path):
@@ -779,7 +779,7 @@ def test_confidence_low_for_business_residual(tmp_path):
     fn = _function(sl, "f")
     leaves = _all_leaves(build_predicate_tree(fn))
     assert leaves[0]["authority_role"] == "business"
-    assert leaves[0]["confidence"] == "low"  # type: ignore[typeddict-item]
+    assert leaves[0]["confidence"] == "low"  # pyright: ignore[reportTypedDictNotRequiredAccess]
 
 
 def test_confidence_low_for_unsupported(tmp_path):
@@ -800,7 +800,7 @@ def test_confidence_low_for_unsupported(tmp_path):
     )
     fn = _function(sl, "f")
     leaves = _all_leaves(build_predicate_tree(fn))
-    assert leaves[0]["confidence"] == "low"  # type: ignore[typeddict-item]
+    assert leaves[0]["confidence"] == "low"  # pyright: ignore[reportTypedDictNotRequiredAccess]
 
 
 # ---------------------------------------------------------------------------
@@ -953,7 +953,7 @@ def test_confidence_high_for_time_gate(tmp_path):
     fn = _function(sl, "f")
     leaves = _all_leaves(build_predicate_tree(fn))
     assert leaves[0]["authority_role"] == "time"
-    assert leaves[0]["confidence"] == "high"  # type: ignore[typeddict-item]
+    assert leaves[0]["confidence"] == "high"  # pyright: ignore[reportTypedDictNotRequiredAccess]
 
 
 def test_multi_statement_caller_guard_yields_caller_authority_leaf(tmp_path):

@@ -144,7 +144,7 @@ class AuditTextExtractionWorker(AuditRowWorker):
                 )
         return audit.id, outcome
 
-    def _persist_outcome(self, audit_id: int, outcome: ExtractionOutcome) -> None:
+    def _persist_outcome(self, audit_id: int, result: ExtractionOutcome) -> None:
         """Write the extraction outcome back to the row in its own session."""
         now = datetime.now(timezone.utc)
         session = SessionLocal()
@@ -153,13 +153,13 @@ class AuditTextExtractionWorker(AuditRowWorker):
             if audit is None:
                 logger.warning("Audit %s disappeared before outcome could be saved", audit_id)
                 return
-            audit.text_extraction_status = outcome.status
-            audit.text_extraction_error = outcome.error
+            audit.text_extraction_status = result.status
+            audit.text_extraction_error = result.error
             audit.text_extraction_worker = None
-            if outcome.status == "success":
-                audit.text_storage_key = outcome.storage_key
-                audit.text_size_bytes = outcome.text_size_bytes
-                audit.text_sha256 = outcome.text_sha256
+            if result.status == "success":
+                audit.text_storage_key = result.storage_key
+                audit.text_size_bytes = result.text_size_bytes
+                audit.text_sha256 = result.text_sha256
                 audit.text_extracted_at = now
             session.commit()
         except Exception as exc:

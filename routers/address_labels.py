@@ -10,13 +10,17 @@ consumers are unchanged, and exposes chain-qualified rows under a separate map.
 
 from __future__ import annotations
 
-from typing import Any
-
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 
 from db.models import AddressLabel
 from schemas.api_requests import AddressLabelUpsert
+from schemas.api_responses import (
+    AddressLabelDeleteResponse,
+    AddressLabelsResponse,
+    AddressLabelUpsertResponse,
+    AddressLabelView,
+)
 from utils.chains import UnknownChainError, chain_by_name
 
 from . import deps
@@ -40,7 +44,7 @@ def _resolve_chain_or_400(chain: str | None) -> str | None:
         raise HTTPException(status_code=400, detail=f"Unknown chain: {chain!r}") from None
 
 
-def _row_view(row: AddressLabel) -> dict[str, Any]:
+def _row_view(row: AddressLabel) -> AddressLabelView:
     return {
         "name": row.name,
         "note": row.note,
@@ -48,8 +52,8 @@ def _row_view(row: AddressLabel) -> dict[str, Any]:
     }
 
 
-@router.get("/api/address_labels")
-def list_address_labels() -> dict[str, Any]:
+@router.get("/api/address_labels", response_model=None)
+def list_address_labels() -> AddressLabelsResponse:
     """Return stored address → name mappings.
 
     ``labels`` keeps the original ``{address: {...}}`` shape and carries only
@@ -62,8 +66,8 @@ def list_address_labels() -> dict[str, Any]:
     """
     with deps.SessionLocal() as session:
         rows = session.execute(select(AddressLabel)).scalars().all()
-        labels: dict[str, Any] = {}
-        chain_labels: dict[str, dict[str, Any]] = {}
+        labels: dict[str, AddressLabelView] = {}
+        chain_labels: dict[str, dict[str, AddressLabelView]] = {}
         for row in rows:
             if row.chain is None:
                 labels[row.address] = _row_view(row)
@@ -72,12 +76,12 @@ def list_address_labels() -> dict[str, Any]:
         return {"labels": labels, "chain_labels": chain_labels}
 
 
-@router.put("/api/address_labels/{address}", dependencies=[Depends(deps.require_admin_key)])
+@router.put("/api/address_labels/{address}", dependencies=[Depends(deps.require_admin_key)], response_model=None)
 def upsert_address_label(
     address: str,
     payload: AddressLabelUpsert,
     chain: str | None = Query(default=None),
-) -> dict[str, Any]:
+) -> AddressLabelUpsertResponse:
     """Create or update the human-readable name for an address.
 
     Idempotent — repeated calls with the same body leave the row unchanged
@@ -111,11 +115,11 @@ def upsert_address_label(
         }
 
 
-@router.delete("/api/address_labels/{address}", dependencies=[Depends(deps.require_admin_key)])
+@router.delete("/api/address_labels/{address}", dependencies=[Depends(deps.require_admin_key)], response_model=None)
 def delete_address_label(
     address: str,
     chain: str | None = Query(default=None),
-) -> dict[str, Any]:
+) -> AddressLabelDeleteResponse:
     a = deps._normalize_address_or_400(address)
     c = _resolve_chain_or_400(chain)
     with deps.SessionLocal() as session:

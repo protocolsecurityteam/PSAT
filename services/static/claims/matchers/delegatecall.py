@@ -51,6 +51,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from ...contract_analysis_pipeline.predicate_types import (
+    TARGET_KIND_STORAGE_NO_SETTER,
+    TARGET_KIND_STORAGE_SETTER,
+)
 from ..context import ClaimContext
 from ..decorator import claim_matcher
 from ..types import ClaimEvidence
@@ -133,7 +137,7 @@ def _classify_state_variable(ctx: ClaimContext, variable: Any) -> tuple[str, lis
         for signature in ctx.function_signatures()
         if any(write.get("var") == name for write in _facts.state_writes(ctx, signature))
     )
-    return ("storage_setter" if writers else "storage_no_setter"), writers
+    return (TARGET_KIND_STORAGE_SETTER if writers else TARGET_KIND_STORAGE_NO_SETTER), writers
 
 
 def _destination_operand(ir: Any) -> Any | None:
@@ -223,7 +227,7 @@ def _resolve(ctx: ClaimContext, unit: Any, bindings: dict[int, Any], depth: int)
                         # entire storage.
                         writers = _assembly_slot_writers(ctx, slot)
                         record = {
-                            "target_kind": "storage_setter" if writers else "storage_no_setter",
+                            "target_kind": TARGET_KIND_STORAGE_SETTER if writers else TARGET_KIND_STORAGE_NO_SETTER,
                             "storage_slot_variable": str(getattr(slot, "name", "") or ""),
                             **({"writer_signatures": writers} if writers else {}),
                         }

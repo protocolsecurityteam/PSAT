@@ -183,12 +183,12 @@ const SEVERITY = {
 // point: `not_determined` is an event the backend's rules did not rate, and it
 // renders at `notable` prominence. Nothing here may default to `routine` —
 // that would be silent suppression minted from ignorance, client-side.
-export const SALIENCE_ALERT = "alert";
-export const SALIENCE_NOTABLE = "notable";
+const SALIENCE_ALERT = "alert";
+const SALIENCE_NOTABLE = "notable";
 export const SALIENCE_ROUTINE = "routine";
 export const SALIENCE_NOT_DETERMINED = "not_determined";
 
-export const SALIENCE_VALUES = [
+const SALIENCE_VALUES = [
   SALIENCE_ALERT,
   SALIENCE_NOTABLE,
   SALIENCE_ROUTINE,
@@ -213,7 +213,7 @@ export function eventSalience(evt) {
   return SALIENCE_VALUES.includes(value) ? value : SALIENCE_NOT_DETERMINED;
 }
 
-export function salienceRank(level) {
+function salienceRank(level) {
   const rank = SALIENCE_ORDER[level];
   return rank === undefined ? SALIENCE_ORDER[SALIENCE_NOT_DETERMINED] : rank;
 }

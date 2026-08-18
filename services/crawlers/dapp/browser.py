@@ -13,7 +13,7 @@ import time
 from typing import Callable
 from urllib.parse import urlparse
 
-from playwright.async_api import BrowserContext, Page, async_playwright  # pyright: ignore[reportMissingImports]
+from playwright.async_api import BrowserContext, Page, async_playwright
 
 from services.crawlers.dapp.inject import build_provider_script
 from services.crawlers.dapp.interaction_log import InteractionLog

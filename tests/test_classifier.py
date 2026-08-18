@@ -65,7 +65,7 @@ def test_helper_functions():
     # minted the address 0x…001 out of a truncated "0x1").
     for malformed in ("0x", "0x0", "0x1", None, "0x" + "0" * 63, "0x" + "0" * 65, "0x" + " " * 2 + "0" * 62):
         with pytest.raises(ValueError):
-            cls._slot_to_address(malformed)  # type: ignore[arg-type]
+            cls._slot_to_address(malformed)  # pyright: ignore[reportArgumentType]
 
     impl = "aabbccddee11223344556677889900aabbccddee"
     assert cls.detect_eip1167("0x" + cls.EIP1167_PREFIX + impl + cls.EIP1167_SUFFIX) == "0x" + impl
@@ -174,7 +174,7 @@ def test_full_classification_pipeline(monkeypatch):
         (eip1967, cls.EIP1967_ADMIN_SLOT): _slot_for(eip1967_admin),
         (beacon_proxy, cls.EIP1967_BEACON_SLOT): _slot_for(beacon_addr),
         (uups, cls.EIP1822_LOGIC_SLOT): _slot_for(uups_impl),
-        (oz, cls.OZ_IMPL_SLOT): _slot_for(oz_impl),
+        (oz, cls.OZ_LEGACY_IMPL_SLOT): _slot_for(oz_impl),
         (gnosis, "0x0"): _slot_for(gnosis_impl),  # GnosisSafe slot 0
     }
 

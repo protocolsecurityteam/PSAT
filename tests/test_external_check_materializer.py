@@ -27,7 +27,7 @@ def test_materialize_external_check_probes_event_candidates(monkeypatch):
     monkeypatch.setattr(mod, "rpc_batch_request_with_status", fake_batch)
 
     cap = materialize_external_check_from_events(
-        session=object(),  # type: ignore[arg-type]
+        session=object(),  # pyright: ignore[reportArgumentType]
         rpc_url="http://rpc",
         chain_id=1,
         checker_address="0x" + "11" * 20,
@@ -93,7 +93,7 @@ def test_materialize_external_check_multicall_parity(monkeypatch):
     def _run():
         mod._CANDIDATE_CACHE.clear()
         return materialize_external_check_from_events(
-            session=object(),  # type: ignore[arg-type]
+            session=object(),  # pyright: ignore[reportArgumentType]
             rpc_url="http://rpc",
             chain_id=1,
             checker_address=checker,
@@ -126,7 +126,7 @@ def test_materialize_external_check_multicall_falls_back_to_batch(monkeypatch):
     mod._CANDIDATE_CACHE.clear()
 
     cap = materialize_external_check_from_events(
-        session=object(),  # type: ignore[arg-type]
+        session=object(),  # pyright: ignore[reportArgumentType]
         rpc_url="http://rpc",
         chain_id=1,
         checker_address="0x" + "11" * 20,
@@ -193,7 +193,7 @@ def test_candidate_cache_caps_entry_count(monkeypatch):
 
     for i in range(40):
         materialize_external_check_from_events(
-            session=object(),  # type: ignore[arg-type]
+            session=object(),  # pyright: ignore[reportArgumentType]
             rpc_url="http://rpc",
             chain_id=i,  # distinct checker key per call
             checker_address="0x" + "11" * 20,
@@ -211,7 +211,7 @@ def test_clear_candidate_cache_empties_and_resets(monkeypatch):
     monkeypatch.setattr(mod, "_candidate_addresses_from_hypersync", lambda **_k: [])
     monkeypatch.setattr(mod, "rpc_batch_request_with_status", lambda _u, _c: [("0x" + "0" * 63 + "1", False)])
     materialize_external_check_from_events(
-        session=object(),  # type: ignore[arg-type]
+        session=object(),  # pyright: ignore[reportArgumentType]
         rpc_url="http://rpc",
         chain_id=1,
         checker_address="0x" + "11" * 20,

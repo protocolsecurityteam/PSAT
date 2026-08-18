@@ -234,7 +234,7 @@ class _FailingEffectsWorker(EffectsWorker):
         super().__init__()
         self._exc = exc
 
-    def process(self, _session, _job):
+    def process(self, session, job):
         raise self._exc
 
 

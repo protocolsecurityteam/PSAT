@@ -25,14 +25,12 @@ from slither import Slither  # noqa: E402
 
 from services.static.contract_analysis_pipeline.reentrancy_pause import (  # noqa: E402
     W2_REASON_AMBIGUOUS_DECLARATION,
-    W2_REASON_FUNCTION_NOT_ANALYZED,
     W2_REASON_GUARD_NOT_APPLIED,
     W2_REASON_NO_VERIFIED_GUARD,
     W2_VERIFIED_GUARD_BASIS,
     ReentrancyAnalyzer,
     live_declarations,
     reentrancy_guard_modifiers,
-    verified_guard_verdict,
     verified_guard_verdicts,
 )
 
@@ -527,12 +525,6 @@ def test_verdicts_are_total_over_live_declarations(tmp_path):
     assert set(verdicts_of) == {f.full_name for f in live}
     assert {v["declaration"] for v in verdicts_of.values()} == {f.canonical_name for f in live}
     assert all(v["state"] in ("proven", "not_determined") for v in verdicts_of.values())
-
-
-def test_lookup_of_an_unanalyzed_function_is_a_stated_refusal(tmp_path):
-    verdicts = verified_guard_verdicts(_contract(tmp_path, _OZ_V4, "C"))
-    assert verified_guard_verdict(verdicts, "neverSeen()") == _refusal(W2_REASON_FUNCTION_NOT_ANALYZED)
-    assert verified_guard_verdict(verdicts, "withdraw()") is verdicts["withdraw()"]
 
 
 def test_refusal_reasons_separate_the_two_ways_a_guard_can_be_missing(tmp_path):

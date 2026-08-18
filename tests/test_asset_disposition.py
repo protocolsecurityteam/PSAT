@@ -400,7 +400,7 @@ def _resolve(monkeypatch, *, universe, facts, buckets, state=P.ASSET_UNPRICED):
         "services.monitoring.delivery_evidence.load_delivery_evidence",
         lambda session, holders: facts,
     )
-    disposition, census = P._resolve_asset_disposition(None, plane, buckets, universe)  # type: ignore[arg-type]
+    disposition, census = P._resolve_asset_disposition(None, plane, buckets, universe)  # pyright: ignore[reportArgumentType]
     return disposition, census
 
 

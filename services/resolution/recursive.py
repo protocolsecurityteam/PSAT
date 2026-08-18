@@ -21,13 +21,20 @@ from db.models import (
     EDGE_RELATION_EXTERNAL_CALL_TARGET,
 )
 from db.storage import StorageContentIncomplete, StorageUnavailable
-from schemas.contract_analysis import ContractAnalysis
-from schemas.control_tracking import ControlSnapshot
+from schemas.contract_analysis import ContractAnalysis, ControllerProvenance
+from schemas.control_tracking import (
+    ControlSnapshot,
+    ControlTrackingPlan,
+    ResolvedControllerType,
+    coerce_resolved_controller_type,
+)
 from schemas.resolved_control_graph import (
     ResolvedAnalysisState,
     ResolvedControlGraph,
+    ResolvedEdgeRelation,
     ResolvedGraphEdge,
     ResolvedGraphNode,
+    ResolvedNodeType,
 )
 from services.discovery.classifier import ClassificationIncompleteError
 from services.discovery.fetch import fetch, scaffold
@@ -60,8 +67,13 @@ class UnresolvedProxyError(RuntimeError):
 ANALYZABLE_TYPES = {"contract", "timelock", "proxy_admin"}
 DEFAULT_RECURSION_MAX_DEPTH = int(os.getenv("PSAT_RECURSION_MAX_DEPTH", "6"))
 
+# Tied to the schema vocabulary: pyright rejects these lines if the members
+# leave ``ControllerProvenance``, so the comparisons below cannot drift.
+_PROVENANCE_CALL_TARGET: ControllerProvenance = "call_target"
+_PROVENANCE_CALLER_GATE: ControllerProvenance = "caller_gate"
 
-def _coerce_resolved_type(value: object) -> str:
+
+def _coerce_resolved_type(value: object) -> ResolvedControllerType:
     """A ``resolved_type`` that was never determined must surface as the
     vocabulary's not-determined token (``"unknown"``), never as a fabricated
     concrete one.
@@ -74,13 +86,11 @@ def _coerce_resolved_type(value: object) -> str:
     concrete, determined type. The literal string ``"None"`` is likewise
     coerced: it can arrive from a previously stored graph (the policy-stage
     refresh pre-seeds from the persisted artifact) and means the same absence.
+    Any other out-of-vocabulary token is the same class of undetermined input
+    — nothing downstream can act on a type it does not know — so membership in
+    ``RESOLVED_CONTROLLER_TYPES`` is the earned bar for a concrete answer.
     """
-    if value is None:
-        return "unknown"
-    text = str(value)
-    if not text or text == "None":
-        return "unknown"
-    return text
+    return coerce_resolved_controller_type(value)
 
 
 _MATERIALIZE_METRIC_LOCK = threading.Lock()
@@ -127,7 +137,7 @@ class PendingContract(TypedDict):
 
 class RolePrincipalAccumulator(TypedDict):
     address: str
-    resolved_type: str
+    resolved_type: ResolvedControllerType
     details: dict[str, object]
     roles: set[int]
     functions: set[str]
@@ -135,7 +145,7 @@ class RolePrincipalAccumulator(TypedDict):
 
 class RolePrincipal(TypedDict):
     address: str
-    resolved_type: str
+    resolved_type: ResolvedControllerType
     details: dict[str, object]
     roles: list[int]
     functions: list[str]
@@ -217,7 +227,7 @@ def _build_static_artifacts(
     workspace_prefix: str,
     *,
     chain_id: int,
-) -> tuple[str, dict[str, Any], dict[str, Any], dict[str, Any] | None]:
+) -> tuple[str, ContractAnalysis, ControlTrackingPlan, dict[str, Any] | None]:
     """Run the expensive forge+Slither+predicate pipeline for *effective_address*.
 
     Returns ``(contract_name, analysis, tracking_plan, predicate_trees)``.
@@ -241,8 +251,8 @@ def _build_static_artifacts(
         scaffold(effective_address, result, project_dir)
         analysis, predicate_trees, _effects = collect_contract_analysis_with_artifacts(project_dir)
 
-    plan = cast(dict, build_control_tracking_plan(cast(ContractAnalysis, analysis)))
-    return contract_name, cast(dict[str, Any], analysis), plan, predicate_trees
+    plan = build_control_tracking_plan(analysis)
+    return contract_name, analysis, plan, predicate_trees
 
 
 def _chain_name_for_materialization(chain_id: int) -> str:
@@ -254,6 +264,19 @@ def _chain_name_for_materialization(chain_id: int) -> str:
     from utils.chains import require_chain
 
     return require_chain(chain_id, context="materialization chain name").name
+
+
+def _widen_built(
+    built: tuple[str, ContractAnalysis, ControlTrackingPlan, dict[str, Any] | None],
+) -> tuple[str, dict[str, Any], dict[str, Any], dict[str, Any] | None]:
+    """Widen a fresh build to the mixed-provenance materialize shape.
+
+    The cross-process cache serves both fresh builds (typed at the producer)
+    and persisted JSONB rows (shape unverified), so its tuple stays wide; the
+    fresh arm is only ever widened, never the reverse.
+    """
+    name, analysis, plan, predicate_trees = built
+    return name, cast("dict[str, Any]", analysis), cast("dict[str, Any]", plan), predicate_trees
 
 
 def _materialize_with_cross_process_cache(
@@ -284,14 +307,14 @@ def _materialize_with_cross_process_cache(
 
     if not bytecode_keccak:
         _bump_materialize_metric("materialize_builds")
-        return _build_static_artifacts(effective_address, workspace_prefix, chain_id=build_chain_id)
+        return _widen_built(_build_static_artifacts(effective_address, workspace_prefix, chain_id=build_chain_id))
 
     try:
         from db import contract_materializations as cm
     except Exception as exc:
         logger.debug("contract_materializations unavailable, falling back to direct build: %s", exc)
         _bump_materialize_metric("materialize_builds")
-        return _build_static_artifacts(effective_address, workspace_prefix, chain_id=build_chain_id)
+        return _widen_built(_build_static_artifacts(effective_address, workspace_prefix, chain_id=build_chain_id))
 
     if not cm.is_enabled():
         # Operator-controlled kill switch (PSAT_CONTRACT_MATERIALIZATIONS=0)
@@ -299,7 +322,7 @@ def _materialize_with_cross_process_cache(
         # broken table or hot-spot lock contention can't fail-stop the
         # pipeline.
         _bump_materialize_metric("materialize_builds")
-        return _build_static_artifacts(effective_address, workspace_prefix, chain_id=build_chain_id)
+        return _widen_built(_build_static_artifacts(effective_address, workspace_prefix, chain_id=build_chain_id))
 
     built = {"ran": False}
 
@@ -349,7 +372,7 @@ def _materialize_with_cross_process_cache(
         )
         logger.warning("contract_materializations.materialize_or_wait failed, falling back: %s", exc)
         _bump_materialize_metric("materialize_builds")
-        return _build_static_artifacts(effective_address, workspace_prefix, chain_id=build_chain_id)
+        return _widen_built(_build_static_artifacts(effective_address, workspace_prefix, chain_id=build_chain_id))
 
     if not built["ran"]:
         # materialize_or_wait returned without invoking our builder — served from
@@ -579,10 +602,10 @@ def _ensure_node(
     nodes: dict[str, ResolvedGraphNode],
     *,
     address: str,
-    resolved_type: str,
+    resolved_type: ResolvedControllerType,
     label: str,
     depth: int,
-    node_type: str,
+    node_type: ResolvedNodeType,
     contract_name: str | None = None,
     analyzed: bool = False,
     details: dict[str, object] | None = None,
@@ -595,7 +618,7 @@ def _ensure_node(
         "id": node_id,
         "address": normalized,
         "node_type": node_type,
-        "resolved_type": resolved_type,  # type: ignore[typeddict-item]
+        "resolved_type": resolved_type,
         "label": label,
         "contract_name": contract_name,
         "depth": depth,
@@ -614,7 +637,7 @@ def _ensure_node(
         current["analyzed"] = True
         current["node_type"] = "contract"
     if _resolved_type_rank(resolved_type) >= _resolved_type_rank(current.get("resolved_type")):
-        current["resolved_type"] = resolved_type  # type: ignore[typeddict-item]
+        current["resolved_type"] = resolved_type
     if label:
         current["label"] = label
     if details:
@@ -657,8 +680,10 @@ def _add_edge(edges: dict[tuple, ResolvedGraphEdge], edge: ResolvedGraphEdge) ->
     edges[key] = edge
 
 
-def _nested_principals_for_details(resolved_type: str, details: dict[str, object]) -> list[tuple[str, str, str]]:
-    principals: list[tuple[str, str, str]] = []
+def _nested_principals_for_details(
+    resolved_type: ResolvedControllerType, details: dict[str, object]
+) -> list[tuple[str, ResolvedEdgeRelation, str]]:
+    principals: list[tuple[str, ResolvedEdgeRelation, str]] = []
     if resolved_type == "safe":
         owners = details.get("owners")
         for owner in owners if isinstance(owners, list) else []:
@@ -1097,7 +1122,7 @@ def _add_nested_principals(
     rpc_url: str,
     from_node_id: str,
     source_controller_id: str | None,
-    resolved_type: str,
+    resolved_type: ResolvedControllerType,
     details: dict[str, object],
     depth: int,
     max_depth: int,
@@ -1122,7 +1147,7 @@ def _add_nested_principals(
             {
                 "from_id": from_node_id,
                 "to_id": nested_node_id,
-                "relation": relation,  # type: ignore[typeddict-item]
+                "relation": relation,
                 "label": label,
                 "source_controller_id": source_controller_id,
                 "notes": [],
@@ -1171,11 +1196,14 @@ def resolve_control_graph(
 
     classify_stats: dict[str, int] = {"hits": 0, "misses": 0}
 
-    def _cached_classify(addr: str) -> tuple[str, dict[str, object]]:
+    def _cached_classify(addr: str) -> tuple[ResolvedControllerType, dict[str, object]]:
         key = addr.lower()
         if key in _classify_cache:
             classify_stats["hits"] += 1
-            return _classify_cache[key]
+            kind, details = _classify_cache[key]
+            # The cache may be pre-seeded from a persisted artifact, so a read
+            # is not a proven vocabulary member until coerced.
+            return _coerce_resolved_type(kind), details
         classify_stats["misses"] += 1
         kind, details, cacheable = classify_resolved_address_with_status(rpc_url, addr, chain_id=chain_id)
         # Skip caching transient RPC errors — otherwise a "contract" fallback gets cemented in the persisted
@@ -1429,9 +1457,9 @@ def resolve_control_graph(
                 # established. Here the not-determined input reaches a
                 # not-determined relation.
                 provenance = controller_value.get("authority_provenance")
-                if provenance == "call_target":
+                if provenance == _PROVENANCE_CALL_TARGET:
                     relation = EDGE_RELATION_EXTERNAL_CALL_TARGET
-                elif provenance == "caller_gate":
+                elif provenance == _PROVENANCE_CALLER_GATE:
                     relation = EDGE_RELATION_CONTROLLER_VALUE
                 else:
                     relation = EDGE_RELATION_CONTROLLER_VALUE_UNATTRIBUTED

@@ -40,8 +40,14 @@ import logging
 import re
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from weakref import WeakKeyDictionary
+
+if TYPE_CHECKING:  # typing-only: the effects plane stays off static's runtime import graph
+    from services.static.contract_analysis_pipeline.predicate_types import (
+        OperandAbsorption,
+        StateVarTargetKind,
+    )
 
 from eth_utils.crypto import keccak
 from sqlalchemy import select
@@ -1087,10 +1093,11 @@ def has_native_payout(fn: "FunctionFacts") -> bool:
 # Destination kinds that PROVE a fixed destination: the value is baked into the
 # code, or lives in storage the static plane completed a setter scan over and
 # found nothing that could repoint it.
-_FIXED_TARGET_KINDS = frozenset({"immutable", "constant", "storage_no_setter"})
+_FIXED_TARGET_KINDS: frozenset[StateVarTargetKind] = frozenset({"immutable", "constant", "storage_no_setter"})
 # Redirectable, but only by whoever holds the setter — an admin fact, not a
-# caller one.
-_ADMIN_TARGET_KIND = "storage_setter"
+# caller one. Annotated against the static plane's Literal (type-only import)
+# so a vocabulary drift is a pyright error without a runtime coupling.
+_ADMIN_TARGET_KIND: "StateVarTargetKind" = "storage_setter"
 
 
 def _target_member_kinds(flow: Mapping[str, Any]) -> list[str]:
@@ -1926,8 +1933,9 @@ def _compared_operands(leaf: Mapping[str, Any]) -> list[dict[str, Any]]:
 # every tree built by a builder that records absorbed operands
 # (``predicates._stamp_absorbed_operands``). Duplicated as a literal for the same
 # reason ``"op"``/``"leaf"`` are: the effects plane reads static's persisted JSON and
-# does not import the static package.
-_OPERAND_ABSORPTION_RECORDED = "recorded"
+# does not import the static package at runtime. Annotated against the canonical
+# ``predicate_types.OperandAbsorption`` (type-only) so drift is a pyright error.
+_OPERAND_ABSORPTION_RECORDED: "OperandAbsorption" = "recorded"
 
 
 # Operand sources that stand for an expression whose CONTENTS were not recorded, so

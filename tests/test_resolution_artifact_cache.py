@@ -180,7 +180,7 @@ def test_cached_artifacts_are_deep_copied(monkeypatch):
     )
 
     first = _materialize_contract_artifacts("0xABC", "http://rpc", workspace_prefix="test", chain="ethereum")
-    first["analysis"]["functions"].append({"poisoned": True})  # type: ignore[attr-defined]
+    first["analysis"]["functions"].append({"poisoned": True})
     first["tracking_plan"]["controllers"].append({"poisoned": True})
 
     second = _materialize_contract_artifacts("0xABC", "http://rpc", workspace_prefix="test", chain="ethereum")
@@ -366,7 +366,7 @@ def test_materialization_persists_a_row_keyed_by_chain_and_keccak(monkeypatch):
     """A row per (chain, bytecode_keccak) — operators answer "have we
     ever materialized this?" without resolving artifacts; next-day
     re-runs become pure DB lookups."""
-    from db import contract_materializations as cm  # type: ignore[attr-defined]  # provided by the fix
+    from db import contract_materializations as cm  # provided by the fix
 
     scaffold_calls: list[Any] = []
     collect_calls: list[Any] = []

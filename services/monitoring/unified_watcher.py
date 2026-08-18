@@ -218,8 +218,8 @@ def _confirmation_depth_for(chain: str) -> int:
 # defensive import mirrors workers/retry_policy.py so a psycopg2-less test env
 # still imports the module.
 try:
-    import psycopg2  # type: ignore[import-untyped]
-    from psycopg2.errors import DeadlockDetected as _PgDeadlockDetected  # type: ignore[import-untyped]
+    import psycopg2
+    from psycopg2.errors import DeadlockDetected as _PgDeadlockDetected
 
     _DEADLOCK_TYPES: tuple[type[BaseException], ...] = (_PgDeadlockDetected,)
     _PSYCOPG2_ERROR: tuple[type[BaseException], ...] = (psycopg2.Error,)

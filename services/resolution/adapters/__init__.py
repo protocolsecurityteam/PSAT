@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Protocol
 
-from ..capabilities import CapabilityExpr, Confidence
+from ..capabilities import CapabilityConfidence, CapabilityExpr
 
 # Convenience re-export for adapters that need to construct caps.
 __all__ = [
@@ -47,7 +47,7 @@ class EnumerationResult:
     """Adapter output for enumerate()."""
 
     members: list[str] = field(default_factory=list)
-    confidence: Confidence = "enumerable"
+    confidence: CapabilityConfidence = "enumerable"
     partial_reason: str | None = None
     last_indexed_block: int | None = None
 

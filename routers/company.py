@@ -12,6 +12,16 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import aliased
 
 from db.models import AuditContractCoverage, AuditReport, Contract, Protocol
+from schemas.api_responses import (
+    AuditBrief,
+    AuditCoverageEntry,
+    CompanyAddressesResponse,
+    CompanyAuditCoverageResponse,
+    CompanyAuditsResponse,
+    CompanyFunctionsResponse,
+    CompanyOverviewResponse,
+    CompanyScoreResponse,
+)
 from services.aggregations import CompanyNotFound, build_company_overview
 from services.aggregations.company_overview import (
     all_addresses_for_protocol,
@@ -84,8 +94,8 @@ def _log_endpoint(route: str, *, company: str, started: float, **extras: Any) ->
     )
 
 
-@router.get("/api/company/{company_name}")
-def company_overview(company_name: str, response: Response) -> dict:
+@router.get("/api/company/{company_name}", response_model=None)
+def company_overview(company_name: str, response: Response) -> CompanyOverviewResponse:
     """Aggregated governance overview for all contracts in a company."""
     # Largest payload on the site (1-3 MB). Letting the browser hold it for
     # 15s + serve-stale-while-revalidate makes back/forward navigation and
@@ -95,6 +105,9 @@ def company_overview(company_name: str, response: Response) -> dict:
     started = time.monotonic()
     with deps.SessionLocal() as session:
         try:
+            # cast: assemble_company_payload provably builds exactly this
+            # shape; the annotation belongs on the producer once
+            # services/aggregations adopts it.
             payload = build_company_overview(session, company_name)
         except CompanyNotFound:
             _log_endpoint("/api/company/{name}", company=company_name, started=started, outcome="not_found")
@@ -109,8 +122,8 @@ def company_overview(company_name: str, response: Response) -> dict:
     return payload
 
 
-@router.get("/api/company/{company_name}/addresses")
-def company_addresses(company_name: str, response: Response) -> dict[str, Any]:
+@router.get("/api/company/{company_name}/addresses", response_model=None)
+def company_addresses(company_name: str, response: Response) -> CompanyAddressesResponse:
     """Full inventory of contract addresses for a protocol.
 
     Split out from the main ``/api/company/{name}`` payload so the
@@ -135,8 +148,8 @@ def company_addresses(company_name: str, response: Response) -> dict[str, Any]:
     return {"all_addresses": addresses}
 
 
-@router.get("/api/company/{company_name}/functions")
-def company_functions(company_name: str, response: Response) -> dict[str, Any]:
+@router.get("/api/company/{company_name}/functions", response_model=None)
+def company_functions(company_name: str, response: Response) -> CompanyFunctionsResponse:
     """Per-contract function entries for a protocol, keyed by the composite
     ``"<chain>::<address>"`` entity token (invariant 13) so a same-address
     cross-chain pair keeps each chain's own analysis. The frontend indexes this
@@ -168,8 +181,8 @@ def company_functions(company_name: str, response: Response) -> dict[str, Any]:
     return {"functions": functions_by_entity}
 
 
-@router.get("/api/company/{company_name}/audits")
-def company_audits(company_name: str) -> dict[str, Any]:
+@router.get("/api/company/{company_name}/audits", response_model=None)
+def company_audits(company_name: str) -> CompanyAuditsResponse:
     """List all known audit reports for a company."""
     started = time.monotonic()
     with deps.SessionLocal() as session:
@@ -187,7 +200,7 @@ def company_audits(company_name: str) -> dict[str, Any]:
             .scalars()
             .all()
         )
-        result = {
+        result: CompanyAuditsResponse = {
             "company": company_name,
             "protocol_id": protocol_row.id,
             "audit_count": len(audit_rows),
@@ -203,8 +216,8 @@ def company_audits(company_name: str) -> dict[str, Any]:
     return result
 
 
-@router.get("/api/company/{company_name}/audit_coverage")
-def company_audit_coverage(company_name: str) -> dict[str, Any]:
+@router.get("/api/company/{company_name}/audit_coverage", response_model=None)
+def company_audit_coverage(company_name: str) -> CompanyAuditCoverageResponse:
     """For each contract in the company's inventory, list audits covering it.
 
     Reads from the persisted ``audit_contract_coverage`` join table — rows
@@ -323,7 +336,7 @@ def company_audit_coverage(company_name: str) -> dict[str, Any]:
         # the proxy's entries with its current implementation's.
         contracts_by_addr = {c.address.lower(): c for c in contracts if c.address}
 
-        coverage: list[dict[str, Any]] = []
+        coverage: list[AuditCoverageEntry] = []
         for c in contracts:
             entries = list(coverage_by_contract.get(c.id, []))
             seen_audit_ids = {e.audit_report_id for e in entries}
@@ -335,7 +348,7 @@ def company_audit_coverage(company_name: str) -> dict[str, Any]:
                             entries.append(e)
                             seen_audit_ids.add(e.audit_report_id)
             entries = sorted(entries, key=_sort_key, reverse=True)
-            matching = []
+            matching: list[AuditBrief] = []
             for e in entries:
                 audit = audits_by_id.get(e.audit_report_id)
                 if audit is None:
@@ -363,7 +376,7 @@ def company_audit_coverage(company_name: str) -> dict[str, Any]:
                     "audits": matching,
                 }
             )
-        result = {
+        result: CompanyAuditCoverageResponse = {
             "company": company_name,
             "protocol_id": protocol_row.id,
             "contract_count": len(coverage),
@@ -384,8 +397,8 @@ def company_audit_coverage(company_name: str) -> dict[str, Any]:
     return result
 
 
-@router.get("/api/company/{company_name}/score")
-def company_score(company_name: str) -> dict[str, Any]:
+@router.get("/api/company/{company_name}/score", response_model=None)
+def company_score(company_name: str) -> CompanyScoreResponse:
     """The protocol's latest score, served as the ledger payload verbatim.
 
     No projection into any other shape. Every projection attempted so far has
@@ -432,7 +445,7 @@ def company_score(company_name: str) -> dict[str, Any]:
             )
             raise HTTPException(status_code=503, detail=f"Score document could not be read: {exc}") from exc
 
-        payload = {
+        payload: CompanyScoreResponse = {
             "company": company_name,
             "protocol_id": protocol_row.id,
             "score_id": row.id,

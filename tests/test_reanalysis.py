@@ -48,6 +48,7 @@ from db.models import (
     ProxyUpgradeEvent,
     WatchedProxy,
 )
+from schemas.control_tracking import MonitoredContractType
 from services.monitoring.reanalysis import (
     _REANALYSIS_WRITE_TARGETS,
     REANALYSIS_POLL_FIELDS_VENDORED,
@@ -401,7 +402,7 @@ def _make_protocol(session: SASession, name: str = "TestProtocol") -> Protocol:
 def _make_monitored_contract(
     session: SASession,
     address: str,
-    contract_type: str = "regular",
+    contract_type: MonitoredContractType = "regular",
     last_scanned_block: int = 0,
     protocol_id: int | None = None,
     chain: str = "ethereum",

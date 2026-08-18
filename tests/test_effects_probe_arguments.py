@@ -201,7 +201,7 @@ def _seeder(budget: SeedBudget | None = None):
     def seeder(_request):
         return None
 
-    seeder.budget = budget if budget is not None else SeedBudget()  # type: ignore[attr-defined]
+    seeder.budget = budget if budget is not None else SeedBudget()  # pyright: ignore[reportFunctionMemberAccess]
     return seeder
 
 

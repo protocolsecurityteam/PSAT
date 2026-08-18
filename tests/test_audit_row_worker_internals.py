@@ -90,7 +90,7 @@ class _TestWorker(AuditRowWorker):
     def _stale_recovery_query(self, cutoff):  # noqa: ANN201, ARG002
         raise AssertionError("_stale_recovery_query should not be called when _recover_stale_rows is overridden")
 
-    def _claim_batch(self, session):  # noqa: ARG002
+    def _claim_batch(self, session) -> list[Any]:  # noqa: ARG002
         self._claim_calls += 1
         if self._batches:
             return self._batches.pop(0)
@@ -104,8 +104,8 @@ class _TestWorker(AuditRowWorker):
         self.processed.append(audit.id)
         return audit.id, _Outcome(status="success")
 
-    def _persist_outcome(self, audit_id: int, outcome) -> None:
-        self.persisted.append((audit_id, outcome))
+    def _persist_outcome(self, audit_id: int, result) -> None:
+        self.persisted.append((audit_id, result))
 
 
 # ---------------------------------------------------------------------------
@@ -255,8 +255,8 @@ class TestRunLoop:
         rows = [_FakeRow(100), _FakeRow(101)]
 
         class _ExitAfterOneBatchWorker(_TestWorker):
-            def _persist_outcome(self, audit_id, outcome):
-                super()._persist_outcome(audit_id, outcome)
+            def _persist_outcome(self, audit_id, result):
+                super()._persist_outcome(audit_id, result)
                 # Signal the loop to stop after the first persist completes.
                 self._running = False
 
@@ -316,8 +316,8 @@ class TestRunLoop:
                     raise RuntimeError("simulated failure")
                 return super()._process_row(audit)
 
-            def _persist_outcome(self, audit_id, outcome):
-                super()._persist_outcome(audit_id, outcome)
+            def _persist_outcome(self, audit_id, result):
+                super()._persist_outcome(audit_id, result)
                 if audit_id == 201:
                     self._running = False
 

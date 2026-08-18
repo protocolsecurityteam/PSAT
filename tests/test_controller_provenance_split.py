@@ -172,7 +172,7 @@ def test_treeless_artifact_keeps_the_control_edge_through_the_plan(tmp_path, sha
         "subject": {"address": "0x" + "11" * 20, "name": "Vault"},
         "controller_tracking": list(by_source.values()),
     }
-    plan = build_control_tracking_plan(analysis)  # type: ignore[arg-type]
+    plan = build_control_tracking_plan(analysis)  # pyright: ignore[reportArgumentType]
     assert plan["tracked_controllers"], "plan lost every controller"
     assert not any(c.get("authority_provenance") for c in plan["tracked_controllers"])
 
@@ -183,7 +183,7 @@ def test_provenance_survives_the_tracking_plan(tmp_path):
         "subject": {"address": "0x" + "11" * 20, "name": "Vault"},
         "controller_tracking": list(by_source.values()),
     }
-    plan = build_control_tracking_plan(analysis)  # type: ignore[arg-type]
+    plan = build_control_tracking_plan(analysis)  # pyright: ignore[reportArgumentType]
     by_id = {c["controller_id"]: c for c in plan["tracked_controllers"]}
     assert by_id["external_contract:roleRegistry"].get("authority_provenance") == "caller_gate"
     assert by_id["external_contract:eETH"].get("authority_provenance") == "call_target"
@@ -371,7 +371,7 @@ def test_plan_built_from_a_pre_provenance_artifact_claims_nothing(tmp_path):
         "subject": {"address": "0x" + "11" * 20, "name": "Vault"},
         "controller_tracking": legacy,
     }
-    plan = build_control_tracking_plan(analysis)  # type: ignore[arg-type]
+    plan = build_control_tracking_plan(analysis)  # pyright: ignore[reportArgumentType]
     assert all("authority_provenance" not in c for c in plan["tracked_controllers"])
 
 

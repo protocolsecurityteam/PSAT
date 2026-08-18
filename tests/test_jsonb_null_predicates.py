@@ -32,7 +32,7 @@ import pytest
 from sqlalchemy import JSON, select
 from sqlalchemy.orm import Session
 
-from db.jsonb import jsonb_has_payload, jsonb_state, jsonb_unset, jsonb_written_null
+from db.jsonb import JSONB_UNSET, JSONB_WRITTEN_NULL, jsonb_has_payload, jsonb_state
 from db.models import Base, ContractMaterialization
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -201,10 +201,14 @@ def test_written_null_and_unset_are_separately_addressable(db_session: Session, 
     """
     scoped = ContractMaterialization.chain.in_(_materializations)
     written_null = db_session.scalars(
-        select(ContractMaterialization.chain).where(scoped, jsonb_written_null(ContractMaterialization.analysis))
+        select(ContractMaterialization.chain).where(
+            scoped, jsonb_state(ContractMaterialization.analysis) == JSONB_WRITTEN_NULL
+        )
     ).all()
     unset = db_session.scalars(
-        select(ContractMaterialization.chain).where(scoped, jsonb_unset(ContractMaterialization.analysis))
+        select(ContractMaterialization.chain).where(
+            scoped, jsonb_state(ContractMaterialization.analysis) == JSONB_UNSET
+        )
     ).all()
     assert list(written_null) == ["w0-5-written-null"]
     assert list(unset) == ["w0-5-unset"]

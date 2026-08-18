@@ -11,6 +11,8 @@ from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from schemas.control_tracking import MonitoredContractType
+
 #: A 20-byte lowercase-or-checksummed hex address. Shared by every request
 #: model so no ingest path accepts a 42-char string that is not actually hex.
 _HEX_ADDRESS_RE = re.compile(r"0x[a-fA-F0-9]{40}")
@@ -213,7 +215,7 @@ def _reject_analyzer_owned_config_keys(value: dict | None) -> dict | None:
 class UpsertMonitoredContractRequest(BaseModel):
     address: str = Field(min_length=42, max_length=42)
     chain: str = "ethereum"
-    contract_type: str = "regular"
+    contract_type: MonitoredContractType = "regular"
     monitoring_config: dict | None = None
     needs_polling: bool = False
     is_active: bool = True

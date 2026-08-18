@@ -36,7 +36,7 @@ from services.effects.exceptions import AnvilSpawnError, ForkRpcTimeoutError
 # an otherwise-fine job. Wrapped in try/except so test environments without
 # psycopg2 (none today, but cheap insurance) still import this module.
 try:
-    import psycopg2  # type: ignore[import-untyped]
+    import psycopg2
 
     _PSYCOPG2_OPERATIONAL: tuple[type[BaseException], ...] = (psycopg2.OperationalError,)
 except Exception:  # pragma: no cover — psycopg2 is a hard dep in production

@@ -19,6 +19,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from db.models import IndexedEventLog
+from services.resolution.caller_sources import CALLER_SOURCES as _CALLER_SOURCES
 from services.resolution.capabilities import CapabilityExpr
 from services.resolution.repos.event_logs_pg import _word_to_address
 from utils.rpc import (
@@ -30,7 +31,7 @@ from utils.rpc import (
 
 logger = logging.getLogger(__name__)
 
-_CALLER_SOURCES = {"msg_sender", "tx_origin", "signature_recovery", "root_caller"}
+
 _MAX_CANDIDATES = int(os.getenv("PSAT_EXTERNAL_CHECK_MATERIALIZE_MAX_CANDIDATES", "512"))
 
 # Per-checker candidate cache keyed on (chain_id, checker_address). _MAX_CANDIDATES
@@ -292,7 +293,7 @@ def _candidate_addresses_from_hypersync(*, checker_address: str, limit: int, cha
 
 async def _candidate_addresses_from_hypersync_async(*, checker_address: str, limit: int, chain_id: int) -> list[str]:
     try:
-        import hypersync  # type: ignore
+        import hypersync
     except Exception:
         return []
 

@@ -12,10 +12,10 @@ operator view of internal process health, not part of the public surface.
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from fastapi import APIRouter, Depends
 
+from schemas.api_responses import FleetStatusResponse
 from services.aggregations import build_fleet_status
 
 from . import deps
@@ -25,8 +25,10 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-@router.get("/api/fleet", dependencies=[Depends(deps.require_admin_key)])
-def fleet_status() -> dict[str, Any]:
+@router.get("/api/fleet", dependencies=[Depends(deps.require_admin_key)], response_model=None)
+def fleet_status() -> FleetStatusResponse:
     """Liveness + work breakdown for every background process."""
     with deps.SessionLocal() as session:
+        # cast: build_fleet_status provably returns exactly this top level;
+        # the annotation belongs on the producer once aggregations adopts it.
         return build_fleet_status(session)

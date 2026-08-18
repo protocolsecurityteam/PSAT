@@ -376,7 +376,7 @@ class TestResolutionStageComposition:
         session = MagicMock()
         session.execute.return_value.scalar_one_or_none.return_value = None
 
-        ResolutionWorker().process(session, _job())  # type: ignore[arg-type]
+        ResolutionWorker().process(session, _job())  # pyright: ignore[reportArgumentType]
 
         assert len(seen) == 1
         assert seen[0]["registry_address"] == REGISTRY
@@ -393,7 +393,7 @@ class TestResolutionStageComposition:
         session.execute.return_value.scalar_one_or_none.return_value = None
         job = _job(request={"rpc_url": "https://rpc.example", "chain": "ethereum", "proxy_address": PROXY_REGISTRY})
 
-        ResolutionWorker().process(session, job)  # type: ignore[arg-type]
+        ResolutionWorker().process(session, job)  # pyright: ignore[reportArgumentType]
 
         assert seen[0]["registry_address"] == PROXY_REGISTRY
 
@@ -412,7 +412,7 @@ class TestResolutionStageComposition:
         details: list[str] = []
         monkeypatch.setattr(ResolutionWorker, "update_detail", lambda _self, _s, _j, text: details.append(text))
 
-        ResolutionWorker().process(session, _job())  # type: ignore[arg-type]
+        ResolutionWorker().process(session, _job())  # pyright: ignore[reportArgumentType]
 
         assert degraded == ["resolution_role_holder_plane"]
         # The stage still reached its terminal detail.
@@ -430,7 +430,7 @@ class TestResolutionStageComposition:
         session = MagicMock()
         session.execute.return_value.scalar_one_or_none.return_value = None
 
-        ResolutionWorker().process(session, _job())  # type: ignore[arg-type]
+        ResolutionWorker().process(session, _job())  # pyright: ignore[reportArgumentType]
 
 
 # ---------------------------------------------------------------------------

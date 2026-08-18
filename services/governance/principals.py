@@ -6,6 +6,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from db.models import EffectiveFunction, FunctionPrincipal
+from schemas.control_tracking import ResolvedControllerType
 
 # A principal is *terminal* when its resolved_type names a settled controlling
 # key or a recognized governance primitive (Safe / EOA / zero / timelock /
@@ -15,7 +16,9 @@ from db.models import EffectiveFunction, FunctionPrincipal
 # over-claim bug where a ``resolved_type=contract`` row reads as a *settled*
 # principal to a consumer when the real key is still unknown: the absence of a
 # proven positive is never itself a proven fact.
-TERMINAL_PRINCIPAL_TYPES = frozenset({"safe", "eoa", "zero", "timelock", "proxy_admin", "cross_chain_authority"})
+TERMINAL_PRINCIPAL_TYPES: frozenset[ResolvedControllerType] = frozenset(
+    {"safe", "eoa", "zero", "timelock", "proxy_admin", "cross_chain_authority"}
+)
 
 # Depth bound for the contract-principal terminal walk. A control chain deeper
 # than this in practice signals a loop or a pathological factory graph; we stop

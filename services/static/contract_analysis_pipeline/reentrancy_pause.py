@@ -46,29 +46,26 @@ guard applied to the function in hand.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, TypedDict, get_args
 
-try:
-    from slither.core.cfg.node import NodeType  # type: ignore[import]
-    from slither.slithir.operations import (  # type: ignore[import]
-        Assignment,
-        Binary,
-        BinaryType,
-        InternalCall,
-        LibraryCall,
-        SolidityCall,
-        Unary,
-    )
-
-    SLITHER_AVAILABLE = True
-except Exception:  # pragma: no cover
-    SLITHER_AVAILABLE = False
-
-from .predicate_types import LeafPredicate, PredicateTree
+from .predicate_types import AuthorityRole, LeafPredicate, PredicateTree
 from .shared import _all_modifiers, _all_state_variables
+from .slither_compat import (
+    SLITHER_AVAILABLE,
+    Assignment,
+    Binary,
+    BinaryType,
+    InternalCall,
+    LibraryCall,
+    NodeType,
+    SolidityCall,
+    Unary,
+)
 
-GuardKind = Literal["reentrancy", "pause"]
+StructuralGuardKind = Literal["reentrancy", "pause"]
+# The guard roles this pass stamps are leaf-classifier vocabulary; a rename
+# there must not strand these tokens.
+assert set(get_args(StructuralGuardKind)) <= set(get_args(AuthorityRole))
 
 
 class PauseInfo(TypedDict):
@@ -95,9 +92,6 @@ W2_REASON_GUARD_NOT_APPLIED = "guard_modifier_not_applied"
 #: No modifier on the contract passes the test at all (fake set/restore pairs,
 #: name-only locks, and transient-storage guards all land here).
 W2_REASON_NO_VERIFIED_GUARD = "no_verified_guard_modifier"
-#: Asked about a function this contract's analysis never enumerated. Absence of a
-#: row is never absence of a guard.
-W2_REASON_FUNCTION_NOT_ANALYZED = "function_not_analyzed"
 #: Two live declarations answer to the same signature, so no single body is THE
 #: function being asked about. Refuse rather than pick one.
 W2_REASON_AMBIGUOUS_DECLARATION = "ambiguous_function_declaration"
@@ -376,19 +370,6 @@ def verified_guard_verdicts(contract: Any) -> dict[str, VerifiedGuardVerdict]:
             ),
         }
     return verdicts
-
-
-def verified_guard_verdict(
-    verdicts: Mapping[str, VerifiedGuardVerdict],
-    function_full_name: str,
-) -> VerifiedGuardVerdict:
-    """Look up one function in :func:`verified_guard_verdicts`' output.
-
-    Separate from the producer so a consumer computes the contract-scoped
-    analysis once and still gets an explicit verdict for a function the analysis
-    never saw — including one whose only declarations were shadowed away.
-    """
-    return verdicts.get(function_full_name) or _guard_refusal(W2_REASON_FUNCTION_NOT_ANALYZED)
 
 
 def _guard_refusal(reason: str, declaration: str | None = None) -> VerifiedGuardVerdict:

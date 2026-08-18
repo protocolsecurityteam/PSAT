@@ -53,6 +53,11 @@ from typing_extensions import NotRequired
 
 from utils.logging import record_degraded
 
+from .predicate_types import (
+    STATE_VAR_TARGET_KINDS,
+    TARGET_KIND_STORAGE_NO_SETTER,
+    TARGET_KIND_STORAGE_SETTER,
+)
 from .provenance import ProvenanceEngine, is_top
 from .record_ordering import OrderingWitness, attach_record_ordering
 from .shared import _all_state_variables
@@ -649,7 +654,7 @@ def _auto_getter_selector(variable: Any) -> str | None:
 
     A parameterised getter cannot be read without choosing a key, and choosing
     one is not something this plane can witness, so it yields ``None``."""
-    from slither.core.variables.state_variable import StateVariable  # type: ignore[import]
+    from slither.core.variables.state_variable import StateVariable
 
     if not isinstance(variable, StateVariable) or getattr(variable, "visibility", None) != "public":
         return None
@@ -701,9 +706,9 @@ def _receiver_descriptor(
     one on the contract and one on the library, produce BYTE-IDENTICAL
     descriptors (same name ⇒ same visibility, mutability and minted selector),
     so a disagreement between two distinct assets reads as agreement."""
-    from slither.core.declarations.solidity_variables import SolidityVariable  # type: ignore[import]
-    from slither.core.variables.state_variable import StateVariable  # type: ignore[import]
-    from slither.slithir.variables import Constant  # type: ignore[import]
+    from slither.core.declarations.solidity_variables import SolidityVariable
+    from slither.core.variables.state_variable import StateVariable
+    from slither.slithir.variables import Constant
 
     if resolved is None:
         return _receiver_not_determined("unresolved_head")
@@ -1410,7 +1415,7 @@ def _resolve_storage_origin(arg: Any, function: Any, seen: set[str] | None = Non
     direct state var and a local storage pointer assigned from a state var or a
     member/index of one (``Box storage b = box;`` / ``= boxes[k];``). A pointer
     sourced from a call return is unresolvable — ``None``."""
-    from slither.core.variables.state_variable import StateVariable  # type: ignore[import]
+    from slither.core.variables.state_variable import StateVariable
 
     if isinstance(arg, StateVariable):
         return getattr(arg, "name", None)
@@ -1651,9 +1656,9 @@ def _engine_bundle_for(unit: Any) -> _EngineBundle:
     cached = _ENGINE_BUNDLE.get(unit)
     if cached is not None:
         return cached
-    from slither.core.cfg.node import NodeType  # type: ignore[import]
-    from slither.core.variables.local_variable import LocalVariable  # type: ignore[import]
-    from slither.slithir.operations import Phi  # type: ignore[import]
+    from slither.core.cfg.node import NodeType
+    from slither.core.variables.local_variable import LocalVariable
+    from slither.slithir.operations import Phi
 
     engine = ProvenanceEngine(unit)
     engine.run()
@@ -1809,7 +1814,7 @@ def _is_caller_supplied_leaf(value: Any, ctx: _UnitCtx) -> bool:
     influence. A missing binding fails closed."""
     if value is None:
         return False
-    from slither.core.declarations.solidity_variables import SolidityVariable  # type: ignore[import]
+    from slither.core.declarations.solidity_variables import SolidityVariable
 
     if isinstance(value, SolidityVariable) and str(getattr(value, "name", "")) == "msg.value":
         return True
@@ -1868,9 +1873,9 @@ def _operand_is_direct(value: Any, param_names: set[str]) -> bool:
     tn = type(value).__name__
     if "Temporary" in tn or "Reference" in tn or "Tuple" in tn:
         return False
-    from slither.core.declarations.solidity_variables import SolidityVariable  # type: ignore[import]
-    from slither.core.variables.state_variable import StateVariable  # type: ignore[import]
-    from slither.slithir.variables import Constant  # type: ignore[import]
+    from slither.core.declarations.solidity_variables import SolidityVariable
+    from slither.core.variables.state_variable import StateVariable
+    from slither.slithir.variables import Constant
 
     if isinstance(value, (StateVariable, SolidityVariable, Constant)):
         return True
@@ -1889,7 +1894,7 @@ def _state_var_target_kind(name: str, ctx: _UnitCtx) -> str:
     if getattr(var, "is_immutable", False):
         return "immutable"
     if name in ctx.setters:
-        return "storage_setter"
+        return TARGET_KIND_STORAGE_SETTER
     if name in ctx.alias_indeterminate:
         # Aliased into a callee we could not decide writes-through — the
         # no-setter proof for this specific var is unsound.
@@ -1897,7 +1902,7 @@ def _state_var_target_kind(name: str, ctx: _UnitCtx) -> str:
     # No attributed setter. Only a *complete* scan makes that a proven negative
     # ("fixed destination"); an assembly-sstore/delegatecall/unresolved-alias
     # blind spot leaves it unknown — never assert immutability we could not prove.
-    return "storage_no_setter" if ctx.setter_scan_complete else "indeterminate"
+    return TARGET_KIND_STORAGE_NO_SETTER if ctx.setter_scan_complete else "indeterminate"
 
 
 # A ``neutral origin`` is the entry-rooted source of a value forwarded across an
@@ -2166,7 +2171,7 @@ def _single_phi_input(var: Any, ctx: _UnitCtx) -> Any:
     ENTRYPOINT parameter-binding Phi (Slither's interprocedural SSA link — following
     it would cross into the caller's SSA and strip a forwarded parameter of the
     binding the nested classifiers resolve it through)."""
-    from slither.core.cfg.node import NodeType  # type: ignore[import]
+    from slither.core.cfg.node import NodeType
 
     ir = ctx.def_by_id.get(id(var))
     if ir is None or type(ir).__name__ != "Phi":
@@ -2223,7 +2228,7 @@ def _element_walk(operand: Any, ctx: _UnitCtx) -> list[_ElementRoot] | None:
     base, the member and the key together). Forking the walk would let the two
     drift, and a join across them would then join a record to a different
     record."""
-    from slither.core.variables.state_variable import StateVariable  # type: ignore[import]
+    from slither.core.variables.state_variable import StateVariable
 
     seen: set[int] = set()
     stack: list[tuple[Any, tuple[Any, ...], tuple[str, ...]]] = [(operand, (), ())]
@@ -2364,10 +2369,10 @@ def _type_bit_width(declared: Any) -> int | None:
     width this pass can measure (a dynamic type, an enum, a struct). A contract
     reference IS an address, which is what lets an ``IERC20(addr)`` /
     ``uint160`` hop keep resolving."""
-    from slither.core.declarations.contract import Contract  # type: ignore[import]
-    from slither.core.solidity_types.elementary_type import ElementaryType  # type: ignore[import]
-    from slither.core.solidity_types.user_defined_type import UserDefinedType  # type: ignore[import]
-    from slither.exceptions import SlitherException  # type: ignore[import]
+    from slither.core.declarations.contract import Contract
+    from slither.core.solidity_types.elementary_type import ElementaryType
+    from slither.core.solidity_types.user_defined_type import UserDefinedType
+    from slither.exceptions import SlitherException
 
     if isinstance(declared, ElementaryType):
         try:
@@ -2894,7 +2899,7 @@ def _is_self_balance_read(value: Any, ctx: _UnitCtx) -> bool:
     ``SOLIDITY_CALL balance(address)`` built-in whose sole argument resolves to the
     ``this`` Solidity variable. An arbitrary ``other.balance`` reads a foreign
     balance and must NOT qualify, so the argument identity is checked."""
-    from slither.core.declarations.solidity_variables import SolidityVariable  # type: ignore[import]
+    from slither.core.declarations.solidity_variables import SolidityVariable
 
     _, ir = _resolve_copies(value, ctx.def_by_id)
     if ir is None or type(ir).__name__ != "SolidityCall":
@@ -2943,7 +2948,7 @@ def _callee_is_two_arg_min(fn: Any) -> bool:
     never its name: exactly one comparison IF over the two parameters, each arm
     returning one parameter, the smaller taken on the corresponding branch. Any
     other shape (a max, three args, a computed result) fails to ``False``."""
-    from slither.core.cfg.node import NodeType  # type: ignore[import]
+    from slither.core.cfg.node import NodeType
 
     params = getattr(fn, "parameters", None) or []
     if len(params) != 2:
@@ -2987,7 +2992,7 @@ def _capped_ternary(operand: Any, ctx: _UnitCtx) -> bool:
     to a 2-input Phi over branch assignments, controlled by an inequality IF, where
     the construct returns the SMALLER value and one compared operand is the
     self-balance read. ``min(self_balance, X) <= self_balance``."""
-    from slither.core.cfg.node import NodeType  # type: ignore[import]
+    from slither.core.cfg.node import NodeType
 
     phi = ctx.def_by_id.get(id(operand))
     if phi is None or type(phi).__name__ != "Phi":
@@ -3124,10 +3129,6 @@ def _classify_site(operand: Any, ctx: _UnitCtx, *, amount: bool) -> tuple[str, s
     tier = "dispositive_ast" if direct else "static_trace"
     return (kind, tier)
 
-
-# The ``target_kind`` values that name a state variable of the analysed unit —
-# the only ones for which a ``target_variable`` exists to be published.
-_STATE_VAR_TARGET_KINDS = frozenset({"constant", "immutable", "storage_setter", "storage_no_setter"})
 
 # ``writer_surface_closed`` has exactly one admissible value. Declared as a
 # literal-typed constant so the type checker, not a reviewer, is what rejects a
@@ -4057,7 +4058,7 @@ def _attach_target_variable(
     only under ``storage_no_setter``, where the kind itself is the completed-scan
     negative; where no writer could be NAMED the key is omitted and
     ``target_writer_absent_reason`` says which of the two absences it is."""
-    if target["kind"] not in _STATE_VAR_TARGET_KINDS or not sites:
+    if target["kind"] not in STATE_VAR_TARGET_KINDS or not sites:
         return
     if any(canonical is None for _, canonical, _, _, _ in sites):
         # A site whose declaration could not be identified cannot be shown to
@@ -4073,8 +4074,8 @@ def _attach_target_variable(
     # so even a row carrying no writer list still carries the bound.
     flow["writer_surface_closed"] = _WRITER_SURFACE_CLOSED
     writers = sorted({signature for _, _, signatures, _, _ in sites for signature in signatures})
-    if not writers and target["kind"] != "storage_no_setter":
-        if target["kind"] == "storage_setter":
+    if not writers and target["kind"] != TARGET_KIND_STORAGE_NO_SETTER:
+        if target["kind"] == TARGET_KIND_STORAGE_SETTER:
             reasons = {reason for _, _, _, _, reason in sites if reason}
             if len(reasons) == 1:
                 flow["target_writer_absent_reason"] = next(iter(reasons))

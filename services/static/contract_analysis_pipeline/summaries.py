@@ -513,7 +513,7 @@ def _resolve_cast_head(head: Any, def_by_id: dict[int, Any]) -> Any:
     A mapping element (``ReferenceVariable``, e.g. ``tokens[id]``) or a computed
     value is not temporary-rooted, so it is returned unchanged and names no getter.
     Reads typed IR attributes only; never ``str(ir)``."""
-    from slither.slithir.variables.temporary import TemporaryVariable  # type: ignore[import]
+    from slither.slithir.variables.temporary import TemporaryVariable
 
     seen: set[int] = set()
     value = head

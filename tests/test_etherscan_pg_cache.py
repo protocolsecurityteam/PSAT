@@ -331,7 +331,7 @@ def test_whitelisted_action_is_inmem_cached(monkeypatch):
     etherscan.get("contract", "getabi", 1, address="0xfeed")
     assert len(etherscan._cache) == 1
     # Second call hits in-mem; wire must not be called again.
-    etherscan.requests.get.side_effect = AssertionError("second call must hit in-mem cache")
+    setattr(etherscan.requests.get, "side_effect", AssertionError("second call must hit in-mem cache"))
     etherscan.get("contract", "getabi", 1, address="0xfeed")
 
 
@@ -388,7 +388,7 @@ def test_source_cache_wire_fetch_populates_then_serves(monkeypatch):
     assert len(etherscan._source_cache) == 1
     assert etherscan._cache == {}, "source must not enter the metadata cache"
     # Second call hits the source cache; wire must not be called again.
-    etherscan.requests.get.side_effect = AssertionError("second call must hit the source cache")
+    setattr(etherscan.requests.get, "side_effect", AssertionError("second call must hit the source cache"))
     result = etherscan.get("contract", "getsourcecode", 1, address="0xfeed")
     assert result == payload
 

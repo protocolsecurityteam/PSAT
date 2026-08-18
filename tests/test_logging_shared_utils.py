@@ -33,7 +33,7 @@ class _FakeStreamResponse:
 
     def raise_for_status(self):
         if self.status_code >= 400:
-            raise requests.HTTPError(f"HTTP {self.status_code}", response=self)  # type: ignore[arg-type]
+            raise requests.HTTPError(f"HTTP {self.status_code}", response=self)  # pyright: ignore[reportArgumentType]
 
     def iter_lines(self):
         yield from self._lines

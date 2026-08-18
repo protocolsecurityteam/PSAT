@@ -182,17 +182,6 @@ def authorization_opened(
     return before == "caller_rejected_consistent" and after == "not_caller_discriminating"
 
 
-def same_gate(a: EthCallResult, b: EthCallResult) -> bool:
-    """Two outcomes hit the SAME gate iff both revert with identical raw data
-    (§8.3). Success≠revert are different; a node error (no revert data) is never
-    "same" (unattributable → withhold)."""
-    if a.success or b.success:
-        return a.success and b.success
-    if a.revert_data is None or b.revert_data is None:
-        return False
-    return a.revert_data == b.revert_data
-
-
 # ---------------------------------------------------------------------------
 # Transcript emission (§8.5)
 # ---------------------------------------------------------------------------

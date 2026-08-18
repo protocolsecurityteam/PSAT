@@ -36,6 +36,7 @@ from db.models import (
     exactness_eligible_cursor_clause,
 )
 from db.queue import HEARTBEAT_EVENT_INDEXER, get_artifact, record_heartbeat
+from services.resolution.caller_sources import CALLER_SOURCES as _CALLER_SOURCES
 from services.resolution.deferred_reconciler import reconcile_deferred_resolutions, reconcile_role_set_drift
 from services.resolution.repos.event_logs_rpc import FetchedEventLog, FetchWindowStat
 from services.resolution.role_store_standards import all_topic0s, detect_standards, resolve_probe_code
@@ -142,13 +143,6 @@ def _is_solmate_cancall_descriptor(descriptor: dict[str, Any]) -> bool:
     return (isinstance(signature, str) and signature.replace(" ", "") == _SOLMATE_CANCALL_SIGNATURE) or (
         isinstance(selector, str) and selector.lower() == _SOLMATE_CANCALL_SELECTOR
     )
-
-
-# Key sources that resolve to the transaction's caller — a gate keyed on one of
-# these discriminates who may call. Mirrors the resolution-side _CALLER_SOURCES
-# (predicate_evaluator / event_indexed) so the indexer's trigger agrees with the
-# adapter that folds what it enrolls.
-_CALLER_SOURCES = {"msg_sender", "tx_origin", "signature_recovery", "root_caller"}
 
 
 def _is_single_address_param_signature(signature: Any) -> bool:

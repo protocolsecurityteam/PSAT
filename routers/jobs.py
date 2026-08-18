@@ -13,6 +13,14 @@ from sqlalchemy import func, select, text
 from db.models import Artifact, Contract, Job, JobStage, JobStatus, Protocol, derive_job_chain_id
 from db.queue import store_artifact
 from schemas.api_requests import AnalyzeRequest
+from schemas.api_responses import (
+    AnalyzeRemainingResponse,
+    CancelQueuedJobsResponse,
+    DeleteCompanyAddressResponse,
+    JobDict,
+    JobStageTimingsResponse,
+    QueuedJobRef,
+)
 from schemas.stage_errors import StageError, StageErrors
 from services.discovery.ranking import not_superseded_impl_clause
 from utils.chains import (
@@ -30,16 +38,16 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-@router.get("/api/jobs", dependencies=[Depends(deps.require_admin_key)])
-def list_jobs() -> list[dict[str, Any]]:
+@router.get("/api/jobs", dependencies=[Depends(deps.require_admin_key)], response_model=None)
+def list_jobs() -> list[JobDict]:
     with deps.SessionLocal() as session:
         stmt = select(Job).order_by(Job.created_at.desc())
         jobs = session.execute(stmt).scalars().all()
         return [job.to_dict() for job in jobs]
 
 
-@router.post("/api/analyze", dependencies=[Depends(deps.require_admin_key)])
-def analyze_address(request: AnalyzeRequest) -> dict[str, Any]:
+@router.post("/api/analyze", dependencies=[Depends(deps.require_admin_key)], response_model=None)
+def analyze_address(request: AnalyzeRequest) -> JobDict:
     if request.address and not request.address.startswith("0x"):
         raise HTTPException(status_code=400, detail="Address must start with 0x")
     # Allowlist enforcement (inv. 14): the edge keeps its mainnet default, but a
@@ -101,8 +109,9 @@ def analyze_address(request: AnalyzeRequest) -> dict[str, Any]:
 @router.post(
     "/api/company/{company_name}/analyze-remaining",
     dependencies=[Depends(deps.require_admin_key)],
+    response_model=None,
 )
-def analyze_remaining(company_name: str) -> dict[str, Any]:
+def analyze_remaining(company_name: str) -> AnalyzeRemainingResponse:
     """Queue analysis jobs for all discovered-but-not-analyzed contracts in a company."""
     with deps.SessionLocal() as session:
         protocol_row = session.execute(select(Protocol).where(Protocol.name == company_name)).scalar_one_or_none()
@@ -126,7 +135,7 @@ def analyze_remaining(company_name: str) -> dict[str, Any]:
             .all()
         )
 
-        queued = []
+        queued: list[QueuedJobRef] = []
         for contract in unanalyzed:
             # Re-check inside the loop so concurrent calls (double-click or
             # duplicate request) don't each create a job for the same contract.
@@ -169,8 +178,9 @@ def analyze_remaining(company_name: str) -> dict[str, Any]:
 @router.delete(
     "/api/company/{company_name}/queued-jobs",
     dependencies=[Depends(deps.require_admin_key)],
+    response_model=None,
 )
-def cancel_queued_company_jobs(company_name: str) -> dict[str, Any]:
+def cancel_queued_company_jobs(company_name: str) -> CancelQueuedJobsResponse:
     """Cancel queued jobs for a company; leaves processing/completed/failed untouched."""
     with deps.SessionLocal() as session:
         protocol_row = session.execute(select(Protocol).where(Protocol.name == company_name)).scalar_one_or_none()
@@ -195,12 +205,13 @@ def cancel_queued_company_jobs(company_name: str) -> dict[str, Any]:
 @router.delete(
     "/api/company/{company_name}/addresses/{address}",
     dependencies=[Depends(deps.require_admin_key)],
+    response_model=None,
 )
 def delete_company_address(
     company_name: str,
     address: str,
     chain: str = Query(default="ethereum"),
-) -> dict[str, Any]:
+) -> DeleteCompanyAddressResponse:
     """Remove a Contract row from a protocol.
 
     Scoped to the protocol AND chain: the same address can host a contract on
@@ -237,8 +248,8 @@ def delete_company_address(
     return {"company": company_name, "address": address, "chain": chain_name, "deleted": True}
 
 
-@router.get("/api/jobs/{job_id}", dependencies=[Depends(deps.require_admin_key)])
-def get_job(job_id: str) -> dict[str, Any]:
+@router.get("/api/jobs/{job_id}", dependencies=[Depends(deps.require_admin_key)], response_model=None)
+def get_job(job_id: str) -> JobDict:
     with deps.SessionLocal() as session:
         job = session.get(Job, job_id)
         if job is None:
@@ -319,8 +330,8 @@ def get_job_errors(job_id: str) -> JobErrorsResponse:
         )
 
 
-@router.post("/api/jobs/{job_id}/retry", dependencies=[Depends(deps.require_admin_key)])
-def retry_job(job_id: str) -> dict[str, Any]:
+@router.post("/api/jobs/{job_id}/retry", dependencies=[Depends(deps.require_admin_key)], response_model=None)
+def retry_job(job_id: str) -> JobDict:
     """Operator-initiated retry of a ``failed_terminal`` job.
 
     Resets ``status`` to ``queued``, ``retry_count`` to 0, ``next_attempt_at``
@@ -436,8 +447,8 @@ def retry_job(job_id: str) -> dict[str, Any]:
         return job.to_dict()
 
 
-@router.get("/api/jobs/{job_id}/stage_timings", dependencies=[Depends(deps.require_admin_key)])
-def get_job_stage_timings(job_id: str) -> dict[str, Any]:
+@router.get("/api/jobs/{job_id}/stage_timings", dependencies=[Depends(deps.require_admin_key)], response_model=None)
+def get_job_stage_timings(job_id: str) -> JobStageTimingsResponse:
     """Return all per-stage timing artifacts the worker fleet wrote for
     this job, keyed by stage name. Schema-v2 layout (one
     ``stage_timing_<stage>`` artifact per stage). Used by the bench

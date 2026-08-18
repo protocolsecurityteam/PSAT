@@ -313,7 +313,7 @@ def _value_predicate_passes(value_hex: str, predicate: dict[str, Any]) -> bool:
             pass
     if op == "in":
         rhs_set = {_to_int(r) for r in rhs_raw}
-        rhs_set.discard(None)  # type: ignore[arg-type]
+        rhs_set.discard(None)
         return actual_int in rhs_set
     if not rhs_raw:
         return False
@@ -429,7 +429,7 @@ async def enumerate_mapping_allowlist(
         )
 
     if hypersync_module is None:
-        import hypersync as hypersync_module  # type: ignore
+        import hypersync as hypersync_module
     if client is None:
         if not bearer_token:
             raise RuntimeError("Hypersync requires an API token; pass bearer_token= or set ENVIO_API_TOKEN.")
@@ -660,7 +660,7 @@ def enumerate_mapping_allowlist_sync(
                         "principals": len(db_hit["principals"]),
                     },
                 )
-                result = EnumerationResult(**db_hit)  # type: ignore[typeddict-item]
+                result = EnumerationResult(**db_hit)
                 with _CACHE_LOCK:
                     _store_enumeration(_CACHE, cache_key, (result, now), _PRESENT_PRESSURE_NAME)
                 return result
@@ -768,7 +768,7 @@ async def enumerate_mapping_values(
         topic0_to_specs.setdefault(topic0, []).append(spec)
 
     if hypersync_module is None:
-        import hypersync as hypersync_module  # type: ignore
+        import hypersync as hypersync_module
     if client is None:
         if not bearer_token:
             raise RuntimeError("Hypersync requires an API token; pass bearer_token= or set ENVIO_API_TOKEN.")

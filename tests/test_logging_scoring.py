@@ -260,7 +260,7 @@ def _score(caplog):
     """Every assertion below is scoped to the loop's own logger: a stray record
     from any other one must not be able to move a count."""
     with caplog.at_level(logging.INFO, logger=_LOOP_LOGGER):
-        loop.score_protocol(_FakeSession(), loop.DueProtocol(7, SCORE_TRIGGER_DIRTY_LOOP))  # type: ignore[arg-type]
+        loop.score_protocol(_FakeSession(), loop.DueProtocol(7, SCORE_TRIGGER_DIRTY_LOOP))  # pyright: ignore[reportArgumentType]
     return [r for r in caplog.records if r.name == _LOOP_LOGGER]
 
 
@@ -337,7 +337,7 @@ def test_the_cli_emits_the_same_summary_and_a_malformed_document_does_not_fail_i
     monkeypatch.setattr(cli, "compute_protocol_score", lambda *a, **k: document)
 
     with caplog.at_level(logging.INFO, logger="services.scoring.cli"):
-        assert cli.score(None, 7) is document  # type: ignore[arg-type]
+        assert cli.score(None, 7) is document  # pyright: ignore[reportArgumentType]
 
     summaries = [
         r for r in caplog.records if r.name == "services.scoring.cli" and r.message == "score document summary"
@@ -433,7 +433,7 @@ def test_an_absent_artifact_and_a_malformed_one_are_different_facts(
     import db.queue
 
     monkeypatch.setattr(db.queue, "get_artifact", lambda session, job_id, name: payload)
-    receivers, state = _asset_identity(session=None, job_id="job-1")  # type: ignore[arg-type]
+    receivers, state = _asset_identity(session=None, job_id="job-1")  # pyright: ignore[reportArgumentType]
     assert state == expected_state
     assert len(receivers) == expected_keys
 
@@ -481,7 +481,7 @@ def test_contracts_with_no_protocol_are_counted_not_silently_skipped(monkeypatch
     token = stage_metrics_var.set(metrics)
     try:
         with caplog.at_level(logging.WARNING, logger="services.scoring.distill"):
-            out = distill.distill_job_signals(session, _Job())  # type: ignore[arg-type]
+            out = distill.distill_job_signals(session, _Job())  # pyright: ignore[reportArgumentType]
     finally:
         stage_metrics_var.reset(token)
 
@@ -500,7 +500,7 @@ def test_no_orphans_means_no_warning(monkeypatch, caplog):
     token = stage_metrics_var.set(metrics)
     try:
         with caplog.at_level(logging.WARNING, logger="services.scoring.distill"):
-            distill.distill_job_signals(session, _Job())  # type: ignore[arg-type]
+            distill.distill_job_signals(session, _Job())  # pyright: ignore[reportArgumentType]
     finally:
         stage_metrics_var.reset(token)
 

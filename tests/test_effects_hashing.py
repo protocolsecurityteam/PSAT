@@ -21,7 +21,6 @@ from services.effects.hashing import (
     bytecode_fallback_hash,
     contract_surface_hash,
     resolved_function_hash,
-    source_content_fast_path_hash,
 )
 
 # ---------------------------------------------------------------------------
@@ -32,15 +31,15 @@ from services.effects.hashing import (
 
 def _var(role_cls: str, name: str = "") -> object:
     v = type(role_cls, (), {})()
-    v.name = name  # type: ignore[attr-defined]
+    v.name = name  # pyright: ignore[reportAttributeAccessIssue]
     return v
 
 
 def _ir(op: str, *, read=(), lvalue=None, function=None) -> object:
     inst = type(op, (), {})()
-    inst.read = list(read)  # type: ignore[attr-defined]
-    inst.lvalue = lvalue  # type: ignore[attr-defined]
-    inst.function = function  # type: ignore[attr-defined]
+    inst.read = list(read)  # pyright: ignore[reportAttributeAccessIssue]
+    inst.lvalue = lvalue  # pyright: ignore[reportAttributeAccessIssue]
+    inst.function = function  # pyright: ignore[reportAttributeAccessIssue]
     return inst
 
 
@@ -105,7 +104,7 @@ def test_internal_callee_is_inlined():
 def test_recursion_terminates():
     """A self-recursive internal call must not blow the stack."""
     fn = _fn("R.loop()", nodes=[])
-    fn.nodes = [_node("EXPRESSION", [_ir("InternalCall", function=fn)])]  # type: ignore[attr-defined]
+    fn.nodes = [_node("EXPRESSION", [_ir("InternalCall", function=fn)])]  # pyright: ignore[reportAttributeAccessIssue]
     assert isinstance(resolved_function_hash(fn), str)
 
 
@@ -212,22 +211,6 @@ def test_contract_surface_hash_is_selectorless_and_masks():
 
 
 # ---------------------------------------------------------------------------
-# Item 3 — source-content fast path soundness precondition.
-# ---------------------------------------------------------------------------
-
-
-def test_source_fast_path_refuses_when_overridden_or_multifile():
-    src = "function f() { paused = true; }"
-    assert source_content_fast_path_hash(src, is_overridden=True, single_file=True) is None
-    assert source_content_fast_path_hash(src, is_overridden=False, single_file=False) is None
-    ok = source_content_fast_path_hash(src, is_overridden=False, single_file=True)
-    assert isinstance(ok, str) and ok
-    # Stable and content-sensitive.
-    assert ok == source_content_fast_path_hash(src, is_overridden=False, single_file=True)
-    assert ok != source_content_fast_path_hash(src + " ", is_overridden=False, single_file=True)
-
-
-# ---------------------------------------------------------------------------
 # Real-Slither corroboration (gated behind local solc, offline compile only).
 # ---------------------------------------------------------------------------
 
@@ -242,7 +225,7 @@ def _solc_086() -> str:
         except ValueError:
             continue
         if len(parsed) == 3 and (0, 8, 26) <= parsed and parsed[:2] == (0, 8) and (best is None or parsed > best):
-            best = parsed  # type: ignore[assignment]
+            best = parsed
     if best is None:
         pytest.skip("no installed solc >=0.8.26 (run `solc-select install 0.8.27`)")
     return str(ss.artifact_path(".".join(str(x) for x in best)))

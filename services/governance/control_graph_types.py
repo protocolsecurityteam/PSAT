@@ -70,6 +70,7 @@ from db.models import (
     FunctionPrincipal,
 )
 from db.queue import _mainnet_coalesced_chain
+from schemas.control_tracking import ResolvedControllerType, coerce_resolved_controller_type
 from services.discovery.perimeter import (
     CONTROL_GRAPH_BASIS_KEY,
     FP_MATERIALIZATION_BASIS,
@@ -85,13 +86,13 @@ logger = logging.getLogger(__name__)
 # with the CGN vocabulary verbatim. EOA / contract are intentionally excluded:
 # they're not monitored controllers and writing them would surface unrelated
 # nodes on the Surface canvas (whose node-keep filter admits any principal type).
-_RECONCILABLE_TYPES = ("safe", "timelock", "proxy_admin")
+_RECONCILABLE_TYPES: tuple[ResolvedControllerType, ...] = ("safe", "timelock", "proxy_admin")
 
 # Tie-break when one address holds more than one FP type across functions:
 # prefer the higher-authority kind (a Safe that also looks like a proxy admin
 # is a Safe). Matches the Safe > Timelock > proxy admin precedence used by
 # ``services.governance.primary_controller``.
-_TYPE_PRIORITY = {"safe": 3, "timelock": 2, "proxy_admin": 1}
+_TYPE_PRIORITY: dict[ResolvedControllerType, int] = {"safe": 3, "timelock": 2, "proxy_admin": 1}
 
 # Intrinsic principal-config keys that travel WITH the type — the classifier
 # returns them in the same call (a safe's signer set + threshold, a timelock's
@@ -179,7 +180,7 @@ def reconcile_control_graph_types(session: Session, contract_ids: Sequence[int])
     # each chain (a Safe on ethereum, a Timelock on base), and control edges never
     # cross chains (inv. 15), so a per-address fold would let one chain's higher-
     # priority type overwrite the twin's node on another chain.
-    rows_by_key: dict[tuple[str, str], list[tuple[str, dict[str, Any]]]] = {}
+    rows_by_key: dict[tuple[str, str], list[tuple[ResolvedControllerType, dict[str, Any]]]] = {}
     for chain, addr, resolved_type, details in session.execute(
         select(
             Contract.chain,
@@ -198,12 +199,20 @@ def reconcile_control_graph_types(session: Session, contract_ids: Sequence[int])
         if not addr or not resolved_type:
             continue
         key = (_chain_key(chain), addr)
-        rows_by_key.setdefault(key, []).append((resolved_type, details if isinstance(details, dict) else {}))
+        # The SQL filter above guarantees membership; the coercion carries the
+        # proof to the type level without a cast.
+        rows_by_key.setdefault(key, []).append(
+            (coerce_resolved_controller_type(resolved_type), details if isinstance(details, dict) else {})
+        )
 
-    best_by_key: dict[tuple[str, str], str] = {}
+    def _priority(rt: ResolvedControllerType) -> int:
+        return _TYPE_PRIORITY.get(rt, 0)
+
+    best_by_key: dict[tuple[str, str], ResolvedControllerType] = {}
     intrinsic_by_key: dict[tuple[str, str], dict[str, Any]] = {}
     for key, rows in rows_by_key.items():
-        best = max((rt for rt, _ in rows), key=lambda rt: _TYPE_PRIORITY.get(rt, 0))
+        typed_rows: list[ResolvedControllerType] = [rt for rt, _ in rows]
+        best = max(typed_rows, key=_priority)
         best_by_key[key] = best
         # Intrinsic config comes only from the rows of the winning type — a
         # safe's owners must not bleed onto a timelock-typed write, and vice

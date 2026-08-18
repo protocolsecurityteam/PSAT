@@ -12,11 +12,11 @@ from sqlalchemy.orm import Session
 
 from db.models import IndexedEventCursor, IndexedEventLog, enrollment_basis_permits_exactness
 from services.resolution.adapters import EnumerationResult
+from services.resolution.caller_sources import CALLER_SOURCES as _CALLER_SOURCES
 from utils.logging import record_stage_metric
 
 logger = logging.getLogger(__name__)
 
-_CALLER_SOURCES = {"msg_sender", "tx_origin", "signature_recovery", "root_caller"}
 
 # Tally of partial fold outcomes broken out by ``partial_reason`` — bounded
 # because the reason set is finite (cold index, unresolved key, HyperSync
@@ -478,9 +478,6 @@ class PostgresEventLogRepo:
         if any(block is None or not complete for block, complete in states):
             return None
         return min(block for block, _ in states if block is not None)
-
-    def _cursor_block(self, chain_id: int, event_address: str, topic0: str) -> int | None:
-        return self._cursor_state(chain_id, event_address, topic0)[0]
 
     def _cursor_state(self, chain_id: int, event_address: str, topic0: str) -> tuple[int | None, bool]:
         """``(last_indexed_block, backfill_complete)`` for one cursor, or

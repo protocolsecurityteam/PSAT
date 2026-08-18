@@ -282,7 +282,7 @@ def test_undecisive_slot_only_latch_does_not_mask_a_decisive_one():
 
 def test_zeppelinos_proxy_confirms_when_eip1967_empty():
     """USDC/cbETH family: EIP-1967 impl slot empty, legacy zeppelinos slot set."""
-    from services.resolution.one_shot_probe import ZEPPELINOS_IMPL_SLOT
+    from utils.evm import OZ_LEGACY_IMPL_SLOT as ZEPPELINOS_IMPL_SLOT
 
     rpc = FakeRpc(
         storage={

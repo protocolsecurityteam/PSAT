@@ -11,6 +11,7 @@ from sqlalchemy import func, select
 
 from db.models import Contract, MonitoredContract, MonitoredEvent, Protocol
 from schemas.api_requests import UpdateMonitoredContractRequest, UpsertMonitoredContractRequest
+from schemas.api_responses import MonitoredContractItem, MonitoredEventItem
 from services.monitoring.chain_rpc import chain_id_for, rpc_for_chain
 from services.monitoring.tracking_plan_state import CONFIG_SUPPLIED_BY_CALLER, preserve_scan_plane_facts
 from utils.chains import UnsupportedChainError, require_supported_chain
@@ -99,7 +100,7 @@ def _stamp_caller_supplied(
     return preserve_scan_plane_facts(stamped, existing_config)
 
 
-def _monitored_contract_payload(c: MonitoredContract) -> dict[str, Any]:
+def monitored_contract_payload(c: MonitoredContract) -> MonitoredContractItem:
     return {
         "id": str(c.id),
         "address": c.address,
@@ -120,11 +121,11 @@ def _monitored_contract_payload(c: MonitoredContract) -> dict[str, Any]:
     }
 
 
-@router.get("/api/monitored-contracts")
+@router.get("/api/monitored-contracts", response_model=None)
 def list_monitored_contracts(
     protocol_id: int | None = None,
     chain: str | None = None,
-) -> list[dict[str, Any]]:
+) -> list[MonitoredContractItem]:
     """List all MonitoredContract rows, optionally filtered."""
     with deps.SessionLocal() as session:
         stmt = select(MonitoredContract).order_by(MonitoredContract.created_at.desc())
@@ -133,11 +134,13 @@ def list_monitored_contracts(
         if chain is not None:
             stmt = stmt.where(MonitoredContract.chain == chain)
         contracts = session.execute(stmt).scalars().all()
-        return [_monitored_contract_payload(c) for c in contracts]
+        return [monitored_contract_payload(c) for c in contracts]
 
 
-@router.post("/api/protocols/{protocol_id}/monitoring", dependencies=[Depends(deps.require_admin_key)])
-def upsert_protocol_monitoring(protocol_id: int, request: UpsertMonitoredContractRequest) -> dict[str, Any]:
+@router.post(
+    "/api/protocols/{protocol_id}/monitoring", dependencies=[Depends(deps.require_admin_key)], response_model=None
+)
+def upsert_protocol_monitoring(protocol_id: int, request: UpsertMonitoredContractRequest) -> MonitoredContractItem:
     """Create or update one monitored contract for a protocol."""
     # Allowlist enforcement (inv. 14): enrolling a contract on a chain takes
     # scanner leases and RPC on that chain, so a chain this deployment has not
@@ -205,11 +208,13 @@ def upsert_protocol_monitoring(protocol_id: int, request: UpsertMonitoredContrac
         session.commit()
         session.refresh(existing)
         deps.log_admin_mutation("monitoring_upsert", id=str(existing.id), protocol_id=protocol_id)
-        return _monitored_contract_payload(existing)
+        return monitored_contract_payload(existing)
 
 
-@router.patch("/api/monitored-contracts/{contract_id}", dependencies=[Depends(deps.require_admin_key)])
-def update_monitored_contract(contract_id: str, request: UpdateMonitoredContractRequest) -> dict[str, Any]:
+@router.patch(
+    "/api/monitored-contracts/{contract_id}", dependencies=[Depends(deps.require_admin_key)], response_model=None
+)
+def update_monitored_contract(contract_id: str, request: UpdateMonitoredContractRequest) -> MonitoredContractItem:
     """Update monitoring_config, is_active, or needs_polling on a MonitoredContract."""
     try:
         parsed = uuid.UUID(contract_id)
@@ -230,17 +235,17 @@ def update_monitored_contract(contract_id: str, request: UpdateMonitoredContract
         session.commit()
         session.refresh(mc)
         deps.log_admin_mutation("monitored_contract_update", id=str(mc.id))
-        return _monitored_contract_payload(mc)
+        return monitored_contract_payload(mc)
 
 
-@router.get("/api/monitored-events")
+@router.get("/api/monitored-events", response_model=None)
 def list_monitored_events(
     contract_id: str | None = None,
     address: str | None = None,
     chain: str | None = None,
     event_type: str | None = None,
     limit: int = Query(default=50, ge=1, le=500),
-) -> list[dict[str, Any]]:
+) -> list[MonitoredEventItem]:
     """List MonitoredEvent rows, optionally filtered.
 
     Filter modes (apply additively):

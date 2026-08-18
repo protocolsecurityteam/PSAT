@@ -35,12 +35,14 @@ from typing import Any, Protocol, cast
 
 from eth_utils.crypto import keccak
 
+from services.resolution.caller_sources import CALLER_SOURCES as _CALLER_SOURCES
 from services.static.contract_analysis_pipeline.predicate_types import (
     LeafPredicate,
     PredicateTree,
     SetDescriptor,
 )
 from services.static.contract_analysis_pipeline.shared import external_bool_leaf_is_gate_shape
+from utils.evm import OWNER_SELECTOR
 from utils.logging import record_stage_metric
 
 from .capabilities import (
@@ -63,7 +65,6 @@ from .permissionless_shapes import (
 
 logger = logging.getLogger(__name__)
 
-_CALLER_SOURCES = {"msg_sender", "tx_origin", "signature_recovery", "root_caller"}
 
 # Telemetry for the delegated-role-gate durability invariant (CONTROLLER_RESOLUTION_
 # SPEC §5): the guard closing a fail-open, and the broader tripwire of a caller gate
@@ -733,7 +734,7 @@ def _nullary_getter_selector(name: str | None) -> str | None:
 # public view getter, which reads the same storage, so we read that live instead.
 # OZ v4 keeps a plain ``_owner`` state var and OZ v5 keeps it in a namespaced
 # storage struct, but both expose ``owner()`` identically.
-_OWNER_SELECTOR = "0x8da5cb5b"  # owner()
+_OWNER_SELECTOR = OWNER_SELECTOR
 _GOVERNOR_SELECTOR = "0x0c340a24"  # governor()
 _AUTHORITY_SELECTOR = "0xbf7e214f"  # authority()
 
@@ -1812,7 +1813,7 @@ def _observed_event_key_words_from_hypersync(
 
     async def _scan() -> list[str]:
         try:
-            import hypersync  # type: ignore
+            import hypersync
         except Exception:
             return []
         from services.resolution.repos.event_logs_hypersync import _hypersync_url_for_chain
@@ -2210,7 +2211,7 @@ def _maybe_inline_cross_contract_call(
     from services.resolution.adapters import AdapterRegistry as _Reg
 
     registry_adapters = (
-        ctx.adapter._registry  # type: ignore[attr-defined]
+        ctx.adapter._registry  # pyright: ignore[reportAttributeAccessIssue]
         if hasattr(ctx.adapter, "_registry")
         else _Reg()
     )
@@ -2791,7 +2792,7 @@ def _condition_from_leaf(leaf: LeafPredicate) -> Condition:
         # business leaf): record that this open is a permit, not a bare open.
         kind = "permit_sig"
     return Condition(
-        kind=kind,  # type: ignore[arg-type]
+        kind=kind,
         description=leaf.get("expression") or "",
     )
 

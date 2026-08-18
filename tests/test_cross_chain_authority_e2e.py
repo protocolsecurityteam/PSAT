@@ -40,8 +40,8 @@ import services.resolution.tracking as tracking
 from services.policy.principal_enrichment import build_principal_labels
 from services.resolution.cross_chain_authority import (
     CROSS_CHAIN_AUTHORITY_TYPE,
-    apply_l1_to_l2_alias,
     make_cross_chain_recognizer,
+    undo_l1_to_l2_alias,
 )
 from services.resolution.tracking import clear_classify_cache
 from utils.concurrency import RpcExecutor
@@ -61,7 +61,7 @@ L1_PROXY_ADMIN_OWNER = "0x7bb41c3008b3f03fe483b28b8db90e19cf07595c"
 # and cross-checked against the recognizer's own transform so the fixture and the
 # code under test cannot silently drift.
 ALIASED_L1_OWNER = "0x8cc51c3008b3f03fe483b28b8db90e19cf076a6d"
-assert apply_l1_to_l2_alias(L1_PROXY_ADMIN_OWNER) == ALIASED_L1_OWNER
+assert undo_l1_to_l2_alias(ALIASED_L1_OWNER) == L1_PROXY_ADMIN_OWNER
 
 # Native Base principals (arbitrary Base-local addresses, NOT cross-chain).
 NATIVE_EOA_OWNER = "0x" + "ab" * 20

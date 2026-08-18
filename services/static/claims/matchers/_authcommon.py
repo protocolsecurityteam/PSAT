@@ -13,6 +13,8 @@ from __future__ import annotations
 from collections.abc import Iterator
 from typing import Any
 
+from utils.evm import CANCALL_SIGNATURE
+
 from ..context import ClaimContext, abi_selector
 
 # --- canonical 4-byte selectors (interface/enum params normalized) ----------
@@ -40,7 +42,7 @@ ROLE_HOLDERS = abi_selector("roleHolders(uint256)")  # Solady EnumerableRoles
 SET_USER_ROLE = abi_selector("setUserRole(address,uint8,bool)")  # Solmate
 SET_ROLE_CAPABILITY = abi_selector("setRoleCapability(uint8,address,bytes4,bool)")
 SET_PUBLIC_CAPABILITY = abi_selector("setPublicCapability(address,bytes4,bool)")
-CAN_CALL = abi_selector("canCall(address,address,bytes4)")  # Solmate Authority
+CAN_CALL = abi_selector(CANCALL_SIGNATURE)  # Solmate Authority
 RELY = abi_selector("rely(address)")  # Maker wards
 DENY = abi_selector("deny(address)")  # Maker wards
 SET_AUTHORITY = abi_selector("setAuthority(address)")  # Solmate Auth/DSAuth
@@ -126,16 +128,12 @@ def clean_scalar_writes(ctx: ClaimContext, function: str) -> set[str]:
     return out
 
 
-def writes_state_var(ctx: ClaimContext, function: str, name: str) -> bool:
-    return name in clean_scalar_writes(ctx, function)
-
-
 def _cache(ctx: ClaimContext) -> dict[str, Any]:
     cache = getattr(ctx, "_auth_family_cache", None)
     if cache is None:
         cache = {}
         try:
-            ctx._auth_family_cache = cache  # type: ignore[attr-defined]
+            ctx._auth_family_cache = cache  # pyright: ignore[reportAttributeAccessIssue]
         except Exception:
             pass
     return cache

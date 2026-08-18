@@ -34,11 +34,10 @@ from services.static.contract_analysis_pipeline.tracking import (  # noqa: E402
     _writer_survives_hygiene,
 )
 from services.static.contract_analysis_pipeline.writer_openness import (  # noqa: E402
-    WRITER_OPENNESS_NOT_DETERMINED,
-    WRITER_OPENNESS_RESTRICTED,
     openness_of_write_paths,
     restricted_function_signatures,
 )
+from utils.scoring_status import OPENNESS_NOT_DETERMINED, OPENNESS_RESTRICTED  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # writer_openness — "the gate holds on every path"
@@ -121,16 +120,16 @@ def test_a_function_without_a_tree_is_not_determined():
 
 def test_one_unrestricted_path_demotes_the_event():
     restricted = frozenset({"a()", "b()"})
-    assert openness_of_write_paths({"a()"}, {"a()"}, restricted) == WRITER_OPENNESS_RESTRICTED
-    assert openness_of_write_paths({"a()"}, {"a()", "b()"}, restricted) == WRITER_OPENNESS_RESTRICTED
+    assert openness_of_write_paths({"a()"}, {"a()"}, restricted) == OPENNESS_RESTRICTED
+    assert openness_of_write_paths({"a()"}, {"a()", "b()"}, restricted) == OPENNESS_RESTRICTED
     # An open EMITTER demotes.
-    assert openness_of_write_paths({"a()", "c()"}, {"a()", "c()"}, restricted) == WRITER_OPENNESS_NOT_DETERMINED
+    assert openness_of_write_paths({"a()", "c()"}, {"a()", "c()"}, restricted) == OPENNESS_NOT_DETERMINED
     # An open WRITER demotes even when every emitter we found is gated — this
     # is the arm that survives an emitter set the IR walk could not complete.
-    assert openness_of_write_paths({"a()"}, {"a()", "c()"}, restricted) == WRITER_OPENNESS_NOT_DETERMINED
+    assert openness_of_write_paths({"a()"}, {"a()", "c()"}, restricted) == OPENNESS_NOT_DETERMINED
     # Nothing proven about paths we never found.
-    assert openness_of_write_paths(set(), {"a()"}, restricted) == WRITER_OPENNESS_NOT_DETERMINED
-    assert openness_of_write_paths({"a()"}, set(), restricted) == WRITER_OPENNESS_NOT_DETERMINED
+    assert openness_of_write_paths(set(), {"a()"}, restricted) == OPENNESS_NOT_DETERMINED
+    assert openness_of_write_paths({"a()"}, set(), restricted) == OPENNESS_NOT_DETERMINED
 
 
 def test_the_kill_switch_cannot_promote(monkeypatch):
@@ -433,10 +432,10 @@ def test_a_legacy_witness_under_a_slot_type_does_not_promote():
         "member_witness": witness,
         "writer_openness": "restricted",
     }
-    assert _resolve_spec_tier(slot_typed, mc) == WITNESS_TIER_ACTIVITY  # type: ignore[arg-type]
+    assert _resolve_spec_tier(slot_typed, mc) == WITNESS_TIER_ACTIVITY  # pyright: ignore[reportArgumentType]
 
     member_typed = dict(slot_typed, event_type="member_changed:m")
-    assert _resolve_spec_tier(member_typed, mc) == WITNESS_TIER_SELF_DESCRIBING  # type: ignore[arg-type]
+    assert _resolve_spec_tier(member_typed, mc) == WITNESS_TIER_SELF_DESCRIBING  # pyright: ignore[reportArgumentType]
 
 
 def test_member_change_never_reflects_into_last_known_state():
@@ -446,7 +445,7 @@ def test_member_change_never_reflects_into_last_known_state():
 
     mc = SimpleNamespace(last_known_state={"m": "before"})
     _update_state_from_event(
-        mc,  # type: ignore[arg-type]
+        mc,  # pyright: ignore[reportArgumentType]
         {"event_type": "member_changed:m", "effect_tags": {"writes": ["m"]}, "key": "0xabc", "direction": "add"},
     )
     assert mc.last_known_state == {"m": "before"}
@@ -459,7 +458,7 @@ def test_member_change_never_writes_a_controller_value_row():
 
     mc = SimpleNamespace(contract_id=1, address="0x" + "11" * 20, chain="ethereum")
     _sync_relational_tables(
-        None,  # type: ignore[arg-type]
-        mc,  # type: ignore[arg-type]
+        None,  # pyright: ignore[reportArgumentType]
+        mc,  # pyright: ignore[reportArgumentType]
         {"event_type": "member_changed:m", "effect_tags": {"writes": ["m"]}, "key": "0xabc", "direction": "add"},
     )

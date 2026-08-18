@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from services.resolution.permissionless_shapes import CALLER_GATE_BASIS_TAGS, earned_public_enabled
+from utils.scoring_status import OPENNESS_STATES, TRACE_STEP_ENUMERABLE_ROLE_STORE, TRACE_STEP_SOLMATE_ROLES_AUTHORITY
 
 
 @dataclass
@@ -39,7 +40,7 @@ class CapabilitySurface:
 #: Three-state authority verdict persisted alongside ``authority_public``
 #: (``effective_functions.authority_openness``). See
 #: ``capability_surface_openness``.
-AUTHORITY_OPENNESS_VALUES = ("open", "restricted", "not_determined")
+AUTHORITY_OPENNESS_VALUES = OPENNESS_STATES
 
 
 def capability_surface_openness(cap_dict: dict[str, Any], surface: CapabilitySurface) -> str:
@@ -229,8 +230,7 @@ def _last_indexed_blocks(cap_dict: Any) -> list[int]:
 #: role requirement; ``enumerable_role_store`` deliberately DISSOLVES role identity
 #: (it probes the gate, never a role name), so a row
 #: resolved by it is role-gated with the role NOT determined.
-_ROLE_WITNESSING_TRACE_STEP = "solmate_roles_authority"
-_ROLE_DISSOLVING_TRACE_STEPS = frozenset({"enumerable_role_store"})
+_ROLE_DISSOLVING_TRACE_STEPS = frozenset({TRACE_STEP_ENUMERABLE_ROLE_STORE})
 
 
 def capability_role_grants(cap_dict: dict[str, Any]) -> list[dict[str, Any]] | None:
@@ -292,7 +292,7 @@ def capability_role_grants(cap_dict: dict[str, Any]) -> list[dict[str, Any]] | N
             if name in _ROLE_DISSOLVING_TRACE_STEPS:
                 not_determined = True
                 continue
-            if name != _ROLE_WITNESSING_TRACE_STEP:
+            if name != TRACE_STEP_SOLMATE_ROLES_AUTHORITY:
                 continue
             roles = [r for r in (step.get("roles") or []) if isinstance(r, int)]
             if not roles:

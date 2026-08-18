@@ -39,23 +39,18 @@ from __future__ import annotations
 import logging
 from typing import Any, cast
 
-try:
-    from slither.core.cfg.node import NodeType  # type: ignore[import]
-    from slither.slithir.operations import (  # type: ignore[import]
-        Assignment,
-        Delete,
-        HighLevelCall,
-        InternalCall,
-        LibraryCall,
-        SolidityCall,
-    )
-    from slither.slithir.variables import Constant  # type: ignore[import]
-
-    SLITHER_AVAILABLE = True
-except Exception:  # pragma: no cover
-    SLITHER_AVAILABLE = False
-
 from .predicate_types import LeafPredicate, PredicateTree
+from .slither_compat import (
+    SLITHER_AVAILABLE,
+    Assignment,
+    Constant,
+    Delete,
+    HighLevelCall,
+    InternalCall,
+    LibraryCall,
+    NodeType,
+    SolidityCall,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -502,7 +497,7 @@ def _apply_structural_candidates(contract: Any, predicate_trees: dict[str, Predi
                 slot_writes = _assembly_slot_writes(fn)
             payload = _modifier_slot_candidate(fn, slot_writes)
             if payload is not None:
-                tree["one_shot_candidate_latch"] = payload  # type: ignore[typeddict-unknown-key]
+                tree["one_shot_candidate_latch"] = payload
 
 
 def _candidate_leaf_shape(leaf: LeafPredicate) -> bool:

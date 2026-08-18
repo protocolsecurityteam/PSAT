@@ -106,11 +106,3 @@ class InteractionLog:
             }
             for addr, info in sorted(by_addr.items())
         ]
-
-    def get_permits(self) -> list[CapturedInteraction]:
-        """Get all permit signature requests."""
-        return [i for i in self.interactions if i.is_permit]
-
-    def get_transactions(self) -> list[CapturedInteraction]:
-        """Get all sendTransaction captures."""
-        return [i for i in self.interactions if i.type == "sendTransaction"]

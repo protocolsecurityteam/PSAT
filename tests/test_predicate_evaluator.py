@@ -444,7 +444,7 @@ def test_caller_dependent_unsupported_stays_unsupported():
             "basis": [],
         },
     }
-    cap = evaluate_tree(tree)  # type: ignore[arg-type]
+    cap = evaluate_tree(tree)  # pyright: ignore[reportArgumentType]
     assert cap.kind == "unsupported"
     assert cap.unsupported_reason == "test_unsupported"
 
@@ -466,7 +466,7 @@ def test_zero_address_equality_is_empty_principal_set():
             "basis": [],
         },
     }
-    cap = evaluate_tree(tree, EvaluationContext(state_var_values={"owner": "0x" + "0" * 40}))  # type: ignore[arg-type]
+    cap = evaluate_tree(tree, EvaluationContext(state_var_values={"owner": "0x" + "0" * 40}))  # pyright: ignore[reportArgumentType]
     assert cap.kind == "finite_set"
     assert cap.members == []
     assert cap.membership_quality == "exact"
@@ -497,7 +497,7 @@ def test_state_variable_member_path_equality_uses_projected_controller_value():
     cap = evaluate_tree(
         cast(PredicateTree, tree),
         EvaluationContext(state_var_values={"accountantState.payoutAddress": payout}),
-    )  # type: ignore[arg-type]
+    )
     assert cap.kind == "finite_set"
     assert cap.members == [payout]
     assert cap.membership_quality == "exact"
@@ -519,7 +519,7 @@ def test_self_address_equality_resolves_to_contract_principal():
         },
     }
 
-    cap = evaluate_tree(tree, EvaluationContext(contract_address=contract_address))  # type: ignore[arg-type]
+    cap = evaluate_tree(tree, EvaluationContext(contract_address=contract_address))  # pyright: ignore[reportArgumentType]
 
     assert cap.kind == "finite_set"
     assert cap.members == [contract_address]
@@ -542,7 +542,7 @@ def test_call_frame_normalization_keeps_self_bound_parameters_symbolic():
     }
     frame = CallFrame(bound_parameters=(operand,))
 
-    normalized = _normalize_tree_for_frame(tree, frame)  # type: ignore[arg-type]
+    normalized = _normalize_tree_for_frame(tree, frame)  # pyright: ignore[reportArgumentType]
 
     normalized_leaf = cast(dict[str, Any], normalized.get("leaf"))
     assert normalized_leaf["operands"] == [operand]
@@ -664,7 +664,7 @@ def test_inlined_callee_msg_sender_equality_is_call_edge_condition(monkeypatch):
         ),
     )
 
-    cap = evaluate_tree_with_registry(target_tree, AdapterRegistry(), ctx)  # type: ignore[arg-type]
+    cap = evaluate_tree_with_registry(target_tree, AdapterRegistry(), ctx)  # pyright: ignore[reportArgumentType]
 
     assert cap.kind == "finite_set"
     assert cap.members == [manager_addr]
@@ -729,7 +729,7 @@ def test_view_call_mapping_key_expands_to_returned_role_members(monkeypatch):
         },
     }
 
-    cap = evaluate_tree(tree, EvaluationContext(contract_address="0x" + "11" * 20, adapter=Adapter()))  # type: ignore[arg-type]
+    cap = evaluate_tree(tree, EvaluationContext(contract_address="0x" + "11" * 20, adapter=Adapter()))  # pyright: ignore[reportArgumentType]
 
     assert cap.kind == "finite_set"
     assert cap.members == [member]
@@ -844,7 +844,7 @@ def test_delegated_check_conditional_inline_preserves_structural_result(monkeypa
         ),
     )
 
-    cap = evaluate_tree_with_registry(target_tree, AdapterRegistry(), ctx)  # type: ignore[arg-type]
+    cap = evaluate_tree_with_registry(target_tree, AdapterRegistry(), ctx)  # pyright: ignore[reportArgumentType]
 
     assert cap.kind == "conditional_universal"
     assert cap.conditions
@@ -966,7 +966,7 @@ def test_delegated_opaque_checker_materializes_with_zero_arg_getter(monkeypatch)
         ),
     )
 
-    cap = evaluate_tree_with_registry(target_tree, AdapterRegistry(), ctx)  # type: ignore[arg-type]
+    cap = evaluate_tree_with_registry(target_tree, AdapterRegistry(), ctx)  # pyright: ignore[reportArgumentType]
 
     assert cap.kind == "finite_set"
     assert cap.members == [member]

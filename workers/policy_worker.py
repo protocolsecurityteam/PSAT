@@ -504,8 +504,11 @@ def _selector_by_function_key(function_records: list[dict] | None) -> dict[str, 
 class PolicyWorker(BaseWorker):
     stage = JobStage.policy
 
+    # Read-only by contract: nothing ever assigns ``self.next_stage``, so a
+    # property satisfies every consumer — but the base declares it as a plain
+    # writable attribute, which pyright cannot reconcile with an override.
     @property
-    def next_stage(self) -> JobStage:
+    def next_stage(self) -> JobStage:  # pyright: ignore[reportIncompatibleVariableOverride]
         """Flag-dynamic transition: route into ``effects``
         only when ``PSAT_EFFECTS_STAGE`` is armed, else straight to
         ``coverage``. The flag gates the *transition itself* — with it off no

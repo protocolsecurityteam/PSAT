@@ -147,7 +147,7 @@ class HyperSyncEventLogRepo:
             return EnumerationResult(members=[], confidence="partial", partial_reason="unresolved_event_key")
 
         try:
-            import hypersync  # type: ignore
+            import hypersync
 
             from services.resolution.hypersync_bound import build_hypersync_client
 
@@ -270,7 +270,7 @@ class HyperSyncEventLogRepo:
             return EnumerationResult(members=[], confidence="partial", partial_reason="ambiguous_event_direction")
 
         try:
-            import hypersync  # type: ignore
+            import hypersync
 
             from services.resolution.hypersync_bound import build_hypersync_client
 

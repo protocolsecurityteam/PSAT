@@ -38,21 +38,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-try:
-    from slither.core.cfg.node import NodeType  # type: ignore[import]
-    from slither.core.declarations.modifier import Modifier  # type: ignore[import]
-    from slither.slithir.operations import (  # type: ignore[import]
-        Condition,
-        HighLevelCall,
-        InternalCall,
-        LibraryCall,
-    )
-
-    SLITHER_AVAILABLE = True
-except Exception:  # pragma: no cover
-    SLITHER_AVAILABLE = False
-    Modifier = type(None)  # placeholder
-
+from .slither_compat import (
+    SLITHER_AVAILABLE,
+    Condition,
+    HighLevelCall,
+    InternalCall,
+    LibraryCall,
+    NodeType,
+)
 
 DEFAULT_INTERNAL_CALL_DEPTH = 4
 
@@ -687,7 +680,7 @@ class RevertDetector:
         We only scan the catch arm — the success arm of a try is
         the call's lvalue path and doesn't itself revert."""
         try:
-            catch_type = NodeType.CATCH  # type: ignore[attr-defined]
+            catch_type = NodeType.CATCH
         except AttributeError:
             return False
         # First descend into the CATCH siblings; the TRY node's sons

@@ -315,13 +315,14 @@ def test_merge_uses_impl_name_and_propagates_company():
         "contract_name": "LiquidityPool",
     }
 
-    merged = _merge_proxy_impl_entries([proxy_entry, impl_entry])
+    # Partial test payloads: the merge reads via .get, full AnalysisListEntry not needed.
+    merged = _merge_proxy_impl_entries([proxy_entry, impl_entry])  # pyright: ignore[reportArgumentType]
     assert len(merged) == 1
     # Merge sets display_name from impl's contract_name directly (no chain suffix)
-    assert merged[0]["display_name"] == "LiquidityPool"
+    assert merged[0].get("display_name") == "LiquidityPool"
     assert merged[0]["company"] == "TestCo"
     assert merged[0]["rank_score"] == 0.8
-    assert merged[0]["proxy_address_display"] == PROXY
+    assert merged[0].get("proxy_address_display") == PROXY
 
 
 def test_display_name_chain_suffix_and_generic_fallback():
@@ -370,10 +371,10 @@ def test_proxy_with_completed_impl_visible_after_merge():
         "proxy_address": "0x3333333333333333333333333333333333333333",
         "contract_name": "EETH",
     }
-    merged = _merge_proxy_impl_entries([proxy_entry, impl_entry])
+    merged = _merge_proxy_impl_entries([proxy_entry, impl_entry])  # pyright: ignore[reportArgumentType]
     assert len(merged) == 1
-    assert merged[0]["display_name"] == "EETH"
-    assert merged[0]["proxy_address_display"] == "0x3333333333333333333333333333333333333333"
+    assert merged[0].get("display_name") == "EETH"
+    assert merged[0].get("proxy_address_display") == "0x3333333333333333333333333333333333333333"
 
 
 def test_orphan_impl_appears_in_merged_list():
@@ -394,7 +395,7 @@ def test_orphan_impl_appears_in_merged_list():
         "proxy_address": "0x9999999999999999999999999999999999999999",
         "contract_name": "Impl",
     }
-    merged = _merge_proxy_impl_entries([orphan])
+    merged = _merge_proxy_impl_entries([orphan])  # pyright: ignore[reportArgumentType]
     assert len(merged) == 1
 
 
@@ -912,7 +913,7 @@ def test_resolution_worker_rewrites_address_for_impl_jobs(monkeypatch):
 
     monkeypatch.setattr("workers.resolution_worker.resolve_control_graph", fake_resolve_graph)
 
-    worker.process(session, job)  # type: ignore[arg-type]
+    worker.process(session, job)
 
     # The tracking plan should have proxy address, not impl
     assert captured_plans[0]["contract_address"] == PROXY
@@ -986,7 +987,7 @@ def test_tracking_plan_preserves_controller_ids_and_read_specs():
         ],
     }
 
-    plan = build_control_tracking_plan(analysis)  # type: ignore[arg-type]
+    plan = build_control_tracking_plan(analysis)  # pyright: ignore[reportArgumentType]
 
     assert plan["contract_address"] == "0x1111111111111111111111111111111111111111"
     assert plan["contract_name"] == "Vault"
@@ -1085,7 +1086,7 @@ def test_discovery_company_mode_advances_to_selection(monkeypatch):
     monkeypatch.setattr(worker, "_spawn_parallel_discovery", lambda *_a, **_kw: None)
 
     try:
-        worker.process(session, job)  # type: ignore[arg-type]
+        worker.process(session, job)  # pyright: ignore[reportArgumentType]
     except JobHandledDirectly:
         pass  # expected hand-off signal
 
@@ -1174,7 +1175,7 @@ def test_discovery_reads_and_writes_protocol_declared_chains(monkeypatch):
     monkeypatch.setattr("services.discovery.run_discovery.run_discovery", fake_run_discovery)
 
     try:
-        worker.process(session, job)  # type: ignore[arg-type]
+        worker.process(session, job)  # pyright: ignore[reportArgumentType]
     except JobHandledDirectly:
         pass
 
@@ -1239,7 +1240,7 @@ def test_static_worker_reads_discovery_artifacts(monkeypatch):
     monkeypatch.setattr(worker, "_run_tracking_plan_phase", lambda *_a, **_kw: None)
     monkeypatch.setattr(worker, "update_detail", lambda *_a, **_kw: None)
 
-    worker.process(session, job)  # type: ignore[arg-type]
+    worker.process(session, job)
 
     assert len(scaffold_args) == 1
     passed_sources, passed_meta, passed_build, passed_remap = scaffold_args[0]
@@ -1456,7 +1457,7 @@ def test_static_worker_proxy_skips_analysis_and_completes(monkeypatch):
     monkeypatch.setattr(worker, "_run_tracking_plan_phase", lambda *_a, **_kw: slither_called.append(True))
 
     try:
-        worker.process(session, job)  # type: ignore[arg-type]
+        worker.process(session, job)
         assert False, "Expected JobHandledDirectly"
     except JobHandledDirectly:
         pass
@@ -1536,7 +1537,7 @@ def test_policy_worker_fails_cleanly_on_missing_artifacts(monkeypatch):
     import pytest
 
     with pytest.raises(RuntimeError, match="contract_analysis"):
-        worker.process(session, job)  # type: ignore[arg-type]
+        worker.process(session, job)
 
     # contract_analysis present but control_snapshot missing
     monkeypatch.setattr(
@@ -1545,7 +1546,7 @@ def test_policy_worker_fails_cleanly_on_missing_artifacts(monkeypatch):
     )
 
     with pytest.raises(RuntimeError, match="control_snapshot"):
-        worker.process(session, job)  # type: ignore[arg-type]
+        worker.process(session, job)
 
 
 # ===================================================================
@@ -1570,7 +1571,7 @@ def test_resolution_worker_fails_on_missing_artifacts(monkeypatch):
         lambda _s, _j, name: None,
     )
     with pytest.raises(RuntimeError, match="control_tracking_plan"):
-        worker.process(session, job)  # type: ignore[arg-type]
+        worker.process(session, job)
 
     # tracking plan present but contract_analysis missing
     monkeypatch.setattr(
@@ -1580,4 +1581,4 @@ def test_resolution_worker_fails_on_missing_artifacts(monkeypatch):
         ),
     )
     with pytest.raises(RuntimeError, match="contract_analysis"):
-        worker.process(session, job)  # type: ignore[arg-type]
+        worker.process(session, job)

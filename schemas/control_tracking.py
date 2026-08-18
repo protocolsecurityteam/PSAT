@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal, TypedDict
+from typing import Literal, TypedDict, cast, get_args
 
 from typing_extensions import NotRequired
 
@@ -17,11 +17,6 @@ from .contract_analysis import (
 TrackingStrategy = Literal["event_first_with_polling_fallback"]
 PollingCadence = Literal["realtime_confirm", "periodic_reconciliation", "state_only"]
 WatchTransport = Literal["wss_logs"]
-ChangeKind = Literal[
-    "controller_value_changed",
-    "controller_event_observed",
-    "controller_tracking_gap",
-]
 ResolvedControllerType = Literal[
     "zero",
     "eoa",
@@ -37,6 +32,35 @@ ResolvedControllerType = Literal[
     # A label, not a cross-chain control edge.
     "cross_chain_authority",
 ]
+
+# Derived from the Literal so a membership set can never drift from the type.
+RESOLVED_CONTROLLER_TYPES: frozenset[str] = frozenset(get_args(ResolvedControllerType))
+
+
+def coerce_resolved_controller_type(value: object) -> ResolvedControllerType:
+    """Boundary validator for ``resolved_type`` values of unproven provenance
+    (persisted artifacts, pre-seeded caches, JSONB rows).
+
+    Only a proven vocabulary member passes through; ``None``, the stringified
+    ``"None"`` a legacy store could carry, and any out-of-vocabulary token all
+    surface as ``"unknown"`` — the vocabulary's not-determined arm — because a
+    token nothing downstream knows licenses no concrete branch.
+    """
+    if value is None:
+        return "unknown"
+    text = str(value)
+    if text in RESOLVED_CONTROLLER_TYPES:
+        return cast(ResolvedControllerType, text)
+    return "unknown"
+
+
+# ``monitored_contracts.contract_type``. ``proxy_admin`` controllers are stored
+# as ``"proxy"`` (the historical mapping in ``controllers_for_protocol``).
+# ``role_control`` and ``contract`` are legacy-row shapes no producer mints today
+# (watcher tests register them directly); both stay admissible so re-upserts of
+# such rows cannot 422 and the DB CHECK admits the test-planted states.
+MonitoredContractType = Literal["regular", "proxy", "safe", "timelock", "pausable", "role_control", "contract"]
+MONITORED_CONTRACT_TYPES: frozenset[str] = frozenset(get_args(MonitoredContractType))
 
 
 class EventWatch(TypedDict):
@@ -72,6 +96,8 @@ class ControlTrackingPlan(TypedDict):
     contract_address: str
     contract_name: str
     tracking_strategy: TrackingStrategy
+    # Required on every fresh build; legacy persisted artifacts may lack it,
+    # but those are read as untyped JSONB (``.get``), never as this type.
     tracked_controllers: list[TrackedController]
 
 
@@ -91,21 +117,9 @@ class ControlSnapshotValue(TypedDict):
 class ControlSnapshot(TypedDict):
     schema_version: str
     contract_address: str
+    # contract_name/controller_values: required on every fresh build; legacy
+    # persisted artifacts may lack them, but those are read as untyped JSONB
+    # (``.get``), never as this type.
     contract_name: str
     block_number: int
     controller_values: dict[str, ControlSnapshotValue]
-
-
-class ControlChangeEvent(TypedDict):
-    schema_version: str
-    contract_address: str
-    contract_name: str
-    change_kind: ChangeKind
-    controller_id: str
-    block_number: int
-    tx_hash: str | None
-    old_value: str | None
-    new_value: str | None
-    observed_via: str
-    notes: list[str]
-    event_signature: str | None

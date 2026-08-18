@@ -30,10 +30,14 @@ from utils.balance_status import (
     SWEEP_STATUS_COMPLETED,
     TYPED_PER_ID_BASES,
 )
+from utils.execution_record import GATE_CLAIM_NOT_CORROBORATED
 from utils.scoring_status import (
+    OPENNESS_OPEN,
+    OPENNESS_RESTRICTED,
     PERIMETER_NOT_DETERMINED,
     PERIMETER_SETTLED,
     PERIMETER_UNSETTLED,
+    TRACE_STEP_SOLMATE_ROLES_AUTHORITY,
 )
 
 if TYPE_CHECKING:
@@ -401,15 +405,6 @@ class ValuePlane:
         if self.unpriced_positions.get(canonical):
             return EMPTY_REFUSED_UNPRICED_POSITIONS
         return None
-
-    def asset_is_disposed(self, key: str, asset: str) -> bool:
-        """Whether THIS reading's every incoming delivery was a mass distribution.
-
-        Read at the canonical key, like every other sheet question. ``False`` is
-        the absence of the evidence and never a proof that the asset arrived
-        some other way.
-        """
-        return asset in (self.asset_disposition.get(self.canonical(key)) or {})
 
     def disposition_refusal(self, key: str) -> str | None:
         """Why this sheet's dispositions may not DETERMINE it, or ``None``.
@@ -3384,8 +3379,8 @@ _RESOLVED_CODELESS = "eoa"
 # ``effective_functions.authority_openness``: the only value that witnesses a
 # gate, and the value that witnesses its proven absence. Everything else is the
 # third state.
-_OPENNESS_RESTRICTED = "restricted"
-_OPENNESS_PUBLIC = "open"
+_OPENNESS_RESTRICTED = OPENNESS_RESTRICTED
+_OPENNESS_PUBLIC = OPENNESS_OPEN
 
 
 @dataclass
@@ -4553,7 +4548,7 @@ MEMBERSHIP_QUALITY_EXACT = "exact"
 # record, per (destination, selector). The corroborating one is contract-scoped
 # and cannot separate two selectors on one host that consult different
 # authorities, so it is admitted as a cross-check and never as the source.
-SOLMATE_ROLES_AUTHORITY_STEP = "solmate_roles_authority"
+SOLMATE_ROLES_AUTHORITY_STEP = TRACE_STEP_SOLMATE_ROLES_AUTHORITY
 AUTHORITY_CONTROLLER_ID = "external_contract:authority"
 # The gate's own admission that it could not resolve the authority it consults.
 CALLER_TAINTED_AUTHORITY_UNRESOLVED = "caller_tainted_authority_unresolved"
@@ -4598,7 +4593,7 @@ DELETABILITY_REASONS = (
 # the second is one that answered differently, and only the second is evidence.
 CROSSCHECK_AGREES = "agrees"
 CROSSCHECK_DISAGREES = "disagrees"
-CROSSCHECK_NOT_CORROBORATED = "not_corroborated"
+CROSSCHECK_NOT_CORROBORATED = GATE_CLAIM_NOT_CORROBORATED
 CROSSCHECK_NOT_COMPARED = "not_compared"
 
 

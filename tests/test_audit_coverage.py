@@ -881,7 +881,7 @@ def test_extract_reviewed_commits_empty_input_safe():
     from services.audits.source_equivalence import extract_reviewed_commits
 
     assert extract_reviewed_commits("") == []
-    assert extract_reviewed_commits(None) == []  # type: ignore[arg-type]
+    assert extract_reviewed_commits(None) == []  # pyright: ignore[reportArgumentType]
 
 
 # ---------------------------------------------------------------------------

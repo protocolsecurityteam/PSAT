@@ -28,9 +28,9 @@ def browser_module(monkeypatch: pytest.MonkeyPatch):
     """Stub Playwright before importing the browser module."""
     pw = ModuleType("playwright")
     pw_async = ModuleType("playwright.async_api")
-    pw_async.async_playwright = MagicMock()  # type: ignore[attr-defined]
-    pw_async.BrowserContext = MagicMock()  # type: ignore[attr-defined]
-    pw_async.Page = MagicMock()  # type: ignore[attr-defined]
+    pw_async.async_playwright = MagicMock()  # pyright: ignore[reportAttributeAccessIssue]
+    pw_async.BrowserContext = MagicMock()  # pyright: ignore[reportAttributeAccessIssue]
+    pw_async.Page = MagicMock()  # pyright: ignore[reportAttributeAccessIssue]
     monkeypatch.setitem(sys.modules, "playwright", pw)
     monkeypatch.setitem(sys.modules, "playwright.async_api", pw_async)
     sys.modules.pop("services.crawlers.dapp.browser", None)

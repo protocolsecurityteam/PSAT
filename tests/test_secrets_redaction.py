@@ -151,7 +151,7 @@ class TestSanitizeUrl:
 
     def test_non_string_passes_through(self):
         # ``Job.error`` can be None; helper must not raise.
-        assert sanitize_url(None) is None  # type: ignore[arg-type]
+        assert sanitize_url(None) is None  # pyright: ignore[reportArgumentType]
 
 
 class TestSanitizeString:
@@ -254,7 +254,9 @@ def test_job_to_dict_redacts_rpc_url_in_request():
     job = _build_real_job({"address": "0xabc", "rpc_url": _ALCHEMY})
     out = job.to_dict()
     assert "FAKE_ALCHEMY_KEY_FOR_TESTS" not in str(out)
-    assert "<redacted>" in out["request"]["rpc_url"]
+    request = out["request"]
+    assert request is not None
+    assert "<redacted>" in request["rpc_url"]
 
 
 def test_job_to_dict_redacts_url_inside_error_traceback():
@@ -267,7 +269,9 @@ def test_job_to_dict_redacts_url_inside_error_traceback():
     job = _build_real_job({"address": "0xabc"}, error=fake_tb)
     out = job.to_dict()
     assert "FAKE_ALCHEMY_KEY_FOR_TESTS" not in str(out)
-    assert "<redacted>" in out["error"]
+    error = out["error"]
+    assert error is not None
+    assert "<redacted>" in error
 
 
 @patch("routers.deps.SessionLocal")

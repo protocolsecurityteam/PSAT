@@ -80,7 +80,7 @@ class _FakeDappHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def log_message(self, _format: str, *args) -> None:
+    def log_message(self, format: str, *args) -> None:
         return
 
 
@@ -126,9 +126,9 @@ def fake_dapp_url():
 def dapp_worker_module(monkeypatch: pytest.MonkeyPatch):
     pw = ModuleType("playwright")
     pw_async = ModuleType("playwright.async_api")
-    pw_async.async_playwright = MagicMock()  # type: ignore[attr-defined]
-    pw_async.BrowserContext = MagicMock()  # type: ignore[attr-defined]
-    pw_async.Page = MagicMock()  # type: ignore[attr-defined]
+    pw_async.async_playwright = MagicMock()  # pyright: ignore[reportAttributeAccessIssue]
+    pw_async.BrowserContext = MagicMock()  # pyright: ignore[reportAttributeAccessIssue]
+    pw_async.Page = MagicMock()  # pyright: ignore[reportAttributeAccessIssue]
     monkeypatch.setitem(sys.modules, "playwright", pw)
     monkeypatch.setitem(sys.modules, "playwright.async_api", pw_async)
 

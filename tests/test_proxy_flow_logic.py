@@ -125,7 +125,7 @@ def test_resolve_impl_job_waits_for_processing_to_terminate():
     )
 
     impl_job = _resolve_impl_job(
-        client,  # type: ignore[arg-type]
+        client,  # pyright: ignore[reportArgumentType]
         parent_job_id="parent-1",
         impl_address=impl_addr,
         timeout=10,
@@ -148,7 +148,7 @@ def test_resolve_impl_job_returns_immediately_when_already_completed():
     )
 
     impl_job = _resolve_impl_job(
-        client,  # type: ignore[arg-type]
+        client,  # pyright: ignore[reportArgumentType]
         parent_job_id="parent-2",
         impl_address=impl_addr,
     )
@@ -172,7 +172,7 @@ def test_resolve_impl_job_returns_failed_terminal_without_polling():
     )
 
     impl_job = _resolve_impl_job(
-        client,  # type: ignore[arg-type]
+        client,  # pyright: ignore[reportArgumentType]
         parent_job_id="parent-3",
         impl_address=impl_addr,
     )
@@ -195,7 +195,7 @@ def test_resolve_impl_job_polls_through_processing_to_failed_terminal():
     )
 
     impl_job = _resolve_impl_job(
-        client,  # type: ignore[arg-type]
+        client,  # pyright: ignore[reportArgumentType]
         parent_job_id="parent-4",
         impl_address=impl_addr,
         timeout=5,
@@ -212,7 +212,7 @@ def test_resolve_impl_job_returns_none_when_no_candidate_anywhere():
     client = _StubClient(children=[], all_jobs=[])
 
     result = _resolve_impl_job(
-        client,  # type: ignore[arg-type]
+        client,  # pyright: ignore[reportArgumentType]
         parent_job_id="parent-5",
         impl_address="0xdeadbeef",
         timeout=1,
@@ -237,7 +237,7 @@ def test_resolve_impl_job_prefers_terminal_candidate_over_processing():
     )
 
     impl_job = _resolve_impl_job(
-        client,  # type: ignore[arg-type]
+        client,  # pyright: ignore[reportArgumentType]
         parent_job_id="parent-6",
         impl_address=impl_addr,
     )

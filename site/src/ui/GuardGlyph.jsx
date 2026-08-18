@@ -109,5 +109,3 @@ export function GuardGlyph({ kind, accent, title }) {
     />
   );
 }
-
-export default GuardGlyph;

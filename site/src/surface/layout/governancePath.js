@@ -108,7 +108,7 @@ export function edgeClaims(flow) {
 // renounce/accept, "roles" also covers revoke), so the gate can admit a seed
 // the scorer's finer set would not — but never a capability family the scorer
 // rules non-transitive: pause, fund flows, mint/burn never expand.
-export const AGENCY_CAPABILITIES = new Set([
+const AGENCY_CAPABILITIES = new Set([
   "upgrade", // upgrade.implementation, proxy.admin_change
   "arbitrary-call", // exec.arbitrary
   "delegatecall", // delegatecall.execute
