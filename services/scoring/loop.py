@@ -307,13 +307,56 @@ def _confidence_detail(document: ScoreDocument) -> dict[str, Any]:
     return detail if isinstance(detail, dict) else {}
 
 
+def _int(value: Any) -> int | None:
+    """*value* as an int, or ``None`` where it is not one. Never raises.
+
+    Every arithmetic input to the summary goes through here. A blob key whose
+    payload is not a number is a question this line cannot answer, and neither
+    raising out of a fold that succeeded nor coercing it to a zero is an answer.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return int(value)
+
+
+def _flow_pricing(confidence: dict[str, Any]) -> tuple[int | None, int | None]:
+    """The ``[decidable, seen]`` pairs, summed — or ``None`` where they are not.
+
+    Three outcomes, kept apart. An ABSENT census is ``None``: publishing a zero
+    for a block the document never carried is exactly the fallback-as-fact this
+    line exists to make visible. A census that is present and empty is a real
+    zero — the fold publishes only entities with a seen count, so no entry means
+    no flow claim was scored. A census carrying a pair this reader cannot add is
+    ``None`` too: a short sum presented as a whole one would read as a pricing
+    regression that never happened.
+    """
+    pricing = confidence.get("flow_pricing_decidable")
+    if not isinstance(pricing, dict):
+        return None, None
+    decidable = seen = 0
+    for pair in pricing.values():
+        if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+            return None, None
+        left, right = _int(pair[0]), _int(pair[1])
+        if left is None or right is None:
+            return None, None
+        decidable += left
+        seen += right
+    return decidable, seen
+
+
 def document_summary(document: ScoreDocument, universe: ProtocolUniverse | None) -> dict[str, Any]:
     """The fields the one summary INFO carries, all read off the finished document.
 
     Nothing is recomputed here: the fold's own counters are the record, and a
     number this loop derived a second way would be a second answer to a question
-    the document already answered. Every field is read defensively — a summary
-    that raises would fail a fold that succeeded.
+    the document already answered.
+
+    TOTAL over every document shape, and deliberately so: it is called from the
+    loop (where a raise would arm the backoff for a protocol that succeeded) and
+    from the offline CLI (where it would fail a score that computed). A field it
+    cannot read is published as ``None`` — the same third state the rest of this
+    system keeps — and never as a zero standing in for an unasked question.
     """
     population = document.provenance.get("population")
     population = population if isinstance(population, dict) else {}
@@ -323,20 +366,21 @@ def document_summary(document: ScoreDocument, universe: ProtocolUniverse | None)
 
     warnings_by_kind: dict[str, int] = {}
     for warning in document.warnings:
-        kind = str(warning.get("kind")) if isinstance(warning, dict) else "?"
+        # A warning that names no kind is bucketed as unknown; ``str(None)``
+        # would publish the literal "None" as though it were a vocabulary member.
+        raw_kind = warning.get("kind") if isinstance(warning, dict) else None
+        kind = str(raw_kind) if isinstance(raw_kind, str) and raw_kind else "unknown"
         warnings_by_kind[kind] = warnings_by_kind.get(kind, 0) + 1
 
-    undetermined = sum(len(finding.get("undetermined_instances") or []) for finding in document.findings)
+    undetermined = sum(
+        len(finding.get("undetermined_instances") or [])
+        for finding in document.findings
+        if isinstance(finding, dict) and isinstance(finding.get("undetermined_instances") or [], (list, tuple))
+    )
 
     # ``flow_pricing_decidable`` is per entity ``[decidable, seen]``; the pair is
     # what makes a pricing regression a visible step change between two folds.
-    pricing = confidence.get("flow_pricing_decidable")
-    priced_decidable = priced_seen = 0
-    if isinstance(pricing, dict):
-        for pair in pricing.values():
-            if isinstance(pair, (list, tuple)) and len(pair) == 2:
-                priced_decidable += int(pair[0])
-                priced_seen += int(pair[1])
+    priced_decidable, priced_seen = _flow_pricing(confidence)
 
     faults = document.execution_evidence_faults
     return {
@@ -369,8 +413,9 @@ def document_summary(document: ScoreDocument, universe: ProtocolUniverse | None)
         "universe_addresses": len(universe.addresses) if universe is not None else None,
         # An absent census is the earned zero at this model version (see
         # ``ScoreDocument.execution_evidence_faults``), and this document was just
-        # folded by this build — so the census provably ran.
-        "execution_records_faulted": int(faults.get("records_faulted") or 0) if isinstance(faults, dict) else 0,
+        # folded by this build — so the census provably ran. A census PRESENT
+        # with an unreadable count is not that zero and publishes ``None``.
+        "execution_records_faulted": _int(faults.get("records_faulted")) if isinstance(faults, dict) else 0,
     }
 
 
