@@ -473,8 +473,12 @@ def test_poller_publishes_the_plan_entries_it_could_not_dispatch(db_session):
 def test_send_discord_reports_a_rejected_post():
     from services.monitoring import notifier
 
+    # A Discord-host URL, so the SSRF host gate lets the post through and the
+    # response-handling path under test actually runs.
+    webhook = "https://discord.com/api/webhooks/1/test"
     with patch.object(notifier.requests, "post") as post:
         post.return_value = MagicMock(ok=False, status_code=401, text="unauthorized")
-        assert notifier._send_discord("http://hook", {"title": "x"}) is False
+        assert notifier._send_discord(webhook, {"title": "x"}) is False
         post.return_value = MagicMock(ok=True, status_code=204, text="")
-        assert notifier._send_discord("http://hook", {"title": "x"}) is True
+        assert notifier._send_discord(webhook, {"title": "x"}) is True
+    assert post.call_count == 2

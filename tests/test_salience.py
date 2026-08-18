@@ -950,7 +950,7 @@ def notify_env(db_session, make_mc):
     sub = ProtocolSubscription(
         id=uuid.uuid4(),
         protocol_id=mc.protocol_id,
-        discord_webhook_url="https://discord.invalid/hook",
+        discord_webhook_url="https://discord.com/api/webhooks/1/test",
     )
     db_session.add(sub)
     db_session.commit()
