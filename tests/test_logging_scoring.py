@@ -134,7 +134,41 @@ def test_a_document_with_no_provenance_blocks_omits_rather_than_guesses():
     assert summary["signals"] is None
     assert summary["tracked_total_usd"] is None
     assert summary["confidence_reachability_pct"] is None
+    # An ABSENT census is not a completed count of zero.
+    assert (summary["flow_pricing_decidable"], summary["flow_pricing_seen"]) == (None, None)
+
+
+def test_an_empty_pricing_census_is_a_real_zero():
+    """Present and empty is the fold saying no flow claim was scored — the one
+    case where 0 is the answer rather than a stand-in for an unasked question."""
+    summary = loop.document_summary(
+        _document(model_parameters={"confidence_detail": {"flow_pricing_decidable": {}}}), None
+    )
     assert (summary["flow_pricing_decidable"], summary["flow_pricing_seen"]) == (0, 0)
+
+
+@pytest.mark.parametrize(
+    "census",
+    [
+        pytest.param({"ethereum::0x1": [None, 3]}, id="none-in-the-pair"),
+        pytest.param({"ethereum::0x1": [1, None]}, id="none-in-the-seen-count"),
+        pytest.param({"ethereum::0x1": [1, 3], "ethereum::0x2": "not a pair"}, id="not-a-pair"),
+        pytest.param({"ethereum::0x1": [1]}, id="short-pair"),
+        pytest.param({"ethereum::0x1": ["1", "3"]}, id="strings"),
+    ],
+)
+def test_an_unaddable_pricing_pair_publishes_null_rather_than_a_short_sum(census):
+    """A partial sum presented as a whole one reads as a pricing regression that
+    never happened — and raising would fail a fold that computed."""
+    summary = loop.document_summary(
+        _document(model_parameters={"confidence_detail": {"flow_pricing_decidable": census}}), None
+    )
+    assert (summary["flow_pricing_decidable"], summary["flow_pricing_seen"]) == (None, None)
+
+
+def test_a_kindless_warning_is_bucketed_as_unknown_not_as_the_string_none():
+    summary = loop.document_summary(_document(warnings=[{"note": "no kind here"}, {"kind": ""}, "not a dict"]), None)
+    assert summary["warnings_by_kind"] == {"unknown": 3}
 
 
 def test_the_execution_fault_census_is_counted_into_the_summary():
@@ -143,6 +177,31 @@ def test_the_execution_fault_census_is_counted_into_the_summary():
         None,
     )
     assert summary["execution_records_faulted"] == 3
+
+
+def test_an_unreadable_fault_count_is_null_and_never_the_earned_zero():
+    summary = loop.document_summary(_document(execution_evidence_faults={"records_faulted": None}), None)
+    assert summary["execution_records_faulted"] is None
+
+
+def test_the_summary_is_total_over_a_malformed_document():
+    """Both entrypoints call this: a raise arms the backoff in the loop and
+    fails a computed score in the CLI."""
+    summary = loop.document_summary(
+        _document(
+            findings=["not a dict", {"undetermined_instances": "not a list"}],
+            warnings=["not a dict"],
+            provenance={"population": "not a dict", "exposure_coverage": 7},
+            model_parameters={"confidence_detail": "not a dict"},
+            execution_evidence_faults={"records_faulted": "three"},
+        ),
+        None,
+    )
+    assert summary["undetermined_instances"] == 0
+    assert summary["signals"] is None
+    assert summary["tracked_total_usd"] is None
+    assert (summary["flow_pricing_decidable"], summary["flow_pricing_seen"]) == (None, None)
+    assert summary["execution_records_faulted"] is None
 
 
 # ------------------------------------------------------------ the loop boundary
@@ -262,6 +321,30 @@ def test_a_failing_summary_never_unmakes_a_committed_score(_substituted_fold, ca
 
 def test_a_clean_fold_raises_no_warning(_substituted_fold, caplog):
     assert [r for r in _score(caplog) if r.levelno >= logging.WARNING and r.name == _LOOP_LOGGER] == []
+
+
+def test_the_cli_emits_the_same_summary_and_a_malformed_document_does_not_fail_it(monkeypatch, caplog):
+    """The CLI calls the summary bare, so the summary itself has to be total."""
+    from services.scoring import cli
+
+    document = _document(
+        findings=["not a dict"],
+        provenance={"population": "not a dict"},
+        model_parameters={"confidence_detail": {"flow_pricing_decidable": {"ethereum::0x1": [None, 1]}}},
+    )
+    monkeypatch.setattr(cli, "distill_protocol_in_memory", lambda session, pid: [])
+    monkeypatch.setattr(cli, "load_protocol_universe", lambda session, pid: None)
+    monkeypatch.setattr(cli, "compute_protocol_score", lambda *a, **k: document)
+
+    with caplog.at_level(logging.INFO, logger="services.scoring.cli"):
+        assert cli.score(None, 7) is document  # type: ignore[arg-type]
+
+    summaries = [
+        r for r in caplog.records if r.name == "services.scoring.cli" and r.message == "score document summary"
+    ]
+    assert len(summaries) == 1
+    assert summaries[0].flow_pricing_decidable is None
+    assert summaries[0].universe_addresses is None
 
 
 # --------------------------------------------------- the W2 precondition's arms
