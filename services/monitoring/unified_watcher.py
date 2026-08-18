@@ -511,6 +511,7 @@ def _process_window(
     window_start: int,
     window_end: int,
     dirty: dict[tuple[uuid.UUID, str], _DirtyController] | None = None,
+    counters: dict[str, int] | None = None,
 ) -> list[MonitoredEvent]:
     """Decode a window's logs and run the full side-effect pipeline.
 
@@ -525,6 +526,11 @@ def _process_window(
     publishes nothing here; an ``activity`` occurrence publishes nothing at
     all. Hand-rolled OZ / Safe / Timelock / proxy events decode through
     ``parse_any_log``, carry no spec, and are unchanged.
+
+    *counters* is the pass's tally. A log that matched an enrolled spec and then
+    would not decode is dropped — correctly, nothing about it is publishable —
+    but the drop is otherwise traceless, and a decoder that has drifted from the
+    plan looks exactly like a quiet contract.
     """
     if not fetched_logs:
         return []
@@ -588,6 +594,12 @@ def _process_window(
                 continue
             parsed = parse_tracked_log(raw, spec)
             if not parsed:
+                if counters is not None:
+                    counters["undecodable_tracked_logs"] = counters.get("undecodable_tracked_logs", 0) + 1
+                logger.debug(
+                    "scan: tracked log matched an enrolled spec but did not decode",
+                    extra={"address": emitter, "topic0": fl.topics[0], "chain": cohort.chain},
+                )
                 continue
 
         mc = mc_by_addr.get(emitter)
@@ -1192,6 +1204,8 @@ def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
     # controller — the exact shape of the crowd-traffic problem — collapse to
     # one read. In-memory only, by design: no persistence, no migration.
     dirty_controllers: dict[tuple[uuid.UUID, str], _DirtyController] = {}
+    # Pass-scoped counts of what the decode dropped (see ``_process_window``).
+    scan_counters: dict[str, int] = {}
 
     while windows_scanned < max_windows_pass:
         eligible: list[tuple[_Cohort, int]] = []
@@ -1256,7 +1270,9 @@ def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
                 cohort.failed = True
                 break
 
-            window_events = _process_window(session, cohort, fetched_logs, window_start, window_end, dirty_controllers)
+            window_events = _process_window(
+                session, cohort, fetched_logs, window_start, window_end, dirty_controllers, scan_counters
+            )
 
             # Enrich after the ON-CONFLICT insert has decided which rows are
             # real (no spend on rows a concurrent scanner won), inside the same
@@ -1390,6 +1406,10 @@ def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
             # means the verification pass itself did not complete — not zero.
             "verification_reads_failed": verification.reads_failed,
             "verification_reads_over_budget": verification.reads_over_budget,
+            # Logs that matched an enrolled tracked-topic spec and would not
+            # decode. Not a partial — nothing was withheld that was ever
+            # observed — but a spec/decoder drift shows up here and nowhere else.
+            "undecodable_tracked_logs": scan_counters.get("undecodable_tracked_logs", 0),
         },
     )
     return ScanResult(
@@ -2401,6 +2421,12 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
         contracts_by_chain[mc.chain].append(mc)
 
     chunks: list[tuple[str, list[tuple[MonitoredContract, list[tuple[dict, tuple[str, list]]]]]]] = []
+    # Plan entries this pass could not turn into a call. Dropping them is
+    # deliberate (a forward-compatible schema addition must not break a running
+    # watcher), but they vanished from every accounting: a plan the analyzer
+    # rewrote into a kind this build does not know reads exactly like a contract
+    # with nothing to poll.
+    entries_unrecognized = 0
     for chunk_chain, chain_contracts in contracts_by_chain.items():
         current: list[tuple[MonitoredContract, list[tuple[dict, tuple[str, list]]]]] = []
         current_calls = 0
@@ -2410,9 +2436,11 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
             if isinstance(plan, list):
                 for entry in plan:
                     if not isinstance(entry, dict):
+                        entries_unrecognized += 1
                         continue
                     call = _rpc_call_for_entry(mc.address, entry)
                     if call is None:
+                        entries_unrecognized += 1
                         continue
                     entries.append((entry, call))
             if current and current_calls + len(entries) > MAX_BATCH_SIZE:
@@ -2558,6 +2586,10 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
             "chunks_transport_failed": chunks_transport_failed,
             "entry_errors": entry_errors,
             "entries_no_value": entries_no_value,
+            # NOT a partial: an entry this build cannot dispatch was never
+            # dispatched, so nothing failed to be observed. Published so the
+            # silent drop is countable.
+            "entries_unrecognized": entries_unrecognized,
             "oldest_last_polled_age_s": oldest_age_s,
         },
     )

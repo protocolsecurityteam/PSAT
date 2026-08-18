@@ -222,7 +222,14 @@ def _run_supervised_default(rpc_url: str, interval: float | None) -> None:
     supervisor = _build_default_supervisor(rpc_url, interval)
 
     def handle_signal(signum, _frame):
-        logger.info("Received signal %s, shutting down", signum)
+        # Identified: every daemon in the stack logs this line as ``__main__``,
+        # so without the name and pid a shutdown sweep is N byte-identical lines
+        # and no way to tell which process is still up.
+        logger.info(
+            "Received signal %s, shutting down",
+            signum,
+            extra={"daemon": "protocol_monitor_supervised", "pid": os.getpid(), "signal": int(signum)},
+        )
         supervisor.request_stop()
 
     signal.signal(signal.SIGTERM, handle_signal)
@@ -274,8 +281,14 @@ def main():
     # The flag modes run a single loop in the foreground and exit cleanly on a
     # signal. The default (no-flag) mode installs its own signal handlers around
     # the Supervisor, so it is handled separately below.
+    mode = "tvl" if args.tvl else "poll" if args.poll else "reconcile" if args.reconcile else "scan"
+
     def handle_signal(signum, frame):
-        logger.info("Received signal %s, shutting down", signum)
+        logger.info(
+            "Received signal %s, shutting down",
+            signum,
+            extra={"daemon": f"protocol_monitor_{mode}", "pid": os.getpid(), "signal": int(signum)},
+        )
         raise SystemExit(0)
 
     if args.tvl:

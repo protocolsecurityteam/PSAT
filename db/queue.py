@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 import uuid
 from datetime import datetime
 from typing import Any
@@ -84,6 +85,22 @@ HEARTBEAT_PROTOCOL_SCORE = "protocol_score"
 HEARTBEAT_OPS_ALERTER = "ops_alerter"
 
 
+# Seconds between two WARNINGs about the same process's failing heartbeat
+# write. The first failure warns immediately; a persistent outage then re-warns
+# on this cadence so the condition stays visible without repeating per pass.
+_HEARTBEAT_WARN_INTERVAL_S = 300.0
+_heartbeat_last_warned: dict[str, float] = {}
+
+
+def _heartbeat_failure_is_due(process: str) -> bool:
+    now = time.monotonic()
+    last = _heartbeat_last_warned.get(process)
+    if last is not None and now - last < _HEARTBEAT_WARN_INTERVAL_S:
+        return False
+    _heartbeat_last_warned[process] = now
+    return True
+
+
 def record_heartbeat(process: str, *, status: str = "running", detail: dict[str, Any] | None = None) -> None:
     """Upsert a background daemon's liveness row (best-effort).
 
@@ -105,8 +122,20 @@ def record_heartbeat(process: str, *, status: str = "running", detail: dict[str,
             )
             session.execute(stmt)
             session.commit()
-    except Exception:
-        logger.debug("heartbeat write failed for process=%s", process, exc_info=True)
+    except Exception as exc:
+        # Rate-limited rather than silent: a heartbeat that never lands makes
+        # the fleet view show every daemon dead while the processes run happily,
+        # and the ops watchdog pages on exactly that. Rate-limited rather than
+        # unconditional because this is called once per pass by every daemon in
+        # the process, so a DB outage would otherwise turn one fault into a
+        # WARNING storm on top of it.
+        if _heartbeat_failure_is_due(process):
+            logger.warning(
+                "heartbeat write failed; the fleet view will read this daemon as dead",
+                extra={"daemon": process, "exc_type": type(exc).__name__, "error": str(exc)},
+            )
+        else:
+            logger.debug("heartbeat write failed for process=%s", process, exc_info=True)
 
 
 # Default lifetime of a daemon-pass lease. Chosen to exceed
@@ -1673,7 +1702,15 @@ def proven_analysis_schema_version(session: Session, job: Job) -> int | None:
         seen.add(str(donor_id))
         try:
             current = session.get(Job, donor_id)
-        except Exception:
+        except Exception as exc:
+            # A DB error reads exactly like "no donor", which publishes "no
+            # witnessed era" for a job that has one. Nothing here can recover it
+            # — the caller's contract is a value or None — so the honest move is
+            # to say the None came from a failed read.
+            logger.warning(
+                "donor-era walk could not read a donor job; the era reads as not witnessed",
+                extra={"donor_job_id": str(donor_id), "exc_type": type(exc).__name__, "error": str(exc)},
+            )
             return None
         if current is None:
             return None

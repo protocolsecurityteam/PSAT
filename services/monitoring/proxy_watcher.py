@@ -7,7 +7,25 @@ upgrade scanner and poller live in ``services.monitoring.unified_watcher``.
 
 from __future__ import annotations
 
-from utils.rpc import normalize_hex, rpc_request
+import logging
+import time
+from dataclasses import dataclass
+
+from utils.rpc import RpcClientTimeout, normalize_hex, rpc_request
+
+logger = logging.getLogger(__name__)
+
+# Seconds between two WARNINGs that an implementation is not determined. See
+# ``_warn_not_determined``; process-local, and a restart re-announces once.
+_NOT_DETERMINED_WARN_INTERVAL_S = 300.0
+_last_warned_at: float | None = None
+
+
+def reset_not_determined_warn_state() -> None:
+    """Re-arm the WARNING (tests, and any caller wanting a fresh announce)."""
+    global _last_warned_at
+    _last_warned_at = None
+
 
 # Storage slots used for implementation resolution
 _EIP1967_IMPL_SLOT = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc"
@@ -22,32 +40,91 @@ _TARGET_SEL = "0xd4b83992"  # target()
 _MASTER_COPY_SEL = "0xa619486e"  # masterCopy()
 
 
-def _read_slot(
-    rpc_url: str, address: str, slot: str, block: str = "latest", *, chain_id: int | None = None
-) -> str | None:
-    """Read a storage slot and return the address if non-zero, else None."""
+@dataclass(frozen=True)
+class _Read:
+    """One probe's outcome, in the three states it actually has.
+
+    ``address`` — the node answered and named one.
+    ``answered`` and no address — the node answered, and what it answered says
+    there is no implementation at this location (an empty slot, the zero
+    address, a reverted getter).
+    ``answered is False`` — the node did not answer at all. Nothing is known,
+    and in particular nothing is known that would license "no implementation".
+    Both used to collapse into a bare ``None`` behind ``except Exception: pass``.
+    """
+
+    address: str | None
+    answered: bool
+
+    @classmethod
+    def absent(cls) -> _Read:
+        return cls(address=None, answered=True)
+
+    @classmethod
+    def unreachable(cls) -> _Read:
+        return cls(address=None, answered=False)
+
+
+def _answered_with_an_error(exc: BaseException) -> bool:
+    """Whether the NODE answered, and its answer was an error (a revert).
+
+    ``rpc_request`` raises ``RuntimeError`` for a transport failure, for an HTTP
+    failure, for the pre-request URL/chain_id guard AND for a JSON-RPC ``error``
+    payload — but only the last is re-raised as the node's own object, so
+    ``str(exc)`` is that payload's repr (``{'code': -32000, 'message': …}``).
+    That shape is the POSITIVE signature, and everything else falls through to
+    "did not answer".
+
+    The default direction is the whole point. Answered-absent is the state that
+    licenses "there is no implementation here", so it is claimed only where the
+    node actually said so; an unrecognised failure — the chain_id guard, a
+    client bug, anything a later refactor adds — degrades to not_determined
+    rather than into a proven negative.
+    """
+    if isinstance(exc, RpcClientTimeout) or not isinstance(exc, RuntimeError):
+        return False
+    text = str(exc)
+    return text.startswith("{") and "'code'" in text
+
+
+def _address_of(result: object) -> str | None:
+    if isinstance(result, str) and result and result != "0x" + "0" * 64:
+        addr = "0x" + result[-40:]
+        if addr != "0x" + "0" * 40:
+            return normalize_hex(addr)
+    return None
+
+
+def _read_slot(rpc_url: str, address: str, slot: str, block: str = "latest", *, chain_id: int | None = None) -> _Read:
+    """Read a storage slot. See :class:`_Read` for the three outcomes."""
     try:
         result = rpc_request(rpc_url, "eth_getStorageAt", [address, slot, block], chain_id=chain_id)
-        if result and result != "0x" + "0" * 64:
-            addr = "0x" + result[-40:]
-            if addr != "0x" + "0" * 40:
-                return normalize_hex(addr)
-    except Exception:
-        pass
-    return None
+    except Exception as exc:
+        answered = _answered_with_an_error(exc)
+        logger.debug(
+            "proxy watcher: storage read rejected" if answered else "proxy watcher: storage read did not answer",
+            extra={"address": address, "slot": slot, "chain_id": chain_id, "exc_type": type(exc).__name__},
+        )
+        return _Read.absent() if answered else _Read.unreachable()
+    found = _address_of(result)
+    return _Read(address=found, answered=True)
 
 
-def _call_getter(rpc_url: str, address: str, selector: str, *, chain_id: int | None = None) -> str | None:
-    """Call a view function that returns a single address.  Returns None on revert."""
+def _call_getter(rpc_url: str, address: str, selector: str, *, chain_id: int | None = None) -> _Read:
+    """Call a view function returning a single address. See :class:`_Read`."""
     try:
         result = rpc_request(rpc_url, "eth_call", [{"to": address, "data": selector}, "latest"], chain_id=chain_id)
-        if result and result != "0x" + "0" * 64:
-            addr = "0x" + result[-40:]
-            if addr != "0x" + "0" * 40:
-                return normalize_hex(addr)
-    except Exception:
-        pass
-    return None
+    except Exception as exc:
+        # An error PAYLOAD from a view getter is a revert: this contract does
+        # not implement it, which is an answer. Anything else is not.
+        answered = _answered_with_an_error(exc)
+        logger.debug(
+            "proxy watcher: getter reverted" if answered else "proxy watcher: getter call did not answer",
+            extra={"address": address, "selector": selector, "chain_id": chain_id, "exc_type": type(exc).__name__},
+        )
+        return _Read.absent() if answered else _Read.unreachable()
+    found = _address_of(result)
+    return _Read(address=found, answered=True)
 
 
 # Maps proxy_type to the single resolution method needed.  Each entry is
@@ -89,34 +166,80 @@ def resolve_current_implementation(
     *chain_id* (the proxy's chain, threaded from the static worker) arms the
     inv-7 URL↔chain_id guard on every underlying read; None keeps it a no-op.
     """
+    reads: list[_Read] = []
+
+    def _resolved(read: _Read) -> str | None:
+        reads.append(read)
+        return read.address
+
+    def _single(read: _Read) -> str | None:
+        """The one-probe paths, whose only probe carries the whole answer."""
+        if not read.answered:
+            _warn_not_determined(proxy_address, chain_id, proxy_type, probes=1, unanswered=1)
+        return read.address
+
     # Fast path: historical block lookup (Aave V2 revision events)
     if block != "latest":
-        return _read_slot(rpc_url, proxy_address, _EIP1967_IMPL_SLOT, block, chain_id=chain_id)
+        return _single(_read_slot(rpc_url, proxy_address, _EIP1967_IMPL_SLOT, block, chain_id=chain_id))
 
     # Fast path: known proxy_type → single targeted RPC call
     if proxy_type and proxy_type in _RESOLVE_BY_TYPE:
         method, arg = _RESOLVE_BY_TYPE[proxy_type]
         if method == "slot":
-            return _read_slot(rpc_url, proxy_address, arg, chain_id=chain_id)
-        return _call_getter(rpc_url, proxy_address, arg, chain_id=chain_id)
+            return _single(_read_slot(rpc_url, proxy_address, arg, chain_id=chain_id))
+        return _single(_call_getter(rpc_url, proxy_address, arg, chain_id=chain_id))
 
     # Fallback: try all methods in priority order (registration, unknown type)
     for slot in (_EIP1967_IMPL_SLOT, _EIP1822_LOGIC_SLOT, _OZ_IMPL_SLOT):
-        addr = _read_slot(rpc_url, proxy_address, slot, chain_id=chain_id)
+        addr = _resolved(_read_slot(rpc_url, proxy_address, slot, chain_id=chain_id))
         if addr:
             return addr
 
-    addr = _call_getter(rpc_url, proxy_address, _IMPLEMENTATION_SEL, chain_id=chain_id)
+    addr = _resolved(_call_getter(rpc_url, proxy_address, _IMPLEMENTATION_SEL, chain_id=chain_id))
     if addr:
         return addr
 
     for sel in (_MASTER_COPY_SEL, _COMPTROLLER_IMPL_SEL, _TARGET_SEL):
-        addr = _call_getter(rpc_url, proxy_address, sel, chain_id=chain_id)
+        addr = _resolved(_call_getter(rpc_url, proxy_address, sel, chain_id=chain_id))
         if addr:
             return addr
 
-    addr = _read_slot(rpc_url, proxy_address, _GNOSIS_SLOT, chain_id=chain_id)
+    addr = _resolved(_read_slot(rpc_url, proxy_address, _GNOSIS_SLOT, chain_id=chain_id))
     if addr:
         return addr
 
+    unanswered = sum(1 for read in reads if not read.answered)
+    if unanswered:
+        _warn_not_determined(proxy_address, chain_id, proxy_type, probes=len(reads), unanswered=unanswered)
     return None
+
+
+def _warn_not_determined(
+    proxy_address: str, chain_id: int | None, proxy_type: str | None, *, probes: int, unanswered: int
+) -> None:
+    """One line per RESOLUTION, never per probe: a dead route fails all eight.
+
+    The ``None`` this accompanies is not "no implementation" — some probe never
+    answered — and the caller cannot tell the two apart from the return value,
+    so the log is where the difference is recorded.
+
+    Warn-once-then-DEBUG, because the condition is systemic when it happens at
+    all: a dead route fails every watched proxy of every pass, and this module
+    has no cycle object to hang a tally on, so the window is a time bound.
+    """
+    global _last_warned_at
+    now = time.monotonic()
+    first = _last_warned_at is None or now - _last_warned_at >= _NOT_DETERMINED_WARN_INTERVAL_S
+    if first:
+        _last_warned_at = now
+    logger.log(
+        logging.WARNING if first else logging.DEBUG,
+        "proxy watcher: implementation not determined; some probe did not answer",
+        extra={
+            "address": proxy_address,
+            "chain_id": chain_id,
+            "proxy_type": proxy_type,
+            "probes": probes,
+            "probes_unanswered": unanswered,
+        },
+    )

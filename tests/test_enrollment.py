@@ -825,6 +825,37 @@ class TestEnrollmentIntegration:
         assert pausable_mc.monitoring_config["watch_roles"] is True
         assert pausable_mc.monitoring_config["watch_upgrades"] is False
 
+    def test_the_baseline_only_outcome_is_counted_per_cycle_not_logged_per_contract(self, pg_session, caplog):
+        """26% of a pipeline run's log volume was this one line, 8,196 times."""
+        import logging as _logging
+
+        from db.models import Contract, Protocol
+        from services.monitoring.enrollment import enroll_protocol_contracts
+        from services.monitoring.tracking_plan_state import NO_CURRENT_MATERIALIZATION
+
+        proto = Protocol(name=PROTO_NAME)
+        pg_session.add(proto)
+        pg_session.flush()
+        for index in range(2):
+            # Own address prefixes: this class's rows outlive the test.
+            address = "0x" + f"1{index}" * 20
+            pg_session.add(Contract(address=address, chain="ethereum", protocol_id=proto.id, contract_name=f"C{index}"))
+            _create_completed_job(pg_session, address, proto.id)
+        pg_session.commit()
+
+        with caplog.at_level(_logging.DEBUG, logger="services.monitoring.enrollment"):
+            with patch("services.monitoring.enrollment.rpc_request", return_value="0x100"):
+                enroll_protocol_contracts(pg_session, proto.id, "http://rpc", "ethereum")
+
+        per_contract = [r for r in caplog.records if "no current tracking_plan materialization" in r.message]
+        assert per_contract, "the per-contract line still exists, at DEBUG"
+        assert {r.levelno for r in per_contract} == {_logging.DEBUG}
+
+        summary = next(r for r in caplog.records if r.message.startswith("Enrolled ") and hasattr(r, "baseline_only"))
+        assert summary.levelno == _logging.INFO
+        assert summary.baseline_only == 2
+        assert summary.plan_not_determined == {NO_CURRENT_MATERIALIZATION: 2}
+
     def test_enroll_proxy_without_summary_uses_contract_fields(self, pg_session):
         """Proxy contracts with is_proxy=True but NO ContractSummary must still
         be enrolled as type='proxy' with correct monitoring config, WatchedProxy
