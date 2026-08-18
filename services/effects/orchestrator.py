@@ -49,7 +49,6 @@ from services.effects.config import (
     SCOPE_KERNEL,
     SCOPE_PROJECTION,
 )
-from services.effects.exceptions import UnresolvedProxyImplementation
 from services.effects.harness import (
     CallBatch,
     ObservedEffect,
@@ -60,7 +59,6 @@ from services.effects.harness import (
 from services.effects.seeding import Seeder, SimulateSeeder, input_seeding_enabled
 from services.effects.selection import Candidate
 from services.effects.simulate import Simulate
-from utils.logging import record_degraded
 
 logger = logging.getLogger(__name__)
 
@@ -204,19 +202,16 @@ def _hashable_code_address(session: Session, candidate: Candidate) -> str | None
         return candidate.contract_address
     implementation = (contract.implementation or "").strip().lower()
     if not implementation or implementation in ("0x", "0x" + "0" * 40):
+        # No ``record_degraded`` here on purpose: returning ``None`` lands in the
+        # worker's receiving arm, which records the skip once per candidate up to
+        # a cap. Recording here too would double every entry in an uncapped
+        # artifact, and the dedup race that produces unresolved proxies produces
+        # them in bulk.
         context = {
             "contract_id": candidate.contract_id,
             "contract_address": candidate.contract_address,
             "function_id": candidate.function_id,
         }
-        record_degraded(
-            phase="effects_proxy_without_implementation",
-            exc=UnresolvedProxyImplementation(
-                f"proxy contract row {candidate.contract_id} ({candidate.contract_address}) has function rows "
-                "and no resolved implementation"
-            ),
-            context=context,
-        )
         logger.warning(
             "effects hash: proxy with function rows and no resolved implementation — refusing to hash the "
             "forwarding stub (it collides across every implementation behind it) and skipping the candidate",

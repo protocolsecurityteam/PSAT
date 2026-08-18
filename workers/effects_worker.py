@@ -71,7 +71,7 @@ from services.effects.config import (
     VERDICT_UNKNOWN,
 )
 from services.effects.discrepancies import authority_contradiction, file_new_idiom_candidate, route_discrepancy
-from services.effects.exceptions import BehaviorHashUnavailable
+from services.effects.exceptions import AnvilRssUnmeasured, BehaviorHashUnavailable
 from services.effects.harness import Discrepancy, ObservedEffect
 from services.effects.orchestrator import (
     HashResolver,
@@ -1121,21 +1121,32 @@ class EffectsWorker(BaseWorker):
         if sample is None:
             return
         try:
-            measured = int(sample())
+            measured = sample()
         except Exception as exc:
-            # Once per job. The peak stays ``None`` — unmeasured is published as
-            # unmeasured, never as a 0 MB peak nobody observed — and the failure
-            # is a degradation of what this stage can report about its own cost.
-            if not self._rss_sample_failed:
-                self._rss_sample_failed = True
-                record_degraded(phase="effects_rss_sample", exc=exc, context={"exc_type": type(exc).__name__})
-                logger.warning(
-                    "effects: anvil RSS sampling failed; peak_anvil_rss_mb is unmeasured, not zero",
-                    extra={"exc_type": type(exc).__name__},
-                )
+            self._note_rss_unmeasured(reason="sampler_raised", exc=exc)
+            return
+        # ``None`` is the transport saying it does not KNOW (fork exited, /proc
+        # unreadable) — the case that used to arrive as a 0 and get published as
+        # a measured "used no memory".
+        if measured is None:
+            self._note_rss_unmeasured(reason="read_did_not_answer", exc=AnvilRssUnmeasured("rss_mb returned None"))
             return
         current = counters.peak_anvil_rss_mb
-        counters.peak_anvil_rss_mb = measured if current is None else max(current, measured)
+        counters.peak_anvil_rss_mb = int(measured) if current is None else max(current, int(measured))
+
+    def _note_rss_unmeasured(self, *, reason: str, exc: BaseException) -> None:
+        """One line + one degraded record per job for an RSS read that did not
+        answer. The peak stays ``None`` and the metric says so, so unmeasured is
+        published as unmeasured rather than as a 0 MB peak nobody observed."""
+        if self._rss_sample_failed:
+            return
+        self._rss_sample_failed = True
+        context = {"reason": reason, "exc_type": type(exc).__name__}
+        record_degraded(phase="effects_rss_sample", exc=exc, context=context)
+        logger.warning(
+            "effects: anvil RSS sampling did not answer; peak_anvil_rss_mb is unmeasured, not zero",
+            extra=context,
+        )
 
     def _probe_one(self, it: _Item, counters: _Counters) -> None:
         try:

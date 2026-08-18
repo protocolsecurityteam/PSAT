@@ -390,14 +390,15 @@ def _load_contract_facts_uncached(session: Session, address: str) -> ContractFac
         # Not "this contract has no facts": the lookup did not answer. Every
         # Tier-1 probe on this address degrades to ``unknown`` from here, so a
         # storage/DB outage has to be visible as degradation, not as a verdict.
-        record_degraded(
-            phase="effects_calldata_facts",
-            exc=exc,
-            context={"address": address, "exc_type": type(exc).__name__},
-        )
+        # ``contract_address``, never ``address``: the JSON formatter writes the
+        # ambient ``address`` contextvar (the JOB's address) first and drops any
+        # extra that collides with it, which would silently replace the address
+        # this lookup was actually about.
+        context = {"contract_address": address, "exc_type": type(exc).__name__}
+        record_degraded(phase="effects_calldata_facts", exc=exc, context=context)
         logger.warning(
             "effects calldata: analysis-job lookup failed; no contract facts for this address",
-            extra={"address": address, "exc_type": type(exc).__name__},
+            extra=context,
         )
         return None
     if lookup is None:
