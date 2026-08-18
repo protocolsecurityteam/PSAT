@@ -113,6 +113,31 @@ def test_run_discovery_folds_budget_metrics(monkeypatch):
     assert "phase_ms_discovery_addresses" in metrics
 
 
+def test_probe_chain_survives_a_bound_job_chain(monkeypatch, caplog):
+    """The probed chain is not the job's chain. JsonFormatter writes the bound
+    context fields first and skips any ``extra`` that collides, so a key named
+    ``chain`` here would be silently replaced by the job's own chain."""
+    import json
+
+    from services.discovery import chain_resolver
+    from utils.logging import JsonFormatter
+
+    monkeypatch.setattr(chain_resolver, "_erpc_url_for_chain", lambda _chain: "http://stub")
+    monkeypatch.setattr(
+        chain_resolver,
+        "_batch_get_code",
+        lambda _url, _addrs: (_ for _ in ()).throw(TimeoutError("probe timed out")),
+    )
+
+    with bind_trace_context(trace_id="t", job_id="j", stage="discovery", chain="ethereum"):
+        with caplog.at_level(logging.WARNING, logger="services.discovery.chain_resolver"):
+            chain_resolver._probe_chain_batch(["0x" + "11" * 20], "base")
+        payload = json.loads(JsonFormatter().format(caplog.records[0]))
+
+    assert payload["chain"] == "ethereum"
+    assert payload["probe_chain"] == "base"
+
+
 def test_chain_probe_failure_warns_instead_of_reading_as_no_code(monkeypatch, caplog):
     """D3: an empty probe result is indistinguishable from "no code here", so
     the failure has to survive as a WARNING."""
@@ -132,11 +157,15 @@ def test_chain_probe_failure_warns_instead_of_reading_as_no_code(monkeypatch, ca
     assert hits == set()
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 1
-    assert warnings[0].chain == "base"
+    # ``probe_chain``, not ``chain``: the probed chain is not the job's chain,
+    # and JsonFormatter drops an extra that collides with a context field.
+    assert warnings[0].probe_chain == "base"
+    assert not hasattr(warnings[0], "chain")
     assert warnings[0].exc_type == "TimeoutError"
 
     degraded = [e for e in errors if e.phase == "chain_probe"]
     assert len(degraded) == 1
+    assert degraded[0].context["probe_chain"] == "base"
     # The provider's own text is what separates a 402 from a 401 from a timeout.
     assert "probe timed out" in degraded[0].message
 
@@ -170,7 +199,7 @@ def test_chain_probe_error_fills_warn_even_when_the_batch_returns(monkeypatch, c
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 1
     assert warnings[0].probe_failed == 2
-    assert warnings[0].chain == "base"
+    assert warnings[0].probe_chain == "base"
     assert warnings[0].exc_type == "RuntimeError"
 
     degraded = [e for e in errors if e.phase == "chain_probe"]

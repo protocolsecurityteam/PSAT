@@ -226,7 +226,10 @@ def test_hydration_db_error_warns_and_rolls_back(monkeypatch: pytest.MonkeyPatch
     ]
     assert len(warnings) == 1
     assert getattr(warnings[0], "exc_type", None) == "RuntimeError"
-    assert getattr(warnings[0], "address", None) == TARGET_ADDRESS
+    # ``bundle_address``, not ``address``: JsonFormatter drops an extra whose
+    # key collides with a bound context field (the job's own address).
+    assert getattr(warnings[0], "bundle_address", None) == TARGET_ADDRESS
+    assert getattr(warnings[0], "bundle_chain", None) == "ethereum"
 
     hydration = [e for e in degraded if e.phase == "nested_artifact_hydration"]
     assert len(hydration) == 1

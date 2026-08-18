@@ -324,16 +324,19 @@ def _load_nested_artifacts(session: Session, job_id, *, chain: str) -> dict[str,
             # remaining bundle. The bundle is dropped either way, but a row miss
             # is an expected outcome (silent, above) and a DB error is not.
             session.rollback()
+            # ``bundle_*``, not ``address``/``chain``: the job's own address and
+            # chain are already bound as context fields, and the formatter drops
+            # an ``extra`` whose key collides with one of them.
             record_degraded(
                 phase="nested_artifact_hydration",
                 exc=exc,
-                context={"job_id": str(job_id), "address": address, "chain": chain},
+                context={"job_id": str(job_id), "bundle_address": address, "bundle_chain": chain},
             )
             logger.warning(
                 "Materialization hydration failed for %s on %s; bundle dropped from policy analysis",
                 address,
                 chain,
-                extra={"exc_type": type(exc).__name__, "address": address, "chain": chain},
+                extra={"exc_type": type(exc).__name__, "bundle_address": address, "bundle_chain": chain},
             )
             mrow = None
         if mrow is None:

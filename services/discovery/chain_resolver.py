@@ -23,6 +23,7 @@ import contextvars
 import json
 import logging
 import os
+import threading
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -63,6 +64,17 @@ class _ErrorFills:
     count: int = 0
     last_exc: BaseException | None = None
     exc_types: set[str] = field(default_factory=set)
+    # The individual-read fallback fans out over ``_FALLBACK_WORKERS`` threads
+    # that all share this object; ``count += 1`` is a read-modify-write, so an
+    # unlocked census undercounts exactly when the outage is widest.
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    def record(self, exc: BaseException | None) -> None:
+        with self._lock:
+            self.count += 1
+            if exc is not None:
+                self.last_exc = exc
+                self.exc_types.add(type(exc).__name__)
 
 
 # Sink for the probe currently in flight. A ContextVar rather than a parameter
@@ -76,12 +88,8 @@ _probe_error_fills: contextvars.ContextVar[_ErrorFills | None] = contextvars.Con
 
 def _record_error_fill(exc: BaseException | None) -> None:
     sink = _probe_error_fills.get()
-    if sink is None:
-        return
-    sink.count += 1
-    if exc is not None:
-        sink.last_exc = exc
-        sink.exc_types.add(type(exc).__name__)
+    if sink is not None:
+        sink.record(exc)
 
 
 def _erpc_url_for_chain(chain_name: str) -> str | None:
@@ -193,16 +201,19 @@ def _probe_chain_batch(
         # The empty set is indistinguishable from "no address has code here", so
         # the log line is the only place the difference survives: without it a
         # chain-wide probe outage silently shrinks multichain membership.
+        # ``probe_chain``, not ``chain``: the probed chain differs from the job's
+        # chain by construction, and the formatter drops an ``extra`` that
+        # collides with a bound context field.
         record_degraded(
             phase="chain_probe",
             exc=exc,
-            context={"chain": chain_name, "addresses": len(addresses)},
+            context={"probe_chain": chain_name, "addresses": len(addresses)},
         )
         logger.warning(
             "Chain probe failed for %s (%d address(es)); chain contributes no membership evidence",
             chain_name,
             len(addresses),
-            extra={"chain": chain_name, "exc_type": type(exc).__name__, "addresses": len(addresses)},
+            extra={"probe_chain": chain_name, "exc_type": type(exc).__name__, "addresses": len(addresses)},
         )
         _debug_log(debug, f"  {chain_name}: probe failed: {exc!r}")
         return set()
@@ -219,7 +230,7 @@ def _probe_chain_batch(
             record_degraded(
                 phase="chain_probe",
                 exc=last_exc,
-                context={"chain": chain_name, "probe_failed": error_fills.count, "addresses": len(addresses)},
+                context={"probe_chain": chain_name, "probe_failed": error_fills.count, "addresses": len(addresses)},
             )
         logger.warning(
             "Chain probe could not read %d of %d address(es) on %s; those read as no-code",
@@ -227,7 +238,7 @@ def _probe_chain_batch(
             len(addresses),
             chain_name,
             extra={
-                "chain": chain_name,
+                "probe_chain": chain_name,
                 "probe_failed": error_fills.count,
                 "addresses": len(addresses),
                 "exc_type": type(last_exc).__name__ if last_exc is not None else None,
@@ -263,12 +274,12 @@ def _probe_chains(
                 record_degraded(
                     phase="chain_probe",
                     exc=exc,
-                    context={"chain": chain_name},
+                    context={"probe_chain": chain_name},
                 )
                 logger.warning(
                     "Chain probe raised for %s; chain contributes no membership evidence",
                     chain_name,
-                    extra={"chain": chain_name, "exc_type": type(exc).__name__},
+                    extra={"probe_chain": chain_name, "exc_type": type(exc).__name__},
                 )
                 _debug_log(debug, f"  {chain_name}: probe failed: {exc!r}")
 
