@@ -230,7 +230,7 @@ def test_record_swallows_storage_errors():
     import workers.base as base
 
     original = base.store_artifact
-    base.store_artifact = _boom  # type: ignore[assignment]
+    base.store_artifact = _boom
     try:
         # Should not raise.
         w._record_stage_timing(
@@ -242,7 +242,7 @@ def test_record_swallows_storage_errors():
             status="success",
         )
     finally:
-        base.store_artifact = original  # type: ignore[assignment]
+        base.store_artifact = original
 
 
 # ---------------------------------------------------------------------------

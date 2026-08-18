@@ -1260,7 +1260,7 @@ def build_governance_view(
     fp_function_detail_by_cid: dict[int, list[dict[str, Any]]] = children["fp_function_detail"]
     # Keyed by ADDRESS, unlike every sibling stage's contract_id map — the walk is a
     # fact about the address, not about the subject contract that recorded it.
-    terminal_walk_by_address: dict[str, dict[str, Any]] = children["terminal_walk"]  # type: ignore[assignment]
+    terminal_walk_by_address: dict[str, dict[str, Any]] = children["terminal_walk"]  # pyright: ignore[reportAssignmentType]
 
     # Delivery shape for every balance row in this view, read ONCE for the whole
     # request. The evidence plane is keyed by the account the read was issued

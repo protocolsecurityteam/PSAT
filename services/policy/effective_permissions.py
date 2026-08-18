@@ -334,7 +334,7 @@ def _normalize_capability_output(
             try:
                 from services.resolution.capability_resolver import capability_to_dict
 
-                cap_dict = capability_to_dict(cap)  # type: ignore[arg-type]
+                cap_dict = capability_to_dict(cap)  # pyright: ignore[reportArgumentType]
                 if not isinstance(cap_dict.get("kind"), str):
                     cap_dict = _unsupported_capability("malformed_semantic_capability")
                 out[str(fn_signature)] = cap_dict

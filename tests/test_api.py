@@ -589,7 +589,7 @@ def test_stage_timings_endpoint_is_admin_gated() -> None:
     matching = [r for r in api.app.routes if getattr(r, "path", None) == target_path]
     assert matching, f"route {target_path} is not registered"
     route = matching[0]
-    route_deps = [dep.call for dep in route.dependant.dependencies]  # type: ignore[attr-defined]
+    route_deps = [dep.call for dep in route.dependant.dependencies]  # pyright: ignore[reportAttributeAccessIssue]
     assert require_admin_key in route_deps, "stage_timings must require an admin key"
 
 

@@ -115,7 +115,7 @@ def test_decode_controller_value_refuses_unstorable_struct_blob():
         "type_kind": "struct",
     }
     with pytest.raises(ValueError, match="exceeds storable width"):
-        _decode_controller_value(_RAW_STRUCT, "state_variable", struct_spec_no_projection)  # type: ignore[arg-type]
+        _decode_controller_value(_RAW_STRUCT, "state_variable", struct_spec_no_projection)  # pyright: ignore[reportArgumentType]
 
 
 def test_decode_controller_value_storable_paths_unchanged():
@@ -134,7 +134,7 @@ def test_decode_controller_value_storable_paths_unchanged():
             {"name": "isPaused", "abi_type": "bool"},
         ],
     }
-    assert _decode_controller_value(_RAW_STRUCT, "state_variable", projected) == _ADDR  # type: ignore[arg-type]
+    assert _decode_controller_value(_RAW_STRUCT, "state_variable", projected) == _ADDR  # pyright: ignore[reportArgumentType]
 
 
 # ---------------------------------------------------------------------------

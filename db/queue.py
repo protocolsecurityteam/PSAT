@@ -1404,7 +1404,7 @@ def store_source_files(session: Session, job_id: Any, files: dict[str, str]) -> 
             if failure is None:
                 failure = outcome
             continue
-        path, key = outcome  # type: ignore[misc]
+        path, key = outcome
         entries.append((path, key))
         uploaded_keys.append(key)
 
@@ -1521,7 +1521,7 @@ def get_source_files(session: Session, job_id: Any) -> dict[str, str]:
     for item, outcome in fetch_results:
         if isinstance(outcome, BaseException):
             raise outcome
-        path, content = outcome  # type: ignore[misc]
+        path, content = outcome
         if isinstance(content, StorageKeyMissing):
             proven_absent[path] = f"no object at any candidate for {item[1]}"
             continue
@@ -2045,7 +2045,7 @@ def copy_static_cache(session: Session, source_job_id: Any, target_job_id: Any) 
             store_artifact(session, target_job_id, art.name, data=art.data, text_data=art.text_data)
 
     session.commit()
-    return new_contract.id  # type: ignore[attr-defined]
+    return new_contract.id
 
 
 # Code-plane artifacts safe to reuse across a same-source deployment. Unlike the

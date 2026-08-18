@@ -179,7 +179,7 @@ def test_parallel_map_propagates_trace_id():
 
     for item, outcome in results:
         assert not isinstance(outcome, BaseException)
-        idx, trace = outcome  # type: ignore[misc]
+        idx, trace = outcome
         assert idx == item
         assert trace == "parent-job"
 

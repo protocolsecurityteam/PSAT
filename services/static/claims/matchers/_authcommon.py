@@ -133,7 +133,7 @@ def _cache(ctx: ClaimContext) -> dict[str, Any]:
     if cache is None:
         cache = {}
         try:
-            ctx._auth_family_cache = cache  # type: ignore[attr-defined]
+            ctx._auth_family_cache = cache  # pyright: ignore[reportAttributeAccessIssue]
         except Exception:
             pass
     return cache

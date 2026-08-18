@@ -115,16 +115,16 @@ def test_successful_process_with_degraded_records_writes_artifact(db_session, te
     completes: list = []
     monkey_advance = base.advance_job
     monkey_complete = None
-    base.advance_job = lambda _s, jid, ns, _d, **_kw: advances.append((jid, ns))  # type: ignore[assignment]
+    base.advance_job = lambda _s, jid, ns, _d, **_kw: advances.append((jid, ns))
     import db.queue as db_queue
 
     monkey_complete = db_queue.complete_job
-    db_queue.complete_job = lambda _s, jid: completes.append(jid)  # type: ignore[assignment]
+    db_queue.complete_job = lambda _s, jid: completes.append(jid)
     try:
         worker._execute_job(db_session, job)
     finally:
-        base.advance_job = monkey_advance  # type: ignore[assignment]
-        db_queue.complete_job = monkey_complete  # type: ignore[assignment]
+        base.advance_job = monkey_advance
+        db_queue.complete_job = monkey_complete
 
     db_session.expire_all()
     payload = _read_stage_errors(db_session, job.id)
@@ -207,11 +207,11 @@ def test_successful_process_without_degraded_writes_no_artifact(db_session, test
     import workers.base as base
 
     monkey_advance = base.advance_job
-    base.advance_job = lambda *_a, **_kw: None  # type: ignore[assignment]
+    base.advance_job = lambda *_a, **_kw: None
     try:
         worker._execute_job(db_session, job)
     finally:
-        base.advance_job = monkey_advance  # type: ignore[assignment]
+        base.advance_job = monkey_advance
 
     db_session.expire_all()
     payload = _read_stage_errors(db_session, job.id)

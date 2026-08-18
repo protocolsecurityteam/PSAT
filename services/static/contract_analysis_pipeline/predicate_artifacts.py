@@ -520,7 +520,7 @@ def _value_writer_spec(spec: WriterEventSpec) -> dict[str, Any]:
         "indexed_positions": [int(pos) for pos in spec.get("indexed_positions") or []],
         "direction": "set",
         "writer_function": spec.get("writer_function") or "",
-        "value_position": int(spec["value_position"]),  # type: ignore[arg-type]
+        "value_position": int(spec["value_position"]),  # pyright: ignore[reportArgumentType]
     }
 
 

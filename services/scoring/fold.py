@@ -4716,7 +4716,7 @@ def _destination_magnitudes(signals: list[FunctionSignal]) -> dict[tuple[str, st
         if not magnitude.is_determined or not _is_number(magnitude.value):
             continue
         key = (entity_key(signal.chain, signal.deployment_address), signal.selector.lower())
-        usd = float(magnitude.value)  # type: ignore[arg-type]  # _is_number narrows it
+        usd = float(magnitude.value)  # pyright: ignore[reportArgumentType]  # _is_number narrows it
         previous = out.get(key)
         # Two signals on one selector are the same function distilled twice; the
         # LOWER figure is the one both witnesses support. The execution is taken
@@ -5406,7 +5406,7 @@ def _witnessed_magnitude(instance: _Instance) -> float | None:
     """The one dollar figure this call's witness proved, if it proved one."""
     raw = instance.magnitude.value
     if instance.magnitude.is_determined and _is_number(raw):
-        return float(raw)  # type: ignore[arg-type]  # _is_number narrows it
+        return float(raw)  # pyright: ignore[reportArgumentType]  # _is_number narrows it
     return None
 
 

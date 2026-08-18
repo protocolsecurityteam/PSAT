@@ -97,7 +97,7 @@ def parallel_map(
     workers = max_workers if max_workers is not None else _max_fanout()
     workers = max(1, min(workers, len(items_list)))
 
-    results: list[tuple[T, R | BaseException]] = [(item, None) for item in items_list]  # type: ignore[misc]
+    results: list[tuple[T, R | BaseException]] = [(item, None) for item in items_list]  # pyright: ignore[reportAssignmentType]
 
     if workers == 1 and heartbeat is None:
         for idx, item in enumerate(items_list):

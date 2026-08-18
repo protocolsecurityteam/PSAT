@@ -428,8 +428,8 @@ def test_policy_worker_resolver_keeps_error_and_absence_apart():
 
     original_read = pw.read_contract_controllers
     original_classify = pw.classify_resolved_address_with_status
-    pw.read_contract_controllers = _fake_read  # type: ignore[assignment]
-    pw.classify_resolved_address_with_status = lambda rpc_url, address, chain_id=None: ("eoa", {}, True)  # type: ignore[assignment]
+    pw.read_contract_controllers = _fake_read
+    pw.classify_resolved_address_with_status = lambda rpc_url, address, chain_id=None: ("eoa", {}, True)
     try:
         resolver = pw._make_terminal_controller_resolver("http://rpc.example", chain_id=1)
         assert resolver is not None
@@ -445,8 +445,8 @@ def test_policy_worker_resolver_keeps_error_and_absence_apart():
         assert steps is not None
         assert [step["address"] for step in steps] == [EOA]
     finally:
-        pw.read_contract_controllers = original_read  # type: ignore[assignment]
-        pw.classify_resolved_address_with_status = original_classify  # type: ignore[assignment]
+        pw.read_contract_controllers = original_read
+        pw.classify_resolved_address_with_status = original_classify
 
 
 def test_multi_plane_records_silence_per_plane():

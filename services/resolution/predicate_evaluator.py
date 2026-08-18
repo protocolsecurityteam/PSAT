@@ -1812,7 +1812,7 @@ def _observed_event_key_words_from_hypersync(
 
     async def _scan() -> list[str]:
         try:
-            import hypersync  # type: ignore
+            import hypersync
         except Exception:
             return []
         from services.resolution.repos.event_logs_hypersync import _hypersync_url_for_chain
@@ -2210,7 +2210,7 @@ def _maybe_inline_cross_contract_call(
     from services.resolution.adapters import AdapterRegistry as _Reg
 
     registry_adapters = (
-        ctx.adapter._registry  # type: ignore[attr-defined]
+        ctx.adapter._registry  # pyright: ignore[reportAttributeAccessIssue]
         if hasattr(ctx.adapter, "_registry")
         else _Reg()
     )
@@ -2791,7 +2791,7 @@ def _condition_from_leaf(leaf: LeafPredicate) -> Condition:
         # business leaf): record that this open is a permit, not a bare open.
         kind = "permit_sig"
     return Condition(
-        kind=kind,  # type: ignore[arg-type]
+        kind=kind,
         description=leaf.get("expression") or "",
     )
 

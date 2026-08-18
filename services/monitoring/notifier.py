@@ -787,7 +787,7 @@ def notify_protocol_events(session: Session, events: list[MonitoredEvent]) -> No
                     continue
 
                 try:
-                    if _send_discord(sub.discord_webhook_url, embed):  # type: ignore[arg-type]
+                    if _send_discord(sub.discord_webhook_url, embed):  # pyright: ignore[reportArgumentType]
                         sent += 1
                     else:
                         failed += 1
@@ -914,7 +914,7 @@ def notify_reanalysis_complete(session: Session, job: "Job") -> None:
     failed = 0
     for sub in subs:
         try:
-            if _send_discord(sub.discord_webhook_url, embed):  # type: ignore[arg-type]
+            if _send_discord(sub.discord_webhook_url, embed):  # pyright: ignore[reportArgumentType]
                 sent += 1
             else:
                 failed += 1

@@ -135,7 +135,7 @@ def test_min_of_present_is_not_implemented():
 
 
 def _blacklist(members: list[str], *, block: int | None, quality: str = "exact") -> CapabilityExpr:
-    cap = CapabilityExpr.cofinite_blacklist(members, confidence="enumerable", blacklist_quality=quality)  # type: ignore[arg-type]
+    cap = CapabilityExpr.cofinite_blacklist(members, confidence="enumerable", blacklist_quality=quality)  # pyright: ignore[reportArgumentType]
     cap.last_indexed_block = block
     return cap
 

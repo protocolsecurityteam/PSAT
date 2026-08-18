@@ -69,10 +69,10 @@ def test_group_scan_failure_is_swallowed_warning_not_exception(caplog):
     sentinel = object()
     with caplog.at_level(logging.WARNING, logger="workers.event_log_indexer"):
         summary = scan_enrolled_events(
-            session,  # type: ignore[arg-type]
-            fetchers={1: sentinel},  # type: ignore[arg-type]
+            session,  # pyright: ignore[reportArgumentType]
+            fetchers={1: sentinel},  # pyright: ignore[reportArgumentType]
             head_fetchers={1: _BoomHead()},
-            block_hash_fetchers={1: sentinel},  # type: ignore[arg-type]
+            block_hash_fetchers={1: sentinel},  # pyright: ignore[reportArgumentType]
         )
 
     assert summary.failed_groups == 1
@@ -237,7 +237,7 @@ def test_shutdown_line_names_the_process(monkeypatch, caplog):
 
     indexer.main()
     with caplog.at_level(logging.INFO, logger="workers.event_log_indexer"):
-        handlers[signal_mod.SIGTERM](signal_mod.SIGTERM, None)  # type: ignore[operator]
+        handlers[signal_mod.SIGTERM](signal_mod.SIGTERM, None)  # pyright: ignore[reportCallIssue]
 
     record = next(r for r in caplog.records if "shutting down" in r.getMessage())
     assert indexer.WORKER_ID in record.getMessage()

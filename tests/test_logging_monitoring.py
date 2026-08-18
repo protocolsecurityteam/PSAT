@@ -189,7 +189,7 @@ def test_sweep_budget_exceeded_is_logged_with_its_cost(caplog):
             from_block=0,
             to_block=100,
             cost=cost,
-            fetcher=_Blown(),  # type: ignore[arg-type]
+            fetcher=_Blown(),  # pyright: ignore[reportArgumentType]
         )
 
     assert failure is not None

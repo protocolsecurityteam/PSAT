@@ -1652,7 +1652,7 @@ class StaticWorker(BaseWorker):
                 static_outcome,
             )
         else:
-            deps_output = static_outcome  # type: ignore[assignment]
+            deps_output = static_outcome  # pyright: ignore[reportAssignmentType]
             if cached_static_deps is None and isinstance(deps_output, dict):
                 store_artifact(session, job.id, "static_dependencies", data=deps_output)
             static_dep_count = len(deps_output.get("dependencies", [])) if isinstance(deps_output, dict) else 0
@@ -1691,7 +1691,7 @@ class StaticWorker(BaseWorker):
                 dyn_outcome,
             )
         else:
-            dyn_output = dyn_outcome  # type: ignore[assignment]
+            dyn_output = dyn_outcome  # pyright: ignore[reportAssignmentType]
             if prev_dyn and not tx_hashes and isinstance(dyn_output, dict):
                 dyn_output = _merge_dynamic_deps(prev_dyn, dyn_output)
             if isinstance(dyn_output, dict):

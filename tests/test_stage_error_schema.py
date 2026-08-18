@@ -77,7 +77,7 @@ def test_stage_error_unserializable_context_is_replaced_with_truncated_sentinel(
     # Either the json fallback handled it via str(), or it triggered the
     # sentinel — both are acceptable, but the size cap should not trip on a
     # tiny dict, so the result is the small dict or the sentinel.
-    assert err.context == {"_truncated": True} or err.context == {"x": err.context["x"]}  # type: ignore[index]
+    assert err.context == {"_truncated": True} or err.context == {"x": err.context["x"]}  # pyright: ignore[reportOptionalSubscript]
 
 
 def test_stage_errors_envelope_serializes_empty_list_cleanly():

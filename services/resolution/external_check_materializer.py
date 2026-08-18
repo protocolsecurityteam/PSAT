@@ -292,7 +292,7 @@ def _candidate_addresses_from_hypersync(*, checker_address: str, limit: int, cha
 
 async def _candidate_addresses_from_hypersync_async(*, checker_address: str, limit: int, chain_id: int) -> list[str]:
     try:
-        import hypersync  # type: ignore
+        import hypersync
     except Exception:
         return []
 

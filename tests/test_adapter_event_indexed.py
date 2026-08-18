@@ -232,7 +232,7 @@ def test_postgres_event_repo_folds_add_remove_hints_in_log_order():
     ]
     repo = PostgresEventLogRepo(cast(Any, FakeSession(rows)))
     # The fold gates trust on backfill_complete now, not the raw cursor block.
-    repo._cursor_state = lambda chain_id, event_address, topic0: (100, True)  # type: ignore[method-assign]
+    repo._cursor_state = lambda chain_id, event_address, topic0: (100, True)
 
     result = repo.fold_event_history(
         chain_id=1,
@@ -434,7 +434,7 @@ def _conflict_hints(value_position):
 
 def _run_conflict_fold(hints):
     repo = PostgresEventLogRepo(cast(Any, FakeSession(_conflict_rows())))
-    repo._cursor_state = lambda chain_id, event_address, topic0: (100, True)  # type: ignore[method-assign]
+    repo._cursor_state = lambda chain_id, event_address, topic0: (100, True)
     return repo.fold_event_history(
         chain_id=1,
         event_address=ADDR_A,

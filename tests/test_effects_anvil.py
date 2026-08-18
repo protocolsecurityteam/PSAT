@@ -644,7 +644,7 @@ def _anvil_with_proc(proc: object) -> SubprocessAnvil:
     """A SubprocessAnvil whose only wired dependency is ``_proc`` — no real
     subprocess spawned, so ``rss_mb`` is exercised in isolation."""
     anvil = SubprocessAnvil.__new__(SubprocessAnvil)
-    anvil._proc = proc  # type: ignore[attr-defined]
+    anvil._proc = proc  # pyright: ignore[reportAttributeAccessIssue]
     return anvil
 
 

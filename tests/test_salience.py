@@ -1215,7 +1215,7 @@ def test_max_salience_requires_a_stated_floor():
     the one level the mechanical gate forbids from an absent input. Callers
     state their own floor instead."""
     with pytest.raises(TypeError):
-        sal.max_salience()  # type: ignore[call-arg]
+        sal.max_salience()  # pyright: ignore[reportCallIssue]
     assert sal.max_salience(sal.SALIENCE_NOTABLE) == sal.SALIENCE_NOTABLE
     assert sal.max_salience(sal.SALIENCE_NOTABLE, *[]) == sal.SALIENCE_NOTABLE
     assert sal.max_salience(sal.SALIENCE_ROUTINE) == sal.SALIENCE_ROUTINE

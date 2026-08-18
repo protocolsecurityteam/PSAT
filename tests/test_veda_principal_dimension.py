@@ -555,7 +555,7 @@ def test_residual_as_conditions_variants():
     assert any("nope" in c["description"] for c in by_reason)
     generic = _residual_as_conditions({"kind": "external_check_only"})
     assert generic and "external authorization check" in generic[0]["description"]
-    assert _residual_as_conditions("not-a-dict") == []  # type: ignore[arg-type]  # defensive non-dict guard
+    assert _residual_as_conditions("not-a-dict") == []  # pyright: ignore[reportArgumentType]  # defensive non-dict guard
 
 
 # ---------------------------------------------------------------------------

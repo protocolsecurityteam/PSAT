@@ -1147,7 +1147,7 @@ def _add_nested_principals(
             {
                 "from_id": from_node_id,
                 "to_id": nested_node_id,
-                "relation": relation,  # type: ignore[typeddict-item]
+                "relation": relation,
                 "label": label,
                 "source_controller_id": source_controller_id,
                 "notes": [],

@@ -251,7 +251,7 @@ def corpus(tmp_path_factory):
         "subject": {"address": "0x" + "11" * 20, "name": "WitnessCorpus"},
         "controller_tracking": targets,
     }
-    plan = build_control_tracking_plan(analysis)  # type: ignore[arg-type]
+    plan = build_control_tracking_plan(analysis)  # pyright: ignore[reportArgumentType]
     specs = extract_governance_topics(dict(plan))
     planned = {tc["controller_id"] for tc in plan["tracked_controllers"]}
     polling = build_polling_plan(contract_type="regular", tracking_plan=plan, tracked_topics=specs)
@@ -715,7 +715,7 @@ def opaque(tmp_path_factory):
             },
             "controller_tracking": targets,
         }
-        plan = build_control_tracking_plan(analysis)  # type: ignore[arg-type]
+        plan = build_control_tracking_plan(analysis)  # pyright: ignore[reportArgumentType]
         out[name] = {
             "contract": contract,
             "effects": effects,

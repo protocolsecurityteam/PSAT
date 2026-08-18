@@ -78,7 +78,7 @@ def _leaf_restricts_caller(leaf: Mapping[str, Any]) -> bool:
             leaf.get("callee_signature") or descriptor_signature,
         ):
             return False
-    if leaf_is_caller_tainted(leaf) and is_permissionless_caller_shape(leaf):  # type: ignore[arg-type]
+    if leaf_is_caller_tainted(leaf) and is_permissionless_caller_shape(leaf):  # pyright: ignore[reportArgumentType]
         return False
     return True
 

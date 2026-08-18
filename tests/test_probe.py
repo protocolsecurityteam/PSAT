@@ -33,7 +33,7 @@ class _StubRegistry(AdapterRegistry):
         self.cap = cap or CapabilityExpr.unsupported("no_cap_set")
         self.calls: list[tuple[dict, EvaluationContext]] = []
 
-    def enumerate(self, descriptor, ctx):  # type: ignore[override]
+    def enumerate(self, descriptor, ctx):
         self.calls.append((descriptor, ctx))
         return self.cap
 
@@ -303,7 +303,7 @@ def test_unsupported_capability_passes_reason_through():
 
 
 def _composite(kind: str, *children: CapabilityExpr) -> CapabilityExpr:
-    return CapabilityExpr(kind=kind, children=list(children))  # type: ignore[arg-type]
+    return CapabilityExpr(kind=kind, children=list(children))  # pyright: ignore[reportArgumentType]
 
 
 def test_and_all_yes_returns_yes():

@@ -432,10 +432,10 @@ def test_a_legacy_witness_under_a_slot_type_does_not_promote():
         "member_witness": witness,
         "writer_openness": "restricted",
     }
-    assert _resolve_spec_tier(slot_typed, mc) == WITNESS_TIER_ACTIVITY  # type: ignore[arg-type]
+    assert _resolve_spec_tier(slot_typed, mc) == WITNESS_TIER_ACTIVITY  # pyright: ignore[reportArgumentType]
 
     member_typed = dict(slot_typed, event_type="member_changed:m")
-    assert _resolve_spec_tier(member_typed, mc) == WITNESS_TIER_SELF_DESCRIBING  # type: ignore[arg-type]
+    assert _resolve_spec_tier(member_typed, mc) == WITNESS_TIER_SELF_DESCRIBING  # pyright: ignore[reportArgumentType]
 
 
 def test_member_change_never_reflects_into_last_known_state():
@@ -445,7 +445,7 @@ def test_member_change_never_reflects_into_last_known_state():
 
     mc = SimpleNamespace(last_known_state={"m": "before"})
     _update_state_from_event(
-        mc,  # type: ignore[arg-type]
+        mc,  # pyright: ignore[reportArgumentType]
         {"event_type": "member_changed:m", "effect_tags": {"writes": ["m"]}, "key": "0xabc", "direction": "add"},
     )
     assert mc.last_known_state == {"m": "before"}
@@ -458,7 +458,7 @@ def test_member_change_never_writes_a_controller_value_row():
 
     mc = SimpleNamespace(contract_id=1, address="0x" + "11" * 20, chain="ethereum")
     _sync_relational_tables(
-        None,  # type: ignore[arg-type]
-        mc,  # type: ignore[arg-type]
+        None,  # pyright: ignore[reportArgumentType]
+        mc,  # pyright: ignore[reportArgumentType]
         {"event_type": "member_changed:m", "effect_tags": {"writes": ["m"]}, "key": "0xabc", "direction": "add"},
     )

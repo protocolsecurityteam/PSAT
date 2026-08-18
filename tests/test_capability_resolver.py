@@ -323,7 +323,7 @@ def test_capability_to_dict_handles_composite():
 
     inner_finite = CapabilityExpr.finite_set(["0x" + "11" * 20], quality="exact")
     inner_thresh = CapabilityExpr.threshold_group(2, ["0x" + "22" * 20, "0x" + "33" * 20])
-    composite = CapabilityExpr(kind="OR", children=[inner_finite, inner_thresh])  # type: ignore[arg-type]
+    composite = CapabilityExpr(kind="OR", children=[inner_finite, inner_thresh])
     out = capability_to_dict(composite)
 
     assert out["kind"] == "OR"

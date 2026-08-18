@@ -234,14 +234,14 @@ def test_transient_then_success(clean_jobs, test_session_local, monkeypatch):
 
     advances: list = []
     monkey_advance = base.advance_job
-    base.advance_job = lambda _s, jid, ns, _d, **_kw: advances.append((jid, ns))  # type: ignore[assignment]
+    base.advance_job = lambda _s, jid, ns, _d, **_kw: advances.append((jid, ns))
     try:
         for _ in range(3):
             job.expire_all()
             current = job.get(Job, job_row.id)
             worker._execute_job(job, current)
     finally:
-        base.advance_job = monkey_advance  # type: ignore[assignment]
+        base.advance_job = monkey_advance
 
     job.expire_all()
     refreshed = job.get(Job, job_row.id)

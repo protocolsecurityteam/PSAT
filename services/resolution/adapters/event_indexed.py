@@ -237,7 +237,7 @@ class EventIndexedAdapter:
         return CapabilityExpr.finite_set(
             merged,
             quality="exact" if worst_confidence == "enumerable" else "lower_bound",
-            confidence=worst_confidence,  # type: ignore[arg-type]
+            confidence=worst_confidence,
             last_indexed_block=last_block,
         )
 
@@ -503,7 +503,7 @@ class EventIndexedAdapter:
         try:
             scan = enumerate_mapping_values_sync(
                 contract_address,
-                writer_specs,  # type: ignore[arg-type]
+                writer_specs,
                 chain=str(ctx.chain_id) if isinstance(ctx.chain_id, int) else None,
                 **kwargs,
             )

@@ -273,7 +273,7 @@ def test_reclaimed_job_cannot_be_silently_finished_by_original_holder(session):
     assert getattr(b, "lease_id", None) != a_lease, "B's claim must produce a fresh lease id"
 
     with pytest.raises(LeaseLost):
-        complete_job(session, a.id, lease_id=a_lease)  # type: ignore[call-arg]
+        complete_job(session, a.id, lease_id=a_lease)
 
 
 @requires_postgres
@@ -296,7 +296,7 @@ def test_reclaimed_job_cannot_be_silently_advanced_by_original_holder(session):
     assert b.worker_id == "worker-B"
 
     with pytest.raises(LeaseLost):
-        advance_job(session, a.id, JobStage.static, lease_id=a_lease)  # type: ignore[call-arg]
+        advance_job(session, a.id, JobStage.static, lease_id=a_lease)
 
 
 @requires_postgres

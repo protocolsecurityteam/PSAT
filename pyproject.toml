@@ -65,7 +65,7 @@ target-version = "py310"
 line-length = 120
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "W"]
+select = ["E", "F", "I", "W", "PGH"]
 
 [tool.ruff.lint.per-file-ignores]
 "services/crawlers/dapp/browser.py" = ["E501"]
@@ -86,6 +86,10 @@ skip_empty = true
 [tool.pyright]
 pythonVersion = "3.10"
 typeCheckingMode = "standard"
+# Suppressions must be pyright-format with explicit rules; mypy-format
+# ``type: ignore`` comments are inert (there is no mypy in this repo).
+enableTypeIgnoreComments = false
+reportUnnecessaryTypeIgnoreComment = "error"
 # ``scoring_prototype`` is a read-only diagnostic oracle committed as spec-packet
 # material, not product code: nothing in the pipeline imports it and it is
 # explicitly not to be fixed or iterated (SCORER_INTEGRATION_STRATEGY, "Status of

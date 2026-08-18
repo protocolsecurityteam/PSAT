@@ -191,7 +191,7 @@ def test_concurrent_enroll_insert_is_race_safe(race_session):
             _commit_conflicting_monitored_contract(proto.id, addr)
         return result
 
-    race_session.execute = execute_then_inject  # type: ignore[method-assign]
+    race_session.execute = execute_then_inject
     try:
         with patch("services.monitoring.enrollment.rpc_request", return_value="0x100"):
             # No PendingRollbackError / IntegrityError may escape.

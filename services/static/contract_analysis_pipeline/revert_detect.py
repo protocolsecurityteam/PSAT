@@ -680,7 +680,7 @@ class RevertDetector:
         We only scan the catch arm — the success arm of a try is
         the call's lvalue path and doesn't itself revert."""
         try:
-            catch_type = NodeType.CATCH  # type: ignore[attr-defined]
+            catch_type = NodeType.CATCH
         except AttributeError:
             return False
         # First descend into the CATCH siblings; the TRY node's sons

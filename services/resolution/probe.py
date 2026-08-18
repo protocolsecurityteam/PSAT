@@ -133,7 +133,7 @@ def probe_signature(
     # evaluator handles it cleanly. The evaluator returns a
     # signature_witness whose .signer is the address-set the
     # signature must recover to.
-    isolated_tree = make_leaf_node(leaf)  # type: ignore[arg-type]
+    isolated_tree = make_leaf_node(leaf)  # pyright: ignore[reportArgumentType]
     cap = evaluate_tree_with_registry(isolated_tree, registry, ctx)
     if cap.kind == "signature_witness" and cap.signer is not None:
         answer = _resolve_in_capability(cap.signer, recovered_signer)

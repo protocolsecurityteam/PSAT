@@ -109,7 +109,7 @@ def _reads(**overrides: str | None) -> NodeReads:
         "last_checkpoint_timestamp": _word(1774052327),
     }
     base.update(overrides)
-    return NodeReads(**base)  # type: ignore[arg-type]
+    return NodeReads(**base)
 
 
 def _calldata(node: str = NODE_WITH_SHARES, strategy: str = STRATEGY) -> str:

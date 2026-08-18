@@ -151,7 +151,7 @@ def enrich_dependency_metadata(
                 # returns ``(None, {})``; a raised exception here is unexpected.
                 info_cache[addr] = (None, {})
             else:
-                info_cache[addr] = value  # type: ignore[assignment]
+                info_cache[addr] = value
 
     for addr, info in deps.items():
         if not isinstance(info, dict):

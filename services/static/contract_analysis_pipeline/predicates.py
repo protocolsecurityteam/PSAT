@@ -726,8 +726,8 @@ def _build_internal_call_or_and_subtree(ir: Any, prov: ProvenanceMap, gate: Reve
             return None
         # Slither types these as Optional but a well-formed Binary IR has both
         # operands present; if one is missing the helper isn't recognizable.
-        left = inner.variable_left  # type: ignore[union-attr]
-        right = inner.variable_right  # type: ignore[union-attr]
+        left = inner.variable_left
+        right = inner.variable_right
         if left is None or right is None:
             return None
         children = [
@@ -1743,7 +1743,7 @@ def _try_membership_via_value_compare(
     # ``value_predicate`` as "filter values where this op + RHS holds".
     allowed_op = "eq" if operator == "eq" else "ne"
     value_predicate: ValuePredicate = {
-        "op": allowed_op,  # type: ignore[typeddict-item]
+        "op": allowed_op,
         "rhs_values": [str(const_value)],
         "value_type": _value_type_of_index_ir(index_ir),
     }
@@ -1793,8 +1793,8 @@ def _find_index_value_pair(a: Any, b: Any, function: Any) -> tuple[Any | None, A
     if isinstance(defining, Binary):
         bt_name = getattr(getattr(defining, "type", None), "name", "").upper()
         if bt_name == "AND":  # bitwise & (Slither's BinaryType.AND); &&  is ANDAND
-            left = defining.variable_left  # type: ignore[union-attr]
-            right = defining.variable_right  # type: ignore[union-attr]
+            left = defining.variable_left
+            right = defining.variable_right
             # The "mask" side of `(value & MASK)` can be a literal
             # Constant OR a state-level `constant`/`immutable` value
             # (which Slither emits as a StateIRVariable). Either is
@@ -3240,9 +3240,9 @@ def _apply_polarity(operator: str, polarity: str) -> LeafOperator:
     """If polarity is allowed_when_false (if-revert), invert the
     operator. The inversion table: eq↔ne, lt↔gte, lte↔gt."""
     if polarity == "allowed_when_true":
-        return operator  # type: ignore[return-value]
+        return operator  # pyright: ignore[reportReturnType]
     inv = {"eq": "ne", "ne": "eq", "lt": "gte", "gte": "lt", "lte": "gt", "gt": "lte"}
-    return inv.get(operator, operator)  # type: ignore[return-value]
+    return inv.get(operator, operator)  # pyright: ignore[reportReturnType]
 
 
 def _make_leaf(
@@ -3356,8 +3356,8 @@ def _reconstruct_index_chain(ir: Any, prov: ProvenanceMap, function: Any | None 
     visited: set[str] = set()
     current = ir
     while isinstance(current, Index):
-        keys.insert(0, _expand_key_operand(current.variable_right, prov, function))  # type: ignore[union-attr]
-        left = current.variable_left  # type: ignore[union-attr]
+        keys.insert(0, _expand_key_operand(current.variable_right, prov, function))
+        left = current.variable_left
         left_name = getattr(left, "name", None)
         if left_name in visited:
             break  # cycle guard

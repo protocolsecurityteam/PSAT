@@ -151,7 +151,7 @@ class TestSanitizeUrl:
 
     def test_non_string_passes_through(self):
         # ``Job.error`` can be None; helper must not raise.
-        assert sanitize_url(None) is None  # type: ignore[arg-type]
+        assert sanitize_url(None) is None  # pyright: ignore[reportArgumentType]
 
 
 class TestSanitizeString:

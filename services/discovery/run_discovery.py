@@ -186,20 +186,20 @@ def _make_search_fn(mode: str, budget: _Budget, research_seeds: list[dict] | Non
 
 
 def _patch_search(fn):
-    audit_reports_mod._tavily_search = fn  # type: ignore[attr-defined]
-    inventory_mod._tavily_search = fn  # type: ignore[attr-defined]
-    inventory_domain_mod._tavily_search = fn  # type: ignore[attr-defined]
+    audit_reports_mod._tavily_search = fn
+    inventory_mod._tavily_search = fn
+    inventory_domain_mod._tavily_search = fn
 
 
 def _restore_search(original):
-    audit_reports_mod._tavily_search = original  # type: ignore[attr-defined]
-    inventory_mod._tavily_search = original  # type: ignore[attr-defined]
-    inventory_domain_mod._tavily_search = original  # type: ignore[attr-defined]
+    audit_reports_mod._tavily_search = original
+    inventory_mod._tavily_search = original
+    inventory_domain_mod._tavily_search = original
 
 
 def _patch_classify_with_seeds(research_seeds: list[dict]):
     """Bypass stage 1b classifier for Deep Research seeds."""
-    original = audit_reports_mod.classify_search_results  # type: ignore[attr-defined]
+    original = audit_reports_mod.classify_search_results
 
     def wrapped(results, company, debug=False):
         classified = original(results, company, debug=debug)
@@ -220,7 +220,7 @@ def _patch_classify_with_seeds(research_seeds: list[dict]):
                 seen.add(url)
         return classified
 
-    audit_reports_mod.classify_search_results = wrapped  # type: ignore[attr-defined]
+    audit_reports_mod.classify_search_results = wrapped
     return original
 
 
@@ -513,8 +513,8 @@ def run_discovery(
     started_at = time.monotonic()
 
     # ---- Audits ----
-    original_search = inventory_domain_mod._tavily_search  # type: ignore[attr-defined]
-    original_classify = audit_reports_mod.classify_search_results  # type: ignore[attr-defined]
+    original_search = inventory_domain_mod._tavily_search
+    original_classify = audit_reports_mod.classify_search_results
 
     with log_timed_phase(logger, "discovery_audits") as ph_audit:
         # 1a. Deep Research for audit seeds
@@ -556,7 +556,7 @@ def run_discovery(
             )
         finally:
             _restore_search(original_search)
-            audit_reports_mod.classify_search_results = original_classify  # type: ignore[attr-defined]
+            audit_reports_mod.classify_search_results = original_classify
         _merge_ai_audit_metadata(audit_result, audit_seed_metadata)
         ph_audit["audit_seeds"] = len(audit_seeds)
         ph_audit["reports"] = len(audit_result.get("reports", []))

@@ -1010,7 +1010,7 @@ class TestExtractReferencedRepos:
 
     def test_empty_and_none_text(self):
         assert source_equivalence.extract_referenced_repos("") == []
-        assert source_equivalence.extract_referenced_repos(None) == []  # type: ignore[arg-type]
+        assert source_equivalence.extract_referenced_repos(None) == []  # pyright: ignore[reportArgumentType]
 
     def test_lowercases_owner_and_repo(self):
         """Normalize so fallback comparisons hit regardless of casing."""

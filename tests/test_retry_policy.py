@@ -75,7 +75,7 @@ def _http_error(status: int | None) -> requests.exceptions.HTTPError:
     # SimpleNamespace stand-in is enough — avoids constructing a real
     # ``Response`` object just to set one attribute.
     response = SimpleNamespace(status_code=status) if status is not None else None
-    return requests.exceptions.HTTPError(f"{status}", response=response)  # type: ignore[arg-type]
+    return requests.exceptions.HTTPError(f"{status}", response=response)  # pyright: ignore[reportArgumentType]
 
 
 @pytest.mark.parametrize("status", [408, 425, 429, 500, 502, 503, 504, 522, 524])
@@ -91,7 +91,7 @@ def test_classify_http_terminal_statuses(status):
 def test_classify_http_no_response_is_terminal():
     """HTTPError raised without a response is treated as a deterministic shape problem."""
     exc = requests.exceptions.HTTPError("no response attached")
-    exc.response = None  # type: ignore[assignment]
+    exc.response = None
     assert classify(exc) == "terminal"
 
 

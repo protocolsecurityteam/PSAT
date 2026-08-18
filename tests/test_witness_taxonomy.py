@@ -335,8 +335,8 @@ def test_qualification_fields_round_trip_through_the_plan_assembler():
             }
         ],
     }
-    plan = dict(build_control_tracking_plan(analysis))  # type: ignore[arg-type]
-    event = dict(plan["tracked_controllers"][0]["event_watch"]["events"][0])  # type: ignore[index,typeddict-item]
+    plan = dict(build_control_tracking_plan(analysis))  # pyright: ignore[reportArgumentType]
+    event = dict(plan["tracked_controllers"][0]["event_watch"]["events"][0])  # pyright: ignore[reportIndexIssue]
     assert event["member_witness"] == {
         "mapping_name": "fromDenyList",
         "key_position": 0,

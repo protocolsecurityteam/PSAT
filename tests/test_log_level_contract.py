@@ -108,7 +108,7 @@ ALLOW_LIST: dict[str, dict[int, str]] = {
 def _attach_parents(tree: ast.AST) -> None:
     for node in ast.walk(tree):
         for child in ast.iter_child_nodes(node):
-            child.parent = node  # type: ignore[attr-defined]
+            child.parent = node  # pyright: ignore[reportAttributeAccessIssue]
 
 
 def _enclosing_handler(node: ast.AST) -> ast.ExceptHandler | None:

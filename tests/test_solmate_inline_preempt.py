@@ -115,7 +115,7 @@ def test_inline_returns_none_when_materialization_fails(monkeypatch):
     # dicts and ``getattr`` on the ctx, so passing plain dicts + a SimpleNamespace
     # exercises the production code paths without instantiating the real
     # ``LeafPredicate`` / ``SetDescriptor`` / ``EvaluationContext`` classes.
-    result = PE._maybe_inline_cross_contract_call(leaf, descriptor, ctx)  # type: ignore[arg-type]
+    result = PE._maybe_inline_cross_contract_call(leaf, descriptor, ctx)  # pyright: ignore[reportArgumentType]
     assert result is None, (
         "Inlining must return None when the delegated check can't be materialized, "
         "so the caller's external_set adapter dispatch gets a turn "

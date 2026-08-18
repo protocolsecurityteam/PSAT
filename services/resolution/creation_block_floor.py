@@ -114,7 +114,7 @@ def _floor_from_cursor(address: str, chain_id: int, session: object | None) -> i
     try:
         if session is not None and hasattr(session, "execute"):
             return _query(session)
-        with SessionLocal() as sess:  # type: ignore[misc]
+        with SessionLocal() as sess:
             return _query(sess)
     except Exception:
         return None

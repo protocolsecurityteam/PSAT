@@ -119,7 +119,7 @@ def make_cross_chain_recognizer(
     a recognizer in when one exists.
     """
     try:
-        info = chain_by_id(int(chain_id))  # type: ignore[arg-type]
+        info = chain_by_id(int(chain_id))  # pyright: ignore[reportArgumentType]
     except (UnknownChainError, TypeError, ValueError):
         return None
     if not (info.bridge_executors or info.cross_domain_messengers):

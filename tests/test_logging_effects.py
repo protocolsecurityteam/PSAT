@@ -128,8 +128,8 @@ def test_close_warns_when_sigterm_is_escalated_to_sigkill(caplog):
 
     anvil = SubprocessAnvil.__new__(SubprocessAnvil)
     proc = _StubbornProc()
-    anvil._proc = proc  # type: ignore[attr-defined]
-    anvil._drain = None  # type: ignore[attr-defined]
+    anvil._proc = proc  # pyright: ignore[reportAttributeAccessIssue]
+    anvil._drain = None
 
     with caplog.at_level(logging.WARNING, logger=ANVIL_LOGGER):
         anvil.close()
@@ -146,19 +146,17 @@ def test_close_joins_the_drain_thread(tmp_path):
     binary = _fake_anvil_bin(tmp_path, "while true; do echo tick; sleep 0.2; done\n")
     anvil = SubprocessAnvil.__new__(SubprocessAnvil)
     cmd = [binary]
-    anvil._output_tail = anvil_mod.deque(maxlen=8)  # type: ignore[attr-defined]
-    anvil._drain = None  # type: ignore[attr-defined]
-    anvil._proc = subprocess.Popen(  # type: ignore[attr-defined]
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
-    )
-    anvil._drain = anvil_mod.threading.Thread(target=anvil._drain_output, daemon=True)  # type: ignore[attr-defined]
-    anvil._drain.start()  # type: ignore[attr-defined]
-    thread = anvil._drain  # type: ignore[attr-defined]
+    anvil._output_tail = anvil_mod.deque(maxlen=8)
+    anvil._drain = None
+    anvil._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    anvil._drain = anvil_mod.threading.Thread(target=anvil._drain_output, daemon=True)
+    anvil._drain.start()
+    thread = anvil._drain
 
     anvil.close()
 
     assert not thread.is_alive()
-    assert anvil._drain is None  # type: ignore[attr-defined]
+    assert anvil._drain is None
 
 
 # ---------------------------------------------------------------------------
@@ -398,7 +396,7 @@ def test_every_worklist_item_lands_in_exactly_one_counter():
         _item(cached=_cached_row(), needs_audit=True, probed=None),  # withheld
     ]
     for it in items:
-        worker._resolve_item(session, it, counters)  # type: ignore[arg-type]
+        worker._resolve_item(session, it, counters)  # pyright: ignore[reportArgumentType]
 
     assert (counters.probes_failed, counters.cache_misses, counters.cache_hits_kernel, counters.withheld) == (
         1,
@@ -452,9 +450,9 @@ def test_hashless_candidates_record_a_capped_sample_plus_the_exact_total(monkeyp
     token = degraded_errors_var.set(accumulator)
     try:
         items = worker._plan(
-            None,  # type: ignore[arg-type]
+            None,  # pyright: ignore[reportArgumentType]
             candidates,
-            SimpleNamespace(chain_id=1),  # type: ignore[arg-type]
+            SimpleNamespace(chain_id=1),  # pyright: ignore[reportArgumentType]
             lambda _s, _c: None,
             counters,
         )
@@ -497,7 +495,7 @@ def test_selectionless_job_still_reports_a_defined_funnel():
         protocol_id = None
 
     funnel: dict = {}
-    assert EffectsWorker.__new__(EffectsWorker)._select(None, _Job(), funnel=funnel) == []  # type: ignore[arg-type]
+    assert EffectsWorker.__new__(EffectsWorker)._select(None, _Job(), funnel=funnel) == []  # pyright: ignore[reportArgumentType]
     assert funnel["rows_in"] == 0 and funnel["selected"] == 0
     assert funnel["not_run_reason"] == "job_has_no_protocol"
 
@@ -543,7 +541,7 @@ def test_a_dead_fork_publishes_no_rss_peak_at_all(caplog):
             return 0
 
     dead_fork = SubprocessAnvil.__new__(SubprocessAnvil)
-    dead_fork._proc = _ExitedProc()  # type: ignore[attr-defined]
+    dead_fork._proc = _ExitedProc()  # pyright: ignore[reportAttributeAccessIssue]
     counters, records, accumulator, metrics = _rss_outcome(dead_fork, caplog)
 
     assert counters.peak_anvil_rss_mb is None
@@ -567,7 +565,7 @@ def test_the_transport_reports_a_dead_or_unreadable_fork_as_unknown():
             return 0
 
     anvil = SubprocessAnvil.__new__(SubprocessAnvil)
-    anvil._proc = _Exited()  # type: ignore[attr-defined]
+    anvil._proc = _Exited()  # pyright: ignore[reportAttributeAccessIssue]
     assert anvil.rss_mb() is None
 
 

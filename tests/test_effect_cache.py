@@ -294,7 +294,7 @@ def test_fk_vanish_fallback_warns_and_records_degraded(clean_effects, caplog):
 
     accumulator: list = []
     token = degraded_errors_var.set(accumulator)
-    session.execute = execute_then_delete  # type: ignore[method-assign]
+    session.execute = execute_then_delete
     try:
         with caplog.at_level(logging.WARNING, logger="db.effect_cache"):
             record_effect_verdict(
