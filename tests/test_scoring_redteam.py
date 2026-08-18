@@ -2195,6 +2195,7 @@ def test_a_closure_publishes_a_zero_count_for_a_rule_that_never_fired():
     """An admission rule reports where it did NOT fire, or it discloses nothing."""
     closure = closure_of({KEY_C: {KEY_V}})
     assert closure.refusal_counts() == {
+        P.REFUSAL_MALFORMED_NODE_ID: 0,
         P.REFUSAL_SELF_EDGE: 0,
         P.REFUSAL_ZERO_ANCHOR: 0,
         P.REFUSAL_ZERO_PRINCIPAL: 0,

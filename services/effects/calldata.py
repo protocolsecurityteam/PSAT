@@ -69,6 +69,7 @@ from services.resolution.differential_probe import (
     _is_address_type,
     _parse_arg_types,
 )
+from utils.logging import record_degraded
 
 logger = logging.getLogger(__name__)
 
@@ -385,8 +386,20 @@ def _load_contract_facts_uncached(session: Session, address: str) -> ContractFac
 
     try:
         lookup = find_analysis_job_for_address(session, address, required_artifact="effects", completed_only=False)
-    except Exception:
-        logger.debug("effects calldata: analysis-job lookup failed for %s", address, exc_info=True)
+    except Exception as exc:
+        # Not "this contract has no facts": the lookup did not answer. Every
+        # Tier-1 probe on this address degrades to ``unknown`` from here, so a
+        # storage/DB outage has to be visible as degradation, not as a verdict.
+        # ``contract_address``, never ``address``: the JSON formatter writes the
+        # ambient ``address`` contextvar (the JOB's address) first and drops any
+        # extra that collides with it, which would silently replace the address
+        # this lookup was actually about.
+        context = {"contract_address": address, "exc_type": type(exc).__name__}
+        record_degraded(phase="effects_calldata_facts", exc=exc, context=context)
+        logger.warning(
+            "effects calldata: analysis-job lookup failed; no contract facts for this address",
+            extra=context,
+        )
         return None
     if lookup is None:
         return None
@@ -527,7 +540,17 @@ def encode_calldata(
 
         values = [subs[i] if i in subs else _default_value_for_type(t) for i, t in enumerate(types)]
         encoded = abi_encode(types, values).hex() if types else ""
-    except Exception:
+    except Exception as exc:
+        logger.debug(
+            "effects calldata: encode failed",
+            extra={
+                "selector": selector,
+                "canonical_signature": canonical_signature,
+                "arg_count": len(types),
+                "substituted_indices": sorted(subs),
+                "exc_type": type(exc).__name__,
+            },
+        )
         return None
     return selector + encoded
 

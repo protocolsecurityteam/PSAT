@@ -5,19 +5,20 @@ The level contract in ``utils/logging.py`` says: any worker emitting
 path must also call ``record_degraded(...)`` in the same except block, so
 the partial outcome shows up in the ``stage_errors`` artifact downstream.
 
-This test parses each pipeline-worker module with ``ast`` and flags any
+This test parses each in-perimeter module with ``ast`` and flags any
 ``logger.warning`` / ``logger.exception`` call inside an ``except``
 handler that:
 
   * does not end with ``raise`` (i.e. the exception is swallowed), AND
   * does not call ``record_degraded(...)`` anywhere in the same handler.
 
-Approximate by design: doesn't reason about call-chains (a helper that
-wraps the logger call hides its site from this check) and doesn't try to
-classify control-flow patterns. Catches the common regression where a new
-``except → logger.warning → continue`` lands without a paired
-``record_degraded``. Per-file allow-list below covers the few intentional
-exceptions; every entry has a one-line reason.
+Approximate by design: it resolves one level of module-local indirection
+(a handler calling a helper defined in the same module that itself calls
+``record_degraded`` counts as paired) but doesn't chase call-chains
+further, and doesn't try to classify control-flow patterns. Catches the
+common regression where a new ``except → logger.warning → continue``
+lands without a paired ``record_degraded``. Per-file allow-list below
+covers the few intentional exceptions; every entry has a one-line reason.
 """
 
 from __future__ import annotations
@@ -26,9 +27,8 @@ import ast
 from pathlib import Path
 
 # Pipeline workers (BaseWorker subclasses that drive the jobs queue).
-# Deliberately narrow: these are where degradation tracking matters
-# most. Audit-row workers + monitoring loops are intentionally excluded —
-# they don't bind ``degraded_errors_var`` so ``record_degraded`` is a no-op
+# Audit-row workers + monitoring loops are intentionally excluded — they
+# don't bind ``degraded_errors_var`` so ``record_degraded`` is a no-op
 # there and the contract doesn't apply.
 PIPELINE_WORKERS: tuple[str, ...] = (
     "workers/discovery.py",
@@ -37,6 +37,31 @@ PIPELINE_WORKERS: tuple[str, ...] = (
     "workers/policy_worker.py",
     "workers/coverage_worker.py",
     "workers/effects_worker.py",
+    "workers/selection_worker.py",
+    "workers/dapp_crawl_worker.py",
+    "workers/defillama_worker.py",
+)
+
+# Service modules that execute *under* those workers' job contexts, so the
+# accumulator is bound and ``record_degraded`` is not a no-op. Globs rather
+# than file lists, so a new module landing in one of these packages inherits
+# the contract instead of silently opting out.
+#
+# Deliberately outside the perimeter:
+#   * ``services/scoring/planes.py`` and ``loop.py`` — monitor thread / CLI
+#     only; no accumulator is ever bound, and planes.py's loader WARNINGs are
+#     documented deliberate no-pairs.
+#   * ``services/monitoring/**`` other than ``balance_reads.py`` — daemon
+#     loops with no accumulator. ``balance_reads`` is in because the
+#     resolution worker calls it per job.
+PIPELINE_SERVICE_GLOBS: tuple[str, ...] = (
+    "services/effects/*.py",
+    "services/scoring/distill.py",
+    "services/discovery/**/*.py",
+    "services/policy/*.py",
+    "services/static/contract_analysis_pipeline/*.py",
+    "services/resolution/**/*.py",
+    "services/monitoring/balance_reads.py",
 )
 
 # {file: {line_of_logger_call: reason}}
@@ -44,8 +69,9 @@ PIPELINE_WORKERS: tuple[str, ...] = (
 # with record_degraded. Each entry needs justification — when in doubt,
 # prefer adding record_degraded to silence the test.
 # The keys are LINE-PINNED, so any edit above a listed call site shifts them and
-# this file must be re-pinned in the same commit. ``test_allow_list_is_current``
-# below fails loudly when an entry stops matching a real violation.
+# this file must be re-pinned in the same commit.
+# ``test_allow_list_entries_still_present`` below fails loudly when an entry
+# stops matching a real violation.
 ALLOW_LIST: dict[str, dict[int, str]] = {
     "workers/policy_worker.py": {
         # Reanalysis-completion notifier: the reanalysis itself completed
@@ -53,14 +79,28 @@ ALLOW_LIST: dict[str, dict[int, str]] = {
         # doesn't change the job's stage output. record_degraded would
         # mislead callers of /api/jobs/{id}/errors into thinking the
         # reanalysis was degraded.
-        1071: "Notifier side-effect; reanalysis already completed before this fired.",
+        1090: "Notifier side-effect; reanalysis already completed before this fired.",
     },
     "workers/effects_worker.py": {
         # Fork-close cleanup: the anvil subprocess close failing is a resource
         # side-effect (port/memory), not a degradation of the stage's verdict
         # output. record_degraded would mislead /monitor into flagging a healthy
         # job's effects stage as degraded.
-        581: "Fork-close cleanup side-effect; does not degrade the stage's verdict output.",
+        628: "Fork-close cleanup side-effect; does not degrade the stage's verdict output.",
+    },
+    "services/effects/anvil.py": {
+        # Same fork-close-cleanup exemption class as the effects_worker entry
+        # above: SubprocessAnvil.close() escalating SIGTERM → SIGKILL is a
+        # resource outcome (port/pid), not a change to the stage's verdicts.
+        850: "Fork-close cleanup side-effect; SIGKILL escalation does not degrade the verdicts.",
+        861: "Fork-close cleanup side-effect; an unreaped pid does not degrade the verdicts.",
+    },
+    "services/resolution/repos/event_logs_rpc.py": {
+        # Env-var parse, evaluated per call on every job of every worker in the
+        # process. A malformed cap is a deployment misconfiguration, not a
+        # per-job partial outcome, and recording it would stamp every job's
+        # stage_errors with the same process-level fact.
+        60: "Process-level env parse; a bad cap is a misconfiguration, not a per-job degradation.",
     },
 }
 
@@ -89,14 +129,42 @@ def _is_logger_warning_or_exception(node: ast.Call) -> bool:
     return isinstance(func.value, ast.Name) and func.value.id == "logger"
 
 
-def _handler_calls_record_degraded(handler: ast.ExceptHandler) -> bool:
+def _recording_helper_names(tree: ast.AST) -> set[str]:
+    """Functions in this module that themselves call ``record_degraded``.
+
+    A module that funnels its degraded records through a local wrapper (to
+    attach a fixed phase prefix, say) still honours the contract; without
+    this the check would read the wrapper as an unpaired swallow.
+    """
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if any(_is_record_degraded_call(inner) for inner in ast.walk(node) if isinstance(inner, ast.Call)):
+            names.add(node.name)
+    names.discard("record_degraded")
+    return names
+
+
+def _is_record_degraded_call(node: ast.Call) -> bool:
+    func = node.func
+    if isinstance(func, ast.Name):
+        return func.id == "record_degraded"
+    if isinstance(func, ast.Attribute):
+        return func.attr == "record_degraded"
+    return False
+
+
+def _handler_calls_record_degraded(handler: ast.ExceptHandler, helpers: set[str]) -> bool:
     for node in ast.walk(handler):
         if not isinstance(node, ast.Call):
             continue
-        func = node.func
-        if isinstance(func, ast.Name) and func.id == "record_degraded":
+        if _is_record_degraded_call(node):
             return True
-        if isinstance(func, ast.Attribute) and func.attr == "record_degraded":
+        func = node.func
+        if isinstance(func, ast.Name) and func.id in helpers:
+            return True
+        if isinstance(func, ast.Attribute) and func.attr in helpers:
             return True
     return False
 
@@ -110,6 +178,7 @@ def _handler_ends_with_raise(handler: ast.ExceptHandler) -> bool:
 def _find_violations(rel_path: str, source: str) -> list[int]:
     tree = ast.parse(source)
     _attach_parents(tree)
+    helpers = _recording_helper_names(tree)
     violations: list[int] = []
     for node in ast.walk(tree):
         if not (isinstance(node, ast.Call) and _is_logger_warning_or_exception(node)):
@@ -119,16 +188,30 @@ def _find_violations(rel_path: str, source: str) -> list[int]:
             continue  # Not inside an except block — contract doesn't apply.
         if _handler_ends_with_raise(handler):
             continue  # Re-raises; BaseWorker's failure path will log + record.
-        if _handler_calls_record_degraded(handler):
+        if _handler_calls_record_degraded(handler, helpers):
             continue
         violations.append(node.lineno)
     return violations
 
 
+def _enforced_paths(repo_root: Path) -> list[str]:
+    paths = list(PIPELINE_WORKERS)
+    for pattern in PIPELINE_SERVICE_GLOBS:
+        paths.extend(sorted(str(p.relative_to(repo_root)) for p in repo_root.glob(pattern)))
+    return paths
+
+
+def test_service_globs_still_match_files() -> None:
+    """A renamed package would empty a glob and silently drop the perimeter."""
+    repo_root = Path(__file__).parent.parent
+    empty = [pattern for pattern in PIPELINE_SERVICE_GLOBS if not list(repo_root.glob(pattern))]
+    assert not empty, "PIPELINE_SERVICE_GLOBS entries match nothing: " + ", ".join(empty)
+
+
 def test_warning_in_swallowed_except_pairs_with_record_degraded() -> None:
     repo_root = Path(__file__).parent.parent
     failures: list[str] = []
-    for rel in PIPELINE_WORKERS:
+    for rel in _enforced_paths(repo_root):
         path = repo_root / rel
         for line in _find_violations(rel, path.read_text()):
             allowed = ALLOW_LIST.get(rel, {})
@@ -146,6 +229,11 @@ def test_allow_list_entries_still_present() -> None:
     """If an allow-listed line moves or disappears, the entry rots silently —
     fail loudly so the next maintainer re-evaluates the exemption."""
     repo_root = Path(__file__).parent.parent
+    enforced = set(_enforced_paths(repo_root))
+    outside = sorted(rel for rel in ALLOW_LIST if rel not in enforced)
+    assert not outside, "ALLOW_LIST exempts files the check no longer covers, so the entries do nothing: " + ", ".join(
+        outside
+    )
     stale: list[str] = []
     for rel, lines in ALLOW_LIST.items():
         path = repo_root / rel

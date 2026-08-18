@@ -183,6 +183,13 @@ def main() -> int:
     parser.add_argument("--preamble", default="")
     args = parser.parse_args()
 
+    from utils.logging import configure_logging
+
+    # The probe's own output is the print()s below; this is so the library
+    # code it drives logs through the house JSON handler instead of falling
+    # to lastResort (WARNING-only, unscrubbed).
+    configure_logging()
+
     control: dict[str, dict[str, str]] = {}
     _install_control(control)
 

@@ -19,6 +19,7 @@ from typing import Any
 
 from services.discovery.static_dependencies import normalize_address
 from utils.chains import canonical_chain, require_chain
+from utils.logging import record_degraded
 
 logger = logging.getLogger(__name__)
 
@@ -853,6 +854,11 @@ def backfill_historical_impl_contracts(
             except Exception as exc:
                 # One flaky match shouldn't poison the rest; admin
                 # refresh_coverage can fill in what we missed.
+                record_degraded(
+                    phase="backfilled_impl_coverage_refresh",
+                    exc=exc,
+                    context={"contract_id": contract_id, "protocol_id": protocol_id},
+                )
                 logger.warning(
                     "Coverage refresh failed for backfilled impl contract_id=%s: %s",
                     contract_id,

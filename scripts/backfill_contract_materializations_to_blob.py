@@ -54,6 +54,7 @@ from sqlalchemy.orm import Session
 from db.contract_materializations import _blob_key
 from db.models import ContractMaterialization, SessionLocal
 from db.storage import JSON_CONTENT_TYPE, StorageError, get_storage_client
+from utils.logging import configure_logging
 
 logger = logging.getLogger(__name__)
 
@@ -130,7 +131,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = ap.parse_args(argv)
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    configure_logging()
 
     client = get_storage_client()
     if client is None and not args.dry_run:
@@ -200,12 +201,24 @@ def main(argv: list[str] | None = None) -> int:
                         clear_jsonb=args.clear_jsonb,
                     )
                 except StorageError as exc:
-                    logger.error("backfill: row %s upload failed: %s", row_id, exc)
+                    logger.warning(
+                        "backfill: row %s upload failed",
+                        row_id,
+                        extra={"exc_type": type(exc).__name__, "row_id": row_id},
+                    )
                     failed_rows.append(row_id)
                     session.rollback()
                     continue
-                except Exception:
-                    logger.exception("backfill: row %s unexpected error", row_id)
+                except Exception as exc:
+                    # Unlike the StorageError arm this one has no known shape, so
+                    # the traceback rides along — at WARNING, since the run
+                    # continues and the summary below is what fails it.
+                    logger.warning(
+                        "backfill: row %s unexpected error",
+                        row_id,
+                        exc_info=exc,
+                        extra={"exc_type": type(exc).__name__, "row_id": row_id},
+                    )
                     failed_rows.append(row_id)
                     session.rollback()
                     continue

@@ -1339,21 +1339,31 @@ class TestTypedIdRecordAndCursor:
         )
         session.flush()
 
-    def test_a_run_of_re_scans_that_never_settle_the_ids_stops_paying_for_them(self, db_session):
+    def test_a_run_of_re_scans_that_never_settle_the_ids_stops_paying_for_them(self, db_session, caplog):
         # A delivering log this decoder cannot read an id out of will not become
         # readable by scanning it again — and the scan SUCCEEDS, so the failing-
         # sweep bound cannot catch it. Without this the contract pays a
         # genesis-to-head scan every hour, forever.
+        import logging as _logging
+
+        from services.monitoring import balance_observation as _bo
+
+        _bo._GIVE_UP_ANNOUNCED.clear()
         _proto, contract = self._fixture(db_session, address="0x" + "e8" * 20)
         for index in range(ID_RESCAN_RUN - 1):
             self._unsettled_scan(db_session, contract, through=1000 + index)
             assert sweep_from_block(db_session, subject=ObservationSubject.of_contract(contract)) == 0
             assert id_rescan_keeps_failing(db_session, subject=ObservationSubject.of_contract(contract)) is False
         self._unsettled_scan(db_session, contract, through=1234)
-        assert id_rescan_keeps_failing(db_session, subject=ObservationSubject.of_contract(contract)) is True
-        # Bounded out: the cursor is inherited again...
-        assert sweep_from_block(db_session, subject=ObservationSubject.of_contract(contract)) == 1235
-        assert scanned_from_block(db_session, subject=ObservationSubject.of_contract(contract)) == 0
+        with caplog.at_level(_logging.WARNING, logger="services.monitoring.balance_observation"):
+            assert id_rescan_keeps_failing(db_session, subject=ObservationSubject.of_contract(contract)) is True
+            # Bounded out: the cursor is inherited again...
+            assert sweep_from_block(db_session, subject=ObservationSubject.of_contract(contract)) == 1235
+            assert scanned_from_block(db_session, subject=ObservationSubject.of_contract(contract)) == 0
+        # Three calls crossed the bound; one line was emitted for the crossing.
+        warnings = [r for r in caplog.records if getattr(r, "give_up", None) == "id_rescan"]
+        assert len(warnings) == 1
+        assert warnings[0].levelno == _logging.WARNING
         # ...and the receipt is STILL unresolved, so the sheet is still refused.
         # What the bound buys back is the request budget, never the answer.
         carried = known_typed_assets(db_session, subject=ObservationSubject.of_contract(contract))
@@ -2050,9 +2060,13 @@ class TestEscalationAndRecording:
         # keeps the asset from silently disappearing out of the row set.
         assert known_swept_assets(db_session, subject=ObservationSubject.of_contract(contract)) == (TOKEN,)
 
-    def test_a_run_of_failed_scans_stops_the_escalation_asking_again(self, db_session):
+    def test_a_run_of_failed_scans_stops_the_escalation_asking_again(self, db_session, caplog):
+        import logging as _logging
+
+        from services.monitoring import balance_observation as _bo
         from services.monitoring.balance_observation import sweep_keeps_failing
 
+        _bo._GIVE_UP_ANNOUNCED.clear()
         _proto, contract = self._fixture(db_session, address="0x" + "b2" * 20)
         for _ in range(SWEEP_FAILURE_RUN):
             db_session.add(
@@ -2067,10 +2081,19 @@ class TestEscalationAndRecording:
                 )
             )
         db_session.flush()
-        assert sweep_keeps_failing(db_session, subject=ObservationSubject.of_contract(contract)) is True
-        # ...and the trigger that would otherwise fire stops firing, so an
-        # unprovable holder cannot spend the request budget every hour forever.
-        assert escalation_reason(db_session, subject=ObservationSubject.of_contract(contract), page=page([])) is None
+        with caplog.at_level(_logging.WARNING, logger="services.monitoring.balance_observation"):
+            assert sweep_keeps_failing(db_session, subject=ObservationSubject.of_contract(contract)) is True
+            # ...and the trigger that would otherwise fire stops firing, so an
+            # unprovable holder cannot spend the request budget every hour forever.
+            assert (
+                escalation_reason(db_session, subject=ObservationSubject.of_contract(contract), page=page([])) is None
+            )
+        # The give-up is announced once, at the crossing — not on every later
+        # cycle that re-reads the same three failed rows and gives up again.
+        warnings = [r for r in caplog.records if getattr(r, "give_up", None) == "sweep"]
+        assert len(warnings) == 1
+        assert warnings[0].levelno == _logging.WARNING
+        assert warnings[0].address == contract.address
 
     def test_another_tenants_row_is_never_adopted_for_a_read(self, db_session):
         # ``uq_contract_address_chain`` means there is at most ONE row per

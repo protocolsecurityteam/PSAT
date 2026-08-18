@@ -14,6 +14,7 @@ from typing import Any, TypedDict
 from eth_utils.crypto import keccak
 
 from services.static.contract_analysis_pipeline.mapping_events import WriterEventSpec
+from utils.logging import record_degraded
 from utils.rpc import normalize_hex as _normalize_hex
 
 logger = logging.getLogger(__name__)
@@ -490,6 +491,11 @@ async def enumerate_mapping_allowlist(
         except Exception as exc:
             status = "error"
             error = str(exc)
+            record_degraded(
+                phase="mapping_enumerator_scan",
+                exc=exc,
+                context={"address": contract_address, "page_count": page_count},
+            )
             logger.warning(
                 "mapping_enumerator: RPC error during scan",
                 extra={
@@ -633,6 +639,11 @@ def enumerate_mapping_allowlist_sync(
                 ttl_s=_cache_ttl_s(),
             )
         except Exception as exc:
+            record_degraded(
+                phase="mapping_enumerator_l2_read",
+                exc=exc,
+                context={"address": contract_address, "chain": chain},
+            )
             logger.warning(
                 "mapping_enumerator: L2 read failed, falling through to scan",
                 extra={"address": contract_address, "exc_type": type(exc).__name__},
@@ -685,6 +696,11 @@ def enumerate_mapping_allowlist_sync(
                 result=dict(result),
             )
         except Exception as exc:
+            record_degraded(
+                phase="mapping_enumerator_l2_write",
+                exc=exc,
+                context={"address": contract_address, "chain": chain},
+            )
             logger.warning(
                 "mapping_enumerator: L2 write failed",
                 extra={"address": contract_address, "exc_type": type(exc).__name__},

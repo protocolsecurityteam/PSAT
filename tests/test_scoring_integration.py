@@ -227,7 +227,7 @@ def _effects_worker(monkeypatch):
     """
     from workers.effects_worker import EffectsWorker
 
-    monkeypatch.setattr(EffectsWorker, "_select", lambda self, session, job: [])
+    monkeypatch.setattr(EffectsWorker, "_select", lambda self, session, job, funnel=None: [])
     return EffectsWorker()
 
 

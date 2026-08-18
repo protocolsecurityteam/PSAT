@@ -8,6 +8,8 @@ from difflib import SequenceMatcher
 
 import requests
 
+from utils.logging import record_degraded
+
 logger = logging.getLogger(__name__)
 
 DEFILLAMA_PROTOCOLS_URL = "https://api.llama.fi/protocols"
@@ -156,6 +158,7 @@ def resolve_protocol(name: str) -> dict:
     try:
         protocols = _fetch_protocols()
     except Exception as exc:
+        record_degraded(phase="defillama_protocols_fetch", exc=exc, context={"name": name})
         logger.warning("Failed to fetch DefiLlama protocols: %s", exc)
         return {"slug": None, "url": None, "name": None, "chains": [], "all_slugs": [], "all_names": []}
 

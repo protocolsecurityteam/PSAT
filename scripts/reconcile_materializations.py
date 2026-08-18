@@ -40,6 +40,7 @@ from services.monitoring.materialization_reconciler import (
     plan_rebuilds,
 )
 from utils.chains import chain_enabled
+from utils.logging import configure_logging
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +107,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = ap.parse_args(argv)
 
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    configure_logging()
 
     with SessionLocal() as session:
         candidates, backlog = plan_rebuilds(session, budget=args.budget)

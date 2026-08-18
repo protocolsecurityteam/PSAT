@@ -1321,14 +1321,13 @@ def test_resource_cap_logs_exactly_what_it_dropped(db_session, caplog):
 
     assert [k.function_id for k in kept] == [keep.id]
 
-    msg = caplog.text
-    # Names the two dropped candidates, not the kept one.
-    assert str(drop_mid.id) in msg
-    assert str(drop_low.id) in msg
-    assert "0xcafe0002" in msg and "0xcafe0003" in msg
-    assert "dropped 2" in msg
-    # The high-value survivor is not reported as dropped.
-    assert "0xcafe0001" not in msg
+    rec = next(r for r in caplog.records if r.name == "services.effects.selection")
+    # Names the two dropped candidates (in ``extra``, queryable), not the kept one.
+    assert rec.dropped == 2
+    assert rec.dropped_sample_truncated is False
+    assert {e["function_id"] for e in rec.dropped_sample} == {drop_mid.id, drop_low.id}
+    assert {e["selector"] for e in rec.dropped_sample} == {"0xcafe0002", "0xcafe0003"}
+    assert keep.id not in {e["function_id"] for e in rec.dropped_sample}
 
 
 def test_value_never_gates_without_cap(db_session):

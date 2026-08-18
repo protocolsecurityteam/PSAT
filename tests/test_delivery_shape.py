@@ -1619,3 +1619,67 @@ def test_the_universe_memo_ttl_can_only_be_narrowed(monkeypatch, env, expected):
     else:
         monkeypatch.setenv("PSAT_UNIVERSE_MEMO_TTL_SECONDS", env)
     assert delivery_shape._memo_ttl_seconds() == expected
+
+
+# --- what the writer says out loud -----------------------------------------
+
+
+def test_a_first_determination_is_quiet_and_a_withdrawal_is_not(db_session, caplog):
+    """Both wear the same diff; only one is an alarm.
+
+    A row moving off ``not_determined`` is ordinary convergence — thousands of
+    them across a corpus — while a verdict a consumer has already read being
+    WITHDRAWN is the event worth waking up for.
+    """
+    import logging
+
+    from services.monitoring.delivery_evidence import FAN_OUT_THRESHOLD_K, record_delivery_evidence
+
+    holder, token = _addr("f11p"), _addr("f11pt")
+    counts: dict[str, int] = {}
+
+    def _record(entries, *, through):
+        return record_delivery_evidence(
+            db_session,
+            chain_id=CHAIN,
+            holder_address=holder,
+            token_address=token,
+            scanned_from_block=0,
+            measured_through_block=through,
+            deliveries=entries,
+            scan_basis="method",
+            counts=counts,
+        )
+
+    def _delivery(*, tx, block, fan_out):
+        return {
+            "tx": _tx(tx),
+            "block": block,
+            "log_index": 1,
+            "fan_out": fan_out,
+            "fan_out_basis": DELIVERY_FAN_OUT_BASIS_RECEIPT,
+        }
+
+    with caplog.at_level(logging.DEBUG, logger="services.monitoring.delivery_evidence"):
+        # Insert: nothing found yet, so nothing is determined and nothing is said.
+        assert _record([], through=100) == DELIVERY_SHAPE_NOT_DETERMINED
+        # First determination: a mass distribution, published for the first time.
+        assert (
+            _record([_delivery(tx=1, block=110, fan_out=FAN_OUT_THRESHOLD_K + 5)], through=120)
+            == DELIVERY_SHAPE_FAN_OUT_ALL
+        )
+
+    assert counts["verdicts_first_determined"] == 1
+    assert "verdicts_changed" not in counts
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger="services.monitoring.delivery_evidence"):
+        # A later delivery below K withdraws the published positive.
+        assert _record([_delivery(tx=2, block=130, fan_out=1)], through=140) == DELIVERY_SHAPE_HAS_DIRECT_DELIVERY
+
+    assert counts["verdicts_changed"] == 1
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert warnings[0].previous_shape == DELIVERY_SHAPE_FAN_OUT_ALL
+    assert warnings[0].shape == DELIVERY_SHAPE_HAS_DIRECT_DELIVERY

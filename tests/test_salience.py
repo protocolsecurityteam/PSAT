@@ -1001,6 +1001,24 @@ def test_a_subscription_without_min_salience_receives_exactly_what_it_does_today
     assert send.call_count == 1
 
 
+def test_a_rejected_webhook_is_not_counted_as_a_sent_notification(db_session, notify_env, caplog):
+    """A revoked webhook used to look exactly like successful delivery."""
+    import logging as _logging
+    from types import SimpleNamespace
+
+    _sub, emit = notify_env
+    event = emit("ownership_transferred", {"salience": sal.SALIENCE_ROUTINE, "new_owner": ADDR(9)})
+    with patch("services.monitoring.notifier.requests.post") as post:
+        post.return_value = SimpleNamespace(ok=False, status_code=401, text="unauthorized")
+        with caplog.at_level(_logging.INFO, logger="services.monitoring.notifier"):
+            notify_protocol_events(db_session, [event])
+
+    assert post.call_count == 1
+    summary = next(r for r in caplog.records if hasattr(r, "sent") and hasattr(r, "failed"))
+    assert summary.sent == 0
+    assert summary.failed == 1
+
+
 def test_min_salience_composes_with_the_event_type_filter(db_session, notify_env):
     """Both must pass. The type filter alone still admits; adding the
     threshold subtracts, and only for the subscription that asked."""

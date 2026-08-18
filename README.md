@@ -51,7 +51,7 @@ Common env vars:
 Run the FastAPI demo server:
 
 ```bash
-uv run uvicorn api:app --host 127.0.0.1 --port 8000
+uv run python serve.py
 ```
 
 Backend/API URL:

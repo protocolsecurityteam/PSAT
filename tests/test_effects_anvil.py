@@ -648,7 +648,7 @@ def _anvil_with_proc(proc: object) -> SubprocessAnvil:
     return anvil
 
 
-def test_rss_mb_positive_for_live_pid_zero_when_exited():
+def test_rss_mb_measures_a_live_pid_and_answers_none_when_it_cannot():
     import os
 
     class _LiveProc:
@@ -663,22 +663,25 @@ def test_rss_mb_positive_for_live_pid_zero_when_exited():
         def poll(self):
             return 0  # exited
 
-    # A live process reports a non-negative MB figure (positive on Linux, 0 on a
-    # non-Linux host where /proc is absent) and never raises.
-    assert _anvil_with_proc(_LiveProc()).rss_mb() >= 0
-    # An exited process is never sampled (guards against a reused pid) → 0.
-    assert _anvil_with_proc(_DeadProc()).rss_mb() == 0
+    # A live process reports whole MB and never raises. ``None`` on a non-Linux
+    # host where /proc is absent — the read did not answer, which is not zero.
+    live = _anvil_with_proc(_LiveProc()).rss_mb()
+    assert live is None or live >= 0
+    # An exited process is never sampled (guards against a reused pid), and the
+    # answer is NOT KNOWN rather than "used no memory".
+    assert _anvil_with_proc(_DeadProc()).rss_mb() is None
 
 
 @pytest.mark.skipif(not anvil_available(), reason="anvil not on PATH")
 def test_rss_mb_on_real_subprocess():
-    """A live NON-FORKING anvil reports positive RSS; 0 once closed."""
+    """A live NON-FORKING anvil reports positive RSS; unknown once closed."""
     anvil = SubprocessAnvil(port=8548, hardfork_name="prague")
     try:
-        assert anvil.rss_mb() > 0
+        measured = anvil.rss_mb()
+        assert measured is not None and measured > 0
     finally:
         anvil.close()
-    assert anvil.rss_mb() == 0
+    assert anvil.rss_mb() is None
 
 
 def test_build_anvil_cmd_forking_passes_auth_header():

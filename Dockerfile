@@ -46,7 +46,7 @@ RUN uv pip install "vyper==0.3.10"
 # Playwright browsers + OS deps (required by dapp_crawl_worker). ~400MB.
 RUN uv run --no-sync playwright install --with-deps chromium
 
-COPY api.py alembic.ini ./
+COPY api.py serve.py alembic.ini ./
 COPY alembic/ alembic/
 COPY db/ db/
 COPY workers/ workers/
