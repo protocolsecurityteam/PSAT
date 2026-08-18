@@ -307,13 +307,17 @@ def test_artifact_endpoint_publishes_three_answers_not_two(api_with, db_session,
     assert readable.status_code == 200
     assert readable.json() == {"results": {}}
 
-    # B — not determined. Its own status, its own header, and the reason kept.
+    # B — not determined. Its own status, its own header, and a safe reason:
+    # the third state is published distinctly, but the raw exception message is
+    # logged server-side only, never echoed to the (possibly public) caller.
     with patch.object(StorageClient, "_get_one", side_effect=StorageUnavailable("bucket unreachable")):
         outage = client.get(url, headers=_admin_headers())
     assert outage.status_code == 503
     assert outage.headers.get("X-PSAT-Artifact-State") == "not_determined"
     assert outage.json()["artifact"] == "slither_results"
-    assert "bucket unreachable" in outage.json()["reason"]
+    assert outage.json()["reason"] == "Artifact read did not complete"
+    # The raw exception message must not reach the client.
+    assert "bucket unreachable" not in outage.text
 
     # C — proven absent: the job never produced this artifact.
     never = client.get("/api/analyses/three-answers/artifact/no_such_artifact.json", headers=_admin_headers())
@@ -336,8 +340,11 @@ def test_artifact_endpoint_publishes_three_answers_not_two(api_with, db_session,
 
 
 def test_artifact_endpoint_publishes_a_keyless_row_as_the_third_state(api_with, db_session, storage_bucket):
-    """``StorageKeyAbsent`` is the class that names the third state, so
-    the boundary must publish it as the third state.
+    """A keyless artifact row (``StorageKeyAbsent`` internally) must be published
+    as the not_determined third state — distinct from both a proven-present body
+    and a never-produced artifact — but with a safe reason label, not the raw
+    exception class name (the reason is publicly reachable on consumer-safe
+    artifacts, so it must not carry internal exception detail).
 
     Reachable by construction on the *real* write path, which is how this test
     builds the row rather than hand-inserting one: ``store_artifact`` with an
@@ -375,7 +382,9 @@ def test_artifact_endpoint_publishes_a_keyless_row_as_the_third_state(api_with, 
     assert unknown.status_code == 503
     assert unknown.headers.get("X-PSAT-Artifact-State") == "not_determined"
     assert unknown.json()["artifact"] == "dependencies"
-    assert "StorageKeyAbsent" in unknown.json()["reason"]
+    assert unknown.json()["reason"] == "Artifact key not recorded"
+    # The internal exception class name must not reach the client.
+    assert "StorageKeyAbsent" not in unknown.text
 
     # Negative control — the job never produced this one. Determined, and it
     # must stay a silent 404 with no state header.

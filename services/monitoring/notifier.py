@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from urllib.parse import urlparse
 
 import requests
 from sqlalchemy import select
@@ -27,10 +28,30 @@ from services.monitoring.salience import (
     SALIENCE_NOTABLE,
     SALIENCE_ROUTINE,
 )
+from utils.egress import UnsafeUrlError, connect_host
 
 logger = logging.getLogger(__name__)
 
 DISCORD_TIMEOUT = 10
+
+# Invariant: outbound webhook POSTs go only to Discord over https. A webhook
+# URL is user-supplied; without this gate it is an SSRF sink that posts our
+# embed body to any host.
+_DISCORD_WEBHOOK_HOSTS = frozenset({"discord.com", "discordapp.com", "canary.discord.com", "ptb.discord.com"})
+
+
+def _is_discord_webhook(webhook_url: str) -> bool:
+    # Host derived via the shared egress helper (not urlparse) so this gate and
+    # the SSRF guard cannot disagree on the authority — the parser divergence a
+    # backslash/userinfo host exploits.
+    parsed = urlparse(webhook_url)
+    if parsed.scheme != "https":
+        return False
+    try:
+        host = connect_host(webhook_url)
+    except UnsafeUrlError:
+        return False
+    return host.lower() in _DISCORD_WEBHOOK_HOSTS
 
 
 def _send_discord(webhook_url: str, embed: dict) -> bool:
@@ -40,6 +61,12 @@ def _send_discord(webhook_url: str, embed: dict) -> bool:
     then discarded, so a revoked or rate-limited webhook counted toward the
     caller's "sent" total exactly like a delivered post.
     """
+    if not _is_discord_webhook(webhook_url):
+        logger.warning(
+            "Skipping non-Discord webhook target",
+            extra={"host": urlparse(webhook_url).hostname},
+        )
+        return False
     resp = requests.post(
         webhook_url,
         json={"embeds": [embed]},

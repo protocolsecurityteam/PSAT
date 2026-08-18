@@ -182,12 +182,16 @@ def _resolve_chain(inferred: str, requested: str | None) -> tuple[str | None, bo
 
 def _fetch_page(url: str, debug: bool = False) -> str | None:
     """Fetch a page via HTTP and return its text, or None on failure."""
+    from utils.egress import UnsafeUrlError, safe_get
+
     try:
-        resp = _requests.get(url, timeout=30, headers={"User-Agent": "PSAT/0.1"})
+        resp = safe_get(url, timeout=30, headers={"User-Agent": "PSAT/0.1"})
         if resp.status_code == 200:
             _debug_log(debug, f"Fetched {url} ({len(resp.text)} chars)")
             return resp.text
         _debug_log(debug, f"Fetch {url}: HTTP {resp.status_code}")
+    except UnsafeUrlError as exc:
+        _debug_log(debug, f"Fetch {url} refused: {exc}")
     except _requests.RequestException as exc:
         _debug_log(debug, f"Fetch {url} failed: {exc!r}")
     return None

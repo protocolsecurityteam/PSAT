@@ -1447,15 +1447,15 @@ def test_analyses_proxy_hidden_when_impl_not_completed(mock_session_cls):
 
 
 def test_analyze_address_not_starting_with_0x():
-    """Address that doesn't start with 0x after length validation should get 400."""
+    """A 42-char value that isn't a 0x-prefixed hex address is rejected at
+    request validation (422), before the endpoint body runs."""
     client = _make_client()
-    # 42 chars but doesn't start with 0x — pydantic min_length=42 passes but
-    # the endpoint's manual check should catch it
+    # 42 chars but not 0x + 40 hex — the AnalyzeRequest hex validator rejects it.
     response = client.post(
         "/api/analyze",
         json={"address": "xx1111111111111111111111111111111111111111"},
     )
-    assert response.status_code == 400
+    assert response.status_code == 422
 
 
 # ============================================================================

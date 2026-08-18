@@ -33,7 +33,7 @@ from services.monitoring.ops_alerts import (
 from services.monitoring.process_meta import ERROR, FRESH, PROCESS_META, STALE, classify, stale_after_seconds
 from tests.conftest import requires_postgres
 
-_WEBHOOK = "https://discord.example/webhook/abc"
+_WEBHOOK = "https://discord.com/api/webhooks/123456789/abcDEF-token"
 
 
 @pytest.fixture()

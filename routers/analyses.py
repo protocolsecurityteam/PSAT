@@ -63,7 +63,8 @@ def _upgrade_history_stage_raised(session: Any, job: Job) -> str | None:
         # record exists for this job.
         return None
     except Exception as exc:  # storage down, undeserializable, key never recorded
-        return f"stage_errors unreadable ({type(exc).__name__}): cannot rule out a failed upgrade-history stage"
+        logger.error("stage_errors for job %s unreadable: %s", job.id, exc, extra={"exc_type": type(exc).__name__})
+        return "stage_errors unreadable: cannot rule out a failed upgrade-history stage"
     if not isinstance(body, dict):
         return None
     for error in body.get("errors") or []:
@@ -322,7 +323,7 @@ def analysis_artifact(
             # names it separately: answering 404 here is byte-identical to a job
             # that never produced the artifact, and no consumer can tell them
             # apart from the response.
-            not_determined = f"{type(exc).__name__}: {exc}"
+            not_determined = "Artifact key not recorded"
             logger.error("artifact %s for job %s not determined: %s", lookup_name, job.id, exc)
         except Exception as exc:
             # Everything else — StorageUnavailable, StorageContentNotDetermined,
@@ -330,7 +331,7 @@ def analysis_artifact(
             # find out. Fall through to the synthesis fallback, which may still
             # produce the body from a different source; if it does not, this is
             # published as its own answer rather than as absence.
-            not_determined = f"{type(exc).__name__}: {exc}"
+            not_determined = "Artifact read did not complete"
             logger.error("artifact %s for job %s not determined: %s", lookup_name, job.id, exc)
 
         # upgrade_history is reproducible from UpgradeEvent rows. When the

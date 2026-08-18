@@ -37,6 +37,10 @@ from services.audits.text_extraction import (
     process_audit_report,
 )
 from services.discovery.audit_reports._dedup import _collapse_same_audit_mirrors
+from services.discovery.audit_reports._fetch import (
+    _MAX_DOWNLOAD_BYTES,
+    _fetch_html_page,
+)
 from services.discovery.audit_reports_llm import (
     _chunked_text,
     _extract_one_chunk,
@@ -548,3 +552,117 @@ def test_extraction_outcome_defaults_are_none():
     assert oc.storage_key is None
     assert oc.text_size_bytes is None
     assert oc.text_sha256 is None
+
+
+# ---------------------------------------------------------------------------
+# _fetch_html_page — SSRF egress guard routing + preserved download protections.
+#
+# The candidate URLs come from attacker-seedable Exa/Tavily results, and the
+# fetched HTML feeds LLM extraction whose output is stored on ``AuditReport``
+# and served publicly. So the outbound request must go through the shared
+# egress guard (``utils.egress.safe_get``), and the pre-existing download-cap /
+# binary-rejection protections must survive that reroute.
+# ---------------------------------------------------------------------------
+
+
+class _FakeResp:
+    """Minimal stand-in for the streamed ``requests.Response`` shape that
+    ``_fetch_html_page`` consumes."""
+
+    def __init__(self, *, status_code=200, content_type="text/html", chunks=()):
+        self.status_code = status_code
+        self.headers = {"content-type": content_type}
+        self._chunks = list(chunks)
+        self.closed = False
+
+    def iter_content(self, chunk_size=64_000):
+        yield from self._chunks
+
+    def close(self):
+        self.closed = True
+
+
+class TestFetchHtmlPage:
+    def test_normal_page_parses(self, monkeypatch):
+        resp = _FakeResp(chunks=[b"<html>hello world</html>"])
+        monkeypatch.setattr("utils.egress.safe_get", lambda *a, **kw: resp)
+
+        out = _fetch_html_page("https://example.com/report")
+        assert out == "<html>hello world</html>"
+
+    def test_internal_target_refused_without_raising(self, monkeypatch):
+        """A URL whose host would resolve to an internal address is refused by
+        the guard and treated as a plain fetch failure (None, no exception).
+
+        This also proves the request is routed through ``safe_get``: the raw
+        ``requests.get`` is booby-trapped, so reverting to it would fetch the
+        internal URL and blow up here instead of returning None."""
+        from utils.egress import UnsafeUrlError
+
+        def refuse(*_a, **_kw):
+            raise UnsafeUrlError("host resolves to non-public address 169.254.169.254")
+
+        def raw_egress_tripwire(*_a, **_kw):
+            raise AssertionError("raw requests.get reached — SSRF guard bypassed")
+
+        monkeypatch.setattr("utils.egress.safe_get", refuse)
+        monkeypatch.setattr(
+            "services.discovery.audit_reports._fetch._requests.get",
+            raw_egress_tripwire,
+        )
+
+        out = _fetch_html_page("http://169.254.169.254/latest/meta-data/")
+        assert out is None
+
+    def test_unsafe_error_does_not_leak_into_return(self, monkeypatch):
+        """``UnsafeUrlError`` carries the refused URL/reason; the function must
+        swallow it to None and never surface it to the caller (witness
+        discipline — the stored/returned output leaks nothing about the probe)."""
+        from utils.egress import UnsafeUrlError
+
+        def refuse(*_a, **_kw):
+            raise UnsafeUrlError("http://internal.secret/ resolves to 10.0.0.5")
+
+        monkeypatch.setattr("utils.egress.safe_get", refuse)
+
+        assert _fetch_html_page("http://internal.secret/") is None
+
+    def test_binary_content_type_rejected(self, monkeypatch):
+        """Content-type binary rejection is preserved: a PDF response is
+        skipped (None) and the body is never streamed."""
+        resp = _FakeResp(content_type="application/pdf", chunks=[b"%PDF-1.7 ..."])
+        monkeypatch.setattr("utils.egress.safe_get", lambda *a, **kw: resp)
+
+        out = _fetch_html_page("https://example.com/report")
+        assert out is None
+        assert resp.closed is True
+
+    def test_non_200_returns_none(self, monkeypatch):
+        resp = _FakeResp(status_code=404)
+        monkeypatch.setattr("utils.egress.safe_get", lambda *a, **kw: resp)
+
+        assert _fetch_html_page("https://example.com/missing") is None
+
+    def test_download_cap_still_truncates(self, monkeypatch):
+        """The size cap is preserved: a body far larger than the cap stops at
+        ``_MAX_DOWNLOAD_BYTES`` rather than being read whole."""
+        oversized = [b"a" * 64_000 for _ in range(100)]  # 6.4 MB offered
+        resp = _FakeResp(chunks=oversized)
+        monkeypatch.setattr("utils.egress.safe_get", lambda *a, **kw: resp)
+
+        out = _fetch_html_page("https://example.com/huge")
+        assert out is not None
+        # Reads whole chunks until downloaded >= cap, then stops: exactly the
+        # first ceil(cap / chunk) chunks, nowhere near the 6.4 MB offered.
+        assert len(out) == _MAX_DOWNLOAD_BYTES
+        assert len(out) < sum(len(c) for c in oversized)
+
+    def test_request_exception_returns_none(self, monkeypatch):
+        import requests
+
+        def boom(*_a, **_kw):
+            raise requests.RequestException("connection reset")
+
+        monkeypatch.setattr("utils.egress.safe_get", boom)
+
+        assert _fetch_html_page("https://example.com/report") is None

@@ -3,6 +3,7 @@ add/delete, refresh-coverage, and per-contract audit timeline."""
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -15,6 +16,8 @@ from services.aggregations import build_audits_pipeline, build_contract_audit_ti
 from services.audits.serializers import _audit_report_to_dict
 
 from . import deps
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -58,11 +61,14 @@ def get_audit_pdf(audit_id: int):
     need a passthrough that strips those headers and sets
     `Content-Type: application/pdf`.
 
-    Only proxies URLs already stored in `AuditReport` rows (admin-curated),
-    so this is not a generic fetch-any-url SSRF gadget.
+    The stored URL is crawler/LLM-sourced, so the fetch is routed through
+    ``safe_get`` — the target (and every redirect hop) must resolve to a
+    public address, closing the unauthenticated SSRF read.
     """
     import requests
 
+    from services.audits.text_extraction import _ACCEPTED_CONTENT_TYPES, _MAX_PDF_BYTES
+    from utils.egress import UnsafeUrlError, safe_get
     from utils.github_urls import github_blob_to_raw
 
     with deps.SessionLocal() as session:
@@ -75,14 +81,58 @@ def get_audit_pdf(audit_id: int):
         url = github_blob_to_raw(url)
         filename = f"audit-{audit_id}.pdf"
 
+    # This is a PUBLIC, unauthenticated route and ``url`` is crawler/LLM-sourced.
+    # Stream with a content-type gate + hard byte cap so a seeded URL pointing at
+    # a large or non-PDF public file can't buffer an unbounded body into the
+    # 512MB web VM. Mirrors the download discipline in
+    # ``services.audits.text_extraction.download_audit_body``.
     try:
-        resp = requests.get(url, timeout=30)
-        resp.raise_for_status()
+        resp = safe_get(url, timeout=30, stream=True)
+    except UnsafeUrlError as exc:
+        logger.warning("Refused audit PDF fetch for audit %s: %s", audit_id, exc)
+        raise HTTPException(status_code=502, detail="Failed to fetch PDF") from exc
     except requests.RequestException as exc:
-        raise HTTPException(status_code=502, detail=f"Failed to fetch PDF: {exc}") from exc
+        logger.warning("Audit PDF fetch failed for audit %s: %s", audit_id, exc)
+        raise HTTPException(status_code=502, detail="Failed to fetch PDF") from exc
+
+    try:
+        try:
+            resp.raise_for_status()
+        except requests.RequestException as exc:
+            logger.warning("Audit PDF fetch failed for audit %s: %s", audit_id, exc)
+            raise HTTPException(status_code=502, detail="Failed to fetch PDF") from exc
+
+        content_type = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
+        # Empty content-type is tolerated (some CDNs omit it); a present but
+        # non-PDF type means we were served an HTML error page or other body.
+        if content_type and content_type not in _ACCEPTED_CONTENT_TYPES:
+            logger.warning(
+                "Audit PDF fetch for audit %s returned unexpected content-type %r",
+                audit_id,
+                content_type,
+            )
+            raise HTTPException(status_code=502, detail="Audit source did not return a PDF")
+
+        chunks: list[bytes] = []
+        total = 0
+        for chunk in resp.iter_content(chunk_size=131_072):
+            if not chunk:
+                continue
+            total += len(chunk)
+            if total > _MAX_PDF_BYTES:
+                logger.warning(
+                    "Audit PDF for audit %s exceeded size cap %d bytes; aborting stream",
+                    audit_id,
+                    _MAX_PDF_BYTES,
+                )
+                raise HTTPException(status_code=502, detail="PDF exceeds the maximum allowed size")
+            chunks.append(chunk)
+        body = b"".join(chunks)
+    finally:
+        resp.close()
 
     return Response(
-        content=resp.content,
+        content=body,
         media_type="application/pdf",
         headers={
             "Content-Disposition": f'inline; filename="{filename}"',
@@ -123,13 +173,15 @@ def get_audit_text(audit_id: int) -> str:
     try:
         body = client.get(storage_key)
     except deps.StorageUnavailable as exc:
-        raise HTTPException(status_code=503, detail=f"storage error: {exc}") from exc
+        logger.warning("Audit text storage unavailable for audit %s: %s", audit_id, exc)
+        raise HTTPException(status_code=503, detail="storage error") from exc
     except deps.StorageError as exc:
         # Covers StorageKeyMissing — DB says text is available but the object
         # got deleted. Inconsistent state; surface as 500 so ops notice.
+        logger.error("Audit text record missing from storage for audit %s: %s", audit_id, exc)
         raise HTTPException(
             status_code=500,
-            detail=f"text record missing from storage: {exc}",
+            detail="text record missing from storage",
         ) from exc
     return body.decode("utf-8")
 

@@ -6,7 +6,7 @@ import logging
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 
 from db.models import Contract, MonitoredContract, MonitoredEvent, Protocol
@@ -211,8 +211,12 @@ def upsert_protocol_monitoring(protocol_id: int, request: UpsertMonitoredContrac
 @router.patch("/api/monitored-contracts/{contract_id}", dependencies=[Depends(deps.require_admin_key)])
 def update_monitored_contract(contract_id: str, request: UpdateMonitoredContractRequest) -> dict[str, Any]:
     """Update monitoring_config, is_active, or needs_polling on a MonitoredContract."""
+    try:
+        parsed = uuid.UUID(contract_id)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=404, detail="MonitoredContract not found") from exc
     with deps.SessionLocal() as session:
-        mc = session.get(MonitoredContract, uuid.UUID(contract_id))
+        mc = session.get(MonitoredContract, parsed)
         if mc is None:
             raise HTTPException(status_code=404, detail="MonitoredContract not found")
 
@@ -235,7 +239,7 @@ def list_monitored_events(
     address: str | None = None,
     chain: str | None = None,
     event_type: str | None = None,
-    limit: int = 50,
+    limit: int = Query(default=50, ge=1, le=500),
 ) -> list[dict[str, Any]]:
     """List MonitoredEvent rows, optionally filtered.
 
@@ -247,6 +251,12 @@ def list_monitored_events(
         having to look up the MonitoredContract row.
       - ``event_type``: filter to a single event_type
     """
+    parsed_contract_id: uuid.UUID | None = None
+    if contract_id is not None:
+        try:
+            parsed_contract_id = uuid.UUID(contract_id)
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(status_code=422, detail="contract_id is not a valid UUID") from exc
     with deps.SessionLocal() as session:
         # Multi-key sort. detected_at desc is the primary axis, but the
         # column has a now()-default that ties events written in the
@@ -269,8 +279,8 @@ def list_monitored_events(
             )
             .limit(limit)
         )
-        if contract_id is not None:
-            stmt = stmt.where(MonitoredEvent.monitored_contract_id == contract_id)
+        if parsed_contract_id is not None:
+            stmt = stmt.where(MonitoredEvent.monitored_contract_id == parsed_contract_id)
         # address and/or chain — resolve to a set of MonitoredContract ids
         # then narrow events. Either filter alone is supported; together
         # they intersect at the contract level. Without either, we don't
