@@ -192,7 +192,7 @@ TARGET_KIND_RANK: dict[str, int] = {
     "caller_controlled": 2,
     "token_owner": 3,
     "self": 4,
-    "storage_setter": 5,
+    ADMIN_TARGET_KIND: 5,
     "storage_no_setter": 6,
     "constant": 7,
     "immutable": 7,

@@ -21,7 +21,7 @@ from schemas.control_tracking import (
 )
 from services.monitoring.restaking_reads import decode_word as _decode_word
 from services.resolution.tracking_plan import is_primitive_scalar_read_spec
-from utils.evm import SAFE_GUARD_SLOT, SAFE_MODULES_HEAD_SLOT
+from utils.evm import EIP1967_IMPL_SLOT, SAFE_GUARD_SLOT, SAFE_MODULES_HEAD_SLOT
 from utils.logging import record_degraded
 from utils.rpc import (
     eth_call_batch as _eth_call_batch,
@@ -470,10 +470,6 @@ def _negative_control_probe(rpc_url: str, address: str, block_tag: str, *, chain
     return "error"
 
 
-# ERC-1967 implementation slot (keccak256("eip1967.proxy.implementation") - 1).
-_ERC1967_IMPLEMENTATION_SLOT = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc"
-
-
 def _get_storage_at(rpc_url: str, address: str, slot: str, block_tag: str, *, chain_id: int | None = None) -> str:
     """Raw ``eth_getStorageAt``; raises on transport/malformed response.
     Module-level (like ``_get_code``) so tests can stub the wire."""
@@ -746,7 +742,7 @@ def _read_erc1967_implementation(rpc_url: str, address: str, block_tag: str, *, 
     zero" is a typing verdict (not a proxy), so it is earned only by a full
     zero word — a short return is a transport artifact and stays an error."""
     try:
-        raw = _get_storage_at(rpc_url, address, _ERC1967_IMPLEMENTATION_SLOT, block_tag, chain_id=chain_id)
+        raw = _get_storage_at(rpc_url, address, EIP1967_IMPL_SLOT, block_tag, chain_id=chain_id)
     except Exception:
         return _PROBE_ERROR
     word = raw[2:].lower()

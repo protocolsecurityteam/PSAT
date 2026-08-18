@@ -56,9 +56,9 @@ def coerce_resolved_controller_type(value: object) -> ResolvedControllerType:
 
 # ``monitored_contracts.contract_type``. ``proxy_admin`` controllers are stored
 # as ``"proxy"`` (the historical mapping in ``controllers_for_protocol``).
-# ``role_control`` is minted by controller-role tracking and branched on in the
-# unified watcher; ``contract`` exists on legacy rows that predate this
-# vocabulary. Both must stay admissible or admin re-upserts of existing rows 422.
+# ``role_control`` and ``contract`` are legacy-row shapes no producer mints today
+# (watcher tests register them directly); both stay admissible so re-upserts of
+# such rows cannot 422 and the DB CHECK admits the test-planted states.
 MonitoredContractType = Literal["regular", "proxy", "safe", "timelock", "pausable", "role_control", "contract"]
 MONITORED_CONTRACT_TYPES: frozenset[str] = frozenset(get_args(MonitoredContractType))
 
