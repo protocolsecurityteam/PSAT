@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from services.discovery.source_confidence import asserts_ownership
 from utils.chains import UnknownChainError, canonical_chain, canonical_chain_list, chain_by_id
+from utils.logging import record_degraded
 
 from .models import (
     Artifact,
@@ -1706,7 +1707,16 @@ def proven_analysis_schema_version(session: Session, job: Job) -> int | None:
             # A DB error reads exactly like "no donor", which publishes "no
             # witnessed era" for a job that has one. Nothing here can recover it
             # — the caller's contract is a value or None — so the honest move is
-            # to say the None came from a failed read.
+            # to say the None came from a failed read. The sole caller is the
+            # static worker, inside a job, so the WARNING is paired with
+            # ``record_degraded``: this module sits outside the level-contract
+            # checker's perimeter, which is why the pairing is stated here
+            # rather than enforced.
+            record_degraded(
+                phase="donor_era_walk",
+                exc=exc,
+                context={"donor_job_id": str(donor_id), "job_id": str(getattr(job, "id", ""))},
+            )
             logger.warning(
                 "donor-era walk could not read a donor job; the era reads as not witnessed",
                 extra={"donor_job_id": str(donor_id), "exc_type": type(exc).__name__, "error": str(exc)},

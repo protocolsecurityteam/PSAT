@@ -151,6 +151,26 @@ def test_warn_degraded_once_warns_first_then_debugs(caplog):
     assert records[-1].degraded_seen == 4
 
 
+def test_warn_degraded_once_alarms_per_scope_not_per_kind(caplog):
+    """One chain's outage must not demote the next chain's to DEBUG."""
+    counts: dict[str, int] = {}
+    with caplog.at_level(logging.DEBUG, logger="services.monitoring"):
+        for chain_id in (1, 1, 8453, 8453):
+            monitoring.warn_degraded_once(
+                monitoring.logger,
+                counts,
+                "head_read_failed",
+                "head read failed",
+                scope=chain_id,
+                chain_id=chain_id,
+            )
+
+    records = [r for r in caplog.records if r.message == "head read failed"]
+    assert [r.levelno for r in records] == [logging.WARNING, logging.DEBUG, logging.WARNING, logging.DEBUG]
+    # And the tally says WHICH unit degraded, not only how often something did.
+    assert counts == {"head_read_failed:1": 2, "head_read_failed:8453": 2}
+
+
 def test_sweep_budget_exceeded_is_logged_with_its_cost(caplog):
     """It used to become a per-holder failure string and nothing else."""
     from services.monitoring import asset_sweep
@@ -176,7 +196,7 @@ def test_sweep_budget_exceeded_is_logged_with_its_cost(caplog):
     rec = next(r for r in caplog.records if r.levelno == logging.WARNING)
     assert rec.degraded_kind == "sweep_budget_exceeded"
     assert rec.get_logs == 1500
-    assert cost.degraded["sweep_budget_exceeded"] == 1
+    assert cost.degraded["sweep_budget_exceeded:1"] == 1
 
 
 def test_sweep_give_up_transition_warns_once_per_subject(caplog):
@@ -244,13 +264,14 @@ def test_proxy_watcher_unanswered_probe_warns_once_per_resolution(caplog):
     with patch.object(proxy_watcher, "rpc_request", _dead):
         with caplog.at_level(logging.DEBUG, logger="services.monitoring.proxy_watcher"):
             assert proxy_watcher.resolve_current_implementation("0x" + "e" * 40, "http://stub") is None
-            # A dead route fails every watched proxy, so the second resolution
-            # carries the count rather than a second alarm.
-            assert proxy_watcher.resolve_current_implementation("0x" + "f" * 40, "http://stub") is None
+            # Eight probes failed; the next pass over the SAME proxy carries the
+            # repeat at DEBUG (a different proxy has its own alarm — see below).
+            assert proxy_watcher.resolve_current_implementation("0x" + "e" * 40, "http://stub") is None
 
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert len(warnings) == 1  # one per outage, never one per probe
+    assert len(warnings) == 1  # one per resolution, never one per probe
     assert warnings[0].probes_unanswered == warnings[0].probes
+    assert warnings[0].probes > 1
 
 
 def test_proxy_watcher_reverting_getter_is_not_a_transport_failure(caplog):
@@ -294,6 +315,69 @@ def test_proxy_watcher_treats_an_unrecognised_failure_as_not_determined(caplog):
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 1
     assert warnings[0].probes_unanswered == 1
+
+
+def test_proxy_watcher_rate_limit_payload_is_not_a_proven_absence(caplog):
+    """The outage class this split exists for arrives as an error payload too.
+
+    A provider rate limit and a contract revert are both ``error`` objects; only
+    the revert says anything about the contract, so only it may read as "no
+    implementation here".
+    """
+    from services.monitoring import proxy_watcher
+
+    def _rate_limited(*_args, **_kwargs):
+        raise RuntimeError(str({"code": -32005, "message": "daily request count exceeded"}))
+
+    proxy_watcher.reset_not_determined_warn_state()
+    with patch.object(proxy_watcher, "rpc_request", _rate_limited):
+        with caplog.at_level(logging.WARNING, logger="services.monitoring.proxy_watcher"):
+            assert (
+                proxy_watcher.resolve_current_implementation("0x" + "a1" * 20, "http://stub", proxy_type="custom")
+                is None
+            )
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert warnings[0].probes_unanswered == 1
+
+
+def test_proxy_watcher_storage_read_error_is_never_an_empty_slot(caplog):
+    """A storage read has no revert semantics; every error is a failure to answer."""
+    from services.monitoring import proxy_watcher
+
+    def _trie_gone(_url, method, _params, **_kwargs):
+        assert method == "eth_getStorageAt"
+        raise RuntimeError(str({"code": -32000, "message": "missing trie node"}))
+
+    proxy_watcher.reset_not_determined_warn_state()
+    with patch.object(proxy_watcher, "rpc_request", _trie_gone):
+        with caplog.at_level(logging.WARNING, logger="services.monitoring.proxy_watcher"):
+            assert (
+                proxy_watcher.resolve_current_implementation("0x" + "a2" * 20, "http://stub", proxy_type="eip1967")
+                is None
+            )
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert warnings[0].probes_unanswered == 1
+
+
+def test_proxy_watcher_warn_once_is_keyed_per_proxy(caplog):
+    """One subject's alarm must not stand for another subject's silence."""
+    from services.monitoring import proxy_watcher
+
+    def _dead(*_args, **_kwargs):
+        raise RuntimeError("RPC request failed for http://stub: connection refused")
+
+    proxy_watcher.reset_not_determined_warn_state()
+    with patch.object(proxy_watcher, "rpc_request", _dead):
+        with caplog.at_level(logging.DEBUG, logger="services.monitoring.proxy_watcher"):
+            for address in ("0x" + "b1" * 20, "0x" + "b1" * 20, "0x" + "b2" * 20):
+                proxy_watcher.resolve_current_implementation(address, "http://stub", proxy_type="eip1967")
+
+    warned = [r.address for r in caplog.records if r.levelno == logging.WARNING]
+    assert warned == ["0x" + "b1" * 20, "0x" + "b2" * 20]
 
 
 # --- the fleet's own liveness signal ----------------------------------------

@@ -601,6 +601,7 @@ def run_sweeps(
                 cost.degraded,
                 "chain_unrouted",
                 "asset sweep: no RPC URL for chain; its holders are not swept and record nothing",
+                scope=chain_id,
                 chain_id=chain_id,
                 holders=len(cohort),
             )

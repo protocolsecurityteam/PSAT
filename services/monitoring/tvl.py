@@ -593,16 +593,22 @@ def refresh_contract_balances(
         # A failed read is a degraded cycle, and this loop has no
         # ``record_degraded`` available (it runs outside ``BaseWorker``, where
         # that call is a no-op). The persisted fetch row is the durable trace;
-        # this flag is what carries it into the per-cycle heartbeat, and the log
-        # below is unconditional so a failure is visible even without the DB.
+        # this flag is what carries it into the per-cycle heartbeat. The log is
+        # emitted for every failed contract — at WARNING for the first of each
+        # (protocol, chain) in the cycle and DEBUG for the rest of that scope,
+        # so a systemic outage raises one alarm per independently-failing unit
+        # rather than one per contract or one for the whole cycle.
+        scope = f"{protocol_id}:{chain_id}"
         if native_class_failed or assets_class_failed:
             warn_degraded_once(
                 logger,
                 counts,
                 "balance_fetch_degraded",
                 "balance fetch degraded; the contract is omitted from the protocol's on-chain total",
+                scope=scope,
                 observed_address=observed_address,
                 chain_id=chain_id,
+                protocol_id=protocol_id,
                 native_status=native_status,
                 asset_set_status=recorded.asset_set_status,
             )
@@ -612,8 +618,10 @@ def refresh_contract_balances(
                 counts,
                 "native_unpriced",
                 "balance omitted from breakdown; the native quantity could not be priced",
+                scope=scope,
                 observed_address=observed_address,
                 chain_id=chain_id,
+                protocol_id=protocol_id,
             )
 
     session.commit()

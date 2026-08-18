@@ -7,24 +7,31 @@ upgrade scanner and poller live in ``services.monitoring.unified_watcher``.
 
 from __future__ import annotations
 
+import ast
 import logging
 import time
 from dataclasses import dataclass
 
+from utils.logging import record_degraded
 from utils.rpc import RpcClientTimeout, normalize_hex, rpc_request
 
 logger = logging.getLogger(__name__)
 
-# Seconds between two WARNINGs that an implementation is not determined. See
-# ``_warn_not_determined``; process-local, and a restart re-announces once.
+# Seconds between two WARNINGs about the SAME proxy's undetermined
+# implementation. Keyed by subject rather than held as one module-wide clock:
+# this module is called both by the monitor daemon (per watched proxy, on a
+# clock) and by the static worker inside a job, and a single global would let
+# the daemon's earlier warn silence the job's own degraded resolution — the
+# thing that job's ``stage_errors`` is supposed to record. Process-local and
+# bounded; a restart re-announces once, and nothing published depends on it.
 _NOT_DETERMINED_WARN_INTERVAL_S = 300.0
-_last_warned_at: float | None = None
+_NOT_DETERMINED_WARN_MAX = 4096
+_last_warned_at: dict[str, float] = {}
 
 
 def reset_not_determined_warn_state() -> None:
     """Re-arm the WARNING (tests, and any caller wanting a fresh announce)."""
-    global _last_warned_at
-    _last_warned_at = None
+    _last_warned_at.clear()
 
 
 # Storage slots used for implementation resolution
@@ -55,36 +62,65 @@ class _Read:
 
     address: str | None
     answered: bool
+    # Kept only for the unanswered arm, so the resolution's WARNING and its
+    # ``record_degraded`` name the failure that actually happened rather than
+    # the fact that some probe failed.
+    exc: BaseException | None = None
 
     @classmethod
     def absent(cls) -> _Read:
         return cls(address=None, answered=True)
 
     @classmethod
-    def unreachable(cls) -> _Read:
-        return cls(address=None, answered=False)
+    def unreachable(cls, exc: BaseException | None = None) -> _Read:
+        return cls(address=None, answered=False, exc=exc)
 
 
-def _answered_with_an_error(exc: BaseException) -> bool:
-    """Whether the NODE answered, and its answer was an error (a revert).
+# EIP-1474's code for a reverted call, and the message every client that does
+# not use it still writes. A revert is the ONLY error a getter can answer with
+# that says anything about the contract; every other error payload — a rate
+# limit (-32005), a missing trie node, an exhausted upstream — is the provider
+# talking about itself.
+_REVERT_CODE = 3
+_REVERT_TEXT = "revert"
 
-    ``rpc_request`` raises ``RuntimeError`` for a transport failure, for an HTTP
-    failure, for the pre-request URL/chain_id guard AND for a JSON-RPC ``error``
-    payload — but only the last is re-raised as the node's own object, so
-    ``str(exc)`` is that payload's repr (``{'code': -32000, 'message': …}``).
-    That shape is the POSITIVE signature, and everything else falls through to
-    "did not answer".
 
-    The default direction is the whole point. Answered-absent is the state that
-    licenses "there is no implementation here", so it is claimed only where the
-    node actually said so; an unrecognised failure — the chain_id guard, a
-    client bug, anything a later refactor adds — degrades to not_determined
-    rather than into a proven negative.
+def _error_payload(exc: BaseException) -> dict | None:
+    """The JSON-RPC ``error`` object this exception carries, if it carries one.
+
+    ``rpc_request`` re-raises the node's error object stringified
+    (``RuntimeError(str(payload["error"]))``), so its repr parses straight back;
+    every other ``RuntimeError`` it raises is a sentence it wrote itself and
+    does not. Parsed rather than sniffed because the fields are what decide the
+    outcome, and a substring test over the repr cannot tell a revert from a rate
+    limit.
     """
     if isinstance(exc, RpcClientTimeout) or not isinstance(exc, RuntimeError):
+        return None
+    try:
+        payload = ast.literal_eval(str(exc))
+    except (MemoryError, RecursionError, SyntaxError, TypeError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _call_reverted(exc: BaseException) -> bool:
+    """Whether an ``eth_call`` failure is the CONTRACT answering, not the provider.
+
+    Only a revert says "this contract does not implement that getter", and only
+    that licenses ``_Read.absent``. Everything else — a rate limit, an upstream
+    exhausted, a transport failure, the pre-request chain_id guard, anything a
+    later refactor adds — is the provider failing to answer, and a provider
+    fault must never be published as a fact about the contract. That direction
+    is the whole point of the split: the outage class this exists for
+    (eRPC rate limiting) arrives as an error payload too.
+    """
+    payload = _error_payload(exc)
+    if payload is None:
         return False
-    text = str(exc)
-    return text.startswith("{") and "'code'" in text
+    if payload.get("code") == _REVERT_CODE:
+        return True
+    return _REVERT_TEXT in str(payload.get("message") or "").lower()
 
 
 def _address_of(result: object) -> str | None:
@@ -100,12 +136,15 @@ def _read_slot(rpc_url: str, address: str, slot: str, block: str = "latest", *, 
     try:
         result = rpc_request(rpc_url, "eth_getStorageAt", [address, slot, block], chain_id=chain_id)
     except Exception as exc:
-        answered = _answered_with_an_error(exc)
+        # A storage read has no revert semantics: every slot of every account
+        # has a value, and the empty one comes back as a word of zeros through
+        # the success path below. So an ERROR of any kind here is the provider
+        # failing to answer — never the chain saying the slot is empty.
         logger.debug(
-            "proxy watcher: storage read rejected" if answered else "proxy watcher: storage read did not answer",
+            "proxy watcher: storage read did not answer",
             extra={"address": address, "slot": slot, "chain_id": chain_id, "exc_type": type(exc).__name__},
         )
-        return _Read.absent() if answered else _Read.unreachable()
+        return _Read.unreachable(exc)
     found = _address_of(result)
     return _Read(address=found, answered=True)
 
@@ -115,14 +154,14 @@ def _call_getter(rpc_url: str, address: str, selector: str, *, chain_id: int | N
     try:
         result = rpc_request(rpc_url, "eth_call", [{"to": address, "data": selector}, "latest"], chain_id=chain_id)
     except Exception as exc:
-        # An error PAYLOAD from a view getter is a revert: this contract does
-        # not implement it, which is an answer. Anything else is not.
-        answered = _answered_with_an_error(exc)
+        # A REVERT is the contract answering "I do not implement that", which is
+        # an answer. Any other error is the provider talking about itself.
+        reverted = _call_reverted(exc)
         logger.debug(
-            "proxy watcher: getter reverted" if answered else "proxy watcher: getter call did not answer",
+            "proxy watcher: getter reverted" if reverted else "proxy watcher: getter call did not answer",
             extra={"address": address, "selector": selector, "chain_id": chain_id, "exc_type": type(exc).__name__},
         )
-        return _Read.absent() if answered else _Read.unreachable()
+        return _Read.absent() if reverted else _Read.unreachable(exc)
     found = _address_of(result)
     return _Read(address=found, answered=True)
 
@@ -175,7 +214,7 @@ def resolve_current_implementation(
     def _single(read: _Read) -> str | None:
         """The one-probe paths, whose only probe carries the whole answer."""
         if not read.answered:
-            _warn_not_determined(proxy_address, chain_id, proxy_type, probes=1, unanswered=1)
+            _warn_not_determined(proxy_address, chain_id, proxy_type, probes=1, unanswered=1, exc=read.exc)
         return read.address
 
     # Fast path: historical block lookup (Aave V2 revision events)
@@ -208,38 +247,63 @@ def resolve_current_implementation(
     if addr:
         return addr
 
-    unanswered = sum(1 for read in reads if not read.answered)
+    unanswered = [read for read in reads if not read.answered]
     if unanswered:
-        _warn_not_determined(proxy_address, chain_id, proxy_type, probes=len(reads), unanswered=unanswered)
+        _warn_not_determined(
+            proxy_address,
+            chain_id,
+            proxy_type,
+            probes=len(reads),
+            unanswered=len(unanswered),
+            exc=next((read.exc for read in unanswered if read.exc is not None), None),
+        )
     return None
 
 
 def _warn_not_determined(
-    proxy_address: str, chain_id: int | None, proxy_type: str | None, *, probes: int, unanswered: int
+    proxy_address: str,
+    chain_id: int | None,
+    proxy_type: str | None,
+    *,
+    probes: int,
+    unanswered: int,
+    exc: BaseException | None = None,
 ) -> None:
     """One line per RESOLUTION, never per probe: a dead route fails all eight.
 
     The ``None`` this accompanies is not "no implementation" — some probe never
     answered — and the caller cannot tell the two apart from the return value,
-    so the log is where the difference is recorded.
+    so the log and the job's degraded accumulator are where the difference is
+    recorded. ``record_degraded`` fires under the static worker (whose job
+    context is bound); it is the documented no-op under the monitor daemon,
+    where the alarm is the log.
 
-    Warn-once-then-DEBUG, because the condition is systemic when it happens at
-    all: a dead route fails every watched proxy of every pass, and this module
-    has no cycle object to hang a tally on, so the window is a time bound.
+    Warn-once-then-DEBUG PER PROXY: a dead route fails every watched proxy of
+    every pass, so an unkeyed window would let one subject's alarm stand for
+    every other subject's silence. Keyed, the storm is bounded by the number of
+    proxies rather than by the number of passes.
     """
-    global _last_warned_at
+    key = proxy_address.lower()
     now = time.monotonic()
-    first = _last_warned_at is None or now - _last_warned_at >= _NOT_DETERMINED_WARN_INTERVAL_S
+    last = _last_warned_at.get(key)
+    first = last is None or now - last >= _NOT_DETERMINED_WARN_INTERVAL_S
     if first:
-        _last_warned_at = now
+        if len(_last_warned_at) >= _NOT_DETERMINED_WARN_MAX:
+            # A de-dupe cursor, not a record: the worst a reset costs is one
+            # repeated announcement.
+            _last_warned_at.clear()
+        _last_warned_at[key] = now
+    fields = {
+        "address": proxy_address,
+        "chain_id": chain_id,
+        "proxy_type": proxy_type,
+        "probes": probes,
+        "probes_unanswered": unanswered,
+    }
+    if exc is not None:
+        record_degraded(phase="proxy_implementation", exc=exc, context=dict(fields))
     logger.log(
         logging.WARNING if first else logging.DEBUG,
         "proxy watcher: implementation not determined; some probe did not answer",
-        extra={
-            "address": proxy_address,
-            "chain_id": chain_id,
-            "proxy_type": proxy_type,
-            "probes": probes,
-            "probes_unanswered": unanswered,
-        },
+        extra={**fields, "exc_type": None if exc is None else type(exc).__name__},
     )
