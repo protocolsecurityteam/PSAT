@@ -105,10 +105,6 @@ export function relationWord(relation) {
   return RELATION_WORDS[relation] || relation || "";
 }
 
-export function isHexAddress(value) {
-  return /^0x[a-fA-F0-9]{40}$/.test(String(value || ""));
-}
-
 export function formatUsd(value) {
   if (!value || value < 0.01) return null;
   if (value >= 1e9) return `$${(value / 1e9).toFixed(1)}B`;

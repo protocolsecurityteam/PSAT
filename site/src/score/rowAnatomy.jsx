@@ -10,7 +10,7 @@ import { Fragment, useState } from "react";
 import EntityButton, { entityProps } from "./EntityButton.jsx";
 import { shortAddress } from "./format.js";
 
-export const TARGETS_SHORT = 3;
+const TARGETS_SHORT = 3;
 
 // The kind chip is a row's handle on WHO ACTS, on every panel that renders
 // one. A merged chip splits into one handle per member: each k/n selects its
@@ -63,7 +63,7 @@ export function KindChip({ chip, chain, controller, onSelect }) {
 // because which member gates a given host is the card's fact, not this row's.
 // The surface marks the pair its own caller list witnesses, or marks less;
 // nothing here asserts any pair is on any particular contract.
-export function highlightHint(row) {
+function highlightHint(row) {
   const controllers = row.controllers?.length ? row.controllers : row.controller ? [row.controller] : [];
   if (!row.exampleFunction && !controllers.length) return undefined;
   return { functionSignature: row.exampleFunction || "", controllers };

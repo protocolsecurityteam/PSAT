@@ -409,7 +409,7 @@ export function hasClaims(fn) {
   return claimsOf(fn).length > 0;
 }
 
-export const OBSERVED_TIER = "behavioral_observed";
+const OBSERVED_TIER = "behavioral_observed";
 
 // The claim that drives tone / chip / ordering: lowest priority number wins,
 // ties resolved by claim_id for determinism.

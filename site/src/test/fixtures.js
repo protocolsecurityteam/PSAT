@@ -77,11 +77,6 @@ export const COVERAGE_FIXTURE = {
   ],
 };
 
-export const PIPELINE_FIXTURE = {
-  groups: [],
-  recent_completed: [],
-};
-
 export const ADDRESS_LABELS = { labels: {} };
 
 // Rich ProtocolSurface fixture — contracts with functions that exercise

@@ -23,7 +23,7 @@ export function usdCompact(value) {
 // $29.55M — more digits than the bound has meaning for. Sub-cent figures are
 // real ceilings the producer measured, so they print as "< $0.01" rather than
 // rounding to a zero nobody proved.
-export function usdCeiling(value) {
+function usdCeiling(value) {
   if (typeof value !== "number" || !Number.isFinite(value)) return null;
   if (value === 0) return "$0.00";
   if (value < 0.01) return "< $0.01";

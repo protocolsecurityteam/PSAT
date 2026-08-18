@@ -16,7 +16,7 @@ const elk = new ELK();
 // entirely; they remain addressable via search and sidebar.
 const MIN_GROUP_SIZE = 1;
 
-export function hierarchicalLayout(machines, edgePairs) {
+function hierarchicalLayout(machines, edgePairs) {
   const n = machines.length;
   if (n === 0) return [];
   if (n === 1) return [{ x: 0, y: 0 }];
@@ -770,7 +770,7 @@ const HANDLE_AXIS = {
 // either both top-level (cross-group bundles) or both children of the
 // same group (intra-group bundles). So a raw position.x/y comparison
 // is enough; we don't need to walk parent chains.
-export function assignEdgeLanes(nodes, edges) {
+function assignEdgeLanes(nodes, edges) {
   const nodeById = new Map();
   for (const n of nodes) nodeById.set(n.id, n);
 

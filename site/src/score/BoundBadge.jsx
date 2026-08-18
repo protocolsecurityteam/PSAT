@@ -7,8 +7,8 @@
 // Shared because every surface that prints a value band owes the reader the
 // same direction beside it: a band shown bare on one row and badged on another
 // reads as two different claims about the same field.
-export const BOUND_BADGE = { floor: "floor", ceiling: "ceiling" };
-export const BOUND_TITLE = {
+const BOUND_BADGE = { floor: "floor", ceiling: "ceiling" };
+const BOUND_TITLE = {
   floor: "at least this much — the priced entities and answered instances are a floor over what this reaches",
   ceiling: "at most this much — composed from the destination's own witness, which bounds one call from above",
 };

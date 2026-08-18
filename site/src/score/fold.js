@@ -11,7 +11,7 @@
 // promotes every finding below it, so the recovered points always exceed the
 // removed nets. Every counterfactual here re-ranks and re-folds.
 
-export const DECAY = 0.6;
+const DECAY = 0.6;
 
 export function round4(value) {
   return Math.round(value * 1e4) / 1e4;
@@ -21,7 +21,7 @@ export function round4(value) {
 // charge, not a zero one — and `Number(null)` is 0, so coercing here would
 // publish a proven zero the document never proved (and sink the row to last
 // rank, moving every net below it). null instead, and the fold refuses.
-export function rawOf(finding) {
+function rawOf(finding) {
   const raw = finding?.raw_points;
   return typeof raw === "number" && Number.isFinite(raw) ? raw : null;
 }

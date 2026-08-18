@@ -429,5 +429,3 @@ function ToolCallCard({ call }) {
     </div>
   );
 }
-
-export default AgentPanel;

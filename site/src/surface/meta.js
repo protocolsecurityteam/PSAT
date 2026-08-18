@@ -45,19 +45,6 @@ export const TYPE_META = {
   many: { label: "MULTI", accent: "#8a80a0" },
 };
 
-export const MONITOR_FLAGS = [
-  { key: "watch_upgrades", label: "Upgrades" },
-  { key: "watch_ownership", label: "Ownership" },
-  { key: "watch_pause", label: "Pause" },
-  { key: "watch_roles", label: "Roles" },
-  // Read both `watch_safe_signers` (auto-enrolled rows + new editor
-  // saves) and `watch_signers` (legacy alias) so the chip lights up
-  // either way. ``aliases`` is consumed by ``monitoringChips``.
-  { key: "watch_safe_signers", aliases: ["watch_signers"], label: "Safe activity" },
-  { key: "watch_timelock", label: "Timelock" },
-  { key: "watch_state", label: "State" },
-];
-
 export const MONITOR_ALERT_GROUPS = [
   {
     key: "upgrades",

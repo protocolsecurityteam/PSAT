@@ -59,7 +59,7 @@ export function categoryById(id) {
 // magnitude is unmeasured, `behind_unestablished_hops` holds entities behind a
 // link that was never established. The dollars decide which one the row is
 // about — the basis carrying the ceiling is the question holding the stake.
-export const CATEGORY_OF_BASIS = {
+const CATEGORY_OF_BASIS = {
   reached_unwitnessed: "magnitude",
   behind_unestablished_hops: "reachability",
 };
@@ -140,7 +140,7 @@ export function ceilingBearingEntities(lever) {
   return entities;
 }
 
-export function joinKey(row) {
+function joinKey(row) {
   return `${row?.capability}|${row?.principal}|${row?.chain}`;
 }
 
@@ -166,7 +166,7 @@ export function leverChip(lever, row) {
 // No longer printed on the row — the chip click reaches the principal card
 // where the proposer state lives — but still part of the group key: rows that
 // answered the proposer question differently never merge.
-export function proposerUnproven(row) {
+function proposerUnproven(row) {
   return row?.finding ? timelockProposer(row.finding)?.proven === false : false;
 }
 
@@ -202,8 +202,8 @@ export function claimSignature(lever, row) {
   });
 }
 
-export const POOL_EPSILON_USD = 0.01;
-export const POOL_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+const POOL_EPSILON_USD = 0.01;
+const POOL_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
 // One pot of money reachable by several questions. Membership needs the same
 // chain, the same ceiling, and an OVERLAP in the entities the ceiling is made
@@ -241,7 +241,7 @@ export function assignPools(rows) {
   return pools;
 }
 
-export const VISIBLE_LEVER_ROWS = 6;
+const VISIBLE_LEVER_ROWS = 6;
 
 // The whole table. `deductionRows` is the projection Deductions already renders
 // from — the lever rollup carries no functions or targets of its own, so the

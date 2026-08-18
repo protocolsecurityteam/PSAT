@@ -548,5 +548,3 @@ export function JobDetail({ job, onClose, refreshTick, now = Date.now() }) {
     </>
   );
 }
-
-export default JobDetail;
