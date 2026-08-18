@@ -224,11 +224,14 @@ def test_rotating_left_xff_hop_does_not_escape_limit(client):
 
 def test_client_ip_prefers_fly_then_rightmost_xff():
     from types import SimpleNamespace
+    from typing import cast
+
+    from starlette.requests import Request
 
     from utils.ratelimit import client_ip
 
     def req(headers, host="1.1.1.1"):
-        return SimpleNamespace(headers=headers, client=SimpleNamespace(host=host))
+        return cast(Request, SimpleNamespace(headers=headers, client=SimpleNamespace(host=host)))
 
     assert client_ip(req({"fly-client-ip": "8.8.8.8", "x-forwarded-for": "1.2.3.4"})) == "8.8.8.8"
     assert client_ip(req({"x-forwarded-for": "1.2.3.4, 5.6.7.8"})) == "5.6.7.8"

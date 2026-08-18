@@ -58,6 +58,7 @@ class AnalyzeRequest(BaseModel):
         for url in v:
             _require_http_url(url)
         return v
+
     defillama_protocol: str | None = Field(default=None, min_length=1)
     name: str | None = None
     chain: str | None = None
