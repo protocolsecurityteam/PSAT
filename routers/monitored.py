@@ -100,7 +100,7 @@ def _stamp_caller_supplied(
     return preserve_scan_plane_facts(stamped, existing_config)
 
 
-def _monitored_contract_payload(c: MonitoredContract) -> MonitoredContractItem:
+def monitored_contract_payload(c: MonitoredContract) -> MonitoredContractItem:
     return {
         "id": str(c.id),
         "address": c.address,
@@ -134,7 +134,7 @@ def list_monitored_contracts(
         if chain is not None:
             stmt = stmt.where(MonitoredContract.chain == chain)
         contracts = session.execute(stmt).scalars().all()
-        return [_monitored_contract_payload(c) for c in contracts]
+        return [monitored_contract_payload(c) for c in contracts]
 
 
 @router.post(
@@ -208,7 +208,7 @@ def upsert_protocol_monitoring(protocol_id: int, request: UpsertMonitoredContrac
         session.commit()
         session.refresh(existing)
         deps.log_admin_mutation("monitoring_upsert", id=str(existing.id), protocol_id=protocol_id)
-        return _monitored_contract_payload(existing)
+        return monitored_contract_payload(existing)
 
 
 @router.patch(
@@ -235,7 +235,7 @@ def update_monitored_contract(contract_id: str, request: UpdateMonitoredContract
         session.commit()
         session.refresh(mc)
         deps.log_admin_mutation("monitored_contract_update", id=str(mc.id))
-        return _monitored_contract_payload(mc)
+        return monitored_contract_payload(mc)
 
 
 @router.get("/api/monitored-events", response_model=None)

@@ -259,13 +259,16 @@ class DeleteAuditResponse(TypedDict):
 # ---------------------------------------------------------------------------
 
 
-class MonitoredContractBrief(TypedDict):
-    """The per-row keys ``/api/protocols/{id}/monitoring`` serializes."""
+class MonitoredContractItem(TypedDict):
+    """The one MonitoredContract row serialization — ``monitored_contract_payload``
+    in routers/monitored.py, shared by the protocols listing."""
 
     id: str
     address: str
     chain: str
     contract_type: str
+    protocol_id: int | None
+    contract_id: int | None
     monitoring_config: dict[str, Any] | None
     last_known_state: dict[str, Any] | None
     last_poll_status: dict[str, Any] | None
@@ -276,16 +279,6 @@ class MonitoredContractBrief(TypedDict):
     enrollment_source: str | None
     created_at: str | None
     updated_at: str | None
-
-
-class MonitoredContractItem(MonitoredContractBrief):
-    """``routers/monitored.py``'s serializer — the brief plus row linkage.
-
-    Two serializers exist for the same row type; see LANE_API notes on the
-    key-set divergence before unifying."""
-
-    protocol_id: int | None
-    contract_id: int | None
 
 
 class MonitoredEventItem(TypedDict):

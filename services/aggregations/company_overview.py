@@ -1077,8 +1077,6 @@ def _has_timelock_delay(details: Any) -> bool:
 
 def _principal_lookup_type(resolved_type: str | None, details: Any) -> str | None:
     normalized = (resolved_type or "").lower()
-    if normalized == "gnosis_safe":
-        normalized = "safe"
     if normalized in _SETTLED_CONTROLLER_TYPES:
         return normalized
     if _has_timelock_delay(details):

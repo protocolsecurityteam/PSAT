@@ -18,7 +18,7 @@ from db.models import (
 from schemas.api_requests import ProtocolSubscribeRequest
 from schemas.api_responses import (
     EnrolledContractBrief,
-    MonitoredContractBrief,
+    MonitoredContractItem,
     MonitoredEventItem,
     ProtocolTvlResponse,
     ReEnrollResponse,
@@ -27,37 +27,20 @@ from schemas.api_responses import (
 from utils.chains import UnsupportedChainError, require_supported_chain
 
 from . import deps
+from .monitored import monitored_contract_payload
 
 router = APIRouter()
 
 
 @router.get("/api/protocols/{protocol_id}/monitoring", response_model=None)
-def list_protocol_monitoring(protocol_id: int) -> list[MonitoredContractBrief]:
+def list_protocol_monitoring(protocol_id: int) -> list[MonitoredContractItem]:
     """List all MonitoredContract rows for a protocol (including inactive)."""
     with deps.SessionLocal() as session:
         stmt = select(MonitoredContract).where(
             MonitoredContract.protocol_id == protocol_id,
         )
         contracts = session.execute(stmt).scalars().all()
-        return [
-            {
-                "id": str(c.id),
-                "address": c.address,
-                "chain": c.chain,
-                "contract_type": c.contract_type,
-                "monitoring_config": c.monitoring_config,
-                "last_known_state": c.last_known_state,
-                "last_poll_status": c.last_poll_status,
-                "last_scanned_block": c.last_scanned_block,
-                "enrollment_block": c.enrollment_block,
-                "needs_polling": c.needs_polling,
-                "is_active": c.is_active,
-                "enrollment_source": c.enrollment_source,
-                "created_at": c.created_at.isoformat() if c.created_at else None,
-                "updated_at": c.updated_at.isoformat() if c.updated_at else None,
-            }
-            for c in contracts
-        ]
+        return [monitored_contract_payload(c) for c in contracts]
 
 
 @router.post(
