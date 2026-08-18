@@ -379,6 +379,7 @@ def creation_block(holder_address: str, *, chain_id: int, cost: DispositionCost)
             cost.degraded,
             "creation_block_unknown",
             "disposition: creation block lookup failed; the holder is scanned from genesis instead",
+            scope=chain_id,
             holder_address=holder_address,
             chain_id=chain_id,
             exc_type=type(exc).__name__,

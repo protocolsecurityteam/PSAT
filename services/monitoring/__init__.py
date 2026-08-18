@@ -48,9 +48,11 @@ def warn_degraded_once(
     counts: dict[str, int],
     kind: str,
     message: str,
+    *,
+    scope: Any = None,
     **fields: Any,
 ) -> None:
-    """WARNING the first time *kind* degrades in a cycle, DEBUG for the repeats.
+    """WARNING the first time *(kind, scope)* degrades in a cycle, DEBUG after.
 
     The failures this covers are systemic when they happen at all — one dead RPC
     route fails every holder in the pass — so a per-call WARNING would bury the
@@ -58,16 +60,25 @@ def warn_degraded_once(
     carry the count, which *counts* accumulates for the cycle summary that
     reports it. The summary is the record; this is the alarm.
 
+    *scope* is what the alarm is ABOUT and it is load-bearing: a cycle spans
+    several chains and several protocols, so a kind-only key lets the first
+    chain's failure demote every other chain's to DEBUG — precisely hiding a
+    second, independent outage behind the one already reported. Pass the chain
+    id (or whatever identifies the independent unit); omit it only where the
+    kind can occur once per cycle by construction.
+
     *counts* is the cycle's own mutable tally, threaded by the caller — these
     loops run outside ``BaseWorker``, so there is no job-scoped accumulator to
-    hang it on.
+    hang it on. Its keys are the scoped ones, so the summary reports which unit
+    degraded rather than only how often something did.
     """
-    seen = counts.get(kind, 0)
-    counts[kind] = seen + 1
+    key = kind if scope is None else f"{kind}:{scope}"
+    seen = counts.get(key, 0)
+    counts[key] = seen + 1
     log.log(
         logging.WARNING if seen == 0 else logging.DEBUG,
         message,
-        extra={"degraded_kind": kind, "degraded_seen": seen + 1, **fields},
+        extra={"degraded_kind": kind, "degraded_scope": scope, "degraded_seen": seen + 1, **fields},
     )
 
 

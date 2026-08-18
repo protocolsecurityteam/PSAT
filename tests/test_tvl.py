@@ -496,7 +496,11 @@ class TestRefreshAllProtocols:
         for i, p in enumerate([p1, p2]):
             db_session.add(
                 Contract(
-                    address=_addr("all_protos", f"{p.id:02x}{i}"),
+                    # Keyed on the loop index, not the protocol id: ``_addr``
+                    # truncates to 42 chars, so two ids sharing a hex prefix
+                    # composed the SAME address and the second insert violated
+                    # the (address, chain) unique key.
+                    address=_addr("all_protos", f"b{i}"),
                     chain="ethereum",
                     protocol_id=p.id,
                     contract_name=f"Contract_{p.id}",
