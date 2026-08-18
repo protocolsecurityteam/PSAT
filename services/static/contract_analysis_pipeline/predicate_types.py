@@ -14,7 +14,7 @@ the schema, and the resolver can import them without circular deps.
 
 from __future__ import annotations
 
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, TypedDict, get_args
 
 from typing_extensions import NotRequired
 
@@ -318,6 +318,13 @@ class PredicateTree(TypedDict, total=False):
 # Value of ``PredicateTree.operand_absorption``. A single state, because the only
 # question a reader asks is "did the recorder run"; absence is the other answer.
 OPERAND_ABSORPTION_RECORDED = "recorded"
+
+# What an admin-set state variable's writer set proves about the target: minted
+# by the effects pass, matched by the scoring plane and the calldata prober.
+StateVarTargetKind = Literal["constant", "immutable", "storage_setter", "storage_no_setter"]
+TARGET_KIND_STORAGE_SETTER = "storage_setter"
+TARGET_KIND_STORAGE_NO_SETTER = "storage_no_setter"
+STATE_VAR_TARGET_KINDS: frozenset[str] = frozenset(get_args(StateVarTargetKind))
 
 
 def mark_operand_absorption_recorded(tree: PredicateTree | None) -> None:

@@ -807,14 +807,19 @@ WRITER_OPENNESS_VALUES = frozenset({WRITER_OPENNESS_RESTRICTED, WRITER_OPENNESS_
 # controller id names a different slot.
 MAX_EVENT_TYPE_LENGTH = 100
 
-_VALUE_CHANGED_STEM = "value_changed"
-_MEMBER_CHANGED_STEM = "member_changed"
+VALUE_CHANGED_STEM = "value_changed"
+MEMBER_CHANGED_STEM = "member_changed"
+
+# Signal classes stamped into tracking plans and read back by salience and the
+# polling planner — one home so the classifier and its readers cannot drift.
+SIGNAL_CLASS_CONFIG = "config"
+SIGNAL_CLASS_METRIC = "metric"
 
 
 def value_changed_event_type(controller_id: str | None) -> str:
     """Event type for a read-verified old→new diff on *controller_id*."""
     cid = (controller_id or "").strip()
-    return f"{_VALUE_CHANGED_STEM}:{cid}" if cid else _VALUE_CHANGED_STEM
+    return f"{VALUE_CHANGED_STEM}:{cid}" if cid else VALUE_CHANGED_STEM
 
 
 def member_changed_event_type(mapping_var: str | None) -> str:
@@ -825,7 +830,7 @@ def member_changed_event_type(mapping_var: str | None) -> str:
     index.
     """
     var = (mapping_var or "").strip()
-    return f"{_MEMBER_CHANGED_STEM}:{var}" if var else _MEMBER_CHANGED_STEM
+    return f"{MEMBER_CHANGED_STEM}:{var}" if var else MEMBER_CHANGED_STEM
 
 
 # How much an occurrence of a spec is allowed to claim, as an order. Used to
@@ -864,7 +869,7 @@ def is_member_changed_event_type(event_type: object) -> bool:
     reflection, ``ControllerValue`` rows) must not read an entry's key or value
     as the slot's.
     """
-    return isinstance(event_type, str) and event_type.startswith(f"{_MEMBER_CHANGED_STEM}:")
+    return isinstance(event_type, str) and event_type.startswith(f"{MEMBER_CHANGED_STEM}:")
 
 
 def member_witness_mapping_var(raw: object) -> str:
@@ -1302,7 +1307,7 @@ def _assign_member_witness_keys(event: dict, spec: dict, by_declaration: dict[in
     record proved the event states no value at all.
     """
     event_type = event.get("event_type")
-    if not isinstance(event_type, str) or not event_type.startswith(f"{_MEMBER_CHANGED_STEM}:"):
+    if not isinstance(event_type, str) or not event_type.startswith(f"{MEMBER_CHANGED_STEM}:"):
         return True
     witness = spec.get("member_witness")
     if not is_member_witness(witness):

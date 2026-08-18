@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal, TypedDict
+from typing import Literal, TypedDict, get_args
 
 from typing_extensions import NotRequired
 
@@ -32,6 +32,14 @@ ResolvedControllerType = Literal[
     # A label, not a cross-chain control edge.
     "cross_chain_authority",
 ]
+
+# Derived from the Literal so a membership set can never drift from the type.
+RESOLVED_CONTROLLER_TYPES: frozenset[str] = frozenset(get_args(ResolvedControllerType))
+
+# ``monitored_contracts.contract_type``. ``proxy_admin`` controllers are stored
+# as ``"proxy"`` (the historical mapping in ``controllers_for_protocol``).
+MonitoredContractType = Literal["regular", "proxy", "safe", "timelock"]
+MONITORED_CONTRACT_TYPES: frozenset[str] = frozenset(get_args(MonitoredContractType))
 
 
 class EventWatch(TypedDict):
