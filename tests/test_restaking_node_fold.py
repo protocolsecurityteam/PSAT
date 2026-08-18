@@ -285,7 +285,10 @@ def test_no_module_outside_the_plane_imports_the_position_model():
     }
     offenders = []
     for path in root.rglob("*.py"):
-        if any(part in {".venv", "node_modules", "alembic", ".claude"} for part in path.parts):
+        # Exclude on REPO-RELATIVE parts: a worktree checkout lives under
+        # .claude/worktrees/, so matching absolute parts would skip every file
+        # and pass this guard vacuously there.
+        if any(part in {".venv", "node_modules", "alembic", ".claude"} for part in path.relative_to(root).parts):
             continue
         if path in allowed:
             continue

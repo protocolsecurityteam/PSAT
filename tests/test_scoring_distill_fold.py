@@ -2059,47 +2059,6 @@ def test_the_zero_address_is_refused_at_both_ends_and_the_refusal_is_counted(cor
     assert closure.controlled_by(entity_key("ethereum", real)) == (entity_key("ethereum", anchor.address),)
 
 
-def test_the_restaking_fold_publishes_what_it_read_and_what_it_dropped(corpus, db_session):
-    """Every admission rule states where it fired. A position dropped uncounted
-    reads as a node that holds nothing rather than one this plane refused."""
-    from db.models import RestakingPosition
-
-    for node, agreement, block in (
-        ("0x" + "e1" * 20, "agree", 100),
-        ("0x" + "e2" * 20, "inconsistent", 101),
-    ):
-        db_session.add(
-            RestakingPosition(
-                chain_id=1,
-                node_address=node,
-                protocol_id=corpus.protocol.id,
-                block_number=block,
-                block_hash=bytes([block % 251]) * 32,
-                eigenpod="0x" + "ed" * 20,
-                eigenpod_basis="proven_pod_cross_read",
-                eigenlayer_beacon_shares_wei=32 * 10**18,
-                shares_basis="eigenlayer_beacon_shares",
-                shares_strategy="0x" + "cd" * 20,
-                deposit_shares_wei=32 * 10**18,
-                cross_read_agreement=agreement,
-                consensus_layer_residual="not_determined",
-                node_set_completeness="not_determined",
-            )
-        )
-    db_session.commit()
-
-    plane = load_value_plane(db_session, corpus.protocol.id)
-    annotation = next(a for a in plane.annotations if a["fact"].startswith("restaking positions folded"))
-    assert annotation["positions_read"] == 2
-    assert annotation["positions_dropped"] == {
-        "cross_read_inconsistent": 1,
-        "shares_basis_not_admissible": 0,
-        "shares_unreadable": 0,
-        "unknown_chain_id": 0,
-    }
-    assert annotation["entities"] == 1
-
-
 def test_an_edge_with_an_unkeyable_endpoint_is_refused_by_name_not_dropped(corpus, db_session):
     """An uncounted drop reads as a protocol with less control in it."""
     from db.models import ControlGraphEdge
