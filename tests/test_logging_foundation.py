@@ -20,6 +20,7 @@ from utils.logging import (
     CryticCompileEchoDemoter,
     JsonFormatter,
     _install_third_party_log_hygiene,
+    bind_trace_context,
     stream_subprocess,
     uvicorn_log_config,
 )
@@ -151,6 +152,51 @@ def test_jsonformatter_scrubs_secrets_in_message_extra_and_exc_info():
     exc_out = json.loads(fmt.format(exc_record))
     assert "exc_info" in exc_out
     assert "SUPERSECRETKEY123" not in json.dumps(exc_out)
+
+
+def test_bound_contextvar_shadows_a_colliding_extra_key():
+    """The contextvar wins and the ``extra`` is dropped — silently.
+
+    This is a trap, not a preference: a call site that passes
+    ``extra={"address": ...}`` while a worker has bound the ``address``
+    contextvar publishes the *worker's* value under that key and loses its own,
+    with no error and no duplicate to notice. It usually looks right, because
+    the two usually agree — which is precisely why it survives review. It has
+    now bitten three lanes (``transcript_job_id``, ``probe_chain``,
+    ``bundle_address``, ``contract_address`` are all renames away from it).
+
+    Rule: never name an ``extra`` key after one of the six contextvars
+    (``trace_id``/``job_id``/``stage``/``worker_id``/``address``/``chain``)
+    unless you mean the ambient one; qualify it instead.
+    """
+    fmt = JsonFormatter()
+    record = logging.LogRecord(
+        name="test.shadowing",
+        level=logging.WARNING,
+        pathname=__file__,
+        lineno=1,
+        msg="reads reverted",
+        args=(),
+        exc_info=None,
+    )
+    record.address = "0x" + "ee" * 20  # the collision
+    record.contract_address = "0x" + "11" * 20  # the qualified spelling
+    record.chain = "base"
+
+    with bind_trace_context(address="0x" + "99" * 20, chain="ethereum"):
+        out = json.loads(fmt.format(record))
+
+    # Both colliding keys carry the ambient value; neither extra survives.
+    assert out["address"] == "0x" + "99" * 20
+    assert out["chain"] == "ethereum"
+    assert "0x" + "ee" * 20 not in json.dumps(out)
+    # The qualified key is untouched — this is the escape hatch.
+    assert out["contract_address"] == "0x" + "11" * 20
+
+    # Unbound, the same extra passes straight through: the shadowing is a
+    # property of the ambient bind, so it appears only under a worker job.
+    out_unbound = json.loads(fmt.format(record))
+    assert out_unbound["address"] == "0x" + "ee" * 20
 
 
 def test_formatter_drops_uvicorn_color_message_duplicate():

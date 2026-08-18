@@ -1373,7 +1373,12 @@ def build_control_snapshot(
             extra={
                 "reverted_controllers": len(reverted),
                 "tracked_controllers": len(controller_values),
-                "address": plan["contract_address"],
+                # NOT ``address``: the resolution worker binds that contextvar
+                # per job, and JsonFormatter writes contextvars first and drops
+                # a colliding extra — so an ``address`` key here would silently
+                # publish the job's address instead of this snapshot's subject.
+                # They usually match; across a nested resolution they need not.
+                "contract_address": plan["contract_address"],
                 "block_number": block_number,
                 "reverted_sample": sorted(reverted)[:_REVERTED_SAMPLE_LIMIT],
             },

@@ -1540,6 +1540,9 @@ def main() -> None:
         # The fleet stops as one, so every daemon logs this within the same
         # second. Without the identity the lines are byte-identical and it is
         # impossible to tell which process did (or did not) get the signal.
+        # The ``worker_id`` extra deliberately shares a contextvar's name: a
+        # signal landing before the loop binds it would otherwise leave the line
+        # anonymous, and the two can never disagree — both are ``WORKER_ID``.
         logger.info(
             "worker %s received signal %s, shutting down",
             WORKER_ID,

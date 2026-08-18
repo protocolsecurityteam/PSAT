@@ -146,7 +146,11 @@ def test_reverting_controller_reads_collapse_to_one_summary_warning(monkeypatch,
     accumulator: list = []
     token = degraded_errors_var.set(accumulator)
     try:
-        with bind_trace_context(job_id="1", stage="resolution"):
+        # A deliberately DIFFERENT ambient address than the plan's subject: the
+        # resolution worker binds this per job, and an ``address`` key in the
+        # summary's ``extra`` would be dropped in favour of it (JsonFormatter
+        # writes contextvars first), silently misattributing the census.
+        with bind_trace_context(job_id="1", stage="resolution", address="0x" + "99" * 20):
             with caplog.at_level(logging.DEBUG, logger="services.resolution.tracking"):
                 snapshot = tracking.build_control_snapshot(
                     _reverting_plan(["owner", "authority", "admin"]),  # type: ignore[arg-type]
@@ -168,6 +172,9 @@ def test_reverting_controller_reads_collapse_to_one_summary_warning(monkeypatch,
     assert len(summaries) == 1
     assert summaries[0].reverted_controllers == 3
     assert summaries[0].tracked_controllers == 3
+    # Survives the ambient bind because it is not named ``address``.
+    assert summaries[0].contract_address == "0x" + "11" * 20
+    assert not hasattr(summaries[0], "address")
     assert summaries[0].reverted_sample == [
         "state_variable:admin",
         "state_variable:authority",
