@@ -174,7 +174,7 @@ def test_full_classification_pipeline(monkeypatch):
         (eip1967, cls.EIP1967_ADMIN_SLOT): _slot_for(eip1967_admin),
         (beacon_proxy, cls.EIP1967_BEACON_SLOT): _slot_for(beacon_addr),
         (uups, cls.EIP1822_LOGIC_SLOT): _slot_for(uups_impl),
-        (oz, cls.OZ_IMPL_SLOT): _slot_for(oz_impl),
+        (oz, cls.OZ_LEGACY_IMPL_SLOT): _slot_for(oz_impl),
         (gnosis, "0x0"): _slot_for(gnosis_impl),  # GnosisSafe slot 0
     }
 

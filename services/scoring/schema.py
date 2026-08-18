@@ -87,6 +87,7 @@ from utils.scoring_status import (
     GRADE_STATE_NOT_DETERMINED,
     GRADE_STATES,
     NO_SELECTOR,
+    NOT_DETERMINED,
     OPENNESS_NOT_DETERMINED,
     OPENNESS_STATES,
     PERIMETER_NOT_DETERMINED,
@@ -110,8 +111,6 @@ from utils.scoring_status import (
 )
 
 T = TypeVar("T")
-
-NOT_DETERMINED = "not_determined"
 
 
 def coalesce_chain(chain: str | None) -> str:

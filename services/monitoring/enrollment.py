@@ -24,6 +24,7 @@ from db.models import (
     WatchedProxy,
 )
 from db.storage import StorageContentAbsent, StorageContentIncomplete
+from schemas.control_tracking import MonitoredContractType
 from services.governance.control_graph_types import reconcile_control_graph_types
 from services.monitoring.chain_rpc import chain_id_for, rpc_for_chain
 from services.monitoring.event_topics import extract_governance_topics
@@ -999,7 +1000,7 @@ def _bridge_to_watched_proxy(
 # controller principals. Pass 2 in ``_enroll_controller_addresses`` scans the
 # full set so a controller of any flavor gets demoted once it stops being a
 # controller (primary or co-controller).
-_CONTROLLER_MONITORED_TYPES = ("safe", "timelock", "proxy")
+_CONTROLLER_MONITORED_TYPES: tuple[MonitoredContractType, ...] = ("safe", "timelock", "proxy")
 
 
 def _chain_token(chain: str | None) -> str:

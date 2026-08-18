@@ -15,11 +15,23 @@ and returns results in <1s regardless of chain history length.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from collections.abc import Mapping, Sequence
+from typing import Any, cast
 
+from typing_extensions import NotRequired
+
+from schemas.control_tracking import RESOLVED_CONTROLLER_TYPES, ResolvedControllerType
+from schemas.upgrade_history import (
+    ImplementationRecord,
+    ProxyUpgradeHistory,
+    UpgradeEventRecord,
+    UpgradeEventType,
+    UpgradeHistoryOutput,
+)
 from services.discovery.static_dependencies import normalize_address
 from utils.chains import canonical_chain, require_chain
 from utils.logging import record_degraded
+from utils.scoring_status import NOT_DETERMINED
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +84,7 @@ UPGRADED_REVISION_TOPIC0 = "0x65a5e70879738a94a00f00947edae8111ae0aed9175ce342db
 # Diamond (EIP-2535) — DiamondCut((address,uint8,bytes4[])[],address,bytes)
 DIAMOND_CUT_TOPIC0 = "0x8faa70878671ccd212d20771b795c50af8fd3ff6cf27f4bde57e5d4de0aeb673"
 
-EVENT_TOPICS = {
+EVENT_TOPICS: dict[str, UpgradeEventType] = {
     UPGRADED_TOPIC0: "upgraded",
     ADMIN_CHANGED_TOPIC0: "admin_changed",
     BEACON_UPGRADED_TOPIC0: "beacon_upgraded",
@@ -113,8 +125,15 @@ def _data_to_addresses(data: str, count: int) -> list[str]:
     return addresses
 
 
-def parse_upgrade_log(log: dict) -> dict | None:
-    """Parse an Etherscan log entry into an UpgradeEvent dict."""
+class _ParsedUpgradeLog(UpgradeEventRecord):
+    """Transient parse shape: the published record plus the emitter used to
+    group events. ``_strip_internal`` removes the key before anything persists."""
+
+    _emitter: NotRequired[str]
+
+
+def parse_upgrade_log(log: dict) -> _ParsedUpgradeLog | None:
+    """Parse an Etherscan log entry into an upgrade-event record."""
     topics = log.get("topics", [])
     if not topics:
         return None
@@ -124,7 +143,7 @@ def parse_upgrade_log(log: dict) -> dict | None:
     if not event_type:
         return None
 
-    event: dict = {
+    event: _ParsedUpgradeLog = {
         "event_type": event_type,
         "block_number": _hex_to_int(log.get("blockNumber", "0x0")),
         "tx_hash": log.get("transactionHash"),
@@ -276,7 +295,7 @@ def _fetch_logs_etherscan(proxy_address: str, topic0: str, from_block: int = 0, 
         return []
 
 
-def fetch_upgrade_events(proxy_addresses: list[str], from_block: int = 0, chain_id: int = 1) -> list[dict]:
+def fetch_upgrade_events(proxy_addresses: list[str], from_block: int = 0, chain_id: int = 1) -> list[_ParsedUpgradeLog]:
     """Fetch all EIP-1967 upgrade events for proxy addresses via Etherscan.
 
     Queries each proxy for all three event types (Upgraded, AdminChanged,
@@ -290,7 +309,7 @@ def fetch_upgrade_events(proxy_addresses: list[str], from_block: int = 0, chain_
         chain_id: Chain the proxies live on; threaded to the Etherscan getLogs
             query so L2 upgrade events resolve against the right explorer.
     """
-    all_events: list[dict] = []
+    all_events: list[_ParsedUpgradeLog] = []
 
     # Flatten the address × topic matrix into one task list. Each
     # ``_fetch_logs_etherscan`` call goes through the global Etherscan rate
@@ -334,9 +353,9 @@ def fetch_upgrade_events(proxy_addresses: list[str], from_block: int = 0, chain_
 
 
 def _build_implementation_timeline(
-    events: list[dict],
+    events: Sequence[Mapping[str, Any]],
     current_impl: str | None,
-) -> list[dict]:
+) -> list[ImplementationRecord]:
     """Build an ordered list of ImplementationRecords from upgrade events."""
     upgrade_events = [e for e in events if e["event_type"] == "upgraded" and e.get("implementation")]
 
@@ -345,9 +364,9 @@ def _build_implementation_timeline(
             return [{"address": current_impl}]
         return []
 
-    records: list[dict] = []
+    records: list[ImplementationRecord] = []
     for i, event in enumerate(upgrade_events):
-        record: dict = {
+        record: ImplementationRecord = {
             "address": event["implementation"],
             "block_introduced": event["block_number"],
             "tx_hash": event["tx_hash"],
@@ -368,11 +387,15 @@ def _build_implementation_timeline(
 # ---------------------------------------------------------------------------
 
 
-def _enrich_implementations(implementations: list[dict], known_names: dict[str, str], *, chain_id: int) -> None:
+def _enrich_implementations(
+    implementations: list[ImplementationRecord], known_names: dict[str, str], *, chain_id: int
+) -> None:
     """Add contract names to historical implementations not already named in dependencies.json."""
     from utils.etherscan import get_contract_info, parallel_get
 
-    addrs_to_fetch = sorted({impl["address"] for impl in implementations if impl["address"] not in known_names})
+    addrs_to_fetch = sorted(
+        {addr for impl in implementations if (addr := impl.get("address")) is not None and addr not in known_names}
+    )
     fetched: dict[str, str | None] = {}
     if addrs_to_fetch:
         calls = {addr: (lambda a=addr: get_contract_info(a, chain_id=chain_id)) for addr in addrs_to_fetch}
@@ -385,7 +408,9 @@ def _enrich_implementations(implementations: list[dict], known_names: dict[str, 
                 fetched[addr] = None
 
     for impl in implementations:
-        addr = impl["address"]
+        addr = impl.get("address")
+        if addr is None:
+            continue
         if addr in known_names:
             impl["contract_name"] = known_names[addr]
             continue
@@ -442,12 +467,17 @@ def _extract_proxies_from_dependencies(
 # ---------------------------------------------------------------------------
 
 
-def _strip_internal(event: dict) -> dict:
-    """Remove internal keys (prefixed with _) before serialization."""
-    return {k: v for k, v in event.items() if not k.startswith("_")}
+def _strip_internal(event: _ParsedUpgradeLog) -> UpgradeEventRecord:
+    """Remove the transient grouping key before serialization."""
+    out = event.copy()
+    if "_emitter" in out:
+        del out["_emitter"]
+    return out
 
 
-def build_upgrade_history(dependencies: dict, *, enrich: bool = True, from_block: int = 0, chain_id: int = 1) -> dict:
+def build_upgrade_history(
+    dependencies: dict, *, enrich: bool = True, from_block: int = 0, chain_id: int = 1
+) -> UpgradeHistoryOutput:
     """Build upgrade history for all proxy contracts in a unified deps dict.
 
     Args:
@@ -478,15 +508,15 @@ def build_upgrade_history(dependencies: dict, *, enrich: bool = True, from_block
     all_events = fetch_upgrade_events(list(proxy_meta.keys()), from_block=from_block, chain_id=chain_id)
 
     # Group events by emitting proxy address
-    events_by_proxy: dict[str, list[dict]] = {addr: [] for addr in proxy_meta}
+    events_by_proxy: dict[str, list[_ParsedUpgradeLog]] = {addr: [] for addr in proxy_meta}
     for event in all_events:
         emitter = event.get("_emitter")
         if emitter and emitter in events_by_proxy:
             events_by_proxy[emitter].append(event)
 
-    proxies: dict[str, dict] = {}
+    proxies: dict[str, ProxyUpgradeHistory] = {}
     total_upgrades = 0
-    all_implementations: list[dict] = []
+    all_implementations: list[ImplementationRecord] = []
 
     for addr, (proxy_type, current_impl) in proxy_meta.items():
         proxy_events = events_by_proxy.get(addr, [])
@@ -513,8 +543,9 @@ def build_upgrade_history(dependencies: dict, *, enrich: bool = True, from_block
     else:
         # Still apply names we already have — zero extra API calls
         for impl in all_implementations:
-            if impl["address"] in known_names:
-                impl["contract_name"] = known_names[impl["address"]]
+            known = known_names.get(impl.get("address", ""))
+            if known is not None:
+                impl["contract_name"] = known
 
     return {
         "schema_version": "0.1",
@@ -924,14 +955,15 @@ def synthesize_from_events(session, contract) -> dict | None:
     current_impl = (contract.implementation or events[-1]["implementation"]).lower()
     implementations = _build_implementation_timeline(events, current_impl)
 
-    impl_addrs = {impl["address"] for impl in implementations}
+    impl_addrs = {addr for impl in implementations if (addr := impl.get("address")) is not None}
     if impl_addrs:
         name_rows = session.execute(
             select(Contract.address, Contract.contract_name).where(Contract.address.in_(list(impl_addrs)))
         ).all()
         names = {addr.lower(): name for addr, name in name_rows if name}
         for impl in implementations:
-            n = names.get(impl["address"].lower())
+            addr = impl.get("address")
+            n = names.get(addr.lower()) if addr is not None else None
             if n:
                 impl["contract_name"] = n
 
@@ -981,8 +1013,6 @@ def synthesize_from_events(session, contract) -> dict | None:
 #     ERC-2771 all break it) and says nothing about what the upgrade's guard
 #     reads. Nothing is published for it.
 # ---------------------------------------------------------------------------
-
-NOT_DETERMINED = "not_determined"
 
 # Fixed inspection order over the persisted classification planes. This is an
 # order of RECORD, not of strength: planes that disagree yield not_determined
@@ -1081,7 +1111,9 @@ def _row_chain_id(chain_name: Any) -> int | None:
         return None
 
 
-def _classify_emitter(session, address: str, *, chain_id: int) -> tuple[str | None, str | None, int | None]:
+def _classify_emitter(
+    session, address: str, *, chain_id: int
+) -> tuple[ResolvedControllerType | None, str | None, int | None]:
     """Read the emitter's type off the PERSISTED classification planes, SCOPED
     to the chain the receipt was read on.
 
@@ -1154,6 +1186,10 @@ def _classify_emitter(session, address: str, *, chain_id: int) -> tuple[str | No
     if len(kinds) != 1:
         return None, None, None
     resolved_type = kinds.pop()
+    if resolved_type not in RESOLVED_CONTROLLER_TYPES:
+        # The planes agreed on a spelling outside the vocabulary: no verdict.
+        return None, None, None
+    typed_resolved = cast(ResolvedControllerType, resolved_type)
 
     plane = next(p for p in _CLASSIFICATION_PLANES if p in observed)
     block: int | None = None
@@ -1169,7 +1205,7 @@ def _classify_emitter(session, address: str, *, chain_id: int) -> tuple[str | No
         if isinstance(candidate, int) and not isinstance(candidate, bool):
             block = candidate
             break
-    return resolved_type, plane, block
+    return typed_resolved, plane, block
 
 
 def _fetch_receipt(rpc_url: str, tx_hash: str, *, chain_id: int) -> dict | None:

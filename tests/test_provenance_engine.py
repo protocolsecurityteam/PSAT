@@ -153,7 +153,7 @@ def test_is_top_singleton_invariant():
 
 def test_source_unknown_kind_raises():
     with pytest.raises(ValueError):
-        Source(kind="not_a_real_kind")
+        Source(kind="not_a_real_kind")  # pyright: ignore[reportArgumentType]
 
 
 # ---------------------------------------------------------------------------

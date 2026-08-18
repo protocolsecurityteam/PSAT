@@ -68,8 +68,8 @@ logger = logging.getLogger(__name__)
 # failure this loop exists to prevent was invisible precisely because only the
 # third of these was ever recorded.
 OUTCOME_GATE_CLOSED = "gate_closed"
-OUTCOME_NO_ROWS = "no_rows"
-OUTCOME_ROWS_WRITTEN = "rows_written"
+OUTCOME_NO_ROWS = ROLE_REFRESH_OUTCOME_NO_ROWS
+OUTCOME_ROWS_WRITTEN = ROLE_REFRESH_OUTCOME_ROWS_WRITTEN
 # Reachable only from the resolution stage, which can be handed a job with no
 # runtime address at all. The loop selects from the cursor table, so it always
 # has one.

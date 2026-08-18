@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal, TypedDict, get_args
+from typing import Literal, TypedDict, cast, get_args
 
 from typing_extensions import NotRequired
 
@@ -36,9 +36,27 @@ ResolvedControllerType = Literal[
 # Derived from the Literal so a membership set can never drift from the type.
 RESOLVED_CONTROLLER_TYPES: frozenset[str] = frozenset(get_args(ResolvedControllerType))
 
+
+def coerce_resolved_controller_type(value: object) -> ResolvedControllerType:
+    """Boundary validator for ``resolved_type`` values of unproven provenance
+    (persisted artifacts, pre-seeded caches, JSONB rows).
+
+    Only a proven vocabulary member passes through; ``None``, the stringified
+    ``"None"`` a legacy store could carry, and any out-of-vocabulary token all
+    surface as ``"unknown"`` — the vocabulary's not-determined arm — because a
+    token nothing downstream knows licenses no concrete branch.
+    """
+    if value is None:
+        return "unknown"
+    text = str(value)
+    if text in RESOLVED_CONTROLLER_TYPES:
+        return cast(ResolvedControllerType, text)
+    return "unknown"
+
+
 # ``monitored_contracts.contract_type``. ``proxy_admin`` controllers are stored
 # as ``"proxy"`` (the historical mapping in ``controllers_for_protocol``).
-MonitoredContractType = Literal["regular", "proxy", "safe", "timelock"]
+MonitoredContractType = Literal["regular", "proxy", "safe", "timelock", "pausable"]
 MONITORED_CONTRACT_TYPES: frozenset[str] = frozenset(get_args(MonitoredContractType))
 
 

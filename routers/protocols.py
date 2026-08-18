@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import case, func, select
@@ -17,6 +16,14 @@ from db.models import (
     TvlSnapshot,
 )
 from schemas.api_requests import ProtocolSubscribeRequest
+from schemas.api_responses import (
+    EnrolledContractBrief,
+    MonitoredContractBrief,
+    MonitoredEventItem,
+    ProtocolTvlResponse,
+    ReEnrollResponse,
+    SubscriptionItem,
+)
 from utils.chains import UnsupportedChainError, require_supported_chain
 
 from . import deps
@@ -24,8 +31,8 @@ from . import deps
 router = APIRouter()
 
 
-@router.get("/api/protocols/{protocol_id}/monitoring")
-def list_protocol_monitoring(protocol_id: int) -> list[dict[str, Any]]:
+@router.get("/api/protocols/{protocol_id}/monitoring", response_model=None)
+def list_protocol_monitoring(protocol_id: int) -> list[MonitoredContractBrief]:
     """List all MonitoredContract rows for a protocol (including inactive)."""
     with deps.SessionLocal() as session:
         stmt = select(MonitoredContract).where(
@@ -53,8 +60,10 @@ def list_protocol_monitoring(protocol_id: int) -> list[dict[str, Any]]:
         ]
 
 
-@router.post("/api/protocols/{protocol_id}/re-enroll", dependencies=[Depends(deps.require_admin_key)])
-def re_enroll_protocol(protocol_id: int, chain: str = "ethereum") -> dict[str, Any]:
+@router.post(
+    "/api/protocols/{protocol_id}/re-enroll", dependencies=[Depends(deps.require_admin_key)], response_model=None
+)
+def re_enroll_protocol(protocol_id: int, chain: str = "ethereum") -> ReEnrollResponse:
     """Manually trigger monitoring enrollment for a protocol.
 
     Calls enroll_protocol_contracts directly, bypassing the automatic
@@ -84,26 +93,29 @@ def re_enroll_protocol(protocol_id: int, chain: str = "ethereum") -> dict[str, A
 
         enrolled = enroll_protocol_contracts(session, protocol_id, rpc_url, chain)
         deps.log_admin_mutation("re_enroll", id=protocol_id, count=len(enrolled))
+        contracts: list[EnrolledContractBrief] = [
+            {
+                "id": str(mc.id),
+                "address": mc.address,
+                "contract_type": mc.contract_type,
+                "monitoring_config": mc.monitoring_config,
+                "needs_polling": mc.needs_polling,
+                "is_active": mc.is_active,
+            }
+            for mc in enrolled
+        ]
         return {
             "status": "enrolled",
             "protocol_id": protocol_id,
             "contracts_enrolled": len(enrolled),
-            "contracts": [
-                {
-                    "id": str(mc.id),
-                    "address": mc.address,
-                    "contract_type": mc.contract_type,
-                    "monitoring_config": mc.monitoring_config,
-                    "needs_polling": mc.needs_polling,
-                    "is_active": mc.is_active,
-                }
-                for mc in enrolled
-            ],
+            "contracts": contracts,
         }
 
 
-@router.post("/api/protocols/{protocol_id}/subscribe", dependencies=[Depends(deps.require_admin_key)])
-def subscribe_to_protocol(protocol_id: int, request: ProtocolSubscribeRequest) -> dict[str, Any]:
+@router.post(
+    "/api/protocols/{protocol_id}/subscribe", dependencies=[Depends(deps.require_admin_key)], response_model=None
+)
+def subscribe_to_protocol(protocol_id: int, request: ProtocolSubscribeRequest) -> SubscriptionItem:
     """Create a ProtocolSubscription for governance event notifications."""
     with deps.SessionLocal() as session:
         protocol = session.get(Protocol, protocol_id)
@@ -132,8 +144,8 @@ def subscribe_to_protocol(protocol_id: int, request: ProtocolSubscribeRequest) -
         }
 
 
-@router.get("/api/protocols/{protocol_id}/subscriptions")
-def list_protocol_subscriptions(protocol_id: int) -> list[dict[str, Any]]:
+@router.get("/api/protocols/{protocol_id}/subscriptions", response_model=None)
+def list_protocol_subscriptions(protocol_id: int) -> list[SubscriptionItem]:
     """List all ProtocolSubscription rows for a protocol."""
     from utils.secrets import sanitize_url
 
@@ -170,10 +182,10 @@ def delete_protocol_subscription(sub_id: str) -> dict[str, str]:
         return {"status": "removed"}
 
 
-@router.get("/api/protocols/{protocol_id}/events")
+@router.get("/api/protocols/{protocol_id}/events", response_model=None)
 def list_protocol_events(
     protocol_id: int, limit: int = Query(default=50, ge=1, le=500), chain: str | None = None
-) -> list[dict[str, Any]]:
+) -> list[MonitoredEventItem]:
     """List MonitoredEvents for all contracts in a protocol.
 
     ``chain`` scopes the feed to one chain's monitored rows. The same address
@@ -220,8 +232,8 @@ def list_protocol_events(
         ]
 
 
-@router.get("/api/protocols/{protocol_id}/tvl")
-def protocol_tvl(protocol_id: int, days: int = 30) -> dict[str, Any]:
+@router.get("/api/protocols/{protocol_id}/tvl", response_model=None)
+def protocol_tvl(protocol_id: int, days: int = 30) -> ProtocolTvlResponse:
     """Current TVL and historical snapshots for a protocol."""
     days = min(days, deps.MAX_TVL_HISTORY_DAYS)
 

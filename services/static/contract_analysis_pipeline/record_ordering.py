@@ -35,6 +35,8 @@ from typing import Any, TypedDict
 
 from typing_extensions import NotRequired
 
+from utils.scoring_status import NOT_DETERMINED
+
 from .revert_detect import _ir_is_assert, _ir_is_require
 
 # ---------------------------------------------------------------------------
@@ -49,7 +51,6 @@ FLAG_FLIP_CLEARING_ENABLED = True
 
 
 PROVEN = "proven_ordering"
-NOT_DETERMINED = "not_determined"
 
 #: The one basis this module can publish. The verified-guard alternative
 #: satisfier (``w2_verified_guard``) is a different proof and lives in U4.

@@ -15,11 +15,11 @@ import requests
 from eth_utils.crypto import keccak
 
 from services.resolution.capability_resolver import _selector_for_signature
+from utils.etherscan import ETHERSCAN_API
 from utils.logging import record_degraded, record_stage_metric
 
 logger = logging.getLogger(__name__)
 
-ETHERSCAN_API = "https://api.etherscan.io/v2/api"
 MAX_LOGS_PER_TOPIC = int(os.getenv("PSAT_PRINCIPAL_HISTORY_MAX_LOGS_PER_TOPIC", "10000"))
 
 # Process-wide cache of an authority's full role-event log history, keyed

@@ -33,7 +33,7 @@ from services.discovery import (
     find_dynamic_dependencies,
 )
 from services.discovery.dynamic_dependencies import NoNewTransactionsError
-from services.discovery.fetch import _confine, _remapping_target_is_safe, sanitize_evm_version
+from services.discovery.fetch import _MIN_SOLC, _confine, _remapping_target_is_safe, sanitize_evm_version
 from services.monitoring.proxy_watcher import resolve_current_implementation
 from services.resolution.tracking_plan import build_control_tracking_plan
 from services.static.contract_analysis_pipeline import collect_contract_analysis_with_artifacts
@@ -592,8 +592,7 @@ def _finalize_upgrade_history(
 # ---------------------------------------------------------------------------
 # Source / project helpers
 # ---------------------------------------------------------------------------
-# Minimum solc version to avoid known compiler bugs (e.g. Natspec.cpp assertion in 0.8.21).
-_MIN_SOLC = "0.8.24"
+# Minimum solc floor: services.discovery.fetch owns the value (imported above).
 
 
 def _detect_solc_version(sources: dict[str, str]) -> str:
@@ -1621,7 +1620,8 @@ class StaticWorker(BaseWorker):
                 "target_classification": target_classification or {},
                 "dependencies": {},
             }
-            return build_upgrade_history(minimal_deps, from_block=uh_from_block, chain_id=phase_chain_id)
+            # Rebuilt as a plain dict: the worker merges prior history into it.
+            return dict(build_upgrade_history(minimal_deps, from_block=uh_from_block, chain_id=phase_chain_id))
 
         from utils.concurrency import parallel_map
 

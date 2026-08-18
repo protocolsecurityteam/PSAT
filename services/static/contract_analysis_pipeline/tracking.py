@@ -18,8 +18,10 @@ from eth_utils.crypto import keccak
 from schemas.contract_analysis import (
     AssociatedEvent,
     AssociatedEventInput,
+    ControllerKind,
     ControllerProvenance,
     ControllerReadSpec,
+    ControllerTrackingMode,
     ControllerTrackingTarget,
     ControllerTypeComponent,
     ControllerWriterFunction,
@@ -27,6 +29,7 @@ from schemas.contract_analysis import (
     Evidence,
     SemanticControlAnalysis,
 )
+from utils.scoring_status import OPENNESS_NOT_DETERMINED, OPENNESS_RESTRICTED
 
 from .effects import _collect_reentrancy_guard_vars
 from .mapping_events import member_witness_records
@@ -37,12 +40,7 @@ from .shared import (
     _source_evidence,
     external_bool_leaf_is_gate_shape,
 )
-from .writer_openness import (
-    WRITER_OPENNESS_NOT_DETERMINED,
-    WRITER_OPENNESS_RESTRICTED,
-    openness_of_write_paths,
-    restricted_function_signatures,
-)
+from .writer_openness import openness_of_write_paths, restricted_function_signatures
 
 
 def _unit_key(unit) -> str:
@@ -420,15 +418,15 @@ class _EventQualification:
             # Zero: no correspondence was proven. More than one: the same event
             # is the witness for two different mappings, so an occurrence does
             # not say which entry moved.
-            return None, WRITER_OPENNESS_NOT_DETERMINED
+            return None, OPENNESS_NOT_DETERMINED
         witness = witnesses[0]
         emitters = self._emitters.get(signature) or set()
         if not emitters or any(not (writers_by_signature.get(fn) or set()) & target_vars for fn in emitters):
-            return witness, WRITER_OPENNESS_NOT_DETERMINED
+            return witness, OPENNESS_NOT_DETERMINED
         if self._opaque_unrestricted:
             # An open path can write storage nothing attributed to a variable,
             # so no writer set on this contract is known to be complete.
-            return witness, WRITER_OPENNESS_NOT_DETERMINED
+            return witness, OPENNESS_NOT_DETERMINED
         mapping_var = witness["mapping_name"]
         writers = set(self._writers_by_var.get(mapping_var) or set())
         return witness, openness_of_write_paths(emitters, writers, self._restricted)
@@ -1188,7 +1186,7 @@ def _writer_records_from_effects(
             # same convention ``authority_provenance`` follows one level up, and
             # the monitoring plane normalizes it back to an explicit
             # ``not_determined`` on the spec the watcher reads.
-            if openness == WRITER_OPENNESS_RESTRICTED:
+            if openness == OPENNESS_RESTRICTED:
                 event_ref["writer_openness"] = openness
 
     associated_events = sorted(aggregated_events.values(), key=lambda item: item["signature"])
@@ -1371,7 +1369,7 @@ def _emit_oz_v5_owner_target(
             "kind": "state_variable",
             "read_spec": read_spec,
             "confidence": None,
-            "tracking_mode": tracking_mode,  # type: ignore[typeddict-item]
+            "tracking_mode": tracking_mode,
             "writer_functions": writer_functions,
             "associated_events": associated_events,
             "polling_sources": [getter],
@@ -1611,7 +1609,7 @@ def build_controller_tracking(
             seen_ids.add(controller_id)
             continue
 
-        kind: str = "external_contract" if name in authority_state_vars else "state_variable"
+        kind: ControllerKind = "external_contract" if name in authority_state_vars else "state_variable"
         controller_id = f"{kind}:{name}"
         if controller_id in seen_ids:
             continue
@@ -1648,7 +1646,7 @@ def build_controller_tracking(
             qualification,
         )
         if associated_events:
-            tracking_mode: str = "event_plus_state"
+            tracking_mode: ControllerTrackingMode = "event_plus_state"
             notes = [
                 "Monitor associated events for low-latency detection and confirm "
                 "the resulting controller state with RPC reads."
@@ -1671,10 +1669,10 @@ def build_controller_tracking(
             "controller_id": controller_id,
             "label": name,
             "source": name,
-            "kind": kind,  # type: ignore[typeddict-item]
+            "kind": kind,
             "read_spec": read_spec_var,
             "confidence": None,
-            "tracking_mode": tracking_mode,  # type: ignore[typeddict-item]
+            "tracking_mode": tracking_mode,
             "writer_functions": writer_functions,
             "associated_events": associated_events,
             "polling_sources": [name],
@@ -1722,7 +1720,7 @@ def build_controller_tracking(
                 "kind": "state_variable",
                 "read_spec": read_spec_member,
                 "confidence": None,
-                "tracking_mode": tracking_mode,  # type: ignore[typeddict-item]
+                "tracking_mode": tracking_mode,
                 "writer_functions": writer_functions,
                 "associated_events": associated_events,
                 "polling_sources": [name],

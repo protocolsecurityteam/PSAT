@@ -32,10 +32,9 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from .shared import external_bool_leaf_is_gate_shape
+from utils.scoring_status import OPENNESS_NOT_DETERMINED, OPENNESS_RESTRICTED
 
-WRITER_OPENNESS_RESTRICTED = "restricted"
-WRITER_OPENNESS_NOT_DETERMINED = "not_determined"
+from .shared import external_bool_leaf_is_gate_shape
 
 # The two leaf roles that state a constraint on WHO called. Everything else
 # (time, pause, reentrancy, business, one_shot) constrains when or how, and a
@@ -149,7 +148,7 @@ def openness_of_write_paths(emitters: set[str], writers: set[str], restricted: f
     paths we could not find.
     """
     if not emitters or not writers:
-        return WRITER_OPENNESS_NOT_DETERMINED
+        return OPENNESS_NOT_DETERMINED
     if emitters <= restricted and writers <= restricted:
-        return WRITER_OPENNESS_RESTRICTED
-    return WRITER_OPENNESS_NOT_DETERMINED
+        return OPENNESS_RESTRICTED
+    return OPENNESS_NOT_DETERMINED

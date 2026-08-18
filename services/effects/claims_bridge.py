@@ -48,8 +48,9 @@ from services.static.claims.registry import (
     register,
     resolve_claim_precedence,
 )
-from services.static.claims.types import TIER_PRECEDENCE, Claim
+from services.static.claims.types import TIER_PRECEDENCE, Claim, Tier
 from utils.execution_record import PROVING_EXECUTION_KEY
+from utils.scoring_status import WITNESS_TIER_BEHAVIORAL_OBSERVED
 
 # The effects worker runs in its own process and never calls ``build_claims``, so
 # the standard matcher claims (``upgrade.implementation``, ``flow.out``, …) would
@@ -91,8 +92,9 @@ if not is_registered(AUTHORITY_GRANT):
         )
     )
 
-# The provenance tier every bridge-minted claim carries.
-OBSERVED_TIER = "behavioral_observed"
+# The provenance tier every bridge-minted claim carries (shared vocabulary;
+# the annotation pins it inside the claims ``Tier`` Literal).
+OBSERVED_TIER: Tier = WITNESS_TIER_BEHAVIORAL_OBSERVED
 
 
 class VerdictLike(Protocol):

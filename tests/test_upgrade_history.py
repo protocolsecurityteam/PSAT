@@ -100,23 +100,23 @@ class TestParseUpgradeLog:
         upgraded = uh.parse_upgrade_log(upgraded_log)
         assert upgraded is not None
         assert upgraded["event_type"] == "upgraded"
-        assert upgraded["implementation"] == ADDR(42)
+        assert upgraded.get("implementation") == ADDR(42)
         assert upgraded["block_number"] == 10
         assert upgraded["tx_hash"] == "0xabc"
         assert upgraded["log_index"] == 1
-        assert upgraded["timestamp"] > 0
-        assert upgraded["_emitter"] == ADDR(1)
+        assert upgraded.get("timestamp", 0) > 0
+        assert upgraded.get("_emitter") == ADDR(1)
 
         admin = uh.parse_upgrade_log(admin_log)
         assert admin is not None
         assert admin["event_type"] == "admin_changed"
-        assert admin["previous_admin"] == ADDR(1)
-        assert admin["new_admin"] == ADDR(2)
+        assert admin.get("previous_admin") == ADDR(1)
+        assert admin.get("new_admin") == ADDR(2)
 
         beacon = uh.parse_upgrade_log(beacon_log)
         assert beacon is not None
         assert beacon["event_type"] == "beacon_upgraded"
-        assert beacon["beacon"] == ADDR(99)
+        assert beacon.get("beacon") == ADDR(99)
 
     def test_malformed_logs_return_none(self):
         """Unknown topic0, empty topics, and missing data are handled gracefully."""
@@ -164,7 +164,7 @@ class TestParseUpgradeLog:
         event = uh.parse_upgrade_log(log)
         assert event is not None
         assert event["event_type"] == "upgraded"
-        assert event["implementation"] == impl
+        assert event.get("implementation") == impl
 
     def test_non_indexed_beacon_upgraded_event(self):
         """BeaconUpgraded with beacon address in data instead of topics."""
@@ -174,7 +174,7 @@ class TestParseUpgradeLog:
         event = uh.parse_upgrade_log(log)
         assert event is not None
         assert event["event_type"] == "beacon_upgraded"
-        assert event["beacon"] == beacon
+        assert event.get("beacon") == beacon
 
     def test_indexed_admin_changed_event(self):
         """AdminChanged with addresses in topics instead of data."""
@@ -195,8 +195,8 @@ class TestParseUpgradeLog:
         event = uh.parse_upgrade_log(log)
         assert event is not None
         assert event["event_type"] == "admin_changed"
-        assert event["previous_admin"] == old_admin
-        assert event["new_admin"] == new_admin
+        assert event.get("previous_admin") == old_admin
+        assert event.get("new_admin") == new_admin
 
     def test_none_in_topics_array(self):
         """Topics list with None entries must not crash."""
@@ -260,7 +260,7 @@ class TestBuildUpgradeHistory:
         assert h["first_upgrade_block"] is None
         assert h["last_upgrade_block"] is None
         assert len(h["implementations"]) == 1
-        assert h["implementations"][0]["address"] == impl
+        assert h["implementations"][0].get("address") == impl
         assert h["events"] == []
         assert result["total_upgrades"] == 0
 
@@ -305,11 +305,11 @@ class TestBuildUpgradeHistory:
         # Implementation timeline
         impls = h["implementations"]
         assert len(impls) == 2
-        assert impls[0]["address"] == impl_v1
-        assert impls[0]["block_introduced"] == 0x64
-        assert impls[0]["timestamp_introduced"] == 0x65A00000
-        assert impls[0]["block_replaced"] == 0xC8
-        assert impls[0]["timestamp_replaced"] == 0x65B00000
+        assert impls[0].get("address") == impl_v1
+        assert impls[0].get("block_introduced") == 0x64
+        assert impls[0].get("timestamp_introduced") == 0x65A00000
+        assert impls[0].get("block_replaced") == 0xC8
+        assert impls[0].get("timestamp_replaced") == 0x65B00000
         assert "block_replaced" not in impls[1]
 
         # Contract name enrichment happened
@@ -381,8 +381,8 @@ class TestBuildUpgradeHistory:
         assert "upgraded" in event_types
         assert "admin_changed" in event_types
         admin_event = next(e for e in h["events"] if e["event_type"] == "admin_changed")
-        assert admin_event["previous_admin"] == ADDR(50)
-        assert admin_event["new_admin"] == ADDR(51)
+        assert admin_event.get("previous_admin") == ADDR(50)
+        assert admin_event.get("new_admin") == ADDR(51)
 
     def test_implementation_as_dict_in_target_classification(self, monkeypatch, tmp_path):
         """When target_classification has implementation as a dict (with address
@@ -418,7 +418,7 @@ class TestBuildUpgradeHistory:
         )
 
         result = uh.build_upgrade_history(deps_path)
-        assert result["proxies"][target]["implementations"][0]["contract_name"] == "KnownImpl"
+        assert result["proxies"][target]["implementations"][0].get("contract_name") == "KnownImpl"
 
     def test_enrichment_calls_etherscan_for_unknown_implementations(self, monkeypatch, tmp_path):
         """Historical implementations not named in dependencies.json get their
@@ -449,8 +449,8 @@ class TestBuildUpgradeHistory:
 
         result = uh.build_upgrade_history(deps_path)
         impls = result["proxies"][target]["implementations"]
-        assert impls[0]["contract_name"] == "ImplV1"  # fetched via etherscan
-        assert impls[1]["contract_name"] == "ImplV2"  # reused from deps
+        assert impls[0].get("contract_name") == "ImplV1"  # fetched via etherscan
+        assert impls[1].get("contract_name") == "ImplV2"  # reused from deps
 
     def test_enrichment_deduplicates_calls(self, monkeypatch, tmp_path):
         """get_contract_info is called at most once per unique unknown address,
@@ -485,7 +485,7 @@ class TestBuildUpgradeHistory:
         impls = result["proxies"][target]["implementations"]
         assert len(impls) == 2
         for impl in impls:
-            assert impl["contract_name"] == "SharedImpl"
+            assert impl.get("contract_name") == "SharedImpl"
 
     def test_enrich_false_skips_etherscan_but_applies_known_names(self, monkeypatch, tmp_path):
         """enrich=False never calls get_contract_info but still applies names
@@ -584,7 +584,7 @@ class TestBuildUpgradeHistory:
         assert h["last_upgrade_block"] is None
         assert h["events"] == []
         assert len(h["implementations"]) == 1
-        assert h["implementations"][0]["address"] == impl
+        assert h["implementations"][0].get("address") == impl
 
     def test_non_indexed_upgraded_in_full_pipeline(self, monkeypatch, tmp_path):
         """OZ legacy target proxies with implementation in data (not topics)
@@ -629,8 +629,8 @@ class TestBuildUpgradeHistory:
         h = result["proxies"][target]
         assert h["upgrade_count"] == 2
         assert len(h["implementations"]) == 2
-        assert h["implementations"][0]["address"] == impl_v1
-        assert h["implementations"][1]["address"] == impl_v2
+        assert h["implementations"][0].get("address") == impl_v1
+        assert h["implementations"][1].get("address") == impl_v2
 
 
 # ---------------------------------------------------------------------------

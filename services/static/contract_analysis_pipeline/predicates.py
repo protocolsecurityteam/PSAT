@@ -53,6 +53,7 @@ from eth_utils.crypto import keccak
 
 from .predicate_types import (
     AuthorityRole,
+    ComparisonOperator,
     Confidence,
     LeafKind,
     LeafOperator,
@@ -1893,7 +1894,7 @@ def _try_threshold_membership(
     # → operator="gte", rhs=["10"]; downstream backends apply the
     # predicate to latest-value-per-key without re-deriving polarity.
     threshold_value_predicate: ValuePredicate = {
-        "op": operator,  # type: ignore[typeddict-item]
+        "op": operator,
         "rhs_values": [str(threshold_value)],
         "value_type": _value_type_of_index_ir(index_ir),
     }
@@ -1915,10 +1916,18 @@ def _try_threshold_membership(
     return leaf
 
 
-def _swap_operator(op: LeafOperator) -> LeafOperator:
+_COMPARISON_SWAP: dict[ComparisonOperator, ComparisonOperator] = {
+    "gt": "lt",
+    "lt": "gt",
+    "gte": "lte",
+    "lte": "gte",
+}
+
+
+def _swap_operator(op: ComparisonOperator) -> ComparisonOperator:
     """Flip a comparison operator when its operands swap. e.g.
     ``a >= b`` ↔ ``b <= a``."""
-    return {"gt": "lt", "lt": "gt", "gte": "lte", "lte": "gte"}.get(op, op)  # type: ignore[return-value]
+    return _COMPARISON_SWAP[op]
 
 
 EIP_1271_MAGIC_VALUE = "0x1626ba7e"
@@ -2786,7 +2795,7 @@ def _derived_view_call_source(sources: SourceSet) -> Source | None:
 
 
 def _source_to_operand(source: Source, *, nested: bool = False) -> Operand:
-    op: Operand = {"source": source.kind}  # type: ignore[typeddict-item]
+    op: Operand = {"source": source.kind}
     if source.parameter_index is not None:
         op["parameter_index"] = source.parameter_index
     if source.parameter_name is not None:

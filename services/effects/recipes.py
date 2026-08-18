@@ -72,13 +72,12 @@ from services.effects.simulate import (
     transfers_out,
     transfers_out_with_asset,
 )
+from utils.evm import EIP1967_IMPL_SLOT
 from utils.execution_record import PROVING_EXECUTION_KEY, residue_payload
 from utils.rpc import EthCallResult
 
 logger = logging.getLogger(__name__)
 
-# EIP-1967 implementation slot. keccak("eip1967.proxy.implementation") - 1.
-EIP1967_IMPL_SLOT = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc"
 # ERC-20 totalSupply().
 TOTAL_SUPPLY_SELECTOR = "0x18160ddd"
 

@@ -14,7 +14,12 @@ from eth_abi.abi import decode
 from eth_utils.crypto import keccak as _keccak
 
 from schemas.contract_analysis import ControllerReadSpec
-from schemas.control_tracking import ControlSnapshot, ControlTrackingPlan, TrackedController
+from schemas.control_tracking import (
+    ControlSnapshot,
+    ControlTrackingPlan,
+    ResolvedControllerType,
+    TrackedController,
+)
 from services.monitoring.restaking_reads import decode_word as _decode_word
 from services.resolution.tracking_plan import is_primitive_scalar_read_spec
 from utils.logging import record_degraded
@@ -33,6 +38,7 @@ from utils.rpc import (
 from utils.rpc import (
     selector as _selector,
 )
+from utils.scoring_status import NOT_DETERMINED
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +49,7 @@ _PROBE_ERROR = object()
 # Process-wide classify cache keyed on (rpc_url, address, block_tag); skips error returns. Immutable classifications
 # (eoa/proxy/plain contract) keep the long TTL; entries whose details carry mutable Safe owners/threshold or timelock
 # delay use a short TTL at block_tag='latest' so a changed owner-set / delay re-probes sooner.
-_CLASSIFY_CACHE: dict[tuple[str, str, str], tuple[str, dict[str, object], float]] = {}
+_CLASSIFY_CACHE: dict[tuple[str, str, str], tuple[ResolvedControllerType, dict[str, object], float]] = {}
 _CLASSIFY_CACHE_LOCK = threading.Lock()
 _CLASSIFY_CACHE_MAX = 4096
 _CLASSIFY_CACHE_TTL_S = float(os.getenv("PSAT_CLASSIFY_CACHE_TTL_S", "1800"))
@@ -253,7 +259,7 @@ def _coerce_int(value: object) -> int:
 
 def classify_resolved_address_with_status(
     rpc_url: str, address: str, block_tag: str = "latest", *, chain_id: int | None = None
-) -> tuple[str, dict[str, object], bool]:
+) -> tuple[ResolvedControllerType, dict[str, object], bool]:
     """Like ``classify_resolved_address`` but also returns a ``cacheable`` flag (False if any probe errored)."""
     normalized = _normalize_hex(address)
     cache_key = (rpc_url, normalized, block_tag)
@@ -285,7 +291,7 @@ def classify_resolved_address_with_status(
 
 def classify_resolved_address(
     rpc_url: str, address: str, block_tag: str = "latest", *, chain_id: int | None = None
-) -> tuple[str, dict[str, object]]:
+) -> tuple[ResolvedControllerType, dict[str, object]]:
     """Backwards-compatible wrapper that drops the cacheable flag; use the ``_with_status`` form if you maintain a
     downstream cache."""
     kind, details, _cacheable = classify_resolved_address_with_status(rpc_url, address, block_tag, chain_id=chain_id)
@@ -507,7 +513,6 @@ _ADDRESS_WORD_MAX = (1 << 160) - 1
 _SAFE_VERSIONS_WITH_GUARD = frozenset({"1.3.0", "1.4.1"})
 _SAFE_VERSIONS_WITHOUT_GUARD = frozenset({"1.1.1"})
 
-_NOT_DETERMINED = "not_determined"
 _BLOCK_TAG_ALIASES = frozenset({"latest", "pending", "earliest", "safe", "finalized"})
 
 
@@ -555,18 +560,18 @@ def _safe_guard_state(guard_word: str | None, version: str | None) -> tuple[str,
     an unread word, an unknown version, or a word that contradicts the version's
     feature set all land there rather than on a polarity."""
     if guard_word is None or version is None:
-        return _NOT_DETERMINED, None
+        return NOT_DETERMINED, None
     address = _word_to_address(guard_word)
     if address is None:
-        return _NOT_DETERMINED, None
+        return NOT_DETERMINED, None
     is_zero = address == "0x" + "0" * 40
     if version in _SAFE_VERSIONS_WITH_GUARD:
         return ("proven_zero", None) if is_zero else ("proven_address", address)
     if version in _SAFE_VERSIONS_WITHOUT_GUARD:
         # A nonzero word at a slot the release does not implement is unexplained;
         # "feature_absent" would be asserting more than the read supports.
-        return ("feature_absent", None) if is_zero else (_NOT_DETERMINED, None)
-    return _NOT_DETERMINED, None
+        return ("feature_absent", None) if is_zero else (NOT_DETERMINED, None)
+    return NOT_DETERMINED, None
 
 
 def _probe_safe_protection(rpc_url: str, address: str, block_tag: str, *, chain_id: int | None = None) -> dict:
@@ -579,13 +584,13 @@ def _probe_safe_protection(rpc_url: str, address: str, block_tag: str, *, chain_
     ``not_determined``: publishing ``[head]`` would report a two-module Safe as a
     one-module Safe. Never raises; every failure arm publishes ``not_determined``."""
     out: dict[str, object] = {
-        "probe_block": _NOT_DETERMINED,
-        "safe_version": _NOT_DETERMINED,
-        "modules_head": _NOT_DETERMINED,
-        "module_set": _NOT_DETERMINED,
-        "module_set_basis": _NOT_DETERMINED,
-        "protection_is_upper_bound": _NOT_DETERMINED,
-        "guard": _NOT_DETERMINED,
+        "probe_block": NOT_DETERMINED,
+        "safe_version": NOT_DETERMINED,
+        "modules_head": NOT_DETERMINED,
+        "module_set": NOT_DETERMINED,
+        "module_set_basis": NOT_DETERMINED,
+        "protection_is_upper_bound": NOT_DETERMINED,
+        "guard": NOT_DETERMINED,
     }
     probe_block = _resolve_pinned_block(rpc_url, block_tag, chain_id=chain_id)
     if probe_block is None:
@@ -698,9 +703,9 @@ def probe_declared_vault_backlink(
         "probe_block": probe_block,
         "backlink_getter": _BACKLINK_GETTER_SIG,
         "gated_contract_address": (gated_contract_address or "").lower(),
-        "backlink_address": _NOT_DETERMINED,
-        "negative_control": _NOT_DETERMINED,
-        "declared_vault_matches_gated_contract": _NOT_DETERMINED,
+        "backlink_address": NOT_DETERMINED,
+        "negative_control": NOT_DETERMINED,
+        "declared_vault_matches_gated_contract": NOT_DETERMINED,
     }
 
     declared = _try_eth_call_decoded(
@@ -760,7 +765,7 @@ def _resolve_uiv_shape(
     owner: object | None,
     *,
     chain_id: int | None = None,
-) -> tuple[str, dict[str, object], bool]:
+) -> tuple[ResolvedControllerType, dict[str, object], bool]:
     """Type an address whose ``UPGRADE_INTERFACE_VERSION()`` answered.
 
     A successful UIV read selects the OZ-v5 UPGRADE MACHINERY, not a proxy
@@ -887,7 +892,7 @@ def _probe_classify(rpc_url: str, address: str, block_tag: str, *, chain_id: int
 
 def _classify_uncached_batched(
     rpc_url: str, normalized: str, block_tag: str, *, chain_id: int | None = None
-) -> tuple[str, dict[str, object], bool]:
+) -> tuple[ResolvedControllerType, dict[str, object], bool]:
     """Same contract as ``_classify_uncached`` but batches the 6 probes upfront, saving 5 RTT in the common generic-
     contract case."""
     if normalized == "0x0000000000000000000000000000000000000000":
@@ -990,12 +995,12 @@ def _classify_uncached_batched(
 
 # Canonical-impl bytecode keccak registry; matches short-circuit the 6-probe classifier (empty by default — populate via
 # follow-up or test monkeypatch).
-_KNOWN_BYTECODE_IMPLS: dict[str, tuple[str, dict[str, object]]] = {}
+_KNOWN_BYTECODE_IMPLS: dict[str, tuple[ResolvedControllerType, dict[str, object]]] = {}
 
 
 def _classify_uncached(
     rpc_url: str, normalized: str, block_tag: str, *, chain_id: int | None = None
-) -> tuple[str, dict[str, object], bool]:
+) -> tuple[ResolvedControllerType, dict[str, object], bool]:
     """The classifier. Returns ``(kind, details, had_rpc_error)``; caller must skip caching on had_rpc_error."""
     if normalized == "0x0000000000000000000000000000000000000000":
         return "zero", {"address": normalized}, False

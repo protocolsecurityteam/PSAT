@@ -12,6 +12,16 @@ import logging
 import time
 from dataclasses import dataclass
 
+from utils.evm import (
+    COMPTROLLER_IMPL_SELECTOR,
+    EIP1822_LOGIC_SLOT,
+    EIP1967_IMPL_SLOT,
+    GNOSIS_MASTERCOPY_SLOT,
+    IMPLEMENTATION_SELECTOR,
+    MASTER_COPY_SELECTOR,
+    OZ_LEGACY_IMPL_SLOT,
+    TARGET_SELECTOR,
+)
 from utils.logging import record_degraded
 from utils.rpc import RpcClientTimeout, normalize_hex, rpc_request
 
@@ -32,19 +42,6 @@ _last_warned_at: dict[str, float] = {}
 def reset_not_determined_warn_state() -> None:
     """Re-arm the WARNING (tests, and any caller wanting a fresh announce)."""
     _last_warned_at.clear()
-
-
-# Storage slots used for implementation resolution
-_EIP1967_IMPL_SLOT = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc"
-_EIP1822_LOGIC_SLOT = "0xc5f16f0fcc639fa48a6947836d9850f504798523bf8c9a3a87d5876cf622bcf7"
-_OZ_IMPL_SLOT = "0x7050c9e0f4ca769c69bd3a8ef740bc37934f8e2c036e5a723fd8ee048ed3f8c3"
-_GNOSIS_SLOT = "0x0"
-
-# Getter selectors for protocol-specific proxies
-_IMPLEMENTATION_SEL = "0x5c60da1b"  # implementation()
-_COMPTROLLER_IMPL_SEL = "0xbb82aa5e"  # comptrollerImplementation()
-_TARGET_SEL = "0xd4b83992"  # target()
-_MASTER_COPY_SEL = "0xa619486e"  # masterCopy()
 
 
 @dataclass(frozen=True)
@@ -170,14 +167,14 @@ def _call_getter(rpc_url: str, address: str, selector: str, *, chain_id: int | N
 # either ("slot", slot_hex) for eth_getStorageAt or ("call", selector)
 # for eth_call.  This lets a known-type proxy resolve in exactly 1 RPC call.
 _RESOLVE_BY_TYPE: dict[str, tuple[str, str]] = {
-    "eip1967": ("slot", _EIP1967_IMPL_SLOT),
-    "beacon_proxy": ("slot", _EIP1967_IMPL_SLOT),
-    "eip1822": ("slot", _EIP1822_LOGIC_SLOT),
-    "oz_legacy": ("slot", _OZ_IMPL_SLOT),
-    "custom": ("call", _IMPLEMENTATION_SEL),
-    "gnosis_safe": ("slot", _GNOSIS_SLOT),
-    "compound": ("call", _COMPTROLLER_IMPL_SEL),
-    "synthetix": ("call", _TARGET_SEL),
+    "eip1967": ("slot", EIP1967_IMPL_SLOT),
+    "beacon_proxy": ("slot", EIP1967_IMPL_SLOT),
+    "eip1822": ("slot", EIP1822_LOGIC_SLOT),
+    "oz_legacy": ("slot", OZ_LEGACY_IMPL_SLOT),
+    "custom": ("call", IMPLEMENTATION_SELECTOR),
+    "gnosis_safe": ("slot", GNOSIS_MASTERCOPY_SLOT),
+    "compound": ("call", COMPTROLLER_IMPL_SELECTOR),
+    "synthetix": ("call", TARGET_SELECTOR),
     # eip2535 and eip1167 don't have a single implementation address
     # (diamond has facets, 1167 is immutable) — omitted intentionally.
 }
@@ -219,7 +216,7 @@ def resolve_current_implementation(
 
     # Fast path: historical block lookup (Aave V2 revision events)
     if block != "latest":
-        return _single(_read_slot(rpc_url, proxy_address, _EIP1967_IMPL_SLOT, block, chain_id=chain_id))
+        return _single(_read_slot(rpc_url, proxy_address, EIP1967_IMPL_SLOT, block, chain_id=chain_id))
 
     # Fast path: known proxy_type → single targeted RPC call
     if proxy_type and proxy_type in _RESOLVE_BY_TYPE:
@@ -229,21 +226,21 @@ def resolve_current_implementation(
         return _single(_call_getter(rpc_url, proxy_address, arg, chain_id=chain_id))
 
     # Fallback: try all methods in priority order (registration, unknown type)
-    for slot in (_EIP1967_IMPL_SLOT, _EIP1822_LOGIC_SLOT, _OZ_IMPL_SLOT):
+    for slot in (EIP1967_IMPL_SLOT, EIP1822_LOGIC_SLOT, OZ_LEGACY_IMPL_SLOT):
         addr = _resolved(_read_slot(rpc_url, proxy_address, slot, chain_id=chain_id))
         if addr:
             return addr
 
-    addr = _resolved(_call_getter(rpc_url, proxy_address, _IMPLEMENTATION_SEL, chain_id=chain_id))
+    addr = _resolved(_call_getter(rpc_url, proxy_address, IMPLEMENTATION_SELECTOR, chain_id=chain_id))
     if addr:
         return addr
 
-    for sel in (_MASTER_COPY_SEL, _COMPTROLLER_IMPL_SEL, _TARGET_SEL):
+    for sel in (MASTER_COPY_SELECTOR, COMPTROLLER_IMPL_SELECTOR, TARGET_SELECTOR):
         addr = _resolved(_call_getter(rpc_url, proxy_address, sel, chain_id=chain_id))
         if addr:
             return addr
 
-    addr = _resolved(_read_slot(rpc_url, proxy_address, _GNOSIS_SLOT, chain_id=chain_id))
+    addr = _resolved(_read_slot(rpc_url, proxy_address, GNOSIS_MASTERCOPY_SLOT, chain_id=chain_id))
     if addr:
         return addr
 

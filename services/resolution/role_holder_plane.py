@@ -64,11 +64,12 @@ from db.models import (
     RoleDefinition,
     RoleHolderPlane,
 )
-from services.resolution.absence_coverage import NOT_DETERMINED, absence_coverage
+from services.resolution.absence_coverage import absence_coverage
 from services.resolution.repos.event_logs_rpc import default_result_cap
 from utils.chains import DEFAULT_CONFIRMATION_DEPTH
 from utils.logging import record_degraded
 from utils.rpc import EthCallResult, decode_bool_word, encode_address_word, eth_call_batch, rpc_request, selector
+from utils.scoring_status import NOT_DETERMINED
 
 logger = logging.getLogger(__name__)
 

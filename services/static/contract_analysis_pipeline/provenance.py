@@ -25,10 +25,11 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, replace
-from typing import Any, Iterable
+from typing import Any, Iterable, get_args
 
 from eth_utils.crypto import keccak
 
+from .predicate_types import OperandSource
 from .slither_compat import (
     SLITHER_AVAILABLE,
     Assignment,
@@ -66,20 +67,9 @@ from .slither_compat import (
 # ---------------------------------------------------------------------------
 
 
-SOURCE_KINDS = (
-    "msg_sender",
-    "tx_origin",
-    "parameter",
-    "state_variable",
-    "constant",
-    "view_call",
-    "external_call",
-    "computed",
-    "block_context",
-    "signature_recovery",
-    "self_address",
-    "top",
-)
+# Derived from the published Literal so the mint and the payload type can
+# never drift; ``__post_init__`` still validates dynamic construction.
+SOURCE_KINDS: tuple[OperandSource, ...] = get_args(OperandSource)
 
 
 @dataclass(frozen=True)
@@ -91,7 +81,7 @@ class Source:
     fixed-point comparison.
     """
 
-    kind: str  # one of SOURCE_KINDS
+    kind: OperandSource
     parameter_index: int | None = None
     parameter_name: str | None = None
     state_variable_name: str | None = None

@@ -24,6 +24,14 @@ GNOSIS_MASTERCOPY_SLOT = "0x0"
 GNOSIS_SLOT0_PATTERN = "73" + "ff" * 20 + "60005416"
 # masterCopy() — GnosisSafe getter (older implementations)
 MASTER_COPY_SELECTOR = "0xa619486e"
+# implementation() — EIP-897 / custom proxy getter
+IMPLEMENTATION_SELECTOR = "0x5c60da1b"
+# comptrollerImplementation() — Compound
+COMPTROLLER_IMPL_SELECTOR = "0xbb82aa5e"
+# target() — Synthetix
+TARGET_SELECTOR = "0xd4b83992"
+# owner()
+OWNER_SELECTOR = "0x8da5cb5b"
 
 # Solmate Authority / OZ AccessManager share this signature; signature alone
 # does not identify the standard.

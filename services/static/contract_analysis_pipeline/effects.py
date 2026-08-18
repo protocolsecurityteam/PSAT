@@ -53,6 +53,11 @@ from typing_extensions import NotRequired
 
 from utils.logging import record_degraded
 
+from .predicate_types import (
+    STATE_VAR_TARGET_KINDS,
+    TARGET_KIND_STORAGE_NO_SETTER,
+    TARGET_KIND_STORAGE_SETTER,
+)
 from .provenance import ProvenanceEngine, is_top
 from .record_ordering import OrderingWitness, attach_record_ordering
 from .shared import _all_state_variables
@@ -1889,7 +1894,7 @@ def _state_var_target_kind(name: str, ctx: _UnitCtx) -> str:
     if getattr(var, "is_immutable", False):
         return "immutable"
     if name in ctx.setters:
-        return "storage_setter"
+        return TARGET_KIND_STORAGE_SETTER
     if name in ctx.alias_indeterminate:
         # Aliased into a callee we could not decide writes-through — the
         # no-setter proof for this specific var is unsound.
@@ -1897,7 +1902,7 @@ def _state_var_target_kind(name: str, ctx: _UnitCtx) -> str:
     # No attributed setter. Only a *complete* scan makes that a proven negative
     # ("fixed destination"); an assembly-sstore/delegatecall/unresolved-alias
     # blind spot leaves it unknown — never assert immutability we could not prove.
-    return "storage_no_setter" if ctx.setter_scan_complete else "indeterminate"
+    return TARGET_KIND_STORAGE_NO_SETTER if ctx.setter_scan_complete else "indeterminate"
 
 
 # A ``neutral origin`` is the entry-rooted source of a value forwarded across an
@@ -3125,10 +3130,6 @@ def _classify_site(operand: Any, ctx: _UnitCtx, *, amount: bool) -> tuple[str, s
     return (kind, tier)
 
 
-# The ``target_kind`` values that name a state variable of the analysed unit —
-# the only ones for which a ``target_variable`` exists to be published.
-_STATE_VAR_TARGET_KINDS = frozenset({"constant", "immutable", "storage_setter", "storage_no_setter"})
-
 # ``writer_surface_closed`` has exactly one admissible value. Declared as a
 # literal-typed constant so the type checker, not a reviewer, is what rejects a
 # ``True`` — there is no migration here and so no CHECK constraint to lean on.
@@ -4057,7 +4058,7 @@ def _attach_target_variable(
     only under ``storage_no_setter``, where the kind itself is the completed-scan
     negative; where no writer could be NAMED the key is omitted and
     ``target_writer_absent_reason`` says which of the two absences it is."""
-    if target["kind"] not in _STATE_VAR_TARGET_KINDS or not sites:
+    if target["kind"] not in STATE_VAR_TARGET_KINDS or not sites:
         return
     if any(canonical is None for _, canonical, _, _, _ in sites):
         # A site whose declaration could not be identified cannot be shown to
@@ -4073,8 +4074,8 @@ def _attach_target_variable(
     # so even a row carrying no writer list still carries the bound.
     flow["writer_surface_closed"] = _WRITER_SURFACE_CLOSED
     writers = sorted({signature for _, _, signatures, _, _ in sites for signature in signatures})
-    if not writers and target["kind"] != "storage_no_setter":
-        if target["kind"] == "storage_setter":
+    if not writers and target["kind"] != TARGET_KIND_STORAGE_NO_SETTER:
+        if target["kind"] == TARGET_KIND_STORAGE_SETTER:
             reasons = {reason for _, _, _, _, reason in sites if reason}
             if len(reasons) == 1:
                 flow["target_writer_absent_reason"] = next(iter(reasons))

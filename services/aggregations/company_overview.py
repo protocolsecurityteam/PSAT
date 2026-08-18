@@ -56,6 +56,7 @@ from db.models import (
     UpgradeEvent,
     derive_job_chain_id,
 )
+from schemas.control_tracking import ResolvedControllerType
 from services.effects.selection import disposed_from_holdings, load_protocol_reference_shapes
 from services.governance.primary_controller import (
     assign_co_controllers,
@@ -580,7 +581,7 @@ def _prefetch_child_tables(
             .join(FunctionPrincipal, FunctionPrincipal.function_id == EffectiveFunction.id)
             .where(
                 EffectiveFunction.contract_id.in_(id_list),
-                FunctionPrincipal.resolved_type.in_(("safe", "timelock", "eoa", "proxy_admin")),
+                FunctionPrincipal.resolved_type.in_(sorted(_SETTLED_CONTROLLER_TYPES)),
             )
         ).all():
             cid, address, resolved_type, details = row
@@ -978,8 +979,19 @@ def _prefetch_child_tables(
     return out
 
 
-_PRINCIPAL_TYPES = frozenset({"contract", "safe", "timelock", "eoa", "proxy_admin"})
-_PRINCIPAL_TYPES_SQL = ("contract", "safe", "timelock", "eoa", "proxy_admin")
+_PRINCIPAL_TYPES: frozenset[ResolvedControllerType] = frozenset({"contract", "safe", "timelock", "eoa", "proxy_admin"})
+_PRINCIPAL_TYPES_SQL = tuple(sorted(_PRINCIPAL_TYPES))
+
+# Settled controlling-key kinds: a concrete controller identity. Excludes
+# ``contract`` (a way-point whose ultimate key is unestablished) and the
+# not-determined arms.
+_SETTLED_CONTROLLER_TYPES: frozenset[ResolvedControllerType] = frozenset({"safe", "timelock", "eoa", "proxy_admin"})
+# Governance mechanisms that are themselves CONTRACTS. Excludes ``eoa``
+# deliberately: a bare key can control, but it is not an enrollable contract.
+_CONTROLLER_CONTRACT_TYPES: frozenset[ResolvedControllerType] = frozenset({"safe", "timelock", "proxy_admin"})
+# Mechanisms that interpose on a governed call path (delay / admin hop) —
+# a passthrough entity is attributed to what sits behind it.
+_PASSTHROUGH_CONTROLLER_TYPES: frozenset[ResolvedControllerType] = frozenset({"timelock", "proxy_admin"})
 
 # ControllerValue.controller_id values that denote a contract's *active*
 # owner. The substring heuristic ``"owner" in controller_id.lower()`` used
@@ -1059,7 +1071,7 @@ def _principal_lookup_type(resolved_type: str | None, details: Any) -> str | Non
     normalized = (resolved_type or "").lower()
     if normalized == "gnosis_safe":
         normalized = "safe"
-    if normalized in {"safe", "timelock", "eoa", "proxy_admin"}:
+    if normalized in _SETTLED_CONTROLLER_TYPES:
         return normalized
     if _has_timelock_delay(details):
         return "timelock"
@@ -1069,7 +1081,7 @@ def _principal_lookup_type(resolved_type: str | None, details: Any) -> str | Non
 
 
 def _principal_type_priority(resolved_type: str | None) -> int:
-    if resolved_type in {"safe", "timelock", "eoa", "proxy_admin"}:
+    if resolved_type in _SETTLED_CONTROLLER_TYPES:
         return 3
     if resolved_type == "contract":
         return 1
@@ -1836,7 +1848,7 @@ def build_governance_view(
     governance_passthrough = {
         entity
         for entity in fp_addrs_by_contract_entity
-        if principal_lookup.get(_entity_addr(entity), {}).get("resolved_type") in {"timelock", "proxy_admin"}
+        if principal_lookup.get(_entity_addr(entity), {}).get("resolved_type") in _PASSTHROUGH_CONTROLLER_TYPES
     }
     # Bare-address mirror for the caller_detail capability walk below, whose inner
     # caller keys stay bare addresses.
@@ -2356,7 +2368,7 @@ def _build_flows_and_principals(
                 continue
             lookup_meta = principal_lookup.get(node_addr, {})
             resolved_type = lookup_meta.get("resolved_type") or cgn.resolved_type
-            if resolved_type not in ("safe", "timelock", "proxy_admin", "eoa"):
+            if resolved_type not in _SETTLED_CONTROLLER_TYPES:
                 continue
             if node_addr == "0x0000000000000000000000000000000000000000":
                 continue
@@ -2437,7 +2449,7 @@ def _build_flows_and_principals(
             resolved_type = fp.get("resolved_type")
             if lookup_meta.get("resolved_type") and resolved_type in (None, "", "unknown", "contract"):
                 resolved_type = lookup_meta["resolved_type"]
-            if resolved_type not in ("safe", "timelock", "eoa", "proxy_admin"):
+            if resolved_type not in _SETTLED_CONTROLLER_TYPES:
                 continue
             if pa in contract_addrs:
                 continue
@@ -2891,7 +2903,7 @@ def controllers_for_protocol(session: Session, protocol_id: int) -> dict[tuple[s
         if not (principal.get("primary_for") or principal.get("co_controls")):
             continue
         ptype = principal.get("type")
-        if ptype not in ("safe", "timelock", "proxy_admin"):
+        if ptype not in _CONTROLLER_CONTRACT_TYPES:
             continue
         addr = (principal.get("address") or "").lower()
         if not addr:

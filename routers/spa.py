@@ -26,7 +26,7 @@ class _ImmutableStaticFiles(StaticFiles):
     repeat visitors skip the ~2MB bundle download entirely.
     """
 
-    async def get_response(self, path: str, scope: Scope):  # type: ignore[override]
+    async def get_response(self, path: str, scope: Scope):
         response = await super().get_response(path, scope)
         if response.status_code == 200:
             response.headers["Cache-Control"] = "public, max-age=31536000, immutable"

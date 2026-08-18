@@ -40,6 +40,10 @@ from typing import Any
 
 from eth_utils.crypto import keccak
 
+from schemas.contract_analysis import ControllerProvenance
+from services.monitoring.event_topics import SIGNAL_CLASS_CONFIG, SIGNAL_CLASS_METRIC
+from utils.evm import EIP1822_LOGIC_SLOT, EIP1967_IMPL_SLOT, GNOSIS_MASTERCOPY_SLOT, OZ_LEGACY_IMPL_SLOT
+
 logger = logging.getLogger(__name__)
 
 
@@ -90,19 +94,13 @@ def _handrolled_events_for_write_target(write_target: str) -> list[str]:
 # Vendored standards
 # ---------------------------------------------------------------------------
 
-# EIP-1967 implementation slot. Shared with proxy_watcher; duplicated here
-# to avoid coupling the new poll path to the legacy module's import graph.
-EIP1967_IMPL_SLOT = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc"
-EIP1822_LOGIC_SLOT = "0xc5f16f0fcc639fa48a6947836d9850f504798523bf8c9a3a87d5876cf622bcf7"
-OZ_LEGACY_IMPL_SLOT = "0x7050c9e0f4ca769c69bd3a8ef740bc37934f8e2c036e5a723fd8ee048ed3f8c3"
-GNOSIS_MASTERCOPY_SLOT = "0x0"
 
 # Safe module linked list head — ``modules[SENTINEL_MODULES]`` with the mapping
 # at storage slot 1 and ``SENTINEL_MODULES == address(0x1)`` — and the guard
 # slot, ``keccak256("guard_manager.guard.address")``, the literal the 1.3.0 and
 # 1.4.1 singletons carry. Recomputed from the preimages so neither can drift
-# from what it claims to be. Duplicated from services/resolution/tracking.py for
-# the same import-graph reason as the proxy slots above.
+# from what it claims to be. Duplicated from services/resolution/tracking.py to
+# keep this module off the resolution plane's import graph.
 SAFE_MODULES_HEAD_SLOT = "0x" + keccak((1).to_bytes(32, "big") + (1).to_bytes(32, "big")).hex()
 SAFE_GUARD_SLOT = "0x" + keccak(text="guard_manager.guard.address").hex()
 
@@ -395,19 +393,16 @@ def _member_word_index(read_spec: Mapping[str, Any]) -> int | None:
 # entries this builder emits — there is no third state here — but the BASIS
 # rides along so a consumer can see why, and so a later re-analysis can
 # upgrade ``metric`` → ``config`` without a silent behaviour change.
-SIGNAL_CLASS_CONFIG = "config"
-SIGNAL_CLASS_METRIC = "metric"
 
 # Basis codes. ``vendored:*`` is the entry's own ``source`` verbatim (the
 # provenance the plan already carried); the other three are stated here.
-SIGNAL_BASIS_CALLER_GATE = "caller_gate"
+SIGNAL_BASIS_CALLER_GATE: ControllerProvenance = "caller_gate"
 SIGNAL_BASIS_NO_GATE_PROVENANCE = "no_gate_provenance"
 SIGNAL_BASIS_TYPE_KIND_REFERENCE = "type_kind_reference"
 
 # The one ``authority_provenance`` value that PROVES the controller behind an
-# entry gates callers — same literal ``event_topics._PROVEN_CONTROLLER_PROVENANCE``
-# uses, restated here rather than imported so this module stays acyclic.
-_PROVEN_GATE_PROVENANCE = "caller_gate"
+# entry gates callers; the annotation pins it inside the schema vocabulary.
+_PROVEN_GATE_PROVENANCE: ControllerProvenance = "caller_gate"
 
 # Reference-typed reads name a binding, not a quantity: a moved address or
 # contract reference is a control-plane fact whatever the analyzer proved

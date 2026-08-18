@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import distinct, func, select, text, tuple_
 
 from db.models import Job, JobStatus
+from schemas.api_responses import PipelineStatsResponse
 
 from . import deps
 from .spa import _site_index_response
@@ -122,8 +123,8 @@ def config() -> dict[str, str]:
     return {"default_rpc_url": sanitize_url(deps.DEFAULT_RPC_URL)}
 
 
-@router.get("/api/stats", dependencies=[Depends(deps.require_admin_key)])
-def pipeline_stats() -> dict[str, Any]:
+@router.get("/api/stats", dependencies=[Depends(deps.require_admin_key)], response_model=None)
+def pipeline_stats() -> PipelineStatsResponse:
     """Quick stats: unique addresses stored, total jobs, etc."""
     with deps.SessionLocal() as session:
         # Count entities as (chain_id, address): a CREATE2 twin is one address

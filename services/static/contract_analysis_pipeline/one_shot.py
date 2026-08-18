@@ -497,7 +497,7 @@ def _apply_structural_candidates(contract: Any, predicate_trees: dict[str, Predi
                 slot_writes = _assembly_slot_writes(fn)
             payload = _modifier_slot_candidate(fn, slot_writes)
             if payload is not None:
-                tree["one_shot_candidate_latch"] = payload  # type: ignore[typeddict-unknown-key]
+                tree["one_shot_candidate_latch"] = payload
 
 
 def _candidate_leaf_shape(leaf: LeafPredicate) -> bool:

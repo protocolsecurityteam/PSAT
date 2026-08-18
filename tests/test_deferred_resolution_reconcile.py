@@ -57,7 +57,7 @@ from services.resolution.capabilities import CapabilityExpr, ExternalCheck  # no
 from services.resolution.capability_resolver import capability_to_dict  # noqa: E402
 from services.resolution.deferred_reconciler import (  # noqa: E402
     DEFERRED_MARKER,
-    ROLE_STORE_TRACE_STEP,
+    TRACE_STEP_ENUMERABLE_ROLE_STORE,
     _iter_deferred_authorities,
     _iter_role_store_frontiers,
     reconcile_deferred_resolutions,
@@ -715,7 +715,7 @@ def _role_store_cap(authority: str, frontier: int, members=("0x" + "ab" * 20,)) 
             last_indexed_block=frontier,
             trace=[
                 {
-                    "step": ROLE_STORE_TRACE_STEP,
+                    "step": TRACE_STEP_ENUMERABLE_ROLE_STORE,
                     "authority": authority.lower(),
                     "fold_frontier": frontier,
                     "standard": "solady_enumerable_roles",
@@ -763,13 +763,14 @@ def test_iter_role_store_frontiers_walks_nested():
             CapabilityExpr.finite_set(["0x" + "b2" * 20]),
             CapabilityExpr.finite_set(
                 ["0x" + "c3" * 20],
-                trace=[{"step": ROLE_STORE_TRACE_STEP, "authority": auth, "fold_frontier": 42}],
+                trace=[{"step": TRACE_STEP_ENUMERABLE_ROLE_STORE, "authority": auth, "fold_frontier": 42}],
             ),
         ]
     )
     assert set(_iter_role_store_frontiers(capability_to_dict(cap))) == {(auth, 42)}
     # A step without a numeric frontier is skipped (defensive).
-    assert list(_iter_role_store_frontiers({"trace": [{"step": ROLE_STORE_TRACE_STEP, "authority": auth}]})) == []
+    frontierless = {"trace": [{"step": TRACE_STEP_ENUMERABLE_ROLE_STORE, "authority": auth}]}
+    assert list(_iter_role_store_frontiers(frontierless)) == []
 
 
 @requires_postgres

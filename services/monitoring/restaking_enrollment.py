@@ -39,7 +39,7 @@ from eth_utils.crypto import keccak
 from sqlalchemy import distinct, func, select
 from sqlalchemy.orm import Session
 
-from db.models import Contract, IndexedEventLog
+from db.models import ENROLLMENT_BASIS_TRACKED_TOPICS, Contract, IndexedEventLog
 from utils.etherscan import get_contract_creation_block
 from workers.event_log_indexer import enroll_event_cursor
 
@@ -53,9 +53,8 @@ PUBKEY_LINKED_TOPIC0 = "0x" + keccak(text=PUBKEY_LINKED_SIGNATURE).hex()
 # The basis this cursor's enrollment carries. It is asserted by code rather than
 # read off a descriptor, so it takes the same coverage ceiling as the
 # ``tracked_topics`` surface: enrolled, never complete, never licensing an
-# absence claim. Named here so the column added by the event-cursor coverage
-# unit can take this value at assembly without a second literal appearing.
-RESTAKING_FOLD_ENROLLMENT_BASIS = "tracked_topics_asserted"
+# absence claim. Aliased from the column's home so no second literal exists.
+RESTAKING_FOLD_ENROLLMENT_BASIS = ENROLLMENT_BASIS_TRACKED_TOPICS
 
 # How far back the emitter probe looks. A shorter window can only find FEWER
 # emitters, which can only shrink the node set — the safe direction, and already

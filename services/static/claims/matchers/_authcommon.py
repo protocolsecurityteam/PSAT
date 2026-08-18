@@ -13,6 +13,8 @@ from __future__ import annotations
 from collections.abc import Iterator
 from typing import Any
 
+from utils.evm import CANCALL_SIGNATURE
+
 from ..context import ClaimContext, abi_selector
 
 # --- canonical 4-byte selectors (interface/enum params normalized) ----------
@@ -40,7 +42,7 @@ ROLE_HOLDERS = abi_selector("roleHolders(uint256)")  # Solady EnumerableRoles
 SET_USER_ROLE = abi_selector("setUserRole(address,uint8,bool)")  # Solmate
 SET_ROLE_CAPABILITY = abi_selector("setRoleCapability(uint8,address,bytes4,bool)")
 SET_PUBLIC_CAPABILITY = abi_selector("setPublicCapability(address,bytes4,bool)")
-CAN_CALL = abi_selector("canCall(address,address,bytes4)")  # Solmate Authority
+CAN_CALL = abi_selector(CANCALL_SIGNATURE)  # Solmate Authority
 RELY = abi_selector("rely(address)")  # Maker wards
 DENY = abi_selector("deny(address)")  # Maker wards
 SET_AUTHORITY = abi_selector("setAuthority(address)")  # Solmate Auth/DSAuth

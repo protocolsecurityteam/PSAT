@@ -44,7 +44,7 @@ CapKind = Literal[
 ]
 
 MembershipQuality = Literal["exact", "lower_bound", "upper_bound"]
-Confidence = Literal["enumerable", "partial", "check_only"]
+CapabilityConfidence = Literal["enumerable", "partial", "check_only"]
 
 # Why a finite_set is empty, when it is. Lets the policy layer tell an
 # empty-by-design ceiling (a 2-step accept gate with no pending transfer) apart
@@ -166,7 +166,7 @@ class CapabilityExpr:
     # complement is an upper bound on who may call. Inert today — every cofinite produced
     # now is exact — and carried for surfacing only; the projection never branches on it.
     blacklist_quality: MembershipQuality = "exact"
-    confidence: Confidence = "enumerable"
+    confidence: CapabilityConfidence = "enumerable"
     # Why this set is empty (see ``EmptyReason``); only meaningful for an empty
     # finite_set. Default-None keeps the wire shape of every populated set and of
     # the pre-existing empty sets byte-identical.
@@ -211,7 +211,7 @@ class CapabilityExpr:
         members: list[str],
         *,
         quality: MembershipQuality = "exact",
-        confidence: Confidence = "enumerable",
+        confidence: CapabilityConfidence = "enumerable",
         conditions: list[Condition] | None = None,
         last_indexed_block: int | None = None,
         trace: list[dict[str, Any]] | None = None,
@@ -236,7 +236,7 @@ class CapabilityExpr:
         m: int,
         signers: list[str],
         *,
-        confidence: Confidence = "enumerable",
+        confidence: CapabilityConfidence = "enumerable",
         conditions: list[Condition] | None = None,
     ) -> "CapabilityExpr":
         return cls(
@@ -251,7 +251,7 @@ class CapabilityExpr:
         cls,
         blacklist: list[str],
         *,
-        confidence: Confidence = "enumerable",
+        confidence: CapabilityConfidence = "enumerable",
         conditions: list[Condition] | None = None,
         subject: Subject = "root",
         blacklist_quality: MembershipQuality = "exact",
@@ -777,8 +777,8 @@ def _combine_blacklist_quality(qa: MembershipQuality, qb: MembershipQuality) -> 
     return "lower_bound"
 
 
-def _meet_confidence(a: Confidence, b: Confidence) -> Confidence:
-    """Confidence lattice meet (least-confident wins)."""
+def _meet_confidence(a: CapabilityConfidence, b: CapabilityConfidence) -> CapabilityConfidence:
+    """CapabilityConfidence lattice meet (least-confident wins)."""
     order = {"enumerable": 2, "partial": 1, "check_only": 0}
     if order[a] <= order[b]:
         return a

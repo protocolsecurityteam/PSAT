@@ -28,6 +28,8 @@ from typing import Any
 
 from eth_utils.crypto import keccak
 
+from utils.evm import EIP1967_IMPL_SLOT
+
 from .claims import (
     Claim,
     RegistryEntry,
@@ -45,9 +47,6 @@ logger = logging.getLogger(__name__)
 TRANSFER_POLICY_CONFIGURE = "transfer_policy.configure"
 UPGRADE_IMPLEMENTATION = "upgrade.implementation"
 CALLEE_POINTER_ROTATE = "callee_pointer.rotate"
-
-# keccak256("eip1967.proxy.implementation") - 1
-EIP1967_IMPL_SLOT = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc"
 
 # proxy_type values whose implementation the classifier reads from a storage
 # slot (the "confirms the linked slot" evidence for the provenance upgrade).

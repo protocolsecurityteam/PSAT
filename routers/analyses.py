@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, cast
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
@@ -11,6 +11,7 @@ from sqlalchemy import select
 
 from db.models import Artifact, Contract, Job, JobStatus
 from db.storage import StorageContentAbsent, StorageKeyAbsent, StorageKeyMissing
+from schemas.api_responses import AnalysisListEntry
 from services.aggregations import build_analysis_detail
 from services.aggregations.company_overview import _coalesce_chain, _job_chain_name
 from services.governance.proxies import _merge_proxy_impl_entries
@@ -113,8 +114,8 @@ def _upgrade_history_absence_reason(session: Any, job: Job, contract: Contract |
     return _upgrade_history_stage_raised(session, job)
 
 
-@router.get("/api/analyses")
-def analyses(response: Response) -> list[dict]:
+@router.get("/api/analyses", response_model=None)
+def analyses(response: Response) -> list[AnalysisListEntry]:
     """List completed analyses with their available artifacts."""
     # Read-mostly listing — let the browser reuse it across navigations.
     # Short max-age + SWR keeps freshness while letting back/forward and
@@ -181,7 +182,7 @@ def analyses(response: Response) -> list[dict]:
             current = jobs_by_id.get(parent_job_id)
         return None
 
-    results = []
+    results: list[AnalysisListEntry] = []
     for job in jobs:
         run_name = job.name or str(job.id)
         request = job.request if isinstance(job.request, dict) else {}
@@ -190,7 +191,7 @@ def analyses(response: Response) -> list[dict]:
         addr_lower = (job.address or "").lower()
         job_chain_key = _coalesce_chain(_job_chain_name(job))
         contract = contracts_by_key.get((job_chain_key, addr_lower))
-        entry: dict[str, Any] = {
+        entry: AnalysisListEntry = {
             "run_name": run_name,
             "job_id": str(job.id),
             "address": job.address,
@@ -202,10 +203,10 @@ def analyses(response: Response) -> list[dict]:
             "proxy_type": contract.proxy_type if contract else None,
             "implementation_address": contract.implementation if contract else None,
             "proxy_address": request.get("proxy_address"),
+            "available_artifacts": sorted(
+                n for n in artifact_names_by_job.get(job.id, []) if not _is_internal_artifact_name(n)
+            ),
         }
-        entry["available_artifacts"] = sorted(
-            n for n in artifact_names_by_job.get(job.id, []) if not _is_internal_artifact_name(n)
-        )
 
         # Hide proxy entries until the impl is completed — otherwise the
         # listing renders a half-populated card that mutates once the impl
@@ -229,7 +230,12 @@ def analyses(response: Response) -> list[dict]:
         if contract_name_source and contract_name_source.contract_name:
             entry["contract_name"] = contract_name_source.contract_name
         results.append(entry)
-    return _merge_proxy_impl_entries(results)
+    # casts: _merge_proxy_impl_entries is typed over bare dicts today; both
+    # drop once services/governance/proxies adopts AnalysisListEntry.
+    return cast(
+        "list[AnalysisListEntry]",
+        _merge_proxy_impl_entries(cast("list[dict[str, Any]]", results)),
+    )
 
 
 @router.get("/api/analyses/{run_name:path}/artifact/{artifact_name:path}")

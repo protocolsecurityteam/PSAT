@@ -46,9 +46,9 @@ guard applied to the function in hand.
 
 from __future__ import annotations
 
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, TypedDict, get_args
 
-from .predicate_types import LeafPredicate, PredicateTree
+from .predicate_types import AuthorityRole, LeafPredicate, PredicateTree
 from .shared import _all_modifiers, _all_state_variables
 from .slither_compat import (
     SLITHER_AVAILABLE,
@@ -62,7 +62,10 @@ from .slither_compat import (
     Unary,
 )
 
-GuardKind = Literal["reentrancy", "pause"]
+StructuralGuardKind = Literal["reentrancy", "pause"]
+# The guard roles this pass stamps are leaf-classifier vocabulary; a rename
+# there must not strand these tokens.
+assert set(get_args(StructuralGuardKind)) <= set(get_args(AuthorityRole))
 
 
 class PauseInfo(TypedDict):

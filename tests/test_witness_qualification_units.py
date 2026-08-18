@@ -34,11 +34,10 @@ from services.static.contract_analysis_pipeline.tracking import (  # noqa: E402
     _writer_survives_hygiene,
 )
 from services.static.contract_analysis_pipeline.writer_openness import (  # noqa: E402
-    WRITER_OPENNESS_NOT_DETERMINED,
-    WRITER_OPENNESS_RESTRICTED,
     openness_of_write_paths,
     restricted_function_signatures,
 )
+from utils.scoring_status import OPENNESS_NOT_DETERMINED, OPENNESS_RESTRICTED  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # writer_openness — "the gate holds on every path"
@@ -121,16 +120,16 @@ def test_a_function_without_a_tree_is_not_determined():
 
 def test_one_unrestricted_path_demotes_the_event():
     restricted = frozenset({"a()", "b()"})
-    assert openness_of_write_paths({"a()"}, {"a()"}, restricted) == WRITER_OPENNESS_RESTRICTED
-    assert openness_of_write_paths({"a()"}, {"a()", "b()"}, restricted) == WRITER_OPENNESS_RESTRICTED
+    assert openness_of_write_paths({"a()"}, {"a()"}, restricted) == OPENNESS_RESTRICTED
+    assert openness_of_write_paths({"a()"}, {"a()", "b()"}, restricted) == OPENNESS_RESTRICTED
     # An open EMITTER demotes.
-    assert openness_of_write_paths({"a()", "c()"}, {"a()", "c()"}, restricted) == WRITER_OPENNESS_NOT_DETERMINED
+    assert openness_of_write_paths({"a()", "c()"}, {"a()", "c()"}, restricted) == OPENNESS_NOT_DETERMINED
     # An open WRITER demotes even when every emitter we found is gated — this
     # is the arm that survives an emitter set the IR walk could not complete.
-    assert openness_of_write_paths({"a()"}, {"a()", "c()"}, restricted) == WRITER_OPENNESS_NOT_DETERMINED
+    assert openness_of_write_paths({"a()"}, {"a()", "c()"}, restricted) == OPENNESS_NOT_DETERMINED
     # Nothing proven about paths we never found.
-    assert openness_of_write_paths(set(), {"a()"}, restricted) == WRITER_OPENNESS_NOT_DETERMINED
-    assert openness_of_write_paths({"a()"}, set(), restricted) == WRITER_OPENNESS_NOT_DETERMINED
+    assert openness_of_write_paths(set(), {"a()"}, restricted) == OPENNESS_NOT_DETERMINED
+    assert openness_of_write_paths({"a()"}, set(), restricted) == OPENNESS_NOT_DETERMINED
 
 
 def test_the_kill_switch_cannot_promote(monkeypatch):
