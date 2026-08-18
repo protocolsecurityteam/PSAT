@@ -105,9 +105,35 @@ def _parent_chain_name(job: Job) -> str:
     child so chain never cascades as ``None`` (inv. 6). Uses the first-class
     ``jobs.chain_id`` column, else derives from ``request["chain"]`` via the
     registry; mainnet resolves to ``"ethereum"`` so mainnet spawns are unchanged."""
+    chain_id = _parent_chain_id(job)
     try:
-        return chain_by_id(_parent_chain_id(job)).name
-    except UnknownChainError:
+        return chain_by_id(chain_id).name
+    except UnknownChainError as exc:
+        # The fallback keeps the spawn path alive, but stamping "ethereum" onto a
+        # child whose parent lives on an unregistered chain is a wrong answer, not
+        # a missing one — surface it rather than let the default pass for a lookup.
+        # ``process()`` calls this ~10× per job, so report each unknown chain_id
+        # once: one data bug is one line, not ten. The seen-set hangs off the job
+        # row (same trick as ``_heartbeat_job_id`` in ``base.py``) rather than a
+        # ContextVar — the K=1 loop runs every job on the worker's own context,
+        # where a ContextVar set would silence every job after the first.
+        seen = getattr(job, "_unknown_chains_reported", None)
+        if seen is None:
+            seen = set()
+            setattr(job, "_unknown_chains_reported", seen)
+        if chain_id not in seen:
+            seen.add(chain_id)
+            record_degraded(
+                phase="parent_chain_name",
+                exc=exc,
+                context={"job_id": str(getattr(job, "id", "")), "chain_id": chain_id},
+            )
+            logger.warning(
+                "Unknown chain_id %s on job %s; falling back to ethereum for the spawned child",
+                chain_id,
+                getattr(job, "id", None),
+                extra={"exc_type": type(exc).__name__, "chain_id": chain_id},
+            )
         return "ethereum"
 
 

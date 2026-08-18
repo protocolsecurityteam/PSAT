@@ -24,6 +24,7 @@ Every fan-out here is a count of same-token transfer LOGS. See
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
@@ -38,6 +39,8 @@ from utils.balance_status import (
     DELIVERY_SHAPE_HAS_DIRECT_DELIVERY,
     DELIVERY_SHAPE_NOT_DETERMINED,
 )
+
+logger = logging.getLogger(__name__)
 
 # --- K, the published model parameter ----------------------------------------
 # The same-token transfer-LOG count above which one delivering transaction is a
@@ -272,6 +275,11 @@ def compose_basis(*, scan_basis: str, scanned_from_block: int, measured_through_
     )
 
 
+def _bump(counts: dict[str, int] | None, key: str) -> None:
+    if counts is not None:
+        counts[key] = counts.get(key, 0) + 1
+
+
 def _set(row: Any, field: str, value: Any) -> None:
     """Assign only on a real change, so an unchanged row stays clean."""
     if getattr(row, field) != value:
@@ -313,8 +321,15 @@ def record_delivery_evidence(
     k: int = FAN_OUT_THRESHOLD_K,
     observed_balance_raw: str | None = None,
     caught_up: bool | None = None,
-) -> None:
-    """Accrete one pair's evidence. THE TRUE INVARIANT, stated exactly.
+    counts: dict[str, int] | None = None,
+) -> str:
+    """Accrete one pair's evidence. Returns the shape the row now publishes.
+
+    The return value, and the optional *counts* tally this folds
+    ``verdicts_first_determined`` / ``verdicts_changed`` into, are for the
+    caller's per-cycle summary and nothing else — the row is the record.
+
+    THE TRUE INVARIANT, stated exactly.
 
     What ACCRETES and is never taken back: the evidence itself — the tally of
     deliveries seen, the tally of deliveries nobody could meter, the smallest
@@ -369,6 +384,7 @@ def record_delivery_evidence(
         from_block = int(scanned_from_block)
         through = max(int(measured_through_block), from_block)
         tally = _fold(_tally_of(deliveries), elided)
+        shape = _shape_for(tally, int(k))
         session.add(
             TokenDeliveryEvidence(
                 chain_id=chain_id,
@@ -381,7 +397,7 @@ def record_delivery_evidence(
                 unreadable_deliveries=tally.unreadable,
                 min_fan_out=tally.min_fan_out,
                 fan_out_threshold_k=int(k),
-                delivery_shape=_shape_for(tally, int(k)),
+                delivery_shape=shape,
                 observed_balance_raw=observed_balance_raw,
                 caught_up=True if caught_up is None else bool(caught_up),
                 basis=compose_basis(
@@ -389,7 +405,11 @@ def record_delivery_evidence(
                 ),
             )
         )
-        return
+        # An inserted row that already names a shape is a first determination
+        # too; one inserted as ``not_determined`` has determined nothing.
+        if shape != DELIVERY_SHAPE_NOT_DETERMINED:
+            _bump(counts, "verdicts_first_determined")
+        return shape
 
     row_k = int(row.fan_out_threshold_k)
     cursor = int(row.measured_through_block)
@@ -421,7 +441,32 @@ def record_delivery_evidence(
     _set(row, "delivery_count", tally.count)
     _set(row, "unreadable_deliveries", tally.unreadable)
     _set(row, "min_fan_out", tally.min_fan_out)
-    _set(row, "delivery_shape", _shape_for(tally, row_k))
+    shape = _shape_for(tally, row_k)
+    previous_shape = str(row.delivery_shape)
+    if shape != previous_shape:
+        # Two different events wear the same diff. A row whose stored shape is
+        # ``not_determined`` is being DECIDED for the first time — ordinary
+        # convergence, thousands of them across a corpus, and warning on those
+        # would bury the other case: a verdict a consumer has already read being
+        # WITHDRAWN. Only the second is the alarm.
+        first_determination = previous_shape == DELIVERY_SHAPE_NOT_DETERMINED
+        fields = {
+            "chain_id": chain_id,
+            "holder_address": holder,
+            "token_address": token,
+            "previous_shape": previous_shape,
+            "shape": shape,
+            "delivery_count": tally.count,
+            "unreadable_deliveries": tally.unreadable,
+            "min_fan_out": tally.min_fan_out,
+        }
+        if first_determination:
+            logger.debug("delivery evidence: pair determined for the first time", extra=fields)
+            _bump(counts, "verdicts_first_determined")
+        else:
+            logger.warning("delivery evidence: published verdict changed for this pair", extra=fields)
+            _bump(counts, "verdicts_changed")
+    _set(row, "delivery_shape", shape)
     _set(row, "measured_through_block", through)
     if caught_up is not None:
         _set(row, "caught_up", bool(caught_up))
@@ -450,6 +495,7 @@ def record_delivery_evidence(
         # Stamped only when a MEASUREMENT moved. Re-deriving a sentence is not a
         # new observation, and dating it as one would age every untouched row.
         row.measured_at = _sql_func.now()
+    return shape
 
 
 def load_delivery_evidence(

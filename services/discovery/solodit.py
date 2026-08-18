@@ -38,6 +38,8 @@ from typing import Any
 
 import requests
 
+from utils.logging import record_degraded
+
 logger = logging.getLogger(__name__)
 
 
@@ -127,6 +129,7 @@ def _decode_response(js_payload: str) -> dict[str, Any] | None:
             timeout=_NODE_TIMEOUT,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        record_degraded(phase="solodit_decode", exc=exc, context={"stage": "node_invoke"})
         logger.warning("Solodit node decode failed: %s", exc)
         return None
     if result.returncode != 0:
@@ -135,6 +138,7 @@ def _decode_response(js_payload: str) -> dict[str, Any] | None:
     try:
         parsed = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
+        record_degraded(phase="solodit_decode", exc=exc, context={"stage": "json_parse"})
         logger.warning("Solodit decode produced non-JSON: %s", exc)
         return None
     return parsed if isinstance(parsed, dict) else None
@@ -182,7 +186,12 @@ def _fetch_page(keyword: str, page: int) -> dict[str, Any] | None:
         if resp.status_code == 200:
             try:
                 body = resp.json()
-            except ValueError:
+            except ValueError as exc:
+                record_degraded(
+                    phase="solodit_fetch",
+                    exc=exc,
+                    context={"keyword": keyword, "page": page, "stage": "envelope_json"},
+                )
                 logger.warning(
                     "Solodit returned non-JSON envelope for keyword=%r page=%d",
                     keyword,
@@ -193,7 +202,12 @@ def _fetch_page(keyword: str, page: int) -> dict[str, Any] | None:
                 return None
             try:
                 payload = body[0]["result"]["data"]
-            except (KeyError, TypeError, IndexError):
+            except (KeyError, TypeError, IndexError) as exc:
+                record_degraded(
+                    phase="solodit_fetch",
+                    exc=exc,
+                    context={"keyword": keyword, "page": page, "stage": "envelope_shape"},
+                )
                 logger.warning(
                     "Solodit envelope missing result.data for keyword=%r page=%d",
                     keyword,

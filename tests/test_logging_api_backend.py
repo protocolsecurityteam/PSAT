@@ -148,6 +148,9 @@ def test_require_admin_key_distinguishes_missing_from_mismatch(caplog, monkeypat
 
 
 def test_fleet_warns_stale_daemon_with_process_and_age():
+    # The WARNING is transition-gated, so the state a prior read may have left
+    # is cleared first: this asserts the announcement, not the dedupe.
+    fleet.reset_fleet_log_dedupe()
     with _capture(fleet.logger) as records:
         fleet._warn_stale_daemon("event_log_indexer", 420.0)
     rec = records[-1]
@@ -157,12 +160,34 @@ def test_fleet_warns_stale_daemon_with_process_and_age():
 
 
 def test_fleet_warns_lagging_cursors_with_spread():
+    fleet.reset_fleet_log_dedupe()
     with _capture(fleet.logger) as records:
         fleet._warn_lagging_cursors(3, 250_000)
     rec = records[-1]
     assert rec.levelno == logging.WARNING
     assert rec.lagging_cursors == 3
     assert rec.block_spread == 250_000
+
+
+def test_fleet_stale_daemon_warning_is_deduped_until_recovery():
+    """739 identical WARNINGs for one 9.6h outage was the measured behaviour."""
+    fleet.reset_fleet_log_dedupe()
+    with _capture(fleet.logger) as records:
+        for _ in range(5):
+            fleet._warn_stale_daemon("event_log_indexer", 420.0)
+    assert len([r for r in records if r.levelno == logging.WARNING]) == 1
+
+    # Recovery is the other half of the transition, and it re-arms the WARNING.
+    with _capture(fleet.logger) as records:
+        fleet._note_daemon_fresh("event_log_indexer")
+        fleet._note_daemon_fresh("event_log_indexer")
+    assert len(records) == 1
+    assert records[0].levelno == logging.INFO
+
+    with _capture(fleet.logger) as records:
+        fleet._warn_stale_daemon("event_log_indexer", 900.0)
+    assert len(records) == 1
+    assert records[0].levelno == logging.WARNING
 
 
 # --- helpers -----------------------------------------------------------------

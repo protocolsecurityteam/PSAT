@@ -454,13 +454,26 @@ def pinned_head(chain_id: int, rpc_url: str) -> tuple[int, str] | None:
     try:
         head = int(rpc_request(rpc_url, "eth_blockNumber", [], retries=1, chain_id=chain_id), 16)
     except Exception as exc:
-        logger.info("restaking position: head read failed on chain %s: %s", chain_id, exc)
+        # Once per chain per cycle. There is no unpinned fallback on this plane,
+        # so a head that will not read withholds every position on the chain.
+        logger.warning(
+            "restaking position: head read failed; no position on this chain is read this cycle",
+            extra={"chain_id": chain_id, "exc_type": type(exc).__name__, "error": str(exc)},
+        )
         return None
     block = max(1, head - PINNED_FINALITY_MARGIN)
     try:
         header = rpc_request(rpc_url, "eth_getBlockByNumber", [hex(block), False], retries=1, chain_id=chain_id)
     except Exception as exc:
-        logger.info("restaking position: block header read failed at %d: %s", block, exc)
+        logger.warning(
+            "restaking position: block header read failed; no position on this chain is read this cycle",
+            extra={
+                "chain_id": chain_id,
+                "block_number": block,
+                "exc_type": type(exc).__name__,
+                "error": str(exc),
+            },
+        )
         return None
     if not isinstance(header, dict):
         return None
@@ -728,7 +741,19 @@ def _aggregate(url: str, calls: list[tuple[str, str]], block_tag: str, chain_id:
     try:
         return multicall3_aggregate3(url, calls, block_tag, chain_id=chain_id)
     except Exception as exc:
-        logger.info("restaking position: aggregate3 failed on chain %s at %s: %s", chain_id, block_tag, exc)
+        # Batched ~1 request per 100 nodes, so the level cannot storm on a
+        # per-node failure — an empty list here maps every call in the chunk to
+        # the non-observing states.
+        logger.warning(
+            "restaking position: aggregate3 did not answer; the chunk's reads are not determined",
+            extra={
+                "chain_id": chain_id,
+                "block_tag": block_tag,
+                "calls": len(calls),
+                "exc_type": type(exc).__name__,
+                "error": str(exc),
+            },
+        )
         return []
 
 

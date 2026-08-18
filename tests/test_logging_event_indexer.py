@@ -9,11 +9,17 @@ degraded-heartbeat decision are exercised without Postgres or an RPC.
 from __future__ import annotations
 
 import logging
+import os
+from contextlib import nullcontext
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
 from services.resolution.repos import event_logs_pg
-from utils.logging import stage_metrics_var
+from utils.logging import stage_metrics_var, worker_id_var
+
+if TYPE_CHECKING:
+    from sqlalchemy.orm import Session
 from workers.event_log_indexer import (
     ScanSummary,
     _heartbeat_status_for_pass,
@@ -163,3 +169,98 @@ def test_note_partial_reason_noop_without_job_context(reason):
     no-op and must not raise — repos call this unconditionally."""
     event_logs_pg._PARTIAL_REASON_COUNTS.clear()
     assert event_logs_pg._note_partial_reason(reason, event_address=_ADDR, repo="postgres") == 1
+
+
+def test_indexer_loop_binds_worker_id_on_both_threads(monkeypatch):
+    """The daemon is not a BaseWorker, so nothing binds ``worker_id`` for it —
+    its whole stream was the one worker output in the fleet with no identity to
+    filter by. Both the reconcile loop AND the backfill thread must carry it
+    (a new thread starts with an empty context, so one bind is not enough)."""
+    import time
+    from threading import Event
+
+    import workers.event_log_indexer as indexer
+
+    seen: dict[str, str | None] = {}
+    stop = Event()
+
+    def _fake_enroll_from_completed_jobs(_session):
+        seen["backfill"] = worker_id_var.get()
+        return 0
+
+    def _fake_heartbeat(*_a, **_k):
+        seen.setdefault("reconcile", worker_id_var.get())
+        # Stop only once the backfill thread has been observed too — it is the
+        # thread whose bind is easiest to lose.
+        deadline = time.monotonic() + 5
+        while "backfill" not in seen and time.monotonic() < deadline:
+            time.sleep(0.01)
+        stop.set()
+
+    monkeypatch.setattr(indexer, "SessionLocal", lambda: nullcontext(object()))
+    monkeypatch.setattr(indexer, "enroll_from_completed_jobs", _fake_enroll_from_completed_jobs)
+    monkeypatch.setattr(indexer, "enroll_from_tracked_topics", lambda *_a, **_k: 0)
+    monkeypatch.setattr(indexer, "scan_enrolled_events", lambda *_a, **_k: ScanSummary())
+    monkeypatch.setattr(indexer, "reconcile_deferred_resolutions", lambda *_a, **_k: 0)
+    monkeypatch.setattr(indexer, "reconcile_role_set_drift", lambda *_a, **_k: 0)
+    monkeypatch.setattr(indexer, "_cursor_progress", lambda _s: (0, 0))
+    monkeypatch.setattr(indexer, "record_heartbeat", _fake_heartbeat)
+
+    indexer.run_event_log_indexer_loop(
+        fetchers={}, head_fetchers={}, block_hash_fetchers={}, interval=0.01, stop_event=stop
+    )
+
+    assert seen.get("backfill") == indexer.WORKER_ID
+    assert seen.get("reconcile") == indexer.WORKER_ID
+    # And the bind is scoped: it must not leak into the caller's context.
+    assert worker_id_var.get() is None
+
+
+def test_shutdown_line_names_the_process(monkeypatch, caplog):
+    """Every daemon logs shutdown within the same second when the fleet stops;
+    byte-identical lines make it impossible to tell which process got the
+    signal."""
+    import signal as signal_mod
+
+    import workers.event_log_indexer as indexer
+
+    handlers: dict[int, object] = {}
+    monkeypatch.setenv("ERPC_BASE_URL", "https://erpc.example")
+    monkeypatch.setattr(signal_mod, "signal", lambda num, fn: handlers.setdefault(num, fn))
+    monkeypatch.setattr(indexer, "run_event_log_indexer_loop", lambda **_k: None)
+    # ``main()`` calls ``configure_logging()``, whose first-call path clears every
+    # root handler — including caplog's. Left in, this test passes only when some
+    # earlier test already configured logging, so it fails whenever xdist gives it
+    # a fresh process. ``test_main_installs_json_logging`` is what covers the real
+    # ``configure_logging`` call.
+    monkeypatch.setattr(indexer, "configure_logging", lambda *_a, **_k: None)
+
+    indexer.main()
+    with caplog.at_level(logging.INFO, logger="workers.event_log_indexer"):
+        handlers[signal_mod.SIGTERM](signal_mod.SIGTERM, None)  # type: ignore[operator]
+
+    record = next(r for r in caplog.records if "shutting down" in r.getMessage())
+    assert indexer.WORKER_ID in record.getMessage()
+    assert record.worker_id == indexer.WORKER_ID
+    assert record.pid == os.getpid()
+
+
+def test_probe_code_failure_is_visible_and_still_over_enrolls(monkeypatch, caplog):
+    """An unreadable probe keeps the fail-safe direction (enroll the union of
+    every standard's topic0s) — but it used to read exactly like a contract that
+    declares no known standard."""
+    import workers.event_log_indexer as indexer
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("rpc down")
+
+    monkeypatch.setattr(indexer, "resolve_probe_code", _boom)
+
+    with caplog.at_level(logging.WARNING, logger="workers.event_log_indexer"):
+        topics = indexer._role_store_topic0s(cast("Session", object()), _ADDR, 1, {})
+
+    assert topics == indexer.all_topic0s()
+    record = next(r for r in caplog.records if r.levelno == logging.WARNING)
+    assert record.exc_type == "RuntimeError"
+    assert record.decision == "enroll_all_standards"
+    assert record.chain_id == 1

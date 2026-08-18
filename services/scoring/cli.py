@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 from typing import Any
 
@@ -27,6 +28,9 @@ from services.scoring.distill import distill_contract_signals, load_protocol_uni
 from services.scoring.fold import compute_protocol_score
 from services.scoring.population import order_signals
 from services.scoring.schema import FunctionSignal, ScoreDocument
+from utils.logging import configure_logging
+
+logger = logging.getLogger(__name__)
 
 
 def distill_protocol_in_memory(session: Session, protocol_id: int) -> list[FunctionSignal]:
@@ -41,12 +45,21 @@ def distill_protocol_in_memory(session: Session, protocol_id: int) -> list[Funct
 
 
 def score(session: Session, protocol_id: int) -> ScoreDocument:
+    # Imported here rather than at module scope so that importing this module —
+    # the differential helpers are used as a library — does not drag in the
+    # monitoring package and the job queue the score loop needs.
+    from services.scoring.loop import document_summary
+
     signals = distill_protocol_in_memory(session, protocol_id)
     # Built here and not in the fold: assembling it reads source artifacts out of
     # object storage, which the fold's planes may not do. ``None`` — an
     # unreadable artifact body — disposes nothing anywhere downstream.
     universe = load_protocol_universe(session, protocol_id)
-    return compute_protocol_score(session, protocol_id, signals=signals, universe=universe)
+    document = compute_protocol_score(session, protocol_id, signals=signals, universe=universe)
+    # The same summary the score loop emits, so a CLI fold and a persisted one
+    # are the same line in the log stream and comparable against each other.
+    logger.info("score document summary", extra=document_summary(document, universe))
+    return document
 
 
 def document_json(document: ScoreDocument) -> dict[str, Any]:
@@ -334,6 +347,11 @@ def differential(document: ScoreDocument, oracle: dict[str, Any]) -> dict[str, A
 
 
 def main(argv: list[str] | None = None) -> int:
+    # First, and before anything imports a session: the distiller and the planes
+    # log their degraded reads, and "see log" below names a log that was never
+    # configured otherwise. stdout stays the product — the document — and every
+    # diagnostic goes to stderr as JSON.
+    configure_logging()
     parser = argparse.ArgumentParser(prog="services.scoring.cli")
     sub = parser.add_subparsers(dest="command", required=True)
 

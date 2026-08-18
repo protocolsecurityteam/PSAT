@@ -51,6 +51,8 @@ from weakref import WeakKeyDictionary
 from eth_utils.crypto import keccak
 from typing_extensions import NotRequired
 
+from utils.logging import record_degraded
+
 from .provenance import ProvenanceEngine, is_top
 from .record_ordering import OrderingWitness, attach_record_ordering
 from .shared import _all_state_variables
@@ -62,6 +64,10 @@ from .summaries import (
 from .token_slots import derive_token_slots
 
 SCHEMA_VERSION = "semantic-3"
+
+# How many unscanned function signatures a degraded record names individually;
+# the count is always exact.
+_UNSCANNED_SAMPLE = 8
 
 
 class ReceiverDescriptor(TypedDict):
@@ -1299,14 +1305,24 @@ def _setter_state_vars(contract: Any) -> dict[str, list[str]]:
     if cached is not None:
         return cached
     setters: dict[str, set[str]] = {}
+    # A swallowed write-set failure empties this function's contribution to the
+    # KEY SET, which downstream reads as "no setter" — a proven claim built on a
+    # failed scan. This module is deliberately logger-free (pure analysis), so
+    # the shortfall is published as a degraded record on the owning job instead;
+    # collected across the loop so one bad contract is one record, not one per
+    # function.
+    unscanned: list[str] = []
+    first_failure: Exception | None = None
     for fn in getattr(contract, "functions", []) or []:
         if getattr(fn, "is_constructor", False):
             continue
+        signature = _function_full_name(fn)
         try:
             written = fn.all_state_variables_written()
-        except Exception:  # pragma: no cover - slither edge
+        except Exception as exc:
             written = []
-        signature = _function_full_name(fn)
+            unscanned.append(signature)
+            first_failure = first_failure or exc
         # Slither synthesises ``slitherConstructorVariables`` /
         # ``slitherConstructorConstantVariables`` to hold declaration-site
         # initialisers. They MUST keep contributing membership — dropping them
@@ -1326,6 +1342,16 @@ def _setter_state_vars(contract: Any) -> dict[str, list[str]]:
     # their origin state var — these are real, redirecting setters.
     for name in _aliased_storage_writes(contract)[0]:
         setters.setdefault(name, set())
+    if first_failure is not None:
+        record_degraded(
+            phase="static_effects_setter_state_vars",
+            exc=first_failure,
+            context={
+                "contract": getattr(contract, "name", None),
+                "functions_unscanned": len(unscanned),
+                "functions_unscanned_sample": unscanned[:_UNSCANNED_SAMPLE],
+            },
+        )
     resolved = {name: sorted(signatures) for name, signatures in setters.items()}
     _SETTER_VARS[contract] = resolved
     return resolved

@@ -20,6 +20,7 @@ without querying the DB or scraping logs:
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -84,10 +85,49 @@ def _bucket_counts(bucket: Any) -> dict[str, Any]:
     return {k: (len(v) if isinstance(v, list) else v) for k, v in bucket.items()}
 
 
+# This function runs once per ``/api/fleet`` read — every ~7s while the monitor
+# page is open — and both conditions below persist for as long as the fault
+# does, so an unconditional WARNING logs one incident thousands of times (739x
+# for a single 9.6h outage, measured). State-transition logging instead: the
+# entry into a condition and the recovery out of it each log once, with a
+# re-warn cadence so a standing fault does not fall out of a log window
+# entirely. Process-local, so a restart re-announces once.
+_CONDITION_RESTATE_S = 900.0
+_condition_state: dict[str, float] = {}
+
+
+def _condition_should_log(key: str, active: bool) -> bool:
+    """Whether this observation of *key* is a transition worth a line.
+
+    True on entering the condition, on leaving it, and once per
+    ``_CONDITION_RESTATE_S`` while it holds. False for every repeat in between.
+
+    ``build_fleet_status`` is a sync endpoint, so anyio runs concurrent reads in
+    a threadpool: the recovery arm pops rather than checking-then-deleting,
+    because two racing recoveries would both pass the check and the second
+    ``del`` would raise into a 500.
+    """
+    now = time.monotonic()
+    last = _condition_state.get(key)
+    if not active:
+        return _condition_state.pop(key, None) is not None
+    if last is not None and now - last < _CONDITION_RESTATE_S:
+        return False
+    _condition_state[key] = now
+    return True
+
+
+def reset_fleet_log_dedupe() -> None:
+    """Drop the transition state, so the next observation announces again."""
+    _condition_state.clear()
+
+
 def _warn_stale_daemon(process: str, beat_age_s: float | None) -> None:
     """WARNING that a heartbeat-backed daemon has gone stale (likely crashed or
     wedged), so the death is captured server-side even when nobody is watching
     ``/api/fleet``. Facts in ``extra`` so an alert can key on ``process``."""
+    if not _condition_should_log(f"stale:{process}", True):
+        return
     # Keyed ``daemon`` not ``process``: ``process`` is a reserved LogRecord
     # attribute (the PID) and stdlib logging raises on the extra-key collision.
     logger.warning(
@@ -97,9 +137,21 @@ def _warn_stale_daemon(process: str, beat_age_s: float | None) -> None:
     )
 
 
+def _note_daemon_fresh(process: str) -> None:
+    """The other half of the transition: one INFO when a stale daemon returns."""
+    if not _condition_should_log(f"stale:{process}", False):
+        return
+    logger.info("fleet: daemon %s is beating again", process, extra={"daemon": process})
+
+
 def _warn_lagging_cursors(lagging_cursors: int, block_spread: int | None) -> None:
     """WARNING that one or more event-indexer cursors lag the leader by more
     than ``_CURSOR_LAG_BLOCKS`` — the backfill-stall signature."""
+    if not _condition_should_log("cursor_lag", bool(lagging_cursors)):
+        return
+    if not lagging_cursors:
+        logger.info("fleet: event-indexer cursors have caught up to the leader")
+        return
     logger.warning(
         "fleet: %d event-indexer cursor(s) lagging the leader",
         lagging_cursors,
@@ -310,8 +362,9 @@ def build_fleet_status(session: Session, *, now: datetime | None = None) -> dict
     idx_by_chain = _indexer_by_chain(session, now)
     idx_lagging = sum(d["lagging_cursors"] for d in idx_by_chain)
     idx_spread = max((d["block_spread"] or 0 for d in idx_by_chain), default=None)
-    if idx_lagging:
-        _warn_lagging_cursors(idx_lagging, idx_spread)
+    # Called on every read, lagging or not: the recovery is the other half of
+    # the transition and it is what closes the incident in the log.
+    _warn_lagging_cursors(idx_lagging, idx_spread)
 
     def _work_for(process: str) -> dict[str, Any] | None:
         if process == HEARTBEAT_COVERAGE_VERIFY:
@@ -365,6 +418,8 @@ def build_fleet_status(session: Session, *, now: datetime | None = None) -> dict
         stale_after = stale_after_seconds(meta["interval_s"])
         if age is None or age >= stale_after:
             _warn_stale_daemon(process, age)
+        else:
+            _note_daemon_fresh(process)
         daemons.append(
             {
                 "process": process,

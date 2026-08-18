@@ -270,14 +270,26 @@ def drain_enrollment_queue(
                 )
                 _finish_success(work_session, claim)
             drained += 1
-        except Exception:
-            logger.exception("enrollment drain failed for protocol %s", claim.protocol_id)
+        except Exception as exc:
+            # Degraded, not failing: the claim is re-queued with backoff and the
+            # drain continues with the next protocol.
+            logger.warning(
+                "enrollment drain failed for a protocol; the claim is re-queued",
+                extra={"protocol_id": claim.protocol_id, "exc_type": type(exc).__name__, "error": str(exc)},
+            )
             failed += 1
             try:
                 with SessionLocal() as fail_session:
                     _finish_failure(fail_session, claim)
-            except Exception:
-                logger.exception("enrollment failure-bookkeeping failed for protocol %s", claim.protocol_id)
+            except Exception as book_exc:
+                logger.warning(
+                    "enrollment failure-bookkeeping failed for a protocol; its backoff is not advanced",
+                    extra={
+                        "protocol_id": claim.protocol_id,
+                        "exc_type": type(book_exc).__name__,
+                        "error": str(book_exc),
+                    },
+                )
 
     if drained or failed:
         logger.info("enrollment drain: %d reconciled, %d failed", drained, failed)
@@ -344,8 +356,11 @@ def reconcile_enrollments(
             protocol_chain = _protocol_chain(session, pid, chain)
             enroll_protocol_contracts(session, pid, rpc_for_chain(protocol_chain, rpc_url), protocol_chain)
             reconciled += 1
-        except Exception:
-            logger.exception("reconciler enrollment failed for protocol %s", pid)
+        except Exception as exc:
+            logger.warning(
+                "reconciler enrollment failed for a protocol; the sweep continues",
+                extra={"protocol_id": pid, "exc_type": type(exc).__name__, "error": str(exc)},
+            )
             # ``enroll_protocol_contracts`` commits internally; a
             # partial write may have landed before the exception.
             # Rollback so the next protocol's queries don't see the
@@ -386,8 +401,13 @@ def run_enrollment_reconciler_loop(
             result = drain_enrollment_queue(rpc_url, chain)
             with SessionLocal() as session:
                 depth = _queue_depth(session)
-        except Exception:
-            logger.exception("reconciler outer loop failed")
+        except Exception as exc:
+            # The tick is lost, not the loop: the heartbeat below records the
+            # degraded pass and the next interval retries.
+            logger.warning(
+                "reconciler tick failed",
+                extra={"exc_type": type(exc).__name__, "error": str(exc)},
+            )
             status = "error"
         record_heartbeat(
             HEARTBEAT_ENROLLMENT_RECONCILER,
@@ -407,7 +427,14 @@ def main() -> None:
     stop_event = Event()
 
     def handle_signal(signum, _frame):
-        logger.info("received signal %s, shutting down", signum)
+        # Named and pid-stamped: this line is emitted by every daemon in the
+        # stack under the ``__main__`` logger, and identical copies of it say
+        # nothing about which process actually went down.
+        logger.info(
+            "received signal %s, shutting down",
+            signum,
+            extra={"daemon": "enrollment_reconciler", "pid": os.getpid(), "signal": int(signum)},
+        )
         stop_event.set()
 
     signal.signal(signal.SIGTERM, handle_signal)

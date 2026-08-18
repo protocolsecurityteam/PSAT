@@ -612,7 +612,13 @@ def get_transaction_receipt(
             timeout=timeout,
         )
     except Exception as exc:
-        logger.debug("receipt fetch failed", extra={"tx_hash": tx_hash, "error": str(exc)})
+        # Stays DEBUG: this is a per-call hot path, and an unread receipt is a
+        # not_determined the CALLER must count — the disposition cycle folds
+        # these into its per-cycle summary (``receipts_unreadable``).
+        logger.debug(
+            "receipt fetch failed",
+            extra={"tx_hash": tx_hash, "chain_id": chain_id, "exc_type": type(exc).__name__, "error": str(exc)},
+        )
         return None
     return receipt if isinstance(receipt, dict) else None
 

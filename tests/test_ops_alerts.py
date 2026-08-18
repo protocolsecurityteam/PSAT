@@ -307,6 +307,9 @@ def test_discord_transport_failure_does_not_suppress_other_daemons(db_session, _
 
     monkeypatch.setattr("services.monitoring.notifier.requests.post", flaky_post)
     monkeypatch.setenv("PSAT_OPS_WEBHOOK_URL", _WEBHOOK)
+    # Pinned rather than incidental: a just-started watchdog, so these beats
+    # read as the cold-start shape and the level below is a stated expectation.
+    monkeypatch.setattr("services.monitoring.ops_alerts._uptime_s", lambda: 5.0)
 
     now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
     # Two daemons go stale together (a monitor VM crash pattern).
@@ -316,7 +319,10 @@ def test_discord_transport_failure_does_not_suppress_other_daemons(db_session, _
         _seed(db_session, process, age_s=100_000, now=now)
     db_session.commit()
 
-    with caplog.at_level("ERROR", logger="services.monitoring.ops_alerts"):
+    # WARNING, not ERROR: these beats are older than the watchdog's own uptime,
+    # which is the cold-start shape (see ``_emit_down``). The level is asserted
+    # on its own below; what this test is about is that every daemon got a line.
+    with caplog.at_level("WARNING", logger="services.monitoring.ops_alerts"):
         out = run_ops_alert_tick(db_session, now=now)
 
     # Both transitions were emitted despite the first post raising.
@@ -324,7 +330,44 @@ def test_discord_transport_failure_does_not_suppress_other_daemons(db_session, _
     assert calls["n"] == 2  # the second post was attempted, not skipped
     assert len(captured) == 1  # first raised, second succeeded
     down_logs = [r for r in caplog.records if r.msg == "ops: daemon %s is down"]
-    assert {r.args[0] for r in down_logs} == down  # every daemon got its ERROR log
+    assert {r.args[0] for r in down_logs} == down  # every daemon got its log
+
+
+def test_daemon_down_is_error_only_when_it_died_on_our_watch(monkeypatch, caplog):
+    """Cold start is a routine condition; a death while we watch is an incident."""
+    import logging as _logging
+
+    from services.monitoring import ops_alerts
+
+    problem = {"kind": "dead", "daemon": HEARTBEAT_PROTOCOL_SCANNER, "status": "stale", "beat_age_s": 100_000.0}
+
+    # Freshly started process: the staleness predates every second we watched.
+    monkeypatch.setattr(ops_alerts, "_uptime_s", lambda: 5.0)
+    with caplog.at_level(_logging.WARNING, logger="services.monitoring.ops_alerts"):
+        ops_alerts._emit_down(dict(problem), webhook_url=None)
+    rec = [r for r in caplog.records if r.msg == "ops: daemon %s is down"][-1]
+    assert rec.levelno == _logging.WARNING
+    assert rec.cold_start is True
+
+    caplog.clear()
+    # A watchdog that has been up for hours: the same beat age is now a death
+    # that happened while we were watching, whatever its arithmetic.
+    monkeypatch.setattr(ops_alerts, "_uptime_s", lambda: 200_000.0)
+    with caplog.at_level(_logging.WARNING, logger="services.monitoring.ops_alerts"):
+        ops_alerts._emit_down(dict(problem), webhook_url=None)
+    rec = [r for r in caplog.records if r.msg == "ops: daemon %s is down"][-1]
+    assert rec.levelno == _logging.ERROR
+    assert rec.cold_start is False
+
+    caplog.clear()
+    # And the arithmetic on its own is not enough: past the cold-start window a
+    # daemon that has NEVER beaten is an incident, not a boot condition.
+    monkeypatch.setattr(ops_alerts, "_uptime_s", lambda: 10_000.0)
+    with caplog.at_level(_logging.WARNING, logger="services.monitoring.ops_alerts"):
+        ops_alerts._emit_down({**problem, "beat_age_s": None}, webhook_url=None)
+    rec = [r for r in caplog.records if r.msg == "ops: daemon %s is down"][-1]
+    assert rec.levelno == _logging.ERROR
+    assert rec.cold_start is False
 
 
 # ── /api/health/monitoring ───────────────────────────────────────────────────

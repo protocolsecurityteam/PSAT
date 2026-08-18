@@ -202,12 +202,20 @@ def _hashable_code_address(session: Session, candidate: Candidate) -> str | None
         return candidate.contract_address
     implementation = (contract.implementation or "").strip().lower()
     if not implementation or implementation in ("0x", "0x" + "0" * 40):
+        # No ``record_degraded`` here on purpose: returning ``None`` lands in the
+        # worker's receiving arm, which records the skip once per candidate up to
+        # a cap. Recording here too would double every entry in an uncapped
+        # artifact, and the dedup race that produces unresolved proxies produces
+        # them in bulk.
+        context = {
+            "contract_id": candidate.contract_id,
+            "contract_address": candidate.contract_address,
+            "function_id": candidate.function_id,
+        }
         logger.warning(
-            "effects hash: contract row %s (%s) is a proxy with function rows and no resolved "
-            "implementation — refusing to hash the forwarding stub (it collides across every "
-            "implementation behind it) and skipping the candidate",
-            candidate.contract_id,
-            candidate.contract_address,
+            "effects hash: proxy with function rows and no resolved implementation — refusing to hash the "
+            "forwarding stub (it collides across every implementation behind it) and skipping the candidate",
+            extra=context,
         )
         return None
     logger.info(
@@ -498,15 +506,29 @@ def _uint_call(transport: AnvilTransport, to: str, data: str) -> int:
     """A uint read off the fork, or 0 when the call fails or returns nothing.
     Zero is not a fallback VALUE here — it is an input the contract itself
     rejects, which is the honest outcome for a delay we could not read."""
+    # The transcript does not exist yet at this point (the recipe mints it), so
+    # the read's failure has nowhere to be published but the log.
     try:
         result = transport.call({"to": to, "data": data})
-    except Exception:
+    except Exception as exc:
+        logger.debug(
+            "effects timelock: delay read failed, passing 0",
+            extra={"contract_address": to, "reason": "call_raised", "exc_type": type(exc).__name__},
+        )
         return 0
     if not result.success or not result.return_data:
+        logger.debug(
+            "effects timelock: delay read failed, passing 0",
+            extra={"contract_address": to, "reason": "reverted" if not result.success else "empty_return"},
+        )
         return 0
     try:
         return int(result.return_data, 16)
     except ValueError:
+        logger.debug(
+            "effects timelock: delay read failed, passing 0",
+            extra={"contract_address": to, "reason": "unparseable_return"},
+        )
         return 0
 
 

@@ -44,17 +44,31 @@ def _is_discord_webhook(webhook_url: str) -> bool:
     return parsed.scheme == "https" and (parsed.hostname or "").lower() in _DISCORD_WEBHOOK_HOSTS
 
 
-def _send_discord(webhook_url: str, embed: dict) -> None:
+def _send_discord(webhook_url: str, embed: dict) -> bool:
+    """Post one embed. ``True`` iff the webhook accepted it.
+
+    The return value is the point: a non-ok response used to be logged here and
+    then discarded, so a revoked or rate-limited webhook counted toward the
+    caller's "sent" total exactly like a delivered post.
+    """
     if not _is_discord_webhook(webhook_url):
-        logger.warning("Skipping non-Discord webhook target: %s", urlparse(webhook_url).hostname)
-        return
+        logger.warning(
+            "Skipping non-Discord webhook target",
+            extra={"host": urlparse(webhook_url).hostname},
+        )
+        return False
     resp = requests.post(
         webhook_url,
         json={"embeds": [embed]},
         timeout=DISCORD_TIMEOUT,
     )
     if not resp.ok:
-        logger.warning("Discord webhook failed (%s): %s", resp.status_code, resp.text[:200])
+        logger.warning(
+            "Discord webhook rejected the post",
+            extra={"status_code": resp.status_code, "response": resp.text[:200]},
+        )
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -734,6 +748,7 @@ def notify_protocol_events(session: Session, events: list[MonitoredEvent]) -> No
         subs_by_protocol.setdefault(sub.protocol_id, []).append(sub)
 
     sent = 0
+    failed = 0
     for protocol_id, proto_events in events_by_protocol.items():
         proto_subs = subs_by_protocol.get(protocol_id, [])
         if not proto_subs:
@@ -762,21 +777,29 @@ def notify_protocol_events(session: Session, events: list[MonitoredEvent]) -> No
                     continue
 
                 try:
-                    _send_discord(sub.discord_webhook_url, embed)  # type: ignore[arg-type]
-                    sent += 1
+                    if _send_discord(sub.discord_webhook_url, embed):  # type: ignore[arg-type]
+                        sent += 1
+                    else:
+                        failed += 1
                 except Exception as exc:
+                    failed += 1
                     logger.warning(
-                        "Discord notification failed for protocol subscription %s: %s",
-                        sub.id,
-                        exc,
-                        extra={"exc_type": type(exc).__name__},
+                        "Discord notification failed for a protocol subscription",
+                        extra={
+                            "subscription_id": str(sub.id),
+                            "protocol_id": protocol_id,
+                            "exc_type": type(exc).__name__,
+                            "error": str(exc),
+                        },
                     )
 
-    if sent:
+    if sent or failed:
         logger.info(
-            "Sent %d protocol notification(s) for %d event(s)",
+            "Sent %d protocol notification(s) for %d event(s), %d failed",
             sent,
             len(events),
+            failed,
+            extra={"sent": sent, "failed": failed, "events": len(events)},
         )
 
 
@@ -878,21 +901,30 @@ def notify_reanalysis_complete(session: Session, job: "Job") -> None:
     }
 
     sent = 0
+    failed = 0
     for sub in subs:
         try:
-            _send_discord(sub.discord_webhook_url, embed)  # type: ignore[arg-type]
-            sent += 1
+            if _send_discord(sub.discord_webhook_url, embed):  # type: ignore[arg-type]
+                sent += 1
+            else:
+                failed += 1
         except Exception as exc:
+            failed += 1
             logger.warning(
-                "Reanalysis completion notification failed for subscription %s: %s",
-                sub.id,
-                exc,
-                extra={"exc_type": type(exc).__name__},
+                "Reanalysis completion notification failed for a subscription",
+                extra={
+                    "subscription_id": str(sub.id),
+                    "job_id": str(job.id),
+                    "exc_type": type(exc).__name__,
+                    "error": str(exc),
+                },
             )
 
-    if sent:
+    if sent or failed:
         logger.info(
-            "Sent %d reanalysis-complete notification(s) for job %s",
+            "Sent %d reanalysis-complete notification(s) for job %s, %d failed",
             sent,
             job.id,
+            failed,
+            extra={"sent": sent, "failed": failed, "job_id": str(job.id)},
         )
