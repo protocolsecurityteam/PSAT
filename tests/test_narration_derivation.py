@@ -1029,7 +1029,7 @@ def test_a_disposed_ceiling_publishes_only_what_its_carrier_record_proves(fold):
     assert carrier["delivery_count"] == 3
     assert (carrier["scanned_from_block"], carrier["measured_through_block"]) == (0, 21_000_000)
     assert carrier["basis"] == DELIVERED["basis"]
-    assert plane.asset_is_disposed(KEY_C, "junk")
+    assert "junk" in (plane.asset_disposition.get(plane.canonical(KEY_C)) or {})
 
     # …and the row REPUBLISHES them, folded over the readings it covers, so the
     # sentence quotes a field a reader can join to rather than a figure only the

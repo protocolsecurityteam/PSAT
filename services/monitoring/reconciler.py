@@ -331,51 +331,6 @@ def _queue_depth(session: Session) -> int:
     return int(session.execute(select(func.count()).select_from(MonitoringEnrollmentQueue)).scalar() or 0)
 
 
-def reconcile_enrollments(
-    session: Session,
-    rpc_url: str,
-    chain: str,
-) -> int:
-    """DEPRECATED — walk-all reconciliation pass; superseded by the dirty-queue
-    drain (:func:`drain_enrollment_queue` + :func:`sweep_enqueue_stale`).
-
-    Walks every ``Protocol`` row and re-enrolls it. Production callers are
-    gone (stage 1 deleted ``_boot_reconcile``); retained for the anvil
-    enrollment suite until it migrates to the drain. New code must use the
-    drain. A per-protocol exception is logged and
-    swallowed so one broken protocol does not abort the sweep. Returns the count
-    of protocols successfully reconciled.
-    """
-    protocol_ids = list(session.execute(select(Protocol.id)).scalars())
-    if not protocol_ids:
-        return 0
-
-    reconciled = 0
-    for pid in protocol_ids:
-        try:
-            protocol_chain = _protocol_chain(session, pid, chain)
-            enroll_protocol_contracts(session, pid, rpc_for_chain(protocol_chain, rpc_url), protocol_chain)
-            reconciled += 1
-        except Exception as exc:
-            logger.warning(
-                "reconciler enrollment failed for a protocol; the sweep continues",
-                extra={"protocol_id": pid, "exc_type": type(exc).__name__, "error": str(exc)},
-            )
-            # ``enroll_protocol_contracts`` commits internally; a
-            # partial write may have landed before the exception.
-            # Rollback so the next protocol's queries don't see the
-            # failed transaction's autobegun state.
-            session.rollback()
-
-    if reconciled:
-        logger.info(
-            "reconciler pass reconciled %d/%d protocols",
-            reconciled,
-            len(protocol_ids),
-        )
-    return reconciled
-
-
 def run_enrollment_reconciler_loop(
     rpc_url: str,
     chain: str,

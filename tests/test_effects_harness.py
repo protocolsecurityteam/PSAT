@@ -25,13 +25,11 @@ from services.effects.config import (
 from services.effects.harness import (
     SimContext,
     authorization_opened,
-    same_gate,
     select_identities,
 )
 from services.effects.preflight import (
     InMemoryCapabilityStore,
     probe_simulate_support,
-    require_simulate_or_fallback,
 )
 from services.effects.selection import AssetHolding
 from services.effects.simulate import (
@@ -52,7 +50,6 @@ TOKEN = "0x" + "33" * 20
 CTX = SimContext(chain_id=1, block=1000, hardfork="prague")
 
 _REVERT_A = "0x08c379a0" + "00" * 4
-_REVERT_B = "0x" + "deadbeef"
 
 
 # --- stubs ------------------------------------------------------------------
@@ -176,9 +173,9 @@ def test_preflight_records_unsupported_and_routes_to_fallback():
 
     store = InMemoryCapabilityStore()
     assert probe_simulate_support(Unsupported(), 8453, store) is False
-    assert require_simulate_or_fallback(store, 8453) is False
-    # Unprobed chain is fail-closed (never assumed supported).
-    assert require_simulate_or_fallback(store, 999) is False
+    assert store.get_simulate_support(8453) is False
+    # An unprobed chain records nothing — never a support claim.
+    assert store.get_simulate_support(999) is None
 
 
 # ---------------------------------------------------------------------------
@@ -460,7 +457,7 @@ def test_code_upgrade_tier1_sentinel_slot_changed_proven():
         principal=PRINCIPAL,
         upgrade_calldata="0x3659cfe6" + "ee" * 32,
         sentinel_address=SENTINEL,
-        sentinel_override=recipes.uups_sentinel_override(SENTINEL),
+        sentinel_override={"code": "0x00"},
         impl_before=_addr_topic("0x" + "01" * 20),
     )
     assert eff.verdict == VERDICT_PROVEN
@@ -902,16 +899,6 @@ def test_section8_rule2b_indeterminate_after_split_never_opens():
     assert authorization_opened(before, after_split) is False
 
 
-def test_section8_rule3_raw_revert_compare_same_gate():
-    a = EthCallResult(False, "0x", _REVERT_A, None)
-    b = EthCallResult(False, "0x", _REVERT_A, None)
-    c = EthCallResult(False, "0x", _REVERT_B, None)
-    assert same_gate(a, b) is True
-    assert same_gate(a, c) is False
-    # A node error (no revert data) is never "same".
-    assert same_gate(a, EthCallResult(False, "0x", None, "oog")) is False
-
-
 def test_section8_rule4_precondition_revert_is_unknown():
     # authority-change: principal cannot even execute F → precondition, not absence.
     randoms, _ = select_identities("0x2f2ff15d", CONTRACT, principal=PRINCIPAL)
@@ -1062,7 +1049,7 @@ def test_code_upgrade_slot_unchanged_is_unknown():
         principal=PRINCIPAL,
         upgrade_calldata="0x3659cfe6" + "ee" * 32,
         sentinel_address=SENTINEL,
-        sentinel_override=recipes.transparent_sentinel_override(SENTINEL),
+        sentinel_override={"code": "0x00"},
         impl_before=_addr_topic("0x" + "01" * 20),
     )
     assert eff.verdict == VERDICT_UNKNOWN

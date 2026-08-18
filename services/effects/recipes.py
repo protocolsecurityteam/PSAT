@@ -93,26 +93,6 @@ def _sim_to_ethcall(r: SimCallResult) -> EthCallResult:
     return EthCallResult(r.success, r.return_data, r.revert_data, None)
 
 
-def transparent_sentinel_override(sentinel_address: str) -> dict[str, dict[str, Any]]:
-    """State override placing plain nonzero code at the sentinel so a transparent
-    proxy's ``_setImplementation`` code check passes. A single ``STOP``
-    (extcodesize=1) is enough — a bare address with no code would revert the
-    upgrade and prove nothing."""
-    return {sentinel_address.lower(): {"code": "0x00"}}
-
-
-def uups_sentinel_override(sentinel_address: str, impl_slot: str = EIP1967_IMPL_SLOT) -> dict[str, dict[str, Any]]:
-    """State override placing an ERC-1822 stub at the sentinel whose
-    ``proxiableUUID()`` returns the canonical impl slot, so a UUPS
-    ``upgradeToAndCall`` (which delegatecalls the new impl to validate it) accepts
-    it. The stub returns ``impl_slot`` for ANY call — a minimal
-    ``PUSH32 slot; PUSH0; MSTORE; PUSH1 32; PUSH0; RETURN``."""
-    slot = impl_slot[2:] if impl_slot.startswith("0x") else impl_slot
-    slot = slot.rjust(64, "0")
-    code = "0x7f" + slot + "5f52" + "6020" + "5f" + "f3"
-    return {sentinel_address.lower(): {"code": code}}
-
-
 # ---------------------------------------------------------------------------
 # Input-asset seeding (shared by value-out and supply)
 # ---------------------------------------------------------------------------

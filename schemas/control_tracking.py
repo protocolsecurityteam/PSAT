@@ -17,11 +17,6 @@ from .contract_analysis import (
 TrackingStrategy = Literal["event_first_with_polling_fallback"]
 PollingCadence = Literal["realtime_confirm", "periodic_reconciliation", "state_only"]
 WatchTransport = Literal["wss_logs"]
-ChangeKind = Literal[
-    "controller_value_changed",
-    "controller_event_observed",
-    "controller_tracking_gap",
-]
 ResolvedControllerType = Literal[
     "zero",
     "eoa",
@@ -94,18 +89,3 @@ class ControlSnapshot(TypedDict):
     contract_name: str
     block_number: int
     controller_values: dict[str, ControlSnapshotValue]
-
-
-class ControlChangeEvent(TypedDict):
-    schema_version: str
-    contract_address: str
-    contract_name: str
-    change_kind: ChangeKind
-    controller_id: str
-    block_number: int
-    tx_hash: str | None
-    old_value: str | None
-    new_value: str | None
-    observed_via: str
-    notes: list[str]
-    event_signature: str | None

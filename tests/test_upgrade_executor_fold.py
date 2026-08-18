@@ -475,9 +475,7 @@ def test_call_targets_distinguish_the_proxies_the_timelock_actually_called(fanou
     assert len(emitters & targets) == 24
     assert sorted(emitters - targets) == sorted(FANOUT_UNTARGETED)
 
-    for address in FANOUT_UNTARGETED:
-        assert uh.executor_call_targeted_proxy(row, address) is False
-    assert uh.executor_call_targeted_proxy(row, PROXY_ETHERFI_NODES_MANAGER) is True
+    assert PROXY_ETHERFI_NODES_MANAGER.lower() in targets
 
 
 # ---------------------------------------------------------------------------
@@ -505,26 +503,22 @@ def test_safe_direct_publishes_no_authoriser_though_receipt_from_is_populated(wo
     assert row.executor_classified_type == "safe"
     # ExecutionSuccess carries no target word.
     assert row.executor_call_targets is None
-    assert uh.executor_call_targeted_proxy(row, PROXY_SAFE_DIRECT) is None
 
     assert row.receipt_from == "0x544bdcbb88f2756000de227580aaad7376f3794e"
     assert not hasattr(row, "authorising_eoa")
     basis = uh.upgrade_action_counts(session, [proxy.id])[proxy.id]["basis"]
     assert basis["authorising_eoa"] == "not_determined"
-    # And the top-level sender is withheld too: the tx's top-level target is
-    # the Safe, not the proxy.
-    assert uh.top_level_msg_sender(row, PROXY_SAFE_DIRECT) is None
 
 
-def test_one_hop_publishes_top_level_sender_and_still_no_authoriser(world, wire):
+def test_one_hop_publishes_no_authoriser(world, wire):
     """``receipt.to == proxy`` is the strongest shape the corpus offers, and it
     is still not authorship.
 
     It proves ``tx.from`` was msg.sender in the TOP-LEVEL frame. It does not
     prove it was msg.sender at the upgrade site (a self-call, a multicall entry
     point or an ERC-2771 path all break that), and it says nothing about what
-    the upgrade's guard reads. So: the narrow fact is published, an
-    ``eoa_one_hop`` executor kind is not, and the authoriser stays unknown.
+    the upgrade's guard reads. So: no ``eoa_one_hop`` executor kind, and the
+    authoriser stays unknown.
     """
     session = world["session"]
     proxy = world["contract"](PROXY_ONE_HOP)
@@ -538,9 +532,7 @@ def test_one_hop_publishes_top_level_sender_and_still_no_authoriser(world, wire)
     assert "eoa_one_hop" not in set(__import__("db.models", fromlist=["EXECUTOR_KINDS"]).EXECUTOR_KINDS)
     assert row.executor_address is None
     assert row.receipt_to == PROXY_ONE_HOP
-
-    assert uh.top_level_msg_sender(row, PROXY_ONE_HOP) == "0xf8a86ea1ac39ec529814c377bd484387d395421e"
-    assert uh.top_level_msg_sender(row, PROXY_SAFE_DIRECT) is None
+    assert row.receipt_from == "0xf8a86ea1ac39ec529814c377bd484387d395421e"
     basis = uh.upgrade_action_counts(session, [proxy.id])[proxy.id]["basis"]
     assert basis["authorising_eoa"] == "not_determined"
 

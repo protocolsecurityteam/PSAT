@@ -979,7 +979,7 @@ def synthesize_from_events(session, contract) -> dict | None:
 #     was msg.sender in the TOP-LEVEL frame; it does not prove it was
 #     msg.sender at the upgrade site (self-call, multicall entry point,
 #     ERC-2771 all break it) and says nothing about what the upgrade's guard
-#     reads. The narrower ``top_level_msg_sender`` is published instead.
+#     reads. Nothing is published for it.
 # ---------------------------------------------------------------------------
 
 NOT_DETERMINED = "not_determined"
@@ -1593,37 +1593,6 @@ def fold_upgrade_transactions(
 # ---------------------------------------------------------------------------
 # Read side — derived per-(tx, proxy) facts and the action-count projection
 # ---------------------------------------------------------------------------
-
-
-def top_level_msg_sender(tx_row, proxy_address: str) -> str | None:
-    """``receipt.from`` — published ONLY where the transaction's top-level
-    target is this proxy, and never as "who authorised".
-
-    Where ``receipt.to == proxy`` the sender provably was ``msg.sender`` in the
-    top-level frame. That is the whole claim. It is not proof the sender was
-    msg.sender at the upgrade site, and it is not proof the upgrade's guard
-    reads msg.sender at all — that is an AST question a receipt cannot answer.
-    """
-    if tx_row is None or not proxy_address:
-        return None
-    if (tx_row.receipt_to or "") != proxy_address.lower():
-        return None
-    return tx_row.receipt_from
-
-
-def executor_call_targeted_proxy(tx_row, proxy_address: str) -> bool | None:
-    """Did the timelock's own ``CallExecuted`` name this proxy as its target?
-
-    ``None`` (not determined) whenever the transaction is not
-    ``timelock_routed`` — a ``ExecutionSuccess`` carries no target word, so for
-    a Safe-direct transaction the answer is unknown, not "no".
-    """
-    if tx_row is None or not proxy_address:
-        return None
-    targets = tx_row.executor_call_targets
-    if not isinstance(targets, list):
-        return None
-    return proxy_address.lower() in {str(t).lower() for t in targets}
 
 
 def event_is_deployment(tx_row, creation_row, *, proxy_address: str, event_block, pair_event_count: int) -> bool:

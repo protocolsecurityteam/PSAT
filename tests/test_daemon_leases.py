@@ -1,8 +1,7 @@
 """Daemon-lease primitive (design §2.4 Layer 1) against the real test Postgres.
 
 No fakes: these drive ``db.queue.try_acquire_daemon_lease`` /
-``renew_daemon_lease`` / ``release_daemon_lease`` over the real
-``daemon_leases`` table. The exclusivity guarantee lives in the
+``renew_daemon_lease`` over the real ``daemon_leases`` table. The exclusivity guarantee lives in the
 ``INSERT ... ON CONFLICT (name) DO UPDATE ... WHERE`` statement, so the
 contention case exercises it through two independent connections.
 """
@@ -17,7 +16,6 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
 from db.queue import (
-    release_daemon_lease,
     renew_daemon_lease,
     try_acquire_daemon_lease,
 )
@@ -97,30 +95,6 @@ def test_holder_reacquire_extends_expiry(lease_session):
     assert _holder(session, name) == holder
 
 
-def test_release_removes_own_row(lease_session):
-    session, created = lease_session
-    name = _lease_name()
-    created.append(name)
-    holder = uuid.uuid4()
-
-    assert try_acquire_daemon_lease(session, name, holder, ttl_seconds=60) is True
-    release_daemon_lease(session, name, holder)
-    assert _holder(session, name) is None
-
-
-def test_release_wrong_holder_noops(lease_session):
-    session, created = lease_session
-    name = _lease_name()
-    created.append(name)
-    holder = uuid.uuid4()
-    other = uuid.uuid4()
-
-    assert try_acquire_daemon_lease(session, name, holder, ttl_seconds=60) is True
-    # Someone who doesn't hold the lease can't delete the real holder's row.
-    release_daemon_lease(session, name, other)
-    assert _holder(session, name) == holder
-
-
 def test_contention_two_connections(lease_session):
     """Two independent sessions prove the ON CONFLICT WHERE is the exclusivity
     guarantee — not any in-process coordination."""
@@ -138,8 +112,8 @@ def test_contention_two_connections(lease_session):
         assert try_acquire_daemon_lease(session_b, name, holder_b, ttl_seconds=60) is False
         assert _holder(session_b, name) == holder_a
 
-        # Once A releases, B can take it from its own connection.
-        release_daemon_lease(session_a, name, holder_a)
+        # Once A's lease expires, B can take it from its own connection.
+        assert try_acquire_daemon_lease(session_a, name, holder_a, ttl_seconds=-5) is True
         assert try_acquire_daemon_lease(session_b, name, holder_b, ttl_seconds=60) is True
         assert _holder(session_a, name) == holder_b
     finally:

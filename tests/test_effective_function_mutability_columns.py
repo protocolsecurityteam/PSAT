@@ -28,7 +28,7 @@ from sqlalchemy import case, func, select, text
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from db.jsonb import JSONB_UNSET, jsonb_state, jsonb_written_null  # noqa: E402
+from db.jsonb import JSONB_UNSET, JSONB_WRITTEN_NULL, jsonb_state  # noqa: E402
 from db.models import Contract, EffectiveFunction  # noqa: E402
 from services.policy.effective_permissions import (  # noqa: E402
     MUTABILITY_FIELDS,
@@ -589,7 +589,7 @@ def test_not_determined_is_sql_null_and_never_the_jsonb_scalar_null(db_session, 
             .select_from(EffectiveFunction)
             .where(
                 EffectiveFunction.contract_id == _contract.id,
-                jsonb_written_null(EffectiveFunction.state_writes),
+                jsonb_state(EffectiveFunction.state_writes) == JSONB_WRITTEN_NULL,
             )
         )
         == 0

@@ -134,13 +134,6 @@ class ClaimContext:
         check for sibling selectors."""
         return {sig.split("(", 1)[0] for sig in self._functions}
 
-    def has_functions(self, *names: str) -> bool:
-        present = self.function_names()
-        return all(name in present for name in names)
-
-    def has_signature(self, signature: str) -> bool:
-        return signature in self._functions
-
     # -- ABI surface (selectors + event topics) -------------------------------
 
     def abi_selectors(self) -> frozenset[str]:
@@ -224,9 +217,6 @@ class ClaimContext:
         """Ids of every ``kind`` sink on ``function`` (stable cross-references
         for a witness)."""
         return [str(s.get("id")) for s in self.sinks(function) if s.get("kind") == kind and s.get("id")]
-
-    def has_sink(self, function: str, kind: str) -> bool:
-        return any(s.get("kind") == kind for s in self.sinks(function))
 
     # -- labels / predicate trees --------------------------------------------
 

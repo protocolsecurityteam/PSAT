@@ -48,16 +48,6 @@ def _normalize(address: str | None) -> str | None:
     return norm
 
 
-def apply_l1_to_l2_alias(l1_address: str | None) -> str | None:
-    """The L2 alias of an L1 address (``L1 + OFFSET mod 2**160``), or ``None`` if
-    *l1_address* is not a well-formed hex address."""
-    norm = _normalize(l1_address)
-    if norm is None:
-        return None
-    aliased = (int(norm, 16) + L1_TO_L2_ALIAS_OFFSET) % _ADDRESS_SPACE
-    return f"0x{aliased:040x}"
-
-
 def undo_l1_to_l2_alias(l2_address: str | None) -> str | None:
     """The L1 address implied by an aliased L2 address (``L2 - OFFSET mod
     2**160``), or ``None`` if *l2_address* is not a well-formed hex address.

@@ -479,9 +479,6 @@ class PostgresEventLogRepo:
             return None
         return min(block for block, _ in states if block is not None)
 
-    def _cursor_block(self, chain_id: int, event_address: str, topic0: str) -> int | None:
-        return self._cursor_state(chain_id, event_address, topic0)[0]
-
     def _cursor_state(self, chain_id: int, event_address: str, topic0: str) -> tuple[int | None, bool]:
         """``(last_indexed_block, backfill_complete)`` for one cursor, or
         ``(None, False)`` when no cursor exists.

@@ -449,10 +449,6 @@ class TestAnvilProxyCache:
 
         # Mock non-classification parts of _run_dependency_phase
         monkeypatch.setattr(
-            "workers.static_worker._resolve_dynamic_deps",
-            lambda *a, **kw: (None, "mocked"),
-        )
-        monkeypatch.setattr(
             "workers.static_worker.build_unified_dependencies",
             lambda *a, **kw: {"target_address": target_addr, "dependencies": {}},
         )

@@ -177,10 +177,6 @@ def test_claim_context_accessors():
     ctx = ClaimContext(contract=None, effects=_facts(), predicate_trees=trees)
     assert ctx.function_signatures() == ["deploy()", "ping()"]
     assert ctx.function_names() == {"deploy", "ping"}
-    assert ctx.has_functions("deploy", "ping")
-    assert not ctx.has_functions("deploy", "missing")
-    assert ctx.has_signature("deploy()")
-    assert ctx.has_sink("deploy()", "contract_creation")
     assert ctx.sink_ids("deploy()", "contract_creation") == ["deploy():sink0:contract_creation:Child"]
     assert ctx.sink_ids("ping()", "contract_creation") == []
     assert ctx.effect_labels("deploy()") == ["contract_deployment"]

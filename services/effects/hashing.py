@@ -207,27 +207,3 @@ def contract_surface_hash(
     code = _mask_immutables(_to_bytes(runtime_bytecode), immutable_references)
     code = _strip_metadata(code)
     return _digest("csh", code.hex())
-
-
-# ---------------------------------------------------------------------------
-# Item 3 — source-content fast path (sound only when NOT overridden + single
-# hashed file). A fast path on top of item 1, never a substitute.
-# ---------------------------------------------------------------------------
-
-
-def source_content_fast_path_hash(
-    source_text: str,
-    *,
-    is_overridden: bool,
-    single_file: bool,
-) -> str | None:
-    """§7 item 3 — hash the defining unit's source directly, but only when the
-    function is *provably not overridden* and lives *wholly in one hashed file*.
-
-    Returns ``None`` when either precondition fails; the caller MUST then fall
-    back to :func:`resolved_function_hash`. Encoding the soundness precondition
-    here — rather than trusting the call site — keeps the fast path from ever
-    silently merging an override with its mixin default."""
-    if is_overridden or not single_file:
-        return None
-    return _digest("sch", source_text)

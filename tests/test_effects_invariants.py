@@ -45,7 +45,6 @@ from services.effects.hashing import resolved_function_hash  # noqa: E402
 from services.effects.preflight import (  # noqa: E402
     InMemoryCapabilityStore,
     probe_simulate_support,
-    require_simulate_or_fallback,
 )
 from services.effects.selection import AuthorityGraph, select_candidates  # noqa: E402
 from tests.cache_helpers import requires_postgres  # noqa: E402
@@ -459,8 +458,8 @@ def test_inv13_tier0_needs_current_state_check():
 
 def test_inv14_capabilities_probed_not_assumed():
     store = InMemoryCapabilityStore()
-    # Unprobed chain is fail-closed (never assumed supported).
-    assert require_simulate_or_fallback(store, 999) is False
+    # An unprobed chain records nothing — never a support claim.
+    assert store.get_simulate_support(999) is None
     from services.effects.simulate import SimResult
 
     assert probe_simulate_support(ScriptedSimulate(SimResult(calls=(ok(),))), 1, store) is True

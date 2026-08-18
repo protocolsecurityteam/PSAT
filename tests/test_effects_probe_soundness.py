@@ -252,7 +252,7 @@ def test_a_reverted_upgrade_probe_is_not_impl_slot_unchanged():
         principal=PRINCIPAL,
         upgrade_calldata=_calldata("upgradeTo(address)", SENTINEL),
         sentinel_address=SENTINEL,
-        sentinel_override=recipes.transparent_sentinel_override(SENTINEL),
+        sentinel_override={"code": "0x00"},
         impl_before=old_impl,
     )
     assert eff.verdict == VERDICT_UNKNOWN

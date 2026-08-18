@@ -259,6 +259,6 @@ def test_crawler_captures_interactions_and_addresses_from_fake_dapp(tmp_path, fa
     assert "apiResponse" in interaction_types
     assert "jsBundle" in interaction_types
 
-    txs = log.get_transactions()
+    txs = [i for i in log.interactions if i.type == "sendTransaction"]
     assert len(txs) == 2
     assert {tx.to for tx in txs} == {addresses["deposit_tx"], addresses["stake_tx"]}

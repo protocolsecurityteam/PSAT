@@ -72,10 +72,3 @@ def probe_simulate_support(
         supported = False
     store.set_simulate_support(chain_id, supported)
     return supported
-
-
-def require_simulate_or_fallback(store: CapabilityStore, chain_id: int) -> bool:
-    """Whether a Tier-1 simulate recipe may run on ``chain_id``. ``False`` is a
-    fail-closed default (unprobed ⇒ do not assume support): the caller routes to
-    the explicit Tier-2 fallback and records that in the verdict reason."""
-    return store.get_simulate_support(chain_id) is True

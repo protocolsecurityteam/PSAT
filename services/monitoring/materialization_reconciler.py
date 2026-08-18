@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from db.contract_materializations import ANALYSIS_SCHEMA_VERSION, builder_claim_is_stale
@@ -193,18 +193,6 @@ def _rebuild_jobs_since(session: Session, since: datetime) -> list[Job]:
         )
         .scalars()
         .all()
-    )
-
-
-def count_rebuilds_queued_since(session: Session, since: datetime) -> int:
-    """Reconciler-issued jobs created since *since* — the budget already spent."""
-    return (
-        session.execute(
-            select(func.count())
-            .select_from(Job)
-            .where(Job.created_at >= since, Job.request[REBUILD_REQUEST_KEY].astext == "true")
-        ).scalar()
-        or 0
     )
 
 

@@ -145,13 +145,3 @@ def test_rpc_batch_request_merges_erpc_directive_headers(monkeypatch):
     headers = mocked_post.call_args.kwargs["headers"]
     assert headers[rpc.ERPC_SECRET_HEADER] == "secret-token"
     assert headers["X-ERPC-Skip-Cache-Read"] == "true"
-
-
-def test_erpc_healthcheck_urls(monkeypatch):
-    monkeypatch.setenv("ERPC_BASE_URL", "https://erpc-proxy.example/")
-
-    assert rpc.erpc_healthcheck_url() == "https://erpc-proxy.example/healthcheck"
-    assert (
-        rpc.erpc_healthcheck_url(1, eval_chain_id=True)
-        == "https://erpc-proxy.example/main/evm/1/healthcheck?eval=all:evm:eth_chainId"
-    )

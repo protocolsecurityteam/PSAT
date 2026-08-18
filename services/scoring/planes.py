@@ -402,15 +402,6 @@ class ValuePlane:
             return EMPTY_REFUSED_UNPRICED_POSITIONS
         return None
 
-    def asset_is_disposed(self, key: str, asset: str) -> bool:
-        """Whether THIS reading's every incoming delivery was a mass distribution.
-
-        Read at the canonical key, like every other sheet question. ``False`` is
-        the absence of the evidence and never a proof that the asset arrived
-        some other way.
-        """
-        return asset in (self.asset_disposition.get(self.canonical(key)) or {})
-
     def disposition_refusal(self, key: str) -> str | None:
         """Why this sheet's dispositions may not DETERMINE it, or ``None``.
 

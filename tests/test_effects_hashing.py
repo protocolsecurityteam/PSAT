@@ -21,7 +21,6 @@ from services.effects.hashing import (
     bytecode_fallback_hash,
     contract_surface_hash,
     resolved_function_hash,
-    source_content_fast_path_hash,
 )
 
 # ---------------------------------------------------------------------------
@@ -209,22 +208,6 @@ def test_contract_surface_hash_is_selectorless_and_masks():
     a = prefix + b"\xaa\xbb\xcc\xdd" + b"\xfe"
     b = prefix + b"\x00\x11\x22\x33" + b"\xfe"
     assert contract_surface_hash(a, immutable_references=refs) == contract_surface_hash(b, immutable_references=refs)
-
-
-# ---------------------------------------------------------------------------
-# Item 3 — source-content fast path soundness precondition.
-# ---------------------------------------------------------------------------
-
-
-def test_source_fast_path_refuses_when_overridden_or_multifile():
-    src = "function f() { paused = true; }"
-    assert source_content_fast_path_hash(src, is_overridden=True, single_file=True) is None
-    assert source_content_fast_path_hash(src, is_overridden=False, single_file=False) is None
-    ok = source_content_fast_path_hash(src, is_overridden=False, single_file=True)
-    assert isinstance(ok, str) and ok
-    # Stable and content-sensitive.
-    assert ok == source_content_fast_path_hash(src, is_overridden=False, single_file=True)
-    assert ok != source_content_fast_path_hash(src + " ", is_overridden=False, single_file=True)
 
 
 # ---------------------------------------------------------------------------

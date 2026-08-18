@@ -320,52 +320,6 @@ def _merge_dynamic_deps(prev: dict, new: dict) -> dict:
     }
 
 
-def _resolve_dynamic_deps(
-    session,
-    job,
-    address: str,
-    dynamic_rpc: str | None,
-    tx_limit: int,
-    tx_hashes: list[str] | None,
-    proxy_addr: str | None,
-    code_cache: dict[str, str],
-) -> tuple[dict | None, str | None]:
-    """Load cached dynamic deps, discover new ones, merge, and persist.
-
-    Returns ``(dyn_output, error_string)``.  On success *error_string* is
-    ``None``.  When previous deps exist and no new transactions are found,
-    the previous output is returned as-is (not an error).
-    """
-    prev_dyn = _load_prev_dynamic_deps(session, job, tx_hashes)
-    start_block = _start_block_from_prev_dyn(prev_dyn)
-    # Chain from ``jobs.chain_id`` (via ``_parent_chain_name``): the txlist fetch
-    # must run on the contract's own chain, not a mainnet default (F2).
-    chain_id = require_chain(chain=_parent_chain_name(job), context="dynamic deps").chain_id
-    try:
-        dyn_output = find_dynamic_dependencies(
-            address,
-            rpc_url=dynamic_rpc,
-            tx_limit=tx_limit,
-            tx_hashes=tx_hashes,
-            proxy_address=proxy_addr,
-            code_cache=code_cache,
-            start_block=start_block,
-            chain_id=chain_id,
-        )
-    except NoNewTransactionsError:
-        if prev_dyn:
-            store_artifact(session, job.id, "dynamic_dependencies", data=prev_dyn)
-            return prev_dyn, None
-        return None, "No representative transactions found"
-    except Exception as exc:
-        return None, str(exc)
-
-    if prev_dyn and not tx_hashes:
-        dyn_output = _merge_dynamic_deps(prev_dyn, dyn_output)
-    store_artifact(session, job.id, "dynamic_dependencies", data=dyn_output)
-    return dyn_output, None
-
-
 def _load_prev_dynamic_deps(session, job, tx_hashes: list[str] | None) -> dict | None:
     """Read the persisted dynamic_dependencies artifact, if any. Tx-hash overrides skip the cache."""
     if tx_hashes:

@@ -126,10 +126,6 @@ def clean_scalar_writes(ctx: ClaimContext, function: str) -> set[str]:
     return out
 
 
-def writes_state_var(ctx: ClaimContext, function: str, name: str) -> bool:
-    return name in clean_scalar_writes(ctx, function)
-
-
 def _cache(ctx: ClaimContext) -> dict[str, Any]:
     cache = getattr(ctx, "_auth_family_cache", None)
     if cache is None:

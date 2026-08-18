@@ -30,12 +30,3 @@ def test_get_contract_addresses():
     assert len(addresses) == 2
     assert "0xaaa" in addresses
     assert "0xbbb" in addresses
-
-
-def test_get_permits():
-    log = InteractionLog()
-    log.add({"type": "signTypedData", "url": "a", "timestamp": 1, "isPermit": True})
-    log.add({"type": "signTypedData", "url": "b", "timestamp": 2, "isPermit": False})
-
-    permits = log.get_permits()
-    assert len(permits) == 1

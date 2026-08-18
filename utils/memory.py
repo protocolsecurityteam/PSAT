@@ -19,12 +19,10 @@ _PROC_MEMINFO = Path("/proc/meminfo")
 # cgroup v2 paths (modern hosts)
 _CGROUP_V2_MAX = Path("/sys/fs/cgroup/memory.max")
 _CGROUP_V2_CURRENT = Path("/sys/fs/cgroup/memory.current")
-_CGROUP_V2_PEAK = Path("/sys/fs/cgroup/memory.peak")
 
 # cgroup v1 paths (Fly machines as of 2026, plus older Linux containers)
 _CGROUP_V1_MAX = Path("/sys/fs/cgroup/memory/memory.limit_in_bytes")
 _CGROUP_V1_CURRENT = Path("/sys/fs/cgroup/memory/memory.usage_in_bytes")
-_CGROUP_V1_PEAK = Path("/sys/fs/cgroup/memory/memory.max_usage_in_bytes")
 
 # v1 unset-sentinel: kernel reports a near-2^63 value when no limit is set
 # at this level (the actual cap lives on a parent cgroup). Treat anything
@@ -110,15 +108,6 @@ def cgroup_memory_current_bytes() -> int | None:
     if total_kb is not None and avail_kb is not None:
         return (total_kb - avail_kb) * 1024
     return None
-
-
-def cgroup_memory_peak_bytes() -> int | None:
-    """High-water mark of cgroup memory since boot. cgroup v2 → cgroup v1.
-    /proc/meminfo doesn't track this, so falls through to None."""
-    v2 = _read_cgroup_int(_CGROUP_V2_PEAK)
-    if v2 is not None:
-        return v2
-    return _read_cgroup_int(_CGROUP_V1_PEAK)
 
 
 def count_sibling_python_procs() -> int:
