@@ -541,8 +541,8 @@ def test_reenroll_route_marks_dirty(api_client, db_session, monkeypatch):
 
     api_module.app.dependency_overrides[require_admin_key] = lambda: None
     monkeypatch.setattr("services.monitoring.enrollment.rpc_request", lambda *a, **kw: "0x100")
+    proto = Protocol(name=NAME_PREFIX + "reenroll")
     try:
-        proto = Protocol(name=NAME_PREFIX + "reenroll")
         db_session.add(proto)
         db_session.commit()
 
@@ -566,9 +566,9 @@ def test_add_audit_route_marks_dirty(api_client, db_session):
     from routers.deps import require_admin_key
 
     api_module.app.dependency_overrides[require_admin_key] = lambda: None
+    name = NAME_PREFIX + "audit"
+    proto = Protocol(name=name)
     try:
-        name = NAME_PREFIX + "audit"
-        proto = Protocol(name=name)
         db_session.add(proto)
         db_session.commit()
 

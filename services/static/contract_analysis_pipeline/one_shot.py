@@ -39,23 +39,18 @@ from __future__ import annotations
 import logging
 from typing import Any, cast
 
-try:
-    from slither.core.cfg.node import NodeType  # type: ignore[import]
-    from slither.slithir.operations import (  # type: ignore[import]
-        Assignment,
-        Delete,
-        HighLevelCall,
-        InternalCall,
-        LibraryCall,
-        SolidityCall,
-    )
-    from slither.slithir.variables import Constant  # type: ignore[import]
-
-    SLITHER_AVAILABLE = True
-except Exception:  # pragma: no cover
-    SLITHER_AVAILABLE = False
-
 from .predicate_types import LeafPredicate, PredicateTree
+from .slither_compat import (
+    SLITHER_AVAILABLE,
+    Assignment,
+    Constant,
+    Delete,
+    HighLevelCall,
+    InternalCall,
+    LibraryCall,
+    NodeType,
+    SolidityCall,
+)
 
 logger = logging.getLogger(__name__)
 

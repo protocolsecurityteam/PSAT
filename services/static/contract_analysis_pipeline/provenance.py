@@ -29,44 +29,37 @@ from typing import Any, Iterable
 
 from eth_utils.crypto import keccak
 
-# Slither IR types — imported lazily where they aren't part of the
-# module's public surface so this file remains importable in test
-# environments without solc.
-
-try:
-    from slither.core.declarations import SolidityVariable  # type: ignore[import]
-    from slither.core.variables import Variable  # type: ignore[import]
-    from slither.core.variables.local_variable import LocalVariable  # type: ignore[import]
-    from slither.core.variables.state_variable import StateVariable  # type: ignore[import]
-    from slither.slithir.operations import (  # type: ignore[import]
-        Assignment,
-        Binary,
-        HighLevelCall,
-        Index,
-        InternalCall,
-        Length,
-        LibraryCall,
-        LowLevelCall,
-        Member,
-        NewArray,
-        NewContract,
-        NewElementaryType,
-        OperationWithLValue,
-        Phi,
-        Return,
-        Send,
-        SolidityCall,
-        Transfer,
-        TypeConversion,
-        Unary,
-        Unpack,
-    )
-    from slither.slithir.variables import Constant, ReferenceVariable, TemporaryVariable  # type: ignore[import]
-
-    SLITHER_AVAILABLE = True
-except Exception:  # pragma: no cover — only when slither unavailable
-    SLITHER_AVAILABLE = False
-
+from .slither_compat import (
+    SLITHER_AVAILABLE,
+    Assignment,
+    Binary,
+    Constant,
+    HighLevelCall,
+    Index,
+    InternalCall,
+    Length,
+    LibraryCall,
+    LocalVariable,
+    LowLevelCall,
+    Member,
+    NewArray,
+    NewContract,
+    NewElementaryType,
+    OperationWithLValue,
+    Phi,
+    ReferenceVariable,
+    Return,
+    Send,
+    SolidityCall,
+    SolidityVariable,
+    StateVariable,
+    TemporaryVariable,
+    Transfer,
+    TypeConversion,
+    Unary,
+    Unpack,
+    Variable,
+)
 
 # ---------------------------------------------------------------------------
 # Source record — one origin tag for an SSA value.

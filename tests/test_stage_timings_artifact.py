@@ -267,7 +267,7 @@ def test_record_timing_runs_before_advance_in_run_loop(monkeypatch):
         next_stage = JobStage.static
         poll_interval = 0.0
 
-        def process(self, _session, _job):
+        def process(self, session, job):
             call_order.append("process")
 
         def _record_stage_timing(self, *_a, **_kw):
@@ -342,7 +342,7 @@ def test_run_loop_folds_recorded_metrics_into_artifact(monkeypatch):
         next_stage = JobStage.resolution
         poll_interval = 0.0
 
-        def process(self, _session, _job):
+        def process(self, session, job):
             record_stage_metric("dependencies", 5)
             record_stage_metric("is_proxy", True)
 

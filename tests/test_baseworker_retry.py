@@ -83,7 +83,7 @@ class _ConfigurableWorker(BaseWorker):
         self.side_effect = side_effect
         self.calls = 0
 
-    def process(self, _session, _job):
+    def process(self, session, job):
         self.calls += 1
         outcome = self.side_effect(self.calls)
         if isinstance(outcome, BaseException):

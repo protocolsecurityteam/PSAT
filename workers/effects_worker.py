@@ -977,6 +977,7 @@ class EffectsWorker(BaseWorker):
 
             # Pass 2: one composite verdict lookup for the whole plan set
             # (collapses the per-plan single-row SELECTs), then assemble items.
+            verdicts: dict[tuple[str, str, str, str, str], EffectBehaviorCache] = {}
             if batched:
                 verdicts = find_cached_verdicts_batch(
                     session,

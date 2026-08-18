@@ -48,24 +48,19 @@ from __future__ import annotations
 
 from typing import Any, Literal, TypedDict
 
-try:
-    from slither.core.cfg.node import NodeType  # type: ignore[import]
-    from slither.slithir.operations import (  # type: ignore[import]
-        Assignment,
-        Binary,
-        BinaryType,
-        InternalCall,
-        LibraryCall,
-        SolidityCall,
-        Unary,
-    )
-
-    SLITHER_AVAILABLE = True
-except Exception:  # pragma: no cover
-    SLITHER_AVAILABLE = False
-
 from .predicate_types import LeafPredicate, PredicateTree
 from .shared import _all_modifiers, _all_state_variables
+from .slither_compat import (
+    SLITHER_AVAILABLE,
+    Assignment,
+    Binary,
+    BinaryType,
+    InternalCall,
+    LibraryCall,
+    NodeType,
+    SolidityCall,
+    Unary,
+)
 
 GuardKind = Literal["reentrancy", "pause"]
 

@@ -80,7 +80,7 @@ class _FakeDappHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def log_message(self, _format: str, *args) -> None:
+    def log_message(self, format: str, *args) -> None:
         return
 
 

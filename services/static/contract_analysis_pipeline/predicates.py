@@ -24,42 +24,6 @@ follow-ups (this commit lays the scaffold + the two most common kinds).
 
 from __future__ import annotations
 
-import os
-from typing import Any, cast
-
-from eth_utils.crypto import keccak
-
-from .shared import external_bool_leaf_is_gate_shape
-
-try:
-    from slither.core.declarations import SolidityVariable  # type: ignore[import]
-    from slither.core.variables.state_variable import StateVariable  # type: ignore[import]
-    from slither.core.variables.variable import Variable  # type: ignore[import]
-    from slither.slithir.operations import (  # type: ignore[import]
-        Assignment,
-        Binary,
-        Condition,
-        HighLevelCall,
-        Index,
-        InternalCall,
-        LibraryCall,
-        LowLevelCall,
-        Member,
-        Phi,
-        Return,
-        Send,
-        SolidityCall,
-        Transfer,
-        Unary,
-        UnaryType,
-        Unpack,
-    )
-    from slither.slithir.variables import Constant, ReferenceVariable  # type: ignore[import]
-
-    SLITHER_AVAILABLE = True
-except Exception:  # pragma: no cover
-    SLITHER_AVAILABLE = False
-
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -82,6 +46,10 @@ except Exception:  # pragma: no cover
 # the engine as before (correctness is identical either way; the
 # cache is a pure perf optimization).
 import contextvars as _contextvars  # noqa: E402
+import os
+from typing import Any, cast
+
+from eth_utils.crypto import keccak
 
 from .predicate_types import (
     AuthorityRole,
@@ -108,6 +76,32 @@ from .provenance import (
     is_top,
 )
 from .revert_detect import DEFAULT_INTERNAL_CALL_DEPTH, Polarity, RevertDetector, RevertGate
+from .shared import external_bool_leaf_is_gate_shape
+from .slither_compat import (
+    SLITHER_AVAILABLE,
+    Assignment,
+    Binary,
+    Condition,
+    Constant,
+    HighLevelCall,
+    Index,
+    InternalCall,
+    LibraryCall,
+    LowLevelCall,
+    Member,
+    Phi,
+    ReferenceVariable,
+    Return,
+    Send,
+    SolidityCall,
+    SolidityVariable,
+    StateVariable,
+    Transfer,
+    Unary,
+    UnaryType,
+    Unpack,
+    Variable,
+)
 
 _helper_engine_cache: _contextvars.ContextVar[dict | None] = _contextvars.ContextVar(
     "psat_predicate_helper_engine_cache", default=None

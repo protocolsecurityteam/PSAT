@@ -408,7 +408,7 @@ def raw_balance_text(value: Any) -> str | None:
         exact = Decimal(str(value))
         whole = int(exact)
     except (ArithmeticError, TypeError, ValueError):
-        whole = None
+        exact, whole = None, None
     if whole is not None and exact == whole:
         return str(whole)
     text = str(value).strip()

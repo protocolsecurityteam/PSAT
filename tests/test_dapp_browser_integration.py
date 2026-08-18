@@ -172,7 +172,7 @@ class _FakeDappHandler(BaseHTTPRequestHandler):
             return
         self._send(404, "text/plain; charset=utf-8", "not found")
 
-    def log_message(self, _format: str, *args) -> None:
+    def log_message(self, format: str, *args) -> None:
         return
 
     def _send(self, status: int, content_type: str, body: str) -> None:

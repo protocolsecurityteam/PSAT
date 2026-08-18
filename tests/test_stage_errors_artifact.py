@@ -53,7 +53,7 @@ class _FailingWorker(BaseWorker):
         self.raise_after_degraded = raise_after_degraded
         self.n_degraded = n_degraded
 
-    def process(self, _session, _job):
+    def process(self, session, job):
         for i in range(self.n_degraded):
             try:
                 raise RuntimeError(f"degraded {i}")
@@ -175,7 +175,7 @@ def test_fresh_session_fail_path_persists_artifact(db_session, test_session_loca
         next_stage = JobStage.static
         poll_interval = 0.0
 
-        def process(self, session, _job):
+        def process(self, session, job):
             session.close()
             raise RuntimeError("session-poisoned")
 
