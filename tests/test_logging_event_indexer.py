@@ -11,11 +11,15 @@ from __future__ import annotations
 import logging
 import os
 from contextlib import nullcontext
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
 from services.resolution.repos import event_logs_pg
 from utils.logging import stage_metrics_var, worker_id_var
+
+if TYPE_CHECKING:
+    from sqlalchemy.orm import Session
 from workers.event_log_indexer import (
     ScanSummary,
     _heartbeat_status_for_pass,
@@ -253,7 +257,7 @@ def test_probe_code_failure_is_visible_and_still_over_enrolls(monkeypatch, caplo
     monkeypatch.setattr(indexer, "resolve_probe_code", _boom)
 
     with caplog.at_level(logging.WARNING, logger="workers.event_log_indexer"):
-        topics = indexer._role_store_topic0s(object(), _ADDR, 1, {})
+        topics = indexer._role_store_topic0s(cast("Session", object()), _ADDR, 1, {})
 
     assert topics == indexer.all_topic0s()
     record = next(r for r in caplog.records if r.levelno == logging.WARNING)

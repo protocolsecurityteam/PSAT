@@ -18,6 +18,7 @@ import subprocess
 import sys
 from decimal import Decimal
 from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
@@ -31,6 +32,11 @@ from services.effects.anvil import _OUTPUT_TAIL_LINES, SubprocessAnvil  # noqa: 
 from services.effects.exceptions import AnvilSpawnError  # noqa: E402
 from services.effects.selection import Candidate  # noqa: E402
 from utils.logging import degraded_errors_var, stage_metrics_var  # noqa: E402
+
+if TYPE_CHECKING:
+    from sqlalchemy.orm import Session
+
+    from services.effects.anvil import AnvilTransport
 
 ANVIL_LOGGER = "services.effects.anvil"
 CALLDATA_LOGGER = "services.effects.calldata"
@@ -172,7 +178,7 @@ def test_contract_facts_lookup_failure_warns_and_records_degraded(monkeypatch, c
     token = degraded_errors_var.set(accumulator)
     try:
         with caplog.at_level(logging.WARNING, logger=CALLDATA_LOGGER):
-            assert calldata_mod._load_contract_facts_uncached(None, "0x" + "ab" * 20) is None
+            assert calldata_mod._load_contract_facts_uncached(cast("Session", None), "0x" + "ab" * 20) is None
     finally:
         degraded_errors_var.reset(token)
 
@@ -199,7 +205,7 @@ def test_uint_call_failure_logs_the_zero_it_passes(caplog):
             raise RuntimeError("fork gone")
 
     with caplog.at_level(logging.DEBUG, logger=ORCH_LOGGER):
-        assert orch_mod._uint_call(_Boom(), "0x" + "11" * 20, "0xf27a0c92") == 0
+        assert orch_mod._uint_call(cast("AnvilTransport", _Boom()), "0x" + "11" * 20, "0xf27a0c92") == 0
 
     rec = next(r for r in caplog.records if r.name == ORCH_LOGGER)
     assert rec.levelno == logging.DEBUG
@@ -226,7 +232,7 @@ def test_proxy_without_implementation_records_degraded(monkeypatch, caplog):
     token = degraded_errors_var.set(accumulator)
     try:
         with caplog.at_level(logging.WARNING, logger=ORCH_LOGGER):
-            assert orch_mod._hashable_code_address(None, candidate) is None
+            assert orch_mod._hashable_code_address(cast("Session", None), candidate) is None
     finally:
         degraded_errors_var.reset(token)
 
