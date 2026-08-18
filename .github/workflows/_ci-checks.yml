@@ -171,8 +171,28 @@ jobs:
           uv run solc-select install 0.8.27
           uv run solc-select install 0.8.25
           uv run solc-select use 0.8.27
+      # The browser download (Playwright CDN) and the --with-deps apt run both
+      # stall intermittently on hosted runners, and a stalled connection has no
+      # read timeout — an unbounded step then wedges the job for hours. Cache
+      # the browser store keyed on the locked Playwright version so most runs
+      # skip the download entirely, and bound + retry the install so a stall
+      # costs minutes, not the job.
+      - name: Cache Playwright browser
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('uv.lock') }}
       - name: Install Playwright browser
-        run: uv run playwright install --with-deps chromium
+        timeout-minutes: 12
+        run: |
+          for attempt in 1 2 3; do
+            if timeout 210 uv run playwright install --with-deps chromium; then
+              exit 0
+            fi
+            echo "playwright install attempt ${attempt} failed or stalled; retrying"
+          done
+          echo "playwright install failed after 3 attempts"
+          exit 1
       - name: Create test database
         run: PGPASSWORD=psat psql -h localhost -U psat -d psat -c "CREATE DATABASE psat_test OWNER psat;"
 
