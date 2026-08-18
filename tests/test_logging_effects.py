@@ -185,7 +185,12 @@ def test_contract_facts_lookup_failure_warns_and_records_degraded(monkeypatch, c
     rec = next(r for r in caplog.records if r.name == CALLDATA_LOGGER)
     assert rec.levelno == logging.WARNING
     assert rec.exc_type == "RuntimeError"
+    # NOT ``address``: the formatter writes the ambient (job) address contextvar
+    # first and drops a colliding extra, which would lose the real datum.
+    assert rec.contract_address == "0x" + "ab" * 20
+    assert not hasattr(rec, "address")
     assert [e.phase for e in accumulator] == ["effects_calldata_facts"]
+    assert accumulator[0].context["contract_address"] == "0x" + "ab" * 20
 
 
 def test_encode_calldata_failure_logs_debug_with_selector(caplog):
@@ -213,7 +218,11 @@ def test_uint_call_failure_logs_the_zero_it_passes(caplog):
     assert rec.exc_type == "RuntimeError"
 
 
-def test_proxy_without_implementation_records_degraded(monkeypatch, caplog):
+def test_proxy_without_implementation_warns_and_leaves_the_record_to_the_worker(monkeypatch, caplog):
+    """The skip is witnessed ONCE, in the worker's receiving arm where it is
+    capped. Recording here too would double every entry of a shortfall the
+    dedup race produces in bulk."""
+
     class _Contract:
         is_proxy = True
         implementation = ""
@@ -240,7 +249,7 @@ def test_proxy_without_implementation_records_degraded(monkeypatch, caplog):
     assert rec.levelno == logging.WARNING
     assert rec.contract_id == 3
     assert rec.function_id == 7
-    assert [e.phase for e in accumulator] == ["effects_proxy_without_implementation"]
+    assert accumulator == [], "the refusing helper must not double-record the worker's capped skip"
 
 
 def test_undecodable_stage_timing_body_pairs_with_record_degraded(monkeypatch, caplog):
@@ -287,9 +296,12 @@ def test_static_setter_var_scan_failure_records_degraded():
 
     accumulator: list = []
     token = degraded_errors_var.set(accumulator)
+    # A fresh instance, so the memo (keyed on the contract OBJECT) cannot serve
+    # this call from an earlier one.
+    contract = _Contract()
+    assert contract not in static_effects._SETTER_VARS
     try:
-        static_effects._SETTER_VARS.pop(_Contract, None)
-        assert static_effects._setter_state_vars(_Contract()) == {}
+        assert static_effects._setter_state_vars(contract) == {}
     finally:
         degraded_errors_var.reset(token)
 
@@ -490,17 +502,13 @@ def test_selectionless_job_still_reports_a_defined_funnel():
     assert funnel["not_run_reason"] == "job_has_no_protocol"
 
 
-def test_unmeasured_rss_is_never_published_as_zero(caplog):
-    """A failed sample must not publish ``peak_anvil_rss_mb=0`` — that is a
-    fallback standing in for a witness."""
+def _rss_outcome(anvil, caplog):
+    """Drive two samples through the worker and hand back (counters, records,
+    degraded records, published metrics)."""
     from workers.effects_worker import EffectsWorker, _Counters
 
-    class _Anvil:
-        def rss_mb(self):
-            raise OSError("/proc gone")
-
     worker = EffectsWorker.__new__(EffectsWorker)
-    worker._anvil = _Anvil()
+    worker._anvil = anvil
     worker._rss_sample_failed = False
     counters = _Counters()
     accumulator: list = []
@@ -512,21 +520,70 @@ def test_unmeasured_rss_is_never_published_as_zero(caplog):
     finally:
         degraded_errors_var.reset(token)
 
-    records = [r for r in caplog.records if r.name == WORKER_LOGGER]
-    assert len(records) == 1, "the once-per-job guard did not hold"
-    assert records[0].levelno == logging.WARNING
-    assert records[0].exc_type == "OSError"
-    assert [e.phase for e in accumulator] == ["effects_rss_sample"]
-    assert counters.peak_anvil_rss_mb is None
-
     metrics: dict = {}
     mtoken = stage_metrics_var.set(metrics)
     try:
         worker._record_metrics(counters)
     finally:
         stage_metrics_var.reset(mtoken)
+    return counters, [r for r in caplog.records if r.name == WORKER_LOGGER], accumulator, metrics
+
+
+def test_a_dead_fork_publishes_no_rss_peak_at_all(caplog):
+    """THE regression, end to end through the REAL transport: a fork that died
+    before the first sample reads 0 bytes out of ``rss_bytes_for_pid`` (which
+    never raises), and publishing that 0 would be a fallback standing in for a
+    witness."""
+    import os
+
+    class _ExitedProc:
+        pid = os.getpid()
+
+        def poll(self):
+            return 0
+
+    dead_fork = SubprocessAnvil.__new__(SubprocessAnvil)
+    dead_fork._proc = _ExitedProc()  # type: ignore[attr-defined]
+    counters, records, accumulator, metrics = _rss_outcome(dead_fork, caplog)
+
+    assert counters.peak_anvil_rss_mb is None
     assert metrics["peak_anvil_rss_measured"] is False
     assert "peak_anvil_rss_mb" not in metrics
+    assert len(records) == 1, "the once-per-job guard did not hold"
+    assert records[0].levelno == logging.WARNING
+    assert records[0].reason == "read_did_not_answer"
+    assert [e.phase for e in accumulator] == ["effects_rss_sample"]
+
+
+def test_the_transport_reports_a_dead_or_unreadable_fork_as_unknown():
+    """The 0→``None`` normalization lives in ``rss_mb`` itself, so every caller
+    gets "not known" instead of a zero that looks measured."""
+    import os
+
+    class _Exited:
+        pid = os.getpid()
+
+        def poll(self):
+            return 0
+
+    anvil = SubprocessAnvil.__new__(SubprocessAnvil)
+    anvil._proc = _Exited()  # type: ignore[attr-defined]
+    assert anvil.rss_mb() is None
+
+
+def test_raising_sampler_is_still_treated_as_unmeasured(caplog):
+    class _Boom:
+        def rss_mb(self):
+            raise OSError("/proc gone")
+
+    counters, records, accumulator, metrics = _rss_outcome(_Boom(), caplog)
+
+    assert counters.peak_anvil_rss_mb is None
+    assert metrics["peak_anvil_rss_measured"] is False
+    assert len(records) == 1
+    assert records[0].reason == "sampler_raised"
+    assert records[0].exc_type == "OSError"
+    assert [e.phase for e in accumulator] == ["effects_rss_sample"]
 
 
 def test_measured_rss_publishes_the_peak():

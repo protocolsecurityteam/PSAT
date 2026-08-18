@@ -867,8 +867,18 @@ class SubprocessAnvil:
         # cycles per job from accumulating threads or descriptors.
         drain = self._drain
         self._drain = None
-        if drain is not None:
+        # ``ident`` is None until the thread actually started — joining one that
+        # never started raises, and this must not mask the failure that brought
+        # us here nor skip the fd cleanup below.
+        if drain is not None and drain.ident is not None:
             drain.join(timeout=_DRAIN_JOIN_TIMEOUT_S)
+            if drain.is_alive():
+                # The process survived even SIGKILL, so the reader is still
+                # blocked in ``read`` holding the buffer lock: ``close()`` would
+                # wait on that lock forever and hang the job thread. The fd
+                # leaks with the unkillable process — the lesser of the two, and
+                # the WARNING above already named it.
+                return
         if self._proc.stdout is not None:
             try:
                 self._proc.stdout.close()
@@ -881,13 +891,20 @@ class SubprocessAnvil:
     def __exit__(self, *_exc: object) -> None:
         self.close()
 
-    def rss_mb(self) -> int:
-        """Resident set size of the anvil subprocess in whole MB; 0 if it has
-        exited (poll reaps it, so a reused pid is never sampled) or /proc is
-        unreadable. Never raises — RSS sampling must not fail a probe."""
+    def rss_mb(self) -> int | None:
+        """Resident set size of the anvil subprocess in whole MB, or ``None``
+        when the answer is NOT KNOWN: the process has exited (poll reaps it, so
+        a reused pid is never sampled) or ``/proc`` did not answer (unreadable,
+        non-Linux host). ``rss_bytes_for_pid`` collapses both of those into
+        ``0``, and publishing that as a measurement would say a fork used no
+        memory when nothing measured it. A live process always reports a
+        positive ``VmRSS``, so a zero read here IS the unreadable case.
+
+        Never raises — RSS sampling must not fail a probe."""
         if self._proc.poll() is not None:
-            return 0
-        return rss_bytes_for_pid(self._proc.pid) // (1024 * 1024)
+            return None
+        measured = rss_bytes_for_pid(self._proc.pid)
+        return measured // (1024 * 1024) if measured > 0 else None
 
     def _wait_ready(self, timeout: float) -> None:
         deadline = time.monotonic() + timeout
