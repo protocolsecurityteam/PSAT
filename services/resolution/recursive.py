@@ -342,6 +342,11 @@ def _materialize_with_cross_process_cache(
         # don't fail-stop the whole pipeline on a cache outage.
         if _is_builder_exception(exc):
             raise
+        record_degraded(
+            phase="materialize_or_wait",
+            exc=exc,
+            context={"chain": chain, "address": effective_address},
+        )
         logger.warning("contract_materializations.materialize_or_wait failed, falling back: %s", exc)
         _bump_materialize_metric("materialize_builds")
         return _build_static_artifacts(effective_address, workspace_prefix, chain_id=build_chain_id)

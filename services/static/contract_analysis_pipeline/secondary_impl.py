@@ -32,6 +32,7 @@ import logging
 from typing import Any, Callable
 
 from schemas.contract_analysis import SecondaryImplPointer
+from utils.logging import record_degraded
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +116,11 @@ def _const_slot_value(var: Any) -> int | None:
         result = ConstantFolding(expr, str(var.type)).result()
         val = getattr(result, "value", None)
     except Exception as exc:  # pragma: no cover - slither edge
+        record_degraded(
+            phase="secondary_impl_const_slot_fold",
+            exc=exc,
+            context={"var": str(getattr(var, "name", "?"))},
+        )
         logger.warning("secondary-impl const-slot fold failed for %s: %s", getattr(var, "name", "?"), exc)
         return None
     if isinstance(val, bool):
@@ -148,6 +154,11 @@ class _SlotLayout:
 
                 self._srs = SlitherReadStorage([self._contract], 20)
             except Exception as exc:  # pragma: no cover - slither tool edge
+                record_degraded(
+                    phase="secondary_impl_slot_layout",
+                    exc=exc,
+                    context={"contract": str(getattr(self._contract, "name", "?"))},
+                )
                 logger.warning("SlitherReadStorage unavailable; secondary-impl var slots unresolved: %s", exc)
                 self._srs = None
         if self._srs is None:
@@ -155,6 +166,11 @@ class _SlotLayout:
         try:
             info = self._srs.get_storage_slot(var, self._contract)
         except Exception as exc:
+            record_degraded(
+                phase="secondary_impl_var_slot",
+                exc=exc,
+                context={"var": str(getattr(var, "name", "?"))},
+            )
             logger.warning("secondary-impl slot computation failed for %s: %s", getattr(var, "name", "?"), exc)
             return None
         raw_slot = getattr(info, "slot", None)

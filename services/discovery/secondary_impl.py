@@ -16,6 +16,8 @@ import hashlib
 import logging
 from typing import Any
 
+from utils.logging import record_degraded
+
 logger = logging.getLogger(__name__)
 
 _ZERO_ADDR = "0x" + "0" * 40
@@ -57,6 +59,7 @@ def _has_code(rpc_request: Any, rpc_url: str, addr: str, block: str, *, chain_id
     try:
         code = rpc_request(rpc_url, "eth_getCode", [addr, block], chain_id=chain_id)
     except Exception as exc:
+        record_degraded(phase="secondary_impl_get_code", exc=exc, context={"address": addr, "block": block})
         logger.warning("secondary-impl getCode failed (addr=%s): %s", addr, exc)
         return False
     return isinstance(code, str) and len(code.replace("0x", "")) > 0
@@ -99,6 +102,11 @@ def resolve_secondary_impl_addresses(
         try:
             word = rpc_request(rpc_url, "eth_getStorageAt", [proxy_address, slot_hex, block], chain_id=chain_id)
         except Exception as exc:
+            record_degraded(
+                phase="secondary_impl_slot_read",
+                exc=exc,
+                context={"proxy_address": proxy_address, "slot": slot_hex},
+            )
             logger.warning("secondary-impl slot read failed (proxy=%s slot=%s): %s", proxy_address, slot_hex, exc)
             continue
         addr = _address_from_storage_word(word, int(ptr.get("offset") or 0))

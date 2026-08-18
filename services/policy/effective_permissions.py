@@ -38,6 +38,7 @@ from services.static.contract_analysis_pipeline.predicate_artifacts import (
     has_no_selector,
     is_canonical_abi_signature,
 )
+from utils.logging import record_degraded
 
 logger = logging.getLogger(__name__)
 
@@ -338,6 +339,11 @@ def _normalize_capability_output(
                     cap_dict = _unsupported_capability("malformed_semantic_capability")
                 out[str(fn_signature)] = cap_dict
             except Exception as exc:
+                record_degraded(
+                    phase="capability_serialization",
+                    exc=exc,
+                    context={"fn_signature": str(fn_signature)},
+                )
                 logger.warning(
                     "Failed to serialize CapabilityExpr for function %s: %s",
                     fn_signature,

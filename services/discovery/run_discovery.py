@@ -31,7 +31,7 @@ from services.discovery.audit_reports_llm import _parse_json_object
 from services.discovery.chain_resolver import validate_claimed_chains
 from utils import exa, llm
 from utils.chains import canonical_chain
-from utils.logging import log_timed_phase, record_stage_metric
+from utils.logging import log_timed_phase, record_degraded, record_stage_metric
 
 logger = logging.getLogger(__name__)
 
@@ -392,6 +392,7 @@ def _needs_dependency_pass(protocol: str, contracts: list[dict], audits: list[di
     try:
         response = llm.chat([{"role": "user", "content": prompt}], max_tokens=700, temperature=0.0)
     except Exception as exc:
+        record_degraded(phase="dependency_classifier", exc=exc, context={"protocol": protocol})
         logger.warning("dependency classifier failed for %s: %s", protocol, exc)
         return False
 
@@ -426,6 +427,7 @@ def _dependency_research(protocol: str, budget: _Budget) -> list[dict]:
     try:
         r1 = _cached_deep_research(pass1, schema=_DEPS_SCHEMA)
     except Exception as exc:
+        record_degraded(phase="dependency_pass_1", exc=exc, context={"protocol": protocol})
         logger.warning("dep pass 1 failed for %s: %s", protocol, exc)
         return []
     components = r1.get("data", {}).get("components", []) or []
@@ -440,6 +442,11 @@ def _dependency_research(protocol: str, budget: _Budget) -> list[dict]:
         try:
             r2 = _cached_deep_research(inst, schema=_AUDIT_SCHEMA)
         except Exception as exc:
+            record_degraded(
+                phase="dependency_pass_2",
+                exc=exc,
+                context={"component": c.get("name"), "author": c.get("author")},
+            )
             logger.warning("dep pass 2 failed for %s/%s: %s", c.get("name"), c.get("author"), exc)
             continue
         for a in r2.get("data", {}).get("auditReports", []):
@@ -534,6 +541,7 @@ def run_discovery(
                     }
                 )
         except Exception as exc:
+            record_degraded(phase="deep_research_audit_seeds", exc=exc, context={"protocol": protocol})
             logger.warning("deep research (audit seeds) failed for %s: %s", protocol, exc)
 
         # 1b. Full pipeline: exa/deep-lite search + research_plus classifier bypass
@@ -588,6 +596,7 @@ def run_discovery(
                     }
                 )
         except Exception as exc:
+            record_degraded(phase="deep_research_addresses", exc=exc, context={"protocol": protocol})
             logger.warning("deep research (addresses) failed for %s: %s", protocol, exc)
         ph_addr["contracts"] = len(inventory_result.get("contracts", []))
 
@@ -598,6 +607,7 @@ def run_discovery(
             debug=False,
         )
     except Exception as exc:
+        record_degraded(phase="claimed_chain_check", exc=exc, context={"protocol": protocol})
         logger.warning("claimed-chain sanity check failed for %s: %s", protocol, exc)
 
     # ---- Dependency two-pass (conditional) ----

@@ -67,6 +67,7 @@ from db.models import (
 from services.resolution.absence_coverage import NOT_DETERMINED, absence_coverage
 from services.resolution.repos.event_logs_rpc import default_result_cap
 from utils.chains import DEFAULT_CONFIRMATION_DEPTH
+from utils.logging import record_degraded
 from utils.rpc import EthCallResult, decode_bool_word, encode_address_word, eth_call_batch, rpc_request, selector
 
 logger = logging.getLogger(__name__)
@@ -228,7 +229,8 @@ def pin_probe_block(rpc_url: str, *, chain_id: int) -> ProbeBlock | None:
     """
     try:
         head = int(str(rpc_request(rpc_url, "eth_blockNumber", [], chain_id=chain_id)), 16)
-    except Exception:
+    except Exception as exc:
+        record_degraded(phase="pin_probe_block_head", exc=exc, context={"chain_id": chain_id})
         logger.warning("could not pin a probe block; role holder plane withheld", exc_info=True)
         return None
     number = head - DEFAULT_CONFIRMATION_DEPTH
@@ -238,8 +240,13 @@ def pin_probe_block(rpc_url: str, *, chain_id: int) -> ProbeBlock | None:
         block = rpc_request(rpc_url, "eth_getBlockByNumber", [hex(number), False], chain_id=chain_id)
         raw = block.get("hash") if isinstance(block, Mapping) else None
         block_hash = _decode_block_hash(raw)
-    except Exception:
+    except Exception as exc:
         # The height still stands on its own; only replay-after-reorg is weaker.
+        record_degraded(
+            phase="pin_probe_block_hash",
+            exc=exc,
+            context={"chain_id": chain_id, "block_number": number},
+        )
         logger.warning("pinned probe block %s but could not read its hash", number, exc_info=True)
         block_hash = None
     return ProbeBlock(number=number, block_hash=block_hash)
