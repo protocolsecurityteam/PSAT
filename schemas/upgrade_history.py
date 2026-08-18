@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Literal, TypedDict, get_args
 
-from typing_extensions import NotRequired
+from typing_extensions import NotRequired, Required
 
 UpgradeEventType = Literal[
     "upgraded",
@@ -38,8 +38,9 @@ class UpgradeEventRecord(TypedDict):
     event_type: UpgradeEventType
     block_number: int
     tx_hash: str | None
-    log_index: int
-    timestamp: NotRequired[int]
+    # Absent on the DB-projection path (persisted rows don't carry it).
+    log_index: NotRequired[int]
+    timestamp: NotRequired[int | None]
     # upgraded / changed_master_copy / new_implementation /
     # new_pending_implementation / target_updated / diamond_cut (first facet)
     implementation: NotRequired[str]
@@ -57,7 +58,7 @@ class UpgradeEventRecord(TypedDict):
 
 
 class ImplementationRecord(TypedDict, total=False):
-    address: str
+    address: Required[str]
     contract_name: str | None
     block_introduced: int
     timestamp_introduced: int | None
@@ -82,3 +83,5 @@ class UpgradeHistoryOutput(TypedDict):
     target_address: str
     proxies: dict[str, ProxyUpgradeHistory]
     total_upgrades: int
+    # Stamped only by ``synthesize_from_events`` (DB-projection fallback).
+    synthesized: NotRequired[bool]

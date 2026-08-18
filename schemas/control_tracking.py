@@ -93,6 +93,8 @@ class ControlTrackingPlan(TypedDict):
     contract_address: str
     contract_name: str
     tracking_strategy: TrackingStrategy
+    # Required on every fresh build; legacy persisted artifacts may lack it,
+    # but those are read as untyped JSONB (``.get``), never as this type.
     tracked_controllers: list[TrackedController]
 
 
@@ -112,6 +114,9 @@ class ControlSnapshotValue(TypedDict):
 class ControlSnapshot(TypedDict):
     schema_version: str
     contract_address: str
+    # contract_name/controller_values: required on every fresh build; legacy
+    # persisted artifacts may lack them, but those are read as untyped JSONB
+    # (``.get``), never as this type.
     contract_name: str
     block_number: int
     controller_values: dict[str, ControlSnapshotValue]

@@ -11,7 +11,6 @@ from collections.abc import Callable
 from typing import Any
 
 from eth_abi.abi import decode
-from eth_utils.crypto import keccak as _keccak
 
 from schemas.contract_analysis import ControllerReadSpec
 from schemas.control_tracking import (
@@ -22,6 +21,7 @@ from schemas.control_tracking import (
 )
 from services.monitoring.restaking_reads import decode_word as _decode_word
 from services.resolution.tracking_plan import is_primitive_scalar_read_spec
+from utils.evm import SAFE_GUARD_SLOT, SAFE_MODULES_HEAD_SLOT
 from utils.logging import record_degraded
 from utils.rpc import (
     eth_call_batch as _eth_call_batch,
@@ -495,10 +495,10 @@ def _get_storage_at(rpc_url: str, address: str, slot: str, block_tag: str, *, ch
 #     ``keccak256(abi.encode(address(0x1), uint256(1)))``.
 #   guard — ``GUARD_STORAGE_SLOT = keccak256("guard_manager.guard.address")``,
 #     the literal present in the 1.3.0 and 1.4.1 singletons.
-_SAFE_SENTINEL_MODULES_WORD = (1).to_bytes(32, "big")
-_SAFE_MODULES_MAPPING_SLOT_WORD = (1).to_bytes(32, "big")
-_SAFE_MODULES_HEAD_SLOT = "0x" + _keccak(_SAFE_SENTINEL_MODULES_WORD + _SAFE_MODULES_MAPPING_SLOT_WORD).hex()
-_SAFE_GUARD_SLOT = "0x" + _keccak(text="guard_manager.guard.address").hex()
+# Canonical values live in ``utils.evm``; tests recompute them from the
+# preimages so they can never drift from what they claim to be.
+_SAFE_MODULES_HEAD_SLOT = SAFE_MODULES_HEAD_SLOT
+_SAFE_GUARD_SLOT = SAFE_GUARD_SLOT
 _SAFE_SENTINEL_ADDRESS = "0x" + "0" * 39 + "1"
 
 # The largest word value that is still a left-padded address.

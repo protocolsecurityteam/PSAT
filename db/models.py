@@ -8,7 +8,7 @@ import os
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from dotenv import load_dotenv
 from sqlalchemy import (
@@ -49,6 +49,9 @@ from utils.balance_status import (
     TOKEN_REFERENCE_SHAPES,
 )
 from utils.chains import UnknownChainError, chain_by_name
+
+if TYPE_CHECKING:
+    from schemas.api_responses import JobDict
 from utils.restaking_status import (
     CONSENSUS_LAYER_RESIDUAL_NOT_DETERMINED,
     CROSS_READ_AGREE,
@@ -279,7 +282,7 @@ class Job(Base):
         ),
     )
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> "JobDict":
         from utils.secrets import sanitize_obj, sanitize_string
 
         return {

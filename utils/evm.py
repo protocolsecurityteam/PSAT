@@ -20,6 +20,12 @@ OZ_LEGACY_IMPL_SLOT = "0x7050c9e0f4ca769c69bd3a8ef740bc37934f8e2c036e5a723fd8ee0
 
 # GnosisSafe proxies keep the singleton/masterCopy in raw slot 0.
 GNOSIS_MASTERCOPY_SLOT = "0x0"
+# Safe modules linked-list head: ``modules[SENTINEL_MODULES]`` where
+# ``SENTINEL_MODULES == address(0x1)`` and the mapping sits in slot 1 —
+# keccak256(abi.encode(address(0x1), uint256(1))).
+SAFE_MODULES_HEAD_SLOT = "0xcc69885fda6bcc1a4ace058b4a62bf5e179ea78fd58a1ccd71c22cc9b688792f"
+# keccak256("guard_manager.guard.address") — the literal in Safe 1.3.0/1.4.1.
+SAFE_GUARD_SLOT = "0x4a204f620c8c5ccdca3fd54d003badd85ba500436a431f0cbda4f558c93c34c8"
 # GnosisSafeProxy runtime bytecode prefix: PUSH20 <ff..ff>; slot-0 SLOAD wiring.
 GNOSIS_SLOT0_PATTERN = "73" + "ff" * 20 + "60005416"
 # masterCopy() — GnosisSafe getter (older implementations)

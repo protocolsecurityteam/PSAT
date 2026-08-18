@@ -606,7 +606,9 @@ def _register_contract(
     # assembly, so default proxy contracts to that vendored entry.
     plan_proxy_type = proxy_type or ("eip1967" if contract_type == "proxy" else None)
     polling_plan = build_polling_plan(
-        contract_type=contract_type,
+        # Deliberately unnarrowed: tests register out-of-vocab types
+        # ("role_control") to exercise the watcher on the ungated column.
+        contract_type=contract_type,  # pyright: ignore[reportArgumentType]
         proxy_type=plan_proxy_type,
         tracking_plan=_synthetic_tracking_plan_for(contract_type),
         tracked_topics=None,

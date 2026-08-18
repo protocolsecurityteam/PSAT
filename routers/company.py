@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Iterable
-from typing import Any, cast
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Response
 from sqlalchemy import func, or_, select
@@ -15,7 +15,6 @@ from db.models import AuditContractCoverage, AuditReport, Contract, Protocol
 from schemas.api_responses import (
     AuditBrief,
     AuditCoverageEntry,
-    AuditReportDict,
     CompanyAddressesResponse,
     CompanyAuditCoverageResponse,
     CompanyAuditsResponse,
@@ -109,7 +108,7 @@ def company_overview(company_name: str, response: Response) -> CompanyOverviewRe
             # cast: assemble_company_payload provably builds exactly this
             # shape; the annotation belongs on the producer once
             # services/aggregations adopts it.
-            payload = cast(CompanyOverviewResponse, build_company_overview(session, company_name))
+            payload = build_company_overview(session, company_name)
         except CompanyNotFound:
             _log_endpoint("/api/company/{name}", company=company_name, started=started, outcome="not_found")
             raise HTTPException(status_code=404, detail="Company not found")
@@ -205,7 +204,7 @@ def company_audits(company_name: str) -> CompanyAuditsResponse:
             "company": company_name,
             "protocol_id": protocol_row.id,
             "audit_count": len(audit_rows),
-            "audits": [cast(AuditReportDict, _audit_report_to_dict(ar)) for ar in audit_rows],
+            "audits": [_audit_report_to_dict(ar) for ar in audit_rows],
         }
     _log_endpoint(
         "/api/company/{name}/audits",
@@ -354,7 +353,7 @@ def company_audit_coverage(company_name: str) -> CompanyAuditCoverageResponse:
                 audit = audits_by_id.get(e.audit_report_id)
                 if audit is None:
                     continue
-                brief = cast(AuditBrief, _audit_brief(audit, e))
+                brief = _audit_brief(audit, e)
                 if getattr(e, "_coverage_source", None) == "inherited":
                     brief["coverage_source"] = "inherited"
                     brief["inherited_from_protocol"] = getattr(e, "_inherited_from_protocol", None)

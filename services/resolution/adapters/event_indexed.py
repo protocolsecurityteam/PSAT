@@ -12,6 +12,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any, Callable, Literal, cast
 
+from services.resolution.caller_sources import CALLER_SOURCES as _CALLER_KEY_SOURCES
+
 from ..capabilities import CapabilityExpr, ExternalCheck
 from . import EnumerationResult, EvaluationContext
 
@@ -20,7 +22,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_CALLER_KEY_SOURCES = {"msg_sender", "tx_origin", "signature_recovery", "root_caller"}
 
 _ZERO_ADDRESS = "0x" + "0" * 40
 

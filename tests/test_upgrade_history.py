@@ -103,8 +103,8 @@ class TestParseUpgradeLog:
         assert upgraded.get("implementation") == ADDR(42)
         assert upgraded["block_number"] == 10
         assert upgraded["tx_hash"] == "0xabc"
-        assert upgraded["log_index"] == 1
-        assert upgraded.get("timestamp", 0) > 0
+        assert upgraded.get("log_index") == 1
+        assert (upgraded.get("timestamp") or 0) > 0
         assert upgraded.get("_emitter") == ADDR(1)
 
         admin = uh.parse_upgrade_log(admin_log)
@@ -154,7 +154,7 @@ class TestParseUpgradeLog:
         )
         event = uh.parse_upgrade_log(log)
         assert event is not None
-        assert event["log_index"] == 0
+        assert event.get("log_index") == 0
 
     def test_non_indexed_upgraded_event(self):
         """OZ legacy proxies emit Upgraded(address) with impl in data, not topics."""

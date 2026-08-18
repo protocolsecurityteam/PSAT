@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from schemas.api_responses import AnalysisListEntry
 
 GENERIC_PROXY_NAMES = {
     "uupsproxy",
@@ -16,7 +20,7 @@ GENERIC_PROXY_NAMES = {
 }
 
 
-def _display_name(entry: dict[str, Any]) -> str:
+def _display_name(entry: "Mapping[str, Any]") -> str:
     chain = str(entry.get("chain") or "").strip()
 
     def with_chain(name: str) -> str:
@@ -36,13 +40,13 @@ def _display_name(entry: dict[str, Any]) -> str:
     return with_chain(str(entry.get("run_name") or contract_name or "").strip())
 
 
-def _merge_proxy_impl_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _merge_proxy_impl_entries(entries: "list[AnalysisListEntry]") -> "list[AnalysisListEntry]":
     # Key the proxy↔impl fold by (coalesced-chain, address) so a CREATE2 twin's
     # impl folds only into the proxy on its own chain (inv. 12) — a bare address
     # match would attach one chain's impl to the other chain's proxy.
     from services.aggregations.company_overview import _coalesce_chain
 
-    impl_by_proxy: dict[tuple[str, str], dict[str, Any]] = {}
+    impl_by_proxy: dict[tuple[str, str], AnalysisListEntry] = {}
     merged_proxies: set[tuple[str, str]] = set()
 
     for entry in entries:
@@ -50,7 +54,7 @@ def _merge_proxy_impl_entries(entries: list[dict[str, Any]]) -> list[dict[str, A
         if proxy_address:
             impl_by_proxy[(_coalesce_chain(entry.get("chain")), proxy_address)] = entry
 
-    merged: list[dict[str, Any]] = []
+    merged: list[AnalysisListEntry] = []
     for entry in entries:
         proxy_address = str(entry.get("proxy_address") or "").lower()
         if proxy_address:

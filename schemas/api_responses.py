@@ -193,6 +193,14 @@ class AuditBrief(TypedDict):
     coverage_source: NotRequired[str]
     inherited_from_protocol: NotRequired[str | None]
     inherited_contract_address: NotRequired[str | None]
+    # Stamped only by the contract-audit-timeline aggregation
+    # (services/aggregations/contract_audit_timeline.py).
+    impl_address: NotRequired[str | None]
+    bytecode_keccak_at_match: NotRequired[str | None]
+    bytecode_keccak_now: NotRequired[str | None]
+    bytecode_drift: NotRequired[bool | None]
+    verified_at: NotRequired[str | None]
+    live_findings: NotRequired[list[dict[str, Any]]]
 
 
 class CompanyAuditsResponse(TypedDict):
@@ -348,7 +356,8 @@ class FleetStatusResponse(TypedDict):
     heterogeneous operator telemetry and stay untyped inside."""
 
     now: str
-    jobs: dict[str, int]
+    # Status-name -> count, plus one nested "by_stage" breakdown dict.
+    jobs: dict[str, Any]
     daemons: list[dict[str, Any]]
     watchers: dict[str, Any]
 

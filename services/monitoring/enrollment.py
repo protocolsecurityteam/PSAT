@@ -603,7 +603,7 @@ def _determine_contract_type(
     contract: Contract,
     summary: ContractSummary | None,
     controller_values: Sequence[ControllerValue],
-) -> str:
+) -> MonitoredContractType:
     """Determine the contract_type based on analysis results.
 
     Checks Contract.is_proxy / proxy_type first — these are populated by the
@@ -735,7 +735,7 @@ def _load_tracking_plan_artifacts(
 def _build_monitoring_config(
     summary: ContractSummary | None,
     controller_values: Sequence[ControllerValue],  # noqa: ARG001 — reserved for future use
-    contract_type: str,
+    contract_type: MonitoredContractType,
     tracked_topics: list[dict] | None = None,
     polling_plan: list[dict] | None = None,
     *,

@@ -36,7 +36,13 @@ from typing import Any, Callable
 
 from eth_utils.crypto import keccak
 
-from utils.evm import EIP1967_ADMIN_SLOT, EIP1967_BEACON_SLOT, EIP1967_IMPL_SLOT, OZ_LEGACY_IMPL_SLOT
+from utils.evm import (
+    EIP1967_ADMIN_SLOT,
+    EIP1967_BEACON_SLOT,
+    EIP1967_IMPL_SLOT,
+    IMPLEMENTATION_SELECTOR,
+    OZ_LEGACY_IMPL_SLOT,
+)
 from utils.rpc import rpc_request
 
 logger = logging.getLogger(__name__)
@@ -58,7 +64,7 @@ def _slot_hex(value: int) -> str:
 # Proxy-standard storage slots; preimage derivations documented in utils.evm.
 ARAGON_KERNEL_SLOT = "0x" + keccak(text="aragonOS.appStorage.kernel").hex()
 
-_IMPLEMENTATION_SELECTOR = "0x" + keccak(text="implementation()").hex()[:8]
+_IMPLEMENTATION_SELECTOR = IMPLEMENTATION_SELECTOR
 _FACET_ADDRESSES_SELECTOR = "0x" + keccak(text="facetAddresses()").hex()[:8]
 
 # ``_disableInitializers()`` sentinels: type-max of the latch word — uint8

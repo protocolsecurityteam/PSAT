@@ -41,6 +41,7 @@ from db.models import (
     UpgradeEvent,
     WatchedProxy,
 )
+from schemas.control_tracking import MonitoredContractType
 
 # ---------------------------------------------------------------------------
 # Skip conditions
@@ -345,7 +346,7 @@ def _setup_contract(
 def _setup_monitored(
     session: Session,
     contract: Contract,
-    contract_type: str,
+    contract_type: MonitoredContractType,
     last_scanned_block: int,
     protocol: Protocol,
     *,

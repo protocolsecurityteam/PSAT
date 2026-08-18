@@ -8,10 +8,13 @@ routers stay thin and the aggregations layer (``audits_pipeline``,
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from schemas.api_responses import AuditBrief, AuditReportDict
 
 
-def _audit_report_to_dict(ar: Any) -> dict[str, Any]:
+def _audit_report_to_dict(ar: Any) -> "AuditReportDict":
     """Serialize an AuditReport row, including text- and scope-extraction state."""
     from utils.github_urls import github_blob_to_raw
 
@@ -45,9 +48,9 @@ def _audit_report_to_dict(ar: Any) -> dict[str, Any]:
     }
 
 
-def _audit_brief(audit: Any, match: Any | None = None) -> dict[str, Any]:
+def _audit_brief(audit: Any, match: Any | None = None) -> "AuditBrief":
     """Compact audit-report dict for the coverage/timeline endpoints."""
-    out: dict[str, Any] = {
+    out: AuditBrief = {
         "audit_id": audit.id,
         "auditor": audit.auditor,
         "title": audit.title,

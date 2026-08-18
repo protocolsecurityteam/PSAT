@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Any, cast
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -43,7 +43,7 @@ def list_jobs() -> list[JobDict]:
     with deps.SessionLocal() as session:
         stmt = select(Job).order_by(Job.created_at.desc())
         jobs = session.execute(stmt).scalars().all()
-        return [cast(JobDict, job.to_dict()) for job in jobs]
+        return [job.to_dict() for job in jobs]
 
 
 @router.post("/api/analyze", dependencies=[Depends(deps.require_admin_key)], response_model=None)
@@ -103,7 +103,7 @@ def analyze_address(request: AnalyzeRequest) -> JobDict:
         else:
             job = deps.create_job(session, req_dict)
         deps.log_admin_mutation("analyze_create", id=str(job.id), stage=job.stage.value)
-        return cast(JobDict, job.to_dict())
+        return job.to_dict()
 
 
 @router.post(
@@ -254,7 +254,7 @@ def get_job(job_id: str) -> JobDict:
         job = session.get(Job, job_id)
         if job is None:
             raise HTTPException(status_code=404, detail="Job not found")
-        return cast(JobDict, job.to_dict())
+        return job.to_dict()
 
 
 class JobErrorsResponse(BaseModel):
@@ -444,7 +444,7 @@ def retry_job(job_id: str) -> JobDict:
         )
         session.refresh(job)
         deps.log_admin_mutation("job_retry", id=str(job.id))
-        return cast(JobDict, job.to_dict())
+        return job.to_dict()
 
 
 @router.get("/api/jobs/{job_id}/stage_timings", dependencies=[Depends(deps.require_admin_key)], response_model=None)

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, cast
+from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
@@ -230,12 +230,7 @@ def analyses(response: Response) -> list[AnalysisListEntry]:
         if contract_name_source and contract_name_source.contract_name:
             entry["contract_name"] = contract_name_source.contract_name
         results.append(entry)
-    # casts: _merge_proxy_impl_entries is typed over bare dicts today; both
-    # drop once services/governance/proxies adopts AnalysisListEntry.
-    return cast(
-        "list[AnalysisListEntry]",
-        _merge_proxy_impl_entries(cast("list[dict[str, Any]]", results)),
-    )
+    return _merge_proxy_impl_entries(results)
 
 
 @router.get("/api/analyses/{run_name:path}/artifact/{artifact_name:path}")

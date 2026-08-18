@@ -39,6 +39,7 @@ from typing import Any, TypeGuard
 
 from eth_utils.crypto import keccak
 
+from services.resolution.caller_sources import CALLER_SOURCES as _CALLER_SOURCES
 from utils.logging import record_stage_metric
 from utils.rpc import encode_address_word, multicall3_aggregate3, rpc_request
 from utils.scoring_status import TRACE_STEP_ENUMERABLE_ROLE_STORE
@@ -61,7 +62,7 @@ _ZERO_ADDRESS = "0x" + "0" * 40
 # fixed sentinel with no plausible role grant; never itself reported as a member.
 _NEGATIVE_CONTROL_ADDR = "0x" + "de1e7e" + "00" * 17
 
-_CALLER_SOURCES = {"msg_sender", "tx_origin", "signature_recovery", "root_caller"}
+
 _MATCH_SCORE = 90
 
 

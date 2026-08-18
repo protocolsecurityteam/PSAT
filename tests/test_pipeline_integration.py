@@ -315,13 +315,14 @@ def test_merge_uses_impl_name_and_propagates_company():
         "contract_name": "LiquidityPool",
     }
 
-    merged = _merge_proxy_impl_entries([proxy_entry, impl_entry])
+    # Partial test payloads: the merge reads via .get, full AnalysisListEntry not needed.
+    merged = _merge_proxy_impl_entries([proxy_entry, impl_entry])  # pyright: ignore[reportArgumentType]
     assert len(merged) == 1
     # Merge sets display_name from impl's contract_name directly (no chain suffix)
-    assert merged[0]["display_name"] == "LiquidityPool"
+    assert merged[0].get("display_name") == "LiquidityPool"
     assert merged[0]["company"] == "TestCo"
     assert merged[0]["rank_score"] == 0.8
-    assert merged[0]["proxy_address_display"] == PROXY
+    assert merged[0].get("proxy_address_display") == PROXY
 
 
 def test_display_name_chain_suffix_and_generic_fallback():
@@ -370,10 +371,10 @@ def test_proxy_with_completed_impl_visible_after_merge():
         "proxy_address": "0x3333333333333333333333333333333333333333",
         "contract_name": "EETH",
     }
-    merged = _merge_proxy_impl_entries([proxy_entry, impl_entry])
+    merged = _merge_proxy_impl_entries([proxy_entry, impl_entry])  # pyright: ignore[reportArgumentType]
     assert len(merged) == 1
-    assert merged[0]["display_name"] == "EETH"
-    assert merged[0]["proxy_address_display"] == "0x3333333333333333333333333333333333333333"
+    assert merged[0].get("display_name") == "EETH"
+    assert merged[0].get("proxy_address_display") == "0x3333333333333333333333333333333333333333"
 
 
 def test_orphan_impl_appears_in_merged_list():
@@ -394,7 +395,7 @@ def test_orphan_impl_appears_in_merged_list():
         "proxy_address": "0x9999999999999999999999999999999999999999",
         "contract_name": "Impl",
     }
-    merged = _merge_proxy_impl_entries([orphan])
+    merged = _merge_proxy_impl_entries([orphan])  # pyright: ignore[reportArgumentType]
     assert len(merged) == 1
 
 

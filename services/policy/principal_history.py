@@ -14,6 +14,7 @@ from typing import Any
 import requests
 from eth_utils.crypto import keccak
 
+from services.resolution.caller_sources import CALLER_SOURCES
 from services.resolution.capability_resolver import _selector_for_signature
 from utils.etherscan import ETHERSCAN_API
 from utils.logging import record_degraded, record_stage_metric
@@ -268,7 +269,7 @@ def _walk_leaves(node: Any) -> Iterable[dict[str, Any]]:
 def _has_target_selector_call_shape(operands: list[Any]) -> bool:
     sources = [operand.get("source") for operand in operands if isinstance(operand, dict)]
     return (
-        any(source in {"msg_sender", "tx_origin", "signature_recovery", "root_caller"} for source in sources)
+        any(source in CALLER_SOURCES for source in sources)
         and "self_address" in sources
         and any(
             operand.get("source") == "computed" and operand.get("computed_kind") == "msg.sig"

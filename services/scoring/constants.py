@@ -178,7 +178,7 @@ PRODUCT_CLAIMS = frozenset(
 UNMODELLED_CLAIMS = frozenset({"value_router", "contract_deployment", "callee_pointer.rotate"})
 
 # --- static destination lattice --------------------------------------------
-FIXED_TARGET_KINDS = frozenset({"immutable", "constant", "storage_no_setter"})
+FIXED_TARGET_KINDS: frozenset[StateVarTargetKind] = frozenset({"immutable", "constant", "storage_no_setter"})
 # Annotated against the static plane's Literal (type-only import) so a
 # vocabulary drift is a pyright error without a runtime coupling.
 ADMIN_TARGET_KIND: "StateVarTargetKind" = "storage_setter"

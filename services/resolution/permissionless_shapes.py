@@ -41,15 +41,10 @@ import os
 from collections.abc import Mapping
 from typing import Any
 
+# Self-auth shapes are excluded by the equality arm below, and permit flows
+# resolve through the ``signature_auth`` leaf kind.
+from services.resolution.caller_sources import CALLER_SOURCES as _CALLER_TAINT_SOURCES
 from services.static.contract_analysis_pipeline.predicate_types import LeafPredicate
-
-# The caller's identity, in every frame representation: ``root_caller`` is the
-# frame-rewritten root msg.sender inside an inlined callee tree;
-# ``signature_recovery`` is a recovered signer — checking it against a
-# contract-governed set is delegated authority (self-auth shapes are excluded
-# by the equality arm below, and permit flows resolve through the
-# ``signature_auth`` leaf kind). Matches the evaluator's ``_CALLER_SOURCES``.
-_CALLER_TAINT_SOURCES = ("msg_sender", "tx_origin", "signature_recovery", "root_caller")
 
 
 def earned_public_enabled() -> bool:

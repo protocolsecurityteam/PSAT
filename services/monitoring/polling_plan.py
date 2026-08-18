@@ -41,8 +41,16 @@ from typing import Any
 from eth_utils.crypto import keccak
 
 from schemas.contract_analysis import ControllerProvenance
+from schemas.control_tracking import MonitoredContractType
 from services.monitoring.event_topics import SIGNAL_CLASS_CONFIG, SIGNAL_CLASS_METRIC
-from utils.evm import EIP1822_LOGIC_SLOT, EIP1967_IMPL_SLOT, GNOSIS_MASTERCOPY_SLOT, OZ_LEGACY_IMPL_SLOT
+from utils.evm import (
+    EIP1822_LOGIC_SLOT,
+    EIP1967_IMPL_SLOT,
+    GNOSIS_MASTERCOPY_SLOT,
+    OZ_LEGACY_IMPL_SLOT,
+    SAFE_GUARD_SLOT,
+    SAFE_MODULES_HEAD_SLOT,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -98,11 +106,9 @@ def _handrolled_events_for_write_target(write_target: str) -> list[str]:
 # Safe module linked list head — ``modules[SENTINEL_MODULES]`` with the mapping
 # at storage slot 1 and ``SENTINEL_MODULES == address(0x1)`` — and the guard
 # slot, ``keccak256("guard_manager.guard.address")``, the literal the 1.3.0 and
-# 1.4.1 singletons carry. Recomputed from the preimages so neither can drift
-# from what it claims to be. Duplicated from services/resolution/tracking.py to
-# keep this module off the resolution plane's import graph.
-SAFE_MODULES_HEAD_SLOT = "0x" + keccak((1).to_bytes(32, "big") + (1).to_bytes(32, "big")).hex()
-SAFE_GUARD_SLOT = "0x" + keccak(text="guard_manager.guard.address").hex()
+# 1.4.1 singletons carry. Canonical values live in ``utils.evm``
+# (re-exported here for the monitoring tests that import them); the
+# preimage-recompute drift test is tests/test_safe_module_guard_monitoring.py.
 
 # proxy_type → polling entry that resolves the current implementation.
 # Mirrors ``services/monitoring/proxy_watcher._RESOLVE_BY_TYPE`` but
@@ -553,7 +559,7 @@ def _derive_suppress_event_types(field: str, tracked_topics: Iterable[Mapping[st
 
 def build_polling_plan(
     *,
-    contract_type: str,
+    contract_type: MonitoredContractType,
     proxy_type: str | None = None,
     tracking_plan: Mapping[str, Any] | None = None,
     tracked_topics: Iterable[Mapping[str, Any]] | None = None,

@@ -12,7 +12,6 @@ operator view of internal process health, not part of the public surface.
 from __future__ import annotations
 
 import logging
-from typing import cast
 
 from fastapi import APIRouter, Depends
 
@@ -32,4 +31,4 @@ def fleet_status() -> FleetStatusResponse:
     with deps.SessionLocal() as session:
         # cast: build_fleet_status provably returns exactly this top level;
         # the annotation belongs on the producer once aggregations adopts it.
-        return cast(FleetStatusResponse, build_fleet_status(session))
+        return build_fleet_status(session)

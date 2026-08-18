@@ -204,9 +204,9 @@ class TestMergeProxyImplEntries:
         result = self._merge([proxy, impl])
         assert len(result) == 1
         merged = result[0]
-        assert merged["proxy_address_display"] == "0xaaa"
-        assert merged["proxy_type_display"] == "ERC1967"
-        assert merged["display_name"] == "VaultImpl"
+        assert merged.get("proxy_address_display") == "0xaaa"
+        assert merged.get("proxy_type_display") == "ERC1967"
+        assert merged.get("display_name") == "VaultImpl"
         # Company comes from proxy when impl is None
         assert merged["company"] == "etherfi"
         # Chain comes from proxy

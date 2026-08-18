@@ -393,9 +393,7 @@ def _enrich_implementations(
     """Add contract names to historical implementations not already named in dependencies.json."""
     from utils.etherscan import get_contract_info, parallel_get
 
-    addrs_to_fetch = sorted(
-        {addr for impl in implementations if (addr := impl.get("address")) is not None and addr not in known_names}
-    )
+    addrs_to_fetch = sorted({impl["address"] for impl in implementations if impl["address"] not in known_names})
     fetched: dict[str, str | None] = {}
     if addrs_to_fetch:
         calls = {addr: (lambda a=addr: get_contract_info(a, chain_id=chain_id)) for addr in addrs_to_fetch}
@@ -408,9 +406,7 @@ def _enrich_implementations(
                 fetched[addr] = None
 
     for impl in implementations:
-        addr = impl.get("address")
-        if addr is None:
-            continue
+        addr = impl["address"]
         if addr in known_names:
             impl["contract_name"] = known_names[addr]
             continue
@@ -906,7 +902,7 @@ def backfill_historical_impl_contracts(
             )
 
 
-def synthesize_from_events(session, contract) -> dict | None:
+def synthesize_from_events(session, contract) -> UpgradeHistoryOutput | None:
     """Rebuild the ``upgrade_history`` artifact shape from ``UpgradeEvent`` rows.
 
     Used as a fallback when the artifact is missing or unreachable in object
@@ -931,7 +927,8 @@ def synthesize_from_events(session, contract) -> dict | None:
     if not rows:
         return None
 
-    events: list[dict] = []
+    events: list[UpgradeEventRecord] = []
+    last_impl: str | None = None
     for ev in rows:
         if not ev.new_impl:
             continue
@@ -940,35 +937,36 @@ def synthesize_from_events(session, contract) -> dict | None:
         # at the _hex_to_int(ts) call. The frontend formatTimestamp does
         # `new Date(ts * 1000)`, so anything else (ISO string) renders as
         # "Invalid Date". Match the canonical shape.
+        impl_lc: str = ev.new_impl.lower()
+        last_impl = impl_lc
         events.append(
             {
                 "event_type": "upgraded",
                 "block_number": ev.block_number,
                 "timestamp": int(ev.timestamp.timestamp()) if ev.timestamp else None,
                 "tx_hash": ev.tx_hash,
-                "implementation": ev.new_impl.lower(),
+                "implementation": impl_lc,
             }
         )
-    if not events:
+    if not events or last_impl is None:
         return None
 
-    current_impl = (contract.implementation or events[-1]["implementation"]).lower()
+    current_impl = (contract.implementation or last_impl).lower()
     implementations = _build_implementation_timeline(events, current_impl)
 
-    impl_addrs = {addr for impl in implementations if (addr := impl.get("address")) is not None}
+    impl_addrs = {impl["address"] for impl in implementations}
     if impl_addrs:
         name_rows = session.execute(
             select(Contract.address, Contract.contract_name).where(Contract.address.in_(list(impl_addrs)))
         ).all()
         names = {addr.lower(): name for addr, name in name_rows if name}
         for impl in implementations:
-            addr = impl.get("address")
-            n = names.get(addr.lower()) if addr is not None else None
+            n = names.get(impl["address"].lower())
             if n:
                 impl["contract_name"] = n
 
     proxy_addr = (contract.address or "").lower()
-    proxy = {
+    proxy: ProxyUpgradeHistory = {
         "proxy_address": proxy_addr,
         "proxy_type": contract.proxy_type or "unknown",
         "current_implementation": current_impl,

@@ -4,7 +4,7 @@ add/delete, refresh-coverage, and per-contract audit timeline."""
 from __future__ import annotations
 
 import logging
-from typing import Any, cast
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import PlainTextResponse, Response
@@ -56,7 +56,7 @@ def get_audit(audit_id: int) -> AuditReportDict:
         ar = session.get(AuditReport, audit_id)
         if ar is None:
             raise HTTPException(status_code=404, detail="Audit not found")
-        return cast(AuditReportDict, _audit_report_to_dict(ar))
+        return _audit_report_to_dict(ar)
 
 
 @router.get("/api/audits/{audit_id}/pdf")
@@ -364,7 +364,7 @@ def add_company_audit(company_name: str, req: AddAuditRequest) -> AuditReportDic
         session.commit()
 
         deps.log_admin_mutation("add_audit", id=ar.id, company=company_name)
-        return cast(AuditReportDict, _audit_report_to_dict(ar))
+        return _audit_report_to_dict(ar)
 
 
 @router.delete(
