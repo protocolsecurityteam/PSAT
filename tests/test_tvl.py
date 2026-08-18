@@ -77,6 +77,20 @@ def _no_pinned_native(monkeypatch):
 
 
 @pytest.fixture()
+def _no_escalation(monkeypatch):
+    """This cycle escalates nothing, so its ``partial`` is about pricing alone.
+
+    A contract with no prior fetch record escalates by rule, and the offline
+    suite has no RPC route to sweep over — so the cycle is honestly partial
+    (nothing gained completeness) for a reason that is a fact about the
+    environment rather than about what these tests assert. Stating "no
+    escalation this cycle" keeps that out of their subject; the tests that ARE
+    about the sweep stub the sweep itself.
+    """
+    monkeypatch.setattr("services.monitoring.tvl.escalation_reason", lambda *a, **kw: None)
+
+
+@pytest.fixture()
 def _cleanup(db_session):
     """Ensure test rows are cleaned up even on failure."""
     yield
@@ -284,7 +298,7 @@ class TestGetProtocolAddresses:
 
 @requires_postgres
 class TestRefreshContractBalances:
-    def test_stores_balances_and_returns_breakdown(self, db_session, monkeypatch, _cleanup):
+    def test_stores_balances_and_returns_breakdown(self, db_session, monkeypatch, _cleanup, _no_escalation):
         protocol = Protocol(name="TestProto_refresh")
         db_session.add(protocol)
         db_session.flush()
@@ -325,7 +339,7 @@ class TestRefreshContractBalances:
         assert len(balances) == 2
         assert {b.token_symbol for b in balances} == {"ETH", "USDC"}
 
-    def test_priced_zero_is_published_unpriced_is_not(self, db_session, monkeypatch, _cleanup):
+    def test_priced_zero_is_published_unpriced_is_not(self, db_session, monkeypatch, _cleanup, _no_escalation):
         """A priced ``usd_value == 0.0`` is a witnessed zero and enters the
         breakdown; an unpriced ``usd_value: None`` does not — the two must be
         distinguishable (readiness §2.3). Row storage is unaffected either way."""
@@ -501,6 +515,59 @@ class TestRefreshAllProtocols:
         snapshots = db_session.query(TvlSnapshot).all()
         assert len(snapshots) == 2
 
+    def test_a_cycle_whose_sweeps_all_failed_beats_degraded(self, db_session, monkeypatch, _cleanup, caplog):
+        """A fleet-wide RPC outage during the sweeps used to beat as a clean cycle."""
+        import logging as _logging
+
+        from services.monitoring.asset_sweep import SweepOutcome
+        from utils.balance_status import SWEEP_STATUS_FAILED
+
+        proto = Protocol(name="Proto_sweepfail")
+        db_session.add(proto)
+        db_session.flush()
+        db_session.add(
+            Contract(
+                address=_addr("all_protos", "f0"),
+                chain="ethereum",
+                protocol_id=proto.id,
+                contract_name="Contract_sweepfail",
+            )
+        )
+        db_session.commit()
+
+        monkeypatch.setattr("services.monitoring.tvl.fetch_defillama_tvl", lambda name: None)
+        monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda address, chain_id=1: 0)
+        monkeypatch.setattr("utils.etherscan.get_eth_price", lambda chain_id=1: 2000.0)
+        # An empty page escalates, so the contract reaches the sweep — which
+        # then fails for it, the way an unreachable chain fails for all of them.
+        monkeypatch.setattr("utils.etherscan.get_token_balances_page", lambda address, chain_id=1: page([]))
+
+        def _every_sweep_fails(requests, **_kwargs):
+            outcomes = {
+                request.subject: SweepOutcome(
+                    address=request.address.lower(),
+                    status=SWEEP_STATUS_FAILED,
+                    swept_from_block=0,
+                    swept_through_block=None,
+                    failure_reason="chain head unknown",
+                )
+                for request in requests
+            }
+            return outcomes, SweepCost(head_reads=1)
+
+        monkeypatch.setattr("services.monitoring.tvl.run_sweeps", _every_sweep_fails)
+
+        with patch("services.monitoring.record_heartbeat") as hb:
+            with caplog.at_level(_logging.WARNING, logger="services.monitoring.tvl"):
+                refresh_all_protocols(db_session)
+
+        _process, kwargs = hb.call_args
+        assert kwargs["status"] == "degraded"
+        assert kwargs["detail"]["partial"] is True
+        assert kwargs["detail"]["sweeps_failed"] == 1
+        assert kwargs["detail"]["sweeps_completed"] == 0
+        assert any("no escalated contract completed a scan" in r.message for r in caplog.records)
+
     def test_rotation_oldest_and_no_snapshot_first_capped(self, db_session, monkeypatch, _cleanup):
         from datetime import datetime, timezone
 
@@ -672,7 +739,7 @@ class TestNativeAssetPricingDispatch:
         monkeypatch.setattr("utils.etherscan.get_eth_price", lambda chain_id=1: 2000.0)
         monkeypatch.setattr("utils.etherscan.get_token_balances_page", lambda address, chain_id=1: page([]))
 
-    def test_base_contract_priced_at_eth_quote(self, db_session, monkeypatch, _cleanup):
+    def test_base_contract_priced_at_eth_quote(self, db_session, monkeypatch, _cleanup, _no_escalation):
         # Base is ETH-native → byte-identical to mainnet pricing.
         protocol = Protocol(name="BaseNativeProto")
         db_session.add(protocol)
@@ -692,7 +759,7 @@ class TestNativeAssetPricingDispatch:
         assert rows[0].token_symbol == "ETH"
         assert float(rows[0].price_usd) == 2000.0
 
-    def test_null_chain_contract_priced_as_eth(self, db_session, monkeypatch, _cleanup):
+    def test_null_chain_contract_priced_as_eth(self, db_session, monkeypatch, _cleanup, _no_escalation):
         # Legacy NULL chain coalesces to mainnet → ETH pricing preserved.
         protocol = Protocol(name="NullChainProto")
         db_session.add(protocol)
@@ -710,7 +777,7 @@ class TestNativeAssetPricingDispatch:
         rows = db_session.query(ContractBalance).all()
         assert len(rows) == 1 and rows[0].token_symbol == "ETH"
 
-    def test_polygon_contract_priced_at_pol_quote(self, db_session, monkeypatch, _cleanup):
+    def test_polygon_contract_priced_at_pol_quote(self, db_session, monkeypatch, _cleanup, _no_escalation):
         # Regression: polygon (native POL) must be priced at its OWN coin's USD
         # quote and recorded under the POL symbol — never raised, never ETH-quoted.
         protocol = Protocol(name="PolygonProto")
@@ -838,7 +905,7 @@ class TestContractBreakdownCompositeKey:
         db_session.commit()
         return protocol, addr
 
-    def test_refresh_keeps_both_chains(self, db_session, monkeypatch, _cleanup):
+    def test_refresh_keeps_both_chains(self, db_session, monkeypatch, _cleanup, _no_escalation):
         protocol, addr = self._two_chain_twin(db_session)
         monkeypatch.setattr("utils.etherscan.get_eth_balance", self._chain_varying_eth_balance)
         monkeypatch.setattr("utils.etherscan.get_eth_price", lambda chain_id=1: 2000.0)
@@ -940,7 +1007,7 @@ class TestContractBreakdownCompositeKey:
         assert {t["symbol"]: t["usd_value"] for t in breakdown[key]["tokens"]} == {"ZERO": 0.0}
         assert partial is False
 
-    def test_snapshot_total_sums_both_chains(self, db_session, monkeypatch, _cleanup):
+    def test_snapshot_total_sums_both_chains(self, db_session, monkeypatch, _cleanup, _no_escalation):
         protocol, _addr_unused = self._two_chain_twin(db_session)
         monkeypatch.setattr("services.monitoring.tvl.fetch_defillama_tvl", lambda name: None)
         monkeypatch.setattr("utils.etherscan.get_eth_balance", self._chain_varying_eth_balance)
@@ -1071,7 +1138,7 @@ class TestFailedReadIsNotAMeasuredZero:
         # plus a fabricated zero.
         assert snapshot.total_usd is not None and float(snapshot.total_usd) == 2000.0
 
-    def test_a_genuine_zero_is_still_published(self, db_session, monkeypatch, _cleanup):
+    def test_a_genuine_zero_is_still_published(self, db_session, monkeypatch, _cleanup, _no_escalation):
         """Recall pin: a contract that really holds nothing keeps its ``0.0``.
 
         Omission must mean "not measured", so a measured empty contract has to

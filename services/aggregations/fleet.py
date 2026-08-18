@@ -101,14 +101,16 @@ def _condition_should_log(key: str, active: bool) -> bool:
 
     True on entering the condition, on leaving it, and once per
     ``_CONDITION_RESTATE_S`` while it holds. False for every repeat in between.
+
+    ``build_fleet_status`` is a sync endpoint, so anyio runs concurrent reads in
+    a threadpool: the recovery arm pops rather than checking-then-deleting,
+    because two racing recoveries would both pass the check and the second
+    ``del`` would raise into a 500.
     """
     now = time.monotonic()
     last = _condition_state.get(key)
     if not active:
-        if last is None:
-            return False
-        del _condition_state[key]
-        return True
+        return _condition_state.pop(key, None) is not None
     if last is not None and now - last < _CONDITION_RESTATE_S:
         return False
     _condition_state[key] = now

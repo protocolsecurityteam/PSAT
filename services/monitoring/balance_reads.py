@@ -7,15 +7,20 @@ different failure behaviour: one swallowed a native-fetch exception into
 a degraded phase. Everything they must now do IDENTICALLY lives here, so the
 three-state a consumer reads does not depend on which loop happened to write it.
 
-``record_degraded`` is deliberately NOT used from here. It is a no-op outside
-``BaseWorker`` (``utils.logging``; bound only in ``workers.base``), and the TVL
-loop runs outside it — adding it there would pass a mocked test and persist
-nothing in production, which is the silent-no-trace shape this unit exists to
-close. The discriminator is the PERSISTED provenance column instead, written by
-both writers, which is what makes the trace identical rather than merely
-similarly-named. The resolution worker keeps its own ``record_degraded`` call;
-the TVL loop's substitute is the house-standard per-cycle heartbeat plus an
-unconditional log.
+``record_degraded`` is NOT what makes a failure here traceable. It is a no-op
+outside ``BaseWorker`` (``utils.logging``; bound only in ``workers.base``), and
+the TVL loop runs outside it — relying on it there would pass a mocked test and
+persist nothing in production, which is the silent-no-trace shape this unit
+exists to close. The discriminator is the PERSISTED provenance column instead,
+written by both writers, which is what makes the trace identical rather than
+merely similarly-named; the TVL loop's substitute is the house-standard
+per-cycle heartbeat plus an unconditional log.
+
+It IS called, from the two swallowed handlers in
+:func:`pinned_native_balances`, and for the complementary reason: that function
+runs per job under the resolution worker, where a WARNING inside a swallowed
+``except`` without it leaves the job's ``stage_errors`` artifact claiming a
+clean run. Under the TVL loop the same call is the documented no-op.
 """
 
 from __future__ import annotations
@@ -36,9 +41,19 @@ from utils.balance_status import (
     NATIVE_STATUS_PROVEN_ZERO,
     STATUS_FETCH_FAILED,
 )
+from utils.logging import record_degraded
 from utils.rpc import MULTICALL3_ADDRESS, multicall3_aggregate3, rpc_request, rpc_url_for_chain_id, selector
 
 logger = logging.getLogger(__name__)
+
+
+def _degraded(exc: BaseException, *, phase: str, **context: Any) -> None:
+    """Pair a swallowed WARNING with the job's degraded accumulator.
+
+    A no-op under the TVL loop (no accumulator is bound there); under the
+    resolution worker it is what puts the swallow in ``stage_errors``.
+    """
+    record_degraded(phase=phase, exc=exc, context=context)
 
 
 @dataclass(frozen=True)
@@ -159,8 +174,12 @@ def pinned_native_balances(
     try:
         head = int(rpc_request(url, "eth_blockNumber", [], retries=1, chain_id=chain_id), 16)
     except Exception as exc:
-        # One per chain per cycle, so the level is affordable — and a chain whose
-        # head cannot be read publishes no pinned zero for any holder on it.
+        # Once per CALL: one per chain in a TVL cycle, but one per contract in
+        # the resolution worker, which calls this per job. That second caller is
+        # a worker job context, so the swallow is paired with ``record_degraded``
+        # — the WARNING alone would leave the job's ``stage_errors`` artifact
+        # claiming a clean run.
+        _degraded(exc, phase="pinned_native_head", chain_id=chain_id, addresses=len(addresses))
         logger.warning(
             "pinned native balance: head read failed; the chain's holders fall back to the unpinned path",
             extra={
@@ -180,6 +199,7 @@ def pinned_native_balances(
     try:
         results = multicall3_aggregate3(url, calls, hex(block), chain_id=chain_id)
     except Exception as exc:
+        _degraded(exc, phase="pinned_native_read", chain_id=chain_id, block_number=block, addresses=len(addresses))
         logger.warning(
             "pinned native balance: aggregate3 did not answer; the chain's holders fall back to the unpinned path",
             extra={

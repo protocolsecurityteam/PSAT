@@ -1753,6 +1753,7 @@ def _resolve_fan_out(
             scan_basis=_scan_basis(chain_id=chain_id, max_block_range=max_block_range),
             observed_balance_raw=entry.observed_balance_raw,
             caught_up=entry.caught_up,
+            counts=cost.counts,
         )
         cost.count("pairs_recorded")
         cost.count(f"verdict_{shape}")

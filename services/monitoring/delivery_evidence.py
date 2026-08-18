@@ -275,6 +275,11 @@ def compose_basis(*, scan_basis: str, scanned_from_block: int, measured_through_
     )
 
 
+def _bump(counts: dict[str, int] | None, key: str) -> None:
+    if counts is not None:
+        counts[key] = counts.get(key, 0) + 1
+
+
 def _set(row: Any, field: str, value: Any) -> None:
     """Assign only on a real change, so an unchanged row stays clean."""
     if getattr(row, field) != value:
@@ -316,11 +321,13 @@ def record_delivery_evidence(
     k: int = FAN_OUT_THRESHOLD_K,
     observed_balance_raw: str | None = None,
     caught_up: bool | None = None,
+    counts: dict[str, int] | None = None,
 ) -> str:
     """Accrete one pair's evidence. Returns the shape the row now publishes.
 
-    The return value is for the caller's per-cycle verdict distribution and
-    nothing else — the row is the record.
+    The return value, and the optional *counts* tally this folds
+    ``verdicts_first_determined`` / ``verdicts_changed`` into, are for the
+    caller's per-cycle summary and nothing else — the row is the record.
 
     THE TRUE INVARIANT, stated exactly.
 
@@ -398,6 +405,10 @@ def record_delivery_evidence(
                 ),
             )
         )
+        # An inserted row that already names a shape is a first determination
+        # too; one inserted as ``not_determined`` has determined nothing.
+        if shape != DELIVERY_SHAPE_NOT_DETERMINED:
+            _bump(counts, "verdicts_first_determined")
         return shape
 
     row_k = int(row.fan_out_threshold_k)
@@ -433,22 +444,28 @@ def record_delivery_evidence(
     shape = _shape_for(tally, row_k)
     previous_shape = str(row.delivery_shape)
     if shape != previous_shape:
-        # A published verdict changed. It is legitimate — new evidence only ever
-        # withdraws a positive — but it is the one thing this writer does that
-        # moves a number a consumer already read, so it says so.
-        logger.warning(
-            "delivery evidence: published verdict changed for this pair",
-            extra={
-                "chain_id": chain_id,
-                "holder_address": holder,
-                "token_address": token,
-                "previous_shape": previous_shape,
-                "shape": shape,
-                "delivery_count": tally.count,
-                "unreadable_deliveries": tally.unreadable,
-                "min_fan_out": tally.min_fan_out,
-            },
-        )
+        # Two different events wear the same diff. A row whose stored shape is
+        # ``not_determined`` is being DECIDED for the first time — ordinary
+        # convergence, thousands of them across a corpus, and warning on those
+        # would bury the other case: a verdict a consumer has already read being
+        # WITHDRAWN. Only the second is the alarm.
+        first_determination = previous_shape == DELIVERY_SHAPE_NOT_DETERMINED
+        fields = {
+            "chain_id": chain_id,
+            "holder_address": holder,
+            "token_address": token,
+            "previous_shape": previous_shape,
+            "shape": shape,
+            "delivery_count": tally.count,
+            "unreadable_deliveries": tally.unreadable,
+            "min_fan_out": tally.min_fan_out,
+        }
+        if first_determination:
+            logger.debug("delivery evidence: pair determined for the first time", extra=fields)
+            _bump(counts, "verdicts_first_determined")
+        else:
+            logger.warning("delivery evidence: published verdict changed for this pair", extra=fields)
+            _bump(counts, "verdicts_changed")
     _set(row, "delivery_shape", shape)
     _set(row, "measured_through_block", through)
     if caught_up is not None:

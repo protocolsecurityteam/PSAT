@@ -37,7 +37,7 @@ from db.models import Contract, ContractBalance, ContractBalanceFetch
 # The two wire-reaching functions are called through the MODULE, not bound here:
 # one indirection point means a stub (the offline suite's, or a test's) holds no
 # matter which producer imported this module's helpers.
-from services.monitoring import asset_sweep
+from services.monitoring import asset_sweep, warn_degraded_once
 from services.monitoring.asset_sweep import (
     SWEEP_COMPLETED,
     CarriedTypedReceipt,
@@ -592,7 +592,18 @@ def run_sweeps(
     for chain_id, cohort in sorted(by_chain.items()):
         rpc_url = rpc_url_for(chain_id)
         if not rpc_url:
-            logger.info("asset sweep: no RPC URL for chain %s; %d contract(s) not swept", chain_id, len(cohort))
+            # The one arm that produces NO outcome at all, so it is invisible in
+            # a completed-vs-failed count: an unrouted chain's holders are not
+            # failed sweeps, they are unattempted ones. Counted under its own
+            # kind so the caller can flip the cycle partial on it.
+            warn_degraded_once(
+                logger,
+                cost.degraded,
+                "chain_unrouted",
+                "asset sweep: no RPC URL for chain; its holders are not swept and record nothing",
+                chain_id=chain_id,
+                holders=len(cohort),
+            )
             continue
         head = asset_sweep.sweep_head_block(rpc_url, chain_id=chain_id, cost=cost)
         by_address = {r.address.lower(): r for r in cohort}

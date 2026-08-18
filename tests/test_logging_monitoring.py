@@ -240,12 +240,16 @@ def test_proxy_watcher_unanswered_probe_warns_once_per_resolution(caplog):
     def _dead(*_args, **_kwargs):
         raise RuntimeError("RPC request failed for http://stub: connection refused")
 
+    proxy_watcher.reset_not_determined_warn_state()
     with patch.object(proxy_watcher, "rpc_request", _dead):
-        with caplog.at_level(logging.WARNING, logger="services.monitoring.proxy_watcher"):
+        with caplog.at_level(logging.DEBUG, logger="services.monitoring.proxy_watcher"):
             assert proxy_watcher.resolve_current_implementation("0x" + "e" * 40, "http://stub") is None
+            # A dead route fails every watched proxy, so the second resolution
+            # carries the count rather than a second alarm.
+            assert proxy_watcher.resolve_current_implementation("0x" + "f" * 40, "http://stub") is None
 
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert len(warnings) == 1  # one per resolution, not one per probe
+    assert len(warnings) == 1  # one per outage, never one per probe
     assert warnings[0].probes_unanswered == warnings[0].probes
 
 
@@ -255,14 +259,128 @@ def test_proxy_watcher_reverting_getter_is_not_a_transport_failure(caplog):
     def _reverts(_url, method, _params, **_kwargs):
         if method == "eth_getStorageAt":
             return "0x" + "0" * 64
-        raise RuntimeError("execution reverted")
+        # The shape ``rpc_request`` raises for a JSON-RPC error payload: the
+        # node's own object, stringified.
+        raise RuntimeError(str({"code": -32000, "message": "execution reverted"}))
 
+    proxy_watcher.reset_not_determined_warn_state()
     with patch.object(proxy_watcher, "rpc_request", _reverts):
         with caplog.at_level(logging.WARNING, logger="services.monitoring.proxy_watcher"):
             assert proxy_watcher.resolve_current_implementation("0x" + "e" * 40, "http://stub") is None
 
     # Every probe ANSWERED; "no implementation here" is a finding, not a fault.
     assert [r for r in caplog.records if r.levelno == logging.WARNING] == []
+
+
+def test_proxy_watcher_treats_an_unrecognised_failure_as_not_determined(caplog):
+    """The chain_id guard raises before the wire; it is not a revert."""
+    from services.monitoring import proxy_watcher
+
+    def _guard(*_args, **_kwargs):
+        raise RuntimeError(
+            "eRPC URL/chain_id mismatch: caller declared chain_id=8453 but the RPC URL routes chain_id=1"
+        )
+
+    proxy_watcher.reset_not_determined_warn_state()
+    with patch.object(proxy_watcher, "rpc_request", _guard):
+        with caplog.at_level(logging.WARNING, logger="services.monitoring.proxy_watcher"):
+            assert (
+                proxy_watcher.resolve_current_implementation(
+                    "0x" + "e" * 40, "http://stub", proxy_type="eip1967", chain_id=8453
+                )
+                is None
+            )
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert warnings[0].probes_unanswered == 1
+
+
+# --- the fleet's own liveness signal ----------------------------------------
+
+
+def test_heartbeat_write_failure_warns_then_rate_limits(caplog, monkeypatch):
+    """A silent heartbeat failure shows every daemon dead while they all run."""
+    from db import queue as dbq
+
+    def _no_session():
+        raise RuntimeError("could not connect to server")
+
+    monkeypatch.setattr(dbq, "SessionLocal", _no_session)
+    dbq._heartbeat_last_warned.clear()
+    with caplog.at_level(logging.DEBUG, logger="db.queue"):
+        for _ in range(4):
+            dbq.record_heartbeat("protocol_tvl")
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert warnings[0].daemon == "protocol_tvl"
+    assert warnings[0].exc_type == "RuntimeError"
+    # The rest are still recorded, just not at a level that storms.
+    assert len([r for r in caplog.records if r.levelno == logging.DEBUG]) == 3
+
+
+# --- scanner / poller: what the pass dropped ---------------------------------
+
+
+def test_undecodable_tracked_log_is_counted_for_the_scanner_heartbeat():
+    """A log that matched an enrolled spec and would not decode left no trace."""
+    mc = MagicMock()
+    mc.address = "0x" + "a" * 40
+    mc.monitoring_config = {"tracked_topics": [{"topic0": "0x" + "1" * 64, "event_type": "x"}]}
+    session = MagicMock()
+    session.execute.return_value.scalars.return_value.all.return_value = [mc]
+
+    fetched = MagicMock()
+    fetched.raw = {"topics": ["0x" + "1" * 64]}
+    fetched.address = mc.address
+    fetched.topics = ["0x" + "1" * 64]
+
+    cohort = uw._Cohort(chain="ethereum", member_ids=[], addresses=[mc.address], cursor=0)
+    counters: dict[str, int] = {}
+    with patch.object(uw, "parse_any_log", lambda _raw: None):
+        with patch.object(uw, "parse_tracked_log", lambda _raw, _spec: None):
+            events = uw._process_window(session, cohort, [fetched], 1, 2, None, counters)
+
+    assert events == []
+    assert counters["undecodable_tracked_logs"] == 1
+
+
+def test_poller_publishes_the_plan_entries_it_could_not_dispatch(db_session):
+    """A plan entry this build cannot dispatch vanished from all accounting."""
+    import uuid as _uuid
+
+    from db.models import MonitoredContract
+
+    db_session.add(
+        MonitoredContract(
+            id=_uuid.uuid4(),
+            address="0x" + "5e" * 20,
+            chain="ethereum",
+            contract_type="regular",
+            monitoring_config={
+                "polling_plan": [
+                    {"field": "owner", "kind": "getter_call", "selector": "0x8da5cb5b", "type_kind": "address"},
+                    {"field": "future", "kind": "a_kind_this_build_does_not_know"},
+                    "not even a dict",
+                ]
+            },
+            last_known_state={},
+            last_scanned_block=0,
+            needs_polling=True,
+            is_active=True,
+        )
+    )
+    db_session.commit()
+
+    with patch.object(uw, "rpc_batch_request_classified", lambda _url, calls: [(None, "ok") for _ in calls]):
+        with patch.object(monitoring, "record_heartbeat") as hb:
+            uw.poll_for_state_changes(db_session, "http://stub")
+
+    _process, kwargs = hb.call_args
+    assert kwargs["detail"]["entries_unrecognized"] == 2
+    # Not a partial: an entry that was never dispatched failed to observe nothing.
+    assert kwargs["detail"]["contracts_selected"] == 1
 
 
 # --- notifier: a rejected post is not a sent one -----------------------------

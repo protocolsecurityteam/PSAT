@@ -232,11 +232,13 @@ class SweepCost:
     multicall: int = 0
     head_reads: int = 0
     windows: list[tuple[int, int, int]] = field(default_factory=list)
-    # Degraded external calls this cycle, by kind. Not a request count and
-    # deliberately outside ``total``: the budget meters what was SPENT, this
-    # meters what came back wrong. It is the cycle's substitute for
-    # ``record_degraded`` (a no-op outside ``BaseWorker``) and the carrier for
-    # the warn-once-then-DEBUG rule in ``warn_degraded_once``.
+    # Degraded external calls in THIS pass, by kind — the scope of a SweepCost,
+    # which is one producer pass rather than a whole daemon cycle. Not a request
+    # count and deliberately outside ``total``: the budget meters what was
+    # SPENT, this meters what came back wrong. It is the pass's substitute for
+    # ``record_degraded`` (a no-op outside ``BaseWorker``), the carrier for the
+    # warn-once-then-DEBUG rule in ``warn_degraded_once``, and what the caller
+    # folds into its per-cycle heartbeat.
     degraded: dict[str, int] = field(default_factory=dict)
 
     @property
@@ -420,10 +422,14 @@ def discover_recipient_assets(
                 to_block=to_block,
             )
         except SweepBudgetExceeded as exc:
-            # Once per cycle: the ceiling trips on one window and every holder
-            # behind it then fails instantly, so the repeats are the SAME event
-            # and are logged as such. Mirrors the disposition phase's budget
-            # line (``delivery_shape``), whose cost breakdown this copies.
+            # Once per SweepCost — which is one per producer pass (a protocol's
+            # contract sweep, or the entity cohort's own allowance), not one per
+            # daemon cycle. The ceiling trips on a single window and every holder
+            # behind it then fails instantly, so those repeats are the same event
+            # and are logged as such; the pass's count reaches the daemon cycle
+            # through the caller, which folds ``cost.degraded`` into its
+            # heartbeat. Mirrors the disposition phase's budget line
+            # (``delivery_shape``), whose cost breakdown this copies.
             warn_degraded_once(
                 logger,
                 cost.degraded,

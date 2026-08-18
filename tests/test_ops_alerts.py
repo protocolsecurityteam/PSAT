@@ -307,6 +307,9 @@ def test_discord_transport_failure_does_not_suppress_other_daemons(db_session, _
 
     monkeypatch.setattr("services.monitoring.notifier.requests.post", flaky_post)
     monkeypatch.setenv("PSAT_OPS_WEBHOOK_URL", _WEBHOOK)
+    # Pinned rather than incidental: a just-started watchdog, so these beats
+    # read as the cold-start shape and the level below is a stated expectation.
+    monkeypatch.setattr("services.monitoring.ops_alerts._uptime_s", lambda: 5.0)
 
     now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
     # Two daemons go stale together (a monitor VM crash pattern).
@@ -339,6 +342,7 @@ def test_daemon_down_is_error_only_when_it_died_on_our_watch(monkeypatch, caplog
     problem = {"kind": "dead", "daemon": HEARTBEAT_PROTOCOL_SCANNER, "status": "stale", "beat_age_s": 100_000.0}
 
     # Freshly started process: the staleness predates every second we watched.
+    monkeypatch.setattr(ops_alerts, "_uptime_s", lambda: 5.0)
     with caplog.at_level(_logging.WARNING, logger="services.monitoring.ops_alerts"):
         ops_alerts._emit_down(dict(problem), webhook_url=None)
     rec = [r for r in caplog.records if r.msg == "ops: daemon %s is down"][-1]
@@ -346,10 +350,21 @@ def test_daemon_down_is_error_only_when_it_died_on_our_watch(monkeypatch, caplog
     assert rec.cold_start is True
 
     caplog.clear()
-    # Same staleness, but this watchdog has been up longer than it.
+    # A watchdog that has been up for hours: the same beat age is now a death
+    # that happened while we were watching, whatever its arithmetic.
     monkeypatch.setattr(ops_alerts, "_uptime_s", lambda: 200_000.0)
     with caplog.at_level(_logging.WARNING, logger="services.monitoring.ops_alerts"):
         ops_alerts._emit_down(dict(problem), webhook_url=None)
+    rec = [r for r in caplog.records if r.msg == "ops: daemon %s is down"][-1]
+    assert rec.levelno == _logging.ERROR
+    assert rec.cold_start is False
+
+    caplog.clear()
+    # And the arithmetic on its own is not enough: past the cold-start window a
+    # daemon that has NEVER beaten is an incident, not a boot condition.
+    monkeypatch.setattr(ops_alerts, "_uptime_s", lambda: 10_000.0)
+    with caplog.at_level(_logging.WARNING, logger="services.monitoring.ops_alerts"):
+        ops_alerts._emit_down({**problem, "beat_age_s": None}, webhook_url=None)
     rec = [r for r in caplog.records if r.msg == "ops: daemon %s is down"][-1]
     assert rec.levelno == _logging.ERROR
     assert rec.cold_start is False

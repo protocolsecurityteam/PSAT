@@ -439,20 +439,32 @@ def refresh_contract_balances(
     # the log and the heartbeat.
     sweeps_failed = sum(1 for outcome in sweeps.values() if outcome.status != SWEEP_STATUS_COMPLETED)
     sweeps_completed = len(sweeps) - sweeps_failed
+    # An escalated holder with NO outcome was never attempted — today that is an
+    # unrouted chain, which produces no failure row to be counted. Tracked apart
+    # from the failures rather than folded in: it is a different fact and it is
+    # the one a completed-vs-failed count cannot see.
+    sweeps_unattempted = max(0, len(sweep_requests) - len(sweeps))
     counts["sweeps_completed"] = counts.get("sweeps_completed", 0) + sweeps_completed
     counts["sweeps_failed"] = counts.get("sweeps_failed", 0) + sweeps_failed
-    if sweeps_failed:
+    counts["sweeps_unattempted"] = counts.get("sweeps_unattempted", 0) + sweeps_unattempted
+    # Every degraded kind the sweep recorded, so an outage that produced no
+    # failed OUTCOME (an unrouted chain) still reaches the cycle heartbeat.
+    for kind, seen in sweep_cost.degraded.items():
+        counts[f"sweep_{kind}"] = counts.get(f"sweep_{kind}", 0) + seen
+    if sweeps_failed or sweeps_unattempted:
         partial = True
-    if sweeps and sweeps_failed == len(sweeps):
+    if sweep_requests and not sweeps_completed:
         logger.warning(
-            "asset sweep: every escalated contract failed to scan; no asset set gains completeness this cycle",
+            "asset sweep: no escalated contract completed a scan; no asset set gains completeness this cycle",
             extra={
                 "protocol_id": protocol_id,
                 "escalated": len(sweep_requests),
                 "sweeps_failed": sweeps_failed,
+                "sweeps_unattempted": sweeps_unattempted,
                 "get_logs": sweep_cost.get_logs,
                 "multicall": sweep_cost.multicall,
                 "head_reads": sweep_cost.head_reads,
+                "degraded": dict(sweep_cost.degraded),
             },
         )
     # The cycle's real request count, carried onto every fetch record it wrote.
@@ -475,6 +487,7 @@ def refresh_contract_balances(
                 "escalated": len(sweep_requests),
                 "sweeps_completed": sweeps_completed,
                 "sweeps_failed": sweeps_failed,
+                "sweeps_unattempted": sweeps_unattempted,
                 "get_logs": sweep_cost.get_logs,
                 "multicall": sweep_cost.multicall,
                 "head_reads": sweep_cost.head_reads,
@@ -1190,18 +1203,40 @@ def refresh_all_protocols(session: Session) -> int:
         try:
             entity_report = refresh_entity_balances_if_due(session, protocol.id)
             if entity_report is not None:
+                # Counted onto the CYCLE under its own keys, never onto the
+                # snapshot's: ``EntityObservationReport.partial`` has no reader,
+                # so without this the cohort's failed scans reached a log line
+                # and nothing else. Distinct keys keep the two passes' figures
+                # from being read as each other's.
+                entity_failed = sum(
+                    1 for outcome in entity_report.sweep_outcomes.values() if outcome.status != SWEEP_STATUS_COMPLETED
+                )
+                cycle_counts["entity_holders_read"] = cycle_counts.get("entity_holders_read", 0) + len(
+                    entity_report.holders
+                )
+                cycle_counts["entity_sweeps_failed"] = cycle_counts.get("entity_sweeps_failed", 0) + entity_failed
+                for kind, seen in entity_report.cost.degraded.items():
+                    cycle_counts[f"entity_sweep_{kind}"] = cycle_counts.get(f"entity_sweep_{kind}", 0) + seen
                 logger.info(
-                    "entity balances for %s: %d holder(s) read, %d excluded, %d getLogs + "
-                    "%d multicall + %d head request(s)",
+                    "entity balances for %s: %d holder(s) read, %d excluded, %d sweep(s) failed",
                     protocol.name,
                     len(entity_report.holders),
                     len(entity_report.excluded),
-                    entity_report.cost.get_logs,
-                    entity_report.cost.multicall,
-                    entity_report.cost.head_reads,
+                    entity_failed,
+                    extra={
+                        "protocol_id": protocol.id,
+                        "holders": len(entity_report.holders),
+                        "excluded": len(entity_report.excluded),
+                        "sweeps_failed": entity_failed,
+                        "get_logs": entity_report.cost.get_logs,
+                        "multicall": entity_report.cost.multicall,
+                        "head_reads": entity_report.cost.head_reads,
+                        "degraded": dict(entity_report.cost.degraded),
+                    },
                 )
         except Exception as exc:
             session.rollback()
+            cycle_counts["entity_passes_failed"] = cycle_counts.get("entity_passes_failed", 0) + 1
             logger.warning(
                 "entity balance refresh failed for protocol %s: %s",
                 protocol.name,

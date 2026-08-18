@@ -8,11 +8,24 @@ upgrade scanner and poller live in ``services.monitoring.unified_watcher``.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 
 from utils.rpc import RpcClientTimeout, normalize_hex, rpc_request
 
 logger = logging.getLogger(__name__)
+
+# Seconds between two WARNINGs that an implementation is not determined. See
+# ``_warn_not_determined``; process-local, and a restart re-announces once.
+_NOT_DETERMINED_WARN_INTERVAL_S = 300.0
+_last_warned_at: float | None = None
+
+
+def reset_not_determined_warn_state() -> None:
+    """Re-arm the WARNING (tests, and any caller wanting a fresh announce)."""
+    global _last_warned_at
+    _last_warned_at = None
+
 
 # Storage slots used for implementation resolution
 _EIP1967_IMPL_SLOT = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc"
@@ -52,16 +65,26 @@ class _Read:
         return cls(address=None, answered=False)
 
 
-# ``rpc_request`` raises ``RuntimeError`` for a transport failure AND for an
-# upstream error payload (which is how a reverting getter arrives), so the two
-# are told apart by the shapes that function authors itself: the timeout has its
-# own class, and the transport/HTTP failures are the only messages it writes —
-# a JSON-RPC error is re-raised as the node's own text.
-_TRANSPORT_PREFIXES = ("RPC request failed", "RPC HTTP")
+def _answered_with_an_error(exc: BaseException) -> bool:
+    """Whether the NODE answered, and its answer was an error (a revert).
 
+    ``rpc_request`` raises ``RuntimeError`` for a transport failure, for an HTTP
+    failure, for the pre-request URL/chain_id guard AND for a JSON-RPC ``error``
+    payload — but only the last is re-raised as the node's own object, so
+    ``str(exc)`` is that payload's repr (``{'code': -32000, 'message': …}``).
+    That shape is the POSITIVE signature, and everything else falls through to
+    "did not answer".
 
-def _did_not_answer(exc: BaseException) -> bool:
-    return isinstance(exc, RpcClientTimeout) or str(exc).startswith(_TRANSPORT_PREFIXES)
+    The default direction is the whole point. Answered-absent is the state that
+    licenses "there is no implementation here", so it is claimed only where the
+    node actually said so; an unrecognised failure — the chain_id guard, a
+    client bug, anything a later refactor adds — degrades to not_determined
+    rather than into a proven negative.
+    """
+    if isinstance(exc, RpcClientTimeout) or not isinstance(exc, RuntimeError):
+        return False
+    text = str(exc)
+    return text.startswith("{") and "'code'" in text
 
 
 def _address_of(result: object) -> str | None:
@@ -77,17 +100,12 @@ def _read_slot(rpc_url: str, address: str, slot: str, block: str = "latest", *, 
     try:
         result = rpc_request(rpc_url, "eth_getStorageAt", [address, slot, block], chain_id=chain_id)
     except Exception as exc:
-        if _did_not_answer(exc):
-            logger.debug(
-                "proxy watcher: storage read did not answer",
-                extra={"address": address, "slot": slot, "chain_id": chain_id, "exc_type": type(exc).__name__},
-            )
-            return _Read.unreachable()
+        answered = _answered_with_an_error(exc)
         logger.debug(
-            "proxy watcher: storage read rejected",
+            "proxy watcher: storage read rejected" if answered else "proxy watcher: storage read did not answer",
             extra={"address": address, "slot": slot, "chain_id": chain_id, "exc_type": type(exc).__name__},
         )
-        return _Read.absent()
+        return _Read.absent() if answered else _Read.unreachable()
     found = _address_of(result)
     return _Read(address=found, answered=True)
 
@@ -97,19 +115,14 @@ def _call_getter(rpc_url: str, address: str, selector: str, *, chain_id: int | N
     try:
         result = rpc_request(rpc_url, "eth_call", [{"to": address, "data": selector}, "latest"], chain_id=chain_id)
     except Exception as exc:
-        if _did_not_answer(exc):
-            logger.debug(
-                "proxy watcher: getter call did not answer",
-                extra={"address": address, "selector": selector, "chain_id": chain_id, "exc_type": type(exc).__name__},
-            )
-            return _Read.unreachable()
-        # The node answered with an error, which for a view getter is a revert:
-        # this contract does not implement it. That IS an answer.
+        # An error PAYLOAD from a view getter is a revert: this contract does
+        # not implement it, which is an answer. Anything else is not.
+        answered = _answered_with_an_error(exc)
         logger.debug(
-            "proxy watcher: getter reverted",
+            "proxy watcher: getter reverted" if answered else "proxy watcher: getter call did not answer",
             extra={"address": address, "selector": selector, "chain_id": chain_id, "exc_type": type(exc).__name__},
         )
-        return _Read.absent()
+        return _Read.absent() if answered else _Read.unreachable()
     found = _address_of(result)
     return _Read(address=found, answered=True)
 
@@ -209,8 +222,18 @@ def _warn_not_determined(
     The ``None`` this accompanies is not "no implementation" — some probe never
     answered — and the caller cannot tell the two apart from the return value,
     so the log is where the difference is recorded.
+
+    Warn-once-then-DEBUG, because the condition is systemic when it happens at
+    all: a dead route fails every watched proxy of every pass, and this module
+    has no cycle object to hang a tally on, so the window is a time bound.
     """
-    logger.warning(
+    global _last_warned_at
+    now = time.monotonic()
+    first = _last_warned_at is None or now - _last_warned_at >= _NOT_DETERMINED_WARN_INTERVAL_S
+    if first:
+        _last_warned_at = now
+    logger.log(
+        logging.WARNING if first else logging.DEBUG,
         "proxy watcher: implementation not determined; some probe did not answer",
         extra={
             "address": proxy_address,

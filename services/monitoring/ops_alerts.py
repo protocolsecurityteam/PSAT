@@ -420,7 +420,15 @@ def _emit_down(problem: dict[str, Any], *, webhook_url: str | None) -> None:
         # ERROR is the Loki alert hook and is reserved for a daemon that dies
         # while we are watching; the cold start still says so, at WARNING, and
         # still posts.
-        cold_start = beat_age is None or beat_age > _uptime_s()
+        #
+        # The uptime bound is what keeps that from swallowing the alarm: beat
+        # age and uptime grow at the same rate, so the comparison alone is a
+        # constant, and a daemon that died ten minutes before the alerter
+        # restarted would read cold-start forever. Only the first two ticks of
+        # this process count as a cold start; after that a still-dead daemon is
+        # an incident, whatever its beat age (including no heartbeat at all).
+        watchdog_is_young = _uptime_s() < 2 * _interval_s()
+        cold_start = watchdog_is_young and (beat_age is None or beat_age > _uptime_s())
         logger.log(
             logging.WARNING if cold_start else logging.ERROR,
             "ops: daemon %s is down",
