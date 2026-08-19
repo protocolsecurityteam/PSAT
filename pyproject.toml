@@ -79,7 +79,7 @@ select = ["E", "F", "I", "W", "PGH"]
 "alembic/versions/*.py" = ["E501"]
 
 [tool.coverage.run]
-source = ["api", "workers", "services", "db", "utils"]
+source = ["api", "workers", "services", "db", "utils", "routers", "schemas"]
 
 [tool.coverage.report]
 fail_under = 70

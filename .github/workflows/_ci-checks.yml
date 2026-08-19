@@ -54,6 +54,7 @@ jobs:
             ci-config:
               - '.github/workflows/**'
               - 'Dockerfile'
+              - 'docker/**'
               - 'fly.toml'
               - 'start_*.sh'
               - 'docker-compose.yml'
