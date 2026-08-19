@@ -1,4 +1,4 @@
-"""Integration tests for DiscoveryWorker._process_address().
+"""Unit tests for DiscoveryWorker._process_address() — mocked sessions, no Postgres.
 
 Covers: happy path, Vyper detection, EVM version fallback, source format detection.
 All tests are CI-friendly -- network calls are mocked via monkeypatch.

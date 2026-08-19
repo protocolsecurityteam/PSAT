@@ -1,7 +1,7 @@
-"""POC reproductions for the three concrete issues raised in code review.
+"""Protocol dedup regression guards: alias-driven merge, slug race, hostname match.
 
-Originally written to demonstrate that each issue was reproducible. After the
-fixes landed they were inverted into regression guards:
+Originally POC reproductions of three concrete issues raised in code review.
+After the fixes landed they were inverted into regression guards:
 
 (1) ``test_orphan_duplicates_merge_via_aliases`` — passing ``aliases`` to
     ``get_or_create_protocol`` pulls every NULL-slug row sharing the family

@@ -1,4 +1,4 @@
-"""Integration tests for API endpoints.
+"""Unit tests for the analyze / analyses endpoints — mocked sessions, no Postgres.
 
 Covers:
 - POST /api/analyze with company and address payloads, plus validation

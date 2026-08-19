@@ -1,10 +1,10 @@
-"""Integration tests for the Discord notification pipeline and subscription API.
+"""Integration tests for the protocol-subscription and monitored-contract routes.
 
 Covers protocol subscription event_filter validation and the monitored-contract
 PATCH / re-enroll endpoints.
 
-All tests run without live services — PostgreSQL for DB, mocked requests.post
-for Discord.
+All tests run without live services — PostgreSQL for the DB, the enrollment call
+patched.
 """
 
 from __future__ import annotations

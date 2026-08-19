@@ -1,15 +1,11 @@
-"""Pinning tests for guard patterns the current pipeline misses.
+"""Regression tests for the generic guard extensions (codex F1–F4).
 
-Each test exercises a real-world auth pattern that the *generic*
-predicate pipeline should pick up structurally — but doesn't, because
-the static stage's structural detectors are too narrow. Marked
-``xfail(strict=True)`` so when the generic extensions land, every
-test flips to XPASS and pytest's strict mode forces removing the
-xfail decorator (ratchet against silent regressions).
-
-The fix in each case is a *generalization* of existing detection,
-not a per-protocol adapter. The fix paths are summarized in the
-docstring of each test.
+Each test compiles a real-world auth pattern — Diamond ACL storage, a
+bitwise role flag, a custom M-of-N threshold, EIP-1271, a hashed
+composite key — and asserts the *generic* predicate pipeline classifies
+it structurally, with no per-protocol adapter. Every one of these
+landed; each test's docstring records the production path that carries
+it, so a regression names the mechanism it broke.
 """
 
 from __future__ import annotations
