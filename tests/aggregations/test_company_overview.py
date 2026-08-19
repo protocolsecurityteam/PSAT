@@ -16,9 +16,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from sqlalchemy import select  # noqa: E402
+from sqlalchemy import select
 
-from db.models import (  # noqa: E402
+from db.models import (
     Contract,
     ContractBalance,
     ContractBalanceFetch,
@@ -28,16 +28,13 @@ from db.models import (  # noqa: E402
     ControllerValue,
     EffectiveFunction,
     FunctionPrincipal,
-    Job,
-    JobStage,
     JobStatus,
     PrincipalLabel,
-    Protocol,
     TokenDeliveryEvidence,
     TokenProtocolReference,
     UpgradeEvent,
 )
-from services.aggregations.company_overview import (  # noqa: E402
+from services.aggregations.company_overview import (
     CompanyNotFound,
     _build_principal_lookup,
     _entity_key,
@@ -50,8 +47,9 @@ from services.aggregations.company_overview import (  # noqa: E402
     resolve_company_jobs,
     resolve_implementation_contracts,
 )
-from tests.conftest import requires_postgres  # noqa: E402
-from utils.balance_status import (  # noqa: E402
+from tests.conftest import requires_postgres
+from tests.support.overview_builders import _add_contract, _add_job, _add_protocol, _addr
+from utils.balance_status import (
     ASSET_SET_STATUS_AT_PAGE_CAP,
     ASSET_SET_STATUS_RETURNED_ASSETS,
     BALANCE_WRITER_TVL,
@@ -64,80 +62,6 @@ from utils.balance_status import (  # noqa: E402
 )
 
 pytestmark = requires_postgres
-
-
-def _addr(seed: str) -> str:
-    """Deterministic-but-test-unique 0x address keyed by ``seed``.
-
-    The conftest db_session fixture cleans up Protocol but not Contract or
-    Job rows (they have ON DELETE SET NULL). Hardcoding addresses across
-    tests collides on uq_contract_address_chain — UUID-derive instead.
-    """
-    return "0x" + (uuid.uuid4().hex + seed.encode().hex())[:40]
-
-
-def _add_protocol(session, name: str) -> Protocol:
-    p = Protocol(name=name)
-    session.add(p)
-    session.commit()
-    session.refresh(p)
-    return p
-
-
-def _add_job(
-    session,
-    *,
-    address: str,
-    name: str | None = None,
-    company: str | None = None,
-    protocol_id: int | None = None,
-    status: JobStatus = JobStatus.completed,
-    request: dict | None = None,
-    is_proxy: bool = False,
-) -> Job:
-    job = Job(
-        id=uuid.uuid4(),
-        address=address,
-        company=company,
-        protocol_id=protocol_id,
-        name=name or address,
-        status=status,
-        stage=JobStage.done,
-        request=request or {"address": address},
-        is_proxy=is_proxy,
-        created_at=datetime.now(timezone.utc),
-        updated_at=datetime.now(timezone.utc),
-    )
-    session.add(job)
-    session.commit()
-    session.refresh(job)
-    return job
-
-
-def _add_contract(
-    session,
-    *,
-    address: str,
-    job: Job,
-    protocol_id: int | None = None,
-    chain: str | None = "ethereum",
-    is_proxy: bool = False,
-    implementation: str | None = None,
-    contract_name: str | None = None,
-) -> Contract:
-    c = Contract(
-        address=address,
-        job_id=job.id,
-        protocol_id=protocol_id,
-        chain=chain,
-        contract_name=contract_name or address,
-        is_proxy=is_proxy,
-        implementation=implementation,
-    )
-    session.add(c)
-    session.commit()
-    session.refresh(c)
-    return c
 
 
 def test_resolve_company_jobs_protocol_path(db_session):
@@ -2842,117 +2766,6 @@ def test_terminal_walk_does_not_overwrite_a_record_that_arrived_with_the_row(db_
     entry = next(e for e in payload["contracts"] if e["address"] == addr)
     nodes = {n["address"].lower(): n for n in entry["control_graph"]["nodes"]}
     assert nodes[controller.lower()]["details"]["terminal_principal"]["status"] == "multi_plane"
-
-
-def test_principal_label_payload_narrows_confidence_and_the_duplicate_label(db_session):
-    """``principal_labels.confidence`` carries no epistemic content: it is a
-    naming-branch label, two-valued in practice (high 1,376 / medium 180 / low 0
-    — ``low`` needs ``resolved_type == "unknown"`` and no such row exists), ~97%
-    a restatement of ``resolved_type``, and cannot say "I did not
-    determine this". ``label`` is byte-identical to ``display_name`` on 1,556/1,556
-    rows, so a consumer reading both believed there were two facts.
-    """
-    from db.models import PrincipalLabel
-    from services.aggregations.analysis_detail import _principal_label_payload
-
-    identical = PrincipalLabel(
-        contract_id=1,
-        address=_addr("plc1"),
-        label="EtherFi admin Safe",
-        display_name="EtherFi admin Safe",
-        resolved_type="safe",
-        labels=["etherfi_admin"],
-        confidence="high",
-        details={},
-        graph_context=[],
-    )
-    out = _principal_label_payload(identical)
-    assert out["naming_rule"] == "high"
-    assert "confidence" not in out
-    # One fact, published once.
-    assert "label" not in out
-    assert out["display_name"] == "EtherFi admin Safe"
-
-    # POSITIVE CONTROL: when the two really differ, both ship.
-    differing = PrincipalLabel(
-        contract_id=1,
-        address=_addr("plc2"),
-        label="raw-label",
-        display_name="Pretty Name",
-        resolved_type="contract",
-        labels=[],
-        confidence="medium",
-        details={},
-        graph_context=[],
-    )
-    out = _principal_label_payload(differing)
-    assert out["label"] == "raw-label"
-    assert out["display_name"] == "Pretty Name"
-    assert out["naming_rule"] == "medium"
-
-
-def test_current_status_needs_a_determined_lower_bound_for_open_ended(db_session):
-    """``covered_to_block is None`` alone is not "this row covers the
-    currently-open impl window" — it is also what a row whose upper bound was never
-    determined looks like, and this module's own ImplWindow docstring calls that
-    inference invalid. ``AuditContractCoverage`` carries no ``successor`` column, so
-    the lower bound is the only evidence available here.
-
-    Armed population 15 (``match_confidence='high'`` with BOTH bounds NULL);
-    realised badge changes today 0 — the 2 high-confidence rows that do land on a
-    current impl are ``covered_from_block`` set / ``covered_to_block`` NULL and keep
-    the badge (the positive control below).
-    """
-    from types import SimpleNamespace
-
-    from services.aggregations.contract_audit_timeline import _current_status
-
-    p = _add_protocol(db_session, f"e2e-l21-{uuid.uuid4().hex[:8]}")
-    impl_addr = _addr("l21i")
-    proxy_addr = _addr("l21p")
-    impl_job = _add_job(db_session, address=impl_addr, protocol_id=p.id, name="Impl")
-    proxy_job = _add_job(db_session, address=proxy_addr, protocol_id=p.id, name="Proxy")
-    impl = _add_contract(db_session, address=impl_addr, job=impl_job, protocol_id=p.id, contract_name="Impl")
-    proxy = _add_contract(
-        db_session,
-        address=proxy_addr,
-        job=proxy_job,
-        protocol_id=p.id,
-        is_proxy=True,
-        implementation=impl_addr,
-        contract_name="Proxy",
-    )
-
-    # ``_current_status`` reads the coverage rows it is handed and only queries for
-    # the impl Contract, so the rows are built in memory — the table's
-    # (report, contract) unique key would otherwise force one AuditReport per shape
-    # for no gain in what is being tested.
-    def _cov(**kwargs):
-        base = {
-            "contract_id": impl.id,
-            "match_type": "impl_era",
-            "match_confidence": "high",
-            "equivalence_status": "pending",
-            "proof_kind": None,
-            "covered_from_block": None,
-            "covered_to_block": None,
-        }
-        base.update(kwargs)
-        return SimpleNamespace(**base)
-
-    # POSITIVE CONTROL: bounded start, no end — genuinely open-ended, keeps "audited".
-    open_ended = _cov(covered_from_block=100)
-    assert _current_status(db_session, proxy, [open_ended]) == "audited"
-
-    # Neither bound determined: never windowed at all, so it cannot earn the badge
-    # on the strength of a missing number.
-    unbounded = _cov()
-    assert _current_status(db_session, proxy, [unbounded]) == "unaudited_since_upgrade"
-
-    # NEGATIVE CONTROL: a cryptographic proof still overrides everything, so the
-    # narrowing cannot have removed the strongest evidence path.
-    proven = _cov(match_confidence="low", equivalence_status="proven", proof_kind="bytecode_match")
-    assert _current_status(db_session, proxy, [unbounded, proven]) == "audited"
 
 
 def test_upgrade_count_counts_transactions_not_upgraded_logs(db_session):

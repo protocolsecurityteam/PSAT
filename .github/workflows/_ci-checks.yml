@@ -96,7 +96,10 @@ jobs:
           cache-dependency-path: site/package-lock.json
       - run: npm ci
       - run: npm test
-      - run: npx playwright install --with-deps chromium
+      # install-deps is best-effort: it apt-installs from azure.archive.ubuntu.com,
+      # which has recurring outages, and the runner image already ships the libraries.
+      - run: timeout 210 npx playwright install-deps chromium || echo "::warning::playwright install-deps failed or stalled (apt mirror outage?); relying on runner-image libraries"
+      - run: npx playwright install chromium
       - run: npx playwright test
 
   test:
@@ -185,13 +188,20 @@ jobs:
       - name: Install Playwright browser
         timeout-minutes: 12
         run: |
+          # Browser binaries (cached above, no apt involved) must install; the
+          # system-deps half runs apt against azure.archive.ubuntu.com, which
+          # has recurring outages — the runner image already ships Chromium's
+          # libraries, so a mirror outage must not fail the build.
+          if ! timeout 210 uv run playwright install-deps chromium; then
+            echo "::warning::playwright install-deps failed (apt mirror outage?); relying on runner-image libraries"
+          fi
           for attempt in 1 2 3; do
-            if timeout 210 uv run playwright install --with-deps chromium; then
+            if timeout 210 uv run playwright install chromium; then
               exit 0
             fi
-            echo "playwright install attempt ${attempt} failed or stalled; retrying"
+            echo "playwright browser install attempt ${attempt} failed or stalled; retrying"
           done
-          echo "playwright install failed after 3 attempts"
+          echo "playwright browser install failed after 3 attempts"
           exit 1
       - name: Create test database
         run: PGPASSWORD=psat psql -h localhost -U psat -d psat -c "CREATE DATABASE psat_test OWNER psat;"

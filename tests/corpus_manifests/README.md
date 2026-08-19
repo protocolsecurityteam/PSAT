@@ -2,7 +2,7 @@
 
 YAML files in this directory pin the **expected semantic predicate-pipeline
 output** for representative real-protocol contract shapes. The harness
-in `tests/test_corpus_manifests.py` parametrizes one test per manifest:
+in `tests/static/test_corpus_manifests.py` parametrizes one test per manifest:
 
 1. Compile the contract source (inline in the YAML or a path to
    `tests/corpus_manifests/contracts/*.sol`).
@@ -56,6 +56,6 @@ Field semantics:
 1. Create `<protocol>.yaml` here.
 2. Drop your Solidity in either inline `source:` or
    `contracts/<protocol>.sol` and reference via `source_path:`.
-3. Run `pytest tests/test_corpus_manifests.py::test_corpus_manifest -k <name>`.
+3. Run `pytest tests/static/test_corpus_manifests.py::test_corpus_manifest -k <name>`.
 4. The test fails on the first divergence — iterate on the manifest
    or extend the semantic pipeline until it passes.

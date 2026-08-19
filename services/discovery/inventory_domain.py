@@ -155,7 +155,9 @@ def _extract_addresses(*values: str) -> set[str]:
 
 def _infer_chain(url: str, text: str) -> str:
     domain = _get_domain(url)
-    for known, chain in EXPLORER_CHAINS.items():
+    # Longest entry first: a subdomain entry (optimistic.etherscan.io) must win
+    # over its parent domain (etherscan.io) regardless of dict order.
+    for known, chain in sorted(EXPLORER_CHAINS.items(), key=lambda kv: -len(kv[0])):
         if _domain_matches(domain, known):
             return chain
     lowered = text.lower()

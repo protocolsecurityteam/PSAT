@@ -21,21 +21,21 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from db.models import ControlGraphNode, EffectiveFunction, FunctionPrincipal  # noqa: E402
-from services.aggregations.company_overview import (  # noqa: E402
+from db.models import ControlGraphNode, EffectiveFunction, FunctionPrincipal
+from services.aggregations.company_overview import (
     _entity_key,
     build_company_overview,
     build_functions_for_protocol,
     prefetch_contracts,
     resolve_implementation_contracts,
 )
-from tests.aggregations.test_company_overview import (  # noqa: E402
+from tests.aggregations.test_company_overview import (
     _add_contract,
     _add_job,
     _add_protocol,
     _addr,
 )
-from tests.conftest import requires_postgres  # noqa: E402
+from tests.conftest import requires_postgres
 
 pytestmark = requires_postgres
 

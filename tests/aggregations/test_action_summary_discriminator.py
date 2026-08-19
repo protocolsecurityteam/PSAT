@@ -9,7 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from services.aggregations.action_summary import (  # noqa: E402
+from services.aggregations.action_summary import (
     ARBITRARY_SUMMARY,
     VACUOUS_SUMMARY,
     describe_action,

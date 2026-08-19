@@ -58,6 +58,8 @@ testpaths = ["tests"]
 markers = [
     "live: tests that require a running API server and workers (deselected by default)",
     "smoke: read-only live tests safe to run against prod post-deploy (subset of `live`)",
+    "compile: invokes a real solc/forge compile (slow; needs a local toolchain)",
+    "anvil: spawns a local anvil node (slow; needs foundry on PATH)",
 ]
 
 [tool.ruff]
@@ -69,9 +71,9 @@ select = ["E", "F", "I", "W", "PGH"]
 
 [tool.ruff.lint.per-file-ignores]
 "services/crawlers/dapp/browser.py" = ["E501"]
-"tests/test_effect_label_adversarial.py" = ["E501"]
-"tests/test_symbolic_effects.py" = ["E501"]
-"tests/*" = ["F811"]
+"tests/static/test_effect_label_adversarial.py" = ["E501"]
+"tests/static/test_symbolic_effects.py" = ["E501"]
+"tests/**" = ["F811"]
 # Alembic autogenerates one-column-per-line table definitions; line length
 # isn't worth fighting with the generator.
 "alembic/versions/*.py" = ["E501"]
