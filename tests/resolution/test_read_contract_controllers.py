@@ -5,9 +5,9 @@ control planes. Stubs the eth_call layer, never the transport."""
 
 from __future__ import annotations
 
+from services.clients.rpc import EthCallResult, selector
 from services.resolution import tracking
 from services.resolution.tracking import read_contract_controllers
-from utils.rpc import EthCallResult, selector
 
 OWNER = "0x" + "a" * 40
 AUTHORITY = "0x" + "b" * 40

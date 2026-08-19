@@ -1,7 +1,7 @@
 """Logging/observability locks for the shared low-level I/O utils.
 
-Covers the swallow sites in ``utils.rpc`` / ``utils.llm`` / ``utils.etherscan`` /
-``utils.concurrency`` that used to emit nothing (or an ERROR traceback) on a
+Covers the swallow sites in ``services.clients.rpc`` / ``utils.llm`` / ``services.clients.etherscan`` /
+``services.concurrency`` that used to emit nothing (or an ERROR traceback) on a
 degraded-but-continuing failure. Each test stubs the wire — no live network/RPC —
 and asserts the new observable behaviour: a WARNING with facts in ``extra``, the
 paired ``record_degraded`` entry, and the LLM completion INFO + ``llm_calls`` metric.
@@ -14,10 +14,10 @@ import logging
 import pytest
 import requests
 
-import utils.etherscan as etherscan
+import services.clients.etherscan as etherscan
+import services.clients.rpc as rpc
 import utils.llm as llm
-import utils.rpc as rpc
-from utils.concurrency import parallel_map
+from services.concurrency import parallel_map
 from utils.logging import bind_trace_context, degraded_errors_var, stage_metrics_var
 
 
@@ -45,7 +45,7 @@ def test_rpc_whole_chunk_failure_warns_with_chunk_start_and_degrades(monkeypatch
     token = degraded_errors_var.set(accumulator)
     try:
         with bind_trace_context(trace_id="t1", job_id="j1", stage="resolution", worker_id="w1"):
-            with caplog.at_level(logging.WARNING, logger="utils.rpc"):
+            with caplog.at_level(logging.WARNING, logger="services.clients.rpc"):
                 results = rpc.rpc_batch_request_with_status("http://erpc/main/evm/1", [("eth_call", [{}, "latest"])])
     finally:
         degraded_errors_var.reset(token)
@@ -53,7 +53,7 @@ def test_rpc_whole_chunk_failure_warns_with_chunk_start_and_degrades(monkeypatch
     # Conservative default preserved: the failed chunk's slot stays errored.
     assert results == [(None, True)]
 
-    warnings = [r for r in caplog.records if r.levelno == logging.WARNING and r.name == "utils.rpc"]
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING and r.name == "services.clients.rpc"]
     assert warnings, "a whole-chunk batch failure must emit a WARNING"
     rec = warnings[0]
     assert rec.chunk_start == 0
@@ -70,13 +70,15 @@ def test_eth_call_batch_whole_chunk_failure_warns_and_degrades(monkeypatch, capl
     token = degraded_errors_var.set(accumulator)
     try:
         with bind_trace_context(trace_id="t1", job_id="j1", stage="resolution", worker_id="w1"):
-            with caplog.at_level(logging.WARNING, logger="utils.rpc"):
+            with caplog.at_level(logging.WARNING, logger="services.clients.rpc"):
                 results = rpc.eth_call_batch("http://erpc/main/evm/1", [{"to": "0x" + "1" * 40, "data": "0x"}])
     finally:
         degraded_errors_var.reset(token)
 
     assert results[0].success is False
-    assert any(r.name == "utils.rpc" and getattr(r, "exc_type", None) == "ConnectionError" for r in caplog.records)
+    assert any(
+        r.name == "services.clients.rpc" and getattr(r, "exc_type", None) == "ConnectionError" for r in caplog.records
+    )
     assert accumulator and accumulator[0].phase == "eth_call_batch_chunk"
 
 
@@ -133,13 +135,13 @@ def test_etherscan_get_contract_info_errored_fetch_warns_and_degrades(monkeypatc
     token = degraded_errors_var.set(accumulator)
     try:
         with bind_trace_context(trace_id="t1", job_id="j1", stage="discovery", worker_id="w1"):
-            with caplog.at_level(logging.WARNING, logger="utils.etherscan"):
+            with caplog.at_level(logging.WARNING, logger="services.clients.etherscan"):
                 name, selectors = etherscan.get_contract_info("0x" + "a" * 40, chain_id=1)
     finally:
         degraded_errors_var.reset(token)
 
     assert name is None and selectors == {}
-    warnings = [r for r in caplog.records if r.name == "utils.etherscan" and r.levelno == logging.WARNING]
+    warnings = [r for r in caplog.records if r.name == "services.clients.etherscan" and r.levelno == logging.WARNING]
     assert warnings, "an errored Etherscan fetch must WARN (distinct from an unverified contract)"
     assert warnings[0].address == "0x" + "a" * 40
     assert warnings[0].exc_type == "RuntimeError"
@@ -153,11 +155,11 @@ def test_parallel_map_heartbeat_failure_demoted_to_warning_with_exc_type(caplog)
     def _bad_heartbeat() -> None:
         raise ValueError("heartbeat boom")
 
-    with caplog.at_level(logging.WARNING, logger="utils.concurrency"):
+    with caplog.at_level(logging.WARNING, logger="services.concurrency"):
         results = parallel_map(lambda x: x * 2, [1, 2, 3], max_workers=1, heartbeat=_bad_heartbeat)
 
     assert [r for _, r in results] == [2, 4, 6]
-    warnings = [r for r in caplog.records if r.name == "utils.concurrency"]
+    warnings = [r for r in caplog.records if r.name == "services.concurrency"]
     assert warnings, "a raising heartbeat must emit a WARNING"
     assert all(r.levelno == logging.WARNING for r in warnings)
     assert warnings[0].exc_type == "ValueError"

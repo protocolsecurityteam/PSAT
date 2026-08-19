@@ -94,7 +94,7 @@ def session():
 def _no_network(monkeypatch):
     """Stub RPC dead so the Solmate adapter's bytecode confirmation / owner-getter probes
     fail and the resolver falls back to its event-only / state-var paths."""
-    import utils.rpc as rpc
+    import services.clients.rpc as rpc
 
     def _boom(*_a, **_k):
         raise RuntimeError("network disabled in test")

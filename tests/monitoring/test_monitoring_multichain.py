@@ -175,9 +175,9 @@ def test_tvl_refresh_passes_contract_chain_id(db_session, monkeypatch):
         seen_chain_ids.append(chain_id)
         return page([])
 
-    monkeypatch.setattr("utils.etherscan.get_eth_balance", _bal)
-    monkeypatch.setattr("utils.etherscan.get_token_balances_page", _tokens)
-    monkeypatch.setattr("utils.etherscan.get_eth_price", lambda *a, **kw: None)
+    monkeypatch.setattr("services.clients.etherscan.get_eth_balance", _bal)
+    monkeypatch.setattr("services.clients.etherscan.get_token_balances_page", _tokens)
+    monkeypatch.setattr("services.clients.etherscan.get_eth_price", lambda *a, **kw: None)
     # The chain id under test rides the Etherscan calls; the pinned native read
     # is a separate wire on the same path, so it is stubbed to its unavailable
     # outcome rather than left live.

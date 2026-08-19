@@ -238,8 +238,8 @@ def _install_probe_stub(
     # Patch the wire only: the real ``multicall3_aggregate3`` (its aggregate3
     # encode/decode) runs against this stubbed ``rpc_request``. Patch the adapter's
     # imported reference too so the pin-once eth_blockNumber read is stubbed.
+    import services.clients.rpc as _rpc
     import services.resolution.adapters.enumerable_role_store as _ers
-    import utils.rpc as _rpc
 
     monkeypatch.setattr(_rpc, "rpc_request", _stub)
     monkeypatch.setattr(_ers, "rpc_request", _stub)
@@ -476,7 +476,7 @@ def test_probe_transport_failure_not_memoized_cross_capability(session, monkeypa
                 results.append((False, b""))
         return "0x" + abi_encode(["(bool,bytes)[]"], [results]).hex()
 
-    import utils.rpc as _rpc
+    import services.clients.rpc as _rpc
 
     monkeypatch.setattr(_rpc, "rpc_request", _stub)
 

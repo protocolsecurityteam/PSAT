@@ -439,7 +439,7 @@ def get_contract_creation_block(address: str, *, chain_id: int, rpc_url: str | N
     tx_hash = item.get("txHash")
     if isinstance(tx_hash, str) and tx_hash.startswith("0x"):
         try:
-            from utils.rpc import default_rpc_url, rpc_request
+            from services.clients.rpc import default_rpc_url, rpc_request
 
             url = rpc_url or default_rpc_url(chain_id=chain_id)
             tx = rpc_request(url, "eth_getTransactionByHash", [tx_hash], chain_id=chain_id) if url else None
@@ -499,9 +499,9 @@ def parallel_get(
     serial dead time between calls is removed.
 
     Failures are returned in-place rather than raised so the caller can
-    decide which IDs to skip (mirrors :func:`utils.concurrency.parallel_map`).
+    decide which IDs to skip (mirrors :func:`services.concurrency.parallel_map`).
     """
-    from utils.concurrency import parallel_map
+    from services.concurrency import parallel_map
 
     if not calls:
         return {}

@@ -56,9 +56,9 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Sequence
 
+from services.clients.rpc import EthCallResult, eth_call_batch
 from services.monitoring.restaking_reads import ZERO_ADDRESS, decode_address_word
 from services.resolution.role_holder_plane import ProbeBlock
-from utils.rpc import EthCallResult, eth_call_batch
 
 logger = logging.getLogger(__name__)
 

@@ -35,8 +35,8 @@ from db.queue import (
     HEARTBEAT_ROLE_HOLDER_PLANE,
     record_heartbeat,
 )
+from services.clients.rpc import default_rpc_url
 from utils.logging import configure_logging
-from utils.rpc import default_rpc_url
 from utils.secrets import sanitize_url
 
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")

@@ -384,7 +384,7 @@ def test_transport_outage_with_real_helper_publishes_nothing(db_session, monkeyp
         def post(self, *a, **k):
             raise requests.ConnectionError("endpoint unreachable")
 
-    with patch("utils.rpc._get_session", return_value=_BoomSession()):
+    with patch("services.clients.rpc._get_session", return_value=_BoomSession()):
         events = poll_for_state_changes(db_session, "http://rpc.invalid")
 
     assert events == []

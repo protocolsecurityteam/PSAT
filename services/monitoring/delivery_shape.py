@@ -67,6 +67,7 @@ from sqlalchemy import func as _sql_func
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
+from services.clients.rpc import get_transaction_receipt
 from services.monitoring import asset_sweep, warn_degraded_once
 from services.monitoring.asset_sweep import (
     TRANSFER_BATCH_TOPIC0,
@@ -97,7 +98,6 @@ from utils.balance_status import (
     USD_CRUMB_THRESHOLD,
 )
 from utils.logging import log_timed_phase
-from utils.rpc import get_transaction_receipt
 
 logger = logging.getLogger(__name__)
 
@@ -365,7 +365,7 @@ def creation_block(holder_address: str, *, chain_id: int, cost: DispositionCost)
         if key in _CREATION_BLOCK_CACHE:
             cached = _CREATION_BLOCK_CACHE[key]
             return 0 if cached is None else cached
-    from utils.etherscan import get_contract_creation_block
+    from services.clients.etherscan import get_contract_creation_block
 
     cost.creation_lookups += 1
     try:

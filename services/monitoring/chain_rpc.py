@@ -10,13 +10,13 @@ Mainnet is byte-for-byte unchanged: chain 1 returns the caller's incoming URL
 verbatim, so the explicit (often local / stubbed) URL tests inject still flows
 through untouched. A second chain resolves its own route from the registry,
 with a local (Anvil/test) fallback URL still allowed to win exactly as
-:func:`utils.rpc.default_rpc_url` lets it everywhere else.
+:func:`services.clients.rpc.default_rpc_url` lets it everywhere else.
 """
 
 from __future__ import annotations
 
+from services.clients.rpc import default_rpc_url
 from utils.chains import UnknownChainError, chain_by_name
-from utils.rpc import default_rpc_url
 
 
 def chain_id_for(chain: str | None, *, default: int = 1) -> int:

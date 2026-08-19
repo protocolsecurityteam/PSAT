@@ -32,6 +32,8 @@ from db.models import (
     TvlSnapshot,
 )
 from db.queue import record_heartbeat
+from services.clients.etherscan import TokenBalancePage
+from services.clients.rpc import rpc_url_for_chain_id
 from services.monitoring import HEARTBEAT_PROTOCOL_TVL, emit_monitor_cycle, warn_degraded_once
 from services.monitoring.asset_sweep import SweepCost, SweepOutcome
 from services.monitoring.balance_observation import (
@@ -67,9 +69,7 @@ from utils.balance_status import (
     SWEEP_STATUS_COMPLETED,
 )
 from utils.chains import chain_by_id
-from utils.etherscan import TokenBalancePage
 from utils.logging import log_timed_phase
-from utils.rpc import rpc_url_for_chain_id
 
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
@@ -278,7 +278,7 @@ def refresh_contract_balances(
     protocol total, so a caller that snapshots TVL leaves it ``None``.
     """
     from services.aggregations.company_overview import _entity_key
-    from utils.etherscan import get_eth_balance, get_eth_price, get_native_price
+    from services.clients.etherscan import get_eth_balance, get_eth_price, get_native_price
 
     counts = counters if counters is not None else {}
     contracts = _get_protocol_addresses(session, protocol_id)
@@ -773,7 +773,7 @@ def refresh_entity_balances(
       rather than being determined as airdrop-delivered. That is the fail-closed
       direction — a weaker claim, never a stronger one.
     """
-    from utils.etherscan import get_eth_price, get_native_price
+    from services.clients.etherscan import get_eth_price, get_native_price
 
     holders, excluded = proven_codeless_holders(session, protocol_id, entity_keys=entity_keys)
     report = EntityObservationReport(holders=holders, excluded=excluded)

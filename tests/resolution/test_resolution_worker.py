@@ -38,9 +38,9 @@ def _stub_etherscan_balances(monkeypatch):
     and no test here exercises it — so the module takes the unpinned path its
     expectations were written against.
     """
-    monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda addr, *a, **k: 0)
-    monkeypatch.setattr("utils.etherscan.get_native_price", lambda *a, **k: 0.0)
-    monkeypatch.setattr("utils.etherscan.get_token_balances_page", lambda addr, *a, **k: page([]))
+    monkeypatch.setattr("services.clients.etherscan.get_eth_balance", lambda addr, *a, **k: 0)
+    monkeypatch.setattr("services.clients.etherscan.get_native_price", lambda *a, **k: 0.0)
+    monkeypatch.setattr("services.clients.etherscan.get_token_balances_page", lambda addr, *a, **k: page([]))
     pinned_native_unavailable(monkeypatch)
 
 
@@ -154,10 +154,12 @@ class TestFetchBalancesHappyPath:
         fake_contract = SimpleNamespace(id=42, address=TARGET_ADDRESS, protocol_id=None)
         job = _job()
 
-        monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda addr, *a, **k: 1_000_000_000_000_000_000)  # 1 ETH
-        monkeypatch.setattr("utils.etherscan.get_native_price", lambda *a, **k: 2000.0)
         monkeypatch.setattr(
-            "utils.etherscan.get_token_balances_page",
+            "services.clients.etherscan.get_eth_balance", lambda addr, *a, **k: 1_000_000_000_000_000_000
+        )  # 1 ETH
+        monkeypatch.setattr("services.clients.etherscan.get_native_price", lambda *a, **k: 2000.0)
+        monkeypatch.setattr(
+            "services.clients.etherscan.get_token_balances_page",
             lambda addr, *a, **k: page(
                 [
                     {
@@ -189,9 +191,11 @@ class TestFetchBalancesHappyPath:
         fake_contract = SimpleNamespace(id=42, address=TARGET_ADDRESS, protocol_id=None)
         job = _job()
 
-        monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda addr, *a, **k: 1_000_000_000_000_000_000)
-        monkeypatch.setattr("utils.etherscan.get_native_price", MagicMock(side_effect=Exception("API down")))
-        monkeypatch.setattr("utils.etherscan.get_token_balances_page", lambda addr, *a, **k: page([]))
+        monkeypatch.setattr(
+            "services.clients.etherscan.get_eth_balance", lambda addr, *a, **k: 1_000_000_000_000_000_000
+        )
+        monkeypatch.setattr("services.clients.etherscan.get_native_price", MagicMock(side_effect=Exception("API down")))
+        monkeypatch.setattr("services.clients.etherscan.get_token_balances_page", lambda addr, *a, **k: page([]))
         monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
 
         cast(Any, worker)._fetch_balances(session, job, fake_contract, chain_id=1)
@@ -209,8 +213,10 @@ class TestFetchBalancesHappyPath:
         fake_contract = SimpleNamespace(id=42, address=TARGET_ADDRESS, protocol_id=None)
         job = _job()
 
-        monkeypatch.setattr("utils.etherscan.get_eth_balance", MagicMock(side_effect=Exception("Network error")))
-        monkeypatch.setattr("utils.etherscan.get_token_balances_page", lambda addr, *a, **k: page([]))
+        monkeypatch.setattr(
+            "services.clients.etherscan.get_eth_balance", MagicMock(side_effect=Exception("Network error"))
+        )
+        monkeypatch.setattr("services.clients.etherscan.get_token_balances_page", lambda addr, *a, **k: page([]))
         monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
 
         cast(Any, worker)._fetch_balances(session, job, fake_contract, chain_id=1)
@@ -232,9 +238,11 @@ class TestFetchBalancesHappyPath:
         fake_contract = SimpleNamespace(id=42, address=TARGET_ADDRESS, protocol_id=None)
         job = _job(request={"chain": "bsc", "chain_id": 56})
 
-        monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda addr, *a, **k: 2_000_000_000_000_000_000)  # 2 BNB
-        monkeypatch.setattr("utils.etherscan.get_native_price", lambda chain_id: 600.0)
-        monkeypatch.setattr("utils.etherscan.get_token_balances_page", lambda addr, *a, **k: page([]))
+        monkeypatch.setattr(
+            "services.clients.etherscan.get_eth_balance", lambda addr, *a, **k: 2_000_000_000_000_000_000
+        )  # 2 BNB
+        monkeypatch.setattr("services.clients.etherscan.get_native_price", lambda chain_id: 600.0)
+        monkeypatch.setattr("services.clients.etherscan.get_token_balances_page", lambda addr, *a, **k: page([]))
         monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
 
         cast(Any, worker)._fetch_balances(session, job, fake_contract, chain_id=56)
@@ -485,8 +493,8 @@ class TestFetchBalancesZeroEth:
         fake_contract = SimpleNamespace(id=42, address=TARGET_ADDRESS, protocol_id=None)
         job = _job()
 
-        monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda addr, *a, **k: 0)
-        monkeypatch.setattr("utils.etherscan.get_token_balances_page", lambda addr, *a, **k: page([]))
+        monkeypatch.setattr("services.clients.etherscan.get_eth_balance", lambda addr, *a, **k: 0)
+        monkeypatch.setattr("services.clients.etherscan.get_token_balances_page", lambda addr, *a, **k: page([]))
         monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
 
         cast(Any, worker)._fetch_balances(session, job, fake_contract, chain_id=1)
@@ -533,8 +541,8 @@ class TestFetchBalancesProxyAddress:
             captured_addrs.append(addr)
             return 0
 
-        monkeypatch.setattr("utils.etherscan.get_eth_balance", fake_get_eth)
-        monkeypatch.setattr("utils.etherscan.get_token_balances_page", lambda addr, *a, **k: page([]))
+        monkeypatch.setattr("services.clients.etherscan.get_eth_balance", fake_get_eth)
+        monkeypatch.setattr("services.clients.etherscan.get_token_balances_page", lambda addr, *a, **k: page([]))
         monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
 
         job = _job(request={"proxy_address": PROXY_ADDRESS})

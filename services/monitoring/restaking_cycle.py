@@ -34,6 +34,7 @@ from sqlalchemy.orm import Session
 
 from db.models import Protocol, SessionLocal
 from db.queue import HEARTBEAT_PROTOCOL_RESTAKING, record_heartbeat
+from services.clients.rpc import rpc_url_for_chain_id
 from services.monitoring import emit_monitor_cycle
 from services.monitoring.restaking_enrollment import (
     DEFAULT_EMITTER_PROBE_SPAN,
@@ -50,7 +51,6 @@ from services.monitoring.restaking_reads import (
     read_positions,
 )
 from services.resolution.repos.event_logs_rpc import RpcEventLogFetcher
-from utils.rpc import rpc_url_for_chain_id
 
 logger = logging.getLogger(__name__)
 

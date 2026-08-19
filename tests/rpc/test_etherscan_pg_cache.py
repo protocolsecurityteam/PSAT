@@ -1,5 +1,5 @@
 """Regression tests for the Postgres-backed Etherscan cache layer in
-``utils.etherscan``.
+``services.clients.etherscan``.
 
 Phase B Step 5. The in-memory cache (``_cache``) was per-process; this
 adds a Postgres-backed layer (``etherscan_cache`` table) so worker
@@ -27,7 +27,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from utils import etherscan
+from services.clients import etherscan
 
 
 @pytest.fixture(autouse=True)

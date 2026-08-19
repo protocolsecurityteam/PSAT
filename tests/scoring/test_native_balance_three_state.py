@@ -30,6 +30,7 @@ from db.models import (
     EffectiveFunction,
     Protocol,
 )
+from services.clients.etherscan import TOKEN_BALANCE_PAGE_SIZE
 from services.effects.selection import (
     HOLDINGS_COMPLETENESS_AT_PAGE_CAP,
     HOLDINGS_COMPLETENESS_NOT_DETERMINED,
@@ -65,7 +66,6 @@ from utils.balance_status import (
     NATIVE_STATUS_PROVEN_ZERO,
     SWEEP_STATUS_COMPLETED,
 )
-from utils.etherscan import TOKEN_BALANCE_PAGE_SIZE
 
 _P = "0x00000000000000000000000000000000000d"
 

@@ -58,6 +58,7 @@ from db.models import (
 )
 from schemas.api_responses import CompanyOverviewResponse, ReachBlock, TvlSummary
 from schemas.control_tracking import MonitoredContractType, ResolvedControllerType
+from services.clients.etherscan import TOKEN_BALANCE_PAGE_SIZE
 from services.effects.selection import disposed_from_holdings, load_protocol_reference_shapes
 from services.governance.primary_controller import (
     assign_co_controllers,
@@ -78,7 +79,6 @@ from utils.balance_status import (
     TOKEN_REFERENCE_NOT_DETERMINED,
 )
 from utils.chains import UnknownChainError, chain_by_id, chain_by_name
-from utils.etherscan import TOKEN_BALANCE_PAGE_SIZE
 
 logger = logging.getLogger("services.aggregations.company_overview")
 
@@ -1575,7 +1575,7 @@ def build_governance_view(
                         # from the value's shape.
                         #
                         # ``not_determined`` deliberately does not name a CAUSE:
-                        # ``utils/etherscan`` distinguishes "no price returned"
+                        # ``services/clients/etherscan`` distinguishes "no price returned"
                         # from "no token divisor returned" (which would make any
                         # USD figure wrong by 10^n), but neither writer persists
                         # ``decimals_reported``, so the DB cannot tell them apart

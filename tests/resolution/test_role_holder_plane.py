@@ -35,9 +35,9 @@ from db.models import (
     RoleDefinition,
     RoleHolderPlane,
 )
+from services.clients.rpc import EthCallResult
 from services.resolution import role_holder_plane as rhp
 from utils.chains import DEFAULT_CONFIRMATION_DEPTH
-from utils.rpc import EthCallResult
 
 REGISTRY = "0x6db24ee656843e3fe03eb8762a54d86186ba6b64"
 SOLADY_REGISTRY = "0x62247d29b4b9becf4bb73e0c722cf6445cfc7ce9"

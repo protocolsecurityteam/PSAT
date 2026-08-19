@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Exa (formerly Metaphor) search client — drop-in shape-compatible with
-``utils.tavily``.
+``services.clients.tavily``.
 
 Exa's neural/auto search mode embeds the query semantically which is a
 much better fit for our use case than Tavily's phrase-match: "ether fi"

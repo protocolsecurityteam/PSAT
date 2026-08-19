@@ -8,7 +8,7 @@ import pytest
 
 from tests.live.conftest import DEFAULT_SINGLE_TIMEOUT, LiveClient
 
-# Burn address: Etherscan returns "No verified source code"; discovery raises (utils/etherscan.py:182).
+# Burn address: Etherscan returns "No verified source code"; discovery raises (services/clients/etherscan.py:182).
 NO_CODE_ADDRESS = "0x0000000000000000000000000000000000000000"
 # Non-trivial-looking undeployed address — guards against tests that only pass for the zero case.
 UNVERIFIED_ADDRESS = "0xDeAdBeefDeadBeefDEADbEEFdEadbeEFDEADBeef"

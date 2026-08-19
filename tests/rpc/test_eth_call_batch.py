@@ -1,4 +1,4 @@
-"""Unit tests for ``utils.rpc.eth_call_batch`` — the revert-data-preserving
+"""Unit tests for ``services.clients.rpc.eth_call_batch`` — the revert-data-preserving
 JSON-RPC array batch the differential probe rides on. Stubs the HTTP session so
 no live RPC is touched (fully deterministic)."""
 
@@ -8,7 +8,7 @@ from typing import Any
 
 from eth_abi.abi import encode as abi_encode
 
-import utils.rpc as rpc
+import services.clients.rpc as rpc
 
 
 class _FakeResponse:

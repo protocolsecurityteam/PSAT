@@ -101,14 +101,14 @@ def _stub_etherscan(monkeypatch, *, wei, token_page=None):
             raise wei
         return wei
 
-    monkeypatch.setattr("utils.etherscan.get_eth_balance", _bal)
-    monkeypatch.setattr("utils.etherscan.get_eth_price", lambda chain_id=1: 2000.0)
+    monkeypatch.setattr("services.clients.etherscan.get_eth_balance", _bal)
+    monkeypatch.setattr("services.clients.etherscan.get_eth_price", lambda chain_id=1: 2000.0)
     # ``get_eth_price`` delegates to ``get_native_price``, so stubbing it does not
     # cover the resolution worker, which calls the native quote directly. Same
     # quote, so the native row is priced the way the TVL arms already price it.
-    monkeypatch.setattr("utils.etherscan.get_native_price", lambda chain_id=1: 2000.0)
+    monkeypatch.setattr("services.clients.etherscan.get_native_price", lambda chain_id=1: 2000.0)
     monkeypatch.setattr(
-        "utils.etherscan.get_token_balances_page",
+        "services.clients.etherscan.get_token_balances_page",
         lambda address, chain_id=1: token_page if token_page is not None else page([]),
     )
 
@@ -449,9 +449,9 @@ class TestObservedAddressPerWriter:
 
         read_at: list[str] = []
         _stub_pinned(monkeypatch, {proxy_addr: 4})
-        monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda a, **k: read_at.append(a) or 0)
-        monkeypatch.setattr("utils.etherscan.get_native_price", lambda *a, **k: 1.0)
-        monkeypatch.setattr("utils.etherscan.get_token_balances_page", lambda a, **k: page([]))
+        monkeypatch.setattr("services.clients.etherscan.get_eth_balance", lambda a, **k: read_at.append(a) or 0)
+        monkeypatch.setattr("services.clients.etherscan.get_native_price", lambda *a, **k: 1.0)
+        monkeypatch.setattr("services.clients.etherscan.get_token_balances_page", lambda a, **k: page([]))
         monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
 
         cast(Any, worker)._fetch_balances(db_session, job, impl, chain_id=1)

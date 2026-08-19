@@ -21,9 +21,9 @@ from db.models import (
 )
 from schemas.control_tracking import ResolvedControllerType, coerce_resolved_controller_type
 from schemas.principal_labels import LabelConfidence, PrincipalLabels, PrincipalPermission, PrincipalProfile
+from services.concurrency import parallel_map
 from services.governance.principals import is_terminal_principal_type, resolve_terminal_principal
 from services.resolution.tracking import classify_resolved_address_with_status
-from utils.concurrency import parallel_map
 from utils.logging import record_stage_metric
 
 logger = logging.getLogger(__name__)

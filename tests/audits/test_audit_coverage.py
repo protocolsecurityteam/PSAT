@@ -1549,9 +1549,9 @@ def test_fetch_bytecode_keccak_returns_hex_hash(monkeypatch):
         lambda *a, **k: "0x1234",
         raising=False,
     )
-    # Patch through the import site (utils.rpc.get_code) since that's what
+    # Patch through the import site (services.clients.rpc.get_code) since that's what
     # _fetch_bytecode_keccak imports at call time.
-    from utils import rpc
+    from services.clients import rpc
 
     monkeypatch.setattr(rpc, "get_code", _stub_get_code({addr: "0x1234"}))
 
@@ -1564,7 +1564,7 @@ def test_fetch_bytecode_keccak_returns_hex_hash(monkeypatch):
 def test_fetch_bytecode_keccak_none_on_empty_code(monkeypatch):
     """EOA or selfdestructed address returns ``None`` not a zero hash."""
     from services.audits import coverage as cov
-    from utils import rpc
+    from services.clients import rpc
 
     monkeypatch.setattr(rpc, "get_code", _stub_get_code({}))
     assert cov._fetch_bytecode_keccak("0x" + "cd" * 20, "ethereum") is None
@@ -1573,7 +1573,7 @@ def test_fetch_bytecode_keccak_none_on_empty_code(monkeypatch):
 def test_fetch_bytecode_keccak_none_on_rpc_error(monkeypatch):
     """RPC exception → NULL propagates (drift-unknown, not drift-detected)."""
     from services.audits import coverage as cov
-    from utils import rpc
+    from services.clients import rpc
 
     def boom(_rpc_url, _addr):
         raise RuntimeError("RPC down")
@@ -1586,7 +1586,7 @@ def test_upsert_coverage_stamps_bytecode_keccak(db_session, seed_protocol, monke
     """End-to-end: after upsert, coverage rows carry ``bytecode_keccak_at_match``."""
     from db.models import AuditContractCoverage
     from services.audits.coverage import upsert_coverage_for_audit
-    from utils import rpc
+    from services.clients import rpc
 
     protocol_id, _ = seed_protocol
     pool_addr = "0x" + "aa" * 20
@@ -1610,7 +1610,7 @@ def test_upsert_coverage_keccak_null_when_rpc_fails(db_session, seed_protocol, m
     """Row still writes, keccak/verified_at stay NULL — drift unknown."""
     from db.models import AuditContractCoverage
     from services.audits.coverage import upsert_coverage_for_audit
-    from utils import rpc
+    from services.clients import rpc
 
     protocol_id, _ = seed_protocol
     _add_contract(db_session, protocol_id, address="0x" + "bb" * 20, name="Treasury")

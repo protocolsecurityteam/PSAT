@@ -40,6 +40,11 @@ from db.queue import (
     renew_daemon_lease,
     try_acquire_daemon_lease,
 )
+from services.clients.rpc import (
+    MAX_BATCH_SIZE,
+    rpc_batch_request_classified,
+    rpc_request,
+)
 from services.monitoring import (
     HEARTBEAT_PROTOCOL_POLLER,
     HEARTBEAT_PROTOCOL_SCANNER,
@@ -76,11 +81,6 @@ from services.monitoring.verify_status import (
 )
 from services.resolution.repos.event_logs_rpc import RpcEventLogFetcher
 from utils.chains import UnknownChainError, chain_by_name
-from utils.rpc import (
-    MAX_BATCH_SIZE,
-    rpc_batch_request_classified,
-    rpc_request,
-)
 
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 

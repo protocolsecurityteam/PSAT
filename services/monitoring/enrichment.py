@@ -60,6 +60,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
 from db.models import Contract, EffectiveFunction, MonitoredContract, MonitoredEvent
+from services.clients.rpc import rpc_batch_request_classified
 from services.monitoring.chain_rpc import chain_id_for
 from services.monitoring.salience import (
     DATA_KEY_CORRELATED_EVENTS,
@@ -74,7 +75,6 @@ from services.monitoring.salience import (
 )
 from services.static.claims.context import abi_selector
 from services.static.claims.matchers._gates import SAFE_EXEC_TRANSACTION
-from utils.rpc import rpc_batch_request_classified
 
 logger = logging.getLogger(__name__)
 

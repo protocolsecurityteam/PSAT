@@ -12,8 +12,8 @@ from __future__ import annotations
 from eth_abi.abi import encode as abi_encode
 from eth_utils.crypto import keccak
 
+from services.clients.rpc import EthCallResult, encode_address_word
 from services.resolution import differential_probe as dp
-from utils.rpc import EthCallResult, encode_address_word
 
 # --- recorded outcome constructors -----------------------------------------
 

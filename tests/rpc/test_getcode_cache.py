@@ -1,5 +1,5 @@
 """Regression tests for the process-wide eth_getCode cache in
-``utils.rpc``.
+``services.clients.rpc``.
 
 Bytecode at a deployed address is effectively immutable for the lifetime
 of a cascade. The cascade probes the same addresses across stages (
@@ -25,7 +25,7 @@ from __future__ import annotations
 import pytest
 from eth_utils.crypto import keccak
 
-from utils import rpc
+from services.clients import rpc
 
 
 @pytest.fixture(autouse=True)

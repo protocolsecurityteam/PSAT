@@ -1,4 +1,4 @@
-"""Regression tests for ``utils.rpc.rpc_batch_request_with_status``.
+"""Regression tests for ``services.clients.rpc.rpc_batch_request_with_status``.
 
 The existing ``rpc_batch_request`` returns ``None`` for both error AND
 "function legitimately returned no data" — fine for callers that don't
@@ -35,7 +35,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-from utils import rpc
+from services.clients import rpc
 
 
 def _reset_thread_session():

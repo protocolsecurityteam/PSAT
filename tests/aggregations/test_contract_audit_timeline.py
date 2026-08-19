@@ -2,7 +2,7 @@
 ``services.aggregations.contract_audit_timeline``.
 
 The live ``bytecode_keccak_now`` is read from the durable ``bytecode_cache``
-layer (utils.rpc PG cache — the system of record for deployed bytecode); only
+layer (services.clients.rpc PG cache — the system of record for deployed bytecode); only
 addresses absent from that layer are fetched live (which itself populates it).
 There is no timeline-local process-global cache. What we pin:
 
@@ -14,7 +14,7 @@ There is no timeline-local process-global cache. What we pin:
    so nothing can accumulate in the long-lived web process.
 
 The two collaborators are imported lazily inside the helper, so the patches
-target their source modules (``utils.rpc`` / ``services.audits.coverage``).
+target their source modules (``services.clients.rpc`` / ``services.audits.coverage``).
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ from tests.support.overview_builders import _add_contract, _add_job, _add_protoc
 def test_reads_keccak_from_pg_bytecode_cache(monkeypatch):
     """A bytecode_cache hit supplies code_keccak directly — no live RPC."""
     addr = "0x" + "ab" * 20
-    monkeypatch.setattr("utils.rpc._pg_bytecode_get", lambda _c, _a: ("0x6080", "0x" + "11" * 32))
+    monkeypatch.setattr("services.clients.rpc._pg_bytecode_get", lambda _c, _a: ("0x6080", "0x" + "11" * 32))
 
     def _no_live(_a, _chain):
         raise AssertionError("must not fetch live when bytecode_cache has the row")
@@ -53,7 +53,7 @@ def test_reads_pg_on_mainnet_chain_id(monkeypatch):
         seen.append(chain_id)
         return ("0x60", "0x" + "33" * 32)
 
-    monkeypatch.setattr("utils.rpc._pg_bytecode_get", _pg)
+    monkeypatch.setattr("services.clients.rpc._pg_bytecode_get", _pg)
     monkeypatch.setattr("services.audits.coverage._fetch_bytecode_keccak", lambda _a, _chain: None)
 
     cat._bytecode_keccak_now_batch({"0x" + "ee" * 20})
@@ -63,7 +63,7 @@ def test_reads_pg_on_mainnet_chain_id(monkeypatch):
 def test_falls_back_to_live_on_pg_miss(monkeypatch):
     """A bytecode_cache miss falls back to the live fetch path."""
     addr = "0x" + "cd" * 20
-    monkeypatch.setattr("utils.rpc._pg_bytecode_get", lambda _c, _a: None)
+    monkeypatch.setattr("services.clients.rpc._pg_bytecode_get", lambda _c, _a: None)
     monkeypatch.setattr("services.audits.coverage._fetch_bytecode_keccak", lambda _a, _chain: "0x" + "22" * 32)
 
     out = cat._bytecode_keccak_now_batch({addr})
@@ -76,7 +76,7 @@ def test_skips_empty_addresses(monkeypatch):
     def _no_pg(_c, _a):
         raise AssertionError("empty address must not be queried")
 
-    monkeypatch.setattr("utils.rpc._pg_bytecode_get", _no_pg)
+    monkeypatch.setattr("services.clients.rpc._pg_bytecode_get", _no_pg)
     monkeypatch.setattr("services.audits.coverage._fetch_bytecode_keccak", lambda _a, _chain: None)
     bad_addrs: set = {"", None}  # deliberately malformed input the batcher must skip
     out = cat._bytecode_keccak_now_batch(bad_addrs)

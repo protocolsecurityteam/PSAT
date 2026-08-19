@@ -13,7 +13,7 @@ Why bytecode keccak is the right key:
 - Two different addresses with the same impl bytecode share the same
   classification (every Safe singleton across DeFi uses the same code
   at different proxy addresses)
-- We already have the keccak cheaply via utils.rpc.get_code_with_keccak
+- We already have the keccak cheaply via services.clients.rpc.get_code_with_keccak
   (commit 00b1034)
 
 Tests:
@@ -41,13 +41,15 @@ def _isolated_classify_cache():
 
 
 def _stub_get_code(monkeypatch, code: str = "0x60806040"):
-    """Stub _get_code at the tracking layer (not utils.rpc)."""
+    """Stub _get_code at the tracking layer (not services.clients.rpc)."""
     monkeypatch.setattr(tracking, "_get_code", lambda *_a, **_kw: code)
 
 
 def _stub_keccak(monkeypatch, keccak_hex: str):
-    """Stub utils.rpc.get_code_with_keccak so the shortcut can read the keccak."""
-    monkeypatch.setattr("utils.rpc.get_code_with_keccak", lambda _rpc, _addr, chain_id=None: ("0x60", keccak_hex))
+    """Stub services.clients.rpc.get_code_with_keccak so the shortcut can read the keccak."""
+    monkeypatch.setattr(
+        "services.clients.rpc.get_code_with_keccak", lambda _rpc, _addr, chain_id=None: ("0x60", keccak_hex)
+    )
 
 
 def test_sequential_classifier_shortcut_fires_on_registry_hit(monkeypatch):
@@ -108,7 +110,7 @@ def test_empty_registry_skips_shortcut(monkeypatch):
         keccak_calls.append(_addr)
         return ("0x60", "0x" + "ee" * 32)
 
-    monkeypatch.setattr("utils.rpc.get_code_with_keccak", _track_keccak)
+    monkeypatch.setattr("services.clients.rpc.get_code_with_keccak", _track_keccak)
     monkeypatch.setattr(tracking, "_KNOWN_BYTECODE_IMPLS", {})
 
     # Make every probe return None so the classifier reaches the
@@ -145,7 +147,7 @@ def test_keccak_fetch_failure_falls_through(monkeypatch):
     def _boom(_rpc, _addr):
         raise RuntimeError("RPC down")
 
-    monkeypatch.setattr("utils.rpc.get_code_with_keccak", _boom)
+    monkeypatch.setattr("services.clients.rpc.get_code_with_keccak", _boom)
     fake_registry = {"0x" + "ff" * 32: ("safe", {})}
     monkeypatch.setattr(tracking, "_KNOWN_BYTECODE_IMPLS", fake_registry)
     monkeypatch.setattr(tracking, "_try_eth_call_decoded", lambda *_a, **_kw: None)

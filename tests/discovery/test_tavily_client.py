@@ -1,4 +1,4 @@
-"""Tests for utils/tavily.py – Tavily search client."""
+"""Tests for services/clients/tavily.py – Tavily search client."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import requests
 
-from utils.tavily import (
+from services.clients.tavily import (
     TavilyError,
     _build_payload,
     _cache_key,
@@ -115,7 +115,7 @@ class TestErrorFromException:
 
 
 class TestBuildPayload:
-    @patch("utils.tavily.load_dotenv")
+    @patch("services.clients.tavily.load_dotenv")
     def test_success(self, _mock_dotenv, monkeypatch):
         monkeypatch.setenv("TAVILY_API_KEY", "test-key")
         payload = _build_payload(
@@ -132,13 +132,13 @@ class TestBuildPayload:
         assert payload["search_depth"] == "advanced"
         assert payload["include_raw_content"] is True
 
-    @patch("utils.tavily.load_dotenv")
+    @patch("services.clients.tavily.load_dotenv")
     def test_missing_api_key_raises(self, _mock_dotenv, monkeypatch):
         monkeypatch.delenv("TAVILY_API_KEY", raising=False)
         with pytest.raises(TavilyError, match="Missing TAVILY_API_KEY"):
             _build_payload("q", 5, "general", "advanced", True)
 
-    @patch("utils.tavily.load_dotenv")
+    @patch("services.clients.tavily.load_dotenv")
     def test_blank_api_key_raises(self, _mock_dotenv, monkeypatch):
         monkeypatch.setenv("TAVILY_API_KEY", "   ")
         with pytest.raises(TavilyError, match="Missing TAVILY_API_KEY"):
@@ -186,7 +186,7 @@ class TestSearch:
             search("hello", max_results=-1)
 
     # 6. successful response
-    @patch("utils.tavily.load_dotenv")
+    @patch("services.clients.tavily.load_dotenv")
     def test_success_returns_filtered_list(self, _mock_dotenv, monkeypatch):
         monkeypatch.setenv("TAVILY_API_KEY", "test-key")
         results_data = [
@@ -195,12 +195,12 @@ class TestSearch:
         ]
         resp = _mock_response(json_data={"results": results_data})
 
-        with patch("utils.tavily.requests.post", return_value=resp) as mock_post:
+        with patch("services.clients.tavily.requests.post", return_value=resp) as mock_post:
             result = search("test query", max_results=5)
             assert result == results_data
             mock_post.assert_called_once()
 
-    @patch("utils.tavily.load_dotenv")
+    @patch("services.clients.tavily.load_dotenv")
     def test_success_filters_non_dict_items(self, _mock_dotenv, monkeypatch):
         monkeypatch.setenv("TAVILY_API_KEY", "test-key")
         results_data = [
@@ -211,18 +211,18 @@ class TestSearch:
         ]
         resp = _mock_response(json_data={"results": results_data})
 
-        with patch("utils.tavily.requests.post", return_value=resp):
+        with patch("services.clients.tavily.requests.post", return_value=resp):
             result = search("query", max_results=5)
             assert result == [{"title": "A"}, {"title": "B"}]
 
     # 7. HTTP 500 retries then raises
-    @patch("utils.tavily.load_dotenv")
-    @patch("utils.tavily.time.sleep")
+    @patch("services.clients.tavily.load_dotenv")
+    @patch("services.clients.tavily.time.sleep")
     def test_http_500_retries_then_raises(self, mock_sleep, _mock_dotenv, monkeypatch):
         monkeypatch.setenv("TAVILY_API_KEY", "test-key")
         resp = _mock_response(status_code=500, text="Internal Server Error")
 
-        with patch("utils.tavily.requests.post", return_value=resp):
+        with patch("services.clients.tavily.requests.post", return_value=resp):
             with pytest.raises(TavilyError, match="HTTP 500"):
                 search("query", max_results=3)
 
@@ -230,13 +230,13 @@ class TestSearch:
         assert mock_sleep.call_count == 2
 
     # 8. HTTP 400 does NOT retry
-    @patch("utils.tavily.load_dotenv")
-    @patch("utils.tavily.time.sleep")
+    @patch("services.clients.tavily.load_dotenv")
+    @patch("services.clients.tavily.time.sleep")
     def test_http_400_no_retry(self, mock_sleep, _mock_dotenv, monkeypatch):
         monkeypatch.setenv("TAVILY_API_KEY", "test-key")
         resp = _mock_response(status_code=400, text="Bad Request")
 
-        with patch("utils.tavily.requests.post", return_value=resp):
+        with patch("services.clients.tavily.requests.post", return_value=resp):
             with pytest.raises(TavilyError, match="HTTP 400"):
                 search("query", max_results=3)
 
@@ -244,26 +244,26 @@ class TestSearch:
         mock_sleep.assert_not_called()
 
     # 8b. HTTP 429 DOES retry
-    @patch("utils.tavily.load_dotenv")
-    @patch("utils.tavily.time.sleep")
+    @patch("services.clients.tavily.load_dotenv")
+    @patch("services.clients.tavily.time.sleep")
     def test_http_429_retries(self, mock_sleep, _mock_dotenv, monkeypatch):
         monkeypatch.setenv("TAVILY_API_KEY", "test-key")
         resp = _mock_response(status_code=429, text="Too Many Requests")
 
-        with patch("utils.tavily.requests.post", return_value=resp):
+        with patch("services.clients.tavily.requests.post", return_value=resp):
             with pytest.raises(TavilyError, match="HTTP 429"):
                 search("query", max_results=3)
 
         assert mock_sleep.call_count == 2
 
     # 9. timeout retries
-    @patch("utils.tavily.load_dotenv")
-    @patch("utils.tavily.time.sleep")
+    @patch("services.clients.tavily.load_dotenv")
+    @patch("services.clients.tavily.time.sleep")
     def test_timeout_retries_then_raises(self, mock_sleep, _mock_dotenv, monkeypatch):
         monkeypatch.setenv("TAVILY_API_KEY", "test-key")
 
         with patch(
-            "utils.tavily.requests.post",
+            "services.clients.tavily.requests.post",
             side_effect=requests.Timeout("timed out"),
         ):
             with pytest.raises(TavilyError, match="timed out"):
@@ -272,13 +272,13 @@ class TestSearch:
         assert mock_sleep.call_count == 2
 
     # 9b. generic RequestException retries
-    @patch("utils.tavily.load_dotenv")
-    @patch("utils.tavily.time.sleep")
+    @patch("services.clients.tavily.load_dotenv")
+    @patch("services.clients.tavily.time.sleep")
     def test_request_exception_retries_then_raises(self, mock_sleep, _mock_dotenv, monkeypatch):
         monkeypatch.setenv("TAVILY_API_KEY", "test-key")
 
         with patch(
-            "utils.tavily.requests.post",
+            "services.clients.tavily.requests.post",
             side_effect=requests.ConnectionError("connection refused"),
         ):
             with pytest.raises(TavilyError, match="request failed"):
@@ -287,13 +287,13 @@ class TestSearch:
         assert mock_sleep.call_count == 2
 
     # 10. invalid JSON raises TavilyError (non-retryable)
-    @patch("utils.tavily.load_dotenv")
-    @patch("utils.tavily.time.sleep")
+    @patch("services.clients.tavily.load_dotenv")
+    @patch("services.clients.tavily.time.sleep")
     def test_invalid_json_raises_no_retry(self, mock_sleep, _mock_dotenv, monkeypatch):
         monkeypatch.setenv("TAVILY_API_KEY", "test-key")
         resp = _mock_response(status_code=200, raise_on_json=True)
 
-        with patch("utils.tavily.requests.post", return_value=resp):
+        with patch("services.clients.tavily.requests.post", return_value=resp):
             with pytest.raises(TavilyError, match="Invalid JSON"):
                 search("query", max_results=3)
 
@@ -301,49 +301,49 @@ class TestSearch:
         mock_sleep.assert_not_called()
 
     # 11. results not a list raises TavilyError
-    @patch("utils.tavily.load_dotenv")
-    @patch("utils.tavily.time.sleep")
+    @patch("services.clients.tavily.load_dotenv")
+    @patch("services.clients.tavily.time.sleep")
     def test_results_not_list_raises(self, mock_sleep, _mock_dotenv, monkeypatch):
         monkeypatch.setenv("TAVILY_API_KEY", "test-key")
         resp = _mock_response(json_data={"results": "not a list"})
 
-        with patch("utils.tavily.requests.post", return_value=resp):
+        with patch("services.clients.tavily.requests.post", return_value=resp):
             with pytest.raises(TavilyError, match="did not include a list"):
                 search("query", max_results=3)
 
         mock_sleep.assert_not_called()
 
     # Edge: missing "results" key returns empty list
-    @patch("utils.tavily.load_dotenv")
+    @patch("services.clients.tavily.load_dotenv")
     def test_missing_results_key_returns_empty(self, _mock_dotenv, monkeypatch):
         monkeypatch.setenv("TAVILY_API_KEY", "test-key")
         resp = _mock_response(json_data={"answer": "something"})
 
-        with patch("utils.tavily.requests.post", return_value=resp):
+        with patch("services.clients.tavily.requests.post", return_value=resp):
             result = search("query", max_results=3)
             assert result == []
 
     # Edge: HTTP 500 with empty body -> detail should be None
-    @patch("utils.tavily.load_dotenv")
-    @patch("utils.tavily.time.sleep")
+    @patch("services.clients.tavily.load_dotenv")
+    @patch("services.clients.tavily.time.sleep")
     def test_http_500_empty_body_detail_none(self, mock_sleep, _mock_dotenv, monkeypatch):
         monkeypatch.setenv("TAVILY_API_KEY", "test-key")
         resp = _mock_response(status_code=500, text="")
 
-        with patch("utils.tavily.requests.post", return_value=resp):
+        with patch("services.clients.tavily.requests.post", return_value=resp):
             with pytest.raises(TavilyError) as exc_info:
                 search("query", max_results=3)
 
         assert "detail" not in exc_info.value.error
 
     # Edge: verify exponential backoff sleep values
-    @patch("utils.tavily.load_dotenv")
-    @patch("utils.tavily.time.sleep")
+    @patch("services.clients.tavily.load_dotenv")
+    @patch("services.clients.tavily.time.sleep")
     def test_backoff_timing(self, mock_sleep, _mock_dotenv, monkeypatch):
         monkeypatch.setenv("TAVILY_API_KEY", "test-key")
         resp = _mock_response(status_code=500, text="err")
 
-        with patch("utils.tavily.requests.post", return_value=resp):
+        with patch("services.clients.tavily.requests.post", return_value=resp):
             with pytest.raises(TavilyError):
                 search("query", max_results=3)
 
@@ -352,12 +352,12 @@ class TestSearch:
         assert mock_sleep.call_args_list[1][0][0] == pytest.approx(1.5)
 
     # Edge: search strips whitespace from query
-    @patch("utils.tavily.load_dotenv")
+    @patch("services.clients.tavily.load_dotenv")
     def test_query_whitespace_stripped(self, _mock_dotenv, monkeypatch):
         monkeypatch.setenv("TAVILY_API_KEY", "test-key")
         resp = _mock_response(json_data={"results": [{"title": "A"}]})
 
-        with patch("utils.tavily.requests.post", return_value=resp) as mock_post:
+        with patch("services.clients.tavily.requests.post", return_value=resp) as mock_post:
             search("  hello world  ", max_results=3)
             posted_payload = mock_post.call_args[1]["json"]
             assert posted_payload["query"] == "hello world"
@@ -409,7 +409,7 @@ class TestCacheKey:
 class TestCacheBehavior:
     """search() consults the cache only when PSAT_TAVILY_CACHE is set."""
 
-    @patch("utils.tavily.load_dotenv")
+    @patch("services.clients.tavily.load_dotenv")
     def test_disabled_skips_storage(self, _mock_dotenv, monkeypatch):
         monkeypatch.setenv("TAVILY_API_KEY", "test-key")
         monkeypatch.delenv("PSAT_TAVILY_CACHE", raising=False)
@@ -418,7 +418,7 @@ class TestCacheBehavior:
         storage_client = MagicMock()
         with (
             patch("db.storage.get_storage_client", return_value=storage_client),
-            patch("utils.tavily.requests.post", return_value=resp) as mock_post,
+            patch("services.clients.tavily.requests.post", return_value=resp) as mock_post,
         ):
             result = search("q", max_results=3)
 
@@ -428,7 +428,7 @@ class TestCacheBehavior:
         storage_client.get.assert_not_called()
         storage_client.put.assert_not_called()
 
-    @patch("utils.tavily.load_dotenv")
+    @patch("services.clients.tavily.load_dotenv")
     def test_hit_skips_network(self, _mock_dotenv, monkeypatch):
         monkeypatch.setenv("TAVILY_API_KEY", "test-key")
         monkeypatch.setenv("PSAT_TAVILY_CACHE", "1")
@@ -446,7 +446,7 @@ class TestCacheBehavior:
 
         with (
             patch("db.storage.get_storage_client", return_value=storage_client),
-            patch("utils.tavily.requests.post") as mock_post,
+            patch("services.clients.tavily.requests.post") as mock_post,
         ):
             result = search("q", max_results=3)
 
@@ -455,7 +455,7 @@ class TestCacheBehavior:
         mock_post.assert_not_called()
         storage_client.put.assert_not_called()
 
-    @patch("utils.tavily.load_dotenv")
+    @patch("services.clients.tavily.load_dotenv")
     def test_miss_writes_envelope(self, _mock_dotenv, monkeypatch):
         from db.storage import StorageKeyMissing
 
@@ -468,7 +468,7 @@ class TestCacheBehavior:
 
         with (
             patch("db.storage.get_storage_client", return_value=storage_client),
-            patch("utils.tavily.requests.post", return_value=resp),
+            patch("services.clients.tavily.requests.post", return_value=resp),
         ):
             result = search("q", max_results=3)
 
@@ -482,7 +482,7 @@ class TestCacheBehavior:
         assert envelope["results"] == [{"title": "fresh"}]
         assert isinstance(envelope["cached_at"], (int, float))
 
-    @patch("utils.tavily.load_dotenv")
+    @patch("services.clients.tavily.load_dotenv")
     def test_empty_results_not_cached(self, _mock_dotenv, monkeypatch):
         from db.storage import StorageKeyMissing
 
@@ -495,7 +495,7 @@ class TestCacheBehavior:
 
         with (
             patch("db.storage.get_storage_client", return_value=storage_client),
-            patch("utils.tavily.requests.post", return_value=resp),
+            patch("services.clients.tavily.requests.post", return_value=resp),
         ):
             result = search("q", max_results=3)
 
@@ -504,7 +504,7 @@ class TestCacheBehavior:
         # path bails before that happens.
         storage_client.put.assert_not_called()
 
-    @patch("utils.tavily.load_dotenv")
+    @patch("services.clients.tavily.load_dotenv")
     def test_expired_envelope_refetches(self, _mock_dotenv, monkeypatch):
         monkeypatch.setenv("TAVILY_API_KEY", "test-key")
         monkeypatch.setenv("PSAT_TAVILY_CACHE", "1")
@@ -523,7 +523,7 @@ class TestCacheBehavior:
 
         with (
             patch("db.storage.get_storage_client", return_value=storage_client),
-            patch("utils.tavily.requests.post", return_value=resp) as mock_post,
+            patch("services.clients.tavily.requests.post", return_value=resp) as mock_post,
         ):
             result = search("q", max_results=3)
 
@@ -531,7 +531,7 @@ class TestCacheBehavior:
         mock_post.assert_called_once()
         storage_client.put.assert_called_once()
 
-    @patch("utils.tavily.load_dotenv")
+    @patch("services.clients.tavily.load_dotenv")
     def test_schema_mismatch_refetches(self, _mock_dotenv, monkeypatch):
         monkeypatch.setenv("TAVILY_API_KEY", "test-key")
         monkeypatch.setenv("PSAT_TAVILY_CACHE", "1")
@@ -550,14 +550,14 @@ class TestCacheBehavior:
 
         with (
             patch("db.storage.get_storage_client", return_value=storage_client),
-            patch("utils.tavily.requests.post", return_value=resp) as mock_post,
+            patch("services.clients.tavily.requests.post", return_value=resp) as mock_post,
         ):
             result = search("q", max_results=3)
 
         assert result == [{"title": "fresh"}]
         mock_post.assert_called_once()
 
-    @patch("utils.tavily.load_dotenv")
+    @patch("services.clients.tavily.load_dotenv")
     def test_no_storage_client_falls_through(self, _mock_dotenv, monkeypatch):
         monkeypatch.setenv("TAVILY_API_KEY", "test-key")
         monkeypatch.setenv("PSAT_TAVILY_CACHE", "1")
@@ -565,14 +565,14 @@ class TestCacheBehavior:
 
         with (
             patch("db.storage.get_storage_client", return_value=None),
-            patch("utils.tavily.requests.post", return_value=resp) as mock_post,
+            patch("services.clients.tavily.requests.post", return_value=resp) as mock_post,
         ):
             result = search("q", max_results=3)
 
         assert result == [{"title": "A"}]
         mock_post.assert_called_once()
 
-    @patch("utils.tavily.load_dotenv")
+    @patch("services.clients.tavily.load_dotenv")
     def test_cache_write_failure_does_not_break_search(self, _mock_dotenv, monkeypatch):
         from db.storage import StorageKeyMissing, StorageUnavailable
 
@@ -586,14 +586,14 @@ class TestCacheBehavior:
 
         with (
             patch("db.storage.get_storage_client", return_value=storage_client),
-            patch("utils.tavily.requests.post", return_value=resp),
+            patch("services.clients.tavily.requests.post", return_value=resp),
         ):
             # Bucket flake on write must not surface to the caller.
             result = search("q", max_results=3)
 
         assert result == [{"title": "A"}]
 
-    @patch("utils.tavily.load_dotenv")
+    @patch("services.clients.tavily.load_dotenv")
     def test_cache_read_failure_falls_through(self, _mock_dotenv, monkeypatch):
         from db.storage import StorageUnavailable
 
@@ -606,7 +606,7 @@ class TestCacheBehavior:
 
         with (
             patch("db.storage.get_storage_client", return_value=storage_client),
-            patch("utils.tavily.requests.post", return_value=resp) as mock_post,
+            patch("services.clients.tavily.requests.post", return_value=resp) as mock_post,
         ):
             result = search("q", max_results=3)
 

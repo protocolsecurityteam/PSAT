@@ -23,13 +23,14 @@ from typing import Any
 
 import yaml
 
+from services.clients import exa
 from services.discovery import audit_reports as audit_reports_mod
 from services.discovery import inventory as inventory_mod
 from services.discovery import inventory_domain as inventory_domain_mod
 from services.discovery.audit_enrichment import enrich_audit_reports
 from services.discovery.audit_reports_llm import _parse_json_object
 from services.discovery.chain_resolver import validate_claimed_chains
-from utils import exa, llm
+from utils import llm
 from utils.chains import canonical_chain
 from utils.logging import log_timed_phase, record_degraded, record_stage_metric
 

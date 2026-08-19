@@ -490,7 +490,7 @@ def _materialize_contract_artifacts(
     # at different addresses share one row.
     bytecode_keccak: str | None = None
     try:
-        from utils.rpc import get_code_with_keccak
+        from services.clients.rpc import get_code_with_keccak
 
         _code, bytecode_keccak = get_code_with_keccak(rpc_url, effective_address)
     except Exception as exc:
@@ -1245,7 +1245,7 @@ def resolve_control_graph(
                 if addr and addr != root_address:
                     processed.add(addr)
 
-    from utils.concurrency import parallel_map
+    from services.concurrency import parallel_map
 
     def _materialize_for_pending(pending: PendingContract) -> tuple[LoadedArtifacts | None, BaseException | None]:
         """Materialize one pending contract's artifacts. Returns

@@ -30,13 +30,13 @@ from __future__ import annotations
 
 import pytest
 
+from services.clients.rpc import EthCallResult, selector
 from services.resolution import tracking
 from services.resolution.tracking import (
     _classify_uncached,
     _classify_uncached_batched,
     read_contract_controllers,
 )
-from utils.rpc import EthCallResult, selector
 
 ADDR = "0x" + "ab" * 20
 OWNER = "0x" + "44" * 20

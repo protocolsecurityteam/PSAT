@@ -2572,7 +2572,7 @@ class MonitoringEnrollmentQueue(Base):
 
 
 class EtherscanCache(Base):
-    """Persistent Etherscan response cache. Read/written by ``utils/etherscan.py``
+    """Persistent Etherscan response cache. Read/written by ``services/clients/etherscan.py``
     via raw SQL; the model exists so the schema participates in
     ``Base.metadata`` and ``alembic check`` doesn't flag the table as drift.
     """
@@ -2699,7 +2699,7 @@ class MappingEnumerationCache(Base):
 
 
 class BytecodeCache(Base):
-    """Persistent eth_getCode bytecode cache. Read/written by ``utils/rpc.py`` via
+    """Persistent eth_getCode bytecode cache. Read/written by ``services/clients/rpc.py`` via
     raw SQL; this model exists so ``alembic check`` doesn't flag the table as
     drift. Bytecode at a deployed address is effectively immutable per
     ``(chain_id, address)`` for the lifetime of the contract — no TTL.

@@ -8,12 +8,12 @@ The headline case: Solmate ``RolesAuthority`` and OZ ``AccessManager`` both expo
 can't tell them apart — but a RolesAuthority's bytecode contains
 ``getRolesWithCapability``/``doesUserHaveRole`` while an AccessManager's contains
 ``getTargetFunctionRole``. Bytecode is immutable per address and fetched through
-the cached ``utils.rpc.get_code``, so repeated probes are cheap.
+the cached ``services.clients.rpc.get_code``, so repeated probes are cheap.
 """
 
 from __future__ import annotations
 
-from utils.rpc import get_code
+from services.clients.rpc import get_code
 
 
 class BytecodeSelectorRepo:

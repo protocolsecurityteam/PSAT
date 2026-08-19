@@ -6,7 +6,7 @@ The DB-integrated behaviours (coverage matcher upgrading via
 surface: Etherscan verified-source parsing, GitHub raw fetch guards,
 candidate-path generation, and the zero-input short-circuits on the
 ``check_audit_row_covers_contract`` entry point. No DB, no network — we
-stub ``requests.get`` and ``utils.etherscan.get`` at module scope.
+stub ``requests.get`` and ``services.clients.etherscan.get`` at module scope.
 """
 
 from __future__ import annotations
@@ -75,7 +75,7 @@ class TestExtractReviewedCommitsFilters:
 class TestFetchEtherscanSourceFiles:
     """The ``services.discovery`` package re-exports ``fetch`` (function)
     into its namespace, shadowing the submodule — so we patch via the
-    submodule object loaded through ``importlib``. ``utils.etherscan.get``
+    submodule object loaded through ``importlib``. ``services.clients.etherscan.get``
     is similarly patched at the submodule level for consistency."""
 
     def test_returns_verified_source_for_successful_getsourcecode(self, monkeypatch):
@@ -92,7 +92,7 @@ class TestFetchEtherscanSourceFiles:
             ]
         }
         fetch_module = importlib.import_module("services.discovery.fetch")
-        etherscan_module = importlib.import_module("utils.etherscan")
+        etherscan_module = importlib.import_module("services.clients.etherscan")
         monkeypatch.setattr(etherscan_module, "get", lambda *_a, **_k: captured)
         monkeypatch.setattr(fetch_module, "parse_sources", lambda _res: {"LiquidityPool.sol": content})
 
@@ -110,7 +110,7 @@ class TestFetchEtherscanSourceFiles:
         import importlib
 
         fetch_module = importlib.import_module("services.discovery.fetch")
-        etherscan_module = importlib.import_module("utils.etherscan")
+        etherscan_module = importlib.import_module("services.clients.etherscan")
         monkeypatch.setattr(
             etherscan_module,
             "get",
@@ -130,7 +130,7 @@ class TestFetchEtherscanSourceFiles:
         def boom(*_a, **_k):
             raise RuntimeError("etherscan down")
 
-        etherscan_module = importlib.import_module("utils.etherscan")
+        etherscan_module = importlib.import_module("services.clients.etherscan")
         monkeypatch.setattr(etherscan_module, "get", boom)
         got = fetch_etherscan_source_files("0x" + "a" * 40, chain_id=1)
         assert got.source is None
@@ -143,7 +143,7 @@ class TestFetchEtherscanSourceFiles:
         import importlib
 
         fetch_module = importlib.import_module("services.discovery.fetch")
-        etherscan_module = importlib.import_module("utils.etherscan")
+        etherscan_module = importlib.import_module("services.clients.etherscan")
         monkeypatch.setattr(
             etherscan_module,
             "get",

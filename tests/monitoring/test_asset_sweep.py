@@ -17,6 +17,7 @@ import pytest
 from sqlalchemy import text
 
 from db.models import Contract, ContractBalance, ContractBalanceFetch, Protocol
+from services.clients.rpc import selector as rpc_selector
 from services.monitoring import asset_sweep as A
 from services.monitoring.asset_sweep import (
     SWEEP_COMPLETED,
@@ -73,7 +74,6 @@ from utils.balance_status import (
     SWEEP_STATUS_COMPLETED,
     SWEEP_STATUS_FAILED,
 )
-from utils.rpc import selector as rpc_selector
 
 HOLDER = "0x00000000000000000000000000000000000ho1de"[:42].ljust(42, "1")
 TOKEN = "0x000000000000000000000000000000000000c0de"

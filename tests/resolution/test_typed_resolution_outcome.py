@@ -73,7 +73,7 @@ def _stub_rpc(monkeypatch: pytest.MonkeyPatch, mode: str, *, recorder: list | No
             raise RuntimeError("execution reverted")
         return "0x"
 
-    monkeypatch.setattr("utils.rpc.rpc_request", fake)
+    monkeypatch.setattr("services.clients.rpc.rpc_request", fake)
 
 
 def _expr_dict(cap: CapabilityExpr) -> dict[str, Any]:
@@ -129,7 +129,7 @@ def test_empty_reason_absent_on_populated_set(monkeypatch: pytest.MonkeyPatch) -
     field is emit-when-non-default, so populated sets keep their wire shape."""
     addr = "0x" + "ab" * 20
     monkeypatch.setattr(
-        "utils.rpc.rpc_request",
+        "services.clients.rpc.rpc_request",
         lambda *a, **k: "0x" + addr[2:].rjust(64, "0"),
     )
     cap_dict = _expr_dict(evaluate_tree(_eq_tree(REVERTING_VAR), _ctx_with_rpc()))

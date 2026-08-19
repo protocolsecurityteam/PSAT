@@ -25,6 +25,7 @@ from db.models import (
 )
 from db.storage import StorageContentAbsent, StorageContentIncomplete
 from schemas.control_tracking import MonitoredContractType
+from services.clients.rpc import rpc_request
 from services.governance.control_graph_types import reconcile_control_graph_types
 from services.monitoring.chain_rpc import chain_id_for, rpc_for_chain
 from services.monitoring.event_topics import extract_governance_topics
@@ -42,7 +43,6 @@ from services.monitoring.tracking_plan_state import (
     preserve_scan_plane_facts,
 )
 from utils.chains import chain_enabled
-from utils.rpc import rpc_request
 
 logger = logging.getLogger(__name__)
 

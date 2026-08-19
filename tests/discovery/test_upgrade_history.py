@@ -56,7 +56,7 @@ def _write_deps_target_proxy(_tmp_path, target, proxy_type, implementation, deps
 
 def _mock_no_enrichment(monkeypatch):
     """Stub out get_contract_info so no real Etherscan calls are made."""
-    from utils import etherscan
+    from services.clients import etherscan
 
     monkeypatch.setattr(etherscan, "get_contract_info", lambda addr, **_kw: (None, {}))
 
@@ -257,7 +257,7 @@ class TestBuildUpgradeHistory:
             ]
 
         monkeypatch.setattr(uh, "_fetch_logs_etherscan", mock_fetch)
-        from utils import etherscan
+        from services.clients import etherscan
 
         monkeypatch.setattr(etherscan, "get_contract_info", lambda addr, **_kw: ("ImplContract", {}))
 
@@ -381,7 +381,7 @@ class TestBuildUpgradeHistory:
             return []
 
         monkeypatch.setattr(uh, "_fetch_logs_etherscan", mock_fetch)
-        from utils import etherscan
+        from services.clients import etherscan
 
         # Should NOT be called for the known impl
         monkeypatch.setattr(
@@ -416,7 +416,7 @@ class TestBuildUpgradeHistory:
             return []
 
         monkeypatch.setattr(uh, "_fetch_logs_etherscan", mock_fetch)
-        from utils import etherscan
+        from services.clients import etherscan
 
         monkeypatch.setattr(etherscan, "get_contract_info", lambda addr, **_kw: ("ImplV1", {}))
 
@@ -442,7 +442,7 @@ class TestBuildUpgradeHistory:
             return []
 
         monkeypatch.setattr(uh, "_fetch_logs_etherscan", mock_fetch)
-        from utils import etherscan
+        from services.clients import etherscan
 
         call_count = [0]
 
@@ -482,7 +482,7 @@ class TestBuildUpgradeHistory:
             return []
 
         monkeypatch.setattr(uh, "_fetch_logs_etherscan", mock_fetch)
-        from utils import etherscan
+        from services.clients import etherscan
 
         monkeypatch.setattr(
             etherscan,
@@ -665,7 +665,7 @@ def test_fetch_upgrade_events_parity_parallel_vs_sequential(monkeypatch, tmp_pat
 
 def test_build_upgrade_history_threads_chain_id_to_getlogs(monkeypatch):
     """A non-mainnet chain_id reaches the Etherscan getLogs event query."""
-    import utils.etherscan as etherscan_mod
+    import services.clients.etherscan as etherscan_mod
 
     seen_chain_ids = []
 
@@ -673,7 +673,7 @@ def test_build_upgrade_history_threads_chain_id_to_getlogs(monkeypatch):
         seen_chain_ids.append(kwargs.get("chain_id"))
         return {"result": []}
 
-    # _fetch_logs_etherscan does `from utils.etherscan import get` at call time,
+    # _fetch_logs_etherscan does `from services.clients.etherscan import get` at call time,
     # so patching the module attribute intercepts the real wire call.
     monkeypatch.setattr(etherscan_mod, "get", fake_get)
     # Name enrichment goes through the get_contract_info wrapper — stub it so
@@ -699,7 +699,7 @@ def test_build_upgrade_history_threads_chain_id_to_getlogs(monkeypatch):
 
 def test_build_upgrade_history_defaults_to_mainnet(monkeypatch):
     """Absent an explicit chain_id, getLogs carries chain_id=1 (mainnet unchanged)."""
-    import utils.etherscan as etherscan_mod
+    import services.clients.etherscan as etherscan_mod
 
     seen_chain_ids = []
 

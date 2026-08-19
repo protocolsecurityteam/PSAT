@@ -1,5 +1,5 @@
 """Regression tests for the per-thread ``requests.Session`` introduced
-in ``utils/rpc.py``.
+in ``services/clients/rpc.py``.
 
 Bare ``requests.post()`` opens a new socket per call. Per-thread Sessions
 let the underlying urllib3 connection pool reuse TCP/TLS sockets across
@@ -24,7 +24,7 @@ import threading
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-from utils import rpc
+from services.clients import rpc
 
 
 def _reset_thread_session():
@@ -92,7 +92,7 @@ def test_rpc_request_retries_on_retryable_status():
     session = rpc._get_session()
     with (
         patch.object(session, "post", side_effect=[failing, succeeding]) as mocked_post,
-        patch("utils.rpc.time.sleep"),  # don't actually back off in tests
+        patch("services.clients.rpc.time.sleep"),  # don't actually back off in tests
     ):
         result = rpc.rpc_request("https://example.invalid", "eth_call", [{}, "latest"], retries=1)
     assert result == "0xok"

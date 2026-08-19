@@ -9,7 +9,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 
-from utils.etherscan import get as etherscan_get
+from services.clients.etherscan import get as etherscan_get
 from utils.logging import record_degraded, record_stage_metric
 
 from .static_dependencies import (
@@ -188,7 +188,7 @@ def resolve_trace_rpc(rpc_url: str | None = None) -> str:
     if rpc_url:
         return rpc_url
     load_dotenv(Path(__file__).resolve().parent.parent / ".env")
-    from utils.rpc import default_rpc_url
+    from services.clients.rpc import default_rpc_url
 
     # Pipeline callers pass a chain-resolved rpc_url; this explicit-mainnet base
     # is only reached from the trace CLI when no --dynamic-rpc is given — a
@@ -384,7 +384,7 @@ def find_dynamic_dependencies(
     if not selected_txs:
         raise NoNewTransactionsError(f"No representative transactions found for {tx_source}")
 
-    from utils.concurrency import parallel_map
+    from services.concurrency import parallel_map
 
     all_edges = []
     trace_methods = set()

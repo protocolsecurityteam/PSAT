@@ -4,8 +4,8 @@ from db.models import (
     EDGE_RELATION_CONTROLLER_VALUE,
     EDGE_RELATION_CONTROLLER_VALUE_UNATTRIBUTED,
 )
+from services.concurrency import RpcExecutor
 from services.policy.principal_enrichment import build_principal_labels
-from utils.concurrency import RpcExecutor
 
 
 @pytest.fixture(autouse=True)

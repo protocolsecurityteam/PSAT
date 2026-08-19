@@ -143,7 +143,7 @@ def test_unverified_source_writes_no_contract_row(monkeypatch):
     from types import SimpleNamespace
     from unittest.mock import MagicMock
 
-    import utils.etherscan as etherscan_module
+    import services.clients.etherscan as etherscan_module
     from workers.discovery import DiscoveryWorker
 
     # 1. The producer of the failure: an unverified payload raises rather than

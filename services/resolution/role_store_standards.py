@@ -31,8 +31,8 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from db.models import Contract
+from services.clients.rpc import default_rpc_url, get_code, parse_address_result, rpc_request
 from utils.evm import EIP1967_IMPL_SLOT
-from utils.rpc import default_rpc_url, get_code, parse_address_result, rpc_request
 
 _ZERO_ADDRESS = "0x" + "0" * 40
 

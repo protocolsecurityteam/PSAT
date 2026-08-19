@@ -853,9 +853,9 @@ def test_delegated_opaque_checker_materializes_with_zero_arg_getter(monkeypatch)
     from eth_utils.crypto import keccak
 
     import db.queue as queue_mod
+    import services.clients.rpc as rpc_mod
     import services.resolution.capability_resolver as resolver_mod
     import services.resolution.external_check_materializer as materializer_mod
-    import utils.rpc as rpc_mod
     from services.resolution.adapters import AdapterRegistry, CallFrame
     from services.resolution.adapters import EvaluationContext as ResolverContext
     from services.resolution.capabilities import CapabilityExpr

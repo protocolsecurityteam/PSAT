@@ -431,7 +431,7 @@ class TestTavilySearch:
         assert queries_used[0] == 5  # not incremented
 
     def test_tavily_error_appended(self, monkeypatch):
-        from utils.tavily import TavilyError
+        from services.clients.tavily import TavilyError
 
         def raise_tavily(*a, **kw):
             raise TavilyError({"error": "rate limit"})

@@ -969,7 +969,7 @@ def _rpc_url(chain: str) -> str:
     unknown or eRPC is unconfigured; the caller catches that and records "drift
     unknown" rather than hitting the wrong chain or a direct provider.
     """
-    from utils.rpc import require_rpc_url
+    from services.clients.rpc import require_rpc_url
 
     return require_rpc_url(chain=chain, context="audit coverage bytecode anchor")
 
@@ -984,7 +984,7 @@ def _fetch_bytecode_keccak(address: str, chain: str) -> str | None:
     """
     from eth_utils.crypto import keccak
 
-    from utils.rpc import get_code
+    from services.clients.rpc import get_code
 
     if not address:
         return None
@@ -1231,7 +1231,7 @@ def _apply_equivalence_http(
         fetch_etherscan_source_files,
         verify_audit_covers_impl,
     )
-    from utils.concurrency import parallel_map
+    from services.concurrency import parallel_map
 
     gh_token = os.environ.get("GITHUB_TOKEN") or None
     # Per-address cache so two audit rows pointing at the same impl only

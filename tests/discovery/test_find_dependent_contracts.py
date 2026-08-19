@@ -2,7 +2,7 @@ import pytest
 
 from services.discovery import static_dependencies as fdc
 
-# offline: BFS pre-fills bytecode via a batched eth_getCode (utils.rpc.get_code_batch,
+# offline: BFS pre-fills bytecode via a batched eth_getCode (services.clients.rpc.get_code_batch,
 # imported at call time); stub it empty so it falls back to the per-address get_code mocks
 pytestmark = pytest.mark.usefixtures("_stub_rpc_bytecode")
 

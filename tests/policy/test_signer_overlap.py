@@ -11,12 +11,12 @@ from typing import Any, cast
 import pytest
 
 from db.models import Contract, EffectiveFunction, FunctionPrincipal, Protocol
+from services.concurrency import RpcExecutor
 from services.policy.principal_enrichment import (
     _compute_signer_overlap,
     build_principal_labels,
     load_protocol_safe_owner_sets,
 )
-from utils.concurrency import RpcExecutor
 
 # Ops Safe (4/7) and pauser Safe (1/5) — the pauser's owners are a strict subset,
 # the exact etherfi shape the plan cites.

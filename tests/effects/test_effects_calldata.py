@@ -2514,7 +2514,7 @@ def test_anvil_factory_is_single_flight_and_closed(monkeypatch):
             self.closed = True
 
     monkeypatch.setattr("services.effects.anvil.SubprocessAnvil", _FakeAnvil)
-    monkeypatch.setattr("utils.rpc.rpc_headers", lambda url, extra=None: {"X-Test": "1"})
+    monkeypatch.setattr("services.clients.rpc.rpc_headers", lambda url, extra=None: {"X-Test": "1"})
     monkeypatch.setenv("PSAT_EFFECTS_FORK", "1")
 
     worker = EffectsWorker()
@@ -2540,7 +2540,7 @@ def test_anvil_spawn_failure_is_memoized_and_raises_per_plan(monkeypatch):
         raise OSError("no anvil")
 
     monkeypatch.setattr("services.effects.anvil.SubprocessAnvil", _boom)
-    monkeypatch.setattr("utils.rpc.rpc_headers", lambda url, extra=None: {})
+    monkeypatch.setattr("services.clients.rpc.rpc_headers", lambda url, extra=None: {})
     monkeypatch.setenv("PSAT_EFFECTS_FORK", "1")
 
     worker = EffectsWorker()

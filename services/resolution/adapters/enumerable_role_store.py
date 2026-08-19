@@ -39,9 +39,9 @@ from typing import Any, TypeGuard
 
 from eth_utils.crypto import keccak
 
+from services.clients.rpc import encode_address_word, multicall3_aggregate3, rpc_request
 from services.resolution.caller_sources import CALLER_SOURCES as _CALLER_SOURCES
 from utils.logging import record_stage_metric
-from utils.rpc import encode_address_word, multicall3_aggregate3, rpc_request
 from utils.scoring_status import TRACE_STEP_ENUMERABLE_ROLE_STORE
 
 from ..capabilities import CapabilityExpr, ExternalCheck

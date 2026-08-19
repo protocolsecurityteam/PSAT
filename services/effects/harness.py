@@ -20,6 +20,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from services.clients.rpc import EthCallResult
 from services.effects.config import (
     BLOCK_SOURCES,
     SCOPE_KERNEL,
@@ -34,7 +35,6 @@ from services.resolution.differential_probe import (
     decode_error,
     derive_random_identities,
 )
-from utils.rpc import EthCallResult
 
 __all__ = [
     "CallBatch",

@@ -17,7 +17,7 @@ from utils.chains import UnknownChainError, chain_by_name
 def _bytecode_keccak_now_batch(addresses: set[str], *, chain_id: int = 1) -> dict[str, str | None]:
     """Return ``{lower_address: keccak_hex_or_None}`` for a set of addresses.
 
-    Reads ``code_keccak`` from the durable ``bytecode_cache`` (utils.rpc PG
+    Reads ``code_keccak`` from the durable ``bytecode_cache`` (services.clients.rpc PG
     layer) on ``chain_id`` — derived from the timeline's contract row so an L2
     contract reads its own chain's cache, not mainnet's; only addresses absent
     there are fetched live. There is no timeline-local cache — dedup and
@@ -26,8 +26,8 @@ def _bytecode_keccak_now_batch(addresses: set[str], *, chain_id: int = 1) -> dic
     (``services.audits.coverage._fetch_bytecode_keccak``) reads on the same
     chain, derived from ``chain_id`` via the registry."""
     from services.audits.coverage import _fetch_bytecode_keccak
+    from services.clients.rpc import _pg_bytecode_get
     from utils.chains import chain_by_id
-    from utils.rpc import _pg_bytecode_get
 
     chain_name = chain_by_id(chain_id).name
     out: dict[str, str | None] = {}

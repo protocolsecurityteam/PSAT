@@ -25,8 +25,8 @@ from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, as_completed, wait
 from typing import Any, TypeVar
 
+from services.clients.rpc import MAX_BATCH_SIZE, rpc_batch_request_with_status
 from utils.logging import record_degraded
-from utils.rpc import MAX_BATCH_SIZE, rpc_batch_request_with_status
 
 logger = logging.getLogger(__name__)
 

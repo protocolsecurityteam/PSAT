@@ -50,6 +50,7 @@ from db.models import (
     SessionLocal,
 )
 from db.queue import HEARTBEAT_ROLE_HOLDER_PLANE, record_heartbeat
+from services.clients.rpc import rpc_url_for_chain_id
 from services.monitoring import emit_monitor_cycle
 from services.resolution.role_holder_plane import (
     ACCESS_CONTROL_TOPIC0S,
@@ -59,7 +60,6 @@ from services.resolution.role_holder_plane import (
     resolve_role_holder_planes,
 )
 from utils.chains import supported_chain_ids
-from utils.rpc import rpc_url_for_chain_id
 
 logger = logging.getLogger(__name__)
 

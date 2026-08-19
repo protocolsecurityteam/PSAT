@@ -395,7 +395,7 @@ def main() -> None:
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
 
-    from utils.rpc import require_rpc_url
+    from services.clients.rpc import require_rpc_url
 
     # Daemon edge (inv. 6): the reconciler is one process serving every chain;
     # ``RECONCILER_FALLBACK_CHAIN`` is the explicit, documented base + ambiguous-

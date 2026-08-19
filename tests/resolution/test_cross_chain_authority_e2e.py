@@ -32,6 +32,7 @@ from typing import Any
 import pytest
 
 import services.resolution.tracking as tracking
+from services.concurrency import RpcExecutor
 from services.policy.principal_enrichment import build_principal_labels
 from services.resolution.cross_chain_authority import (
     CROSS_CHAIN_AUTHORITY_TYPE,
@@ -39,7 +40,6 @@ from services.resolution.cross_chain_authority import (
     undo_l1_to_l2_alias,
 )
 from services.resolution.tracking import clear_classify_cache
-from utils.concurrency import RpcExecutor
 from workers.policy_worker import (
     _chain_id_for_job,
     _known_addresses_for_scope,

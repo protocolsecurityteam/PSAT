@@ -8,8 +8,8 @@ from typing import Any
 
 from dotenv import load_dotenv
 
-from utils.rpc import JSON_RPC_TIMEOUT_SECONDS as RPC_TIMEOUT_SECONDS  # noqa: F401 — re-export
-from utils.rpc import (
+from services.clients.rpc import JSON_RPC_TIMEOUT_SECONDS as RPC_TIMEOUT_SECONDS  # noqa: F401 — re-export
+from services.clients.rpc import (
     get_code,  # noqa: F401 — re-export for backward compat
     normalize_address,  # noqa: F401 — re-export for backward compat
     rpc_request,
@@ -24,7 +24,7 @@ def has_deployed_code(bytecode_hex: str) -> bool:
 
 
 def rpc_call(rpc_url: str, method: str, params: list, retries: int = 1, *, chain_id: int | None = None) -> Any:
-    """Backward-compatible wrapper. Prefer utils.rpc.rpc_request for new code."""
+    """Backward-compatible wrapper. Prefer services.clients.rpc.rpc_request for new code."""
     return rpc_request(rpc_url, method, params, retries=retries, chain_id=chain_id) or "0x"
 
 
@@ -61,7 +61,7 @@ def discover_dependencies(
 ) -> list[str]:
     """BFS-traverse embedded PUSH20 addresses and return deployed contract dependencies.
 
-    Uses ``utils.rpc.get_code_batch`` to probe all candidates extracted
+    Uses ``services.clients.rpc.get_code_batch`` to probe all candidates extracted
     from one contract's bytecode in a single JSON-RPC roundtrip — saves
     N-1 sequential RTTs per BFS layer when the contract embeds many
     PUSH20 addresses (Solidity hardcoded library refs, factory deploys,
@@ -69,7 +69,7 @@ def discover_dependencies(
     addresses not returned by the batch (per-call error handling lives
     inside get_code_batch).
     """
-    from utils.rpc import get_code_batch
+    from services.clients.rpc import get_code_batch
 
     root = normalize_address(root)
     if code_cache is None:
@@ -138,7 +138,7 @@ def find_dependencies(
     URL↔chain_id guard on every ``eth_getCode`` read; None keeps it a no-op for
     the CLI ``main`` path below (which has no chain in scope)."""
     load_dotenv(Path(__file__).resolve().parent.parent / ".env")
-    from utils.rpc import default_rpc_url
+    from services.clients.rpc import default_rpc_url
 
     # The pipeline (static_worker) always passes a chain-resolved rpc_url; this
     # explicit-mainnet base is only reached from the CLI ``main`` below when no

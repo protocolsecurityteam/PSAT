@@ -876,7 +876,7 @@ def _live_resolve_authority(ctx: EvaluationContext | None, selector: str | None)
 
     _bump_resolve_counter(outer, "live_getter_calls")
     try:
-        from utils.rpc import rpc_request
+        from services.clients.rpc import rpc_request
 
         raw = rpc_request(
             rpc_url,
@@ -946,7 +946,7 @@ def _live_resolve_authority_slot(
         return None
     _bump_resolve_counter(outer, "live_slot_calls")
     try:
-        from utils.rpc import rpc_request
+        from services.clients.rpc import rpc_request
 
         raw = rpc_request(
             rpc_url,
@@ -1915,8 +1915,8 @@ def _call_unary_bytes32_view(
     args: list[str],
     block: int | None,
 ) -> list[str]:
+    from services.clients.rpc import rpc_batch_request_with_status
     from services.resolution.repos.event_logs_pg import _normalize_word
-    from utils.rpc import rpc_batch_request_with_status
 
     calls: list[tuple[str, list[Any]]] = []
     for arg in args:
@@ -2467,7 +2467,7 @@ def _resolve_static_external_call_operand(
     if memo is not None and memo_key in memo:
         return {"source": "constant", "constant_value": memo[memo_key]}
     try:
-        from utils.rpc import rpc_request
+        from services.clients.rpc import rpc_request
 
         raw = rpc_request(
             rpc_url,

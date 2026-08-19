@@ -12,6 +12,7 @@ import logging
 import time
 from dataclasses import dataclass
 
+from services.clients.rpc import RpcClientTimeout, normalize_hex, rpc_request
 from utils.evm import (
     COMPTROLLER_IMPL_SELECTOR,
     EIP1822_LOGIC_SLOT,
@@ -23,7 +24,6 @@ from utils.evm import (
     TARGET_SELECTOR,
 )
 from utils.logging import record_degraded
-from utils.rpc import RpcClientTimeout, normalize_hex, rpc_request
 
 logger = logging.getLogger(__name__)
 

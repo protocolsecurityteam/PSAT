@@ -113,12 +113,12 @@ def _patch_pipeline(monkeypatch, *, scaffold_calls, collect_calls, snapshot_call
     monkeypatch.setattr(recursive, "build_control_tracking_plan", _build_plan)
     monkeypatch.setattr(recursive, "build_control_snapshot", _build_snapshot)
     monkeypatch.setattr(recursive, "_build_effective_permissions", _build_perms)
-    # _materialize_contract_artifacts now calls utils.rpc.get_code_with_keccak
+    # _materialize_contract_artifacts now calls services.clients.rpc.get_code_with_keccak
     # to populate the bytecode-keccak secondary cache index. Stub it so
     # tests don't make real eth_getCode RPCs (was making each test ~20s
     # before this stub).
     monkeypatch.setattr(
-        "utils.rpc.get_code_with_keccak",
+        "services.clients.rpc.get_code_with_keccak",
         lambda _rpc, _addr, chain_id=None: ("0x60", "0x" + "ab" * 32),
     )
 
@@ -244,7 +244,9 @@ def test_bytecode_keccak_hit_retargets_plan_to_new_address(monkeypatch):
 
     # Both addresses share the same bytecode → same keccak.
     keccak = "0x" + "ab" * 32
-    monkeypatch.setattr("utils.rpc.get_code_with_keccak", lambda _rpc, _addr, chain_id=None: ("0x60", keccak))
+    monkeypatch.setattr(
+        "services.clients.rpc.get_code_with_keccak", lambda _rpc, _addr, chain_id=None: ("0x60", keccak)
+    )
 
     addr_a = "0x" + "11" * 20
     addr_b = "0x" + "22" * 20

@@ -42,9 +42,9 @@ def _stub_etherscan_balances(monkeypatch):
     balances via Etherscan; benign defaults (these tests assert on address
     rewriting / handoff, not balances). The same call also issues a pinned
     native read over a separate wire, stubbed here to its unavailable outcome."""
-    monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda addr, *a, **k: 0)
-    monkeypatch.setattr("utils.etherscan.get_native_price", lambda *a, **k: 0.0)
-    monkeypatch.setattr("utils.etherscan.get_token_balances_page", lambda addr, *a, **k: page([]))
+    monkeypatch.setattr("services.clients.etherscan.get_eth_balance", lambda addr, *a, **k: 0)
+    monkeypatch.setattr("services.clients.etherscan.get_native_price", lambda *a, **k: 0.0)
+    monkeypatch.setattr("services.clients.etherscan.get_token_balances_page", lambda addr, *a, **k: page([]))
     pinned_native_unavailable(monkeypatch)
 
 
@@ -462,7 +462,7 @@ def test_full_data_flow_unified_through_graph_and_upgrade_history(monkeypatch, t
     # target in a later job, so it should NOT appear here even though it's
     # classified as a proxy.
     monkeypatch.setattr("services.discovery.upgrade_history._fetch_logs_etherscan", lambda _a, _t, from_block=0: [])
-    from utils import etherscan
+    from services.clients import etherscan
 
     monkeypatch.setattr(etherscan, "get_contract_info", lambda _a: (None, {}))
 

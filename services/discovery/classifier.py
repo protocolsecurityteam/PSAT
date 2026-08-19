@@ -16,6 +16,7 @@ Detection methods:
 import json
 import logging
 
+from services.clients.rpc import rpc_batch_request_with_status
 from services.discovery.static_dependencies import get_code, normalize_address, rpc_call
 from utils.evm import (
     COMPTROLLER_IMPL_SELECTOR,
@@ -31,7 +32,6 @@ from utils.evm import (
     TARGET_SELECTOR,
 )
 from utils.logging import record_degraded, record_stage_metric
-from utils.rpc import rpc_batch_request_with_status
 
 logger = logging.getLogger(__name__)
 
@@ -593,7 +593,7 @@ def classify_contracts(
     ``_resolve_proxy`` call).  These are reused in Phase 1, avoiding
     duplicate RPC calls.
     """
-    from utils.concurrency import parallel_map
+    from services.concurrency import parallel_map
 
     target = normalize_address(target)
     all_addrs = list(dict.fromkeys([target] + [normalize_address(a) for a in dependencies]))
@@ -608,7 +608,7 @@ def classify_contracts(
 
     # Fan out every address that isn't already pre-classified. ``code_cache`` is
     # intentionally not threaded through — ``classify_single`` falls through to
-    # the locked process-wide ``_GETCODE_CACHE`` in utils.rpc, which already
+    # the locked process-wide ``_GETCODE_CACHE`` in services.clients.rpc, which already
     # serialises bytecode reads safely.
     addrs_to_classify = [addr for addr in all_addrs if not (pre_classified and addr in pre_classified)]
     parallel_results = parallel_map(
@@ -783,7 +783,7 @@ def main():
     parser.add_argument("--deps", nargs="*", default=[], help="Dependency addresses")
     args = parser.parse_args()
 
-    from utils.rpc import default_rpc_url
+    from services.clients.rpc import default_rpc_url
 
     # CLI dev tool: explicit-mainnet base when no --rpc is given — a documented
     # default (inv. 6), not a silent one. Pipeline classification passes rpc_url.

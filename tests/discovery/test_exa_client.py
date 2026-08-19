@@ -1,4 +1,4 @@
-"""Unit tests for utils.exa HTTP client."""
+"""Unit tests for services.clients.exa HTTP client."""
 
 from __future__ import annotations
 
@@ -9,8 +9,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 import requests
 
-from utils import exa
-from utils.exa import _cache_key
+from services.clients import exa
+from services.clients.exa import _cache_key
 
 
 class _FakeResp:

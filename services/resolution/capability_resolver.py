@@ -51,9 +51,9 @@ from sqlalchemy.orm import Session
 from db.deployment import deployment_scope, normalize_deployment
 from db.models import Contract, ControllerValue, Job, JobStatus
 from db.queue import get_artifact
+from services.clients.rpc import ChainContext, chain_context, eth_call_batch, rpc_request
 from utils.chains import require_chain
 from utils.logging import record_degraded, record_stage_metric
-from utils.rpc import ChainContext, chain_context, eth_call_batch, rpc_request
 
 from .adapters import AdapterRegistry, CallFrame, EvaluationContext
 from .adapters.enumerable_role_store import EnumerableRoleStoreAdapter
@@ -247,7 +247,7 @@ def _resolve_chain_context(
     chain: str | None,
 ) -> ChainContext:
     """Bind ``chain_id`` to its RPC URL (invariant 7). Registry-backed via
-    :func:`utils.rpc.chain_context`. An unregistered ``chain_id`` (only reachable
+    :func:`services.clients.rpc.chain_context`. An unregistered ``chain_id`` (only reachable
     from a hand-built job request) now fails loud (invariant 6): ``require_chain``
     raises :class:`~utils.chains.UnsupportedChainError` with call context instead
     of silently building an eRPC route for an unknown chain. A local (Anvil/test)

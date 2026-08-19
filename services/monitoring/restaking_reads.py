@@ -52,6 +52,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from db.models import Contract, RestakingPosition
+from services.clients.rpc import MULTICALL3_ADDRESS, multicall3_aggregate3, rpc_request, rpc_url_for_chain_id, selector
 from utils.restaking_status import (
     CONSENSUS_LAYER_RESIDUAL_NOT_DETERMINED,
     CROSS_READ_AGREE,
@@ -68,7 +69,6 @@ from utils.restaking_status import (
     SHARES_BASIS_NOT_DETERMINED,
     SHARES_BASIS_READ_FAILED,
 )
-from utils.rpc import MULTICALL3_ADDRESS, multicall3_aggregate3, rpc_request, rpc_url_for_chain_id, selector
 
 logger = logging.getLogger(__name__)
 
@@ -195,7 +195,7 @@ def decode_strict_bool_word(raw: object) -> bool | None:
     """A full 32-byte word that is EXACTLY 0 or EXACTLY 1.
 
     Any other word is not a bool and yields ``None``. Deliberately NOT
-    ``utils.rpc.decode_bool_word``, which answers ``False`` for anything
+    ``services.clients.rpc.decode_bool_word``, which answers ``False`` for anything
     unparseable: here "not a bool" must be distinguishable from "false", because
     a false ``hasPod`` is one third of a proven-absent witness.
     """

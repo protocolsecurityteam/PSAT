@@ -151,8 +151,8 @@ def test_secondary_impl_threads_chain_id(monkeypatch):
         seen.append(chain_id)
         return "0x" + "0" * 24 + _addr("d")[2:]
 
-    # resolve_secondary_impl_addresses imports rpc_request from utils.rpc at call time.
-    monkeypatch.setattr("utils.rpc.rpc_request", _rpc)
+    # resolve_secondary_impl_addresses imports rpc_request from services.clients.rpc at call time.
+    monkeypatch.setattr("services.clients.rpc.rpc_request", _rpc)
 
     out = secondary_impl.resolve_secondary_impl_addresses(
         BASE_URL,

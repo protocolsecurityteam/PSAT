@@ -1380,7 +1380,7 @@ def store_source_files(session: Session, job_id: Any, files: dict[str, str]) -> 
     # RTT per file on the static-stage critical path. Threading-only: each
     # ``client.put`` is an independent HTTP request to object storage with no
     # shared session state.
-    from utils.concurrency import parallel_map
+    from services.concurrency import parallel_map
 
     items = list(files.items())
 
@@ -1496,7 +1496,7 @@ def get_source_files(session: Session, job_id: Any) -> dict[str, str]:
     # Fan out the storage GETs the same way ``store_source_files`` fans out
     # the PUTs — these blocked the static + resolution + policy stages on
     # 30-100 sequential MinIO/S3 RTTs each.
-    from utils.concurrency import parallel_map
+    from services.concurrency import parallel_map
 
     # Capture into a non-None local so the closure's type narrows past pyright
     # (the loop above already raised when client was None for any storage_row).

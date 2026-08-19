@@ -1,4 +1,4 @@
-"""Unit tests for utils/concurrency primitives.
+"""Unit tests for services/concurrency primitives.
 
 Covers ordering, exception capture, heartbeat invocation, RpcExecutor
 singleton semantics, and parallel_rpc_calls chunk routing. Every parallel
@@ -13,8 +13,8 @@ from concurrent.futures import Future
 
 import pytest
 
-from utils import concurrency
-from utils.concurrency import (
+from services import concurrency
+from services.concurrency import (
     RpcExecutor,
     parallel_map,
     parallel_rpc_calls,

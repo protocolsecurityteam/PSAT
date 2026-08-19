@@ -2397,7 +2397,7 @@ def test_a_long_list_the_fetch_paged_to_exhaustion_is_not_read_as_truncated(db_s
     still the answer — there is no ``complete`` member — but it is now the honest one
     rather than a false positive.
     """
-    from utils.etherscan import TOKEN_BALANCE_PAGE_SIZE
+    from services.clients.etherscan import TOKEN_BALANCE_PAGE_SIZE
 
     p = _add_protocol(db_session, f"e2e-decap-{uuid.uuid4().hex[:8]}")
     addr = _addr("decap1")

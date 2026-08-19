@@ -23,6 +23,7 @@ from db.models import (
 from db.nested_artifacts import store_bundle as store_nested_artifacts
 from db.queue import create_job, get_artifact, store_artifact
 from schemas.control_tracking import ControlSnapshot, ControlTrackingPlan
+from services.clients.rpc import require_rpc_url
 from services.discovery.perimeter import queue_discovered_contracts
 from services.monitoring.asset_sweep import SweepOutcome
 from services.monitoring.balance_observation import (
@@ -72,7 +73,6 @@ from services.resolution.tracking import build_control_snapshot
 from utils.balance_status import ASSET_SET_STATUS_FETCH_FAILED, BALANCE_WRITER_RESOLUTION
 from utils.chains import UnknownChainError, chain_by_id, chain_enabled
 from utils.logging import record_degraded, record_stage_metric
-from utils.rpc import require_rpc_url
 from workers.base import BaseWorker
 
 logger = logging.getLogger("workers.resolution_worker")
@@ -563,8 +563,8 @@ class ResolutionWorker(BaseWorker):
         ``chain_id`` is required: it scopes every Etherscan v2 read to
         the job's chain so an L2 job records L2 balances/prices, not mainnet
         ones. A chainless balance fetch can no longer default to mainnet."""
-        from utils.etherscan import TokenBalancePage, get_eth_balance, get_native_price, parallel_get
-        from utils.rpc import rpc_url_for_chain_id
+        from services.clients.etherscan import TokenBalancePage, get_eth_balance, get_native_price, parallel_get
+        from services.clients.rpc import rpc_url_for_chain_id
 
         address = job.address
         if not address or not contract_row:

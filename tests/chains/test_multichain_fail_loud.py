@@ -77,37 +77,37 @@ class TestDefaultRpcUrlNoSilentMainnet:
         monkeypatch.setenv("ERPC_BASE_URL", "https://erpc.example")
 
     def test_none_returns_none_not_mainnet(self):
-        from utils.rpc import default_rpc_url
+        from services.clients.rpc import default_rpc_url
 
         assert default_rpc_url() is None
 
     def test_empty_chain_returns_none(self):
-        from utils.rpc import default_rpc_url
+        from services.clients.rpc import default_rpc_url
 
         assert default_rpc_url(chain="") is None
 
     def test_unknown_sentinel_returns_none(self):
-        from utils.rpc import default_rpc_url
+        from services.clients.rpc import default_rpc_url
 
         assert default_rpc_url(chain="unknown") is None
 
     def test_unregistered_name_returns_none(self):
-        from utils.rpc import default_rpc_url
+        from services.clients.rpc import default_rpc_url
 
         assert default_rpc_url(chain="fantom") is None
 
     def test_explicit_mainnet_still_resolves(self):
-        from utils.rpc import default_rpc_url
+        from services.clients.rpc import default_rpc_url
 
         assert default_rpc_url(chain_id=1) == "https://erpc.example/main/evm/1"
 
     def test_explicit_l2_resolves(self):
-        from utils.rpc import default_rpc_url
+        from services.clients.rpc import default_rpc_url
 
         assert default_rpc_url(chain_id=8453) == "https://erpc.example/main/evm/8453"
 
     def test_local_rpc_still_wins_without_chain(self):
-        from utils.rpc import default_rpc_url
+        from services.clients.rpc import default_rpc_url
 
         assert default_rpc_url(explicit_rpc_url="http://127.0.0.1:8545") == "http://127.0.0.1:8545"
 
@@ -115,14 +115,14 @@ class TestDefaultRpcUrlNoSilentMainnet:
 class TestRequireRpcUrlDistinctErrors:
     def test_no_chain_raises_unsupported_chain(self, monkeypatch):
         monkeypatch.setenv("ERPC_BASE_URL", "https://erpc.example")
-        from utils.rpc import require_rpc_url
+        from services.clients.rpc import require_rpc_url
 
         with pytest.raises(UnsupportedChainError):
             require_rpc_url(context="pipeline X")
 
     def test_unknown_chain_raises_unsupported_chain(self, monkeypatch):
         monkeypatch.setenv("ERPC_BASE_URL", "https://erpc.example")
-        from utils.rpc import require_rpc_url
+        from services.clients.rpc import require_rpc_url
 
         with pytest.raises(UnsupportedChainError):
             require_rpc_url(chain="fantom", context="pipeline X")
@@ -131,7 +131,7 @@ class TestRequireRpcUrlDistinctErrors:
         # Chain resolves fine; the failure is the missing eRPC config — a distinct
         # error class + message, so the two failure modes aren't conflated.
         monkeypatch.delenv("ERPC_BASE_URL", raising=False)
-        from utils.rpc import require_rpc_url
+        from services.clients.rpc import require_rpc_url
 
         with pytest.raises(RuntimeError) as exc:
             require_rpc_url(chain_id=1, context="pipeline X")
@@ -139,7 +139,7 @@ class TestRequireRpcUrlDistinctErrors:
         assert "ERPC_BASE_URL" in str(exc.value)
 
     def test_local_url_wins_without_chain(self):
-        from utils.rpc import require_rpc_url
+        from services.clients.rpc import require_rpc_url
 
         assert require_rpc_url(explicit_rpc_url="http://127.0.0.1:8545") == "http://127.0.0.1:8545"
 
@@ -152,41 +152,41 @@ class TestErpcChainIdGuard:
         monkeypatch.setenv("ERPC_BASE_URL", "https://erpc.example")
 
     def test_parses_chain_id_from_url(self):
-        from utils.rpc import _erpc_chain_id_from_url
+        from services.clients.rpc import _erpc_chain_id_from_url
 
         assert _erpc_chain_id_from_url("https://erpc.example/main/evm/8453") == 8453
 
     def test_mismatch_raises_with_both_ids(self):
-        from utils.rpc import _assert_url_chain_id
+        from services.clients.rpc import _assert_url_chain_id
 
         with pytest.raises(RuntimeError) as exc:
             _assert_url_chain_id("https://erpc.example/main/evm/8453", 1)
         assert "8453" in str(exc.value) and "1" in str(exc.value)
 
     def test_match_is_silent(self):
-        from utils.rpc import _assert_url_chain_id
+        from services.clients.rpc import _assert_url_chain_id
 
         _assert_url_chain_id("https://erpc.example/main/evm/8453", 8453)
 
     def test_none_chain_id_is_noop(self):
-        from utils.rpc import _assert_url_chain_id
+        from services.clients.rpc import _assert_url_chain_id
 
         _assert_url_chain_id("https://erpc.example/main/evm/8453", None)
 
     def test_local_url_is_noop(self):
-        from utils.rpc import _assert_url_chain_id
+        from services.clients.rpc import _assert_url_chain_id
 
         _assert_url_chain_id("http://127.0.0.1:8545", 1)
 
     def test_non_erpc_host_is_noop(self):
-        from utils.rpc import _assert_url_chain_id
+        from services.clients.rpc import _assert_url_chain_id
 
         _assert_url_chain_id("https://some.provider/rpc", 8453)
 
     def test_rpc_request_raises_on_mismatch_before_wire(self, monkeypatch):
         # The guard fires before any network call: a declared chain_id that
         # disagrees with the eRPC URL path raises rather than reading the wrong chain.
-        from utils import rpc
+        from services.clients import rpc
 
         def _boom(*a, **k):  # pragma: no cover - must never be reached
             raise AssertionError("wire call must not happen on a guard mismatch")

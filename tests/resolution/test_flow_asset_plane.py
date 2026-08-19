@@ -28,9 +28,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from services.clients.rpc import EthCallResult
 from services.resolution import flow_asset_plane as fap
 from services.resolution.role_holder_plane import ProbeBlock
-from utils.rpc import EthCallResult
 from workers.resolution_worker import ResolutionWorker
 
 BLOCK = 25643300

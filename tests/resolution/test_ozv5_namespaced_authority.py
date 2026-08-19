@@ -97,7 +97,7 @@ def _stub_rpc_map(monkeypatch: pytest.MonkeyPatch, returns: dict[str, str | None
             raise RuntimeError("execution reverted")
         return "0x" + value[2:].rjust(64, "0")
 
-    monkeypatch.setattr("utils.rpc.rpc_request", fake)
+    monkeypatch.setattr("services.clients.rpc.rpc_request", fake)
 
 
 def _called(recorder: list, selector: str) -> bool:

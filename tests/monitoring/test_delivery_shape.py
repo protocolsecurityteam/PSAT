@@ -186,7 +186,7 @@ def wire(monkeypatch):
     def _rpc(url, method, params, *args, **kwargs):
         return installed(url, method, params, *args, **kwargs)
 
-    monkeypatch.setattr("utils.rpc.rpc_request", _rpc)
+    monkeypatch.setattr("services.clients.rpc.rpc_request", _rpc)
     monkeypatch.setattr("services.resolution.repos.event_logs_rpc.rpc_request", _rpc)
 
     def _head(rpc_url, *, chain_id, cost):
@@ -194,7 +194,7 @@ def wire(monkeypatch):
         return installed.head
 
     monkeypatch.setattr("services.monitoring.asset_sweep.sweep_head_block", _head)
-    monkeypatch.setattr("utils.etherscan.get_contract_creation_block", lambda address, **kw: CREATION)
+    monkeypatch.setattr("services.clients.etherscan.get_contract_creation_block", lambda address, **kw: CREATION)
     yield installed
     delivery_shape.clear_creation_block_cache()
 

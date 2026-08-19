@@ -515,8 +515,8 @@ class EffectsWorker(BaseWorker):
         if self._injected_seams is not None:
             return self._injected_seams
 
+        from services.clients.rpc import eth_call_batch, require_rpc_url
         from services.effects.simulate import eth_simulate_v1
-        from utils.rpc import eth_call_batch, require_rpc_url
 
         chain_id = _chain_id_for_job(job)
         request = job.request if isinstance(job.request, dict) else {}
@@ -534,7 +534,7 @@ class EffectsWorker(BaseWorker):
             return eth_call_batch(rpc_url, calls, block_tag, chain_id=chain_id)
 
         def block_number() -> int | None:
-            from utils.rpc import rpc_request
+            from services.clients.rpc import rpc_request
 
             result = rpc_request(rpc_url, "eth_blockNumber", [], chain_id=chain_id)
             if isinstance(result, str):
@@ -567,9 +567,9 @@ class EffectsWorker(BaseWorker):
         that will not start degrades the stage instead of crashing it."""
         if not _fork_enabled():
             return None
+        from services.clients.rpc import rpc_headers
         from services.effects.anvil import SubprocessAnvil
         from services.effects.exceptions import AnvilSpawnError
-        from utils.rpc import rpc_headers
 
         hardfork = _CHAIN_HARDFORK.get(chain_id, "prague")
         port = _anvil_port()

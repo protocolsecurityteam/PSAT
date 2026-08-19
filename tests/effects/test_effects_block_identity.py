@@ -204,7 +204,7 @@ def test_the_worker_spawns_its_fork_at_the_preflight_pin(monkeypatch):
             pass
 
     monkeypatch.setattr("services.effects.anvil.SubprocessAnvil", _FakeAnvil)
-    monkeypatch.setattr("utils.rpc.rpc_headers", lambda url, extra=None: {})
+    monkeypatch.setattr("services.clients.rpc.rpc_headers", lambda url, extra=None: {})
     monkeypatch.setenv("PSAT_EFFECTS_FORK", "1")
 
     worker = EffectsWorker()
@@ -245,7 +245,7 @@ def test_a_failed_head_pin_leaves_the_fork_unpinned(monkeypatch):
             pass
 
     monkeypatch.setattr("services.effects.anvil.SubprocessAnvil", _FakeAnvil)
-    monkeypatch.setattr("utils.rpc.rpc_headers", lambda url, extra=None: {})
+    monkeypatch.setattr("services.clients.rpc.rpc_headers", lambda url, extra=None: {})
     monkeypatch.setenv("PSAT_EFFECTS_FORK", "1")
 
     def _boom() -> int:

@@ -193,7 +193,7 @@ def test_walk_continues_through_a_uups_proxy_to_the_real_authority(monkeypatch):
     non-terminal, so the terminal-principal walk probes its canonical getters
     (delegatecalled to the implementation) and reaches the real owner —
     instead of stopping at the proxy as terminal 'proxy_admin'."""
-    from utils.rpc import EthCallResult, selector
+    from services.clients.rpc import EthCallResult, selector
     from workers import policy_worker as pw
 
     owner_selector = selector("owner()")

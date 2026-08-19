@@ -1,6 +1,6 @@
 """Stub helpers for the balance wires the two ``contract_balances`` writers use.
 
-``utils.etherscan.get_token_balances_page`` is what the two writers call for the
+``services.clients.etherscan.get_token_balances_page`` is what the two writers call for the
 asset set, because the older list-returning signature cannot distinguish an
 empty page from a failed fetch — and writing rows from the latter publishes
 "holds nothing". Tests that stub the wire therefore stub the page function, and
@@ -14,13 +14,13 @@ must be stubbed separately; see :func:`pinned_native_unavailable`.
 
 from __future__ import annotations
 
+from services.clients.etherscan import TOKEN_BALANCE_PAGE_SIZE, TokenBalancePage
 from utils.balance_status import (
     ASSET_SET_STATUS_AT_PAGE_CAP,
     ASSET_SET_STATUS_FETCH_FAILED,
     ASSET_SET_STATUS_RETURNED_ASSETS,
     ASSET_SET_STATUS_RETURNED_EMPTY,
 )
-from utils.etherscan import TOKEN_BALANCE_PAGE_SIZE, TokenBalancePage
 
 
 def page(rows: list[dict], *, page_length: int | None = None) -> TokenBalancePage:
@@ -50,7 +50,7 @@ def pinned_native_unavailable(monkeypatch) -> None:
     """No pinned height is obtainable, so ``pinned_native_balances`` yields nothing.
 
     ``pinned_native_balances`` reads the head over its own wire before Etherscan
-    is touched, so a test that stubs only ``utils.etherscan`` leaves that read
+    is touched, so a test that stubs only ``services.clients.etherscan`` leaves that read
     live. This pins the head read to a failure, which is the outcome such a test
     already had — the pinned path yields ``(None, {})`` and the writer falls back
     to the unpinned Etherscan answer, where a zero is ``not_determined``.

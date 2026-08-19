@@ -4,7 +4,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from utils import chains, rpc
+from services.clients import rpc
+from utils import chains
 
 
 def _reset_thread_session() -> None:

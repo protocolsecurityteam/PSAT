@@ -26,6 +26,8 @@ from db.nested_artifacts import store_bundle as store_nested_artifacts
 from db.queue import get_artifact, store_artifact
 from schemas.control_tracking import ControlSnapshot
 from schemas.effective_permissions import PrincipalResolution
+from services.clients.rpc import require_rpc_url
+from services.concurrency import parallel_map
 from services.discovery.perimeter import (
     PERIMETER_SPAWN_DEPTH_CAP,
     PERIMETER_SPAWN_LIMIT,
@@ -46,9 +48,7 @@ from services.resolution.recursive import LoadedArtifacts, resolve_control_graph
 from services.resolution.tracking import classify_resolved_address_with_status, read_contract_controllers
 from services.static.claims import Claim, resolve_claim_precedence
 from utils.chains import UnknownChainError, chain_by_id, chain_by_name, require_chain
-from utils.concurrency import parallel_map
 from utils.logging import log_timed_phase, record_degraded, record_stage_metric
-from utils.rpc import require_rpc_url
 from workers.base import BaseWorker
 
 logger = logging.getLogger("workers.policy_worker")

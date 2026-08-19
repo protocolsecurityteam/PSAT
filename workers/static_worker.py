@@ -24,6 +24,7 @@ from db.queue import (
     store_artifact,
 )
 from schemas.contract_analysis import ContractAnalysis
+from services.clients.rpc import default_rpc_url, normalize_hex  # used for address comparison
 from services.discovery import (
     build_dependency_visualization,
     build_unified_dependencies,
@@ -39,7 +40,6 @@ from services.resolution.tracking_plan import build_control_tracking_plan
 from services.static.contract_analysis_pipeline import collect_contract_analysis_with_artifacts
 from utils.chains import UnknownChainError, chain_by_id, chain_enabled, require_chain
 from utils.logging import log_timed_phase, record_degraded, record_stage_metric
-from utils.rpc import default_rpc_url, normalize_hex  # used for address comparison
 from workers.base import BaseWorker, JobHandledDirectly
 
 logger = logging.getLogger("workers.static_worker")
@@ -551,8 +551,8 @@ def _finalize_upgrade_history(
     # never the event rows that were just written.
     if contract_row is not None and stats_proxy_ids:
         try:
+            from services.clients.rpc import chain_id_for_chain_name
             from services.discovery.upgrade_history import fold_upgrade_transactions
-            from utils.rpc import chain_id_for_chain_name
 
             chain_id = chain_id_for_chain_name(contract_row.chain or "ethereum")
             if chain_id is not None:
@@ -1587,7 +1587,7 @@ class StaticWorker(BaseWorker):
 
         # ---- Parallel section: 3 RPC/Etherscan-bound sub-phases. ----
         # Each sub-phase gets its own ``code_cache`` dict; the global locked
-        # ``_GETCODE_CACHE`` in utils.rpc dedups across them so the only cost
+        # ``_GETCODE_CACHE`` in services.clients.rpc dedups across them so the only cost
         # is independent dict lookups per thread.
         proxy_addr = request.get("proxy_address")
 
@@ -1623,7 +1623,7 @@ class StaticWorker(BaseWorker):
             # Rebuilt as a plain dict: the worker merges prior history into it.
             return dict(build_upgrade_history(minimal_deps, from_block=uh_from_block, chain_id=phase_chain_id))
 
-        from utils.concurrency import parallel_map
+        from services.concurrency import parallel_map
 
         def _hb() -> None:
             self._heartbeat(session, job)
@@ -2134,7 +2134,7 @@ class StaticWorker(BaseWorker):
         # says nothing about which of two same-era bundles is the later record.
         produced_here = not request.get("static_cached")
         try:
-            from utils.rpc import get_code_with_keccak
+            from services.clients.rpc import get_code_with_keccak
 
             _code, keccak = get_code_with_keccak(_request_rpc_url(job) or "", address, chain_id=_parent_chain_id(job))
         except Exception as exc:

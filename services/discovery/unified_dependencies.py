@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from utils.etherscan import get_contract_info
+from services.clients.etherscan import get_contract_info
 
 from .static_dependencies import normalize_address
 
@@ -138,7 +138,7 @@ def enrich_dependency_metadata(
         info_cache = {}
     missing = sorted(addr for addr in addrs_to_fetch if addr not in info_cache)
     if missing:
-        from utils.etherscan import parallel_get
+        from services.clients.etherscan import parallel_get
 
         # Each ``get_contract_info`` call still routes through the shared
         # _rate_lock — parallel_get only stacks the inter-call dead time.

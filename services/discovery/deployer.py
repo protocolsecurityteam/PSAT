@@ -32,9 +32,9 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
+from services.clients import etherscan
 from services.discovery.inventory_domain import _debug_log
 from services.discovery.static_dependencies import normalize_address
-from utils import etherscan
 from utils.chains import chain_by_id
 
 logger = logging.getLogger(__name__)

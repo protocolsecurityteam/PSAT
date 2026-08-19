@@ -28,7 +28,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from utils import etherscan
+from services.clients import etherscan
 from utils.logging import record_degraded
 
 from .inventory_domain import CHAIN_IDS, CHAIN_SORT_ORDER, _debug_log
@@ -118,7 +118,7 @@ def enrich_with_activity(
     Mutates the contract dicts in-place (adds ``activity`` and ``rank_score``
     keys) and returns the list sorted by ``rank_score`` descending.
 
-    Rate-limited centrally by ``utils.etherscan``.
+    Rate-limited centrally by ``services.clients.etherscan``.
     """
     if not contracts:
         return contracts

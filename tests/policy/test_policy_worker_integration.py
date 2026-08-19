@@ -383,7 +383,7 @@ class TestProcessFanoutParity:
 
     @staticmethod
     def _run(monkeypatch: pytest.MonkeyPatch, fanout: str) -> tuple[Any, dict[str, Any]]:
-        from utils.concurrency import RpcExecutor
+        from services.concurrency import RpcExecutor
 
         monkeypatch.setenv("PSAT_RPC_FANOUT", fanout)
         RpcExecutor.reset_for_tests()

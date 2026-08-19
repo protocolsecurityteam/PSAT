@@ -94,7 +94,7 @@ def _resolve(trees: dict, fn: str, monkeypatch, *, rpc_owner: str | None = None)
             # the ground-truth owner, left-padded to a 32-byte word.
             return "0x" + rpc_owner[2:].rjust(64, "0")
 
-        monkeypatch.setattr("utils.rpc.rpc_request", fake_rpc)
+        monkeypatch.setattr("services.clients.rpc.rpc_request", fake_rpc)
 
     registry = AdapterRegistry()
     registry.register(SolmateRolesAuthorityAdapter)

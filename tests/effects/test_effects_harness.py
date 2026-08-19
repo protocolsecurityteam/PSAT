@@ -9,6 +9,7 @@ is in ``test_section8_*`` below.
 
 from __future__ import annotations
 
+from services.clients.rpc import EthCallResult
 from services.effects import calldata as calldata_mod
 from services.effects import recipes
 from services.effects.config import (
@@ -49,7 +50,6 @@ from tests.support.effects_stubs import (
     transfer_log,
     uint_ret,
 )
-from utils.rpc import EthCallResult
 
 # ---------------------------------------------------------------------------
 # transfers_out — raw-log extraction, no name inference

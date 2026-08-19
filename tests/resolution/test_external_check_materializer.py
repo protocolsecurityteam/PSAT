@@ -52,8 +52,8 @@ def test_materialize_external_check_multicall_parity(monkeypatch):
     routing through Multicall3 (which becomes msg.sender) cannot change which candidates pass."""
     from eth_abi.abi import decode, encode
 
+    import services.clients.rpc as rpc_mod
     import services.resolution.external_check_materializer as mod
-    import utils.rpc as rpc_mod
 
     member = "0x" + "aa" * 20
     non_member = "0x" + "bb" * 20
@@ -114,8 +114,8 @@ def test_materialize_external_check_multicall_parity(monkeypatch):
 def test_materialize_external_check_multicall_falls_back_to_batch(monkeypatch):
     """If the aggregate3 call raises, _eval_candidate_calls falls back to the JSON-RPC batch and
     selects the same set — enabling Multicall3 never degrades the result on a chain without it."""
+    import services.clients.rpc as rpc_mod
     import services.resolution.external_check_materializer as mod
-    import utils.rpc as rpc_mod
 
     member = "0x" + "aa" * 20
     monkeypatch.setattr(mod, "_candidate_addresses_from_events", lambda **_k: [member])

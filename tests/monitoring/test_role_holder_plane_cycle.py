@@ -34,6 +34,7 @@ from db.models import (
     RoleHolderPlaneRefresh,
 )
 from db.queue import HEARTBEAT_ROLE_HOLDER_PLANE
+from services.clients.rpc import EthCallResult
 from services.monitoring import role_holder_cycle
 from services.monitoring.role_holder_cycle import (
     DUE_CURSORS_WARMED,
@@ -51,7 +52,6 @@ from services.monitoring.role_holder_cycle import (
 )
 from services.resolution import role_holder_plane as rhp
 from services.resolution.role_holder_plane import ROLE_GRANTED_TOPIC0, ROLE_REVOKED_TOPIC0
-from utils.rpc import EthCallResult
 from workers.resolution_worker import ResolutionWorker
 
 REGISTRY = "0x1111111111111111111111111111111111111111"

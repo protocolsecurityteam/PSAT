@@ -118,7 +118,7 @@ def solodit_stub(monkeypatch):
 def http_stubs(monkeypatch):
     """Activate ``responses`` around each test so no outbound HTTP escapes.
 
-    Also forces ``TAVILY_API_KEY`` to a dummy value: ``utils.tavily.search``
+    Also forces ``TAVILY_API_KEY`` to a dummy value: ``services.clients.tavily.search``
     raises ``TavilyError`` when the env var is missing *before* any HTTP
     call is made, which would bypass our ``responses`` stubs entirely —
     the pipeline would see zero Tavily results and the tests would fail

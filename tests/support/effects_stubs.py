@@ -11,6 +11,7 @@ from collections.abc import Sequence
 
 from eth_utils.crypto import keccak
 
+from services.clients.rpc import EthCallResult
 from services.effects.harness import SimContext
 from services.effects.seeding import SEED_ETH_VALUE, AnchorSlot
 from services.effects.simulate import (
@@ -20,7 +21,6 @@ from services.effects.simulate import (
     SimLog,
     SimResult,
 )
-from utils.rpc import EthCallResult
 
 CONTRACT = "0x" + "11" * 20
 PRINCIPAL = "0x" + "22" * 20
