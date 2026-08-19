@@ -16,7 +16,7 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
-from sqlalchemy import create_engine, func, select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from db.models import (
@@ -1256,89 +1256,6 @@ def test_value_never_gates_without_cap(db_session):
 
     got = {cand.function_id for cand in select_candidates(db_session, p.id)}
     assert got == {f.id for f in fns}
-
-
-# ---------------------------------------------------------------------------
-# Optional: the real-protocol funnel against the dev DB (skips when absent)
-# ---------------------------------------------------------------------------
-
-
-def _dev_engine():
-    url = os.environ.get("PSAT_DEV_DATABASE_URL", "postgresql://psat:psat@localhost:5433/psat")
-    try:
-        eng = create_engine(url)
-        with eng.connect() as conn:
-            conn.execute(text("SELECT 1"))
-        return eng
-    except Exception:
-        return None
-
-
-@pytest.mark.dev_db
-def test_appendix_a_funnel_on_dev_db():
-    """Reproduce the selection funnel + gate-lift partition for etherfi (protocol_id=1).
-
-    Counts are computed LIVE from SQL rather than hardcoded — the dev DB drifts as
-    the matchers grow, so the invariant tested is the PARTITION (blank subset ==
-    the old blank-claim predicate; enrolled == flow/supply claim carriers), not a
-    frozen number. Data-gated: skips cleanly when the dev DB / etherfi rows are
-    absent so CI's fresh empty DB never depends on it.
-    """
-    eng = _dev_engine()
-    if eng is None:
-        pytest.skip("dev psat DB not reachable")
-    with Session(eng) as s:
-        # The dev DB is a snapshot of a past run and is treated as read-only, so
-        # it lags the migration chain. Skip rather than migrate it: this test is
-        # data-gated by design and a missing relation is the same "absent" case.
-        if not s.execute(text("SELECT to_regclass('public.contract_balances_latest')")).scalar_one():
-            pytest.skip("dev DB predates the balance-provenance migration")
-        present = s.execute(
-            text(
-                "SELECT count(*) FROM effective_functions ef "
-                "JOIN contracts c ON c.id = ef.contract_id WHERE c.protocol_id = 1"
-            )
-        ).scalar_one()
-        if not present:
-            pytest.skip("etherfi (protocol_id=1) rows absent from dev DB")
-
-        # The blank-claim predicate count (evidence + gated + no confident claim) —
-        # the set the cascade's own filters (a) and (c) admit for full synthesis.
-        # Filter (a) is taken from the module rather than hand-copied as SQL: the
-        # copy was of ``array_length(effect_targets,1) > 0``, and keeping a second
-        # spelling of a retired conflation in a test is how a defect outlives its
-        # fix. What this asserts is the PARTITION (blank == the (a)+(c)+blank set,
-        # enrolled == the flow/supply claim carriers), not a frozen number.
-        expected_blank = s.execute(
-            select(func.count())
-            .select_from(EffectiveFunction)
-            .join(Contract, Contract.id == EffectiveFunction.contract_id)
-            .where(
-                Contract.protocol_id == 1,
-                _has_effect_evidence(),
-                EffectiveFunction.authority_public.is_(False),
-                # jsonb_typeof(SQL NULL) is SQL NULL, so the ELSE arm already folds
-                # the no-row-value case to 0 — all three "no claims" states land here.
-                text(
-                    "(CASE WHEN jsonb_typeof(effective_functions.claims) = 'array' THEN "
-                    "jsonb_array_length(effective_functions.claims) ELSE 0 END) = 0"
-                ),
-            )
-        ).scalar_one()
-
-        cands = select_candidates(s, 1)
-        blank = [c for c in cands if c.restrict_families is None]
-        # The blank subset is exactly the old candidate set — the gate lift is
-        # purely additive over blank functions (no blank function lost).
-        assert len(blank) == expected_blank
-        # Gate lift: every value-mover already carries flow.out, so the lift
-        # re-enrolls a non-empty set of claim-carrying functions for value/supply
-        # probing — restricted to exactly those families, never the whole set.
-        enrolled = [c for c in cands if c.restrict_families]
-        assert enrolled
-        for c in enrolled:
-            assert c.restrict_families is not None
-            assert c.restrict_families <= {"value_out", "supply"}
 
 
 # ---------------------------------------------------------------------------

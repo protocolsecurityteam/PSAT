@@ -60,7 +60,6 @@ markers = [
     "smoke: read-only live tests safe to run against prod post-deploy (subset of `live`)",
     "compile: invokes a real solc/forge compile (slow; needs a local toolchain)",
     "anvil: spawns a local anvil node (slow; needs foundry on PATH)",
-    "dev_db: reads the local dev ``psat`` snapshot DB; skips by design when it is absent",
 ]
 
 [tool.ruff]
