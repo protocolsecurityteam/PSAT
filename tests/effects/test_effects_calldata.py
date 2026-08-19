@@ -16,21 +16,21 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from db.models import Contract, EffectiveFunction, FunctionPrincipal, Protocol  # noqa: E402
-from db.queue import create_job, store_artifact  # noqa: E402
-from services.effects import calldata as cd  # noqa: E402
-from services.effects.anvil import ForkFixture, pause_recipe  # noqa: E402
-from services.effects.config import (  # noqa: E402
+from db.models import Contract, EffectiveFunction, FunctionPrincipal, Protocol
+from db.queue import create_job, store_artifact
+from services.effects import calldata as cd
+from services.effects.anvil import ForkFixture, pause_recipe
+from services.effects.config import (
     EFFECT_CLASS_AUTHORITY_CHANGE,
     EFFECT_CLASS_FREEZE_PAUSE,
     EFFECT_CLASS_SUPPLY,
     EFFECT_CLASS_VALUE_OUT,
 )
-from services.effects.orchestrator import ProbeContext, default_prober  # noqa: E402
-from services.effects.selection import Candidate  # noqa: E402
-from tests.cache_helpers import requires_postgres  # noqa: E402
-from tests.support.effects_stubs import GUARDED, PAUSE, RecordingStore, StubAnvil  # noqa: E402
-from workers.effects_worker import EffectsWorker, _Seams  # noqa: E402
+from services.effects.orchestrator import ProbeContext, default_prober
+from services.effects.selection import Candidate
+from tests.cache_helpers import requires_postgres
+from tests.support.effects_stubs import GUARDED, PAUSE, RecordingStore, StubAnvil
+from workers.effects_worker import EffectsWorker, _Seams
 
 TRANSFER = "0xa9059cbb"  # transfer(address,uint256)
 MINT = "0x40c10f19"  # mint(address,uint256)

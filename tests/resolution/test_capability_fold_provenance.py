@@ -21,7 +21,7 @@ The three rules under test, each with its own failure mode:
 
 from __future__ import annotations
 
-from services.resolution.capabilities import (  # noqa: E402
+from services.resolution.capabilities import (
     CapabilityExpr,
     Condition,
     ExternalCheck,
@@ -29,7 +29,7 @@ from services.resolution.capabilities import (  # noqa: E402
     negate,
     union,
 )
-from services.resolution.capability_resolver import capability_to_dict  # noqa: E402
+from services.resolution.capability_resolver import capability_to_dict
 
 ADDR_A = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 ADDR_B = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"

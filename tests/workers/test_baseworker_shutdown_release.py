@@ -285,7 +285,7 @@ def test_sigterm_during_execute_job_releases_lease(_advance, mock_release, mock_
     started = threading.Event()
     finish = threading.Event()
 
-    def _slow_process(session, job):  # noqa: ARG001
+    def _slow_process(session, job):
         started.set()
         # Simulates forge build blocking on subprocess.run; the daemon
         # thread does its work concurrently.

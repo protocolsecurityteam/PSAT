@@ -97,7 +97,7 @@ def _sub_cent_composing_signals(witness_usd: float):
 # --------------------------------------------------------------------------
 
 
-def test_a_sheet_ceiling_below_a_cent_publishes_the_bound_it_proved(fold):  # noqa: F811
+def test_a_sheet_ceiling_below_a_cent_publishes_the_bound_it_proved(fold):
     """The figure survives the rounding that used to delete it.
 
     ``published_usd`` is the ONLY dollar figure this row puts on the move a code
@@ -119,7 +119,7 @@ def test_a_sheet_ceiling_below_a_cent_publishes_the_bound_it_proved(fold):  # no
     assert FOLD._round_published(1234.5678) == 1234.57
 
 
-def test_the_sub_cent_ceiling_record_agrees_with_its_own_evidence(fold):  # noqa: F811
+def test_the_sub_cent_ceiling_record_agrees_with_its_own_evidence(fold):
     """The sibling fields take the same precision, because the record makes
     equality claims across them.
 
@@ -142,7 +142,7 @@ def test_the_sub_cent_ceiling_record_agrees_with_its_own_evidence(fold):  # noqa
     assert sum(row["usd"] for row in entry["per_asset"]) == entry["published_usd"]
 
 
-def test_the_row_header_says_what_its_own_record_says(fold):  # noqa: F811
+def test_the_row_header_says_what_its_own_record_says(fold):
     """The three keys are one derivation and are published in ONE object.
 
     ``value_at_stake_usd`` is the sum of ``value_by_entity``, whose values are
@@ -168,7 +168,7 @@ def test_the_row_header_says_what_its_own_record_says(fold):  # noqa: F811
     assert "$" in finding["value_band"]
 
 
-def test_a_sub_cent_standing_figure_is_reconciled_at_the_resolution_it_publishes(fold):  # noqa: F811
+def test_a_sub_cent_standing_figure_is_reconciled_at_the_resolution_it_publishes(fold):
     """The reconciliation gate reads the SAME rounding the record prints with.
 
     It compares the standing figure against the node's own sheet and withholds
@@ -198,7 +198,7 @@ def test_a_sub_cent_standing_figure_is_reconciled_at_the_resolution_it_publishes
     assert (withheld[0]["standing_usd"], withheld[0]["sheet_usd"]) == (0.004, SUB_CENT_SHEET)
 
 
-def test_an_earned_zero_is_still_published_as_zero(fold):  # noqa: F811
+def test_an_earned_zero_is_still_published_as_zero(fold):
     """The negative path, and the one the guard must not eat.
 
     ``proven_empty`` is the state in which 0.00 IS the number — every asset's
@@ -227,7 +227,7 @@ def test_an_earned_zero_is_still_published_as_zero(fold):  # noqa: F811
 # --------------------------------------------------------------------------
 
 
-def test_a_sub_cent_composed_entry_keeps_the_ordering_it_publishes(fold):  # noqa: F811
+def test_a_sub_cent_composed_entry_keeps_the_ordering_it_publishes(fold):
     """The composed record's three dollar fields are one derivation.
 
     ``published_usd`` is the MIN of the destination's own flow.out witness and
@@ -253,7 +253,7 @@ def test_a_sub_cent_composed_entry_keeps_the_ordering_it_publishes(fold):  # noq
     assert entry["published_usd"] == entry["destination_sheet_usd"]
 
 
-def test_the_witness_below_a_cent_is_published_even_where_no_sheet_bounds_it(fold):  # noqa: F811
+def test_the_witness_below_a_cent_is_published_even_where_no_sheet_bounds_it(fold):
     """The other arm of ``bounded_by``: the witness is the whole figure.
 
     With no sheet at the destination the flow.out witness IS the published
@@ -274,7 +274,7 @@ def test_the_witness_below_a_cent_is_published_even_where_no_sheet_bounds_it(fol
     assert entry["bounded_by"] == FOLD._BOUNDED_BY_WITNESS
 
 
-def test_the_tie_block_ties_at_the_same_figure_the_entry_publishes(fold):  # noqa: F811
+def test_the_tie_block_ties_at_the_same_figure_the_entry_publishes(fold):
     """``tied_at_usd`` is the published figure restated for the candidates, so it
     is the same number or the block describes a tie at a value nothing holds."""
     entry = FOLD._ComposedMagnitude(

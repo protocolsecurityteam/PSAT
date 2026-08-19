@@ -26,7 +26,7 @@ from typing import Any
 
 import pytest
 
-from db.models import (  # noqa: E402
+from db.models import (
     Contract,
     ControllerValue,
     EffectiveFunction,
@@ -34,7 +34,7 @@ from db.models import (  # noqa: E402
     Job,
     Protocol,
 )
-from services.scoring import planes as P  # noqa: E402
+from services.scoring import planes as P
 
 VAULT = "0x" + "11" * 20
 AUTHORITY = "0x" + "22" * 20

@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from services.monitoring.event_topics import (  # noqa: E402
+from services.monitoring.event_topics import (
     MAX_EVENT_TYPE_LENGTH,
     WITNESS_TIER_ACTIVITY,
     WITNESS_TIER_HINT,
@@ -21,19 +21,19 @@ from services.monitoring.event_topics import (  # noqa: E402
     is_member_changed_event_type,
     member_witness_mapping_var,
 )
-from services.monitoring.polling_plan import (  # noqa: E402
+from services.monitoring.polling_plan import (
     _is_poll_decodable,
     _member_word_index,
     project_entry_return,
 )
-from services.static.contract_analysis_pipeline.tracking import (  # noqa: E402
+from services.static.contract_analysis_pipeline.tracking import (
     _writer_survives_hygiene,
 )
-from services.static.contract_analysis_pipeline.writer_openness import (  # noqa: E402
+from services.static.contract_analysis_pipeline.writer_openness import (
     openness_of_write_paths,
     restricted_function_signatures,
 )
-from utils.scoring_status import OPENNESS_NOT_DETERMINED, OPENNESS_RESTRICTED  # noqa: E402
+from utils.scoring_status import OPENNESS_NOT_DETERMINED, OPENNESS_RESTRICTED
 
 # ---------------------------------------------------------------------------
 # writer_openness — "the gate holds on every path"

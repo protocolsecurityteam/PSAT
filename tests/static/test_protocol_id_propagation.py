@@ -8,11 +8,11 @@ prevents the monitoring enrollment system from activating.
 These tests should FAIL before the fix and PASS after.
 
 Run with:
-    uv run pytest tests/test_protocol_id_propagation.py -v
+    uv run pytest tests/static/test_protocol_id_propagation.py -v
 
 Integration tests (requires PostgreSQL):
     TEST_DATABASE_URL=postgresql://psat:psat@localhost:5433/psat_test \
-        uv run pytest tests/test_protocol_id_propagation.py -v
+        uv run pytest tests/static/test_protocol_id_propagation.py -v
 """
 
 from __future__ import annotations
@@ -388,7 +388,7 @@ class TestProtocolIdPropagationIntegration:
         enrolling completed contracts. The historical in-flight gate
         used to skip in this case with no fallback; that's the bug pinned
         by ``test_in_flight_sibling_job_does_not_block_enrollment`` in
-        ``tests/test_monitoring_enrollment_anvil.py``. This unit-level
+        ``tests/monitoring/test_monitoring_enrollment_anvil.py``. This unit-level
         version covers the same shape against pg_session without anvil,
         and additionally covers the caller-job-self-block case (a
         PolicyWorker calling for its own still-processing job).

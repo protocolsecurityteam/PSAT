@@ -28,16 +28,16 @@ from types import SimpleNamespace
 
 import pytest
 
-from services.policy.capability_surface import (  # noqa: E402
+from services.policy.capability_surface import (
     capability_surface_status,
     project_capability_surface,
 )
-from services.resolution.adapters import CallFrame, EvaluationContext  # noqa: E402
-from services.resolution.adapters.solmate_roles import (  # noqa: E402
+from services.resolution.adapters import CallFrame, EvaluationContext
+from services.resolution.adapters.solmate_roles import (
     CANCALL_SIGNATURE,
     SolmateRolesAuthorityAdapter,
 )
-from services.resolution.capability_resolver import capability_to_dict  # noqa: E402
+from services.resolution.capability_resolver import capability_to_dict
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "solmate" / "roles_authority_3994741a.json"
 # The LayerZeroTeller deployment governed by RolesAuthority 0x3994741a whose

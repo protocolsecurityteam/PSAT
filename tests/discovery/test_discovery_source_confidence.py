@@ -39,13 +39,13 @@ from pathlib import Path
 
 import pytest
 
-from services.discovery.source_confidence import (  # noqa: E402
+from services.discovery.source_confidence import (
     HIGH_CONFIDENCE_SOURCES,
     LOW_CONFIDENCE_SOURCES,
     STRUCTURAL_OWNERSHIP_RELATIONSHIPS,
     asserts_ownership,
 )
-from tests.conftest import requires_postgres  # noqa: E402
+from tests.conftest import requires_postgres
 
 # ---------------------------------------------------------------------------
 # 1. The helper itself

@@ -36,7 +36,7 @@ from typing import Any
 
 import pytest
 
-from services.static import collect_contract_analysis  # noqa: E402
+from services.static import collect_contract_analysis
 
 # Three minimal projects, one subject contract each.
 OZ_SOURCE = """

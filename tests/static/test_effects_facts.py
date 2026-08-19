@@ -3,7 +3,7 @@
 Each test compiles a real Solidity fixture with Slither and drives the
 production ``build_effects`` -> ``build_claims`` -> ``project_effect_labels``
 sequence — no fakes, only the solc compile is real. Precedent:
-``tests/test_selector_canonicalization.py``.
+``tests/policy/test_selector_canonicalization.py``.
 
 The six hardening fixes (spec §3 FACT records / §5 facts-plane prerequisites):
   (a) sink ``origin`` in {body, guard} — a modifier's own auth call is a guard

@@ -19,7 +19,7 @@ from tests.cache_helpers import db_session, requires_postgres  # noqa: F401
 
 _HAS_ANVIL = shutil.which("anvil") is not None
 
-pytestmark = requires_postgres
+pytestmark = [requires_postgres, pytest.mark.anvil]
 
 
 @pytest.fixture(autouse=True)

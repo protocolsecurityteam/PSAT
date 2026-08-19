@@ -18,7 +18,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from tests.conftest import DATABASE_URL as _DB_URL  # noqa: E402
+from tests.conftest import DATABASE_URL as _DB_URL
 from tests.conftest import _can_connect, requires_postgres
 from tests.support.balance_stubs import page, pinned_native_unavailable
 

@@ -18,9 +18,9 @@ import pytest
 from sqlalchemy import select, text
 from sqlalchemy.dialects import postgresql
 
-from db.models import IndexedEventCursor, IndexedEventLog  # noqa: E402
-from services.resolution.repos.event_logs_pg import PostgresEventLogRepo  # noqa: E402
-from tests.conftest import requires_postgres  # noqa: E402
+from db.models import IndexedEventCursor, IndexedEventLog
+from services.resolution.repos.event_logs_pg import PostgresEventLogRepo
+from tests.conftest import requires_postgres
 
 pytestmark = requires_postgres
 

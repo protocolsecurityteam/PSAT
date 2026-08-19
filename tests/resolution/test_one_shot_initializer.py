@@ -41,6 +41,8 @@ from services.static.contract_analysis_pipeline.predicate_artifacts import (  # 
 )
 from tests.support.solc import solc_path_for as _solc_path_for  # noqa: E402
 
+pytestmark = pytest.mark.compile
+
 # Minimal OZ-style Initializable vendored so the fixtures need no remappings.
 OZ_V4_INITIALIZABLE = """
 abstract contract Initializable {

@@ -27,8 +27,8 @@ from datetime import datetime, timezone
 
 import pytest
 
-from services.scoring import distill, loop  # noqa: E402
-from services.scoring.distill import (  # noqa: E402
+from services.scoring import distill, loop
+from services.scoring.distill import (
     ASSET_IDENTITY_ARTIFACT_ABSENT,
     ASSET_IDENTITY_ARTIFACT_MALFORMED,
     ASSET_IDENTITY_LOADED,
@@ -38,14 +38,14 @@ from services.scoring.distill import (  # noqa: E402
     W2_PLANE_ABSENT,
     W2_SELECTOR_UNRESOLVED,
     W2_STATUS_NOT_RESOLVED,
-    ProtocolUniverse,  # noqa: E402
+    ProtocolUniverse,
     _asset_identity,
     _ContractFacts,
     _token_identity,
 )
-from services.scoring.schema import ScoreDocument  # noqa: E402
-from utils.logging import stage_metrics_var  # noqa: E402
-from utils.scoring_status import (  # noqa: E402
+from services.scoring.schema import ScoreDocument
+from utils.logging import stage_metrics_var
+from utils.scoring_status import (
     GRADE_STATE_COMPUTED,
     MODEL_VERSION,
     PERIMETER_SETTLED,

@@ -36,8 +36,8 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from tests.conftest import DATABASE_URL, requires_postgres, requires_storage  # noqa: E402
-from tests.support.pdf import minimal_pdf_with_text  # noqa: E402
+from tests.conftest import DATABASE_URL, requires_postgres, requires_storage
+from tests.support.pdf import minimal_pdf_with_text
 
 pytestmark = [
     requires_postgres,

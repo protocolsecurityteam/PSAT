@@ -23,8 +23,8 @@ from unittest.mock import patch
 import pytest
 from sqlalchemy import select
 
-from tests.conftest import SessionFactory, requires_postgres, requires_storage  # noqa: E402
-from tests.support.pdf import minimal_pdf_with_text  # noqa: E402
+from tests.conftest import SessionFactory, requires_postgres, requires_storage
+from tests.support.pdf import minimal_pdf_with_text
 
 pytestmark = [requires_postgres, requires_storage]
 

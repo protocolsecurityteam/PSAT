@@ -19,14 +19,14 @@ from typing import Any
 
 import pytest
 
-from db import effect_cache  # noqa: E402
-from db.effect_cache import record_effect_verdict, upsert_cached_verdict  # noqa: E402
-from db.models import EffectBehaviorCache, EffectVerdict  # noqa: E402
-from services.effects import claims_bridge  # noqa: E402
-from services.effects.harness import ObservedEffect  # noqa: E402
-from services.effects.selection import Candidate  # noqa: E402
-from tests.cache_helpers import requires_postgres  # noqa: E402
-from workers.effects_worker import EffectsWorker, _Counters, _Item  # noqa: E402
+from db import effect_cache
+from db.effect_cache import record_effect_verdict, upsert_cached_verdict
+from db.models import EffectBehaviorCache, EffectVerdict
+from services.effects import claims_bridge
+from services.effects.harness import ObservedEffect
+from services.effects.selection import Candidate
+from tests.cache_helpers import requires_postgres
+from workers.effects_worker import EffectsWorker, _Counters, _Item
 
 ADDR = "0x" + "ac" * 20
 SELECTOR = "0xee7a7c04"

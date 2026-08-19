@@ -15,10 +15,10 @@ import requests
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from db.models import Artifact, Job, JobStage, JobStatus  # noqa: E402
-from db.queue import create_job  # noqa: E402
-from tests.cache_helpers import requires_postgres  # noqa: E402
-from workers.base import BaseWorker  # noqa: E402
+from db.models import Artifact, Job, JobStage, JobStatus
+from db.queue import create_job
+from tests.cache_helpers import requires_postgres
+from workers.base import BaseWorker
 
 
 @pytest.fixture()

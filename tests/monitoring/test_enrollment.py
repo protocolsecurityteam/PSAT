@@ -4,7 +4,7 @@ All tests require PostgreSQL (TEST_DATABASE_URL env var).
 
 Run:
     TEST_DATABASE_URL=postgresql://psat:psat@localhost:5433/psat_test \
-        uv run pytest tests/test_enrollment.py -v
+        uv run pytest tests/monitoring/test_enrollment.py -v
 """
 
 from __future__ import annotations

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from tests.conftest import requires_postgres  # noqa: E402
+from tests.conftest import requires_postgres
 
 ADDR = "0x1111111111111111111111111111111111111111"
 PROXY = "0x2222222222222222222222222222222222222222"

@@ -13,9 +13,9 @@ from __future__ import annotations
 
 from sqlalchemy import select
 
-from db.contract_materializations import ANALYSIS_SCHEMA_VERSION  # noqa: E402
-from db.models import Contract, ContractSummary, JobStage, JobStatus, RoleDefinition  # noqa: E402
-from db.queue import (  # noqa: E402
+from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
+from db.models import Contract, ContractSummary, JobStage, JobStatus, RoleDefinition
+from db.queue import (
     copy_static_cache_cross_chain,
     create_job,
     find_completed_static_cache,

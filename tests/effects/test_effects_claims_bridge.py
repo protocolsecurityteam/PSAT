@@ -14,8 +14,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
-from services.effects import claims_bridge  # noqa: E402
-from services.effects.config import (  # noqa: E402
+from services.effects import claims_bridge
+from services.effects.config import (
     EFFECT_CLASS_AUTHORITY_CHANGE,
     EFFECT_CLASS_CODE_UPGRADE,
     EFFECT_CLASS_FREEZE_PAUSE,
@@ -27,8 +27,8 @@ from services.effects.config import (  # noqa: E402
     VERDICT_PROVEN,
     VERDICT_UNKNOWN,
 )
-from services.static.claims.registry import resolve_claim_precedence  # noqa: E402
-from services.static.claims.types import Claim  # noqa: E402
+from services.static.claims.registry import resolve_claim_precedence
+from services.static.claims.types import Claim
 
 
 def _static(claim_id: str, tier: str = "standard_exact", **witness: Any) -> Claim:

@@ -21,7 +21,7 @@ import logging
 from typing import Any
 from unittest.mock import patch
 
-from services.static.contract_analysis_pipeline import predicate_artifacts  # noqa: E402
+from services.static.contract_analysis_pipeline import predicate_artifacts
 
 
 class _StubFn:
@@ -57,7 +57,7 @@ class _StubContract:
         self.name = name
         # ``functions_entry_points`` is the iteration target after the
         # AccessControl-override dedup fix (see
-        # ``tests/test_predicate_artifacts_entry_point_dedup.py``).
+        # ``tests/static/test_predicate_artifacts_entry_point_dedup.py``).
         # The stub exposes both attrs so an accidental revert to
         # ``contract.functions`` still finds the test fixtures.
         self.functions = fns

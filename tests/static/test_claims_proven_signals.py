@@ -21,12 +21,14 @@ import pytest
 
 pytest.importorskip("slither")
 
-from tests.support.label_corpus import (  # noqa: E402
+from tests.support.label_corpus import (
     SolcNotInstalled,
     _foundry_env,
     _run_static_sequence,
     _solc_select_binary,
 )
+
+pytestmark = pytest.mark.compile
 
 # --- fixtures ---------------------------------------------------------------
 

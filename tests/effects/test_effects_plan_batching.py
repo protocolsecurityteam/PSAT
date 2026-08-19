@@ -23,8 +23,8 @@ from unittest.mock import MagicMock
 import pytest
 from sqlalchemy import event
 
-from db.effect_cache import upsert_cached_verdict  # noqa: E402
-from db.models import (  # noqa: E402
+from db.effect_cache import upsert_cached_verdict
+from db.models import (
     BytecodeCache,
     Contract,
     EffectBehaviorCache,
@@ -34,14 +34,14 @@ from db.models import (  # noqa: E402
     Protocol,
     UpgradeEvent,
 )
-from services.effects import calldata as calldata_synth  # noqa: E402
-from services.effects import prefetch as prefetch_mod  # noqa: E402
-from services.effects.config import EFFECT_CLASS_CODE_UPGRADE, SCOPE_KERNEL  # noqa: E402
-from services.effects.hashing import bytecode_fallback_hash  # noqa: E402
-from services.effects.orchestrator import ProbeContext, make_bytecode_hash_resolver  # noqa: E402
-from services.effects.selection import Candidate  # noqa: E402
-from tests.cache_helpers import requires_postgres  # noqa: E402
-from workers.effects_worker import EffectsWorker, _Counters  # noqa: E402
+from services.effects import calldata as calldata_synth
+from services.effects import prefetch as prefetch_mod
+from services.effects.config import EFFECT_CLASS_CODE_UPGRADE, SCOPE_KERNEL
+from services.effects.hashing import bytecode_fallback_hash
+from services.effects.orchestrator import ProbeContext, make_bytecode_hash_resolver
+from services.effects.selection import Candidate
+from tests.cache_helpers import requires_postgres
+from workers.effects_worker import EffectsWorker, _Counters
 
 # Distinct runtime bytecode per deployment ⇒ distinct kernel/surface hash, so
 # each candidate is its own behavior. A handful of candidates makes the batched

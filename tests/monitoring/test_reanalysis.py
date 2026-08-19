@@ -14,7 +14,7 @@ Requires:
 
 Run:
     TEST_DATABASE_URL=postgresql://psat:psat@localhost:5433/psat_test \
-        uv run pytest tests/test_reanalysis.py -v --timeout=120
+        uv run pytest tests/monitoring/test_reanalysis.py -v --timeout=120
 """
 
 from __future__ import annotations
@@ -104,7 +104,7 @@ requires_anvil = pytest.mark.skipif(
     reason="Foundry tools (anvil/cast/forge) not found on PATH",
 )
 
-pytestmark = requires_postgres
+pytestmark = [requires_postgres, pytest.mark.anvil, pytest.mark.compile]
 
 
 @pytest.fixture(autouse=True)

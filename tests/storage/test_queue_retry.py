@@ -19,15 +19,15 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from sqlalchemy import text
 
-from db.models import Artifact, Job, JobStage, JobStatus  # noqa: E402
-from db.queue import (  # noqa: E402
+from db.models import Artifact, Job, JobStage, JobStatus
+from db.queue import (
     claim_job,
     create_job,
     fail_job_terminal,
     reclaim_stuck_jobs,
     requeue_job,
 )
-from tests.cache_helpers import requires_postgres  # noqa: E402
+from tests.cache_helpers import requires_postgres
 
 
 @pytest.fixture()

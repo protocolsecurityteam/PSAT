@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from typing import Any, cast
 
-from eth_utils.crypto import keccak  # noqa: E402
+from eth_utils.crypto import keccak
 
-import services.resolution.role_store_standards as rss  # noqa: E402
-from services.resolution.role_store_standards import (  # noqa: E402
+import services.resolution.role_store_standards as rss
+from services.resolution.role_store_standards import (
     OZ_ACCESS_CONTROL_ENUMERABLE,
     SOLADY_ENUMERABLE_ROLES,
     STANDARDS,

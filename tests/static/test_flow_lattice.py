@@ -3,7 +3,7 @@
 Each test compiles a real Solidity fixture with Slither and drives the
 production ``build_effects`` (and, for the passthrough test, ``build_claims``)
 sequence — no fakes, only the solc compile is real. Precedent:
-``tests/test_effects_facts.py``.
+``tests/static/test_effects_facts.py``.
 
 These fixtures are the guard for the two −12 theft-vs-routing false positives:
 an immutable/fixed destination (operational routing) must classify distinctly

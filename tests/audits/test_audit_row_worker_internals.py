@@ -28,8 +28,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from workers import audit_row_worker as arw_module  # noqa: E402
-from workers.audit_row_worker import AuditRowWorker  # noqa: E402
+from workers import audit_row_worker as arw_module
+from workers.audit_row_worker import AuditRowWorker
 
 # ---------------------------------------------------------------------------
 # Minimal concrete subclass driving only what the tests need.
@@ -77,23 +77,23 @@ class _TestWorker(AuditRowWorker):
         self.log = logging.getLogger("tests.test_audit_row_worker_internals")
 
     # Hooks — only what the base class requires.
-    def _pending_rows_query(self):  # noqa: ANN201
+    def _pending_rows_query(self):
         raise AssertionError("_pending_rows_query should not be called when _claim_batch is overridden")
 
-    def _mark_processing(self, row, now) -> None:  # noqa: ARG002
+    def _mark_processing(self, row, now) -> None:
         raise AssertionError("_mark_processing should not be called when _claim_batch is overridden")
 
-    def _stale_recovery_query(self, cutoff):  # noqa: ANN201, ARG002
+    def _stale_recovery_query(self, cutoff):
         raise AssertionError("_stale_recovery_query should not be called when _recover_stale_rows is overridden")
 
-    def _claim_batch(self, session) -> list[Any]:  # noqa: ARG002
+    def _claim_batch(self, session) -> list[Any]:
         self._claim_calls += 1
         if self._batches:
             return self._batches.pop(0)
         # Out of batches — let the caller decide when to stop. Default: no work.
         return []
 
-    def _recover_stale_rows(self, session) -> None:  # noqa: ARG002
+    def _recover_stale_rows(self, session) -> None:
         self._recover_calls += 1
 
     def _process_row(self, audit) -> tuple[int, Any]:
@@ -197,7 +197,7 @@ class _RecoveryWorker(AuditRowWorker):
     def _mark_processing(self, row, now) -> None:  # pragma: no cover
         raise NotImplementedError
 
-    def _stale_recovery_query(self, cutoff):  # noqa: ANN201, ARG002
+    def _stale_recovery_query(self, cutoff):
         return MagicMock()  # placeholder — session.execute is mocked
 
     def _process_row(self, audit):  # pragma: no cover
@@ -398,7 +398,32 @@ def test_recovery_cutoff_is_configured_seconds_in_past():
 # ---------------------------------------------------------------------------
 
 
-def test_audit_concurrency_overridable_via_env(monkeypatch):
+@pytest.fixture()
+def _restore_audit_worker_modules():
+    """Reload the two worker modules back to their unset-env defaults.
+
+    ``importlib.reload`` rebinds ``max_concurrent`` on the CLASS OBJECT, and the
+    class object outlives the test: without this, every later test in the
+    process — in any file — sees the 3/5 this test dialled in. The reload is the
+    point of the test, so the leak is contained here rather than avoided.
+    """
+    yield
+    import importlib
+    import os
+
+    import workers.audit_scope_extraction as scope_mod
+    import workers.audit_text_extraction as text_mod
+
+    # Clear the overrides here rather than relying on monkeypatch's undo
+    # running first — finalizer order between two same-scope fixtures is not
+    # something this restore should depend on.
+    os.environ.pop("PSAT_AUDIT_TEXT_CONCURRENCY", None)
+    os.environ.pop("PSAT_AUDIT_SCOPE_CONCURRENCY", None)
+    importlib.reload(text_mod)
+    importlib.reload(scope_mod)
+
+
+def test_audit_concurrency_overridable_via_env(_restore_audit_worker_modules, monkeypatch):
     """The ``PSAT_AUDIT_*_CONCURRENCY`` env vars override the in-code defaults
     so an operator can dial down a saturated pool without code changes."""
     monkeypatch.setenv("PSAT_AUDIT_TEXT_CONCURRENCY", "3")

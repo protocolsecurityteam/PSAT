@@ -36,6 +36,8 @@ from tests.support.effects_stubs import GUARDED, PAUSE, UNGATED, RecordingStore,
 from utils.rpc import EthCallResult
 from workers.effects_worker import _is_cacheable
 
+pytestmark = pytest.mark.anvil
+
 CONTRACT = "0x" + "11" * 20
 PRINCIPAL = "0x" + "22" * 20
 CTX = SimContext(chain_id=1, block=1, hardfork="prague")

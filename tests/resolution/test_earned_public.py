@@ -821,7 +821,7 @@ class _StubAdapter:
     def __init__(self, cap: Any) -> None:
         self._cap = cap
 
-    def enumerate(self, descriptor: Any, contract_address: Any) -> Any:  # noqa: ARG002
+    def enumerate(self, descriptor: Any, contract_address: Any) -> Any:
         return self._cap
 
 

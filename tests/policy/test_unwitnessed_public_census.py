@@ -18,10 +18,10 @@ from typing import Any, cast
 
 from sqlalchemy import text
 
-from db.models import Contract  # noqa: E402
-from services.policy.effective_permissions import build_effective_permissions  # noqa: E402
-from services.policy.effective_permissions_writer import write_effective_function_rows  # noqa: E402
-from tests.conftest import requires_postgres  # noqa: E402
+from db.models import Contract
+from services.policy.effective_permissions import build_effective_permissions
+from services.policy.effective_permissions_writer import write_effective_function_rows
+from tests.conftest import requires_postgres
 
 _TARGET = {"subject": {"address": "0x" + "ce" * 20, "name": "CensusTarget"}}
 

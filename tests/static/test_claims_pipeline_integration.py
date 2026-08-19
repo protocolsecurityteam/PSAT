@@ -18,8 +18,10 @@ import pytest
 
 pytest.importorskip("slither")
 
-from tests.conftest import requires_postgres  # noqa: E402
-from tests.support.foundry_project import write_foundry_project  # noqa: E402
+from tests.conftest import requires_postgres
+from tests.support.foundry_project import write_foundry_project
+
+pytestmark = pytest.mark.compile
 
 FIXTURES_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "contracts"
 

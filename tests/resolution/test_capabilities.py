@@ -11,7 +11,7 @@ Covers:
 
 from __future__ import annotations
 
-from services.resolution.capabilities import (  # noqa: E402
+from services.resolution.capabilities import (
     CapabilityExpr,
     Condition,
     ExternalCheck,

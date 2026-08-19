@@ -31,9 +31,9 @@ from unittest.mock import patch
 import pytest
 from sqlalchemy import text
 
-from db import contract_materializations as cm  # noqa: E402
-from db.models import ContractMaterialization  # noqa: E402
-from tests.conftest import requires_postgres  # noqa: E402
+from db import contract_materializations as cm
+from db.models import ContractMaterialization
+from tests.conftest import requires_postgres
 
 
 @pytest.fixture()

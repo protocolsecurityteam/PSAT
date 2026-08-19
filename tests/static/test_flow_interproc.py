@@ -29,7 +29,7 @@ The last two sections cover WHICH parameter a ``param`` destination is —
 and the legacy ``contract_analysis`` eth_out flow that used to deny every native
 send had a caller-chosen recipient at all.
 
-Precedent: ``tests/test_flow_lattice.py`` (same compile-with-Slither harness).
+Precedent: ``tests/static/test_flow_lattice.py`` (same compile-with-Slither harness).
 """
 
 from __future__ import annotations

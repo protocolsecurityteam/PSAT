@@ -24,9 +24,9 @@ from pathlib import Path
 
 import pytest
 
-from db import mapping_enumeration_cache as db_cache  # noqa: E402
-from db.models import MappingEnumerationCache  # noqa: E402
-from tests.conftest import requires_postgres  # noqa: E402
+from db import mapping_enumeration_cache as db_cache
+from db.models import MappingEnumerationCache
+from tests.conftest import requires_postgres
 
 _PRODUCER = Path(__file__).resolve().parents[2] / "services" / "resolution" / "mapping_enumerator.py"
 
@@ -137,7 +137,7 @@ def test_every_producible_status_round_trips_through_the_cache(_l2):
     for status in sorted(_scrape_status_vocabulary()):
         try:
             db_cache.upsert(chain="1", address=ADDR, specs_hash=SPECS_HASH, result=_result(status))
-        except Exception as exc:  # noqa: BLE001 — collect all, report together
+        except Exception as exc:
             failures.append(f"{status!r} (len {len(status)}) could not be written: {type(exc).__name__}: {exc}")
             continue
         served = db_cache.find_fresh(chain="1", address=ADDR, specs_hash=SPECS_HASH, ttl_s=9999)

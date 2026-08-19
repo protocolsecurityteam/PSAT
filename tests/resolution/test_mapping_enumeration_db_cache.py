@@ -24,15 +24,15 @@ from typing import Any, cast
 
 import pytest
 
-from db import mapping_enumeration_cache as db_cache  # noqa: E402
-from db.models import MappingEnumerationCache  # noqa: E402
-from services.resolution import mapping_enumerator  # noqa: E402
-from services.resolution.mapping_enumerator import (  # noqa: E402
+from db import mapping_enumeration_cache as db_cache
+from db.models import MappingEnumerationCache
+from services.resolution import mapping_enumerator
+from services.resolution.mapping_enumerator import (
     _event_topic0,
     clear_enumeration_cache,
     enumerate_mapping_allowlist_sync,
 )
-from tests.conftest import requires_postgres  # noqa: E402
+from tests.conftest import requires_postgres
 
 
 @pytest.fixture(autouse=True)
@@ -81,7 +81,7 @@ def _clean_l2(db_session):
     db_session.commit()
 
 
-# --- minimal fakes (mirrors tests/test_mapping_enumerator.py) ---------------
+# --- minimal fakes (mirrors tests/resolution/test_mapping_enumerator.py) ---------------
 
 
 def _addr(suffix: str) -> str:

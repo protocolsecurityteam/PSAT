@@ -53,7 +53,7 @@ _PORT = 8560
 
 CTX = SimContext(chain_id=31337, block=1, hardfork="prague")
 
-pytestmark = pytest.mark.skipif(not anvil_available(), reason="anvil not on PATH")
+pytestmark = [pytest.mark.skipif(not anvil_available(), reason="anvil not on PATH"), pytest.mark.anvil]
 
 # Storage layout of the fixture, read straight off its source declaration order:
 #   0 owner, 1 totalSupply, 2 balanceOf, 3 _allowances  (treasury is immutable).

@@ -28,10 +28,10 @@ import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
-from db.models import Protocol  # noqa: E402
-from db.queue import get_or_create_protocol  # noqa: E402
-from services.discovery.protocol_resolver import _match_protocol  # noqa: E402
-from tests.conftest import requires_postgres  # noqa: E402
+from db.models import Protocol
+from db.queue import get_or_create_protocol
+from services.discovery.protocol_resolver import _match_protocol
+from tests.conftest import requires_postgres
 
 pytestmark = [requires_postgres]
 
@@ -148,7 +148,7 @@ def test_concurrent_slug_insert_serializes():
                     row = get_or_create_protocol(s, name=name, canonical_slug="race-test-slug")
                     s.commit()
                     results[label] = {"id": row.id, "exc": None}
-                except BaseException as exc:  # noqa: BLE001
+                except BaseException as exc:
                     s.rollback()
                     results[label] = {"id": None, "exc": exc}
         finally:

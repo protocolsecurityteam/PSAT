@@ -37,17 +37,17 @@ from typing import Any
 import pytest
 
 pytest.importorskip("slither")
-from slither import Slither  # noqa: E402
+from slither import Slither
 
-from services.static.contract_analysis_pipeline.mapping_events import (  # noqa: E402
+from services.static.contract_analysis_pipeline.mapping_events import (
     discover_mapping_writer_events,
 )
-from services.static.contract_analysis_pipeline.predicate_artifacts import (  # noqa: E402
+from services.static.contract_analysis_pipeline.predicate_artifacts import (
     apply_mapping_event_hint_pass,
 )
-from services.static.contract_analysis_pipeline.predicate_types import PredicateTree  # noqa: E402
-from services.static.contract_analysis_pipeline.predicates import build_predicate_tree  # noqa: E402
-from services.static.contract_analysis_pipeline.writer_gate import apply_writer_gate_pass  # noqa: E402
+from services.static.contract_analysis_pipeline.predicate_types import PredicateTree
+from services.static.contract_analysis_pipeline.predicates import build_predicate_tree
+from services.static.contract_analysis_pipeline.writer_gate import apply_writer_gate_pass
 
 # Same role storage shape, differing only in HOW `_roles` is reached:
 # v4 declares it as a state variable; v5 reaches it through an ERC-7201

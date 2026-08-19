@@ -17,10 +17,10 @@ from typing import Any
 import pytest
 
 pytest.importorskip("slither")
-from slither import Slither  # noqa: E402
+from slither import Slither
 
-from services.static.contract_analysis_pipeline import record_ordering as ro  # noqa: E402
-from services.static.contract_analysis_pipeline.effects import build_effects  # noqa: E402
+from services.static.contract_analysis_pipeline import record_ordering as ro
+from services.static.contract_analysis_pipeline.effects import build_effects
 
 _SRC = """
 // SPDX-License-Identifier: MIT

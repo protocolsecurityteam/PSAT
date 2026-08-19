@@ -9,8 +9,8 @@ that is indistinguishable from a code regression, so these cases pin the
 disclosure itself: the census, the counts it reads off the rows, and its
 absence where the fold walked every record and found none.
 
-The arms themselves live in ``tests/test_three_arm_composition.py`` and the
-record's own shape in ``tests/test_execution_record.py``; nothing here re-tests
+The arms themselves live in ``tests/scoring/test_three_arm_composition.py`` and the
+record's own shape in ``tests/scoring/test_execution_record.py``; nothing here re-tests
 either.
 """
 
@@ -81,7 +81,7 @@ def _fault_warnings(document: Any) -> list[dict[str, Any]]:
 # --------------------------------------------------------------------------
 
 
-def test_a_faulted_execution_is_announced_at_the_documents_top_level(fold):  # noqa: F811
+def test_a_faulted_execution_is_announced_at_the_documents_top_level(fold):
     """A reader must not have to open forty execution blocks to learn the grade
     was computed over evidence that could not be read."""
     document = CA.composed_document(fold, signals=_faulted_signals(), deletability=CA.deletability_plane())
@@ -103,7 +103,7 @@ def test_a_faulted_execution_is_announced_at_the_documents_top_level(fold):  # n
     assert document.document()[_FIELD] == census
 
 
-def test_the_warning_names_the_count_and_every_distinct_reason(fold):  # noqa: F811
+def test_the_warning_names_the_count_and_every_distinct_reason(fold):
     """The warnings list is the loud channel, and a reader scanning it must get
     the number, the reasons and the comparison ban without following a link."""
     document = CA.composed_document(fold, signals=_faulted_signals(), deletability=CA.deletability_plane())
@@ -121,7 +121,7 @@ def test_the_warning_names_the_count_and_every_distinct_reason(fold):  # noqa: F
     assert "not proof the artifact store was unavailable" in note
 
 
-def test_the_grade_stays_computed_and_the_marker_is_not_a_grade_state(fold):  # noqa: F811
+def test_the_grade_stays_computed_and_the_marker_is_not_a_grade_state(fold):
     """Two questions, two vocabularies. A fault-degraded grade is still a
     computed one — the DB pairing constraint binds that token to the three
     figures being present — so the marker cannot be a fourth grade_state."""
@@ -208,7 +208,7 @@ def test_the_denominator_counts_every_record_the_walk_saw() -> None:
 # --------------------------------------------------------------------------
 
 
-def test_a_fault_free_document_publishes_no_field_and_no_warning(fold):  # noqa: F811
+def test_a_fault_free_document_publishes_no_field_and_no_warning(fold):
     """The byte-identity invariant, as a test rather than as a diff somebody ran
     once: a fold that found no fault adds NOTHING to the document."""
     document = CA.composed_document(fold, deletability=CA.deletability_plane())

@@ -19,24 +19,24 @@ from eth_abi.abi import decode as abi_decode
 from eth_abi.abi import encode as abi_encode
 from eth_utils.crypto import keccak
 
-import services.resolution.role_store_standards as rss  # noqa: E402
-from services.policy.capability_surface import project_capability_surface  # noqa: E402
-from services.resolution.adapters import AdapterRegistry, EvaluationContext  # noqa: E402
-from services.resolution.adapters.enumerable_role_store import (  # noqa: E402
+import services.resolution.role_store_standards as rss
+from services.policy.capability_surface import project_capability_surface
+from services.resolution.adapters import AdapterRegistry, EvaluationContext
+from services.resolution.adapters.enumerable_role_store import (
     _NEGATIVE_CONTROL_ADDR,
     EnumerableRoleStoreAdapter,
 )
-from services.resolution.adapters.event_indexed import EventIndexedAdapter  # noqa: E402
-from services.resolution.adapters.solmate_roles import SolmateRolesAuthorityAdapter  # noqa: E402
-from services.resolution.capability_resolver import capability_to_dict  # noqa: E402
-from services.resolution.repos.event_logs_pg import PostgresEventLogRepo  # noqa: E402
-from services.resolution.role_store_standards import (  # noqa: E402
+from services.resolution.adapters.event_indexed import EventIndexedAdapter
+from services.resolution.adapters.solmate_roles import SolmateRolesAuthorityAdapter
+from services.resolution.capability_resolver import capability_to_dict
+from services.resolution.repos.event_logs_pg import PostgresEventLogRepo
+from services.resolution.role_store_standards import (
     OZ_ACCESS_CONTROL_ENUMERABLE,
     SOLADY_ENUMERABLE_ROLES,
 )
-from tests.conftest import DATABASE_URL as _DB_URL  # noqa: E402
+from tests.conftest import DATABASE_URL as _DB_URL
 from tests.conftest import _can_connect, requires_postgres
-from utils.logging import stage_metrics_var  # noqa: E402
+from utils.logging import stage_metrics_var
 
 _PROXY = "0x" + "62" * 20  # registry proxy — where RoleSet is emitted
 _IMPL = "0x" + "3b" * 20  # role-store impl behind the proxy

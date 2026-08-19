@@ -81,7 +81,7 @@ class _Adapter:
         if outer is not None:
             self._outer_ctx = outer
 
-    def enumerate(self, descriptor: Any, contract_address: str | None) -> CapabilityExpr:  # noqa: ARG002
+    def enumerate(self, descriptor: Any, contract_address: str | None) -> CapabilityExpr:
         return CapabilityExpr.finite_set([], quality="lower_bound", confidence="partial")
 
 
@@ -239,6 +239,8 @@ from services.static.contract_analysis_pipeline.internal_authority_slot import (
 )
 from services.static.contract_analysis_pipeline.predicate_artifacts import build_predicate_artifacts  # noqa: E402
 from tests.support.solc import solc_path_for as _solc_path_for  # noqa: E402
+
+pytestmark = pytest.mark.compile
 
 
 def _membership_nft() -> Any:

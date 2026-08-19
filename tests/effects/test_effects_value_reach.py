@@ -18,7 +18,7 @@ publishing the floor under the key that means MEASURED reach, fixed since):
 from __future__ import annotations
 
 from services.effects import recipes
-from services.effects.config import NATIVE_ASSET_LOG_EMITTER, VERDICT_PROVEN  # noqa: F401
+from services.effects.config import NATIVE_ASSET_LOG_EMITTER, VERDICT_PROVEN
 from services.effects.harness import SimContext
 from services.effects.selection import (
     HOLDINGS_COMPLETENESS_AT_PAGE_CAP,

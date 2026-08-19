@@ -22,7 +22,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from db.models import (  # noqa: E402
+from db.models import (
     Contract,
     EffectBehaviorCache,
     EffectiveFunction,
@@ -30,19 +30,19 @@ from db.models import (  # noqa: E402
     EffectVerdict,
     Protocol,
 )
-from db.queue import create_job  # noqa: E402
-from services.effects import anvil, claims_bridge  # noqa: E402
-from services.effects.anvil import EntryPoint  # noqa: E402
-from services.effects.config import EFFECT_CLASS_VALUE_OUT, SCOPE_KERNEL, VERDICT_PROVEN  # noqa: E402
-from services.effects.harness import SimContext  # noqa: E402
-from services.effects.orchestrator import ProbePlan  # noqa: E402
-from services.effects.selection import AssetHolding, Candidate  # noqa: E402
-from services.effects.simulate import SimCallResult, SimResult  # noqa: E402
-from tests.cache_helpers import requires_postgres  # noqa: E402
-from tests.support.effects_stubs import RecordingStore, ok, transfer_log  # noqa: E402
-from utils.execution_record import PROVING_EXECUTION_KEY  # noqa: E402
-from utils.logging import degraded_errors_var, stage_metrics_var  # noqa: E402
-from workers.effects_worker import EffectsWorker, _Seams  # noqa: E402
+from db.queue import create_job
+from services.effects import anvil, claims_bridge
+from services.effects.anvil import EntryPoint
+from services.effects.config import EFFECT_CLASS_VALUE_OUT, SCOPE_KERNEL, VERDICT_PROVEN
+from services.effects.harness import SimContext
+from services.effects.orchestrator import ProbePlan
+from services.effects.selection import AssetHolding, Candidate
+from services.effects.simulate import SimCallResult, SimResult
+from tests.cache_helpers import requires_postgres
+from tests.support.effects_stubs import RecordingStore, ok, transfer_log
+from utils.execution_record import PROVING_EXECUTION_KEY
+from utils.logging import degraded_errors_var, stage_metrics_var
+from workers.effects_worker import EffectsWorker, _Seams
 
 # Deployment A observes the reach; deployment B shares its bytecode and must
 # inherit the code-plane verdict WITHOUT inheriting A's holders or USD.

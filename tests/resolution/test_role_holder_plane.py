@@ -21,11 +21,11 @@ import json
 from typing import Any
 
 import pytest
-from eth_utils.crypto import keccak  # noqa: E402
-from sqlalchemy import text  # noqa: E402
-from sqlalchemy.exc import IntegrityError  # noqa: E402
+from eth_utils.crypto import keccak
+from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 
-from db.models import (  # noqa: E402
+from db.models import (
     ENROLLMENT_BASIS_TRACKED_TOPICS,
     FIRST_INDEXED_BASIS_CREATION,
     FIRST_INDEXED_BASIS_EXPLICIT,
@@ -35,9 +35,9 @@ from db.models import (  # noqa: E402
     RoleDefinition,
     RoleHolderPlane,
 )
-from services.resolution import role_holder_plane as rhp  # noqa: E402
-from utils.chains import DEFAULT_CONFIRMATION_DEPTH  # noqa: E402
-from utils.rpc import EthCallResult  # noqa: E402
+from services.resolution import role_holder_plane as rhp
+from utils.chains import DEFAULT_CONFIRMATION_DEPTH
+from utils.rpc import EthCallResult
 
 REGISTRY = "0x6db24ee656843e3fe03eb8762a54d86186ba6b64"
 SOLADY_REGISTRY = "0x62247d29b4b9becf4bb73e0c722cf6445cfc7ce9"

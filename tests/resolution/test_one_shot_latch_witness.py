@@ -41,13 +41,13 @@ from typing import Any
 
 import pytest
 
-from services.resolution.one_shot_probe import (  # noqa: E402
+from services.resolution.one_shot_probe import (
     LatchReadResult,
     annotate_capability_one_shot,
     latch_descriptor_digest,
     resolve_one_shot_state,
 )
-from tests.support.rpc_stubs import FakeRpc, _word  # noqa: E402
+from tests.support.rpc_stubs import FakeRpc, _word
 
 # Pinned probe height. Every on-chain value below was re-read here; the
 # resolver's own runtime height is head-12 and is not persisted, so this pins
@@ -515,6 +515,8 @@ from services.static.contract_analysis_pipeline.predicate_artifacts import (  # 
     build_predicate_artifacts,
 )
 from tests.support.solc import solc_path_for as _solc_path_for  # noqa: E402
+
+pytestmark = pytest.mark.compile
 
 AST_SOURCE = """
 pragma solidity ^0.8.19;

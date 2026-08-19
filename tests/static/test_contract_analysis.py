@@ -10,6 +10,8 @@ from schemas.contract_analysis import (
 )
 from services.static import collect_contract_analysis
 
+pytestmark = pytest.mark.compile
+
 FIXTURES_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "contracts"
 FIXTURE_INDEX_PATH = FIXTURES_DIR / "index.json"
 
@@ -76,7 +78,7 @@ def test_fixture_index_covers_all_solidity_contract_fixtures():
     #     single-file .sol + one Foundry project).
     #   * ``etherfi_timelock/`` — the VERBATIM Etherscan-verified source of
     #     0xcd425f44… (EtherFiTimelock + its vendored OpenZeppelin tree), pinned
-    #     by ``tests/test_timelock_surface_parity.py``. These files are not
+    #     by ``tests/static/test_timelock_surface_parity.py``. These files are not
     #     hand-authored detection patterns and must not be edited to suit one:
     #     the test's whole claim is that they are byte-identical to what the
     #     chain verified, so indexing them here would invite exactly that edit.
@@ -667,12 +669,12 @@ def test_is_factory_is_not_determined_without_the_effects_artifact(tmp_path):
     substitutes ``{"schema_version", "error"}`` when ``build_effects`` raises,
     and ``false`` would then assert that a contract deploys nothing on the
     strength of never having looked."""
-    from slither import Slither  # noqa: PLC0415
+    from slither import Slither
 
-    from services.static.contract_analysis_pipeline.summaries import (  # noqa: PLC0415
+    from services.static.contract_analysis_pipeline.summaries import (
         _detect_contract_classification,
     )
-    from tests.support.foundry_project import write_foundry_project  # noqa: PLC0415
+    from tests.support.foundry_project import write_foundry_project
 
     project = write_foundry_project(tmp_path, "C", _CLASSIFICATION_SOURCE)
     contract = next(c for c in Slither(str(project)).contracts if c.name == "C")
@@ -696,12 +698,12 @@ def test_standards_absence_is_measured_not_missing(tmp_path):
     from any detector pass, and it is non-empty on 31 of the 88 local contracts
     -- every real token among them. Nulling it would suppress a true negative,
     so this pins that it stays a list."""
-    from slither import Slither  # noqa: PLC0415
+    from slither import Slither
 
-    from services.static.contract_analysis_pipeline.summaries import (  # noqa: PLC0415
+    from services.static.contract_analysis_pipeline.summaries import (
         _detect_contract_classification,
     )
-    from tests.support.foundry_project import write_foundry_project  # noqa: PLC0415
+    from tests.support.foundry_project import write_foundry_project
 
     erc20 = """
     // SPDX-License-Identifier: MIT

@@ -72,7 +72,7 @@ class _Adapter:
         if outer is not None:
             self._outer_ctx = outer
 
-    def enumerate(self, descriptor: Any, contract_address: str | None) -> CapabilityExpr:  # noqa: ARG002
+    def enumerate(self, descriptor: Any, contract_address: str | None) -> CapabilityExpr:
         return CapabilityExpr.finite_set([], quality="lower_bound", confidence="partial")
 
 
@@ -305,6 +305,8 @@ from services.static.contract_analysis_pipeline.predicate_artifacts import (  # 
 )
 from services.static.contract_analysis_pipeline.tracking import build_controller_tracking  # noqa: E402
 from tests.support.solc import solc_path_for as _solc_path_for  # noqa: E402
+
+pytestmark = pytest.mark.compile
 
 FIXTURE = "OzV5NamespacedOwnable.sol"
 FLOOR = (0, 8, 25)

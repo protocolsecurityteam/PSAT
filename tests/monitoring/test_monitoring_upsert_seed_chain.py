@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import pytest
 
-from routers import deps, monitored  # noqa: E402
+from routers import deps, monitored
 
 _ERPC_BASE = "https://erpc.example"
 
@@ -61,7 +61,7 @@ def test_head_block_failure_is_not_determined_not_zero(monkeypatch):
     cursor 25M blocks behind head and a floor that lets every historical event
     publish as a live change. The route refuses the enrollment on ``None``
     rather than persist that (``test_upsert_refuses_to_seed_a_floor_zero_row``
-    in tests/test_cursor_hygiene.py)."""
+    in tests/monitoring/test_cursor_hygiene.py)."""
 
     def _boom(*_a, **_kw):
         raise RuntimeError("upstream down")

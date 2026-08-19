@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 # Re-exported: modules import the gate from here alongside the fixtures below.
-from tests.conftest import requires_postgres as requires_postgres  # noqa: E402
+from tests.conftest import requires_postgres as requires_postgres
 
 DATABASE_URL = os.environ.get("TEST_DATABASE_URL", "")
 

@@ -1,7 +1,7 @@
 """Effects-stage foundations: enum placement, flag-dynamic transition, worker
 scaffolding, and fail-forward semantics (EFFECTS_RESOLUTION_SPEC Phase 1).
 
-The DB-backed cases mirror ``tests/test_baseworker_retry.py`` (real Postgres,
+The DB-backed cases mirror ``tests/workers/test_baseworker_retry.py`` (real Postgres,
 inline-JSONB artifacts, offline-safe). ``PSAT_EFFECTS_STAGE`` is asserted default-
 off.
 """
@@ -14,13 +14,13 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from db.models import Artifact, EffectVerdict, Job, JobStage, JobStatus  # noqa: E402
-from db.queue import create_job  # noqa: E402
-from services.effects.config import EFFECT_CLASS_SUPPLY, VERDICT_PROVEN, effects_stage_enabled  # noqa: E402
-from services.effects.exceptions import ForkRpcTimeoutError  # noqa: E402
-from services.effects.harness import proven  # noqa: E402
-from tests.cache_helpers import requires_postgres  # noqa: E402
-from tests.support.effects_worker_harness import (  # noqa: E402
+from db.models import Artifact, EffectVerdict, Job, JobStage, JobStatus
+from db.queue import create_job
+from services.effects.config import EFFECT_CLASS_SUPPLY, VERDICT_PROVEN, effects_stage_enabled
+from services.effects.exceptions import ForkRpcTimeoutError
+from services.effects.harness import proven
+from tests.cache_helpers import requires_postgres
+from tests.support.effects_worker_harness import (
     CONTRACT_A,
     CONTRACT_B,
     CONTRACT_C,
@@ -32,8 +32,8 @@ from tests.support.effects_worker_harness import (  # noqa: E402
     _seams,
     clean_effects,  # noqa: F401  (imported so pytest registers the fixture here)
 )
-from workers.effects_worker import EffectsWorker  # noqa: E402
-from workers.policy_worker import PolicyWorker  # noqa: E402
+from workers.effects_worker import EffectsWorker
+from workers.policy_worker import PolicyWorker
 
 
 @pytest.fixture()

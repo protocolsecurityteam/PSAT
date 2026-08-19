@@ -33,7 +33,7 @@ from typing import Any
 
 import pytest
 
-from db.models import (  # noqa: E402
+from db.models import (
     EDGE_RELATION_CAPABILITY_PRINCIPAL,
     Contract,
     ControlGraphEdge,
@@ -45,12 +45,12 @@ from db.models import (  # noqa: E402
     JobStatus,
     Protocol,
 )
-from services.discovery.perimeter import (  # noqa: E402
+from services.discovery.perimeter import (
     ZERO_ADDRESS,
     queue_discovered_contracts,
 )
-from services.governance.control_graph_types import materialize_fp_principal_nodes  # noqa: E402
-from tests.conftest import requires_postgres  # noqa: E402
+from services.governance.control_graph_types import materialize_fp_principal_nodes
+from tests.conftest import requires_postgres
 
 pytestmark = [requires_postgres]
 

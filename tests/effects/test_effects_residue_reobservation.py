@@ -27,12 +27,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from db.effect_cache import (  # noqa: E402
+from db.effect_cache import (
     AUDIT_PASSED,
     find_verdict_residue_batch,
     upsert_cached_verdict,
 )
-from db.models import (  # noqa: E402
+from db.models import (
     Contract,
     EffectBehaviorCache,
     EffectiveFunction,
@@ -40,8 +40,8 @@ from db.models import (  # noqa: E402
     EffectVerdict,
     Protocol,
 )
-from db.queue import create_job  # noqa: E402
-from services.effects.config import (  # noqa: E402
+from db.queue import create_job
+from services.effects.config import (
     EFFECT_CLASS_AUTHORITY_CHANGE,
     EFFECT_CLASS_CODE_UPGRADE,
     EFFECT_CLASS_VALUE_OUT,
@@ -51,13 +51,13 @@ from services.effects.config import (  # noqa: E402
     VERDICT_PROVEN,
     VERDICT_UNKNOWN,
 )
-from services.effects.harness import proven, unknown  # noqa: E402
-from services.effects.orchestrator import ProbePlan  # noqa: E402
-from services.effects.selection import Candidate  # noqa: E402
-from services.effects.simulate import SimCallResult, SimResult  # noqa: E402
-from tests.cache_helpers import requires_postgres  # noqa: E402
-from utils.logging import degraded_errors_var, stage_metrics_var  # noqa: E402
-from workers.effects_worker import (  # noqa: E402
+from services.effects.harness import proven, unknown
+from services.effects.orchestrator import ProbePlan
+from services.effects.selection import Candidate
+from services.effects.simulate import SimCallResult, SimResult
+from tests.cache_helpers import requires_postgres
+from utils.logging import degraded_errors_var, stage_metrics_var
+from workers.effects_worker import (
     _RESIDUE_KEY,
     _RESIDUE_PROBE_MAX_ATTEMPTS,
     EffectsWorker,

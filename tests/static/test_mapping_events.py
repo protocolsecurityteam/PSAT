@@ -3,7 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
-from services.static.contract_analysis_pipeline.mapping_events import (  # noqa: E402
+from services.static.contract_analysis_pipeline.mapping_events import (
     discover_mapping_writer_events,
 )
 

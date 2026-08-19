@@ -27,19 +27,19 @@ from typing import Any, cast
 import pytest
 
 pytest.importorskip("slither")
-from slither import Slither  # noqa: E402
+from slither import Slither
 
-from schemas.contract_analysis import (  # noqa: E402
+from schemas.contract_analysis import (
     RoleDefinition,
     SemanticControlAnalysis,
     TimelockAnalysis,
 )
-from services.static.claims import attach_claims_to_effects, build_claims, project_effect_labels  # noqa: E402
-from services.static.contract_analysis_pipeline.effects import build_effects  # noqa: E402
-from services.static.contract_analysis_pipeline.predicate_artifacts import (  # noqa: E402
+from services.static.claims import attach_claims_to_effects, build_claims, project_effect_labels
+from services.static.contract_analysis_pipeline.effects import build_effects
+from services.static.contract_analysis_pipeline.predicate_artifacts import (
     build_predicate_artifacts_with_pause_info,
 )
-from services.static.contract_analysis_pipeline.summaries import (  # noqa: E402
+from services.static.contract_analysis_pipeline.summaries import (
     _detect_timelock,
     _determine_control_model,
 )

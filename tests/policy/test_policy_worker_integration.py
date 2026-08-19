@@ -11,7 +11,7 @@ import pytest
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-from tests.support.policy_builders import (  # noqa: E402
+from tests.support.policy_builders import (
     AUTH_ADDRESS,
     TARGET_ADDRESS,
     ZERO_ADDRESS,

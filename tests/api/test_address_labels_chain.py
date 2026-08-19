@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import pytest
 
-from db.models import AddressLabel  # noqa: E402
-from tests.cache_helpers import requires_postgres  # noqa: E402
+from db.models import AddressLabel
+from tests.cache_helpers import requires_postgres
 
 ADDR = "0x00000000000000000000000000000000deadbeef"
 

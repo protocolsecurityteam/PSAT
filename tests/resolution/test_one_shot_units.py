@@ -10,9 +10,9 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any, cast
 
-from eth_utils.crypto import keccak  # noqa: E402
+from eth_utils.crypto import keccak
 
-from services.resolution.one_shot_probe import (  # noqa: E402
+from services.resolution.one_shot_probe import (
     _classify_value,
     _guard_allows,
     _parse_guard_constant,
@@ -20,13 +20,13 @@ from services.resolution.one_shot_probe import (  # noqa: E402
     collect_one_shot_latches,
     detect_proxy_standard,
 )
-from services.static.contract_analysis_pipeline.one_shot import (  # noqa: E402
+from services.static.contract_analysis_pipeline.one_shot import (
     _is_monotonic_ascent_latch,
     _parse_constant,
     _scalar_candidate,
     _write_falsifies_guard,
 )
-from services.static.contract_analysis_pipeline.predicate_types import LeafPredicate  # noqa: E402
+from services.static.contract_analysis_pipeline.predicate_types import LeafPredicate
 
 _ZERO = "0x" + "0" * 64
 PROXY = "0x" + "11" * 20

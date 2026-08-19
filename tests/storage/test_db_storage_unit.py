@@ -11,9 +11,9 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import pytest  # noqa: E402
+import pytest
 
-from db.storage import (  # noqa: E402
+from db.storage import (
     StorageClient,
     StorageKeyAbsent,
     StorageKeyMissing,

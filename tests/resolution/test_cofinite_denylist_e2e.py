@@ -34,7 +34,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.conftest import DATABASE_URL as _DB_URL  # noqa: E402
+from tests.conftest import DATABASE_URL as _DB_URL
 from tests.conftest import _can_connect, requires_postgres
 
 _FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "cofinite"

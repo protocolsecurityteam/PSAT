@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from schemas.api_requests import (  # noqa: E402
+from schemas.api_requests import (
     AddAuditRequest,
     AnalyzeRequest,
     ProtocolSubscribeRequest,

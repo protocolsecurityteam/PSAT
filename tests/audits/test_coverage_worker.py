@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from sqlalchemy import select
 
-from tests.conftest import requires_postgres  # noqa: E402
+from tests.conftest import requires_postgres
 
 pytestmark = [
     requires_postgres,

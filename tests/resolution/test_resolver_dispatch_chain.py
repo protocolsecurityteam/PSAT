@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from services.resolution.adapters import AdapterRegistry, EvaluationContext  # noqa: E402
-from services.resolution.adapters.event_indexed import EventIndexedAdapter  # noqa: E402
+from services.resolution.adapters import AdapterRegistry, EvaluationContext
+from services.resolution.adapters.event_indexed import EventIndexedAdapter
 
 
 def _registry() -> AdapterRegistry:

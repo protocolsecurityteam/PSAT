@@ -7,8 +7,8 @@ from typing import Any, cast
 
 import pytest
 
-from services.resolution import mapping_enumerator  # noqa: E402
-from services.resolution.mapping_enumerator import (  # noqa: E402
+from services.resolution import mapping_enumerator
+from services.resolution.mapping_enumerator import (
     _decode_address_arg_from_data,
     _decode_address_topic,
     _event_topic0,

@@ -33,10 +33,10 @@ from unittest.mock import patch
 
 import pytest
 
-from db import contract_materializations as cm  # noqa: E402
-from db.models import ContractMaterialization  # noqa: E402
-from db.storage import StorageError, StorageKeyMissing  # noqa: E402
-from tests.conftest import requires_postgres  # noqa: E402
+from db import contract_materializations as cm
+from db.models import ContractMaterialization
+from db.storage import StorageError, StorageKeyMissing
+from tests.conftest import requires_postgres
 
 # --- Stub storage client ----------------------------------------------------
 

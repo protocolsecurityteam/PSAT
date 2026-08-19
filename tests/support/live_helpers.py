@@ -21,7 +21,7 @@ class _ClientLike(Protocol):
     """Subset of ``LiveClient`` that ``_resolve_impl_job`` needs.
 
     Declared as a Protocol so the offline regression test in
-    ``tests/test_live_impl_job_resolution.py`` can pass a stub without inheriting
+    ``tests/meta/test_live_impl_job_resolution.py`` can pass a stub without inheriting
     the full requests-based client. Keeps the helper testable without
     a deployed API.
     """

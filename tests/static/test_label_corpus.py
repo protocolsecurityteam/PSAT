@@ -19,7 +19,7 @@ import pytest
 
 pytest.importorskip("slither")
 
-from tests.support import label_corpus as harness  # noqa: E402
+from tests.support import label_corpus as harness
 
 
 def test_manifest_and_golden_cover_the_same_contracts():

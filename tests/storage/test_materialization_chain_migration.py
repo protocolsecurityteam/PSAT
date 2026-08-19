@@ -14,8 +14,8 @@ from pathlib import Path
 import pytest
 from sqlalchemy import select
 
-from db.models import ContractMaterialization  # noqa: E402
-from tests.conftest import requires_postgres  # noqa: E402
+from db.models import ContractMaterialization
+from tests.conftest import requires_postgres
 
 _MIG_PATH = (
     Path(__file__).resolve().parents[2]

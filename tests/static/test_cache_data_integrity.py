@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import pytest
 
-from tests.cache_helpers import (  # noqa: E402
+from tests.cache_helpers import (
     ADDR_A,
     IMPL_ADDR,
     _create_source_job_with_proxy,

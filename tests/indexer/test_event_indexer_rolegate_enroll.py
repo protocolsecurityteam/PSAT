@@ -13,18 +13,18 @@ from datetime import datetime, timezone
 from typing import Any, cast
 
 import pytest
-from sqlalchemy import func, select  # noqa: E402
+from sqlalchemy import func, select
 
-import services.resolution.role_store_standards as rss  # noqa: E402
-import workers.event_log_indexer as eli  # noqa: E402
-from services.resolution.role_store_standards import (  # noqa: E402
+import services.resolution.role_store_standards as rss
+import workers.event_log_indexer as eli
+from services.resolution.role_store_standards import (
     OZ_ACCESS_CONTROL_ENUMERABLE,
     SOLADY_ENUMERABLE_ROLES,
     all_topic0s,
 )
-from tests.conftest import DATABASE_URL as _DB_URL  # noqa: E402
+from tests.conftest import DATABASE_URL as _DB_URL
 from tests.conftest import _can_connect, requires_postgres
-from workers.event_log_indexer import (  # noqa: E402
+from workers.event_log_indexer import (
     _is_delegated_role_gate_descriptor,
     _is_single_address_param_signature,
     enroll_from_completed_jobs,

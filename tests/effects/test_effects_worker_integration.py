@@ -19,14 +19,14 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-from db import effect_cache  # noqa: E402
-from db.models import (  # noqa: E402
+from db import effect_cache
+from db.models import (
     EffectBehaviorCache,
     EffectiveFunction,
     EffectVerdict,
 )
-from db.queue import create_job, get_artifact  # noqa: E402
-from services.effects.config import (  # noqa: E402
+from db.queue import create_job, get_artifact
+from services.effects.config import (
     EFFECT_CLASS_CODE_UPGRADE,
     EFFECT_CLASS_FREEZE_PAUSE,
     EFFECT_CLASS_SUPPLY,
@@ -37,15 +37,15 @@ from services.effects.config import (  # noqa: E402
     VERDICT_PROVEN,
     VERDICT_UNKNOWN,
 )
-from services.effects.harness import Discrepancy, proven, unknown  # noqa: E402
-from services.effects.simulate import (  # noqa: E402
-    TRANSFER_TOPIC,  # noqa: E402
+from services.effects.harness import Discrepancy, proven, unknown
+from services.effects.simulate import (
+    TRANSFER_TOPIC,
     SimCallResult,
     SimLog,
     SimResult,
 )
-from tests.cache_helpers import requires_postgres  # noqa: E402
-from tests.support.effects_worker_harness import (  # noqa: E402
+from tests.cache_helpers import requires_postgres
+from tests.support.effects_worker_harness import (
     CONTRACT_A,
     CONTRACT_B,
     CONTRACT_C,
@@ -59,7 +59,7 @@ from tests.support.effects_worker_harness import (  # noqa: E402
     clean_effects,  # noqa: F401  (imported so pytest registers the fixture here)
 )
 from workers.effects_worker import (
-    EffectsWorker,  # noqa: E402
+    EffectsWorker,
 )
 
 # ---------------------------------------------------------------------------

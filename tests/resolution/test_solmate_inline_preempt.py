@@ -27,9 +27,9 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import db.queue as DQ  # noqa: E402
-from services.resolution import capability_resolver as CR  # noqa: E402
-from services.resolution import predicate_evaluator as PE  # noqa: E402
+import db.queue as DQ
+from services.resolution import capability_resolver as CR
+from services.resolution import predicate_evaluator as PE
 
 _TELLER = "0x" + "11" * 20
 _ROLES_AUTH = "0x" + "a2" * 20

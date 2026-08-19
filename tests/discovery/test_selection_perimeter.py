@@ -26,8 +26,8 @@ from unittest.mock import patch
 
 import pytest
 
-from tests.conftest import requires_postgres  # noqa: E402
-from workers.base import JobHandledDirectly  # noqa: E402
+from tests.conftest import requires_postgres
+from workers.base import JobHandledDirectly
 
 pytestmark = [requires_postgres]
 

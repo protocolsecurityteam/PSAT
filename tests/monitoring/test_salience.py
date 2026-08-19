@@ -811,7 +811,7 @@ def _no_wire():
     """The driver's transaction fetch is real from phase 2 on, and these tests
     hand it an unreachable endpoint. Stub the batch call so the offline suite
     stays hermetic; the fetch itself is exercised against fixture transactions
-    in ``tests/test_enrichment_decode.py``."""
+    in ``tests/monitoring/test_enrichment_decode.py``."""
     with patch(
         "services.monitoring.enrichment.rpc_batch_request_classified",
         side_effect=lambda _url, calls, *_a, **_kw: [(None, "transport")] * len(calls),

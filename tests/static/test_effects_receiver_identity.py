@@ -29,11 +29,13 @@ import textwrap
 import pytest
 
 pytest.importorskip("slither")
-from eth_utils.crypto import keccak  # noqa: E402
-from slither import Slither  # noqa: E402
+from eth_utils.crypto import keccak
+from slither import Slither
 
-from services.static.contract_analysis_pipeline.effects import build_effects  # noqa: E402
-from tests.support.foundry_project import write_foundry_project  # noqa: E402
+from services.static.contract_analysis_pipeline.effects import build_effects
+from tests.support.foundry_project import write_foundry_project
+
+pytestmark = pytest.mark.compile
 
 _SRC = """
 // SPDX-License-Identifier: MIT

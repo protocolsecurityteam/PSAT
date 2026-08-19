@@ -10,9 +10,9 @@ exercised explicitly.
 
 from __future__ import annotations
 
-from services.resolution.adapters import AdapterRegistry, EvaluationContext  # noqa: E402
-from services.resolution.capabilities import CapabilityExpr, ExternalCheck  # noqa: E402
-from services.resolution.probe import probe_membership  # noqa: E402
+from services.resolution.adapters import AdapterRegistry, EvaluationContext
+from services.resolution.capabilities import CapabilityExpr, ExternalCheck
+from services.resolution.probe import probe_membership
 
 # ---------------------------------------------------------------------------
 # Stub registry — returns whatever CapabilityExpr the test set up.

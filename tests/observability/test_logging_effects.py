@@ -21,14 +21,16 @@ from typing import TYPE_CHECKING, cast
 
 import pytest
 
-from services.effects import anvil as anvil_mod  # noqa: E402
-from services.effects import calldata as calldata_mod  # noqa: E402
-from services.effects import orchestrator as orch_mod  # noqa: E402
-from services.effects import selection as selection_mod  # noqa: E402
-from services.effects.anvil import _OUTPUT_TAIL_LINES, SubprocessAnvil  # noqa: E402
-from services.effects.exceptions import AnvilSpawnError  # noqa: E402
-from services.effects.selection import Candidate  # noqa: E402
-from utils.logging import degraded_errors_var, stage_metrics_var  # noqa: E402
+from services.effects import anvil as anvil_mod
+from services.effects import calldata as calldata_mod
+from services.effects import orchestrator as orch_mod
+from services.effects import selection as selection_mod
+from services.effects.anvil import _OUTPUT_TAIL_LINES, SubprocessAnvil
+from services.effects.exceptions import AnvilSpawnError
+from services.effects.selection import Candidate
+from utils.logging import degraded_errors_var, stage_metrics_var
+
+pytestmark = pytest.mark.anvil
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session

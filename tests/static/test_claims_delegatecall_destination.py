@@ -22,7 +22,9 @@ import pytest
 
 pytest.importorskip("slither")
 
-from tests.support.foundry_project import write_foundry_project  # noqa: E402
+from tests.support.foundry_project import write_foundry_project
+
+pytestmark = pytest.mark.compile
 
 _SRC = """
 // SPDX-License-Identifier: MIT

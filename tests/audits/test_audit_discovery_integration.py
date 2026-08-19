@@ -30,7 +30,7 @@ from typing import Callable
 import pytest
 import responses
 
-from tests.conftest import requires_postgres  # noqa: E402
+from tests.conftest import requires_postgres
 
 pytestmark = [requires_postgres]
 

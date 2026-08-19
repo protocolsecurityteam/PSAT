@@ -36,8 +36,8 @@ from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
-from db.models import JobStage, JobStatus  # noqa: E402
-from workers.base import BaseWorker  # noqa: E402
+from db.models import JobStage, JobStatus
+from workers.base import BaseWorker
 
 
 class _TestWorker(BaseWorker):

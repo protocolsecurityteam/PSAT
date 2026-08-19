@@ -167,7 +167,7 @@ class _Adapter:
     def __init__(self, outer: _Outer) -> None:
         self._outer_ctx = outer
 
-    def enumerate(self, descriptor: Any, contract_address: str | None) -> CapabilityExpr:  # noqa: ARG002
+    def enumerate(self, descriptor: Any, contract_address: str | None) -> CapabilityExpr:
         return CapabilityExpr.finite_set([], quality="lower_bound", confidence="partial")
 
 
@@ -342,6 +342,8 @@ from slither import Slither  # noqa: E402
 
 from services.static.contract_analysis_pipeline.predicate_artifacts import build_predicate_artifacts  # noqa: E402
 from tests.support.solc import solc_path_for as _solc_path_for  # noqa: E402
+
+pytestmark = pytest.mark.compile
 
 
 def _receiver_contract() -> Any:

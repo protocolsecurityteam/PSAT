@@ -31,9 +31,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from sqlalchemy import func, select  # noqa: E402
+from sqlalchemy import func, select
 
-from db.models import (  # noqa: E402
+from db.models import (
     Contract,
     EffectiveFunction,
     IndexedEventCursor,
@@ -42,17 +42,17 @@ from db.models import (  # noqa: E402
     JobStage,
     JobStatus,
 )
-from services.resolution.adapters import CallFrame, EvaluationContext  # noqa: E402
-from services.resolution.adapters.event_indexed import EventIndexedAdapter  # noqa: E402
-from services.resolution.adapters.solmate_roles import (  # noqa: E402
+from services.resolution.adapters import CallFrame, EvaluationContext
+from services.resolution.adapters.event_indexed import EventIndexedAdapter
+from services.resolution.adapters.solmate_roles import (
     _ROLE_TOPICS,
     CANCALL_SELECTOR,
     CANCALL_SIGNATURE,
     SolmateRolesAuthorityAdapter,
 )
-from services.resolution.capabilities import CapabilityExpr, ExternalCheck  # noqa: E402
-from services.resolution.capability_resolver import capability_to_dict  # noqa: E402
-from services.resolution.deferred_reconciler import (  # noqa: E402
+from services.resolution.capabilities import CapabilityExpr, ExternalCheck
+from services.resolution.capability_resolver import capability_to_dict
+from services.resolution.deferred_reconciler import (
     DEFERRED_MARKER,
     TRACE_STEP_ENUMERABLE_ROLE_STORE,
     _iter_deferred_authorities,
@@ -60,9 +60,9 @@ from services.resolution.deferred_reconciler import (  # noqa: E402
     reconcile_deferred_resolutions,
     reconcile_role_set_drift,
 )
-from services.resolution.repos.event_logs_pg import PostgresEventLogRepo  # noqa: E402
-from services.resolution.role_store_standards import SOLADY_ENUMERABLE_ROLES  # noqa: E402
-from tests.conftest import requires_postgres  # noqa: E402
+from services.resolution.repos.event_logs_pg import PostgresEventLogRepo
+from services.resolution.role_store_standards import SOLADY_ENUMERABLE_ROLES
+from tests.conftest import requires_postgres
 
 _ROLE_SET_TOPIC0 = SOLADY_ENUMERABLE_ROLES.grant_events[0].topic0
 

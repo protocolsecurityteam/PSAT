@@ -33,7 +33,9 @@ from typing import Any, cast
 
 import pytest
 
-from tests.support import label_corpus  # noqa: E402
+from tests.support import label_corpus
+
+pytestmark = pytest.mark.compile
 
 TIMELOCK_ADDRESS = "0xcd425f44758a08baab3c4908f3e3de5776e45d7a"
 SOLC_VERSION = "0.8.25"

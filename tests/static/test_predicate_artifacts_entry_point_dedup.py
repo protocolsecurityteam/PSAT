@@ -52,7 +52,7 @@ from services.static.contract_analysis_pipeline.predicate_artifacts import (  # 
 
 
 def _compile(tmp_path: Path, source: str) -> Slither:
-    """Match the helper in ``tests/test_predicate_builder.py``."""
+    """Match the helper in ``tests/static/test_predicate_builder.py``."""
     src = textwrap.dedent(source).strip() + "\n"
     f = tmp_path / "C.sol"
     f.write_text(src)

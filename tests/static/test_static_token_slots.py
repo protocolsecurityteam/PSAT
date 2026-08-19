@@ -33,6 +33,8 @@ from services.static.contract_analysis_pipeline.effects import build_effects  # 
 from services.static.contract_analysis_pipeline.token_slots import derive_token_slots  # noqa: E402
 from tests.support.solc import solc_path_for as _solc_path_for  # noqa: E402
 
+pytestmark = pytest.mark.compile
+
 FLOOR = (0, 8, 20)
 
 

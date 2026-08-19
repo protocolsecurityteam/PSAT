@@ -1,7 +1,7 @@
 """Canned JSON-RPC wire stub for the one-shot latch tests.
 
-Lived in ``tests/test_one_shot_probe.py`` and was imported cross-module by
-``tests/test_one_shot_latch_witness.py``; hoisted here so neither test module
+Lived in ``tests/resolution/test_one_shot_probe.py`` and was imported cross-module by
+``tests/resolution/test_one_shot_latch_witness.py``; hoisted here so neither test module
 imports the other.
 """
 

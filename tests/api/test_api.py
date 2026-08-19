@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
 
-from tests.cache_helpers import requires_postgres  # noqa: E402
+from tests.cache_helpers import requires_postgres
 
 
 def _make_fake_job(

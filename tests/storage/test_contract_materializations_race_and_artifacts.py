@@ -40,9 +40,9 @@ from unittest.mock import patch
 import pytest
 from sqlalchemy import text
 
-from db import contract_materializations as cm  # noqa: E402
-from db.models import ContractMaterialization  # noqa: E402
-from tests.conftest import requires_postgres  # noqa: E402
+from db import contract_materializations as cm
+from db.models import ContractMaterialization
+from tests.conftest import requires_postgres
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -140,7 +140,7 @@ def test_concurrent_materialize_runs_builder_exactly_once(_route_to_test_db, _cl
                     builder=slow_builder,
                 )
             results.append(row)
-        except BaseException as exc:  # noqa: BLE001
+        except BaseException as exc:
             errors.append(exc)
 
     t1 = threading.Thread(target=call, args=("1",))

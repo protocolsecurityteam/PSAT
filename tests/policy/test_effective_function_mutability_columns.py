@@ -24,15 +24,15 @@ from typing import Any
 import pytest
 from sqlalchemy import case, func, select, text
 
-from db.jsonb import JSONB_UNSET, JSONB_WRITTEN_NULL, jsonb_state  # noqa: E402
-from db.models import Contract, EffectiveFunction  # noqa: E402
-from services.policy.effective_permissions import (  # noqa: E402
+from db.jsonb import JSONB_UNSET, JSONB_WRITTEN_NULL, jsonb_state
+from db.models import Contract, EffectiveFunction
+from services.policy.effective_permissions import (
     MUTABILITY_FIELDS,
     _function_records_from_semantic_artifacts,
     _mutability_fields,
     build_effective_permissions,
 )
-from services.policy.effective_permissions_writer import write_effective_function_rows  # noqa: E402
+from services.policy.effective_permissions_writer import write_effective_function_rows
 
 # ---------------------------------------------------------------------------
 # Production shapes.

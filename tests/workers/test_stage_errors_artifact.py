@@ -13,11 +13,11 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from db.models import Artifact, JobStage  # noqa: E402
-from db.queue import create_job  # noqa: E402
-from tests.cache_helpers import requires_postgres  # noqa: E402
-from utils.logging import record_degraded  # noqa: E402
-from workers.base import BaseWorker  # noqa: E402
+from db.models import Artifact, JobStage
+from db.queue import create_job
+from tests.cache_helpers import requires_postgres
+from utils.logging import record_degraded
+from workers.base import BaseWorker
 
 
 @pytest.fixture()

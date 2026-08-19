@@ -39,7 +39,7 @@ class _Adapter:
     def __init__(self) -> None:
         self._outer_ctx = _Outer()
 
-    def enumerate(self, descriptor: Any, contract_address: str | None) -> CapabilityExpr:  # noqa: ARG002
+    def enumerate(self, descriptor: Any, contract_address: str | None) -> CapabilityExpr:
         return CapabilityExpr.finite_set([], quality="lower_bound", confidence="partial")
 
 

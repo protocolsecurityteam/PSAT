@@ -12,7 +12,7 @@ import json
 
 import pytest
 
-from services.audits.scope_extraction import (  # noqa: E402
+from services.audits.scope_extraction import (
     LLMUnavailableError,
     ScopeSection,
     _build_prompt,

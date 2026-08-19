@@ -28,7 +28,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from tests.support.live_helpers import _resolve_impl_job  # noqa: E402
+from tests.support.live_helpers import _resolve_impl_job
 
 
 class _StubClient:

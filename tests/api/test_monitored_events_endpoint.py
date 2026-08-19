@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from tests.conftest import requires_postgres  # noqa: E402
+from tests.conftest import requires_postgres
 
 pytestmark = [requires_postgres]
 

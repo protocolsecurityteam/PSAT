@@ -34,7 +34,7 @@ from slither import Slither  # noqa: E402
 from services.resolution.adapters import (  # noqa: E402
     AdapterRegistry,
     CallFrame,
-    EnumerationResult,  # noqa: E402
+    EnumerationResult,
 )
 from services.resolution.adapters import EvaluationContext as ResolverContext  # noqa: E402
 from services.resolution.adapters.event_indexed import EventIndexedAdapter  # noqa: E402
@@ -89,7 +89,7 @@ class _NoEventsRepo:
 def _resolve(trees: dict, fn: str, monkeypatch, *, rpc_owner: str | None = None) -> CapabilityExpr:
     if rpc_owner is not None:
 
-        def fake_rpc(rpc_url, method, params, retries: int = 1, **_: Any):  # noqa: ARG001
+        def fake_rpc(rpc_url, method, params, retries: int = 1, **_: Any):
             # Any nullary authority getter (owner()/governor()/<var>()) returns
             # the ground-truth owner, left-padded to a 32-byte word.
             return "0x" + rpc_owner[2:].rjust(64, "0")

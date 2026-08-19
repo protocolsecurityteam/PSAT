@@ -11,7 +11,7 @@ a bound (the callee's rate is unseen state that can move arbitrarily) and NOT
 proof of caller control (we cannot see whether the callee honors its argument).
 The tests below pin both the recall and those limits.
 
-Same harness as ``tests/test_flow_lattice.py`` — a real solc compile driving the
+Same harness as ``tests/static/test_flow_lattice.py`` — a real solc compile driving the
 production ``build_effects``. Every fixture is SYNTHETIC and minimal, and no rule
 here keys on a callee name: ``convertToAssets`` is written only because some name
 must appear in the source.

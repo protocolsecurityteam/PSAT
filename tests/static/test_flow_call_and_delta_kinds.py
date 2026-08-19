@@ -1,7 +1,7 @@
 """Regression tests for the two lattice kinds added by SDG §3 A1-recall:
 ``token_owner`` destinations and ``balance_delta`` amounts.
 
-Same harness as ``tests/test_flow_lattice.py`` — a real solc compile driving the
+Same harness as ``tests/static/test_flow_lattice.py`` — a real solc compile driving the
 production ``build_effects``. Every fixture here is SYNTHETIC and minimal so the
 rules are exercised on their shape alone, never on a corpus-specific pattern.
 

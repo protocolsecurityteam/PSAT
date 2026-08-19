@@ -28,10 +28,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from services.resolution import flow_asset_plane as fap  # noqa: E402
-from services.resolution.role_holder_plane import ProbeBlock  # noqa: E402
-from utils.rpc import EthCallResult  # noqa: E402
-from workers.resolution_worker import ResolutionWorker  # noqa: E402
+from services.resolution import flow_asset_plane as fap
+from services.resolution.role_holder_plane import ProbeBlock
+from utils.rpc import EthCallResult
+from workers.resolution_worker import ResolutionWorker
 
 BLOCK = 25643300
 BLOCK_HASH = bytes.fromhex("21d7f476ebacbed97ff15fbe213376984bada1928166b375ab1b1135bd21c188")

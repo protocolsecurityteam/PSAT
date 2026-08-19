@@ -23,13 +23,13 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from db.storage import StorageUnavailable  # noqa: E402
-from services.audits import scope_extraction as scope_pkg  # noqa: E402
-from services.audits.scope_extraction import (  # noqa: E402
+from db.storage import StorageUnavailable
+from services.audits import scope_extraction as scope_pkg
+from services.audits.scope_extraction import (
     ScopeExtractionOutcome,
     process_audit_scope,
 )
-from services.audits.scope_extraction._errors import LLMUnavailableError  # noqa: E402
+from services.audits.scope_extraction._errors import LLMUnavailableError
 
 
 @pytest.fixture(autouse=True)

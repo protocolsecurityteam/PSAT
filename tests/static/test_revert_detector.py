@@ -32,6 +32,8 @@ from services.static.contract_analysis_pipeline.writer_gate import (  # noqa: E4
     apply_writer_gate_pass,
 )
 
+pytestmark = pytest.mark.compile
+
 
 def _cap_for(sl: Slither, full_name: str, cname: str = "C"):
     """Drive the static→evaluator pipeline (same shape as test_earned_public's

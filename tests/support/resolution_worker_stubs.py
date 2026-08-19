@@ -1,6 +1,6 @@
 """Job factory and dependency stubs for ``ResolutionWorker.process`` tests.
 
-Shared by ``tests/test_resolution_worker.py`` and ``tests/test_flow_asset_plane.py``
+Shared by ``tests/resolution/test_resolution_worker.py`` and ``tests/resolution/test_flow_asset_plane.py``
 so the two exercise the worker against one stub surface.
 """
 

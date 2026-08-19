@@ -823,7 +823,7 @@ def test_get_contract_source_fully_readable_carries_no_shortfall(db_session, see
     assert res["source_origin"] == "indexed"
 
 
-def test_classify_address_scopes_the_control_graph_by_chain(db_session, seeded_protocol):  # noqa: PLR0915
+def test_classify_address_scopes_the_control_graph_by_chain(db_session, seeded_protocol):
     """``control_graph_nodes`` has no chain column, so the chain predicate has to
     ride the ``contract_id`` join.
 

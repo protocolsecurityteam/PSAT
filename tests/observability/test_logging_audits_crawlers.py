@@ -24,7 +24,7 @@ def _bound_accumulators():
     """Bind fresh degraded + stage-metric accumulators under a job context.
 
     Returns ``(errors_list, metrics_dict, reset_callable)`` mirroring the
-    pattern in tests/test_record_degraded.py.
+    pattern in tests/observability/test_record_degraded.py.
     """
     errors: list = []
     metrics: dict = {}

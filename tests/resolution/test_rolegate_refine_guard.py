@@ -12,11 +12,11 @@ Two harness layers:
 
   * SHAPE-LEVEL (``evaluate_tree`` on one compiled unit) — companion-2 leaf
     emission, permissionless/pause classification, and the pure shape
-    discriminators. Mirrors ``tests/test_earned_public.py``.
+    discriminators. Mirrors ``tests/resolution/test_earned_public.py``.
   * TWO-HOP DB (``resolve_contract_capabilities`` over a seeded caller +
     registry) — the only path that reaches the ``:1976`` guard, since it
     lives inside ``_maybe_inline_cross_contract_call``. Mirrors the
-    cross-contract inline tests in ``tests/test_capability_resolver.py``.
+    cross-contract inline tests in ``tests/resolution/test_capability_resolver.py``.
 
 The offline suite forces ``PSAT_DIFFERENTIAL_PROBE=0`` (tests/conftest.py),
 so the gated verdict is read directly, not re-opened by a live eth_call

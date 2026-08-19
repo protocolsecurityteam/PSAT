@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from tests.conftest import requires_postgres  # noqa: E402
+from tests.conftest import requires_postgres
 
 pytestmark = [
     requires_postgres,
@@ -1134,7 +1134,7 @@ def test_backfill_coverage_refresh_defers_source_equivalence(
     instead land with ``equivalence_status='pending'`` so the dedicated
     ``CoverageVerifyWorker`` drains them at a controlled rate; promotion
     to ``reviewed_commit`` / ``high`` is exercised by
-    ``tests/test_coverage_verify_worker.py::test_process_row_proves_pending_to_proven``.
+    ``tests/audits/test_coverage_verify_worker.py::test_process_row_proves_pending_to_proven``.
     """
     from db.models import (
         AuditContractCoverage,

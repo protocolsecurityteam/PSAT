@@ -21,9 +21,9 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import select
 
-from db.models import Protocol  # noqa: E402
-from db.queue import get_or_create_protocol  # noqa: E402
-from tests.conftest import requires_postgres  # noqa: E402
+from db.models import Protocol
+from db.queue import get_or_create_protocol
+from tests.conftest import requires_postgres
 
 pytestmark = [requires_postgres]
 

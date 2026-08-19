@@ -16,7 +16,7 @@ import logging
 
 from sqlalchemy.orm.exc import StaleDataError
 
-import workers.coverage_verify as cv  # noqa: E402
+import workers.coverage_verify as cv
 
 LOGGER_NAME = "workers.coverage_verify"
 

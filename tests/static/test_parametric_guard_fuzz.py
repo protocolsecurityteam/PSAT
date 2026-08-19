@@ -77,8 +77,10 @@ from typing import Any
 
 import pytest
 
-from services.static import collect_contract_analysis  # noqa: E402
-from tests.support.foundry_project import write_foundry_project  # noqa: E402
+from services.static import collect_contract_analysis
+from tests.support.foundry_project import write_foundry_project
+
+pytestmark = pytest.mark.compile
 
 # Reserved substrings from legacy classifier terms. Any generated
 # identifier containing one is rejected, so a detected result cannot be

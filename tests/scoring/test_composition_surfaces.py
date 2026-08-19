@@ -54,7 +54,7 @@ def _withheld(row: dict[str, Any]) -> list[dict[str, Any]]:
     return list(row.get("reach_composed_magnitudes_withheld") or [])
 
 
-def _gate_only_document(fold, routes):  # noqa: F811
+def _gate_only_document(fold, routes):
     """One withheld entry on the gate-only arm: the join returns no setter row so
     arm 3 cannot republish and the route alone decides the arm."""
     return CA.composed_document(
@@ -65,7 +65,7 @@ def _gate_only_document(fold, routes):  # noqa: F811
 # CAP-A §R2 — the token names the field it is earned from
 
 
-def test_the_second_typed_reason_names_the_constrained_target_and_not_a_callee(fold):  # noqa: F811
+def test_the_second_typed_reason_names_the_constrained_target_and_not_a_callee(fold):
     """CAP-A §R2. The token is read off ``target_constraint``, which pins the
     destination call's counterparty ARGUMENT; no stored witness restricts the
     callee, so "the callee is restricted" asserted a property the evidence does
@@ -85,7 +85,7 @@ def test_the_second_typed_reason_names_the_constrained_target_and_not_a_callee(f
     [_AUTHORS_THE_AMOUNT_AT_C, _CONSTRAINS_THE_TARGET_AT_C, ()],
     ids=["amount_authored", "target_constrained", "no_flow_witness"],
 )
-def test_no_published_route_state_claims_a_restricted_callee(fold, routes):  # noqa: F811
+def test_no_published_route_state_claims_a_restricted_callee(fold, routes):
     """The retired token has no producer: the classifier cannot emit it under any
     of its outcomes, and it is not in the registry a state is checked against."""
     assert RETIRED_CALLEE_TOKEN not in P.ROUTE_CLASSIFICATIONS
@@ -99,7 +99,7 @@ def test_no_published_route_state_claims_a_restricted_callee(fold, routes):  # n
 # B1-R R2-a — the gate-only arm fires on two tokens and its cause names which
 
 
-def test_the_census_cause_names_the_route_token_and_not_only_the_arm(fold):  # noqa: F811
+def test_the_census_cause_names_the_route_token_and_not_only_the_arm(fold):
     """B1-R R2-a. ``ARM_GATE_ONLY`` is taken on either of two route tokens and
     the census gave both the AUTHORING cause. The two documents differ only in
     the intermediate's stored flow witness, so a cause keyed on the arm alone
@@ -275,7 +275,7 @@ def test_the_component_names_line_up_with_the_order_they_describe():
     assert len(FOLD._ORDER_COMPONENT_NAMES) == len(FOLD._composed_order(_tied_pair()))
 
 
-def test_chosen_by_glosses_the_chain_component_over_the_fields_a_step_publishes(fold):  # noqa: F811
+def test_chosen_by_glosses_the_chain_component_over_the_fields_a_step_publishes(fold):
     """§11.2 (k). The order's tail is every field ``ActAsStep.as_json``
     publishes, so the gloss is read off the steps in hand."""
     document = fold(_tied_signals(), principals=_composing_principals(), **_tied_case())
@@ -302,7 +302,7 @@ def test_the_chain_gloss_is_read_off_the_steps_and_not_written_into_the_sentence
 # CAP-A §B4 — the uncalibrated-arm register
 
 
-def test_the_predicate_block_survives_and_claims_nothing_about_this_row(fold):  # noqa: F811
+def test_the_predicate_block_survives_and_claims_nothing_about_this_row(fold):
     """Ruling 6.1's KEEP, asserted as a property rather than left as an absence
     of change: the block is the only place a reader can check the composed
     ceiling against the destination's own body. M1 and M2 landed in B1 and A3 and
@@ -370,7 +370,7 @@ def test_the_ceiling_direction_stays_allow_listed_on_the_page():
 _TRIMMING_SHEET = 250_000.0
 
 
-def _trimmed_entry(fold, per_asset_state):  # noqa: F811
+def _trimmed_entry(fold, per_asset_state):
     document = fold(
         _composing_signals(),
         principals=_composing_principals(),
@@ -385,7 +385,7 @@ def _trimmed_entry(fold, per_asset_state):  # noqa: F811
     return _gate_row(document)["reach_composed_magnitudes"][0]
 
 
-def test_a_magnitude_trimmed_to_an_incomplete_sheet_publishes_that_it_is_incomplete(fold):  # noqa: F811
+def test_a_magnitude_trimmed_to_an_incomplete_sheet_publishes_that_it_is_incomplete(fold):
     """U1-F4. ``min(witness, sheet)`` against a sheet nobody proved whole.
 
     The published figure is $250k where the destination's own witness says $1M,
@@ -412,7 +412,7 @@ def test_a_magnitude_trimmed_to_an_incomplete_sheet_publishes_that_it_is_incompl
     assert FOLD._TRIMMED_TO_AN_UNPROVEN_CEILING in entry["reading"]
 
 
-def test_a_trim_onto_a_fully_covered_sheet_claims_the_ceiling_it_earned(fold):  # noqa: F811
+def test_a_trim_onto_a_fully_covered_sheet_claims_the_ceiling_it_earned(fold):
     """The negative path. Every asset observed at the destination is priced, so
     the sheet IS an at-most and the entry says so with no caveat attached — a
     disclosure that fired on every trim would say nothing about any of them."""
@@ -424,7 +424,7 @@ def test_a_trim_onto_a_fully_covered_sheet_claims_the_ceiling_it_earned(fold):  
     assert FOLD._TRIMMED_TO_AN_UNPROVEN_CEILING not in entry["reading"]
 
 
-def test_an_entry_no_sheet_bounded_publishes_no_direction_at_all(fold):  # noqa: F811
+def test_an_entry_no_sheet_bounded_publishes_no_direction_at_all(fold):
     """``null`` is the third state, and it is not "not_determined".
 
     Where no sheet exists there is no direction to publish and no completeness
@@ -441,7 +441,7 @@ def test_an_entry_no_sheet_bounded_publishes_no_direction_at_all(fold):  # noqa:
     assert FOLD._TRIMMED_TO_AN_UNPROVEN_CEILING not in entry["reading"]
 
 
-def test_an_entry_built_without_a_plane_cannot_claim_a_ceiling_it_never_read(fold):  # noqa: F811
+def test_an_entry_built_without_a_plane_cannot_claim_a_ceiling_it_never_read(fold):
     """Fail-closed on the third state of the completeness question itself.
 
     ``sheet_is_proven_complete`` is ``None`` where nobody read the destination's
@@ -493,7 +493,7 @@ def test_an_entry_built_without_a_plane_cannot_claim_a_ceiling_it_never_read(fol
 _SECOND_ADMIN = "0x" + "4" * 40
 
 
-def _two_powers_over_one_pot(fold):  # noqa: F811
+def _two_powers_over_one_pot(fold):
     """Two admin capabilities at one seized node, both reaching one destination.
 
     The owner's ruling is about this exact shape on the reference corpus:
@@ -531,7 +531,7 @@ def _row_for(document, capability: str) -> dict[str, Any]:
     return rows[0]
 
 
-def test_the_shared_pot_is_priced_once_and_both_admin_powers_stay_attributed(fold):  # noqa: F811
+def test_the_shared_pot_is_priced_once_and_both_admin_powers_stay_attributed(fold):
     """R2/U-B2, the owner's ruling and its condition, in one document.
 
     THE RULING: composition stays withheld for the second power, so the pot is
@@ -567,7 +567,7 @@ def test_the_shared_pot_is_priced_once_and_both_admin_powers_stay_attributed(fol
     assert ownership_row["reach_composed_magnitudes"] == []
 
 
-def test_the_withheld_door_is_counted_in_its_rows_own_census(fold):  # noqa: F811
+def test_the_withheld_door_is_counted_in_its_rows_own_census(fold):
     """A refusal nobody counted reads the same as a rule nobody ran.
 
     The visibility the ruling turns on is not only the entry: the row's census
@@ -582,7 +582,7 @@ def test_the_withheld_door_is_counted_in_its_rows_own_census(fold):  # noqa: F81
     assert census["composed_withheld_by_arm"] == {FOLD.ARM_NOT_DETERMINED: 1}
 
 
-def test_the_composed_figure_is_the_same_under_either_power(fold):  # noqa: F811
+def test_the_composed_figure_is_the_same_under_either_power(fold):
     """Why counting it once is the right answer rather than a convenient one.
 
     The reason the second charge is refused is that it is the SAME dollars: the

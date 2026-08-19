@@ -25,6 +25,8 @@ from utils.logging import (
     uvicorn_log_config,
 )
 
+pytestmark = pytest.mark.compile
+
 
 def test_stream_subprocess_streams_lines_at_debug_with_source(caplog):
     logger = logging.getLogger("test.stream_subprocess.ok")

@@ -28,12 +28,12 @@ import textwrap
 import pytest
 
 pytest.importorskip("slither")
-from slither import Slither  # noqa: E402
+from slither import Slither
 
-from services.policy.effective_permissions import _abi_signature_and_selector  # noqa: E402
-from services.resolution.predicate_evaluator import evaluate_tree  # noqa: E402
-from services.static.contract_analysis_pipeline.effects import build_effects  # noqa: E402
-from services.static.contract_analysis_pipeline.predicate_artifacts import (  # noqa: E402
+from services.policy.effective_permissions import _abi_signature_and_selector
+from services.resolution.predicate_evaluator import evaluate_tree
+from services.static.contract_analysis_pipeline.effects import build_effects
+from services.static.contract_analysis_pipeline.predicate_artifacts import (
     build_predicate_artifacts,
     has_no_selector,
     is_canonical_abi_signature,

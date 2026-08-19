@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock
 
-from tests.conftest import requires_postgres  # noqa: E402
+from tests.conftest import requires_postgres
 from workers.static_worker import StaticWorker
 
 

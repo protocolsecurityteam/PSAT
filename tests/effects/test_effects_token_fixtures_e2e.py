@@ -93,6 +93,7 @@ _SOLC = _solc_027()
 pytestmark = [
     pytest.mark.skipif(not anvil_available(), reason="anvil not on PATH"),
     pytest.mark.skipif(_SOLC is None, reason="solc 0.8.27 not installed"),
+    pytest.mark.anvil,
 ]
 
 

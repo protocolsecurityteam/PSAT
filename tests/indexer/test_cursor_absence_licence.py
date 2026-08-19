@@ -25,9 +25,9 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from sqlalchemy import func, select, text  # noqa: E402
+from sqlalchemy import func, select, text
 
-from db.models import (  # noqa: E402
+from db.models import (
     ENROLLMENT_BASIS_PREDICATE_HINT,
     ENROLLMENT_BASIS_TRACKED_TOPICS,
     FIRST_INDEXED_BASIS_CREATION,
@@ -38,7 +38,7 @@ from db.models import (  # noqa: E402
     MonitoredContract,
     Protocol,
 )
-from services.resolution.absence_coverage import (  # noqa: E402
+from services.resolution.absence_coverage import (
     REASON_COLD_CURSORS,
     REASON_LOWER_BOUND_UNKNOWN,
     REASON_MISSING_CURSORS,
@@ -46,15 +46,15 @@ from services.resolution.absence_coverage import (  # noqa: E402
     REASON_PAGE_RESIDUAL,
     absence_coverage,
 )
-from services.resolution.deferred_reconciler import _authority_backfilled  # noqa: E402
-from services.resolution.repos.event_logs_pg import PostgresEventLogRepo  # noqa: E402
-from services.resolution.repos.event_logs_rpc import (  # noqa: E402
+from services.resolution.deferred_reconciler import _authority_backfilled
+from services.resolution.repos.event_logs_pg import PostgresEventLogRepo
+from services.resolution.repos.event_logs_rpc import (
     FetchWindowStat,
     RpcEventLogFetcher,
     default_result_cap,
 )
-from tests.conftest import requires_postgres  # noqa: E402
-from workers.event_log_indexer import (  # noqa: E402
+from tests.conftest import requires_postgres
+from workers.event_log_indexer import (
     _ALL_ROLE_STORE_TOPIC0S,
     _authority_has_role_store_cursor,
     _witness_seed_block,

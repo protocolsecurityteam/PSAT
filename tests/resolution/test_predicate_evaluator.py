@@ -1077,7 +1077,7 @@ def test_observed_event_key_words_hypersync_floors_from_block(monkeypatch):
 
     captured: dict = {}
 
-    def _query(*, from_block, to_block, logs, field_selection):  # noqa: ARG001
+    def _query(*, from_block, to_block, logs, field_selection):
         captured["from_block"] = from_block
         return SimpleNamespace(from_block=from_block)
 

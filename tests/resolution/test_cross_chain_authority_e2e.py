@@ -1,7 +1,7 @@
 """Cross-chain authority POSITIVE arm, exercised end-to-end through the real
 resolution/labeling path (MULTICHAIN_INVARIANTS.md invariant 15).
 
-``tests/test_cross_chain_authority.py`` covers the recognizer and its wiring by
+``tests/resolution/test_cross_chain_authority.py`` covers the recognizer and its wiring by
 monkeypatching the *classifier function*. These tests instead stub only the
 *wire* (``services.resolution.tracking._rpc_request``) — the repo's
 integration-test convention — so the genuine
@@ -23,7 +23,7 @@ On Base the L2 ``ProxyAdmin`` is owned by the *aliased* L1 ProxyAdminOwner — t
 default L2 ownership pattern invariant 15 exists to label. The L1 owner Safe is
 placed in the run's known-address scope (a same-address on-chain reference is the
 documented trigger), so the alias resolves; strip it from scope and the label
-must vanish (guarded in ``tests/test_cross_chain_authority.py``).
+must vanish (guarded in ``tests/resolution/test_cross_chain_authority.py``).
 """
 
 from types import SimpleNamespace

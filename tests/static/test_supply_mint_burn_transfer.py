@@ -19,12 +19,14 @@ import pytest
 
 pytest.importorskip("slither")
 
-from tests.support.label_corpus import (  # noqa: E402
+from tests.support.label_corpus import (
     SolcNotInstalled,
     _foundry_env,
     _run_static_sequence,
     _solc_select_binary,
 )
+
+pytestmark = pytest.mark.compile
 
 # A minimal ERC-20 whose supply lives in ``totalShares`` (not ``totalSupply``),
 # with a share-accounting mint/burn: the standard zero-address ``Transfer`` plus

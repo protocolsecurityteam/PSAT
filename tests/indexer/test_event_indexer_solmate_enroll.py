@@ -6,12 +6,12 @@ bytecode-keyed materialization cache won't carry the hints until rebuilt).
 
 from __future__ import annotations
 
-from types import SimpleNamespace  # noqa: E402
-from typing import Any, cast  # noqa: E402
+from types import SimpleNamespace
+from typing import Any, cast
 
-from eth_utils.crypto import keccak  # noqa: E402
+from eth_utils.crypto import keccak
 
-from workers.event_log_indexer import (  # noqa: E402
+from workers.event_log_indexer import (
     _SOLMATE_ROLE_TOPICS,
     _event_address_for_descriptor,
     _is_solmate_cancall_descriptor,

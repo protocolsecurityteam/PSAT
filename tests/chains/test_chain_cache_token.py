@@ -9,7 +9,7 @@ so the L1 (``mapping_enumerator._chain_key``) and L2
 
 from __future__ import annotations
 
-from tests.conftest import requires_postgres  # noqa: E402
+from tests.conftest import requires_postgres
 
 # ---------------------------------------------------------------------------
 # chain_cache_token — pure normalizer
@@ -74,7 +74,7 @@ def test_l2_name_and_decimal_id_hit_same_row(db_session, monkeypatch):
     from db.models import MappingEnumerationCache
 
     # Point the module's own SessionLocal at the test DB (mirrors
-    # tests/test_mapping_enumeration_db_cache.py).
+    # tests/resolution/test_mapping_enumeration_db_cache.py).
     engine = create_engine(os.environ["TEST_DATABASE_URL"])
     monkeypatch.setattr(db_cache, "SessionLocal", sessionmaker(bind=engine))
     db_session.query(MappingEnumerationCache).delete()

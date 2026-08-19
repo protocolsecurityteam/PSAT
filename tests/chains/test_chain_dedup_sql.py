@@ -4,8 +4,8 @@ Proves the ``db.queue`` dedup helpers and ``reconcile_impl_job_for_proxy`` filte
 by chain via the first-class ``jobs.chain_id`` column, so the same address on two
 chains yields two independent jobs and dedup never returns a cross-chain match
 (invariant 1). These complement the pre-existing ``(address, chain)`` tests in
-``tests/test_chain_aware_cache.py`` (which cover the four helpers via
-Python-side filtering) and ``tests/test_deployment_scoping.py`` (reconcile).
+``tests/chains/test_chain_aware_cache.py`` (which cover the four helpers via
+Python-side filtering) and ``tests/resolution/test_deployment_scoping.py`` (reconcile).
 
 All jobs are created through ``create_job`` so the chain_id dual-write is
 exercised end-to-end — the SQL filter reads the same column the enqueue path
@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import uuid
 
-from tests.conftest import requires_postgres  # noqa: E402
+from tests.conftest import requires_postgres
 
 
 def _addr() -> str:

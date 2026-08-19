@@ -8,7 +8,7 @@ shape and stays under its SQL-statement budget, counted via the SQLAlchemy
 
 Run:
     set -a; source .env; set +a
-    uv run pytest tests/test_api_perf_benchmark.py -s -m "not live"
+    uv run pytest tests/api/test_api_perf_benchmark.py -s -m "not live"
 
 The ``-s`` flag is what surfaces the printed actual/budget table.
 """

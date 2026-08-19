@@ -12,6 +12,7 @@ import pytest
 
 from services.scoring import fold as FOLD
 from services.scoring import planes as P
+from services.scoring.constants import FREEZE_CAPABILITY_PROVEN
 from services.scoring.schema import (
     FunctionSignal,
     PrincipalRef,
@@ -310,7 +311,7 @@ def fold(monkeypatch):
         (``CA.admits_every_principal``), because these cases are about the axes
         AROUND the composition rule — ties, chain shapes, predicate blocks — and
         would otherwise all withhold. The rule's own arms are pinned in
-        ``tests/test_three_arm_composition.py``.
+        ``tests/scoring/test_three_arm_composition.py``.
         """
         monkeypatch.setattr(P, "discovery_relation_entities", lambda s, p: discovery or {})
         # ``universe`` is accepted and ignored: a hand-built plane carries
@@ -543,3 +544,118 @@ def _tied_signals(*, tie_usd: float = 1_000_000.0) -> list[FunctionSignal]:
 
 def _cc_row(document, capability: str = "upgrade.implementation") -> dict[str, Any]:
     return next(f for f in document.findings if f["capability"] == capability)
+
+
+# ---------------------------------------------------------------------------
+# Shared across the redteam modules (tests/scoring/redteam/): the addresses and
+# builders more than one section reads.
+# ---------------------------------------------------------------------------
+SAFE2 = "0x" + "5" * 40
+TIMELOCK = "0x" + "7" * 40
+PROXY = "0x" + "6" * 40
+IMPL = "0x" + "9" * 40
+KEY_PROXY = entity_key("ethereum", PROXY)
+KEY_IMPL = entity_key("ethereum", IMPL)
+
+
+def pause_sig(**over: Any) -> FunctionSignal:
+    gates = {
+        "pause_effective": Tri.not_determined().to_json(),
+        "freeze_recovery_principals": Tri.not_determined().to_json(),
+        "freeze_coverage_fraction": Tri.not_determined().to_json(),
+        **over.pop("gates", {}),
+    }
+    return sig(claim_id="pause.set", gates=gates, **over)
+
+
+def _pause_document(fold, pauser: P.PrincipalFacts, recovery: P.PrincipalFacts | None):
+    entries = [{"function_principal_id": 2, "chain": "ethereum", "address": recovery.address}] if recovery else None
+    signal = pause_sig(
+        authority_openness="restricted",
+        principal_state="enumerated",
+        principal_refs=(PrincipalRef(1, "ethereum", pauser.address),),
+        gates=(
+            {"freeze_recovery_principals": Tri.proven("enumerated", entries).to_json()} if entries is not None else {}
+        ),
+        **proven(FREEZE_CAPABILITY_PROVEN, ("freeze_capability_proven",)),
+        **reaches(KEY_C),
+    )
+    principals = {1: pauser}
+    if recovery is not None:
+        principals[2] = recovery
+    return fold([signal], principals=principals, value=value_plane({KEY_C: {"usdc": 5_000_000.0}}))
+
+
+class _Row:
+    """The columns ``_reduce_observations`` reads off a balance row."""
+
+    def __init__(self, usd, *, block=None, fetched=None, rid=0, raw="1000000"):
+        self.usd_value = usd
+        self.block_number = block
+        self.fetched_at = fetched
+        self.id = rid
+        self.raw_balance = raw
+
+
+def _reduce(**buckets):
+    return P._reduce_observations({("k", "asset"): {a: rows for a, rows in buckets.items()}})
+
+
+KEY_ZERO = entity_key("ethereum", "0x" + "0" * 40)
+
+
+def _perimeter_signal():
+    return sig(
+        authority_openness="restricted",
+        principal_state="enumerated",
+        principal_refs=(PrincipalRef(1, "ethereum", EOA),),
+        gates=bounded_by_sheet(1_000_000.0),
+        **proven(1.0),
+        **reaches(KEY_C),
+    )
+
+
+INITIATOR_GUARD = "initiator != address(this)"
+
+
+def _queue_signal(claim: str, **over: Any) -> FunctionSignal:
+    """One principal over the queue: the shape of the AtomicQueue finding."""
+    return sig(
+        claim_id=claim,
+        function_name="setAuthority",
+        deployment_address=C,
+        authority_openness="restricted",
+        principal_state="enumerated",
+        principal_refs=(PrincipalRef(1, "ethereum", EOA),),
+        **proven(0.75),
+        **reaches(KEY_C),
+        **over,
+    )
+
+
+def _var_edge(label, principal=None, anchor=None):
+    return P.ControlEdge(
+        principal=principal or KEY_C,
+        anchor=anchor or KEY_V,
+        relation="controller_value",
+        scope=P.parse_edge_scope(label, "controller_value"),
+        witness=P.EDGE_WITNESS_CONTROL_GRAPH,
+    )
+
+
+ACL_CALL_SITES = {(KEY_C, COMPOSED_SELECTOR): (("finishSolve", "restricted", "", True, CALLING_SELECTOR),)}
+ACL_ACCEPTED = P.DestinationAcceptance(
+    roles=(12,),
+    membership_quality="exact",
+    destination_function="bulkWithdraw",
+    function_principal_id=14279,
+)
+
+
+def _acl_plane(**over: Any) -> P.ActAsPlane:
+    case: dict[str, Any] = {
+        "call_sites": ACL_CALL_SITES,
+        "destination_acl": {(KEY_V, COMPOSED_SELECTOR): {KEY_C: ACL_ACCEPTED}},
+    }
+    case.update(over)
+    return act_as_plane(**case)

@@ -1,6 +1,6 @@
 """What each corpus fixture is FOR, asserted rather than implied.
 
-``tests/test_label_corpus.py`` proves the golden equals a fresh compile of every
+``tests/static/test_label_corpus.py`` proves the golden equals a fresh compile of every
 corpus contract. That is a change detector: it says the bytes moved, never what
 they were supposed to say. A fixture added for a shape the corpus was blind to is
 only a gate if something states the property it was added to hold — otherwise a
@@ -22,7 +22,7 @@ import pytest
 
 pytest.importorskip("slither")
 
-from tests.support import label_corpus as harness  # noqa: E402
+from tests.support import label_corpus as harness
 
 CONSTRAINED = "0x00000000000000000000000000000000000000b0"
 DELEGATECALL = "0x00000000000000000000000000000000000000c0"

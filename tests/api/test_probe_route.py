@@ -15,7 +15,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from tests.conftest import requires_postgres  # noqa: E402
+from tests.conftest import requires_postgres
 
 # ---------------------------------------------------------------------------
 # Fixture helpers

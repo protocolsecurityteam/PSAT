@@ -17,8 +17,8 @@ import pytest
 # Importing the policy-site module registers its policy-tier claim
 # (``transfer_policy.configure``) so the registry invariants below see it
 # deterministically regardless of test order.
-import services.effects.claims_bridge  # noqa: E402,F401  (registers authority.grant, minted only by the effects bridge)
-import services.static.cross_contract  # noqa: E402,F401
+import services.effects.claims_bridge
+import services.static.cross_contract  # noqa: F401
 from services.static.claims import (
     CONSUMER_REFERENCED_CLAIM_IDS,
     Claim,

@@ -23,8 +23,8 @@ from typing import cast
 import pytest
 from eth_utils.crypto import keccak
 
-from services.resolution import tracking  # noqa: E402
-from services.resolution.tracking import (  # noqa: E402
+from services.resolution import tracking
+from services.resolution.tracking import (
     _classify_uncached,
     _classify_uncached_batched,
     _resolve_pinned_block,

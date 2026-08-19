@@ -16,15 +16,15 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import MagicMock
 
-from db.models import Contract  # noqa: E402
-from services.effects.config import (  # noqa: E402
+from db.models import Contract
+from services.effects.config import (
     EFFECT_CLASS_CODE_UPGRADE,
     VERDICT_PROVEN,
     VERDICT_UNKNOWN,
 )
-from services.effects.orchestrator import ProbeContext, _code_upgrade_plans  # noqa: E402
-from services.effects.selection import Candidate  # noqa: E402
-from tests.support.effects_stubs import RecordingStore  # noqa: E402
+from services.effects.orchestrator import ProbeContext, _code_upgrade_plans
+from services.effects.selection import Candidate
+from tests.support.effects_stubs import RecordingStore
 
 IMPL = "0x" + "d1" * 20
 PROXY = "0x" + "35" * 20

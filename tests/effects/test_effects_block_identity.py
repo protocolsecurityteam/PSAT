@@ -36,28 +36,28 @@ from typing import Any
 
 import pytest
 
-from db.effect_cache import (  # noqa: E402
+from db.effect_cache import (
     DEPLOYMENT_PLANE_KEYS,
     code_plane_details,
 )
-from services.effects import recipes  # noqa: E402
-from services.effects.anvil import (  # noqa: E402
+from services.effects import recipes
+from services.effects.anvil import (
     EntryPoint,
     _build_anvil_cmd,
     fork_block_pin,
     pause_recipe,
 )
-from services.effects.claims_bridge import _observed_summary  # noqa: E402
-from services.effects.config import (  # noqa: E402
+from services.effects.claims_bridge import _observed_summary
+from services.effects.config import (
     BLOCK_SOURCE_INVOCATION_PIN,
     BLOCK_SOURCES,
     DURATION_BOUND_NOT_DETERMINED,
     EFFECT_CLASS_FREEZE_PAUSE,
     VERDICT_PROVEN,
 )
-from services.effects.harness import SimContext, new_transcript  # noqa: E402
-from services.effects.orchestrator import ProbeContext  # noqa: E402
-from tests.support.effects_stubs import (  # noqa: E402
+from services.effects.harness import SimContext, new_transcript
+from services.effects.orchestrator import ProbeContext
+from tests.support.effects_stubs import (
     GUARDED,
     PAUSE,
     RecordingStore,
@@ -67,7 +67,9 @@ from tests.support.effects_stubs import (  # noqa: E402
     transfer_log,
     uint_ret,
 )
-from workers.effects_worker import EffectsWorker, _Seams  # noqa: E402
+from workers.effects_worker import EffectsWorker, _Seams
+
+pytestmark = pytest.mark.anvil
 
 # The reference height every pinned read in the investigation reproduces at.
 PINNED_BLOCK = 25643300

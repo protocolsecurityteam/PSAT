@@ -25,9 +25,9 @@ import pytest
 from eth_utils.crypto import keccak
 
 pytest.importorskip("slither")
-from slither import Slither  # noqa: E402
+from slither import Slither
 
-from services.monitoring.event_topics import (  # noqa: E402
+from services.monitoring.event_topics import (
     WITNESS_TIER_ACTIVITY,
     WITNESS_TIER_HINT,
     WITNESS_TIER_SELF_DESCRIBING,
@@ -35,26 +35,26 @@ from services.monitoring.event_topics import (  # noqa: E402
     extract_governance_topics,
     parse_tracked_log,
 )
-from services.monitoring.polling_plan import build_polling_plan  # noqa: E402
-from services.resolution.tracking_plan import build_control_tracking_plan  # noqa: E402
-from services.static.contract_analysis_pipeline.effects import build_effects  # noqa: E402
-from services.static.contract_analysis_pipeline.mapping_events import (  # noqa: E402
+from services.monitoring.polling_plan import build_polling_plan
+from services.resolution.tracking_plan import build_control_tracking_plan
+from services.static.contract_analysis_pipeline.effects import build_effects
+from services.static.contract_analysis_pipeline.mapping_events import (
     discover_mapping_writer_events,
     member_witness_records,
     multi_entry_writers,
 )
-from services.static.contract_analysis_pipeline.predicate_artifacts import (  # noqa: E402
+from services.static.contract_analysis_pipeline.predicate_artifacts import (
     build_predicate_artifacts,
 )
-from services.static.contract_analysis_pipeline.summaries import (  # noqa: E402
+from services.static.contract_analysis_pipeline.summaries import (
     _build_semantic_control_summary,
 )
-from services.static.contract_analysis_pipeline.tracking import (  # noqa: E402
+from services.static.contract_analysis_pipeline.tracking import (
     _assembly_log_functions,
     _state_writers_from_effects,
     build_controller_tracking,
 )
-from utils.scoring_status import OPENNESS_VALUES  # noqa: E402
+from utils.scoring_status import OPENNESS_VALUES
 
 CORPUS_SOURCE = """
 pragma solidity ^0.8.19;

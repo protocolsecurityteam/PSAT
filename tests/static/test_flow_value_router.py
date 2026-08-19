@@ -21,7 +21,7 @@ real Teller/BoringVault shape, no external lib dependency):
     the boundary crossing, not the transfer, is what mints the router flow;
   * the vault, analysed as its OWN entry point, keeps plain ``in``/``out``.
 
-Precedent: ``tests/test_flow_interproc.py`` (same compile-with-Slither harness).
+Precedent: ``tests/static/test_flow_interproc.py`` (same compile-with-Slither harness).
 """
 
 from __future__ import annotations
@@ -36,6 +36,8 @@ from slither import Slither  # noqa: E402
 
 from services.static.claims import build_claims  # noqa: E402
 from services.static.contract_analysis_pipeline.effects import build_effects  # noqa: E402
+
+pytestmark = pytest.mark.compile
 
 # Router → Vault → token-first library transfer (SafeTransferLib idiom). The
 # library body does the real ERC-20 call, so the vault as a direct entry has

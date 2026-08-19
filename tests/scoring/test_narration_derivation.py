@@ -533,7 +533,7 @@ def _published_strings(document) -> list[tuple[str, str]]:
 
 
 @pytest.fixture()
-def republishing_document(fold):  # noqa: F811
+def republishing_document(fold):
     return CA.composed_document(
         fold,
         deletability=CA.deletability_plane(host=_DELETES_THE_VAULT_AUTHORITY),
@@ -589,7 +589,7 @@ def test_every_registered_arm_and_ceiling_carries_its_own_sentence():
     ],
     ids=["republished", "withheld"],
 )
-def test_case7_the_derived_readings_hold_on_a_subsumed_row_too(fold, deletability, key):  # noqa: F811
+def test_case7_the_derived_readings_hold_on_a_subsumed_row_too(fold, deletability, key):
     """§14 case 7 applied to case 8: ``_ComposedMagnitude.as_json`` and
     ``_WithheldComposition.as_json`` have no findings/subsumed branch, and this
     asserts the consequence on the population three earlier passes never
@@ -897,7 +897,7 @@ def test_the_ceiling_source_readings_are_a_closed_keyed_vocabulary():
     assert "determined reading" in FOLD._SHEET_CEILING_DIRECTION_BASIS[True]
 
 
-def _proven_empty_ceiling_row(fold):  # noqa: F811
+def _proven_empty_ceiling_row(fold):
     """The smallest real fold that publishes a proven-empty sheet ceiling."""
     signal = sig(
         authority_openness="restricted",
@@ -915,7 +915,7 @@ def _proven_empty_ceiling_row(fold):  # noqa: F811
     return _cc_row(document)["reach_sheet_ceiling_magnitudes"][0], plane
 
 
-def test_a_proven_empty_ceiling_reads_its_own_admission_and_not_the_priced_one(fold):  # noqa: F811
+def test_a_proven_empty_ceiling_reads_its_own_admission_and_not_the_priced_one(fold):
     """The published sentence is the one keyed by what actually admitted it."""
     entry, _ = _proven_empty_ceiling_row(fold)
     assert entry["ceiling_reason"] == P.CEILING_PROVEN_EMPTY
@@ -926,7 +926,7 @@ def test_a_proven_empty_ceiling_reads_its_own_admission_and_not_the_priced_one(f
     assert "priced holdings" not in entry["reading"]
 
 
-def test_the_direction_basis_on_a_proven_empty_row_states_what_was_observed(fold):  # noqa: F811
+def test_the_direction_basis_on_a_proven_empty_row_states_what_was_observed(fold):
     """The coverage sentence has to be true of a witnessed ZERO, not only of a price."""
     entry, _ = _proven_empty_ceiling_row(fold)
     assert entry["bound_direction"] == FOLD.BOUND_DIRECTION_CEILING
@@ -937,7 +937,7 @@ def test_the_direction_basis_on_a_proven_empty_row_states_what_was_observed(fold
     assert entry["assets_not_priced"] == [] and entry["unpriced_positions"] == 0
 
 
-def test_the_completeness_block_on_a_ceiling_row_is_the_carriers_own_record(fold):  # noqa: F811
+def test_the_completeness_block_on_a_ceiling_row_is_the_carriers_own_record(fold):
     """#171: what the document says about a scan is what the scan's record said.
 
     The basis strings are the producer's ``asset_set_basis`` values, copied and
@@ -977,7 +977,7 @@ DELIVERED = {
 }
 
 
-def _airdrop_determined_ceiling_row(fold):  # noqa: F811
+def _airdrop_determined_ceiling_row(fold):
     """The smallest real fold that publishes a DISPOSED sheet ceiling."""
     signal = sig(
         authority_openness="restricted",
@@ -992,7 +992,7 @@ def _airdrop_determined_ceiling_row(fold):  # noqa: F811
     return _cc_row(document)["reach_sheet_ceiling_magnitudes"][0], plane
 
 
-def test_a_disposed_ceiling_publishes_only_what_its_carrier_record_proves(fold):  # noqa: F811
+def test_a_disposed_ceiling_publishes_only_what_its_carrier_record_proves(fold):
     """#171 walked end to end on a real DISPOSED carrier.
 
     The row's every claim has to come off the delivery evidence the plane copied
@@ -1078,7 +1078,7 @@ def test_a_disposed_ceiling_publishes_only_what_its_carrier_record_proves(fold):
         assert banned not in entry["reading"].lower()
 
 
-def _priced_but_partly_unpriced_ceiling_row(fold):  # noqa: F811
+def _priced_but_partly_unpriced_ceiling_row(fold):
     """A sheet ceiling refused for the ORDINARY reason: a row nobody priced."""
     signal = sig(
         authority_openness="restricted",
@@ -1096,7 +1096,7 @@ def _priced_but_partly_unpriced_ceiling_row(fold):  # noqa: F811
     ]
 
 
-def _priced_sheet_with_a_disposed_row(fold):  # noqa: F811
+def _priced_sheet_with_a_disposed_row(fold):
     """The live $575M proxy's shape: an ADMITTED ceiling whose coverage fails on
     the LIST conjunct alone — every reading priced or disposed, nothing unpriced,
     and no scan proving the list whole."""
@@ -1117,7 +1117,7 @@ def _priced_sheet_with_a_disposed_row(fold):  # noqa: F811
     ]
 
 
-def test_the_reading_and_the_direction_publish_ONE_derived_shortfall(fold):  # noqa: F811
+def test_the_reading_and_the_direction_publish_ONE_derived_shortfall(fold):
     """Two surfaces, one fact, one derivation — which is what stops them drifting.
 
     The row publishes its coverage shortfall twice: as the reason its direction
@@ -1170,7 +1170,7 @@ def test_the_reading_and_the_direction_publish_ONE_derived_shortfall(fold):  # n
     assert FOLD._CEILING_COVERAGE_SHORTFALL_PREFIX not in whole["reading"]
 
 
-def test_the_refused_direction_names_the_conjunct_that_actually_failed(fold):  # noqa: F811
+def test_the_refused_direction_names_the_conjunct_that_actually_failed(fold):
     """The direction basis is derived, because a constant was false of its carrier.
 
     ``complete`` is a conjunction of three, and the shipped sentence named two
@@ -1202,7 +1202,7 @@ def test_the_refused_direction_names_the_conjunct_that_actually_failed(fold):  #
                 assert concept in entry, concept
 
 
-def test_a_ceiling_row_stops_counting_a_disposed_asset_as_a_priced_one(fold):  # noqa: F811
+def test_a_ceiling_row_stops_counting_a_disposed_asset_as_a_priced_one(fold):
     """``assets_priced`` was ``observed - not_priced``, and a disposed reading is
     in neither term — so a sheet whose every asset arrived by mass distribution
     published 140 of 140 priced beside $0. The three counts partition the
@@ -1221,7 +1221,7 @@ def test_a_ceiling_row_stops_counting_a_disposed_asset_as_a_priced_one(fold):  #
     assert unpriced["assets_disposed"] == [] and unpriced["assets_priced"] == 1
 
 
-def test_no_proven_empty_narration_names_a_concept_the_row_does_not_publish(fold):  # noqa: F811
+def test_no_proven_empty_narration_names_a_concept_the_row_does_not_publish(fold):
     """The suite's standing rule, applied to the strings this run added."""
     entry, _ = _proven_empty_ceiling_row(fold)
     published = set(entry)

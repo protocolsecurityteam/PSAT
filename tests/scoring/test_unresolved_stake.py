@@ -154,7 +154,7 @@ def test_levers_rank_on_the_points_ceiling_then_dollars():
     assert all("net_points_lambda" not in e for e in rollup["levers"])
 
 
-def test_the_fold_stamps_the_row_and_publishes_the_rollup(fold):  # noqa: F811
+def test_the_fold_stamps_the_row_and_publishes_the_rollup(fold):
     signal = sig(
         claim_id="authority.replace",
         authority_openness="restricted",

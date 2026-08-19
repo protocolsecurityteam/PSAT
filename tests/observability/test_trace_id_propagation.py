@@ -22,7 +22,7 @@ import uuid
 
 from sqlalchemy import select
 
-from tests.cache_helpers import requires_postgres  # noqa: E402
+from tests.cache_helpers import requires_postgres
 
 
 @requires_postgres

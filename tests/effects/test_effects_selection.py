@@ -1274,6 +1274,7 @@ def _dev_engine():
         return None
 
 
+@pytest.mark.dev_db
 def test_appendix_a_funnel_on_dev_db():
     """Reproduce the selection funnel + gate-lift partition for etherfi (protocol_id=1).
 

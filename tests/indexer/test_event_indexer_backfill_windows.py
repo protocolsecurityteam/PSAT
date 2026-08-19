@@ -22,12 +22,12 @@ from datetime import datetime, timezone
 from typing import Sequence
 
 import pytest
-from sqlalchemy import delete, func, select, update  # noqa: E402
+from sqlalchemy import delete, func, select, update
 
-from services.resolution.repos.event_logs_rpc import FetchedEventLog  # noqa: E402
-from tests.conftest import DATABASE_URL as _DB_URL  # noqa: E402
+from services.resolution.repos.event_logs_rpc import FetchedEventLog
+from tests.conftest import DATABASE_URL as _DB_URL
 from tests.conftest import _can_connect, requires_postgres
-from workers.event_log_indexer import enroll_event_cursor, scan_enrolled_events  # noqa: E402
+from workers.event_log_indexer import enroll_event_cursor, scan_enrolled_events
 
 # A single eth_getLogs / bulk insert blows up past this many blocks in one shot.
 # The indexer must never hand the fetcher a wider window than this.

@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import pytest
 
-from db.models import Artifact, Job, JobStatus  # noqa: E402
-from db.queue import create_job, fail_job_terminal  # noqa: E402
-from tests.cache_helpers import requires_postgres  # noqa: E402
+from db.models import Artifact, Job, JobStatus
+from db.queue import create_job, fail_job_terminal
+from tests.cache_helpers import requires_postgres
 
 
 @pytest.fixture()

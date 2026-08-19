@@ -8,7 +8,7 @@ Requires:
   - anvil, cast, forge (from Foundry) on PATH
 
 Run with:
-    uv run pytest tests/test_unified_watcher_anvil.py -v --timeout=120
+    uv run pytest tests/monitoring/test_unified_watcher_anvil.py -v --timeout=120
 """
 
 from __future__ import annotations
@@ -60,6 +60,8 @@ pytestmark = [
     pytest.mark.skipif(not _has_cast, reason="cast not found on PATH"),
     pytest.mark.skipif(not _has_forge, reason="forge not found on PATH"),
     requires_postgres,
+    pytest.mark.anvil,
+    pytest.mark.compile,
 ]
 
 

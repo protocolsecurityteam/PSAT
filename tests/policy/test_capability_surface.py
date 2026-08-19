@@ -9,7 +9,7 @@ fall through to the residual sink (the old dead-end that left it under-resolved,
 
 from __future__ import annotations
 
-from services.policy.capability_surface import (  # noqa: E402
+from services.policy.capability_surface import (
     capability_surface_status,
     project_capability_surface,
 )

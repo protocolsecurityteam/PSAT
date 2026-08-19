@@ -257,7 +257,7 @@ def test_a_disposed_sheet_holds_a_determined_zero_and_still_trims_nothing():
         assert other.trimming_total(KEY) == other.total(KEY)
 
 
-def test_a_disposed_sheet_refuses_to_bound_a_witness_and_publishes_why(fold):  # noqa: F811
+def test_a_disposed_sheet_refuses_to_bound_a_witness_and_publishes_why(fold):
     """The refusal walked through a real fold, to its published surface.
 
     ``SHEET_BOUND_REFUSED_BY_DISPOSITION`` is the token for the one case where a
@@ -292,7 +292,7 @@ def test_a_disposed_sheet_refuses_to_bound_a_witness_and_publishes_why(fold):  #
     assert "never about what they are worth" in entries[0]["reading"]
 
 
-def test_an_exact_witness_names_the_same_refusal_a_floor_one_does(fold):  # noqa: F811
+def test_an_exact_witness_names_the_same_refusal_a_floor_one_does(fold):
     """The symmetry, closed: the refusal is the SHEET's, so the witness state
     cannot decide whether it is named.
 

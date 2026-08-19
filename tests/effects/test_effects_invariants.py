@@ -14,14 +14,14 @@ from decimal import Decimal
 
 import pytest
 
-from db import effect_cache  # noqa: E402
-from db.effect_cache import (  # noqa: E402
+from db import effect_cache
+from db.effect_cache import (
     KERNEL_SURFACE_SENTINEL,
     find_cached_verdict,
     kernel_verdicts_agree,
     upsert_cached_verdict,
 )
-from db.models import (  # noqa: E402
+from db.models import (
     Contract,
     EffectBehaviorCache,
     EffectiveFunction,
@@ -29,23 +29,25 @@ from db.models import (  # noqa: E402
     JobStage,
     Protocol,
 )
-from services.effects import anvil, recipes  # noqa: E402
-from services.effects.config import (  # noqa: E402
+from services.effects import anvil, recipes
+from services.effects.config import (
     effects_stage_enabled,
 )
-from services.effects.hashing import resolved_function_hash  # noqa: E402
-from services.effects.preflight import (  # noqa: E402
+from services.effects.hashing import resolved_function_hash
+from services.effects.preflight import (
     InMemoryCapabilityStore,
     probe_simulate_support,
 )
-from services.effects.selection import AuthorityGraph, select_candidates  # noqa: E402
-from tests.cache_helpers import requires_postgres  # noqa: E402
-from tests.support.effects_ir import _fn, _ir, _node, _var  # noqa: E402
+from services.effects.selection import AuthorityGraph, select_candidates
+from tests.cache_helpers import requires_postgres
+from tests.support.effects_ir import _fn, _ir, _node, _var
 
 # Shared structural doubles + scripted stubs from the harness tests.
-from tests.support.effects_stubs import CTX, RecordingStore, ScriptedSimulate, ok, transfer_log, uint_ret  # noqa: E402
-from workers.base import _resolve_job_concurrency  # noqa: E402
-from workers.effects_worker import EffectsWorker  # noqa: E402
+from tests.support.effects_stubs import CTX, RecordingStore, ScriptedSimulate, ok, transfer_log, uint_ret
+from workers.base import _resolve_job_concurrency
+from workers.effects_worker import EffectsWorker
+
+pytestmark = pytest.mark.anvil
 
 CONTRACT = "0x" + "11" * 20
 PRINCIPAL = "0x" + "22" * 20

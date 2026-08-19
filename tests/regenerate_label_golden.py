@@ -10,7 +10,7 @@ It compiles every corpus contract (all pinned to solc 0.8.27, installed via
 solc-select) and overwrites ``tests/fixtures/label_corpus/golden.json``. Commit
 the resulting diff alongside the producer change so the A/B gate records the
 intended update. ``--check`` recomputes without writing and exits non-zero on any
-drift — the same assertion ``tests/test_label_corpus.py`` makes.
+drift — the same assertion ``tests/static/test_label_corpus.py`` makes.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from tests.support import label_corpus as harness  # noqa: E402
+from tests.support import label_corpus as harness
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -24,7 +24,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.conftest import SessionFactory, requires_postgres, requires_storage  # noqa: E402
+from tests.conftest import SessionFactory, requires_postgres, requires_storage
 
 pytestmark = [
     requires_postgres,

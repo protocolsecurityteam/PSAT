@@ -21,7 +21,7 @@ What this does NOT assert: the deferred-resolution reconciler's async cold→war
 heal. That waits on the authority's full event backfill (minutes) and the preview
 tears its workers down right after the suite, so it can't complete in-window. The
 cold→warm transition is pinned deterministically offline in
-``tests/test_deferred_resolution_reconcile.py``.
+``tests/resolution/test_deferred_resolution_reconcile.py``.
 """
 
 from __future__ import annotations

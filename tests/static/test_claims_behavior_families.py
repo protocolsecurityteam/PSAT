@@ -22,7 +22,7 @@ import pytest
 
 pytest.importorskip("slither")
 
-from tests.support.label_corpus import SolcNotInstalled, claims_for_address  # noqa: E402
+from tests.support.label_corpus import SolcNotInstalled, claims_for_address
 
 # address -> name of every corpus contract these tests touch.
 TOKEN = "0x0000000000000000000000000000000000000010"

@@ -18,13 +18,13 @@ import uuid
 from datetime import datetime, timezone
 
 import pytest
-from sqlalchemy import func, select  # noqa: E402
+from sqlalchemy import func, select
 
-from services.resolution.repos.event_logs_rpc import FetchedEventLog  # noqa: E402
-from tests.conftest import DATABASE_URL as _DB_URL  # noqa: E402
+from services.resolution.repos.event_logs_rpc import FetchedEventLog
+from tests.conftest import DATABASE_URL as _DB_URL
 from tests.conftest import _can_connect, requires_postgres
-from tests.support.solmate_trees import _SOLMATE_CANCALL_TREES  # noqa: E402
-from workers.event_log_indexer import (  # noqa: E402
+from tests.support.solmate_trees import _SOLMATE_CANCALL_TREES
+from workers.event_log_indexer import (
     _SOLMATE_ROLE_TOPICS,
     enroll_event_cursor,
     enroll_from_completed_jobs,

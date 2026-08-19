@@ -20,7 +20,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from tests.conftest import requires_postgres  # noqa: E402
+from tests.conftest import requires_postgres
 
 
 def _addr() -> str:

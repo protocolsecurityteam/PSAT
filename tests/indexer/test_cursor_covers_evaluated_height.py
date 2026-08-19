@@ -27,22 +27,22 @@ from typing import Any
 
 import pytest
 
-from db.models import IndexedEventCursor, IndexedEventLog  # noqa: E402
-from services.resolution import capability_resolver  # noqa: E402
-from services.resolution.adapters import EvaluationContext  # noqa: E402
-from services.resolution.adapters.event_indexed import EventIndexedAdapter  # noqa: E402
-from services.resolution.capabilities import negate  # noqa: E402
-from services.resolution.capability_resolver import (  # noqa: E402
+from db.models import IndexedEventCursor, IndexedEventLog
+from services.resolution import capability_resolver
+from services.resolution.adapters import EvaluationContext
+from services.resolution.adapters.event_indexed import EventIndexedAdapter
+from services.resolution.capabilities import negate
+from services.resolution.capability_resolver import (
     RESOLVER_FINALITY_MARGIN,
     _resolve_resolution_block,
 )
-from services.resolution.repos.event_logs_hypersync import HyperSyncEventLogRepo  # noqa: E402
-from services.resolution.repos.event_logs_pg import (  # noqa: E402
+from services.resolution.repos.event_logs_hypersync import HyperSyncEventLogRepo
+from services.resolution.repos.event_logs_pg import (
     PostgresEventLogRepo,
     _cursor_covers_block,
     _row_ceiling,
 )
-from tests.conftest import requires_postgres  # noqa: E402
+from tests.conftest import requires_postgres
 
 
 # Pure-function units (no DB) for the two coverage helpers.

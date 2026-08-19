@@ -23,9 +23,9 @@ from typing import Any, cast
 
 import pytest
 
-import services.resolution.creation_block_floor as floor_mod  # noqa: E402
-from services.resolution import mapping_enumerator  # noqa: E402
-from services.resolution.repos.event_logs_hypersync import HyperSyncEventLogRepo  # noqa: E402
+import services.resolution.creation_block_floor as floor_mod
+from services.resolution import mapping_enumerator
+from services.resolution.repos.event_logs_hypersync import HyperSyncEventLogRepo
 
 _REPO = Path(__file__).resolve().parents[2]
 

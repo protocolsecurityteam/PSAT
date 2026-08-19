@@ -22,15 +22,15 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from services.resolution.adapters import AdapterRegistry, CallFrame, EvaluationContext  # noqa: E402
-from services.resolution.adapters.event_indexed import EventIndexedAdapter  # noqa: E402
-from services.resolution.adapters.solmate_roles import (  # noqa: E402
+from services.resolution.adapters import AdapterRegistry, CallFrame, EvaluationContext
+from services.resolution.adapters.event_indexed import EventIndexedAdapter
+from services.resolution.adapters.solmate_roles import (
     _OTHER_CANCALL_STANDARD_SELECTORS,
     _ROLES_AUTHORITY_MARKER_SELECTORS,
     CANCALL_SIGNATURE,
     SolmateRolesAuthorityAdapter,
 )
-from services.resolution.capabilities import CapabilityExpr  # noqa: E402
+from services.resolution.capabilities import CapabilityExpr
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "solmate" / "roles_authority_3994741a.json"
 SAFE_4_6 = "0xcea8039076e35a825854c5c2f85659430b06ec96"

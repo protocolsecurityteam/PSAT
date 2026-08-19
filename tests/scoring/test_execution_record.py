@@ -377,7 +377,7 @@ def _charged(state: str, usd: float = 5_000.0, *keys: str) -> FunctionSignal:
     )
 
 
-def _eoa_finding(fold, signal: FunctionSignal, plane: P.ValuePlane) -> dict[str, Any]:  # noqa: F811
+def _eoa_finding(fold, signal: FunctionSignal, plane: P.ValuePlane) -> dict[str, Any]:
     return fold([signal], principals={1: facts(1, EOA, "eoa")}, value=plane).findings[0]
 
 
@@ -423,7 +423,7 @@ def test_case4_the_genuine_floor_path_keeps_its_floor():
     assert reach.basis == "observed_reach_priced_usd(>= floor)"
 
 
-def test_case4_the_upper_bound_token_is_readable_by_the_fold(fold):  # noqa: F811
+def test_case4_the_upper_bound_token_is_readable_by_the_fold(fold):
     """Registration, not cosmetics: a state outside ``GATE_PROVEN_TOKENS`` is
     MALFORMED, so leaving the token unregistered would take every
     attribution-derived magnitude out at once and call it a relabel."""
@@ -437,7 +437,7 @@ def test_case4_the_upper_bound_token_is_readable_by_the_fold(fold):  # noqa: F81
 # --- regression case 5 (and case 7's subsumed parity) -----------------------
 
 
-def test_case5_a_coverage_gap_over_an_attribution_derived_figure_earns_no_floor(fold):  # noqa: F811
+def test_case5_a_coverage_gap_over_an_attribution_derived_figure_earns_no_floor(fold):
     """Regression case 5. The row's only contribution bounds the principal from
     ABOVE and a gap in coverage cannot turn that into an at-least."""
     finding = _eoa_finding(fold, *_gapped_row(MAGNITUDE_STATE_PROVEN_UPPER_BOUND))
@@ -449,7 +449,7 @@ def test_case5_a_coverage_gap_over_an_attribution_derived_figure_earns_no_floor(
     assert finding["value_at_stake_usd"] == 5_000.0
 
 
-def test_case5_a_genuine_floor_under_the_same_gap_still_earns_it(fold):  # noqa: F811
+def test_case5_a_genuine_floor_under_the_same_gap_still_earns_it(fold):
     """The other arm, so the test above cannot pass by never granting a floor."""
     finding = _eoa_finding(fold, *_gapped_row(MAGNITUDE_STATE_PROVEN_FLOOR))
     assert finding["value_at_stake_bound_direction"] == FOLD.BOUND_DIRECTION_FLOOR
@@ -457,7 +457,7 @@ def test_case5_a_genuine_floor_under_the_same_gap_still_earns_it(fold):  # noqa:
     assert finding["value_band"].startswith(">= ")
 
 
-def test_case5_holds_on_a_subsumed_row_too(fold):  # noqa: F811
+def test_case5_holds_on_a_subsumed_row_too(fold):
     """Case 7's parity clause: three investigation passes have silently measured
     findings only."""
     common: dict[str, Any] = dict(
@@ -493,7 +493,7 @@ def _unbounded_row(state: str) -> tuple[FunctionSignal, P.ValuePlane]:
     return _charged(state), value_plane({}, contracts=(KEY_C,))
 
 
-def test_an_upper_bound_over_an_unpriced_sheet_is_never_disclosed_as_a_floor(fold):  # noqa: F811
+def test_an_upper_bound_over_an_unpriced_sheet_is_never_disclosed_as_a_floor(fold):
     """The direction-earned key, pinned. A floor and an attribution-derived upper
     bound charged against an entity with no priced sheet are the SAME arithmetic
     and OPPOSITE claims, and publishing the second under ``witnessed_floor_usd``
@@ -511,7 +511,7 @@ def test_an_upper_bound_over_an_unpriced_sheet_is_never_disclosed_as_a_floor(fol
     assert finding["value_at_stake_usd"] == 5_000.0
 
 
-def test_a_floor_over_an_unpriced_sheet_keeps_its_own_name_verbatim(fold):  # noqa: F811
+def test_a_floor_over_an_unpriced_sheet_keeps_its_own_name_verbatim(fold):
     """The twin, so the assertion above cannot pass by never using either key."""
     note = _eoa_finding(fold, *_unbounded_row(MAGNITUDE_STATE_PROVEN_FLOOR))["unbounded_floor_magnitudes"][0]
     assert note["witness_state"] == MAGNITUDE_STATE_PROVEN_FLOOR
@@ -526,7 +526,7 @@ def _two_key_row(state: str) -> tuple[FunctionSignal, P.ValuePlane]:
     return _charged(state, 3_000.0, KEY_C, KEY_V), value_plane({KEY_C: {"usdc": 2_000.0}, KEY_V: {"usdc": 2_000.0}})
 
 
-def test_an_upper_bound_is_refused_across_two_keys_rather_than_apportioned(fold):  # noqa: F811
+def test_an_upper_bound_is_refused_across_two_keys_rather_than_apportioned(fold):
     """An EXACT witness bounds the whole call, so its keys may consume it as a
     budget. An upper bound may not: split across two entities with no
     apportionment witness it would attribute up to the WHOLE bound at each.
@@ -547,7 +547,7 @@ def test_an_upper_bound_is_refused_across_two_keys_rather_than_apportioned(fold)
     assert cap["uncapped_sum_usd"] == 4_000.0
 
 
-def test_an_exact_witness_over_two_keys_still_apportions(fold):  # noqa: F811
+def test_an_exact_witness_over_two_keys_still_apportions(fold):
     """The twin: the refusal above must be about the STATE, not the two-key shape."""
     finding = _eoa_finding(fold, *_two_key_row(MAGNITUDE_STATE_PROVEN_EXACT))
     assert finding["value_at_stake_usd"] == 3_000.0
@@ -592,13 +592,13 @@ def _composing_signals(execution_payload: dict[str, Any] | None) -> list[Functio
     ]
 
 
-def _composed(fold, payload):  # noqa: F811
+def _composed(fold, payload):
     document = fold(_composing_signals(payload), principals=RT._composing_principals(), **RT._composing_case())
     row = next(f for f in document.findings if f["capability"] == "authority.replace")
     return row["reach_composed_magnitudes"][0]
 
 
-def test_a_composed_entry_publishes_the_execution_it_has(fold):  # noqa: F811
+def test_a_composed_entry_publishes_the_execution_it_has(fold):
     """The invariant, end to end: a published magnitude names the call that
     produced it, and the route it claims is compared against that call."""
     payload = EX.from_residue(
@@ -640,7 +640,7 @@ def test_a_composed_entry_publishes_the_execution_it_has(fold):  # noqa: F811
     assert route["verdict"] == EX.ROUTE_MISMATCH
 
 
-def test_a_composed_entry_with_no_record_publishes_the_typed_reason(fold):  # noqa: F811
+def test_a_composed_entry_with_no_record_publishes_the_typed_reason(fold):
     """The state every entry on the reference corpus is in today: the figure is
     still published — withholding it is the composition rule's decision — but the
     entry says the execution behind it is not_determined and where to look."""

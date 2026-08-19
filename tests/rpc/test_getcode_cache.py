@@ -33,7 +33,7 @@ def _isolated_cache(monkeypatch):
     # The cross-process PG bytecode layer would inject an extra eth_chainId
     # discovery call into every test in this file (which counts rpc_request
     # invocations). Pin it off; PG-cache behaviour is covered separately in
-    # tests/test_bytecode_pg_cache.py.
+    # tests/rpc/test_bytecode_pg_cache.py.
     monkeypatch.setattr(rpc, "_PG_BYTECODE_CACHE_ENABLED", False)
     rpc.clear_getcode_cache()
     yield

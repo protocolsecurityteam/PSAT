@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from tests.conftest import requires_postgres  # noqa: E402
+from tests.conftest import requires_postgres
 
 
 def _no_auth(api_module):

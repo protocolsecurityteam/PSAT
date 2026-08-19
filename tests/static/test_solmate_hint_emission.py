@@ -8,12 +8,12 @@ from __future__ import annotations
 
 from typing import cast
 
-from eth_utils.crypto import keccak  # noqa: E402
+from eth_utils.crypto import keccak
 
-from services.static.contract_analysis_pipeline.predicate_artifacts import (  # noqa: E402
+from services.static.contract_analysis_pipeline.predicate_artifacts import (
     apply_solmate_authority_hint_pass,
 )
-from services.static.contract_analysis_pipeline.predicate_types import PredicateTree  # noqa: E402
+from services.static.contract_analysis_pipeline.predicate_types import PredicateTree
 
 
 def _t0(signature: str) -> str:

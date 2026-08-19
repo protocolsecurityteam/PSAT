@@ -21,10 +21,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pytest
-from sqlalchemy import text  # noqa: E402
-from sqlalchemy.exc import IntegrityError  # noqa: E402
+from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 
-from db.models import (  # noqa: E402
+from db.models import (
     Contract,
     FunctionScoreSignal,
     Job,
@@ -32,12 +32,12 @@ from db.models import (  # noqa: E402
     ProtocolScore,
     ProtocolScoreLatest,
 )
-from services.aggregations.company_overview import _entity_key as canon_entity_key  # noqa: E402
-from services.scoring.population import (  # noqa: E402
+from services.aggregations.company_overview import _entity_key as canon_entity_key
+from services.scoring.population import (
     current_signals_for_protocol,
     replace_contract_signals,
 )
-from services.scoring.schema import (  # noqa: E402
+from services.scoring.schema import (
     NOT_DETERMINED,
     FunctionSignal,
     PrincipalRef,
@@ -50,7 +50,7 @@ from services.scoring.schema import (  # noqa: E402
     signal_from_row,
     signal_to_row_kwargs,
 )
-from utils.scoring_status import (  # noqa: E402
+from utils.scoring_status import (
     DESTINATION_BEARING_CLAIMS,
     DESTINATION_SHAPE_NOT_APPLICABLE,
     DESTINATION_STATE_NOT_APPLICABLE,

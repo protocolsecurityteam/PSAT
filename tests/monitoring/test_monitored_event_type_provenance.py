@@ -17,12 +17,12 @@ from datetime import datetime, timezone
 import pytest
 from eth_utils.crypto import keccak
 
-from services.monitoring.event_topics import (  # noqa: E402
+from services.monitoring.event_topics import (
     _resolve_event_type,
     extract_governance_topics,
     parse_tracked_log,
 )
-from tests.conftest import requires_postgres  # noqa: E402
+from tests.conftest import requires_postgres
 
 
 def _topic0(signature: str) -> str:

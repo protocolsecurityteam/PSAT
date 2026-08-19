@@ -23,6 +23,8 @@ from services.effects.hashing import (
 )
 from tests.support.effects_ir import _fn, _ir, _node, _var
 
+pytestmark = pytest.mark.compile
+
 
 def test_override_hashes_differently_from_mixin_structural():
     """inv. 2: a stricter override (extra require gate) MUST hash apart from the

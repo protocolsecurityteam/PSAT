@@ -18,11 +18,11 @@ from typing import Any
 
 import pytest
 
-from db import contract_materializations as cm  # noqa: E402
-from db.contract_materializations import ANALYSIS_SCHEMA_VERSION  # noqa: E402
-from db.models import ContractMaterialization  # noqa: E402
-from services.discovery.fetch import source_content_hash  # noqa: E402
-from tests.conftest import requires_postgres  # noqa: E402
+from db import contract_materializations as cm
+from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
+from db.models import ContractMaterialization
+from services.discovery.fetch import source_content_hash
+from tests.conftest import requires_postgres
 
 ADDR_MAINNET = "0x" + "a1" * 20
 ADDR_BASE = "0x" + "b2" * 20

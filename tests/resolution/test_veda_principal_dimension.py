@@ -42,12 +42,12 @@ from pathlib import Path
 
 import pytest
 
-from services.resolution.capabilities import CapabilityExpr, Condition, ExternalCheck  # noqa: E402
-from services.resolution.deferred_reconciler import (  # noqa: E402
+from services.resolution.capabilities import CapabilityExpr, Condition, ExternalCheck
+from services.resolution.deferred_reconciler import (
     DEFERRED_MARKER,
     _iter_deferred_authorities,
 )
-from tests.conftest import DATABASE_URL as _DB_URL  # noqa: E402
+from tests.conftest import DATABASE_URL as _DB_URL
 from tests.conftest import _can_connect, requires_postgres
 
 _FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "solmate" / "veda_teller_stack.json"

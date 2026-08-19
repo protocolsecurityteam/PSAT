@@ -21,12 +21,12 @@ from typing import Any, cast
 
 import pytest
 
-import services.resolution.mapping_enumerator as mapping_enumerator  # noqa: E402
-from db.models import IndexedEventCursor, IndexedEventLog  # noqa: E402
-from services.resolution.adapters import EvaluationContext  # noqa: E402
-from services.resolution.adapters.event_indexed import EventIndexedAdapter  # noqa: E402
-from services.resolution.repos.event_logs_pg import PostgresEventLogRepo  # noqa: E402
-from tests.conftest import requires_postgres  # noqa: E402
+import services.resolution.mapping_enumerator as mapping_enumerator
+from db.models import IndexedEventCursor, IndexedEventLog
+from services.resolution.adapters import EvaluationContext
+from services.resolution.adapters.event_indexed import EventIndexedAdapter
+from services.resolution.repos.event_logs_pg import PostgresEventLogRepo
+from tests.conftest import requires_postgres
 
 pytestmark = requires_postgres
 

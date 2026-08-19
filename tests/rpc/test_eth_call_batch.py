@@ -27,7 +27,7 @@ class _FakeSession:
         self._payload = payload
         self.posted: Any = None
 
-    def post(self, url, json=None, timeout=None, headers=None):  # noqa: A002
+    def post(self, url, json=None, timeout=None, headers=None):
         self.posted = json
         return _FakeResponse(self._payload)
 

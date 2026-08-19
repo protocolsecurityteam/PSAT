@@ -18,10 +18,10 @@ from typing import Any
 import pytest
 
 pytest.importorskip("slither")
-from slither import Slither  # noqa: E402
+from slither import Slither
 
-from services.static.contract_analysis_pipeline.effects import build_effects  # noqa: E402
-from services.static.contract_analysis_pipeline.summaries import _extract_value_flows  # noqa: E402
+from services.static.contract_analysis_pipeline.effects import build_effects
+from services.static.contract_analysis_pipeline.summaries import _extract_value_flows
 
 
 def _compile(tmp_path: Path, source: str, name: str):

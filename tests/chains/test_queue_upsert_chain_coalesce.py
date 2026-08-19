@@ -21,7 +21,7 @@ import uuid
 
 import pytest
 
-from tests.conftest import requires_postgres  # noqa: E402
+from tests.conftest import requires_postgres
 
 
 def _addr() -> str:

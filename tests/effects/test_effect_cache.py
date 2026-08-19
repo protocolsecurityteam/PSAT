@@ -10,8 +10,8 @@ from typing import Any
 
 import pytest
 
-from db import effect_cache  # noqa: E402
-from db.effect_cache import (  # noqa: E402
+from db import effect_cache
+from db.effect_cache import (
     EFFECT_CACHE_SCHEMA_VERSION,
     KERNEL_SURFACE_SENTINEL,
     find_cached_verdict,
@@ -20,8 +20,8 @@ from db.effect_cache import (  # noqa: E402
     record_effect_verdict,
     upsert_cached_verdict,
 )
-from db.models import Contract, EffectBehaviorCache, EffectiveFunction, EffectVerdict  # noqa: E402
-from tests.cache_helpers import requires_postgres  # noqa: E402
+from db.models import Contract, EffectBehaviorCache, EffectiveFunction, EffectVerdict
+from tests.cache_helpers import requires_postgres
 
 KERNEL = "kernel"
 PROJECTION = "projection"

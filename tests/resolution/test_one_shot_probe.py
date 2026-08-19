@@ -11,14 +11,14 @@ exists to kill).
 
 from __future__ import annotations
 
-from eth_utils.crypto import keccak  # noqa: E402
+from eth_utils.crypto import keccak
 
-from services.resolution.one_shot_probe import (  # noqa: E402
+from services.resolution.one_shot_probe import (
     EIP1967_IMPL_SLOT,
     annotate_capability_one_shot,
     resolve_one_shot_state,
 )
-from tests.support.rpc_stubs import FakeRpc, _word  # noqa: E402
+from tests.support.rpc_stubs import FakeRpc, _word
 
 PROXY = "0x" + "11" * 20
 IMPL = "0x" + "22" * 20

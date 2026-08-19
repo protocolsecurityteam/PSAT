@@ -5,13 +5,13 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any, cast
 
-from services.resolution.adapters import (  # noqa: E402
+from services.resolution.adapters import (
     AdapterRegistry,
     EnumerationResult,
     EvaluationContext,
 )
-from services.resolution.adapters.event_indexed import EventIndexedAdapter  # noqa: E402
-from services.resolution.repos.event_logs_pg import PostgresEventLogRepo  # noqa: E402
+from services.resolution.adapters.event_indexed import EventIndexedAdapter
+from services.resolution.repos.event_logs_pg import PostgresEventLogRepo
 
 ADDR_A = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 ADDR_B = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"

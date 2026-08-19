@@ -28,15 +28,15 @@ import uuid
 
 import pytest
 
-from services.discovery.perimeter import (  # noqa: E402
+from services.discovery.perimeter import (
     PERIMETER_DEPTH_KEY,
     ZERO_ADDRESS,
     queue_discovered_contracts,
 )
-from services.resolution.tracking import (  # noqa: E402
+from services.resolution.tracking import (
     _resolve_pinned_block as _REAL_RESOLVE_PINNED_BLOCK,
 )
-from tests.conftest import requires_postgres  # noqa: E402
+from tests.conftest import requires_postgres
 
 pytestmark = [requires_postgres]
 

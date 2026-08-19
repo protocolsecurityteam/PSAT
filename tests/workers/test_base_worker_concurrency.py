@@ -1,7 +1,7 @@
 """Tests for in-process job concurrency in workers.base.BaseWorker.
 
 K=1 keeps the legacy single-job loop byte-identical (covered by
-tests/test_base_worker.py). K>1 dispatches each claimed job into a
+tests/workers/test_base_worker.py). K>1 dispatches each claimed job into a
 per-worker ThreadPoolExecutor so RPC/CPU waits in one job overlap with
 sibling jobs.
 
@@ -154,7 +154,7 @@ def test_concurrent_dispatcher_runs_jobs_in_parallel(
     process_calls: list = []
     process_lock = threading.Lock()
 
-    def _process(session, job):  # noqa: ARG001 — required signature
+    def _process(session, job):
         with process_lock:
             process_calls.append(job.id)
         # All 4 jobs must reach this barrier within the timeout, otherwise
@@ -230,7 +230,7 @@ def test_concurrent_dispatcher_uses_distinct_session_per_job(
     sessions_during_process: list = []
     swp_lock = threading.Lock()
 
-    def _process(session, job):  # noqa: ARG001
+    def _process(session, job):
         # Capture which session each job actually saw.
         with swp_lock:
             sessions_during_process.append(id(session))
@@ -292,7 +292,7 @@ def test_dispatcher_never_exceeds_concurrency_cap(mock_advance, mock_claim, mock
     peak = 0
     state_lock = threading.Lock()
 
-    def _process(session, job):  # noqa: ARG001 — required signature
+    def _process(session, job):
         nonlocal inflight, peak
         with state_lock:
             inflight += 1
@@ -357,7 +357,7 @@ def test_sigterm_drains_inflight_jobs(mock_advance, mock_claim, mock_session_cls
     finished_jobs: list = []
     finished_lock = threading.Lock()
 
-    def _process(session, job):  # noqa: ARG001
+    def _process(session, job):
         started.set()
         time.sleep(0.1)
         with finished_lock:
@@ -416,7 +416,7 @@ def test_sigterm_abandons_jobs_past_drain_timeout(mock_claim, mock_session_cls, 
     mock_claim.side_effect = _claim_side_effect
 
     # process() blocks longer than the 0s drain window.
-    def _slow_process(session, job):  # noqa: ARG001
+    def _slow_process(session, job):
         started.set()
         time.sleep(2.0)
         finished.set()
@@ -480,7 +480,7 @@ def test_concurrent_job_exception_doesnt_kill_dispatcher(
     call_count = {"n": 0}
     call_lock = threading.Lock()
 
-    def _process(session, job):  # noqa: ARG001 — required signature
+    def _process(session, job):
         with call_lock:
             call_count["n"] += 1
             n = call_count["n"]
@@ -541,7 +541,7 @@ def test_concurrent_job_handled_directly_skips_advance(
 
     mock_claim.side_effect = _claim
 
-    def _process(session, job):  # noqa: ARG001 — required signature
+    def _process(session, job):
         raise JobHandledDirectly()
 
     w = _ConcurrentWorker()

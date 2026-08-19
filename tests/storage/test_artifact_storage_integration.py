@@ -20,8 +20,8 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 
-from tests.cache_helpers import requires_postgres  # noqa: E402
-from tests.conftest import SessionFactory, requires_storage  # noqa: E402
+from tests.cache_helpers import requires_postgres
+from tests.conftest import SessionFactory, requires_storage
 
 pytestmark = [requires_postgres, requires_storage]
 

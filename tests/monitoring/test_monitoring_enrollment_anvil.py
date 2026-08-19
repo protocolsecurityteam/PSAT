@@ -38,7 +38,7 @@ Requires ``anvil``, ``cast``, ``forge`` on ``PATH`` and
 PSAT schema applied.
 
 Run:
-    uv run pytest tests/test_monitoring_enrollment_anvil.py -v
+    uv run pytest tests/monitoring/test_monitoring_enrollment_anvil.py -v
 """
 
 from __future__ import annotations
@@ -85,6 +85,8 @@ pytestmark = [
     pytest.mark.skipif(not _has_cast, reason="cast not found on PATH"),
     pytest.mark.skipif(not _has_forge, reason="forge not found on PATH"),
     requires_postgres,
+    pytest.mark.anvil,
+    pytest.mark.compile,
 ]
 
 ACCOUNT1 = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"

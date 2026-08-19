@@ -3,8 +3,8 @@
 Compiles each corpus contract with Slither and runs the exact production static
 label sequence, then flattens the result into deterministic
 ``(contract, address, function, selector, effect_labels, claims)`` tuples for the
-A/B golden gate in ``tests/test_label_corpus.py`` and the per-family assertions in
-``tests/test_claims_behavior_families.py``. It has no import-time side effects.
+A/B golden gate in ``tests/static/test_label_corpus.py`` and the per-family assertions in
+``tests/static/test_claims_behavior_families.py``. It has no import-time side effects.
 
 Compilation is pinned to the solc-select binary named by each manifest entry's
 ``solc_version`` (via ``FOUNDRY_SOLC``), so the gate is deterministic and offline:
@@ -211,7 +211,7 @@ MANIFEST: list[dict[str, Any]] = [
         # implementation passed. This one puts two address parameters in the read
         # set with the NON-FIRST as the destination, and adds the branched /
         # reassigned / written-after-call shapes whose honest answer is
-        # not-determined. Shared with tests/test_claims_upgrade_exec_matchers.py.
+        # not-determined. Shared with tests/static/test_claims_upgrade_exec_matchers.py.
         "address": "0x00000000000000000000000000000000000000d0",
         "name": "ExecBinding",
         "chain": "synthetic",

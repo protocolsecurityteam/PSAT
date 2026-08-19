@@ -45,11 +45,11 @@ from pathlib import Path
 
 import pytest
 
-from services.static.contract_analysis_pipeline.summaries import (  # noqa: E402
+from services.static.contract_analysis_pipeline.summaries import (
     _role_names_from_predicate_trees,
     _role_names_from_tree,
 )
-from services.static.contract_analysis_pipeline.tracking import _is_storage_layout_constant  # noqa: E402
+from services.static.contract_analysis_pipeline.tracking import _is_storage_layout_constant
 
 
 class _Bytes32Constant:

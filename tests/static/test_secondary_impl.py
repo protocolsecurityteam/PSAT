@@ -25,12 +25,12 @@ from pathlib import Path
 
 import pytest
 
-from services.discovery.secondary_impl import (  # noqa: E402
+from services.discovery.secondary_impl import (
     _address_from_storage_word,
     queue_secondary_impl_jobs,
     resolve_secondary_impl_addresses,
 )
-from tests.conftest import requires_postgres  # noqa: E402
+from tests.conftest import requires_postgres
 
 # ---------------------------------------------------------------------------
 # Detection (real Slither)

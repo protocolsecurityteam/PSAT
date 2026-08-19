@@ -32,17 +32,17 @@ from eth_abi.abi import encode
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from db.models import Artifact, Contract, ControllerValue, Job, JobDependency, JobStage, JobStatus  # noqa: E402
-from db.queue import create_job  # noqa: E402
-from schemas.control_tracking import ControlTrackingPlan  # noqa: E402
-from services.resolution.tracking import (  # noqa: E402
+from db.models import Artifact, Contract, ControllerValue, Job, JobDependency, JobStage, JobStatus
+from db.queue import create_job
+from schemas.control_tracking import ControlTrackingPlan
+from services.resolution.tracking import (
     _CONTROLLER_VALUE_MAX_LEN,
     _decode_controller_value,
     build_control_snapshot,
     clear_classify_cache,
 )
-from tests.cache_helpers import requires_postgres  # noqa: E402
-from workers.base import BaseWorker  # noqa: E402
+from tests.cache_helpers import requires_postgres
+from workers.base import BaseWorker
 
 _ADDR = "0x2222222222222222222222222222222222222222"
 # A 3-word struct (address, uint96, bool) — the exact shape of AccountantState.

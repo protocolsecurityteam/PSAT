@@ -10,7 +10,7 @@ resolution, and the DB writes are the production stack.
 
 Scope is the PolicyWorker plumbing only (sibling fetch → derive → EF-row write,
 plus the empty-evidence early return). The four typed derivations themselves are
-unit-tested in ``tests/test_cross_contract_effects.py``.
+unit-tested in ``tests/static/test_cross_contract_effects.py``.
 """
 
 from __future__ import annotations

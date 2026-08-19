@@ -385,7 +385,7 @@ def test_rerun_merges_with_previous_inventory(db_session, monkeypatch):
 # Child-job dedup and confidence-threshold filtering used to be tested here
 # against DiscoveryWorker._process_company. That logic now lives in the
 # SelectionWorker, where it runs once over the unified contract set; see
-# tests/test_selection_worker.py for the equivalent coverage.
+# tests/discovery/test_selection_worker.py for the equivalent coverage.
 # ---------------------------------------------------------------------------
 
 
@@ -487,7 +487,7 @@ def test_is_known_proxy_case_insensitive(db_session):
 # ---------------------------------------------------------------------------
 # Company-mode proxy dedup used to live here against DiscoveryWorker.
 # The logic now runs in SelectionWorker — see
-# tests/test_selection_worker.py::test_existing_non_proxy_job_skips_address
+# tests/discovery/test_selection_worker.py::test_existing_non_proxy_job_skips_address
 # and ::test_proxy_with_existing_job_is_re_queued for the replacement
 # coverage.
 # ---------------------------------------------------------------------------
