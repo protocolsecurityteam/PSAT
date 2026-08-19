@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "../api/client.js";
 import { entityKey } from "../surface/entityKey.js";
-import { shortenAddress } from "../graph.js";
+import { shortenAddress } from "../shared/format.js";
 import { JobDetail } from "./JobDetailPanel.jsx";
 import { FleetStrip, DaemonDetail, computeFleetRates } from "./FleetStrip.jsx";
 import { CORE_STAGES, STAGE_COLORS, STATUS_COLORS, coreIndexForStage, formatStageLabel } from "./jobStages.js";

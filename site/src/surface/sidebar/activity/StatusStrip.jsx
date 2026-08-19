@@ -2,7 +2,7 @@ import React from "react";
 
 import { shortAddr } from "../../format.js";
 import { contractTypeForMachine } from "./helpers.js";
-import { relativeTime, stateRows } from "../../../monitoring/format.js";
+import { relativeTime, stateRows } from "./format.js";
 
 // Monitoring status strip — the entity header in Activity's entity mode. Shows
 // monitoring STATE only (type badge, live state grid, scan freshness), never

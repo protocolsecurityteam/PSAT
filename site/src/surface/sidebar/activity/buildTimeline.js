@@ -5,7 +5,7 @@
 //   - upgrade_history:   back-filled to deployment, UPGRADES only (proxy only).
 // No React — unit-testable.
 
-import { shortenAddress } from "../../../graph.js";
+import { shortenAddress } from "../../../shared/format.js";
 import {
   SALIENCE_NOT_DETERMINED,
   decodeEvent,
@@ -14,7 +14,7 @@ import {
   eventSalience,
   eventSeverity,
   salienceAllows,
-} from "../../../monitoring/format.js";
+} from "./format.js";
 
 const secToMs = (s) => (s == null ? null : Number(s) * 1000);
 

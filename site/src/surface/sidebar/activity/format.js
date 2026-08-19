@@ -1,4 +1,4 @@
-import { shortenAddress } from "../graph.js";
+import { shortenAddress } from "../../../shared/format.js";
 
 export function relativeTime(iso, now = Date.now()) {
   if (!iso) return "—";

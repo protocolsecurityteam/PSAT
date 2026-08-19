@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 
 import { buildTimeline, filterTimelineBySalience } from "./buildTimeline.js";
-import { shortenAddress } from "../../../graph.js";
+import { shortenAddress } from "../../../shared/format.js";
 
 const I1 = "0x1111111111111111111111111111111111111111"; // first deployment
 const I2 = "0x2222222222222222222222222222222222222222";

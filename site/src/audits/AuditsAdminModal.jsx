@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from "react";
-import { api } from "./api/client.js";
-import { useIsAdmin } from "./api/useIsAdmin.js";
+import { api } from "../api/client.js";
+import { useIsAdmin } from "../api/useIsAdmin.js";
 
 // A link href is only safe to hand to the browser when it is http(s); a
 // `javascript:`/`data:` value would execute on click. Returns the URL when it

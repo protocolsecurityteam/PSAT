@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 
 import { api } from "../api/client.js";
-import { shortenAddress } from "../graph.js";
+import { shortenAddress } from "../shared/format.js";
 import {
   CORE_STAGES,
   JOB_STAGE_ORDER,

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { isInertOneShot, isLiveOneShot, oneShotState } from "./oneShot.js";
-import { guardSummary } from "./surface/layout/guardSummary.js";
+import { guardSummary } from "./guardSummary.js";
 
 function fnWithCondition(latch_state) {
   return {

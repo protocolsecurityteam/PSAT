@@ -1,10 +1,10 @@
 import React from "react";
-import { useIsAdmin } from "./api/useIsAdmin.js";
+import { useIsAdmin } from "../api/useIsAdmin.js";
 import {
   upsertAddressLabel,
   deleteAddressLabel,
   resolveLabelName,
-} from "./api/addressLabels.js";
+} from "../api/addressLabels.js";
 
 // Inline "label this address" affordance. Shows the current admin-set name
 // with a pencil for edits; or a "+ label" button when none exists. Uses

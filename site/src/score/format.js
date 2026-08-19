@@ -2,10 +2,12 @@
 // score page needs three significant figures on the dollar totals (the audit
 // block sets $4.08B against $4.17B — one decimal collapses both to $4.1B).
 
+import { middleSlice } from "../shared/format.js";
+
 export function shortAddress(address) {
   const value = String(address || "");
   if (value.length < 12) return value;
-  return `${value.slice(0, 6)}…${value.slice(-4)}`;
+  return middleSlice(value, "…");
 }
 
 export function usdCompact(value) {

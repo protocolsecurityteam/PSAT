@@ -1,14 +1,14 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { api } from "./api/client.js";
-import { useIsAdmin } from "./api/useIsAdmin.js";
-import { listAddressLabels, buildLabelMaps, resolveLabelName } from "./api/addressLabels.js";
+import { api } from "../api/client.js";
+import { useIsAdmin } from "../api/useIsAdmin.js";
+import { listAddressLabels, buildLabelMaps, resolveLabelName } from "../api/addressLabels.js";
 import AddressLabelInline from "./AddressLabelInline.jsx";
 import {
   computeCurrentImplAddrs,
   isPureHistorical,
 } from "./addressFilter.js";
-import { proxyDisplayName } from "./displayName.js";
-import { coalesceChain, entityKey } from "./surface/entityKey.js";
+import { proxyDisplayName } from "../shared/displayName.js";
+import { coalesceChain, entityKey } from "../surface/entityKey.js";
 
 const ADDRESS_RE = /0x[a-fA-F0-9]{40}/g;
 

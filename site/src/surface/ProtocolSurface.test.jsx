@@ -10,14 +10,14 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import userEvent from "@testing-library/user-event";
 
 import ProtocolSurface, { auditHighlightSet, principalOnChain } from "./ProtocolSurface.jsx";
-import { entityKey } from "./surface/entityKey.js";
-import { setFetchHandler } from "./test/fetchMock.js";
+import { entityKey } from "./entityKey.js";
+import { setFetchHandler } from "../test/fetchMock.js";
 import {
   ETHERFI_COMPANY_RICH,
   RICH_COVERAGE,
   RICH_ADDRESSES,
   ADDRESS_LABELS,
-} from "./test/fixtures.js";
+} from "../test/fixtures.js";
 
 function expectNoCrash() {
   expect(screen.queryByText(/Something went wrong/i)).not.toBeInTheDocument();

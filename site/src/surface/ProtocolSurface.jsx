@@ -2,38 +2,38 @@ import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRe
 import { ReactFlowProvider } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 
-import { isBytecodeVerifiedAudit } from "./auditCoverage.js";
-import { api } from "./api/client.js";
-import { useIsAdmin } from "./api/useIsAdmin.js";
-import { getCoverage } from "./api/audits.js";
-import { AgentPanel } from "./surface/inspector/AgentPanel.jsx";
-import { isRoleIdAddress, principalLabel, shortAddr } from "./surface/format.js";
-import { findCaller, findFunctionMatches, findFunctionView } from "./surface/lane.js";
-import { buildMachines } from "./surface/layout/buildMachines.js";
-import { buildGovernsIndex } from "./surface/layout/governsIndex.js";
+import { isBytecodeVerifiedAudit } from "../audits/auditCoverage.js";
+import { api } from "../api/client.js";
+import { useIsAdmin } from "../api/useIsAdmin.js";
+import { getCoverage } from "../api/audits.js";
+import { AgentPanel } from "./inspector/AgentPanel.jsx";
+import { isRoleIdAddress, principalLabel, shortAddr } from "./format.js";
+import { findCaller, findFunctionMatches, findFunctionView } from "./lane.js";
+import { buildMachines } from "./layout/buildMachines.js";
+import { buildGovernsIndex } from "./layout/governsIndex.js";
 import {
   buildControlEdgeIndex,
   edgeClaims,
   flowOnChain,
   shortestControlPath,
-} from "./surface/layout/governancePath.js";
-import { deriveReachOverlay } from "./surface/layout/serverReach.js";
-import { buildEntityIndex } from "./surface/layout/entities.js";
-import { useSurfaceSelection } from "./surface/useSurfaceSelection.js";
-import { coalesceChain, entityKey, principalOnChain } from "./surface/entityKey.js";
-import { chainColor, chainLabel } from "./surface/chainMeta.js";
-import { deriveAvailableChains, defaultChainFor, pickActiveChain } from "./surface/chainScope.js";
-import { SurfaceCanvas } from "./surface/canvas/SurfaceCanvas.jsx";
-import { ChainSwitcher } from "./surface/sidebar/ChainSwitcher.jsx";
-import { EntityCard } from "./surface/lanes/EntityCard.jsx";
-import { AuditsListPanel } from "./surface/sidebar/AuditsListPanel.jsx";
-import { DetailEmptyState } from "./surface/sidebar/DetailEmptyState.jsx";
-import { DraggableSidebar } from "./surface/sidebar/DraggableSidebar.jsx";
-import { InspectorCard } from "./surface/sidebar/InspectorCard.jsx";
-import { SidebarTabs } from "./surface/sidebar/SidebarTabs.jsx";
-import { ActivityPanel } from "./surface/sidebar/activity/ActivityPanel.jsx";
-import { SearchModesBar } from "./surface/sidebar/search/SearchModesBar.jsx";
-import { SearchNavigator } from "./surface/sidebar/search/SearchNavigator.jsx";
+} from "./layout/governancePath.js";
+import { deriveReachOverlay } from "./layout/serverReach.js";
+import { buildEntityIndex } from "./layout/entities.js";
+import { useSurfaceSelection } from "./useSurfaceSelection.js";
+import { coalesceChain, entityKey, principalOnChain } from "./entityKey.js";
+import { chainColor, chainLabel } from "./chainMeta.js";
+import { deriveAvailableChains, defaultChainFor, pickActiveChain } from "./chainScope.js";
+import { SurfaceCanvas } from "./canvas/SurfaceCanvas.jsx";
+import { ChainSwitcher } from "./sidebar/ChainSwitcher.jsx";
+import { EntityCard } from "./lanes/EntityCard.jsx";
+import { AuditsListPanel } from "./sidebar/AuditsListPanel.jsx";
+import { DetailEmptyState } from "./sidebar/DetailEmptyState.jsx";
+import { DraggableSidebar } from "./sidebar/DraggableSidebar.jsx";
+import { InspectorCard } from "./sidebar/InspectorCard.jsx";
+import { SidebarTabs } from "./sidebar/SidebarTabs.jsx";
+import { ActivityPanel } from "./sidebar/activity/ActivityPanel.jsx";
+import { SearchModesBar } from "./sidebar/search/SearchModesBar.jsx";
+import { SearchNavigator } from "./sidebar/search/SearchNavigator.jsx";
 
 // Audit-coverage highlight set: the bytecode-verified-covered contracts for the
 // active audit pick (or the whole proven set when ``all``). Returns a Set of

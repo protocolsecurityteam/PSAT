@@ -4,7 +4,7 @@
 import { TYPE_META } from "../meta.js";
 import { formatDelay, shortAddr } from "../format.js";
 import { collectDirectCallers } from "./controlGraph.js";
-import { oneShotState } from "../../oneShot.js";
+import { oneShotState } from "./oneShot.js";
 
 // Address → on-canvas contract name (the cards collapse a proxy onto its
 // implementation name). Also maps a contract's implementation / secondary-impl

@@ -7,7 +7,7 @@ import { describe, it, expect } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 
 import AuditsAdminModal, { safeHttpUrl } from "./AuditsAdminModal.jsx";
-import { setFetchHandler } from "./test/fetchMock.js";
+import { setFetchHandler } from "../test/fetchMock.js";
 
 describe("safeHttpUrl", () => {
   it("returns the URL for http(s) schemes", () => {
