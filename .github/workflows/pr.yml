@@ -27,8 +27,7 @@ jobs:
   deploy:
     needs: ci
     # Forks lack secrets — skip cleanly. Fork PRs still get ci above.
-    # TEMPORARILY DISABLED to save server costs — drop the `false &&` to re-enable.
-    if: false && github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     environment: staging
     outputs:
@@ -141,9 +140,7 @@ jobs:
     # OpenRouter / Etherscan / Tavily / RPC spend that the live suite incurs.
     # Explicit fork gate retained — don't rely solely on transitive skip
     # from deploy when forks lack secrets.
-    # TEMPORARILY DISABLED to save server costs — drop the `false &&` to re-enable.
     if: |
-      false &&
       github.event.pull_request.head.repo.full_name == github.repository &&
       (needs.ci.outputs.python == 'true' || needs.ci.outputs.ci-config == 'true')
     runs-on: ubuntu-latest
@@ -216,8 +213,7 @@ jobs:
     # binding constraint with several PRs open at once. The next push's deploy
     # recreates these machines from fly.toml fresh.
     needs: [deploy, live-tests]
-    # TEMPORARILY DISABLED to save server costs — drop the `false &&` to re-enable.
-    if: false && always() && needs.deploy.result != 'skipped'
+    if: always() && needs.deploy.result != 'skipped'
     concurrency:
       group: pr-destroy-${{ github.event.pull_request.number }}
       cancel-in-progress: false
