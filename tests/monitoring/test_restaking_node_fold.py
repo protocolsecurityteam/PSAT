@@ -284,7 +284,7 @@ def test_no_module_outside_the_plane_imports_the_position_model():
         # mis-key it — and reading an address out of the table cannot do either.
         # The universe is assembled here rather than in the plane because its
         # source-literal arm reads object storage, which the fold may not.
-        root / "services" / "scoring" / "distill.py",
+        root / "services" / "scoring" / "distill" / "universe.py",
         # This file: the needle appears in the assertion below.
         pathlib.Path(__file__).resolve(),
         # Metadata-registration guard: carries the table NAME in its snapshot
