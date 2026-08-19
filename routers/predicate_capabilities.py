@@ -523,7 +523,8 @@ def company_semantic_capabilities(request: Request, company_name: str) -> dict[s
     NOT admin-gated — read-only / idempotent, the same shape contract
     as ``/api/contract/{addr}/capabilities``.
     """
-    from services.aggregations.company_overview import _entity_addr, _entity_key, _job_chain_name
+    from services.aggregations.company_overview.entity_keys import _entity_addr, _entity_key
+    from services.aggregations.company_overview.jobs import _job_chain_name
     from services.resolution.capability_resolver import resolve_contract_capabilities
 
     _capabilities_rate_check(request, "/api/company/{company_name}/semantic_capabilities")

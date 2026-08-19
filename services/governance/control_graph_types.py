@@ -71,6 +71,7 @@ from db.models import (
 )
 from db.queue import _mainnet_coalesced_chain
 from schemas.control_tracking import ResolvedControllerType, coerce_resolved_controller_type
+from services.aggregations.company_overview.entity_keys import _coalesce_chain
 from services.discovery.perimeter import (
     CONTROL_GRAPH_BASIS_KEY,
     FP_MATERIALIZATION_BASIS,
@@ -107,10 +108,6 @@ def _chain_key(chain: str | None) -> str:
     """Normalize a contract's chain-name for keying: a NULL/blank chain is a
     legacy mainnet row, folded to the same key as an explicit ``ethereum`` so
     the two never split a mainnet principal across two buckets."""
-    # Lazy import: the canonical coalesce lives in the aggregation layer and
-    # must stay the single source of the NULL≡ethereum convention.
-    from services.aggregations.company_overview import _coalesce_chain
-
     return _coalesce_chain(chain)
 
 

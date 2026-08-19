@@ -13,7 +13,8 @@ from db.models import Artifact, Contract, Job, JobStatus
 from db.storage import StorageContentAbsent, StorageKeyAbsent, StorageKeyMissing
 from schemas.api_responses import AnalysisListEntry
 from services.aggregations import build_analysis_detail
-from services.aggregations.company_overview import _coalesce_chain, _job_chain_name
+from services.aggregations.company_overview.entity_keys import _coalesce_chain
+from services.aggregations.company_overview.jobs import _job_chain_name
 from services.governance.proxies import _merge_proxy_impl_entries
 from utils.chains import UnknownChainError, chain_by_name
 

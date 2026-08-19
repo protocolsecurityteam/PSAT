@@ -172,7 +172,7 @@ def _get_protocol_addresses(session: Session, protocol_id: int) -> list[Contract
        and a cursor that stops advancing is what makes a completeness claim go
        stale without saying so.
     """
-    from services.aggregations.company_overview import _entity_key
+    from services.aggregations.company_overview.entity_keys import _entity_key
     from services.monitoring.balance_reads import winning_asset_fetches
 
     contracts = session.execute(select(Contract).where(Contract.protocol_id == protocol_id)).scalars().all()
@@ -277,7 +277,7 @@ def refresh_contract_balances(
     else. The returned breakdown is then partial by construction and is not a
     protocol total, so a caller that snapshots TVL leaves it ``None``.
     """
-    from services.aggregations.company_overview import _entity_key
+    from services.aggregations.company_overview.entity_keys import _entity_key
     from services.clients.etherscan import get_eth_balance, get_eth_price, get_native_price
 
     counts = counters if counters is not None else {}
@@ -1015,7 +1015,7 @@ def _read_existing_balances(session: Session, protocol_id: int) -> tuple[dict[st
     ``TvlSnapshot.total_usd`` as a lower money figure while the cycle reported
     itself complete: an absence turned into a number.
     """
-    from services.aggregations.company_overview import _entity_key
+    from services.aggregations.company_overview.entity_keys import _entity_key
 
     contracts = _get_protocol_addresses(session, protocol_id)
     if not contracts:
