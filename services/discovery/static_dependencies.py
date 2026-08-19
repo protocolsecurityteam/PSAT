@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """Discover statically embedded dependent contract addresses from EVM bytecode."""
 
-import argparse
-import json
 from pathlib import Path
 from typing import Any
 
@@ -150,21 +148,3 @@ def find_dependencies(
     address = normalize_address(address)
     deps = discover_dependencies(effective_rpc, address, code_cache=code_cache, chain_id=chain_id)
     return {"address": address, "dependencies": deps}
-
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("address")
-    parser.add_argument("--rpc")
-    args = parser.parse_args()
-
-    try:
-        output = find_dependencies(args.address.strip(), args.rpc)
-    except RuntimeError as exc:
-        raise SystemExit(str(exc)) from exc
-
-    print(json.dumps(output))
-
-
-if __name__ == "__main__":
-    main()

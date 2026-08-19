@@ -6,15 +6,11 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import sys
 from dataclasses import is_dataclass
 from pathlib import Path
 from typing import Any, Mapping, cast
 
 from eth_utils.crypto import keccak
-
-if __package__ in {None, ""}:
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from schemas.contract_analysis import ContractAnalysis
 from schemas.control_tracking import ControlSnapshot, coerce_resolved_controller_type

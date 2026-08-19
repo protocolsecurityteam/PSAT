@@ -13,7 +13,6 @@ Detection methods:
   - Relational (proxy slot targets -> implementation/beacon)
 """
 
-import json
 import logging
 
 from services.clients.rpc import rpc_batch_request_with_status
@@ -762,38 +761,3 @@ def classify_contracts(
         "classifications": classifications,
         "discovered_addresses": sorted(discovered),
     }
-
-
-# ---------------------------------------------------------------------------
-# Standalone entry point
-# ---------------------------------------------------------------------------
-
-
-def main():
-    import argparse
-    from pathlib import Path
-
-    from dotenv import load_dotenv
-
-    load_dotenv(Path(__file__).resolve().parent.parent / ".env")
-
-    parser = argparse.ArgumentParser(description="Classify contract dependencies")
-    parser.add_argument("address", help="Contract address to classify")
-    parser.add_argument("--rpc", help="RPC URL")
-    parser.add_argument("--deps", nargs="*", default=[], help="Dependency addresses")
-    args = parser.parse_args()
-
-    from services.clients.rpc import default_rpc_url
-
-    # CLI dev tool: explicit-mainnet base when no --rpc is given — a documented
-    # default (inv. 6), not a silent one. Pipeline classification passes rpc_url.
-    resolved_rpc = args.rpc or default_rpc_url(chain_id=1)
-    if not resolved_rpc:
-        raise SystemExit("No RPC URL provided (use --rpc or set ERPC_BASE_URL)")
-
-    result = classify_contracts(args.address.strip(), args.deps, resolved_rpc)
-    print(json.dumps(result, indent=2))
-
-
-if __name__ == "__main__":
-    main()

@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """Discover dynamic runtime dependencies by tracing representative transactions."""
 
-import argparse
-import json
 import logging
 from pathlib import Path
 from typing import Any
@@ -499,28 +497,3 @@ def find_dynamic_dependencies(
         "dependency_graph": _build_graph(direct_edges),
         "trace_errors": trace_errors,
     }
-
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("address")
-    parser.add_argument("--rpc")
-    parser.add_argument("--tx-limit", type=int, default=5)
-    parser.add_argument("--tx-hash", action="append", dest="tx_hashes")
-    args = parser.parse_args()
-
-    try:
-        output = find_dynamic_dependencies(
-            args.address.strip(),
-            rpc_url=args.rpc,
-            tx_limit=args.tx_limit,
-            tx_hashes=args.tx_hashes,
-        )
-    except RuntimeError as exc:
-        raise SystemExit(str(exc)) from exc
-
-    print(json.dumps(output))
-
-
-if __name__ == "__main__":
-    main()
