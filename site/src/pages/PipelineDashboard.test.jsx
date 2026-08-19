@@ -14,7 +14,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { render, screen, fireEvent, waitFor, within, act } from "@testing-library/react";
 
 import PipelineDashboard from "./PipelineDashboard.jsx";
-import { computeFleetRates, daemonTone } from "./FleetStrip.jsx";
+import { computeFleetRates, daemonTone } from "./fleet/fleetHealth.js";
 import { buildLogsDeeplink, inferFlyApp } from "./JobDetailPanel.jsx";
 import { setFetchHandler } from "../test/fetchMock.js";
 

@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { decodeEvent, eventKind, eventKindLabel, eventSalience, eventSeverity, salienceAllows, targetText } from "./format.js";
+import { eventKind, eventKindLabel, eventSalience, eventSeverity, salienceAllows } from "./eventClass.js";
+import { decodeEvent, targetText } from "./format.js";
 import { shortenAddress } from "../../../shared/format.js";
 
 const ADDR_A = "0x1111111111111111111111111111111111111111";

@@ -1,7 +1,9 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
-import { SelectionLegend, buildControlsDetailMap, reachChipText } from "./SurfaceCanvas.jsx";
+import { SelectionLegend } from "./SelectionLegend.jsx";
+import { buildControlsDetailMap } from "./controlsDetail.js";
+import { reachChipText } from "./reachOverlay.js";
 import { entityKey } from "../entityKey.js";
 
 const ADDR = "0x" + "ab".repeat(20);

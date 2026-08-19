@@ -8,13 +8,13 @@
 import { shortenAddress } from "../../../shared/format.js";
 import {
   SALIENCE_NOT_DETERMINED,
-  decodeEvent,
   eventKind,
   eventKindLabel,
   eventSalience,
   eventSeverity,
   salienceAllows,
-} from "./format.js";
+} from "./eventClass.js";
+import { decodeEvent } from "./format.js";
 
 const secToMs = (s) => (s == null ? null : Number(s) * 1000);
 
