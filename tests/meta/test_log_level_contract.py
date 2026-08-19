@@ -55,8 +55,8 @@ PIPELINE_WORKERS: tuple[str, ...] = (
 #     loops with no accumulator. ``balance_reads`` is in because the
 #     resolution worker calls it per job.
 PIPELINE_SERVICE_GLOBS: tuple[str, ...] = (
-    "services/effects/*.py",
-    "services/scoring/distill.py",
+    "services/effects/**/*.py",
+    "services/scoring/distill/*.py",
     "services/discovery/**/*.py",
     "services/policy/*.py",
     "services/static/contract_analysis_pipeline/*.py",

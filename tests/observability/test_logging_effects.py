@@ -179,7 +179,7 @@ def test_contract_facts_lookup_failure_warns_and_records_degraded(monkeypatch, c
     finally:
         degraded_errors_var.reset(token)
 
-    rec = next(r for r in caplog.records if r.name == CALLDATA_LOGGER)
+    rec = next(r for r in caplog.records if r.name.startswith(CALLDATA_LOGGER))
     assert rec.levelno == logging.WARNING
     assert rec.exc_type == "RuntimeError"
     # NOT ``address``: the formatter writes the ambient (job) address contextvar
@@ -195,7 +195,7 @@ def test_encode_calldata_failure_logs_debug_with_selector(caplog):
         # A value that cannot encode into the declared type.
         assert calldata_mod.encode_calldata("0xdeadbeef", "f(uint256)", substitutions={0: "not-a-number"}) is None
 
-    rec = next(r for r in caplog.records if r.name == CALLDATA_LOGGER)
+    rec = next(r for r in caplog.records if r.name.startswith(CALLDATA_LOGGER))
     assert rec.levelno == logging.DEBUG
     assert rec.selector == "0xdeadbeef"
     assert rec.exc_type
