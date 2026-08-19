@@ -31,7 +31,6 @@ faithful ``view_call`` callee tree directly (ROLEGATE_FIX_SPEC §1.2.2).
 
 from __future__ import annotations
 
-import os
 import sys
 import tempfile
 import textwrap
@@ -64,6 +63,8 @@ from services.static.contract_analysis_pipeline.predicate_types import LeafPredi
 from services.static.contract_analysis_pipeline.predicates import build_predicate_tree  # noqa: E402
 from services.static.contract_analysis_pipeline.reentrancy_pause import apply_reentrancy_pause_pass  # noqa: E402
 from services.static.contract_analysis_pipeline.writer_gate import apply_writer_gate_pass  # noqa: E402
+from tests.conftest import DATABASE_URL as _DB_URL  # noqa: E402
+from tests.conftest import _can_connect  # noqa: E402
 
 
 # The guard runs UNCONDITIONALLY (not behind earned_public_enabled()); every
@@ -77,24 +78,6 @@ def both_flags(request, monkeypatch):
 @pytest.fixture
 def earned_public(monkeypatch):
     monkeypatch.setenv("PSAT_AUTHORITY_EARNED_PUBLIC", "1")
-
-
-_DB_URL: str = os.environ.get("TEST_DATABASE_URL", os.environ.get("DATABASE_URL", "")) or ""
-
-
-def _can_connect() -> bool:
-    if not _DB_URL:
-        return False
-    try:
-        from sqlalchemy import create_engine
-
-        engine = create_engine(_DB_URL)
-        with engine.connect():
-            pass
-        engine.dispose()
-        return True
-    except Exception:
-        return False
 
 
 @pytest.fixture

@@ -18,7 +18,6 @@ routes the fallback through the same ``runtime_addr`` the resolver uses
 
 from __future__ import annotations
 
-import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,6 +31,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from eth_utils.crypto import keccak  # noqa: E402
 from sqlalchemy import func, select  # noqa: E402
 
+from tests.conftest import DATABASE_URL as _DB_URL  # noqa: E402
+from tests.conftest import _can_connect, requires_postgres
 from workers.event_log_indexer import (  # noqa: E402
     _event_address_for_descriptor,
     _job_runtime_address,
@@ -124,8 +125,6 @@ def test_external_authority_address_wins_over_proxy():
 
 # --- integration: enroll_from_completed_jobs seeds the cursor at the proxy ---
 
-_DB_URL: str = os.environ.get("TEST_DATABASE_URL", os.environ.get("DATABASE_URL", "")) or ""
-
 
 @pytest.fixture(autouse=True)
 def _no_creation_witness(monkeypatch):
@@ -139,24 +138,6 @@ def _no_creation_witness(monkeypatch):
         raise RuntimeError("no rpc")
 
     monkeypatch.setattr(eli, "rpc_request", _no_wire)
-
-
-def _can_connect() -> bool:
-    if not _DB_URL:
-        return False
-    try:
-        from sqlalchemy import create_engine, text
-
-        engine = create_engine(_DB_URL)
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-        engine.dispose()
-        return True
-    except Exception:
-        return False
-
-
-requires_postgres = pytest.mark.skipif(not _can_connect(), reason="PostgreSQL not available")
 
 
 @pytest.fixture()

@@ -18,7 +18,6 @@ fails here instead of silently in prod.
 
 from __future__ import annotations
 
-import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,27 +30,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from sqlalchemy import delete, func, select, update  # noqa: E402
 
 from services.resolution.repos.event_logs_rpc import FetchedEventLog  # noqa: E402
+from tests.conftest import DATABASE_URL as _DB_URL  # noqa: E402
+from tests.conftest import _can_connect, requires_postgres
 from workers.event_log_indexer import enroll_event_cursor, scan_enrolled_events  # noqa: E402
-
-_DB_URL: str = os.environ.get("TEST_DATABASE_URL", os.environ.get("DATABASE_URL", "")) or ""
-
-
-def _can_connect() -> bool:
-    if not _DB_URL:
-        return False
-    try:
-        from sqlalchemy import create_engine, text
-
-        engine = create_engine(_DB_URL)
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-        engine.dispose()
-        return True
-    except Exception:
-        return False
-
-
-requires_postgres = pytest.mark.skipif(not _can_connect(), reason="PostgreSQL not available")
 
 # A single eth_getLogs / bulk insert blows up past this many blocks in one shot.
 # The indexer must never hand the fetcher a wider window than this.

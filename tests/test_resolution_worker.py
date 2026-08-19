@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import sys
 import uuid
 from pathlib import Path
@@ -15,6 +14,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from db.models import ContractBalance, ContractBalanceFetch
+from tests.conftest import DATABASE_URL as _DB_URL  # noqa: E402
+from tests.conftest import _can_connect, requires_postgres
 from tests.support.balance_stubs import page, pinned_native_unavailable
 from tests.support.resolution_worker_stubs import (
     CHILD_ADDRESS,
@@ -28,8 +29,6 @@ from tests.support.resolution_worker_stubs import (
 )
 from utils.balance_status import NATIVE_STATUS_FETCH_FAILED, NATIVE_STATUS_NOT_DETERMINED
 from workers.resolution_worker import ResolutionWorker
-
-_DB_URL = os.environ.get("TEST_DATABASE_URL", os.environ.get("DATABASE_URL", "")) or ""
 
 
 @pytest.fixture(autouse=True)
@@ -47,24 +46,6 @@ def _stub_etherscan_balances(monkeypatch):
     monkeypatch.setattr("utils.etherscan.get_native_price", lambda *a, **k: 0.0)
     monkeypatch.setattr("utils.etherscan.get_token_balances_page", lambda addr, *a, **k: page([]))
     pinned_native_unavailable(monkeypatch)
-
-
-def _can_connect() -> bool:
-    if not _DB_URL:
-        return False
-    try:
-        from sqlalchemy import create_engine, text
-
-        engine = create_engine(_DB_URL)
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-        engine.dispose()
-        return True
-    except Exception:
-        return False
-
-
-requires_postgres = pytest.mark.skipif(not _can_connect(), reason="PostgreSQL not available")
 
 
 @pytest.fixture

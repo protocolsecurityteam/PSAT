@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import dataclasses
 import logging
-import os
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -31,6 +30,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from sqlalchemy import func, select  # noqa: E402
 
 from services.resolution.repos.event_logs_rpc import FetchedEventLog  # noqa: E402
+from tests.conftest import DATABASE_URL as _DB_URL  # noqa: E402
+from tests.conftest import _can_connect, requires_postgres
 from tests.support.solmate_trees import _SOLMATE_CANCALL_TREES  # noqa: E402
 from utils.chains import ChainInfo, chain_by_id  # noqa: E402
 from workers.event_log_indexer import (  # noqa: E402
@@ -40,8 +41,6 @@ from workers.event_log_indexer import (  # noqa: E402
     enroll_from_completed_jobs,
     scan_enrolled_events,
 )
-
-_DB_URL: str = os.environ.get("TEST_DATABASE_URL", os.environ.get("DATABASE_URL", "")) or ""
 
 _BASE = 8453
 _BASE_HYPERSYNC = "https://base.hypersync.xyz"
@@ -77,24 +76,6 @@ def _no_creation_witness(monkeypatch):
         raise RuntimeError("no rpc")
 
     monkeypatch.setattr(eli, "rpc_request", _no_wire)
-
-
-def _can_connect() -> bool:
-    if not _DB_URL:
-        return False
-    try:
-        from sqlalchemy import create_engine, text
-
-        engine = create_engine(_DB_URL)
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-        engine.dispose()
-        return True
-    except Exception:
-        return False
-
-
-requires_postgres = pytest.mark.skipif(not _can_connect(), reason="PostgreSQL not available")
 
 
 def _base_chaininfo(**overrides) -> ChainInfo:

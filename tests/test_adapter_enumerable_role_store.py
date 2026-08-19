@@ -12,7 +12,6 @@ tests).
 
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -39,6 +38,8 @@ from services.resolution.role_store_standards import (  # noqa: E402
     OZ_ACCESS_CONTROL_ENUMERABLE,
     SOLADY_ENUMERABLE_ROLES,
 )
+from tests.conftest import DATABASE_URL as _DB_URL  # noqa: E402
+from tests.conftest import _can_connect, requires_postgres
 from utils.logging import stage_metrics_var  # noqa: E402
 
 _PROXY = "0x" + "62" * 20  # registry proxy — where RoleSet is emitted
@@ -69,26 +70,6 @@ def both_flags(request, monkeypatch):
 # ---------------------------------------------------------------------------
 # DB session
 # ---------------------------------------------------------------------------
-
-_DB_URL: str = os.environ.get("TEST_DATABASE_URL", os.environ.get("DATABASE_URL", "")) or ""
-
-
-def _can_connect() -> bool:
-    if not _DB_URL:
-        return False
-    try:
-        from sqlalchemy import create_engine, text
-
-        engine = create_engine(_DB_URL)
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-        engine.dispose()
-        return True
-    except Exception:
-        return False
-
-
-requires_postgres = pytest.mark.skipif(not _can_connect(), reason="PostgreSQL not available")
 
 
 @pytest.fixture()

@@ -36,7 +36,6 @@ by a ``conditional_universal`` child, never by the fold seed or a node-level con
 from __future__ import annotations
 
 import json
-import os
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -51,8 +50,9 @@ from services.resolution.deferred_reconciler import (  # noqa: E402
     DEFERRED_MARKER,
     _iter_deferred_authorities,
 )
+from tests.conftest import DATABASE_URL as _DB_URL  # noqa: E402
+from tests.conftest import _can_connect, requires_postgres
 
-_DB_URL: str = os.environ.get("TEST_DATABASE_URL", os.environ.get("DATABASE_URL", "")) or ""
 _FIXTURE = Path(__file__).resolve().parent / "fixtures" / "solmate" / "veda_teller_stack.json"
 
 # RolesAuthority event topic0s (Solmate). Cursor seeding needs one row per topic.
@@ -74,24 +74,6 @@ _BULKWITHDRAW = "bulkWithdraw(ERC20,uint256,uint256,address)"
 _DEPOSIT = "deposit(ERC20,uint256,uint256)"
 _DENY_ALL = "denyAll(address)"
 _ZERO = "0x" + "0" * 40
-
-
-def _can_connect() -> bool:
-    if not _DB_URL:
-        return False
-    try:
-        from sqlalchemy import create_engine, text
-
-        engine = create_engine(_DB_URL)
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-        engine.dispose()
-        return True
-    except Exception:
-        return False
-
-
-requires_postgres = pytest.mark.skipif(not _can_connect(), reason="PostgreSQL not available")
 
 
 @pytest.fixture

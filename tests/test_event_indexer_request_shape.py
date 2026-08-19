@@ -20,7 +20,6 @@ cheap shape:
 
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 
@@ -32,28 +31,10 @@ from sqlalchemy import func, select, update  # noqa: E402
 
 import services.resolution.repos.event_logs_rpc as event_logs_rpc  # noqa: E402
 from services.resolution.repos.event_logs_rpc import FetchedEventLog, RpcEventLogFetcher  # noqa: E402
+from tests.conftest import DATABASE_URL as _DB_URL  # noqa: E402
+from tests.conftest import _can_connect, requires_postgres
 from utils.rpc import RpcClientTimeout  # noqa: E402
 from workers.event_log_indexer import enroll_event_cursor, scan_enrolled_events  # noqa: E402
-
-_DB_URL: str = os.environ.get("TEST_DATABASE_URL", os.environ.get("DATABASE_URL", "")) or ""
-
-
-def _can_connect() -> bool:
-    if not _DB_URL:
-        return False
-    try:
-        from sqlalchemy import create_engine, text
-
-        engine = create_engine(_DB_URL)
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-        engine.dispose()
-        return True
-    except Exception:
-        return False
-
-
-requires_postgres = pytest.mark.skipif(not _can_connect(), reason="PostgreSQL not available")
 
 _CONFIRMATIONS = 12
 _ADDRESS = "0x" + "4d" * 20
