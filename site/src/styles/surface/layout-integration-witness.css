@@ -1,0 +1,671 @@
+/* External integration card — the off-protocol trust surface, elevated. Warm
+   amber border for an external protocol, blue for a linked library. */
+.ps-depends-ext {
+  border: 1px solid rgba(224, 145, 63, 0.32);
+  background: rgba(224, 145, 63, 0.06);
+  border-radius: 9px;
+  padding: 12px;
+  margin-bottom: 8px;
+}
+
+.ps-depends-ext-lib {
+  border-color: rgba(90, 134, 196, 0.32);
+  background: rgba(90, 134, 196, 0.06);
+}
+
+.ps-depends-ext-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ps-depends-ext-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #f0b45f;
+  flex-shrink: 0;
+}
+
+.ps-depends-ext-lib .ps-depends-ext-dot {
+  background: #8fb6ef;
+}
+
+.ps-depends-ext-name {
+  font-size: 14px;
+  font-weight: 800;
+  color: #f2ede6;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ps-depends-ext-tag {
+  flex-shrink: 0;
+  white-space: nowrap;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #f0b45f;
+  border: 1px solid rgba(224, 145, 63, 0.4);
+  border-radius: 4px;
+  padding: 2px 6px;
+}
+
+.ps-depends-ext-lib .ps-depends-ext-tag {
+  color: #8fb6ef;
+  border-color: rgba(90, 134, 196, 0.4);
+}
+
+.ps-depends-explorer {
+  flex-shrink: 0;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #64748b;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.ps-depends-explorer:hover {
+  color: #94a3b8;
+}
+
+.ps-depends-ext-addr {
+  display: block;
+  font-size: 10px;
+  color: #64748b;
+  font-family: "JetBrains Mono", monospace;
+  margin: 6px 0 0;
+  text-decoration: none;
+  border-bottom: 1px dotted rgba(143, 182, 239, 0.35);
+  width: fit-content;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.ps-depends-ext-addr:hover {
+  color: #8fb6ef;
+  border-bottom-style: solid;
+}
+
+.ps-depends-ext-foot {
+  margin-top: 8px;
+}
+
+.ps-depends-prov {
+  font-size: 9px;
+  color: #64748b;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 3px;
+  padding: 1px 5px;
+  letter-spacing: 0.03em;
+}
+
+.ps-lane {
+  border-radius: 10px;
+  background: #0e1116;
+  border: 1px solid rgba(148, 163, 184, 0.1);
+}
+
+.ps-lane-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 12px;
+  color: #cbd5e1;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.ps-lane-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ps-lane-icon {
+  display: block;
+  flex-shrink: 0;
+}
+
+.ps-lane-icon-coin {
+  width: 28px;
+  height: 28px;
+  object-fit: contain;
+  filter: drop-shadow(0 3px 8px rgba(15, 23, 42, 0.28));
+}
+
+.ps-lane-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 0 10px 10px;
+}
+
+.ps-lane-top .ps-lane-body {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.ps-lane-left .ps-lane-header { color: #7cc4b8; }
+.ps-lane-right .ps-lane-header { color: #c4a67a; }
+.ps-lane-top .ps-lane-header { color: #b0b8c8; }
+.ps-lane-ops .ps-lane-header { color: #8a94a6; }
+
+.ps-ops-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ps-ops-category-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(148, 163, 184, 0.1);
+  background: #131820;
+  color: #8a94a6;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+  box-shadow: none;
+  transition: background 120ms ease;
+}
+
+.ps-ops-category-header:hover {
+  background: #1a2030;
+  transform: none;
+  box-shadow: none;
+}
+
+.ps-ops-chevron {
+  font-size: 10px;
+  transition: transform 150ms ease;
+}
+
+.ps-ops-chevron-open {
+  transform: rotate(90deg);
+}
+
+.ps-ops-category-count {
+  margin-left: auto;
+  color: #64748b;
+  font-size: 11px;
+}
+
+.ps-ops-category-body {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 4px;
+  padding: 4px 0 2px;
+}
+
+.ps-lane-empty {
+  padding: 14px 12px;
+  border-radius: 8px;
+  background: #111620;
+  border: 1px dashed rgba(148, 163, 184, 0.2);
+  color: #64748b;
+  font-size: 12px;
+  text-align: center;
+}
+
+.ps-machine-body {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(280px, 360px) minmax(220px, 1fr);
+  gap: 16px;
+  margin-top: 16px;
+}
+
+.ps-port {
+  --port-accent: #94a3b8;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 7px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: #0f141c;
+  border: 1px solid rgba(148, 163, 184, 0.12);
+}
+
+.ps-port.ps-port-score-highlight {
+  border-color: rgba(251, 113, 133, 0.9);
+  box-shadow: 0 0 0 1px rgba(251, 113, 133, 0.85);
+  /* The row is scrolled into view when it takes the mark; without a margin the
+     minimal scroll parks it flush against the fold, where it reads as cut off. */
+  scroll-margin: 28px;
+}
+
+/* The warning names an action AND who can take it, so the ONE caller chip for
+   the controller it named is marked alongside the row. Only that chip: a row's
+   other callers are other principals, and a border on them would read as "these
+   are who the deduction was about" for principals it was not about. Where the
+   named controller is not among this row's callers, the row wears the mark
+   alone. */
+.ps-port.ps-port-score-highlight .ps-caller-btn.ps-caller-score-highlight {
+  border-color: rgba(251, 113, 133, 0.9);
+  box-shadow: 0 0 0 1px rgba(251, 113, 133, 0.7);
+}
+
+.ps-port-copy {
+  min-width: 0;
+  flex: 1;
+}
+
+.ps-port-name {
+  color: #f8fafc;
+  font-size: 12px;
+  font-weight: 700;
+  margin-bottom: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ps-port-action {
+  color: #94a3b8;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+/* Per-function caller buttons: one navigable button per direct caller; a function
+   with no resolved caller (open/unknown) renders a non-navigable .ps-caller-status pill. */
+.ps-callers { display: flex; flex-direction: column; }
+.ps-callers-label {
+  font-size: 9px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
+  color: #5b6675; margin-bottom: 5px;
+}
+.ps-callers-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.ps-caller-btn,
+.ps-caller-status {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 8px; border-radius: 6px;
+  border: 1px solid rgba(148, 163, 184, 0.18); background: #141820;
+  color: #e8edf3; cursor: pointer; font-size: 11px; font-weight: 400; line-height: 1.1;
+  /* Override the global button drop-shadow (teal glow) + hover lift. */
+  box-shadow: none;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+.ps-caller-btn:hover { background: #1a2030; border-color: rgba(148, 163, 184, 0.35); transform: none; box-shadow: none; }
+.ps-caller-status { align-self: flex-start; color: #94a3b8; }
+.ps-caller-status:hover { background: #1a2030; transform: none; box-shadow: none; }
+.ps-caller-ic {
+  width: 18px; height: 18px; border-radius: 5px; flex-shrink: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.ps-caller-ic svg,
+.ps-caller-ic .ps-guard-svg-mask { width: 12px; height: 12px; }
+.ps-caller-name { font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 170px; }
+.ps-caller-sub { color: #9aa7b4; font-family: "JetBrains Mono", monospace; font-size: 10px; }
+
+.ps-guard-svg-mask {
+  --guard-icon-accent: currentColor;
+  width: 16px;
+  height: 16px;
+  display: block;
+  background-color: var(--guard-icon-accent);
+  mask-repeat: no-repeat;
+  mask-position: center;
+  mask-size: contain;
+  -webkit-mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  -webkit-mask-size: contain;
+}
+
+.ps-vault {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+  border-radius: 10px;
+  background: #12161e;
+  border: 1px solid rgba(148, 163, 184, 0.1);
+}
+
+.ps-vault-label {
+  color: #cbd5e1;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.ps-vault-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 80px;
+  border-radius: 8px;
+  border: 1px dashed rgba(148, 163, 184, 0.15);
+  color: #475569;
+  font-size: 12px;
+}
+
+.ps-vault-footer {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.ps-footer-stat {
+  padding: 10px;
+  border-radius: 14px;
+  background: #111620;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  text-align: center;
+}
+
+.ps-footer-stat span {
+  display: block;
+  color: #94a3b8;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.ps-footer-stat strong {
+  color: #e2e8f0;
+  font-family: "Space Grotesk", system-ui, sans-serif;
+  font-size: 22px;
+  line-height: 1;
+}
+
+.ps-inspector {
+  position: sticky;
+  top: 18px;
+  border-radius: 12px;
+  padding: 18px;
+  background: #12161e;
+  border: 1px solid rgba(148, 163, 184, 0.15);
+}
+
+.ps-inspector h3 {
+  margin: 6px 0 10px;
+  color: #e2e8f0;
+  font-family: "Space Grotesk", system-ui, sans-serif;
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.ps-inspector-eyebrow {
+  color: #94a3b8;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.ps-inspector-subtitle {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-bottom: 14px;
+  color: #cbd5e1;
+  font-size: 12px;
+}
+
+.ps-inspector-block {
+  margin-top: 16px;
+}
+
+.ps-inspector-label {
+  color: #94a3b8;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  margin-bottom: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ps-inspector-sublabel {
+  color: #64748b;
+  font-size: 9.5px;
+  font-weight: 500;
+  letter-spacing: 0.03em;
+  text-transform: none;
+}
+
+.ps-principal-indirect {
+  background: rgba(138, 128, 160, 0.05) !important;
+  border-style: dashed !important;
+  border-color: rgba(138, 128, 160, 0.25) !important;
+}
+
+.ps-principal-indirect .ps-principal-origin {
+  color: #8a80a0;
+  font-style: italic;
+}
+
+.ps-inspector-code {
+  display: block;
+  white-space: normal;
+  word-break: break-all;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: #111620;
+  color: #f8fafc;
+  font-size: 11px;
+}
+
+.ps-inspector-body,
+.ps-inspector-empty {
+  margin: 0;
+  color: #cbd5e1;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.ps-principal-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ps-principal-card {
+  padding: 12px;
+  border-radius: 8px;
+  background: #111620;
+  border: 1px solid rgba(148, 163, 184, 0.12);
+}
+
+.ps-principal-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.ps-principal-type {
+  --principal-accent: #94a3b8;
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: rgba(148, 163, 184, 0.1);
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  color: var(--principal-accent);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.ps-principal-address {
+  color: #e2e8f0;
+  font-size: 11px;
+  font-family: "JetBrains Mono", monospace;
+}
+
+.ps-principal-meta {
+  color: #f8fafc;
+  font-size: 13px;
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+
+.ps-principal-origin {
+  color: #94a3b8;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+/* Witness facts: verbose destination/expiry/backing/reach
+   rows in the function inspector. */
+.ps-witness-facts {
+  margin: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.ps-witness-fact {
+  display: grid;
+  grid-template-columns: minmax(96px, auto) 1fr;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.ps-witness-fact dt {
+  color: #94a3b8;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.ps-witness-fact dd {
+  margin: 0;
+  color: #e2e8f0;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+/* Non-terminal way-point / terminal-controller note under a principal card. The
+   "open" variant flags an unresolved/ambiguous controller — never a settled key. */
+.ps-principal-terminal {
+  color: #94a3b8;
+  font-size: 11px;
+  line-height: 1.45;
+  margin-bottom: 4px;
+}
+
+.ps-principal-terminal-open {
+  color: #c8a36a;
+}
+
+.ps-principal-overlap {
+  color: #94a3b8;
+  font-size: 11px;
+  line-height: 1.45;
+  margin-bottom: 4px;
+}
+
+/* Per-plane list under a multi-plane controller note — each parallel plane's own
+   terminal outcome, so the weakest plane is visible. */
+.ps-principal-planes {
+  list-style: none;
+  margin: 2px 0 0;
+  padding: 0 0 0 10px;
+}
+
+.ps-principal-planes li {
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+/* Shared-deployer attribution HINT — a heuristic, deliberately dimmer than the
+   Tier-1 signer-overlap note so it never reads as a control claim. */
+.ps-principal-deployer {
+  color: #7c8899;
+  font-size: 11px;
+  line-height: 1.45;
+  margin-bottom: 4px;
+  font-style: italic;
+}
+
+@media (max-width: 1220px) {
+  .ps-layout {
+    grid-template-columns: minmax(0, 1fr);
+    height: auto;
+  }
+
+  .ps-canvas-wrap {
+    height: 500px;
+  }
+
+  .ps-inspector {
+    position: static;
+  }
+}
+
+@media (max-width: 960px) {
+  .ps-surface {
+    padding: 18px;
+  }
+
+  .ps-surface-overlay {
+    max-width: calc(100vw - 32px);
+    right: 16px;
+  }
+
+  .ps-surface-header,
+  .ps-machine-header {
+    flex-direction: column;
+  }
+
+  .ps-machine-badges,
+  .ps-inspector-badges,
+  .ps-surface-stats {
+    justify-content: flex-start;
+  }
+
+  .ps-machine-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .ps-vault {
+    order: -1;
+  }
+
+  .ps-lane-top .ps-lane-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 640px) {
+  .ps-surface-title {
+    font-size: 28px;
+  }
+
+  .ps-machine {
+    padding: 16px;
+  }
+
+  .ps-port {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .ps-vault-footer,
+  .ps-surface-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
