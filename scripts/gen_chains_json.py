@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Codegen: emit ``site/src/chains.json`` from the canonical chain registry.
+"""Codegen: emit ``site/src/surface/chains.json`` from the canonical chain registry.
 
 The frontend needs chain id / name / explorer-base-url triples but must not keep
 its own hand-maintained map (inv. 5). This script is the single writer of
-``site/src/chains.json``; ``tests/chains/test_chains_json_parity.py`` asserts the
+``site/src/surface/chains.json``; ``tests/chains/test_chains_json_parity.py`` asserts the
 committed file still matches the registry, so a registry change that forgets to
 regenerate the JSON fails CI (parity-or-die).
 
@@ -24,7 +24,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from utils.chains import all_chains  # noqa: E402  (path bootstrap must precede)
 
-CHAINS_JSON_PATH = _REPO_ROOT / "site" / "src" / "chains.json"
+CHAINS_JSON_PATH = _REPO_ROOT / "site" / "src" / "surface" / "chains.json"
 
 
 def build_chains_payload() -> list[dict[str, object]]:
