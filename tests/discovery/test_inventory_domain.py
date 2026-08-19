@@ -261,6 +261,16 @@ class TestInferChain:
         # the ``optimistic``/``matic`` alias arms.
         assert _infer_chain("https://example.com", text) == expected
 
+    @pytest.mark.xfail(
+        strict=True,
+        reason="EXPLORER_CHAINS iteration order lets etherscan.io suffix-match "
+        "optimistic.etherscan.io before its own entry is reached, so the URL "
+        "resolves to ethereum. The map's optimism entry states the intent; this "
+        "pin flips to a hard failure when the ordering is fixed.",
+    )
+    def test_optimistic_etherscan_url_resolves_to_optimism(self):
+        assert _infer_chain("https://optimistic.etherscan.io/address/0x1234", "") == "optimism"
+
     def test_unknown_when_no_clues(self):
         assert _infer_chain("https://example.com", "some random text") == "unknown"
 

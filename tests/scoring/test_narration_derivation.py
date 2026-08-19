@@ -19,7 +19,7 @@ import pytest
 from services.scoring import fold as FOLD
 from services.scoring import planes as P
 from services.scoring.schema import PrincipalRef
-from tests import composition_admission_fixtures as CA
+from tests.support import composition_admission_fixtures as CA
 from tests.support.scoring_builders import (
     CALLING_SELECTOR,
     COMPOSED_SELECTOR,

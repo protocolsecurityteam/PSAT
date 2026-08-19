@@ -20,7 +20,7 @@ from services.scoring.schema import (
     entity_key,
     not_determined_signal_defaults,
 )
-from tests import composition_admission_fixtures as CA
+from tests.support import composition_admission_fixtures as CA
 from utils.scoring_status import (
     SEVERITY_STATE_PROVEN,
     VALUE_BOUND_FLOOR,
