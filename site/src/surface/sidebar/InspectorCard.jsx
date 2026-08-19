@@ -1,7 +1,8 @@
 import { formatDelay, shortAddr } from "../format.js";
 import { GotoArrow } from "../GotoArrow.jsx";
 import { LANE_META, TYPE_META } from "../meta.js";
-import { claimWitnessFacts, sharedDeployerNote, signerOverlapNote, terminalControllerNote } from "../../claimsVocab.js";
+import { claimWitnessFacts } from "../../vocab/witnessFacts.js";
+import { sharedDeployerNote, signerOverlapNote, terminalControllerNote } from "../../vocab/principalNotes.js";
 
 // Way-point / terminal-controller copy for a non-terminal principal. Mirrors the
 // backend witness bar: a resolved_type=contract principal is a way-point, never a

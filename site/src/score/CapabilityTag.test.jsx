@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 
 import CapabilityTag from "./CapabilityTag.jsx";
 import { CAPABILITY_GLOSSARY } from "./capabilityGlossary.js";
-import { CAPABILITY_PHRASE_IDS } from "../claimsVocab.js";
+import { CAPABILITY_PHRASE_IDS } from "../vocab/capabilityPhrase.js";
 
 describe("capability glossary", () => {
   it("covers exactly the fixed capability vocabulary — no gaps, no strays", () => {
