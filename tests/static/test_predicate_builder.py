@@ -1548,7 +1548,7 @@ def test_uncertain_marker_fires_on_unlowerable_caller_eq_gate(tmp_path, monkeypa
     function whose gate IS a direct caller EQ/NEQ compare, the builder must
     flag the full_name instead of silently returning None (which the policy
     would then read as 'unguarded')."""
-    import services.static.contract_analysis_pipeline.predicates as predicates_mod
+    import services.static.contract_analysis_pipeline.predicates.tree as predicates_mod
 
     sl = _compile(tmp_path, _CALLER_EQ_GATED)
     fn = _function(sl, "sweep")
@@ -1565,7 +1565,7 @@ def test_uncertain_marker_not_fired_for_value_gate_under_same_failure(tmp_path, 
     on a value-check gate (``require(amount > 0)``) must NOT flag the function
     — a fail-closed sweep that marks real public functions unsupported is an
     over-hedge the spec forbids."""
-    import services.static.contract_analysis_pipeline.predicates as predicates_mod
+    import services.static.contract_analysis_pipeline.predicates.tree as predicates_mod
 
     sl = _compile(tmp_path, _VALUE_GATED)
     fn = _function(sl, "sweep")
@@ -1595,7 +1595,7 @@ def test_uncertain_marker_reaches_artifact_and_policy_routes_unsupported(tmp_pat
     artifact and build_effective_permissions routes it to ``unsupported`` with
     the truthful reason, while a genuinely gate-less public function on the
     same contract stays public."""
-    import services.static.contract_analysis_pipeline.predicates as predicates_mod
+    import services.static.contract_analysis_pipeline.predicates.tree as predicates_mod
     from services.policy.effective_permissions import build_effective_permissions
     from services.static.contract_analysis_pipeline.predicate_artifacts import build_predicate_artifacts
 
