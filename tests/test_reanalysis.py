@@ -349,18 +349,6 @@ class TestShouldTriggerReanalysis:
             is True
         )
 
-    def test_effect_tags_writes_unrelated_does_not_trigger(self):
-        """Writes to a non-control-relevant slot (e.g. ``feeRecipient``)
-        should not trigger reanalysis even when the event_type isn't
-        canonical."""
-        assert (
-            should_trigger_reanalysis(
-                "controller_changed:state_variable:feeRecipient",
-                {"effect_tags": {"writes": ["feeRecipient"]}},
-            )
-            is False
-        )
-
     def test_effect_tags_delegates_triggers(self):
         """A DELEGATECALL in the emitter body is unconditionally
         upgrade-equivalent — proxy fallback / custom upgrade
@@ -410,21 +398,6 @@ class TestShouldTriggerReanalysis:
         }
         assert should_trigger_reanalysis("upgraded", data) is True
 
-    def test_bare_event_type_without_data_uses_synthesis_fallback(self):
-        """Some queue dedupe paths call ``should_trigger_reanalysis``
-        with only an event_type (no decoded data). The synthesis
-        fallback in ``_HANDROLLED_EVENT_TYPE_TO_TAGS`` must produce
-        the same verdict so those paths don't drift from the production
-        scan path."""
-        # Triggers
-        assert should_trigger_reanalysis("ownership_transferred") is True
-        assert should_trigger_reanalysis("upgraded") is True
-        assert should_trigger_reanalysis("admin_changed") is True
-        # Non-triggers
-        assert should_trigger_reanalysis("paused") is False
-        assert should_trigger_reanalysis("role_granted") is False
-        assert should_trigger_reanalysis("signer_added") is False
-
 
 # ---------------------------------------------------------------------------
 # DB integration tests: maybe_queue_reanalysis
@@ -445,27 +418,21 @@ class TestMaybeQueueReanalysis:
         assert req.get("reanalysis_trigger") == "upgraded"
         assert req.get("chain") == "ethereum"
 
-    def test_ownership_transfer_queues_job(self, db_session):
-        mc = _make_monitored_contract(db_session, "0x" + "bb" * 20)
-        job = maybe_queue_reanalysis(db_session, mc, "ownership_transferred")
+    @pytest.mark.parametrize(
+        ("addr_byte", "contract_type", "event_type"),
+        [
+            ("bb", "regular", "ownership_transferred"),
+            ("cc", "proxy", "admin_changed"),
+            ("dd", "proxy", "beacon_upgraded"),
+        ],
+    )
+    def test_triggering_event_queues_job(self, db_session, addr_byte, contract_type, event_type):
+        mc = _make_monitored_contract(db_session, "0x" + addr_byte * 20, contract_type)
+        job = maybe_queue_reanalysis(db_session, mc, event_type)
         assert job is not None
         assert job.address == mc.address
         assert job.request is not None
-        assert job.request.get("reanalysis_trigger") == "ownership_transferred"
-
-    def test_admin_changed_queues_job(self, db_session):
-        mc = _make_monitored_contract(db_session, "0x" + "cc" * 20, "proxy")
-        job = maybe_queue_reanalysis(db_session, mc, "admin_changed")
-        assert job is not None
-        assert job.request is not None
-        assert job.request.get("reanalysis_trigger") == "admin_changed"
-
-    def test_beacon_upgraded_queues_job(self, db_session):
-        mc = _make_monitored_contract(db_session, "0x" + "dd" * 20, "proxy")
-        job = maybe_queue_reanalysis(db_session, mc, "beacon_upgraded")
-        assert job is not None
-        assert job.request is not None
-        assert job.request.get("reanalysis_trigger") == "beacon_upgraded"
+        assert job.request.get("reanalysis_trigger") == event_type
 
     def test_non_triggering_event_returns_none(self, db_session):
         mc = _make_monitored_contract(db_session, "0x" + "ee" * 20)

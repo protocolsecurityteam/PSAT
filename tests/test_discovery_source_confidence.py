@@ -566,69 +566,6 @@ class TestBackfillOwnershipGate:
 
 
 # ---------------------------------------------------------------------------
-# 4. Analysis-job adoption gate — workers/discovery.py:_process_address
-# ---------------------------------------------------------------------------
-
-
-@requires_postgres
-class TestAnalysisJobAdoptionGate:
-    """Third leak path, caught only by live-DB observation: the static-
-    stage dependency expander (and resolution) spawn discovery jobs for
-    dependencies of a confirmed contract, with the parent's
-    ``protocol_id`` on the request. The discovery worker's
-    ``_process_address`` then stamps that ``protocol_id`` onto the
-    existing Contract row — bypassing the writer gate. Real example:
-    BoringGovernance (etherfi-confirmed) → calls WETH9 → static spawns a
-    WETH9 analysis job → discovery._process_address adopts the orphan
-    WETH9 row into etherfi. WETH9 is not an etherfi contract."""
-
-    def test_orphan_with_only_low_confidence_sources_is_not_adopted(self, db_session, seed_protocol):
-        """A WETH-shaped row exists as orphan from ``dapp_crawl``. An
-        analysis job runs with ``protocol_id=etherfi``. The adoption
-        path must check the orphan's discovery_sources before stamping
-        ownership — only ``dapp_crawl`` → leave orphan."""
-        from db.models import Contract
-        from services.discovery.source_confidence import asserts_ownership
-
-        # Seed an orphan from a low-confidence source.
-        addr = _addr(0xDA51)
-        db_session.add(Contract(address=addr, chain="ethereum", protocol_id=None, discovery_sources=["dapp_crawl"]))
-        db_session.commit()
-
-        # Inline the adoption check that lives in workers/discovery.py
-        # — the pure logic the gate now enforces. Pinning the check at
-        # the helper level keeps the test focused on the gate's intent
-        # without spinning up a worker process.
-        existing = db_session.query(Contract).filter_by(address=addr).one()
-        should_adopt = asserts_ownership(existing.discovery_sources)
-        assert should_adopt is False, (
-            "asserts_ownership returned True for a dapp_crawl-only row — "
-            "the analysis-job adoption gate would re-leak orphan rows"
-        )
-
-    def test_orphan_with_high_confidence_source_is_adopted(self, db_session, seed_protocol):
-        """Counterpart: a contract found via deployer_expansion that
-        ended up orphan for some reason should be adopted by a matching
-        analysis job."""
-        from db.models import Contract
-        from services.discovery.source_confidence import asserts_ownership
-
-        addr = _addr(0xDA52)
-        db_session.add(
-            Contract(
-                address=addr,
-                chain="ethereum",
-                protocol_id=None,
-                discovery_sources=["deployer_expansion"],
-            )
-        )
-        db_session.commit()
-
-        existing = db_session.query(Contract).filter_by(address=addr).one()
-        assert asserts_ownership(existing.discovery_sources) is True
-
-
-# ---------------------------------------------------------------------------
 # 5. End-to-end shape — the EigenLayer leak in miniature
 # ---------------------------------------------------------------------------
 
@@ -692,68 +629,6 @@ class TestEigenLayerLeakShape:
         # not attributed. (Future corroboration can promote them.)
         assert db_session.query(Contract).filter_by(address=proxy_addr).count() == 1
         assert db_session.query(Contract).filter(Contract.address.in_(impl_addrs)).count() == 3
-
-
-# ---------------------------------------------------------------------------
-# 6. Structural-adoption gate at the discovery worker
-# ---------------------------------------------------------------------------
-
-
-@requires_postgres
-class TestStructuralAdoptionAtWorker:
-    """The false-negative fix layer: when ``workers/discovery.py`` runs
-    for a cascade-spawned child (resolution or proxy-impl), the parent
-    has already passed ``discovery_relationship`` + ``parent_owns_high``
-    in the request. The adoption gate consults the structural branch as
-    well as the source-tier branch, and tags ``structural_adoption`` on
-    the row so the audit trail captures *how* ownership was earned.
-    """
-
-    def test_structural_branch_adopts_orphan(self, db_session, seed_protocol):
-        """Reproduces the PR-review case: an UUPSProxy shell of a
-        confirmed etherfi impl was orphan because cascade spawn carried
-        no HIGH discovery source. The gate's structural branch (parent
-        is HIGH-owned, edge is ``implementation``) adopts it.
-        """
-        from db.models import Contract
-
-        addr = _addr(0xCA51)
-        # Pre-existing orphan with no discovery_sources — exactly the
-        # shape we observed for cascade-spawned proxy shells.
-        db_session.add(Contract(address=addr, chain="ethereum", protocol_id=None, discovery_sources=None))
-        db_session.commit()
-
-        # Simulate the gate decision: structural evidence from a HIGH parent.
-        should_adopt = asserts_ownership(None, parent_owns=True, parent_relationship="implementation")
-        assert should_adopt is True
-
-    def test_structural_branch_skips_regular_edges(self, db_session, seed_protocol):
-        """Counterpart: a regular CALL edge (parent → WETH) must NOT
-        trigger structural adoption — re-opens the original WETH leak.
-        """
-        from db.models import Contract
-
-        addr = _addr(0xCA52)
-        db_session.add(Contract(address=addr, chain="ethereum", protocol_id=None, discovery_sources=["dapp_crawl"]))
-        db_session.commit()
-
-        # Regular CALL relationship: structural branch returns False, and
-        # the LOW source list also doesn't qualify → no adoption.
-        existing = db_session.query(Contract).filter_by(address=addr).one()
-        decision = asserts_ownership(existing.discovery_sources) or asserts_ownership(
-            None, parent_owns=True, parent_relationship="regular"
-        )
-        assert decision is False
-
-    def test_structural_branch_does_not_fire_when_parent_low(self, db_session, seed_protocol):
-        """Protocol B's HIGH-owned proxy must not grant ownership to a
-        contract whose only structural edge comes from protocol A's
-        LOW-owned analysis. The gate hinges on ``parent_owns_high``
-        which the cascade-spawn site computes from the parent's own
-        discovery_sources before pushing into the child request.
-        """
-        decision = asserts_ownership(["dapp_crawl"], parent_owns=False, parent_relationship="implementation")
-        assert decision is False
 
 
 # ---------------------------------------------------------------------------

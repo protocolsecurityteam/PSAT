@@ -571,6 +571,42 @@ def test_fetch_path_adopts_existing_row_from_request_sources(monkeypatch):
     assert "inventory" in (existing_row.discovery_sources or [])
 
 
+def test_fetch_path_leaves_low_confidence_orphan_unadopted(monkeypatch):
+    """The BoringGovernance→WETH9 leak path, driven through the worker.
+
+    A dependency-spawned analysis job carries the parent's ``protocol_id``.
+    The existing row is an orphan whose only discovery source is LOW
+    (``dapp_crawl``) and whose deployer is unwitnessed, so no branch of the
+    adoption gate applies: ownership must stay unclaimed."""
+    from utils.concurrency import RpcExecutor
+
+    RpcExecutor.reset_for_tests()
+    result = _etherscan_result()
+    _patch_discovery(monkeypatch, result)
+
+    monkeypatch.setattr("workers.discovery.find_completed_static_cache", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        "services.monitoring.enrollment.mark_enrollment_dirty",
+        lambda session, pid, reason: True,
+    )
+
+    existing_row = MagicMock()
+    existing_row.protocol_id = None
+    existing_row.discovery_sources = ["dapp_crawl"]
+    existing_row.deployer = None
+
+    worker = DiscoveryWorker()
+    monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
+    session = MagicMock()
+    session.execute.return_value.scalar_one_or_none.return_value = existing_row
+    job = _job(protocol_id=1, request={"discovery_sources": ["dapp_crawl"]})
+
+    worker._process_address(session, job)
+
+    assert existing_row.protocol_id is None
+    assert existing_row.discovery_sources == ["dapp_crawl"]
+
+
 def test_process_address_failed_creators_keeps_prior_deployer(monkeypatch):
     """A failed creators refetch must not erase a previously-witnessed
     deployer on an existing Contract row — None means the lookup answered

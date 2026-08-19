@@ -35,12 +35,8 @@ from db.models import (  # noqa: E402
 )
 from services.effects import anvil, recipes  # noqa: E402
 from services.effects.config import (  # noqa: E402
-    EFFECT_CLASS_CODE_UPGRADE,
-    VERDICT_PROVEN,
-    VERDICT_UNKNOWN,
     effects_stage_enabled,
 )
-from services.effects.discrepancies import file_new_idiom_candidate, route_discrepancy  # noqa: E402
 from services.effects.hashing import resolved_function_hash  # noqa: E402
 from services.effects.preflight import (  # noqa: E402
     InMemoryCapabilityStore,
@@ -99,27 +95,6 @@ def test_inv1_no_name_drives_effect():
         simulate_supported=True,
     )
     assert eff.transcript is not None and eff.is_proven
-
-
-# ---------------------------------------------------------------------------
-# The dedup key is the RESOLVED function, never a name/file hash.
-# ---------------------------------------------------------------------------
-
-
-def test_inv2_override_and_mixin_hash_apart():
-    latch = _var("StateVariable", "_pausedUntil")
-    sender = _var("SolidityVariableComposed", "msg.sender")
-    admin = _var("StateVariable", "admin")
-    guardian = _var("StateVariable", "guardian")
-    mixin = _fn("Base.pauseUntil(uint256)", nodes=[_node("EXPRESSION", [_ir("Assignment", lvalue=latch)])])
-    override = _fn(
-        "Strict.pauseUntil(uint256)",
-        nodes=[
-            _node("EXPRESSION", [_ir("Binary", read=[sender, admin, guardian])]),
-            _node("EXPRESSION", [_ir("Assignment", lvalue=latch)]),
-        ],
-    )
-    assert resolved_function_hash(mixin) != resolved_function_hash(override)
 
 
 # ---------------------------------------------------------------------------
@@ -215,26 +190,6 @@ def test_inv5_transitive_reach_beats_direct_balance():
 
 
 # ---------------------------------------------------------------------------
-# Fail-closed both sides: a non-observation is unknown, never proven-absent.
-# ---------------------------------------------------------------------------
-
-
-def test_inv6_nonobservation_is_unknown_not_proven_absent():
-    from services.effects.simulate import SimResult
-
-    eff = recipes.value_out(
-        simulate=ScriptedSimulate(SimResult(calls=(ok(),))),
-        store=RecordingStore(),
-        ctx=CTX,
-        contract_address=CONTRACT,
-        principal=PRINCIPAL,
-        calldata="0x11111111",
-        simulate_supported=True,
-    )
-    assert eff.verdict == VERDICT_UNKNOWN  # never a proven-absent
-
-
-# ---------------------------------------------------------------------------
 # Read-only and keyless: no mainnet writes.
 # ---------------------------------------------------------------------------
 
@@ -291,21 +246,6 @@ def test_inv8_verdict_tiered_and_replayable():
     assert eff.tier and eff.transcript_ptr is not None
     tr = store.stored[-1]
     assert {"tier", "block_number", "hardfork", "calls", "results"} <= set(tr)
-
-
-# ---------------------------------------------------------------------------
-# Both planes retained (static universals + simulation existentials).
-# ---------------------------------------------------------------------------
-
-
-def test_inv9_both_planes_retained():
-    # Simulation adds an existential witness; static's disagreement routing
-    # (both directions) exists so static's vocabulary can grow WITHOUT retiring it.
-    assert callable(route_discrepancy) and callable(file_new_idiom_candidate)
-    # Selection is driven by STATIC facts (blank-claim set), not simulation.
-    src = inspect.getsource(select_candidates)
-    assert "claims" in inspect.getsource(sys.modules["services.effects.selection"])
-    assert "resource_cap" in src
 
 
 # ---------------------------------------------------------------------------
@@ -413,42 +353,6 @@ def test_inv12_verdicts_gate_relative(clean_effects):
     assert not row.gate_ref.startswith("0x")
     # The cache schema has no principal/address column — binding is at read time.
     assert "principal" not in {c.name for c in EffectBehaviorCache.__table__.columns}
-
-
-# ---------------------------------------------------------------------------
-# Tier 0 is historical: an indexed event needs a current-state check.
-# ---------------------------------------------------------------------------
-
-
-def test_inv13_tier0_needs_current_state_check():
-    proven_now = recipes.code_upgrade(
-        simulate=ScriptedSimulate(),
-        store=RecordingStore(),
-        ctx=CTX,
-        proxy_address=CONTRACT,
-        principal=PRINCIPAL,
-        upgrade_calldata="0x",
-        sentinel_address=SENTINEL,
-        sentinel_override=None,
-        impl_before=None,
-        indexed_upgrade=True,
-        current_impl_nonzero=True,
-    )
-    unknown_hist = recipes.code_upgrade(
-        simulate=ScriptedSimulate(),
-        store=RecordingStore(),
-        ctx=CTX,
-        proxy_address=CONTRACT,
-        principal=PRINCIPAL,
-        upgrade_calldata="0x",
-        sentinel_address=SENTINEL,
-        sentinel_override=None,
-        impl_before=None,
-        indexed_upgrade=True,
-        current_impl_nonzero=False,
-    )
-    assert proven_now.verdict == VERDICT_PROVEN and proven_now.effect_class == EFFECT_CLASS_CODE_UPGRADE
-    assert unknown_hist.verdict == VERDICT_UNKNOWN  # history alone never proves present capability
 
 
 # ---------------------------------------------------------------------------

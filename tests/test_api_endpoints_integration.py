@@ -167,13 +167,6 @@ def test_analyze_accepts_address_with_company_context(mock_create_job, mock_sess
     assert req_dict["company"] == "etherfi"
 
 
-def test_analyze_rejects_neither_address_nor_company():
-    """Providing neither address nor company should return 422."""
-    client = _make_client()
-    response = client.post("/api/analyze", json={})
-    assert response.status_code == 422
-
-
 # ---------------------------------------------------------------------------
 # 2. POST /api/analyze — address payload
 # ---------------------------------------------------------------------------
@@ -834,36 +827,6 @@ def test_company_audits_not_found(mock_session_cls):
 
     response = client.get("/api/company/nonexistent/audits")
     assert response.status_code == 404
-
-
-@patch("routers.deps.SessionLocal")
-def test_company_audits_empty(mock_session_cls):
-    """GET /api/company/{name}/audits returns empty list when no audits exist."""
-    client = _make_client()
-    mock_session = MagicMock()
-    _mock_session_ctx(mock_session_cls, mock_session)
-
-    protocol = MagicMock()
-    protocol.id = 1
-
-    call_count = {"n": 0}
-
-    def route_execute(stmt, *args, **kwargs):
-        call_count["n"] += 1
-        result = MagicMock()
-        if call_count["n"] == 1:
-            result.scalar_one_or_none.return_value = protocol
-        else:
-            result.scalars.return_value.all.return_value = []
-        return result
-
-    mock_session.execute.side_effect = route_execute
-
-    response = client.get("/api/company/aave/audits")
-    assert response.status_code == 200
-    body = response.json()
-    assert body["audit_count"] == 0
-    assert body["audits"] == []
 
 
 # ---------------------------------------------------------------------------

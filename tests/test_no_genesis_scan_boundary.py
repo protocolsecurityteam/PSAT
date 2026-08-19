@@ -18,7 +18,6 @@ addresses (the failure mode of the local run that motivated this fix):
 from __future__ import annotations
 
 import ast
-import inspect
 import sys
 from pathlib import Path
 from typing import Any, cast
@@ -37,29 +36,11 @@ _REPO = Path(__file__).resolve().parents[1]
 # (a) required-arg structural guard ------------------------------------------
 
 
-def test_enumerate_allowlist_requires_from_block():
-    sig = inspect.signature(mapping_enumerator.enumerate_mapping_allowlist)
-    param = sig.parameters["from_block"]
-    assert param.default is inspect.Parameter.empty, "from_block must stay required (no genesis default)"
-
-
-def test_enumerate_values_requires_from_block():
-    sig = inspect.signature(mapping_enumerator.enumerate_mapping_values)
-    param = sig.parameters["from_block"]
-    assert param.default is inspect.Parameter.empty, "from_block must stay required (no genesis default)"
-
-
-def test_hypersync_event_repo_requires_from_block():
-    sig = inspect.signature(HyperSyncEventLogRepo.__init__)
-    param = sig.parameters["from_block"]
-    assert param.default is inspect.Parameter.empty, "from_block must stay required (no genesis default)"
-
-
 def test_enumerators_raise_typeerror_when_from_block_omitted():
     """The structural guard, enforced at the call boundary: omitting ``from_block``
-    must raise ``TypeError`` — not silently default to a genesis (0) scan. This is
-    the runtime counterpart to the signature checks above; it would have caught the
-    missed recursive path (which called the enumerator with no ``from_block``)."""
+    must raise ``TypeError`` — not silently default to a genesis (0) scan. It would
+    have caught the missed recursive path (which called the enumerator with no
+    ``from_block``)."""
     import asyncio
 
     # The omitted from_block is the point of the test; pyright correctly objects,

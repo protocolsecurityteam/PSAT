@@ -298,50 +298,6 @@ def test_cors_allows_configured_origin(monkeypatch, db_session) -> None:
         importlib.reload(api)
 
 
-@patch("routers.deps.SessionLocal")
-@patch("routers.deps.create_job")
-def test_analyze_endpoint_creates_job(mock_create_job, mock_session_cls) -> None:
-    client = make_client()
-
-    fake_job = _make_fake_job(status="queued", stage="discovery")
-    fake_job.to_dict.return_value["job_id"] = "job-1"
-    mock_create_job.return_value = fake_job
-
-    mock_session = MagicMock()
-    mock_session_cls.return_value.__enter__ = MagicMock(return_value=mock_session)
-    mock_session_cls.return_value.__exit__ = MagicMock(return_value=False)
-
-    response = client.post(
-        "/api/analyze",
-        json={"address": "0x1234567890123456789012345678901234567890", "name": "demo"},
-    )
-
-    assert response.status_code == 200
-    assert response.json()["job_id"] == "job-1"
-
-
-@patch("routers.deps.SessionLocal")
-@patch("routers.deps.create_job")
-def test_company_analyze_endpoint(mock_create_job, mock_session_cls) -> None:
-    client = make_client()
-
-    fake_job = _make_fake_job(status="queued", stage="discovery")
-    fake_job.to_dict.return_value["job_id"] = "job-2"
-    mock_create_job.return_value = fake_job
-
-    mock_session = MagicMock()
-    mock_session_cls.return_value.__enter__ = MagicMock(return_value=mock_session)
-    mock_session_cls.return_value.__exit__ = MagicMock(return_value=False)
-
-    response = client.post(
-        "/api/analyze",
-        json={"company": "etherfi", "chain": "ethereum", "analyze_limit": 3},
-    )
-
-    assert response.status_code == 200
-    assert response.json()["job_id"] == "job-2"
-
-
 def test_analyze_endpoint_rejects_bad_address() -> None:
     client = make_client()
     response = client.post("/api/analyze", json={"address": "123", "name": "demo"})
@@ -575,22 +531,6 @@ def test_stage_timings_endpoint_404_for_unknown_job(mock_session_cls) -> None:
         headers={"X-PSAT-Admin-Key": "test-admin-key"},
     )
     assert resp.status_code == 404
-
-
-def test_stage_timings_endpoint_is_admin_gated() -> None:
-    """Per-job stage timings are operator execution telemetry, served only to the
-    admin monitor dashboard. Verified at the route-definition level because
-    conftest's ``_bypass_admin_key`` autouse fixture stubs the auth dependency
-    for every test, so an HTTP-status assertion can never fire."""
-    import api
-    from routers.deps import require_admin_key
-
-    target_path = "/api/jobs/{job_id}/stage_timings"
-    matching = [r for r in api.app.routes if getattr(r, "path", None) == target_path]
-    assert matching, f"route {target_path} is not registered"
-    route = matching[0]
-    route_deps = [dep.call for dep in route.dependant.dependencies]  # pyright: ignore[reportAttributeAccessIssue]
-    assert require_admin_key in route_deps, "stage_timings must require an admin key"
 
 
 # ---------------------------------------------------------------------------

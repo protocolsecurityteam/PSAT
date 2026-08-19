@@ -72,12 +72,11 @@ def test_stage_error_unserializable_context_is_replaced_with_truncated_sentinel(
         def __repr__(self) -> str:
             raise RuntimeError("nope")
 
-    # The validator should fall back to the sentinel rather than raise.
+    # ``json.dumps(value, default=str)`` calls ``str(obj)``, which reaches the
+    # raising ``__repr__``; the exception escapes json.dumps and the validator
+    # answers the sentinel. Deterministic — the value, not a disjunction.
     err = _example(context={"x": NotSerializable()})
-    # Either the json fallback handled it via str(), or it triggered the
-    # sentinel — both are acceptable, but the size cap should not trip on a
-    # tiny dict, so the result is the small dict or the sentinel.
-    assert err.context == {"_truncated": True} or err.context == {"x": err.context["x"]}  # pyright: ignore[reportOptionalSubscript]
+    assert err.context == {"_truncated": True}
 
 
 def test_stage_errors_envelope_serializes_empty_list_cleanly():

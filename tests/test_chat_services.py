@@ -486,11 +486,13 @@ def test_truncate_caps_and_run_tool_dispatches(db_session, seeded_protocol):
     out = chat_tools.run_tool("get_protocol_info", db_session, ctx, {})
     assert out["name"] == PROTO_NAME
     assert "error" in chat_tools.run_tool("does_not_exist", db_session, ctx, {})
-    # Bad kwargs surface as an error, not an exception.
-    assert (
-        "error" in chat_tools.run_tool("get_protocol_info", db_session, ctx, {"unknown_arg_that_should_fail": True})
-        or True
-    )  # tools accept **_kw; this just exercises the path
+    # Tools accept ``**_kw``, so an unknown kwarg is absorbed: the call still
+    # answers the protocol, never an error and never an exception.
+    unknown_kwarg_out = chat_tools.run_tool(
+        "get_protocol_info", db_session, ctx, {"unknown_arg_that_should_fail": True}
+    )
+    assert "error" not in unknown_kwarg_out
+    assert unknown_kwarg_out["name"] == PROTO_NAME
 
 
 # ── agent.py + utils.llm.tool_chat ─────────────────────────────────────────

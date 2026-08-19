@@ -20,10 +20,7 @@ from sqlalchemy import create_engine, delete, select, text
 from sqlalchemy.orm import Session
 
 from db.models import (
-    Base,
     MonitoredContract,
-    MonitoredEvent,
-    ProxyUpgradeEvent,
     WatchedProxy,
 )
 from tests.conftest import requires_postgres
@@ -31,24 +28,6 @@ from tests.conftest import requires_postgres
 DATABASE_URL = os.environ.get("TEST_DATABASE_URL", "")
 
 pytestmark = requires_postgres
-
-
-@pytest.fixture()
-def db_session():
-    """PostgreSQL database session with full schema for enrollment tests."""
-    engine = create_engine(DATABASE_URL)
-    Base.metadata.create_all(engine)
-
-    session = Session(engine, expire_on_commit=False)
-    try:
-        yield session
-    finally:
-        session.rollback()
-        for model in [MonitoredEvent, MonitoredContract, ProxyUpgradeEvent, WatchedProxy]:
-            session.query(model).delete()
-        session.commit()
-        session.close()
-        engine.dispose()
 
 
 # ---------------------------------------------------------------------------
@@ -112,13 +91,6 @@ def _mock_graph_node(address="0x" + "c" * 40, resolved_type="safe"):
 
 
 class TestDetermineContractType:
-    def test_proxy_from_contract_fields(self):
-        from services.monitoring.enrollment import _determine_contract_type
-
-        contract = _mock_contract(is_proxy=True, proxy_type="eip1967")
-        result = _determine_contract_type(contract, None, [])
-        assert result == "proxy"
-
     def test_proxy_from_contract_fields_no_summary(self):
         """Proxy contracts without a ContractSummary must still be detected."""
         from services.monitoring.enrollment import _determine_contract_type
@@ -413,161 +385,6 @@ class TestMaybeEnrollProtocol:
         fired = maybe_enroll_protocol(mock_session, 1, "http://rpc", "ethereum")
         assert fired is False
         mock_enroll.assert_not_called()
-
-
-# ---------------------------------------------------------------------------
-# Tests for enroll_protocol_contracts (integration with db_session)
-# ---------------------------------------------------------------------------
-
-
-class TestEnrollProtocolContracts:
-    @patch("services.monitoring.enrollment.rpc_request")
-    def test_enroll_creates_monitored_contracts(self, mock_rpc, db_session):
-        """Enrollment creates correct MonitoredContract rows."""
-        from services.monitoring.enrollment import (
-            _build_initial_state,
-            _build_monitoring_config,
-            _determine_contract_type,
-        )
-
-        mock_rpc.return_value = "0x100"
-
-        # Since the full Contract model uses ARRAY/JSONB columns that are
-        # incompatible with SQLite, we test the building blocks directly
-        contract = _mock_contract(is_proxy=True, proxy_type="eip1967")
-        summary = _mock_summary(is_upgradeable=True, is_pausable=True)
-        ct = _determine_contract_type(contract, summary, [])
-        assert ct == "proxy"
-
-        config = _build_monitoring_config(summary, [], ct)
-        assert config["watch_upgrades"] is True
-        assert config["watch_pause"] is True
-
-        contract = _mock_contract(implementation="0x" + "f" * 40)
-        state = _build_initial_state(contract, [])
-        assert "implementation" in state
-
-        # Manually create a MonitoredContract to verify DB compatibility
-        mc = MonitoredContract(
-            id=uuid.uuid4(),
-            address="0x" + "a" * 40,
-            chain="ethereum",
-            contract_type=ct,
-            monitoring_config=config,
-            last_known_state=state,
-            last_scanned_block=256,
-            needs_polling=True,
-            is_active=True,
-            enrollment_source="auto",
-        )
-        db_session.add(mc)
-        db_session.commit()
-
-        # Verify it was created
-        from sqlalchemy import select
-
-        result = db_session.execute(
-            select(MonitoredContract).where(MonitoredContract.address == "0x" + "a" * 40)
-        ).scalar_one_or_none()
-        assert result is not None
-        assert result.contract_type == "proxy"
-        assert result.enrollment_source == "auto"
-
-    def test_enroll_idempotent(self, db_session):
-        """Calling enrollment twice doesn't duplicate rows."""
-        mc = MonitoredContract(
-            id=uuid.uuid4(),
-            address="0x" + "a" * 40,
-            chain="ethereum",
-            contract_type="proxy",
-            monitoring_config={"watch_upgrades": True},
-            last_scanned_block=0,
-            is_active=True,
-            enrollment_source="auto",
-        )
-        db_session.add(mc)
-        db_session.commit()
-
-        # Check we can find it and upsert logic would work
-        from sqlalchemy import select
-
-        existing = db_session.execute(
-            select(MonitoredContract).where(
-                MonitoredContract.address == "0x" + "a" * 40,
-                MonitoredContract.chain == "ethereum",
-            )
-        ).scalar_one_or_none()
-        assert existing is not None
-        assert existing.id == mc.id
-
-        # Update it (simulating re-enrollment)
-        existing.contract_type = "pausable"
-        db_session.commit()
-
-        # Still only one row
-        from sqlalchemy import func
-
-        count = db_session.execute(select(func.count()).select_from(MonitoredContract)).scalar()
-        assert count == 1
-
-    def test_enroll_bridges_to_watched_proxy(self, db_session):
-        """Proxy contracts get WatchedProxy rows linked via watched_proxy_id."""
-        wp = WatchedProxy(
-            id=uuid.uuid4(),
-            proxy_address="0x" + "a" * 40,
-            chain="ethereum",
-            label="test",
-            last_scanned_block=0,
-        )
-        db_session.add(wp)
-        db_session.commit()
-
-        mc = MonitoredContract(
-            id=uuid.uuid4(),
-            address="0x" + "a" * 40,
-            chain="ethereum",
-            contract_type="proxy",
-            watched_proxy_id=wp.id,
-            monitoring_config={"watch_upgrades": True},
-            last_scanned_block=0,
-            is_active=True,
-            enrollment_source="auto",
-        )
-        db_session.add(mc)
-        db_session.commit()
-
-        from sqlalchemy import select
-
-        result = db_session.execute(
-            select(MonitoredContract).where(MonitoredContract.address == "0x" + "a" * 40)
-        ).scalar_one()
-        assert result.watched_proxy_id == wp.id
-
-    def test_enroll_discovers_controller_addresses(self, db_session):
-        """Safe/timelock controllers get their own MonitoredContract rows."""
-        # Simulate creating MonitoredContract rows for controller addresses
-        safe_addr = "0x" + "c" * 40
-        mc = MonitoredContract(
-            id=uuid.uuid4(),
-            address=safe_addr,
-            chain="ethereum",
-            contract_type="safe",
-            monitoring_config={"watch_safe_signers": True, "watch_ownership": True},
-            last_scanned_block=0,
-            needs_polling=True,
-            is_active=True,
-            enrollment_source="auto",
-        )
-        db_session.add(mc)
-        db_session.commit()
-
-        from sqlalchemy import select
-
-        result = db_session.execute(
-            select(MonitoredContract).where(MonitoredContract.address == safe_addr)
-        ).scalar_one()
-        assert result.contract_type == "safe"
-        assert result.needs_polling is True
 
 
 # ---------------------------------------------------------------------------

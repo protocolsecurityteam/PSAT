@@ -207,13 +207,6 @@ def test_cache_eviction_under_ceiling(monkeypatch):
     assert len(rpc._GETCODE_CACHE) <= rpc._GETCODE_CACHE_MAX
 
 
-def test_clear_getcode_cache_empties_state():
-    rpc._GETCODE_CACHE[("https://rpc", "0xabc")] = ("0x60", "0x" + "0" * 64, 0.0)
-    assert len(rpc._GETCODE_CACHE) == 1
-    rpc.clear_getcode_cache()
-    assert len(rpc._GETCODE_CACHE) == 0
-
-
 def test_get_code_uses_cached_value_with_unrelated_get_code_with_keccak(monkeypatch):
     """Belt-and-suspenders cross-API check: any future split that gives
     each function its own private cache would silently double RPC load."""

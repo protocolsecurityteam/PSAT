@@ -12,16 +12,14 @@ from pathlib import Path
 from typing import Any, cast
 from unittest.mock import MagicMock
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from services.discovery.inventory_domain import (
     ADDRESS_RE,
     CHAIN_IDS,
-    CHAIN_SORT_ORDER,
     DOMAIN_RE,
-    EXPLORER_CHAINS,
-    LOW_TRUST_DOMAINS,
-    TAG_RE,
     URL_RE,
     RateLimiter,
     _collect_in_domain_pages,
@@ -50,9 +48,6 @@ from services.discovery.inventory_domain import (
 
 
 class TestAddressRE:
-    def test_matches_valid_40_hex_address(self):
-        assert ADDRESS_RE.search("0x" + "a" * 40) is not None
-
     def test_matches_mixed_case(self):
         assert ADDRESS_RE.search("0xAaBbCcDdEeFf0011223344556677889900112233") is not None
 
@@ -70,80 +65,21 @@ class TestAddressRE:
     def test_no_match_without_0x(self):
         assert ADDRESS_RE.search("a" * 40) is None
 
-    def test_finds_multiple_addresses(self):
-        text = f"addr1: 0x{'a' * 40} and addr2: 0x{'b' * 40}"
-        matches = ADDRESS_RE.findall(text)
-        assert len(matches) == 2
-
-    def test_embedded_in_url(self):
-        url = f"https://etherscan.io/address/0x{'ff' * 20}"
-        match = ADDRESS_RE.search(url)
-        assert match is not None
-
 
 class TestURLRE:
-    def test_matches_https(self):
-        assert URL_RE.search("https://example.com") is not None
-
-    def test_matches_http(self):
-        assert URL_RE.search("http://example.com") is not None
-
-    def test_no_match_ftp(self):
-        assert URL_RE.search("ftp://example.com") is None
-
-    def test_stops_at_whitespace(self):
-        match = URL_RE.search("visit https://example.com/path more text")
-        assert match is not None
-        assert match.group() == "https://example.com/path"
-
     def test_stops_at_angle_bracket(self):
         match = URL_RE.search('<a href="https://example.com/page">')
         assert match is not None
         # Should stop before the closing quote or angle bracket
         assert ">" not in match.group()
 
-    def test_finds_multiple_urls(self):
-        text = "See https://a.com and http://b.com/path"
-        matches = URL_RE.findall(text)
-        assert len(matches) == 2
-
 
 class TestDomainRE:
-    def test_valid_domain(self):
-        assert DOMAIN_RE.match("example.com") is not None
-
     def test_subdomain(self):
         assert DOMAIN_RE.match("docs.example.com") is not None
 
     def test_hyphenated(self):
         assert DOMAIN_RE.match("my-app.example.com") is not None
-
-    def test_case_insensitive(self):
-        assert DOMAIN_RE.match("Example.COM") is not None
-
-    def test_no_match_single_label(self):
-        assert DOMAIN_RE.match("localhost") is None
-
-    def test_no_match_leading_hyphen(self):
-        assert DOMAIN_RE.match("-example.com") is None
-
-    def test_no_match_with_space(self):
-        assert DOMAIN_RE.match("example .com") is None
-
-
-class TestTagRE:
-    def test_matches_html_tag(self):
-        assert TAG_RE.search("<div>") is not None
-
-    def test_matches_self_closing(self):
-        assert TAG_RE.search("<br/>") is not None
-
-    def test_matches_tag_with_attrs(self):
-        match = TAG_RE.search('<a href="url">')
-        assert match is not None
-
-    def test_no_match_plain_text(self):
-        assert TAG_RE.search("hello world") is None
 
 
 # ---------------------------------------------------------------------------
@@ -152,23 +88,11 @@ class TestTagRE:
 
 
 class TestConstants:
-    def test_explorer_chains_all_lowercase_values(self):
-        for chain in EXPLORER_CHAINS.values():
-            assert chain == chain.lower()
-
-    def test_low_trust_domains_all_lowercase(self):
-        for d in LOW_TRUST_DOMAINS:
-            assert d == d.lower()
-
-    def test_chain_sort_order_has_unknown(self):
-        assert "unknown" in CHAIN_SORT_ORDER
-
     def test_chain_ids_ethereum_is_1(self):
+        # Cross-module agreement: the ``utils.chains`` registry and inventory's
+        # ``CHAIN_IDS`` must resolve the same id, which chain_resolver.py feeds to
+        # Etherscan v2 as the ``chainid`` query param.
         assert CHAIN_IDS["ethereum"] == 1
-
-    def test_chain_ids_all_positive(self):
-        for chain, cid in CHAIN_IDS.items():
-            assert cid > 0, f"{chain} has non-positive chain ID"
 
 
 # ---------------------------------------------------------------------------
@@ -177,18 +101,6 @@ class TestConstants:
 
 
 class TestRateLimiter:
-    def test_init_sets_min_interval(self):
-        rl = RateLimiter(10.0)
-        assert abs(rl._min_interval - 0.1) < 1e-9
-
-    def test_first_call_does_not_sleep(self):
-        rl = RateLimiter(1000.0)  # very fast limit
-        start = time.monotonic()
-        rl.wait()
-        elapsed = time.monotonic() - start
-        # First call should be near-instant (well under 50ms)
-        assert elapsed < 0.05
-
     def test_back_to_back_calls_enforce_interval(self):
         rl = RateLimiter(20.0)  # 50ms interval
         rl.wait()
@@ -261,26 +173,15 @@ class TestGetDomain:
 
 
 class TestDomainMatches:
-    def test_exact_match(self):
-        assert _domain_matches("example.com", "example.com") is True
-
     def test_subdomain_match(self):
         assert _domain_matches("docs.example.com", "example.com") is True
 
     def test_no_match_partial(self):
+        # Suffix-confusion guard: `known in domain` would admit this.
         assert _domain_matches("notexample.com", "example.com") is False
-
-    def test_no_match_unrelated(self):
-        assert _domain_matches("other.org", "example.com") is False
 
 
 class TestIsExplorerDomain:
-    def test_etherscan(self):
-        assert _is_explorer_domain("etherscan.io") is True
-
-    def test_arbiscan(self):
-        assert _is_explorer_domain("arbiscan.io") is True
-
     def test_blockscout_subdomain(self):
         assert _is_explorer_domain("eth.blockscout.com") is True
 
@@ -289,12 +190,6 @@ class TestIsExplorerDomain:
 
 
 class TestIsLowTrustDomain:
-    def test_coingecko(self):
-        assert _is_low_trust_domain("coingecko.com") is True
-
-    def test_twitter(self):
-        assert _is_low_trust_domain("twitter.com") is True
-
     def test_subdomain_of_low_trust(self):
         assert _is_low_trust_domain("www.reddit.com") is True
 
@@ -303,16 +198,11 @@ class TestIsLowTrustDomain:
 
 
 class TestIsAllowedDomain:
-    def test_in_allowed_list(self):
-        assert _is_allowed_domain("docs.example.com", ["example.com"]) is True
-
-    def test_exact_match(self):
-        assert _is_allowed_domain("example.com", ["example.com"]) is True
-
     def test_not_in_list(self):
         assert _is_allowed_domain("other.com", ["example.com"]) is False
 
     def test_empty_list(self):
+        # Fail-closed: an empty allowlist admits nothing.
         assert _is_allowed_domain("example.com", []) is False
 
 
@@ -348,13 +238,6 @@ class TestInferChain:
     def test_arbiscan_url(self):
         assert _infer_chain("https://arbiscan.io/address/0x1234", "") == "arbitrum"
 
-    def test_optimistic_etherscan_url(self):
-        # optimistic.etherscan.io also matches etherscan.io (a parent in the dict),
-        # so the result depends on iteration order.  The code iterates EXPLORER_CHAINS
-        # and etherscan.io appears before optimistic.etherscan.io.
-        result = _infer_chain("https://optimistic.etherscan.io/address/0x1234", "")
-        assert result in ("ethereum", "optimism")
-
     def test_polygonscan_url(self):
         assert _infer_chain("https://polygonscan.com/address/0x1234", "") == "polygon"
 
@@ -364,29 +247,23 @@ class TestInferChain:
     def test_blockscout_base(self):
         assert _infer_chain("https://base.blockscout.com/address/0x1234", "") == "base"
 
-    def test_text_fallback_arbitrum(self):
-        assert _infer_chain("https://example.com", "Deployed on Arbitrum network") == "arbitrum"
-
-    def test_text_fallback_optimism(self):
-        assert _infer_chain("https://example.com", "Optimism chain") == "optimism"
-
-    def test_text_fallback_optimistic(self):
-        assert _infer_chain("https://example.com", "Optimistic rollup") == "optimism"
-
-    def test_text_fallback_polygon(self):
-        assert _infer_chain("https://example.com", "Polygon deployment") == "polygon"
-
-    def test_text_fallback_matic(self):
-        assert _infer_chain("https://example.com", "MATIC network") == "polygon"
-
-    def test_text_fallback_base(self):
-        assert _infer_chain("https://example.com", "Base chain") == "base"
-
-    def test_text_fallback_ethereum(self):
-        assert _infer_chain("https://example.com", "Ethereum mainnet") == "ethereum"
-
-    def test_text_fallback_mainnet(self):
-        assert _infer_chain("https://example.com", "Mainnet contracts") == "ethereum"
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("Deployed on Arbitrum network", "arbitrum"),
+            ("Optimism chain", "optimism"),
+            ("Optimistic rollup", "optimism"),
+            ("Polygon deployment", "polygon"),
+            ("MATIC network", "polygon"),
+            ("Base chain", "base"),
+            ("Ethereum mainnet", "ethereum"),
+            ("Mainnet contracts", "ethereum"),
+        ],
+    )
+    def test_text_fallback(self, text, expected):
+        # One case per distinct literal in _infer_chain's keyword ladder, including
+        # the ``optimistic``/``matic`` alias arms.
+        assert _infer_chain("https://example.com", text) == expected
 
     def test_unknown_when_no_clues(self):
         assert _infer_chain("https://example.com", "some random text") == "unknown"

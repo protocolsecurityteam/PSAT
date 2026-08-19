@@ -275,8 +275,10 @@ def test_accountant_admin_stays_gated(session):
         controllers={"external_contract:authority": _ZERO, "state_variable:owner": _ZERO},
     )
     for sig in ("updateExchangeRate(uint96)", "setRateProviderData(ERC20,bool,address)"):
-        if sig in out:
-            assert _status(out[sig]) != "public", f"Accountant.{sig} (requiresAuth) must NOT open to public"
+        # Index directly, like the siblings above: if canonicalisation ever moves
+        # the output key, this canary must go red rather than silently vanish.
+        assert sig in out, f"Accountant.{sig} missing from the resolved capabilities"
+        assert _status(out[sig]) != "public", f"Accountant.{sig} (requiresAuth) must NOT open to public"
 
 
 # ---------------------------------------------------------------------------

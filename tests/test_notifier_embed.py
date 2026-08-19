@@ -17,6 +17,8 @@ import uuid
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from sqlalchemy.orm import Session
@@ -116,9 +118,20 @@ def test_authority_updated_renders_old_and_new_authority():
     assert fields["New Authority"]["value"] == "`0x" + "22" * 20 + "`"
 
 
-def test_upgraded_renders_new_implementation():
-    evt = _make_evt(
+@pytest.mark.parametrize(
+    "event_type",
+    [
         "upgraded",
+        # GnosisSafe ChangedMasterCopy stores the new master copy under
+        # ``implementation`` for backward compat with the upgrade renderer.
+        "changed_master_copy",
+        # Synthetix TargetUpdated — same shape as Upgraded modulo the topic0.
+        "target_updated",
+    ],
+)
+def test_upgrade_family_renders_new_implementation(event_type):
+    evt = _make_evt(
+        event_type,
         {
             "implementation": "0x" + "cc" * 20,
             "effect_tags": {"writes": ["implementation"], "delegates": True},
@@ -130,44 +143,10 @@ def test_upgraded_renders_new_implementation():
 
 
 def test_new_implementation_renders_via_synthesis_fallback():
-    """Compound NewImplementation lands with effect_tags from the
-    hand-rolled decoder. The render path doesn't need a per-event_type
-    branch — it sees writes=["implementation"] and renders accordingly."""
-    evt = _make_evt(
-        "new_implementation",
-        {
-            "implementation": "0x" + "cc" * 20,
-            "effect_tags": {"writes": ["implementation"], "delegates": True},
-        },
-    )
-    fields = _fields(_format_governance_embed(evt, _FakeSession()))
-    assert fields["New Implementation"]["value"] == "`0x" + "cc" * 20 + "`"
-
-
-def test_changed_master_copy_renders_new_implementation():
-    """GnosisSafe ChangedMasterCopy stores the new master copy under
-    ``implementation`` for backward compat with the upgrade renderer."""
-    evt = _make_evt(
-        "changed_master_copy",
-        {
-            "implementation": "0x" + "cc" * 20,
-            "effect_tags": {"writes": ["implementation"], "delegates": True},
-        },
-    )
-    fields = _fields(_format_governance_embed(evt, _FakeSession()))
-    assert fields["New Implementation"]["value"] == "`0x" + "cc" * 20 + "`"
-
-
-def test_target_updated_renders_new_implementation():
-    """Synthetix TargetUpdated — same shape as Upgraded modulo the
-    topic0."""
-    evt = _make_evt(
-        "target_updated",
-        {
-            "implementation": "0x" + "cc" * 20,
-            "effect_tags": {"writes": ["implementation"], "delegates": True},
-        },
-    )
+    """Compound NewImplementation can land with no effect_tags at all.
+    The renderer must synthesize them from ``_HANDROLLED_EVENT_TYPE_TO_TAGS``
+    — no per-event_type render branch, and no silently empty embed."""
+    evt = _make_evt("new_implementation", {"implementation": "0x" + "cc" * 20})
     fields = _fields(_format_governance_embed(evt, _FakeSession()))
     assert fields["New Implementation"]["value"] == "`0x" + "cc" * 20 + "`"
 
@@ -230,9 +209,10 @@ def test_beacon_upgraded_renders_beacon_address():
     assert fields["Beacon"]["value"] == "`0x" + "dd" * 20 + "`"
 
 
-def test_paused_renders_account_field():
+@pytest.mark.parametrize("event_type", ["paused", "unpaused"])
+def test_pause_family_renders_account_field(event_type):
     evt = _make_evt(
-        "paused",
+        event_type,
         {
             "account": "0x" + "ee" * 20,
             "effect_tags": {"writes": ["paused"]},
@@ -242,22 +222,10 @@ def test_paused_renders_account_field():
     assert fields["Account"]["value"] == "`0x" + "ee" * 20 + "`"
 
 
-def test_unpaused_renders_account_field():
-    """unpaused shares writes=["paused"] with paused — same field shape."""
+@pytest.mark.parametrize("event_type", ["role_granted", "role_revoked"])
+def test_role_family_renders_role_account_sender(event_type):
     evt = _make_evt(
-        "unpaused",
-        {
-            "account": "0x" + "ee" * 20,
-            "effect_tags": {"writes": ["paused"]},
-        },
-    )
-    fields = _fields(_format_governance_embed(evt, _FakeSession()))
-    assert fields["Account"]["value"] == "`0x" + "ee" * 20 + "`"
-
-
-def test_role_granted_renders_role_account_sender():
-    evt = _make_evt(
-        "role_granted",
+        event_type,
         {
             "role": "0x" + "00" * 32,
             "account": "0x" + "ee" * 20,
@@ -275,37 +243,10 @@ def test_role_granted_renders_role_account_sender():
     assert fields["Sender"]["inline"] is True
 
 
-def test_role_revoked_renders_role_account_sender():
+@pytest.mark.parametrize("event_type", ["signer_added", "signer_removed"])
+def test_signer_family_renders_signer_address(event_type):
     evt = _make_evt(
-        "role_revoked",
-        {
-            "role": "0x" + "00" * 32,
-            "account": "0x" + "ee" * 20,
-            "sender": "0x" + "ff" * 20,
-            "effect_tags": {"writes": ["_roles"]},
-        },
-    )
-    fields = _fields(_format_governance_embed(evt, _FakeSession()))
-    assert "Role" in fields
-    assert "Account" in fields
-    assert "Sender" in fields
-
-
-def test_signer_added_renders_signer_address():
-    evt = _make_evt(
-        "signer_added",
-        {
-            "owner": "0x" + "ee" * 20,
-            "effect_tags": {"writes": ["owners"]},
-        },
-    )
-    fields = _fields(_format_governance_embed(evt, _FakeSession()))
-    assert fields["Signer"]["value"] == "`0x" + "ee" * 20 + "`"
-
-
-def test_signer_removed_renders_signer_address():
-    evt = _make_evt(
-        "signer_removed",
+        event_type,
         {
             "owner": "0x" + "ee" * 20,
             "effect_tags": {"writes": ["owners"]},

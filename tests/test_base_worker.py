@@ -628,10 +628,22 @@ def test_heartbeat_swallows_db_failure(mock_signal, SessionLocalMock):
 
 def test_stale_job_timeout_default_is_600():
     """The default stale-job timeout is 600s now that fan-outs can sit minutes between writes."""
+    import importlib
+
     from workers import base
 
-    # Re-resolve in case env var bumps it; default should be 600.
-    assert int(os.environ.get("PSAT_STALE_JOB_TIMEOUT", "600")) >= 600 or base.STALE_JOB_TIMEOUT == 600
+    # Clear the override and re-resolve, so this observes the code's default
+    # rather than whatever the ambient environment happens to carry. The env is
+    # restored and the module reloaded again before leaving, so the reload does
+    # not leak a mutated constant into the rest of the worker process.
+    previous = os.environ.pop("PSAT_STALE_JOB_TIMEOUT", None)
+    try:
+        importlib.reload(base)
+        assert base.STALE_JOB_TIMEOUT == 600
+    finally:
+        if previous is not None:
+            os.environ["PSAT_STALE_JOB_TIMEOUT"] = previous
+        importlib.reload(base)
 
 
 # ---------------------------------------------------------------------------

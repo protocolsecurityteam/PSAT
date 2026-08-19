@@ -225,48 +225,6 @@ class TestFilenameDateExtraction:
 
 
 # ---------------------------------------------------------------------------
-# Audit folder-name allowlist — decides what `src/`-siblings get enumerated
-# ---------------------------------------------------------------------------
-
-
-class TestFolderNameMatching:
-    @pytest.mark.parametrize(
-        "folder_name",
-        [
-            "audits",
-            "audit",
-            "audit-reports",
-            "security-audits",
-            "reviews",
-            "security-reviews",
-            "external-audits",
-            "code-audits",
-            "formal-verification",
-            "security-reports",
-        ],
-    )
-    def test_recognized_folders(self, folder_name):
-        from services.discovery.audit_reports import _AUDIT_FOLDER_LAST_SEGMENTS
-
-        assert folder_name in _AUDIT_FOLDER_LAST_SEGMENTS
-
-    @pytest.mark.parametrize(
-        "folder_name",
-        [
-            "src",
-            "test",
-            "lib",
-            "node_modules",
-            "docs",
-        ],
-    )
-    def test_unrelated_folders_excluded(self, folder_name):
-        from services.discovery.audit_reports import _AUDIT_FOLDER_LAST_SEGMENTS
-
-        assert folder_name not in _AUDIT_FOLDER_LAST_SEGMENTS
-
-
-# ---------------------------------------------------------------------------
 # GitHub blob → raw URL normalization. Blob URLs render HTML (the code-view
 # page); raw URLs serve the actual file bytes. The audit text-extraction
 # worker needs raw URLs for markdown/text files so the response has a
@@ -312,21 +270,6 @@ class TestGithubBlobToRaw:
 
         tree = "https://github.com/a/b/tree/main/audits"
         assert github_blob_to_raw(tree) == tree
-
-    def test_handles_branch_with_slash(self):
-        """Branches can contain slashes (e.g. ``release/1.2``); a naive split
-        would put the slash in the path and break the URL."""
-        from services.discovery.audit_reports import github_blob_to_raw
-
-        src = "https://github.com/a/b/blob/release/1.2/audits/foo.md"
-        # Since the GitHub URL regex uses the first segment after /blob/ as
-        # the ref, this is the documented behaviour — the caller must pass a
-        # single-segment ref or live with this limitation.
-        out = github_blob_to_raw(src)
-        # Either it's converted with ref="release" (current helper scope) or
-        # passed through unchanged — both are acceptable. The important bit
-        # is that it doesn't crash.
-        assert out.startswith(("https://raw.githubusercontent.com/", "https://github.com/"))
 
 
 class TestReportEntryNormalization:

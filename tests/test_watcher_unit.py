@@ -294,8 +294,7 @@ class TestRevertedEthCallPolling:
             "6e6f706500000000000000000000000000000000000000000000000000000000"
         )
         result = parse_address_result(revert_data)
-        if result is not None:
-            assert result == "0x" + "0" * 40 or result is None, f"Revert data was parsed as address: {result}"
+        assert result is None, f"Revert data was parsed as address: {result}"
 
     def test_short_revert_returns_none(self):
         """Short revert responses (< 66 chars) must return None."""

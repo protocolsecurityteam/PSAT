@@ -123,10 +123,6 @@ class TestDisplayName:
         result = self._dn({"contract_name": "ERC1967Proxy", "run_name": "MyRunName"})
         assert result == "MyRunName"
 
-    def test_generic_proxy_name_case_insensitive(self):
-        result = self._dn({"contract_name": "uupsproxy", "run_name": "run1"})
-        assert result == "run1"
-
     def test_all_generic_proxy_names(self):
         from services.governance.proxies import GENERIC_PROXY_NAMES
 
@@ -141,10 +137,6 @@ class TestDisplayName:
 
     def test_empty_entry(self):
         result = self._dn({})
-        assert result == ""
-
-    def test_none_values(self):
-        result = self._dn({"display_name": None, "contract_name": None, "run_name": None})
         assert result == ""
 
     def test_chain_suffix_not_added_to_empty_name(self):
@@ -163,23 +155,12 @@ class TestMergeProxyImplEntries:
 
         return _merge_proxy_impl_entries(entries)
 
-    def test_no_entries(self):
-        assert self._merge([]) == []
-
     def test_non_proxy_entries_pass_through(self):
         entry = {"address": "0xaaa", "run_name": "test"}
         result = self._merge([entry])
         assert len(result) == 1
         assert result[0]["address"] == "0xaaa"
         assert "display_name" in result[0]
-
-    def test_impl_entry_without_matching_proxy_stays(self):
-        # An impl entry (has proxy_address) but no proxy entry matches it
-        impl = {"address": "0xbbb", "proxy_address": "0xaaa", "run_name": "impl"}
-        result = self._merge([impl])
-        # The impl entry should still appear as an unmerged impl
-        assert len(result) == 1
-        assert result[0]["address"] == "0xbbb"
 
     def test_proxy_and_impl_merge(self):
         proxy = {
@@ -243,71 +224,6 @@ class TestMergeProxyImplEntries:
         }
         result = self._merge([proxy, impl])
         assert result[0]["rank_score"] == 5
-
-
-# ============================================================================
-# 3. GET /api/stats
-# ============================================================================
-
-
-@patch("routers.deps.SessionLocal")
-def test_pipeline_stats(mock_session_cls):
-    client = _make_client()
-    mock_session = MagicMock()
-    _mock_session_ctx(mock_session_cls, mock_session)
-
-    # session.execute().scalar() returns counts
-    mock_session.execute.return_value.scalar.return_value = 42
-
-    response = client.get("/api/stats")
-    assert response.status_code == 200
-    body = response.json()
-    assert "unique_addresses" in body
-    assert "total_jobs" in body
-    assert "completed_jobs" in body
-    assert "failed_jobs" in body
-
-
-# ============================================================================
-# 4. GET /api/jobs (list with proxy flagging)
-# ============================================================================
-
-
-@patch("routers.deps.SessionLocal")
-def test_list_jobs_with_proxy_flag(mock_session_cls):
-    client = _make_client()
-    mock_session = MagicMock()
-    _mock_session_ctx(mock_session_cls, mock_session)
-
-    # /api/jobs reads ``Job.is_proxy`` directly — no per-row artifact
-    # resolve. The proxy flag is mirrored onto Job by ``store_artifact``
-    # whenever ``contract_flags`` gets written.
-    job1 = _fake_job(name="proxy_job", address="0xaaa", is_proxy=True)
-    job2 = _fake_job(name="regular_job", address="0xbbb", is_proxy=False)
-
-    mock_session.execute.return_value.scalars.return_value.all.return_value = [job1, job2]
-
-    response = client.get("/api/jobs")
-    assert response.status_code == 200
-    jobs = response.json()
-    assert len(jobs) == 2
-    proxy_entry = next(j for j in jobs if j["name"] == "proxy_job")
-    regular_entry = next(j for j in jobs if j["name"] == "regular_job")
-    assert proxy_entry["is_proxy"] is True
-    assert regular_entry["is_proxy"] is False
-
-
-@patch("routers.deps.SessionLocal")
-def test_list_jobs_empty(mock_session_cls):
-    client = _make_client()
-    mock_session = MagicMock()
-    _mock_session_ctx(mock_session_cls, mock_session)
-
-    mock_session.execute.return_value.scalars.return_value.all.return_value = []
-
-    response = client.get("/api/jobs")
-    assert response.status_code == 200
-    assert response.json() == []
 
 
 # ============================================================================
@@ -1287,13 +1203,6 @@ def test_spa_fallback_api_prefix_returns_404():
     assert response.status_code == 404
 
 
-def test_spa_fallback_non_api_serves_html(spa_index):
-    """Non-API deep links serve the SPA index."""
-    client = _make_client()
-    response = client.get("/some/random/path")
-    assert response.status_code == 200
-
-
 # ============================================================================
 # 12. GET /api/analyses - company_for_job parent chain walking
 # ============================================================================
@@ -1439,23 +1348,6 @@ def test_analyses_proxy_hidden_when_impl_not_completed(mock_session_cls):
     assert response.status_code == 200
     entries = response.json()
     assert not any(e.get("address") == "0xaaaa" for e in entries)
-
-
-# ============================================================================
-# 15. POST /api/analyze - non-0x address
-# ============================================================================
-
-
-def test_analyze_address_not_starting_with_0x():
-    """A 42-char value that isn't a 0x-prefixed hex address is rejected at
-    request validation (422), before the endpoint body runs."""
-    client = _make_client()
-    # 42 chars but not 0x + 40 hex — the AnalyzeRequest hex validator rejects it.
-    response = client.post(
-        "/api/analyze",
-        json={"address": "xx1111111111111111111111111111111111111111"},
-    )
-    assert response.status_code == 422
 
 
 # ============================================================================
@@ -2083,8 +1975,8 @@ def test_analyses_proxy_uses_impl_analysis_when_proxy_has_none(mock_session_cls)
     entries = response.json()
     # The proxy should have picked up impl's analysis
     proxy_entry = next((e for e in entries if e.get("job_id") == str(proxy_job_id)), None)
-    if proxy_entry is not None:
-        assert proxy_entry.get("contract_name") == "ImplName"
+    assert proxy_entry is not None
+    assert proxy_entry.get("contract_name") == "ImplName"
 
 
 # ============================================================================

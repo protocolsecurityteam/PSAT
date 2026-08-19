@@ -30,8 +30,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-import pytest
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tests.support.live_helpers import _resolve_impl_job  # noqa: E402
@@ -90,27 +88,6 @@ class _StubClient:
 
 
 # --- regression cases -------------------------------------------------------
-
-
-def test_pre_fix_bare_assert_demonstrates_the_race():
-    """Pre-fix shape: pick the candidate, no polling, bare assert.
-
-    With the impl in 'processing' the assertion would fail. This test
-    pins the buggy shape so a future refactor can't silently regress
-    back to it without a noise.
-    """
-    impl_addr = "0x43506849d7c04f9138d1a2050bbf3a0c054402dd"
-    all_jobs = [
-        {"job_id": "impl-1", "address": impl_addr, "status": "processing"},
-    ]
-    # Pre-fix logic, inlined:
-    candidates = [j for j in all_jobs if (j.get("address") or "").lower() == impl_addr]
-    impl_job = candidates[0]
-
-    # The old test was: assert impl_job["status"] == "completed"
-    # which fails like this:
-    with pytest.raises(AssertionError):
-        assert impl_job["status"] == "completed"
 
 
 def test_resolve_impl_job_waits_for_processing_to_terminate():
