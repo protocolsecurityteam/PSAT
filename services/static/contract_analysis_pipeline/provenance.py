@@ -24,7 +24,7 @@ shape and operand type.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, Iterable, get_args
 
 from eth_utils.crypto import keccak
@@ -264,6 +264,46 @@ def _env_int(name: str, default: int) -> int:
 
 DEFAULT_INTERNAL_CALL_DEPTH = _env_int("PSAT_PROVENANCE_INTERNAL_CALL_DEPTH", 4)
 DEFAULT_WORKLIST_ITER_CAP = _env_int("PSAT_PROVENANCE_WORKLIST_CAP", 200)
+# Per-variable widening threshold: a value rewritten more than this many times
+# within one engine run is churning, not converging (forward node order settles
+# straight-line code in 1-2 passes; a loop-carried union saturates in a few).
+DEFAULT_WIDEN_AFTER = _env_int("PSAT_PROVENANCE_WIDEN_AFTER", 8)
+
+
+def widen(s: SourceSet) -> SourceSet:
+    """Widening operator: drop ``callee_args_digest`` from every member (and
+    from the members of each ``derived_from``), collapsing digest-only
+    variants into one record.
+
+    Invariant this restores: the provenance lattice must have finite height
+    for the worklist to reach a fixed point. Every Source field except the
+    digest draws from a finite per-function universe (kinds, parameter
+    indices, state-variable names, callee names, ...); the digest is a hash
+    of the member set itself, so a self-referential assignment
+    (``inv = f(inv)`` — OZ ``Math.mulDiv``'s inverse chain) mints a fresh
+    digest variant every iteration and the set never stabilizes. Dropping
+    the digest loses nothing a consumer can observe: it is never emitted
+    (``operands._published_source_key`` excludes it — digest-only variants
+    render identically), and ``derived_from`` origins — the caller-taint
+    witness — are preserved exactly.
+    """
+    if is_top(s):
+        return s
+    out = []
+    changed = False
+    for src in s:
+        derived = src.derived_from
+        if derived:
+            stripped = frozenset(
+                replace(o, callee_args_digest=None) if o.callee_args_digest is not None else o for o in derived
+            )
+            if stripped != derived:
+                derived = stripped
+        if src.callee_args_digest is not None or derived is not src.derived_from:
+            src = replace(src, callee_args_digest=None, derived_from=derived)
+            changed = True
+        out.append(src)
+    return frozenset(out) if changed else s
 
 
 @dataclass
@@ -276,16 +316,35 @@ class ProvenanceMap:
     """
 
     sources: dict[str, SourceSet]
+    # Per-variable rewrite counts for the widening trigger. Scoped to one map
+    # (= one engine run), like the convergence question it answers.
+    update_counts: dict[str, int] = field(default_factory=dict)
 
     def get(self, var_name: str) -> SourceSet:
         return self.sources.get(var_name, EMPTY)
 
     def set(self, var_name: str, value: SourceSet) -> bool:
         """Returns True if this set changed the value (used by worklist
-        to detect convergence)."""
+        to detect convergence).
+
+        A variable rewritten more than ``DEFAULT_WIDEN_AFTER`` times in one
+        run is churning, and its store switches to ``widen(prev ∪ value)``:
+        the join makes the store monotone (a base name with several
+        assignment sites otherwise oscillates between the writers' values
+        forever under replace semantics), and ``widen`` strips the digest
+        variants so the joined set draws from a finite universe and reaches a
+        fixed point. Values that stabilize on their own are never widened —
+        the threshold sits above what converging propagation needs.
+        """
         prev = self.sources.get(var_name, EMPTY)
         if prev == value:
             return False
+        count = self.update_counts.get(var_name, 0)
+        if count >= DEFAULT_WIDEN_AFTER:
+            value = widen(union(prev, value))
+            if prev == value:
+                return False
+        self.update_counts[var_name] = count + 1
         self.sources[var_name] = value
         return True
 
@@ -340,6 +399,8 @@ class ProvenanceEngine:
         # Variable subtypes (Local/Temporary/Reference/Variable) are NOT
         # cached because their provenance changes as dataflow converges.
         self._leaf_value_source_cache: dict[int, SourceSet] = {}
+        # Worklist iterations of the last run() — convergence observability.
+        self.iterations_run: int = 0
 
     # ------------------------------------------------------------------
     # Public entry
@@ -358,10 +419,14 @@ class ProvenanceEngine:
                 if self._step_node(node):
                     changed = True
             iterations += 1
+        # Exposed for convergence assertions/observability. Per-variable
+        # widening (``ProvenanceMap.set``) bounds this well under the cap on
+        # digest-churning shapes; the cap remains the backstop for growth the
+        # widening operator does not cover (e.g. unbounded member_path chains).
+        self.iterations_run = iterations
         if iterations >= self.worklist_cap:
             # Saturate any value we still don't know about by leaving
-            # it empty; consumers treat absent ⇒ unknown. The cap is
-            # high enough that real contracts converge well before.
+            # it empty; consumers treat absent ⇒ unknown.
             pass
         return self.provenance
 
