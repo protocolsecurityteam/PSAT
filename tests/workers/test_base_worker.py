@@ -592,24 +592,44 @@ def test_heartbeat_swallows_db_failure(mock_signal, SessionLocalMock):
     worker_session.execute.assert_not_called()
 
 
-def test_stale_job_timeout_default_is_600():
-    """The default stale-job timeout is 600s now that fan-outs can sit minutes between writes."""
+@pytest.fixture()
+def _restore_workers_base_module():
+    """Clear the stale-job override for one test, then put ``workers.base`` back.
+
+    ``importlib.reload`` re-executes the module body, so ``JobHandledDirectly``
+    and ``BaseWorker`` become NEW class objects while every module that already
+    imported them keeps the old ones. A worker module imported after the reload
+    then raises a ``JobHandledDirectly`` that no ``pytest.raises`` elsewhere
+    matches. The reload is the point of the test, so the original class objects
+    are rebound afterwards rather than the reload avoided.
+    """
     import importlib
 
     from workers import base
 
-    # Clear the override and re-resolve, so this observes the code's default
-    # rather than whatever the ambient environment happens to carry. The env is
-    # restored and the module reloaded again before leaving, so the reload does
-    # not leak a mutated constant into the rest of the worker process.
+    own_types = {
+        name: obj for name, obj in vars(base).items() if isinstance(obj, type) and obj.__module__ == base.__name__
+    }
     previous = os.environ.pop("PSAT_STALE_JOB_TIMEOUT", None)
     try:
-        importlib.reload(base)
-        assert base.STALE_JOB_TIMEOUT == 600
+        yield base
     finally:
         if previous is not None:
             os.environ["PSAT_STALE_JOB_TIMEOUT"] = previous
         importlib.reload(base)
+        for name, obj in own_types.items():
+            setattr(base, name, obj)
+
+
+def test_stale_job_timeout_default_is_600(_restore_workers_base_module):
+    """The default stale-job timeout is 600s now that fan-outs can sit minutes between writes."""
+    import importlib
+
+    # The fixture cleared the override, so this observes the code's default
+    # rather than whatever the ambient environment happens to carry.
+    base = _restore_workers_base_module
+    importlib.reload(base)
+    assert base.STALE_JOB_TIMEOUT == 600
 
 
 # ---------------------------------------------------------------------------
