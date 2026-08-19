@@ -11,12 +11,11 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Event
-from typing import Any, Callable
+from typing import Any
 
 from dotenv import load_dotenv
 from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, make_transient_to_detached
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -53,6 +52,15 @@ from services.monitoring import (
 from services.monitoring.chain_rpc import chain_id_for, rpc_for_chain
 from services.monitoring.enrichment import enrich_events
 from services.monitoring.enrollment import mark_enrollment_dirty
+from services.monitoring.event_state import (
+    _WRITE_TARGET_TO_CONFIG_KEYS as _WRITE_TARGET_TO_CONFIG_KEYS,
+)
+from services.monitoring.event_state import (
+    _new_value_for_write_target,
+    _should_watch,
+    _update_state_from_event,
+    _write_through_proxy_event,
+)
 from services.monitoring.event_topics import (
     _HANDROLLED_EVENT_TYPE_TO_TAGS,
     ALL_EVENT_TOPICS,
@@ -79,215 +87,47 @@ from services.monitoring.verify_status import (
     record_unresolvable_read,
     record_verify_status,
 )
+from services.monitoring.watcher_config import (
+    _AUTHORITY_CONTROLLER_IDS as _AUTHORITY_CONTROLLER_IDS,
+)
+from services.monitoring.watcher_config import (
+    _DB_ERROR_TYPES,
+    _GOVERNANCE_ROTATION_REASON,
+    _GOVERNANCE_ROTATION_WRITE_TARGETS,
+    _LEASE_HOLDER,
+    DEFAULT_MAX_VERIFY_READS_PER_PASS,
+    DEFAULT_POLL_CONTRACTS_PER_PASS,
+    DEFAULT_POLL_INTERVAL,
+    DEFAULT_RUNAWAY_WINDOWS_PER_PASS,
+    DEFAULT_SCAN_INTERVAL,
+    FETCHER_MIN_BISECT_SPAN,
+    _confirmation_depth_for,
+    _is_deadlock_error,
+    _max_getlogs_range_for,
+    _poll_startup_offset,
+    _poller_lease_name,
+    _runaway_lag_blocks_for,
+    _scan_float_env,
+    _scan_int_env,
+    _scanner_lease_name,
+)
+from services.monitoring.watcher_config import (
+    _OWNER_CONTROLLER_IDS as _OWNER_CONTROLLER_IDS,
+)
+from services.monitoring.watcher_config import (
+    DEFAULT_CONFIRMATION_DEPTH as DEFAULT_CONFIRMATION_DEPTH,
+)
+from services.monitoring.watcher_config import (
+    DEFAULT_RUNAWAY_LAG_SECONDS as DEFAULT_RUNAWAY_LAG_SECONDS,
+)
+from services.monitoring.watcher_config import (
+    MAX_BLOCK_RANGE as MAX_BLOCK_RANGE,
+)
 from services.resolution.repos.event_logs_rpc import RpcEventLogFetcher
-from utils.chains import UnknownChainError, chain_by_name
 
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
 logger = logging.getLogger(__name__)
-
-MAX_BLOCK_RANGE = 2000
-DEFAULT_SCAN_INTERVAL = int(os.getenv("PROTOCOL_SCAN_INTERVAL", "600"))
-DEFAULT_POLL_INTERVAL = int(os.getenv("PROTOCOL_POLL_INTERVAL", "600"))
-# Poller rotation slice — how many needs_polling contracts one pass claims,
-# ordered oldest-cursor-first. Bounds the pass to O(slice) memory.
-DEFAULT_POLL_CONTRACTS_PER_PASS = 500
-
-# monitored_events must only ingest confirmed logs — a reorg-rewound event
-# would have already fired a Discord notification and a reanalysis job that
-# cannot be un-sent. Every window end is clamped to head − this depth.
-DEFAULT_CONFIRMATION_DEPTH = 12
-# The shared getLogs fetcher bisects a rejected window down to this floor
-# before re-raising. It must sit well below MAX_BLOCK_RANGE so a provider
-# range/response-cap rejection actually bisects instead of failing the cohort.
-FETCHER_MIN_BISECT_SPAN = 125
-
-# Runaway-cursor backstop (see ``scan_for_events``). The budget is WALL CLOCK,
-# not blocks: ~139 days of the cohort's own chain. No outage-driven backfill
-# reaches that, so a cohort past it is carrying a broken cursor rather than
-# doing real work. Expressing it in blocks would make the threshold mean
-# different things per chain — 1M blocks is ~139 days of mainnet but ~23 days of
-# Base, so a uniform block count would demote every Base cohort after a
-# three-week outage, exactly when catch-up matters most.
-DEFAULT_RUNAWAY_LAG_SECONDS = 12_000_000
-DEFAULT_RUNAWAY_WINDOWS_PER_PASS = 1
-
-# One read per dirty controller per scan pass. Reads beyond this are RECORDED
-# as skipped (services/monitoring/verify_status.py), never silently dropped —
-# a skipped read is a not-determined interval, not an earned negative.
-DEFAULT_MAX_VERIFY_READS_PER_PASS = 25
-
-# Reason stamped on the enrollment-queue row when the watcher's relational sync
-# observes an on-chain controller rotation (owner/admin/authority/implementation).
-# Closes the gap where a rotation installs a new governance Safe that would
-# otherwise stay unmonitored until the slow sweep.
-_GOVERNANCE_ROTATION_REASON = "governance_rotation"
-
-# Write targets whose sync actually installs a new privileged controller — the
-# only changes that can bring a new governance principal into scope and so
-# warrant re-enrolling the protocol. Pause/threshold/roles writes mutate state
-# but don't add a controller address, so they don't mark.
-_GOVERNANCE_ROTATION_WRITE_TARGETS = frozenset(
-    {"owner", "_owner", "admin", "_admin", "authority", "implementation", "beacon"}
-)
-
-
-# Stable per-process lease holder. Generated once at import so every pass this
-# interpreter runs re-acquires its OWN lease (the ``holder = EXCLUDED.holder``
-# branch always wins), and a genuinely separate process — the thing the
-# singleton lease exists to exclude — carries a different uuid and loses.
-_LEASE_HOLDER = uuid.uuid4()
-
-
-def _scanner_lease_name(chain: str) -> str:
-    return f"protocol_scanner:{chain}"
-
-
-def _poller_lease_name(chain: str) -> str:
-    return f"protocol_poller:{chain}"
-
-
-def _scan_int_env(name: str, default: int) -> int:
-    try:
-        return int(os.getenv(name, str(default)))
-    except (TypeError, ValueError):
-        return default
-
-
-def _scan_float_env(name: str, default: float) -> float:
-    try:
-        return float(os.getenv(name, str(default)))
-    except (TypeError, ValueError):
-        return default
-
-
-def _max_getlogs_range_for(chain: str) -> int:
-    """Per-chain getLogs window width from the registry. Mainnet's
-    registry value equals ``MAX_BLOCK_RANGE`` so mainnet is unchanged; an
-    unresolvable chain falls back to the fleet-wide constant."""
-    try:
-        return chain_by_name(chain).max_getlogs_range
-    except UnknownChainError:
-        return MAX_BLOCK_RANGE
-
-
-def _runaway_lag_blocks_for(chain: str) -> int:
-    """The runaway threshold in blocks for *chain*, from the wall-clock budget.
-
-    0 disables the backstop — either because the operator set the budget to 0,
-    or because the chain's block time is not in the registry. An unresolvable
-    chain gives no honest way to convert seconds to blocks, and a borrowed
-    conversion would demote a cohort on a guess; not-determined means the
-    backstop does not fire (demotion needs a witness).
-    """
-    budget_s = max(0, _scan_int_env("PSAT_SCAN_RUNAWAY_LAG_SECONDS", DEFAULT_RUNAWAY_LAG_SECONDS))
-    if not budget_s:
-        return 0
-    try:
-        block_time = chain_by_name(chain).block_time_s
-    except UnknownChainError:
-        return 0
-    if block_time <= 0:
-        return 0
-    return int(budget_s / block_time)
-
-
-def _confirmation_depth_for(chain: str) -> int:
-    """Per-chain reorg-confirmation depth. An explicit
-    ``PSAT_SCAN_CONFIRMATION_DEPTH`` override still wins fleet-wide (operator
-    lever); otherwise the registry's per-chain depth applies. Mainnet's registry
-    value equals ``DEFAULT_CONFIRMATION_DEPTH`` so mainnet is unchanged."""
-    raw = os.getenv("PSAT_SCAN_CONFIRMATION_DEPTH")
-    if raw is not None:
-        try:
-            return max(0, int(raw))
-        except ValueError:
-            pass
-    try:
-        return chain_by_name(chain).confirmation_depth
-    except UnknownChainError:
-        return DEFAULT_CONFIRMATION_DEPTH
-
-
-# psycopg2 raises DeadlockDetected (SQLSTATE 40P01) when Postgres aborts one
-# side of a lock cycle. Driver errors from real cursor executes (including
-# autoflush) always arrive wrapped in a SQLAlchemy OperationalError (``.orig``);
-# the raw psycopg2 form only occurs when an error is raised from an event
-# listener (e.g. before_cursor_execute in tests), which SQLAlchemy does not
-# wrap. Both shapes are recognized as belt-and-braces. The
-# defensive import mirrors workers/retry_policy.py so a psycopg2-less test env
-# still imports the module.
-try:
-    import psycopg2
-    from psycopg2.errors import DeadlockDetected as _PgDeadlockDetected
-
-    _DEADLOCK_TYPES: tuple[type[BaseException], ...] = (_PgDeadlockDetected,)
-    _PSYCOPG2_ERROR: tuple[type[BaseException], ...] = (psycopg2.Error,)
-except Exception:  # pragma: no cover — psycopg2 is a hard dep in production
-    _DEADLOCK_TYPES = ()
-    _PSYCOPG2_ERROR = ()
-
-_DEADLOCK_PGCODE = "40P01"
-
-# Every DB error shape a chunk's writes can raise: SQLAlchemy's wrapper plus the
-# raw psycopg2 error (which is NOT a subclass of SQLAlchemy's). Both poison the
-# session, so both must reach the chunk handler rather than a bare
-# ``except Exception`` that would swallow them into a pending-rollback session.
-_DB_ERROR_TYPES: tuple[type[BaseException], ...] = (OperationalError,) + _PSYCOPG2_ERROR
-
-
-def _is_deadlock_error(exc: BaseException) -> bool:
-    """True iff *exc* is (or wraps) a Postgres deadlock — only ONE side is
-    aborted and the aborted side can simply retry, everything else stays
-    committed.
-
-    Handles both the SQLAlchemy-wrapped form (psycopg2 error on ``.orig``) and
-    the raw psycopg2 form. Deliberately narrow otherwise: a connection-loss
-    error returns False so the caller re-raises it and the pass dies honestly
-    instead of masking a lost database as a per-chunk hiccup.
-    """
-    if _DEADLOCK_TYPES and isinstance(exc, _DEADLOCK_TYPES):
-        return True
-    if getattr(exc, "pgcode", None) == _DEADLOCK_PGCODE:
-        return True
-    orig = getattr(exc, "orig", None)
-    if orig is None:
-        return False
-    if _DEADLOCK_TYPES and isinstance(orig, _DEADLOCK_TYPES):
-        return True
-    return getattr(orig, "pgcode", None) == _DEADLOCK_PGCODE
-
-
-def _poll_startup_offset(interval: float) -> float:
-    """Delay before the poller's FIRST pass so it doesn't fire in lockstep with
-    the scanner.
-
-    The scan and poll loops share the same interval and the supervisor boots
-    them together, so without a phase shift both write ``monitored_contracts``
-    at the same instant every cycle. A half-interval offset de-phases them for
-    the whole run (equal periods stay half a cycle apart). Only the poller
-    shifts — the scanner's first pass must not be delayed, since watchers care
-    about scan latency, not poll latency. The offset stays well under the
-    poller's staleness window (``3 × interval``, process_meta) so the delayed
-    first heartbeat never reads as dead. Overridable via
-    ``PSAT_POLL_STARTUP_OFFSET_S`` (0 disables the shift).
-    """
-    raw = os.getenv("PSAT_POLL_STARTUP_OFFSET_S")
-    if raw is not None:
-        try:
-            return max(0.0, float(raw))
-        except ValueError:
-            pass
-    return max(0.0, interval / 2.0)
-
-
-# Controller IDs that represent the contract owner. Used by relational sync
-# to update only the real owner row, not unrelated controller values that
-# happen to contain "owner" in their name (e.g. token_owner_registry).
-_OWNER_CONTROLLER_IDS = ("owner", "state_variable:owner")
-# Solmate-Auth / DSAuth-style authority pointer. Sync target for the
-# ``authority_updated`` event emitted by Solmate's ``Auth.setAuthority``.
-_AUTHORITY_CONTROLLER_IDS = ("authority", "state_variable:authority", "external_contract:authority")
 
 
 def get_latest_block(rpc_url: str, *, chain_id: int | None = None) -> int:
@@ -1421,341 +1261,6 @@ def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
         degraded=degraded,
         runaway_cohorts=runaway_cohorts,
     )
-
-
-# Per-write-target → monitoring_config flag gates. Tag-driven dispatch
-# routes each ``effect_tags.writes`` entry through this map; if any of
-# the resulting flags is enabled the event passes the watch filter.
-#
-# ``admin``-family writes route to both watch_upgrades (EIP-1967 proxy
-# admin slot is the upgrader role) AND watch_ownership (Compound/Aave/
-# Curve "admin" is the principal owner) because the underlying mutation
-# is "the privileged controller changed" — the monitoring intent depends
-# on what the contract IS, not what the event is named.
-_WRITE_TARGET_TO_CONFIG_KEYS: dict[str, tuple[str, ...]] = {
-    # Ownership
-    "owner": ("watch_ownership",),
-    "_owner": ("watch_ownership",),
-    "pendingOwner": ("watch_ownership",),
-    "_pendingOwner": ("watch_ownership",),
-    # Admin family — both upgrade- and ownership-gated
-    "admin": ("watch_upgrades", "watch_ownership"),
-    "_admin": ("watch_upgrades", "watch_ownership"),
-    "pendingAdmin": ("watch_upgrades", "watch_ownership"),
-    "future_admin": ("watch_upgrades", "watch_ownership"),
-    # Upgrade-relevant slot writes (also any delegates=True event)
-    "implementation": ("watch_upgrades",),
-    "beacon": ("watch_upgrades",),
-    "facets": ("watch_upgrades",),
-    "pendingImplementation": ("watch_upgrades",),
-    "_initialized": ("watch_upgrades",),
-    "_initializing": ("watch_upgrades",),
-    # Authority
-    "authority": ("watch_authority",),
-    # Pause
-    "paused": ("watch_pause",),
-    # Roles
-    "_roles": ("watch_roles",),
-    # Safe signers / Safe + Timelock activity
-    "owners": ("watch_safe_signers",),
-    "threshold": ("watch_safe_signers",),
-    "_safe_op": ("watch_safe_signers",),
-    "_safe_module_op": ("watch_safe_signers",),
-    "_safe_modules": ("watch_safe_modules",),
-    "_safe_guard": ("watch_safe_modules",),
-    "_timelock_op": ("watch_timelock",),
-    "min_delay": ("watch_timelock",),
-}
-
-
-def _should_watch(mc: MonitoredContract, parsed: dict) -> bool:
-    """Check if the monitoring config allows this event.
-
-    Tag-driven: derive the set of monitoring_config flags this event is
-    gated on from ``effect_tags.writes`` + ``effect_tags.delegates``,
-    then pass if any flag is enabled (or defaults on). Legacy events
-    without tags synthesize them from event_type via
-    ``_HANDROLLED_EVENT_TYPE_TO_TAGS``.
-    """
-    config = mc.monitoring_config or {}
-    event_type = parsed.get("event_type", "")
-
-    tags = parsed.get("effect_tags") or _HANDROLLED_EVENT_TYPE_TO_TAGS.get(event_type) or {}
-    writes = tags.get("writes") or []
-    delegates = bool(tags.get("delegates"))
-
-    config_keys: set[str] = set()
-    if delegates:
-        config_keys.add("watch_upgrades")
-    for write_target in writes:
-        if not isinstance(write_target, str):
-            continue
-        keys = _WRITE_TARGET_TO_CONFIG_KEYS.get(write_target)
-        if keys:
-            config_keys.update(keys)
-
-    if not config_keys:
-        return True  # Unrecognized event — allow rather than silently drop.
-
-    # Legacy alias: ``watch_signers`` predates the rename to
-    # ``watch_safe_signers``. Accept either flag so historic
-    # MonitoredContract rows written before the rename keep working
-    # without a migration. Only kicks in when the event's gating
-    # reduces to watch_safe_signers alone — multi-gate events
-    # (admin_changed) flow through the general path.
-    if config_keys == {"watch_safe_signers"}:
-        if config.get("watch_safe_signers") or config.get("watch_signers"):
-            return True
-        if "watch_safe_signers" in config or "watch_signers" in config:
-            return False
-        # Neither key set — default-on, fall through to the general path.
-
-    # Allow if ANY relevant flag is set (or defaults to True via .get()).
-    return any(config.get(key, True) for key in config_keys)
-
-
-def _write_through_proxy_event(
-    session: Session,
-    mc: MonitoredContract,
-    parsed: dict,
-) -> None:
-    """Write a ProxyUpgradeEvent for backward compatibility."""
-    new_impl = parsed.get("implementation") or parsed.get("beacon") or parsed.get("new_admin")
-    if not new_impl:
-        return
-
-    # Load the WatchedProxy to get old implementation
-    wp = session.get(WatchedProxy, mc.watched_proxy_id)
-    if not wp:
-        return
-
-    upgrade_event = ProxyUpgradeEvent(
-        watched_proxy_id=wp.id,
-        block_number=parsed["block_number"],
-        tx_hash=parsed.get("tx_hash", ""),
-        old_implementation=wp.last_known_implementation,
-        new_implementation=new_impl,
-        event_type=parsed["event_type"],
-    )
-    session.add(upgrade_event)
-
-    wp.last_known_implementation = new_impl
-    if parsed["block_number"] > wp.last_scanned_block:
-        wp.last_scanned_block = parsed["block_number"]
-
-
-def _extract_new_owner(parsed: dict) -> object:
-    return parsed.get("new_owner")
-
-
-def _extract_new_authority(parsed: dict) -> object:
-    return parsed.get("new_authority")
-
-
-def _extract_paused_bool(parsed: dict) -> object:
-    # paused/unpaused share writes=["paused"]; the event_type discriminates
-    # the new state. The arg on the wire is the account that flipped the
-    # flag, not the flag value — so we ignore parsed["account"] and read
-    # the semantic from event_type.
-    et = parsed.get("event_type")
-    if et == "paused":
-        return True
-    if et == "unpaused":
-        return False
-    return None
-
-
-def _extract_threshold(parsed: dict) -> object:
-    # GnosisSafe ChangedThreshold(uint256 threshold) decodes to ``threshold``.
-    # Tracked Safe-shaped ABIs may use new_threshold via semantic-key aliasing.
-    val = parsed.get("threshold")
-    if val is None:
-        val = parsed.get("new_threshold")
-    return val
-
-
-def _extract_implementation(parsed: dict) -> object:
-    return parsed.get("implementation")
-
-
-def _extract_new_admin(parsed: dict) -> object:
-    return parsed.get("new_admin")
-
-
-def _extract_beacon(parsed: dict) -> object:
-    return parsed.get("beacon")
-
-
-def _extract_new_delay(parsed: dict) -> object:
-    return parsed.get("new_delay")
-
-
-def _extract_initialized_version(parsed: dict) -> object:
-    # OZ Initializable Initialized(uint64 version). Canonical ABI names
-    # the arg ``version``; some forks use ``initVersion``. Either way the
-    # value goes into last_known_state so reanalysis can compare against
-    # the next observation.
-    version = parsed.get("version")
-    if version is None:
-        version = parsed.get("initVersion")
-    return version
-
-
-_StateExtractor = Callable[[dict], object]
-
-# Per-write-target dispatch for ``_update_state_from_event``. Maps a tag
-# write target → (state_key, extractor). The state_key may differ from
-# the write target (``_initialized`` writes to ``initialized_version``);
-# the extractor pulls the right value out of the decoded event. Targets
-# absent here fall through to the generic name-match reflection so
-# custom slots (e.g. ``protocolAdmin``) work without per-slot code.
-_WRITE_TARGET_TO_STATE: dict[str, tuple[str, _StateExtractor]] = {
-    "owner": ("owner", _extract_new_owner),
-    "authority": ("authority", _extract_new_authority),
-    "paused": ("paused", _extract_paused_bool),
-    "threshold": ("threshold", _extract_threshold),
-    "implementation": ("implementation", _extract_implementation),
-    "admin": ("admin", _extract_new_admin),
-    "beacon": ("beacon", _extract_beacon),
-    "min_delay": ("min_delay", _extract_new_delay),
-    "_initialized": ("initialized_version", _extract_initialized_version),
-}
-
-
-def _resolve_value_for_write_target(parsed: dict, write_target: str) -> object | None:
-    """Pull the new value an event reports for *write_target* using the
-    most specific signal available, falling back to ABI conventions
-    when the analyzer's tag is the only structural pin.
-
-    Resolution order:
-
-      1. **Bare-name match** — ``parsed[write_target]`` works for
-         single-arg events whose only arg is the new value
-         (DSAuth ``LogSetOwner(address indexed owner)`` with
-         write_target ``owner``).
-      2. **OZ ``new<Cap>`` convention** — ``parsed[f"new{Cap}"]`` covers
-         the OZ family (``newOwner``, ``newAdmin``, ``newImplementation``).
-      3. **Tag-pinned ``new*`` arg from the ABI inputs spec** — when the
-         analyzer attached ``_inputs`` (per-contract tracked events via
-         ``parse_tracked_log``), find any input whose name starts with
-         "new" (case-insensitive) and return its value. Catches
-         Compound-shape ``NewAdmin(address newAdmin)`` /
-         ``ProtocolAdminChanged(previousAdmin, newAdmin)`` for a
-         write_target like ``protocolAdmin`` where neither the bare
-         name nor the OZ ``new<Cap>`` convention applies.
-      4. **Positional last-arg fallback** — for single-write events the
-         "new value" is conventionally the last arg even when no naming
-         convention applies (Solady, custom ABIs that just name the
-         arg ``account`` or ``to``). Only fires when ``_inputs`` is
-         present and (3) didn't match.
-
-    Underscore-prefixed write_targets (``_roles``, ``_timelock_op``,
-    ``_safe_op``, ``_safe_module_op``) are synthetic activity markers
-    not real slots; they short-circuit to ``None`` so the fallback
-    doesn't false-positive on the third-arg ``sender`` of a RoleGranted
-    event (which has no canonical extractor and would otherwise hit
-    pass (4) and overwrite ``state["_roles"]`` with a sender address).
-    """
-    if write_target.startswith("_"):
-        return None
-
-    candidate = parsed.get(write_target)
-    if candidate is not None:
-        return candidate
-
-    cap = write_target[:1].upper() + write_target[1:]
-    candidate = parsed.get(f"new{cap}")
-    if candidate is not None:
-        return candidate
-
-    inputs = parsed.get("_inputs")
-    if not isinstance(inputs, list) or not inputs:
-        return None
-
-    # Pass 3: any input whose name starts with "new" (case-insensitive).
-    # First match wins; the analyzer's tag tells us there's a single
-    # write target here, so the convention "the new value of THAT slot
-    # is named new<something>" is reliable.
-    for inp in inputs:
-        if not isinstance(inp, dict):
-            continue
-        name = inp.get("name") or ""
-        if name.lower().startswith("new") and name in parsed:
-            return parsed[name]
-
-    # Pass 4: positional last-arg. The analyzer's tag pins this event
-    # as writing exactly one slot, so the last arg is the conventional
-    # location of the new value across every governance ABI we've seen
-    # (Solady, custom). Skipped when (3) matched.
-    last = inputs[-1]
-    if isinstance(last, dict):
-        name = last.get("name") or ""
-        if name and name in parsed:
-            return parsed[name]
-    return None
-
-
-def _update_state_from_event(mc: MonitoredContract, parsed: dict) -> None:
-    """Reflect the event's mutations into ``last_known_state``.
-
-    Tag-driven: each ``effect_tags.writes`` target either resolves to a
-    canonical (state_key, extractor) in ``_WRITE_TARGET_TO_STATE`` or
-    falls back to generic name-match reflection so custom slots like
-    ``protocolAdmin`` flow through without per-slot code.
-
-    Legacy events without ``effect_tags`` synthesize them from event_type
-    via ``_HANDROLLED_EVENT_TYPE_TO_TAGS`` — covers monitoring_config
-    rows persisted before tag synthesis landed.
-    """
-    event_type = parsed["event_type"]
-    # A qualified member change proves one ENTRY moved. The reflection below
-    # resolves a single "new value" per write target and would store this
-    # entry's key or value as the whole mapping's — a value the mapping does
-    # not have and nothing observed.
-    if is_member_changed_event_type(event_type):
-        return
-
-    state = dict(mc.last_known_state or {})
-    tags = parsed.get("effect_tags") or _HANDROLLED_EVENT_TYPE_TO_TAGS.get(event_type) or {}
-    writes = tags.get("writes") or []
-
-    for write_target in writes:
-        if not isinstance(write_target, str):
-            continue
-        mapping = _WRITE_TARGET_TO_STATE.get(write_target)
-        if mapping is not None:
-            state_key, extractor = mapping
-            value = extractor(parsed)
-            if value is not None:
-                state[state_key] = value
-            continue
-        # Generic resolution for custom slots — uses bare-name match,
-        # OZ ``new<Cap>`` convention, ABI-pinned ``new*`` arg, and last-
-        # arg positional fallback. Unlike the canonical branch we DO
-        # overwrite an existing state entry — this path is the only one
-        # that updates custom slots, so a subsequent observation must
-        # take precedence.
-        candidate = _resolve_value_for_write_target(parsed, write_target)
-        if candidate is not None:
-            state[write_target] = candidate
-
-    mc.last_known_state = state
-    flag_modified(mc, "last_known_state")
-
-
-def _new_value_for_write_target(write_target: str, parsed: dict) -> object | None:
-    """Pull the new value for *write_target* out of a parsed event.
-
-    Tries the canonical extractor in ``_WRITE_TARGET_TO_STATE`` first,
-    then defers to ``_resolve_value_for_write_target`` for custom slots
-    so the event-side relational sync and the state-update sync share
-    one resolution chain.
-    """
-    mapping = _WRITE_TARGET_TO_STATE.get(write_target)
-    if mapping is not None:
-        _, extractor = mapping
-        return extractor(parsed)
-    return _resolve_value_for_write_target(parsed, write_target)
 
 
 def _sync_relational_tables(
