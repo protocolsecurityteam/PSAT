@@ -45,6 +45,20 @@ def test_protocol_events_limit_at_cap_ok(api_client):
     assert resp.status_code == 200
 
 
+# --- Malformed-address contract on /api/analyze ------------------------------
+
+
+def test_analyze_non_prefixed_address_is_422(api_client):
+    # 42 chars but no 0x prefix: the AnalyzeRequest field validator rejects at
+    # the schema layer, so the endpoint's malformed-address contract is a 422.
+    resp = api_client.post(
+        "/api/analyze",
+        json={"address": "ab" + "c" * 40},
+        headers={"X-PSAT-Admin-Key": "test-admin-key"},
+    )
+    assert resp.status_code == 422
+
+
 # --- Guarded UUID parsing (FINDING 15) --------------------------------------
 
 
