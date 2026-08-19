@@ -269,8 +269,11 @@ def test_no_module_outside_the_plane_imports_the_position_model():
         # restaking positions contribute (entity, asset) rows under the same
         # MAX-per-entity fold, keyed by their OWN entity keys — a mandated read,
         # and one that cannot go through the spot-balance readers precisely
-        # because a node has no ``contracts`` row.
-        root / "services" / "scoring" / "planes.py",
+        # because a node has no ``contracts`` row. The plane is a package: the
+        # value plane holds the mandated fold read, and the provenance loader's
+        # row census counts the table (a COUNT, never a quantity or a dollar).
+        root / "services" / "scoring" / "planes" / "value.py",
+        root / "services" / "scoring" / "planes" / "provenance.py",
         # The scorer's P4 universe builder, and an ADDRESS-ONLY read: it selects
         # node_address and eigenpod, unions them into a flat set of strings, and
         # folds no quantity, no share basis and no dollar. The rule this list
