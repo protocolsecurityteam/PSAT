@@ -1,21 +1,20 @@
-"""Benchmarks for high-impact API hotspots (issues #1-6 in the perf review).
+"""Query-count budgets for high-impact API hotspots (issues #1-6 in the perf review).
 
 Seeds a realistic-shape protocol (50 contracts × 50 effective functions
 each, control graph nodes/edges, balances, upgrade events, principal
-labels) and times the three offending endpoints while counting SQL
-statements via the SQLAlchemy ``before_cursor_execute`` event.
+labels), then asserts each hot endpoint answers with the expected payload
+shape and stays under its SQL-statement budget, counted via the SQLAlchemy
+``before_cursor_execute`` event.
 
 Run:
     set -a; source .env; set +a
     uv run pytest tests/test_api_perf_benchmark.py -s -m "not live"
 
-The ``-s`` flag is what surfaces the printed result table.
+The ``-s`` flag is what surfaces the printed actual/budget table.
 """
 
 from __future__ import annotations
 
-import json
-import os
 import time
 import uuid
 from contextlib import contextmanager
@@ -71,13 +70,13 @@ def _addr(seed: int) -> str:
 
 
 def _wipe_perf_data(session) -> None:
-    """Remove rows the benchmark may have left behind on the shared test DB.
+    """Remove rows the perf seed may have left behind on the shared test DB.
 
     The standard ``db_session`` fixture only cleans monitoring + protocol
-    tables — Job/Contract rows from prior benchmark runs would skew SQL
-    counts. Clean by Protocol name (cascades to AuditReport, Contract via
-    SET NULL on contracts.protocol_id, Jobs via SET NULL on jobs.protocol_id)
-    plus a sweep of the company-tagged jobs.
+    tables — Job/Contract rows from prior runs would skew SQL counts. Clean by
+    Protocol name (cascades to AuditReport, Contract via SET NULL on
+    contracts.protocol_id, Jobs via SET NULL on jobs.protocol_id) plus a sweep
+    of the company-tagged jobs.
 
     Also wipes storage-keyed orphan jobs from sibling fixtures — their DB rows
     outlive MinIO teardown and would break /api/analyses once
@@ -114,33 +113,12 @@ def _wipe_perf_data(session) -> None:
 
 
 @pytest.fixture()
-def _simulated_prod_rtt(monkeypatch):
-    # Localhost minio answers a GET in ~1 ms; Fly Tigris in prod sits
-    # closer to 30 ms. The serial-vs-parallel gap we want to demonstrate
-    # only shows up once GET cost is dominated by network latency, so
-    # inject a small sleep into StorageClient.get. Real client.get is
-    # still called — this is added latency, not a mock.
-    import time as _time
-
-    from db.storage import StorageClient
-
-    real_get = StorageClient.get
-    rtt_ms = float(os.environ.get("PSAT_BENCH_RTT_MS", "25"))
-
-    def slow_get(self, key):
-        _time.sleep(rtt_ms / 1000.0)
-        return real_get(self, key)
-
-    monkeypatch.setattr(StorageClient, "get", slow_get)
-
-
-@pytest.fixture()
-def seeded(db_session, storage_bucket, _simulated_prod_rtt):
+def seeded(db_session, storage_bucket):
     # storage_bucket wires ARTIFACT_STORAGE_* to minio so the artifacts
     # below land as storage_key rows (data NULL) — that's what
-    # /api/analyses and /api/jobs/{job_id}/stage_timings hit in prod, and
-    # the only configuration where the per-row HTTP GET cost we're
-    # benchmarking is real.
+    # /api/analyses and /api/jobs/{job_id}/stage_timings hit in prod, so it
+    # is the only configuration where the per-row fetch the query budgets
+    # bound is on the real code path.
     _wipe_perf_data(db_session)
 
     protocol = Protocol(name=PROTOCOL_NAME, chains=["ethereum"])
@@ -467,120 +445,6 @@ def _measure(engine):
         event.remove(engine, "before_cursor_execute", counter)
 
 
-def _run(api_client, db_session, label: str, fn) -> dict:
-    # Warm-up call so connection-pool / planner caches don't unfairly punish
-    # the first measurement; we measure on the second hit.
-    fn()
-    db_session.commit()
-    db_session.expire_all()
-    with _measure(db_session.get_bind()) as counter:
-        resp = fn()
-    assert resp.status_code == 200, f"{label}: {resp.status_code} {resp.text[:200]}"
-    return {"label": label, "queries": counter.count, "elapsed_ms": counter.elapsed_ms}
-
-
-@requires_postgres
-def test_benchmark_high_impact_endpoints(seeded, api_client, db_session, monkeypatch):
-    # audit_timeline calls _fetch_bytecode_keccak via an RPC; stub it so the
-    # benchmark measures DB cost only.
-    from services.aggregations import contract_audit_timeline as _cat
-
-    monkeypatch.setattr(_cat, "_bytecode_keccak_now_batch", lambda addrs, chain_id=1: {a.lower(): None for a in addrs})
-
-    results: list[dict] = []
-
-    results.append(
-        _run(
-            api_client,
-            db_session,
-            "GET /api/company/{name}",
-            lambda: api_client.get(f"/api/company/{PROTOCOL_NAME}"),
-        )
-    )
-
-    results.append(
-        _run(
-            api_client,
-            db_session,
-            "GET /api/analyses",
-            lambda: api_client.get("/api/analyses"),
-        )
-    )
-
-    sample_run = "perf_000"
-    results.append(
-        _run(
-            api_client,
-            db_session,
-            "GET /api/analyses/{run_name}",
-            lambda: api_client.get(f"/api/analyses/{sample_run}"),
-        )
-    )
-
-    results.append(
-        _run(
-            api_client,
-            db_session,
-            "GET /api/jobs",
-            lambda: api_client.get("/api/jobs"),
-        )
-    )
-
-    proxy_contract_id = seeded["proxy_contract_id"]
-    results.append(
-        _run(
-            api_client,
-            db_session,
-            "GET /api/contracts/{id}/audit_timeline",
-            lambda: api_client.get(f"/api/contracts/{proxy_contract_id}/audit_timeline"),
-        )
-    )
-
-    stage_timings_job_id = seeded["stage_timings_job_id"]
-    results.append(
-        _run(
-            api_client,
-            db_session,
-            "GET /api/jobs/{id}/stage_timings",
-            lambda: api_client.get(f"/api/jobs/{stage_timings_job_id}/stage_timings"),
-        )
-    )
-
-    print()
-    print("=" * 78)
-    print(f"{'endpoint':<40} {'queries':>10} {'wall_ms':>10}")
-    print("-" * 78)
-    for r in results:
-        print(f"{r['label']:<40} {r['queries']:>10} {r['elapsed_ms']:>10.1f}")
-    print("=" * 78)
-
-    out_path = os.environ.get("PSAT_BENCH_OUT")
-    if out_path:
-        with open(out_path, "w", encoding="utf-8") as f:
-            json.dump(results, f, indent=2)
-
-    # Sanity assertions: every endpoint must return data. Seed adds a
-    # proxy + impl pair on top of N_CONTRACTS regulars; the proxy-merge
-    # pass in /api/analyses depends on artifact flags we deliberately omit
-    # (the audit_timeline benchmark only needs UpgradeEvent + coverage),
-    # so just assert the listing carries at least the regulars.
-    overview = api_client.get(f"/api/company/{PROTOCOL_NAME}").json()
-    assert overview["contract_count"] >= N_CONTRACTS
-    analyses = api_client.get("/api/analyses").json()
-    assert len([a for a in analyses if a.get("company") == PROTOCOL_NAME]) >= N_CONTRACTS
-    detail = api_client.get(f"/api/analyses/{sample_run}").json()
-    assert detail["run_name"] == sample_run
-    assert "effective_permissions" in detail
-    assert len(detail["effective_permissions"]["functions"]) == N_FUNCTIONS_PER_CONTRACT
-    timeline = api_client.get(f"/api/contracts/{seeded['proxy_contract_id']}/audit_timeline").json()
-    assert timeline["contract"]["is_proxy"] is True
-    assert len(timeline["coverage"]) == 1
-    jobs = api_client.get("/api/jobs").json()
-    assert any(j.get("company") == PROTOCOL_NAME for j in jobs)
-    timings = api_client.get(f"/api/jobs/{stage_timings_job_id}/stage_timings").json()
-    assert set(timings["stage_timings"].keys()) == set(_PERF_STAGE_TIMING_STAGES)
-
-
 # Post-perf actuals + ~3 slack. Tighten when you intentionally lower a count.
 QUERY_BUDGETS = {
     # 25 -> 32 when the payload gained the scorer-computed ``reach`` block:
@@ -597,7 +461,9 @@ QUERY_BUDGETS = {
 
 @requires_postgres
 def test_query_count_budgets(seeded, api_client, db_session, monkeypatch, record_property):
-    """Every hot endpoint must stay under its query budget."""
+    """Every hot endpoint must stay under its query budget, and must answer
+    with the payload shape callers depend on — including the exact
+    ``stage_timings`` key set, which is a wire-shape freeze."""
     from services.aggregations import contract_audit_timeline as _cat
 
     monkeypatch.setattr(_cat, "_bytecode_keccak_now_batch", lambda addrs, chain_id=1: {a.lower(): None for a in addrs})
@@ -613,6 +479,28 @@ def test_query_count_budgets(seeded, api_client, db_session, monkeypatch, record
         "audit_timeline": lambda: api_client.get(f"/api/contracts/{proxy_contract_id}/audit_timeline"),
         "stage_timings": lambda: api_client.get(f"/api/jobs/{stage_timings_job_id}/stage_timings"),
     }
+
+    # Payload-shape sanity first: a wrong-shaped 200 makes the query counts
+    # below meaningless, so shape gates the budget rather than the other way
+    # round. Seed adds a proxy + impl pair on top of N_CONTRACTS regulars; the
+    # proxy-merge pass in /api/analyses depends on artifact flags we
+    # deliberately omit (the audit_timeline case only needs UpgradeEvent +
+    # coverage), so just assert the listing carries at least the regulars.
+    overview = api_client.get(f"/api/company/{PROTOCOL_NAME}").json()
+    assert overview["contract_count"] >= N_CONTRACTS
+    analyses = api_client.get("/api/analyses").json()
+    assert len([a for a in analyses if a.get("company") == PROTOCOL_NAME]) >= N_CONTRACTS
+    detail = api_client.get(f"/api/analyses/{sample_run}").json()
+    assert detail["run_name"] == sample_run
+    assert "effective_permissions" in detail
+    assert len(detail["effective_permissions"]["functions"]) == N_FUNCTIONS_PER_CONTRACT
+    timeline = api_client.get(f"/api/contracts/{seeded['proxy_contract_id']}/audit_timeline").json()
+    assert timeline["contract"]["is_proxy"] is True
+    assert len(timeline["coverage"]) == 1
+    jobs = api_client.get("/api/jobs").json()
+    assert any(j.get("company") == PROTOCOL_NAME for j in jobs)
+    timings = api_client.get(f"/api/jobs/{stage_timings_job_id}/stage_timings").json()
+    assert set(timings["stage_timings"].keys()) == set(_PERF_STAGE_TIMING_STAGES)
 
     actuals: dict[str, int] = {}
     failures: list[str] = []

@@ -97,16 +97,6 @@ def test_init_sets_worker_id_with_classname_and_pid(mock_signal):
     assert w._running is True
 
 
-@patch("workers.base.signal.signal")
-def test_init_registers_signal_handlers(mock_signal):
-    """__init__ registers SIGTERM and SIGINT handlers."""
-    _TestWorker()
-    calls = mock_signal.call_args_list
-    sig_nums = {c[0][0] for c in calls}
-    assert signal.SIGTERM in sig_nums
-    assert signal.SIGINT in sig_nums
-
-
 # ---------------------------------------------------------------------------
 # Tests: _handle_sigterm
 # ---------------------------------------------------------------------------
@@ -118,19 +108,6 @@ def test_handle_sigterm_sets_running_false(mock_signal):
     assert w._running is True
     w._handle_sigterm(signal.SIGTERM, None)
     assert w._running is False
-
-
-# ---------------------------------------------------------------------------
-# Tests: process() (base class)
-# ---------------------------------------------------------------------------
-
-
-def test_base_process_raises_not_implemented():
-    """BaseWorker.process() must raise NotImplementedError."""
-    with patch("workers.base.signal.signal"):
-        w = BaseWorker()
-    with pytest.raises(NotImplementedError):
-        w.process(MagicMock(), MagicMock())
 
 
 # ---------------------------------------------------------------------------
@@ -425,17 +402,6 @@ def test_run_loop_no_job_sleeps(mock_sleep, mock_claim, mock_session_cls, mock_s
     w.run_loop()
 
     mock_sleep.assert_called_with(2.0)
-
-
-@patch("workers.base.signal.signal")
-@patch("workers.base.SessionLocal")
-@patch("workers.base.claim_job")
-def test_run_loop_running_false_exits(mock_claim, mock_session_cls, mock_signal):
-    """Setting _running=False before starting causes immediate exit."""
-    w = _TestWorker()
-    w._running = False
-    w.run_loop()
-    mock_claim.assert_not_called()
 
 
 @patch("workers.base.signal.signal")

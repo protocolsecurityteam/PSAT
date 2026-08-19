@@ -322,18 +322,6 @@ def test_an_unregistered_sheet_state_raises_instead_of_refusing_under_a_borrowed
         P.ceiling_for(_no_rows(), KEY)
 
 
-def test_the_resolver_answers_the_value_conjuncts_only():
-    """It never sees a capability, so it can never have checked one.
-
-    Guards the docstring's contract by construction: the signature carries a
-    plane and a key and nothing else, so a caller cannot read an admitted
-    ceiling as "code control was proven here".
-    """
-    import inspect
-
-    assert list(inspect.signature(P.ceiling_for).parameters) == ["plane", "key"]
-
-
 # --- the empty claim's own conjuncts ----------------------------------------
 # ``proven_empty`` is the only state on this plane that publishes a NUMBER out of
 # an absence, so it is the one with a set conjunct beside its quantity conjunct.

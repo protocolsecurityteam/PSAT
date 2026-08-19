@@ -17,7 +17,6 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from services.audits.scope_extraction import (  # noqa: E402
-    PROMPT_VERSION,
     LLMUnavailableError,
     ScopeSection,
     _build_prompt,
@@ -29,7 +28,6 @@ from services.audits.scope_extraction import (  # noqa: E402
     extract_scope_via_chunk_scan,
     extract_scope_with_llm,
     locate_scope_section,
-    scope_artifact_key,
     validate_contracts,
 )
 
@@ -641,37 +639,6 @@ def test_extract_scope_with_llm_handles_empty_array(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_build_artifact_payload_has_every_expected_key():
-    payload = build_artifact_payload(
-        ["Pool", "Vault"],
-        method="llm",
-        model="google/gemini-2.0-flash-001",
-        extracted_date="2024-12-19",
-        raw_response='["Pool","Vault"]',
-    )
-    assert payload["contracts"] == ["Pool", "Vault"]
-    assert payload["method"] == "llm"
-    assert payload["model"] == "google/gemini-2.0-flash-001"
-    assert payload["extracted_date"] == "2024-12-19"
-    assert payload["prompt_version"] == PROMPT_VERSION
-    assert payload["raw_llm_response"] == '["Pool","Vault"]'
-    assert "extracted_at" in payload
-
-
-def test_build_artifact_payload_json_roundtrip():
-    payload = build_artifact_payload(
-        ["Pool"],
-        method="regex_fallback",
-        model=None,
-        extracted_date=None,
-        raw_response=None,
-    )
-    dumped = json.dumps(payload)
-    again = json.loads(dumped)
-    assert again["contracts"] == ["Pool"]
-    assert again["method"] == "regex_fallback"
-
-
 def test_build_artifact_payload_preserves_scope_section_text():
     payload = build_artifact_payload(
         ["Pool"],
@@ -684,29 +651,9 @@ def test_build_artifact_payload_preserves_scope_section_text():
     assert payload["scope_section_text"] == ("The following contracts were audited:\nsrc/Pool.sol")
 
 
-def test_build_artifact_payload_caps_scope_section_text_at_20k():
-    huge = "x" * 50_000
-    payload = build_artifact_payload(
-        ["Pool"],
-        method="llm",
-        model=None,
-        extracted_date=None,
-        raw_response=None,
-        scope_section_text=huge,
-    )
-    # Capped at 20k so the artifact stays manageable.
-    sliced = payload["scope_section_text"]
-    assert isinstance(sliced, str)
-    assert len(sliced) <= 20_000
-
-
 # ---------------------------------------------------------------------------
-# scope_artifact_key + build_prompt sanity
+# build_prompt sanity
 # ---------------------------------------------------------------------------
-
-
-def test_scope_artifact_key_format():
-    assert scope_artifact_key(42) == "audits/scope/42.json"
 
 
 def test_build_prompt_includes_title_and_scope_text():

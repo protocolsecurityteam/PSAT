@@ -313,59 +313,6 @@ def test_value_out_value_moved_records_single_observed_destination():
     assert eff.concrete["destination"] == recipient.lower()
 
 
-def test_value_out_multi_log_single_destination_records_it():
-    # A withdrawal emitting several outbound Transfer logs that all converge on
-    # ONE destination still has one concrete destination (len(logs) != 1).
-    recipient = "0x" + "ab" * 20
-    base = SimResult(
-        calls=(
-            ok(
-                logs=[
-                    transfer_log(TOKEN, CONTRACT, recipient, 5),
-                    transfer_log(TOKEN, CONTRACT, recipient, 3),
-                ]
-            ),
-        )
-    )
-    eff = recipes.value_out(
-        simulate=ScriptedSimulate(base),
-        store=RecordingStore(),
-        ctx=CTX,
-        contract_address=CONTRACT,
-        principal=PRINCIPAL,
-        calldata="0xabcd0003",
-        simulate_supported=True,
-    )
-    assert eff.verdict == VERDICT_PROVEN
-    assert eff.concrete["destination"] == recipient.lower()
-
-
-def test_value_out_divergent_destinations_withheld():
-    # Outflow to TWO distinct destinations is genuinely ambiguous → no concrete
-    # destination recorded (never guess which is "the" destination).
-    base = SimResult(
-        calls=(
-            ok(
-                logs=[
-                    transfer_log(TOKEN, CONTRACT, "0x" + "ab" * 20, 5),
-                    transfer_log(TOKEN, CONTRACT, "0x" + "cd" * 20, 3),
-                ]
-            ),
-        )
-    )
-    eff = recipes.value_out(
-        simulate=ScriptedSimulate(base),
-        store=RecordingStore(),
-        ctx=CTX,
-        contract_address=CONTRACT,
-        principal=PRINCIPAL,
-        calldata="0xabcd0004",
-        simulate_supported=True,
-    )
-    assert eff.verdict == VERDICT_PROVEN
-    assert "destination" not in eff.concrete
-
-
 def test_value_out_static_fixed_shape_from_static_plane():
     base = SimResult(calls=(ok(logs=[transfer_log(TOKEN, CONTRACT, "0x" + "cd" * 20, 7)]),))
     sim = ScriptedSimulate(base)
@@ -653,22 +600,6 @@ def test_supply_burn_emits_no_backing():
     assert "backing" not in eff.details
 
 
-def test_supply_mint_reverted_fails_closed_no_backing():
-    # Backing fallback: a reverted mint is unknown, never "backed" — no backing field.
-    res = SimResult(calls=(ok(uint_ret(10)), rv(), ok(uint_ret(10))))
-    eff = recipes.supply(
-        simulate=ScriptedSimulate(res),
-        store=RecordingStore(),
-        ctx=CTX,
-        token_address=TOKEN,
-        principal=PRINCIPAL,
-        mint_calldata="0x40c10f19" + "00" * 64,
-        simulate_supported=True,
-    )
-    assert eff.verdict == VERDICT_UNKNOWN
-    assert "backing" not in eff.details
-
-
 def test_supply_unsupported_downgrades_no_backing():
     # Backing fallback: simulate_unsupported → Tier-2 downgrade unknown, never backed.
     eff = recipes.supply(
@@ -876,6 +807,8 @@ def test_section8_rule4b_supply_mint_revert_is_unknown():
     )
     assert eff.verdict == VERDICT_UNKNOWN
     assert eff.reason == "mint_call_reverted"
+    # Backing fallback: a reverted mint is unknown, never "backed" — no backing field.
+    assert "backing" not in eff.details
 
 
 def test_section8_rule5_every_verdict_is_tiered_and_replayable():
@@ -897,21 +830,6 @@ def test_section8_rule5_every_verdict_is_tiered_and_replayable():
     tr = store.stored[-1]
     for key in ("tier", "block_number", "hardfork", "calls", "results"):
         assert key in tr
-
-
-def test_section8_rule6_pure_given_injected_simulate():
-    # No wire is touched: a stub with zero real I/O produces a full verdict.
-    sim = ScriptedSimulate(SimResult(calls=(ok(),)))
-    eff = recipes.value_out(
-        simulate=sim,
-        store=RecordingStore(),
-        ctx=CTX,
-        contract_address=CONTRACT,
-        principal=PRINCIPAL,
-        calldata="0x00000000",
-        simulate_supported=True,
-    )
-    assert eff.effect_class == EFFECT_CLASS_VALUE_OUT
 
 
 def test_section8_rule14_simulate_unsupported_declares_tier2_fallback():

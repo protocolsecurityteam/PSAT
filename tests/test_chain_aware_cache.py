@@ -10,7 +10,6 @@ import uuid
 
 from cache_helpers import (
     ADDR_A,
-    ADDR_B,
     _sqlite_compatible_store_artifact,
     db_session,  # noqa: F401
     requires_postgres,
@@ -135,29 +134,6 @@ class TestStaticCacheChainFiltering:
         found = find_completed_static_cache(db_session, ADDR_A, chain="base")
         assert found is None, "Ethereum cache was returned for a Base request — cross-chain contamination"
 
-    def test_cache_returns_correct_chain_when_both_exist(self, db_session):
-        """When both Ethereum and Base jobs exist, the correct one is returned."""
-        from db.queue import find_completed_static_cache
-
-        job_eth = _create_completed_job_with_chain(db_session, ADDR_A, "ethereum")
-        _create_completed_job_with_chain(db_session, ADDR_B, "base", name="BaseContract")
-        # Use a different address for base to avoid unique constraint; test that
-        # find returns None for ADDR_A on base
-        found_eth = find_completed_static_cache(db_session, ADDR_A, chain="ethereum")
-        assert found_eth is not None and found_eth.id == job_eth.id
-
-        found_base = find_completed_static_cache(db_session, ADDR_A, chain="base")
-        assert found_base is None
-
-    def test_cache_none_chain_is_backward_compatible(self, db_session):
-        """Passing chain=None should still find results (backward compat)."""
-        from db.queue import find_completed_static_cache
-
-        job = _create_completed_job_with_chain(db_session, ADDR_A, "ethereum")
-        found = find_completed_static_cache(db_session, ADDR_A, chain=None)
-        assert found is not None
-        assert found.id == job.id
-
 
 # ---------------------------------------------------------------------------
 # P2: find_previous_company_inventory must respect chain
@@ -208,15 +184,6 @@ class TestCompanyInventoryChainFiltering:
 
 
 class TestDedupChainFiltering:
-    def test_existing_job_same_chain_found(self, db_session):
-        """An existing job on the same chain is found."""
-        from db.queue import create_job, find_existing_job_for_address
-
-        job = create_job(db_session, {"address": ADDR_A, "chain": "ethereum"})
-        found = find_existing_job_for_address(db_session, ADDR_A, chain="ethereum")
-        assert found is not None
-        assert found.id == job.id
-
     def test_existing_job_different_chain_not_found(self, db_session):
         """An Ethereum job must NOT suppress a Base job for the same address."""
         from db.queue import create_job, find_existing_job_for_address

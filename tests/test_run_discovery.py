@@ -29,12 +29,6 @@ def _clear_cache():
 # ---------------------------------------------------------------------------
 
 
-def test_audit_schema_accepts_enrichment_fields():
-    props = rd._AUDIT_SCHEMA["properties"]["auditReports"]["items"]["properties"]
-    for field in ("pdf_url", "source_repo", "reviewed_commits", "referenced_repos"):
-        assert field in props
-
-
 def test_budget_charge_search_increments_and_costs():
     b = rd._Budget()
     b.charge_search("auto")

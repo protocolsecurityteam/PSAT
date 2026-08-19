@@ -96,7 +96,10 @@ def test_personal_flag_stays_business(tmp_path):
 def test_blacklist_writer_gated_promotes(tmp_path):
     """``_blacklist[user] = true`` is written by an Ownable function.
     Reading ``require(!_blacklist[msg.sender])`` should promote to
-    caller_authority via rule b.i."""
+    caller_authority via rule b.i.
+
+    Confidence is MEDIUM on a rule-b.i promotion: the auth signal comes
+    from writer-side analysis, not from the read site's own shape."""
     sl = _compile(
         tmp_path,
         """
@@ -123,6 +126,7 @@ def test_blacklist_writer_gated_promotes(tmp_path):
     assert leaf["kind"] == "membership"
     assert leaf["operator"] == "falsy"
     assert leaf["authority_role"] == "caller_authority"
+    assert leaf["confidence"] == "medium"
 
 
 # ---------------------------------------------------------------------------
@@ -140,7 +144,10 @@ def test_self_administered_wards_promotes(tmp_path):
     pattern in MakerDAO. Without ``map[k]==1`` recognition the leaf
     stays equality, the writer-gate pass-2 doesn't see a membership
     leaf to gate on, and the wards mapping looks like just a uint
-    state-var read."""
+    state-var read.
+
+    Confidence is HIGH here (unlike rule b.i): the writer reads the same
+    map M as its own gate, which is a tight structural match."""
     sl = _compile(
         tmp_path,
         """
@@ -169,6 +176,7 @@ def test_self_administered_wards_promotes(tmp_path):
     assert leaf["set_descriptor"]["truthy_value"] == "1"
     # Promoted via rule b.ii (self-administered).
     assert leaf["authority_role"] == "caller_authority"
+    assert leaf["confidence"] == "high"
 
 
 # ---------------------------------------------------------------------------
@@ -179,7 +187,7 @@ def test_self_administered_wards_promotes(tmp_path):
 def test_open_registration_stays_business(tmp_path):
     """``register(addr)`` writes ``_registered[addr] = true`` with no
     gate. Reading ``require(_registered[msg.sender])`` should stay
-    business — anyone can register anyone."""
+    business — anyone can register anyone, and confidence stays LOW."""
     sl = _compile(
         tmp_path,
         """
@@ -201,6 +209,7 @@ def test_open_registration_stays_business(tmp_path):
     leaves = _all_leaves(trees["someAction()"])
     assert len(leaves) == 1
     assert leaves[0]["authority_role"] == "business"
+    assert leaves[0]["confidence"] == "low"
 
 
 def test_mixed_gated_and_public_external_writers_stays_business(tmp_path):
@@ -232,96 +241,6 @@ def test_mixed_gated_and_public_external_writers_stays_business(tmp_path):
     leaves = _all_leaves(trees["someAction()"])
     assert len(leaves) == 1
     assert leaves[0]["authority_role"] == "business"
-
-
-# ---------------------------------------------------------------------------
-# Confidence: writer-gate-promoted 1-key leaves classify as MEDIUM
-# (the auth signal depends on writer-side analysis, not direct shape).
-# ---------------------------------------------------------------------------
-
-
-def test_confidence_medium_for_writer_gate_promoted_1key(tmp_path):
-    """1-key caller-keyed bool map promoted via rule b.i (writer is
-    authority-gated): the leaf becomes caller_authority but
-    confidence is MEDIUM — promotion depends on the writer's own
-    classification."""
-    sl = _compile(
-        tmp_path,
-        """
-        pragma solidity ^0.8.19;
-        contract C {
-            address public ownerVar;
-            mapping(address => bool) public _blacklist;
-            function setBlacklist(address user, bool val) external {
-                require(msg.sender == ownerVar);
-                _blacklist[user] = val;
-            }
-            function someAction() external view {
-                require(!_blacklist[msg.sender]);
-            }
-        }
-    """,
-    )
-    contract = sl.contracts[0]
-    trees = _build_trees(contract)
-    apply_writer_gate_pass(contract, trees)
-    leaf = _all_leaves(trees["someAction()"])[0]
-    assert leaf["authority_role"] == "caller_authority"
-    assert leaf["confidence"] == "medium"
-
-
-def test_confidence_high_for_self_administered_wards(tmp_path):
-    """Maker-wards-style self-administered ACL: writer reads the
-    same map M as its own gate. Tight structural match per codex
-    review — HIGH confidence."""
-    sl = _compile(
-        tmp_path,
-        """
-        pragma solidity ^0.8.19;
-        contract C {
-            mapping(address => uint256) public wards;
-            function rely(address addr) external {
-                require(wards[msg.sender] == 1);
-                wards[addr] = 1;
-            }
-            function someAction() external view {
-                require(wards[msg.sender] == 1);
-            }
-        }
-    """,
-    )
-    contract = sl.contracts[0]
-    trees = _build_trees(contract)
-    apply_writer_gate_pass(contract, trees)
-    leaf = _all_leaves(trees["someAction()"])[0]
-    assert leaf["authority_role"] == "caller_authority"
-    assert leaf["confidence"] == "high"
-
-
-def test_confidence_low_when_business_after_writer_gate(tmp_path):
-    """Open registration (rule c) keeps the leaf as business.
-    Confidence stays LOW."""
-    sl = _compile(
-        tmp_path,
-        """
-        pragma solidity ^0.8.19;
-        contract C {
-            mapping(address => bool) public _registered;
-            function register(address addr) external {
-                _registered[addr] = true;
-            }
-            function someAction() external view {
-                require(_registered[msg.sender]);
-            }
-        }
-    """,
-    )
-    contract = sl.contracts[0]
-    trees = _build_trees(contract)
-    apply_writer_gate_pass(contract, trees)
-    leaf = _all_leaves(trees["someAction()"])[0]
-    assert leaf["authority_role"] == "business"
-    assert leaf["confidence"] == "low"
 
 
 # ---------------------------------------------------------------------------

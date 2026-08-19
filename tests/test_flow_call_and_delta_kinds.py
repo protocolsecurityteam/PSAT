@@ -239,10 +239,12 @@ contract Requests {
 """
 
 
-def test_calldata_struct_member_destination_is_param(tmp_path):
+def test_calldata_struct_array_element_destination_is_param(tmp_path):
+    """The array-of-struct element shape. The single-struct twin lives in
+    ``test_flow_interproc.py::test_calldata_struct_member_destination_is_param``,
+    which also pins the tier and entry-vs-nested parity."""
     contract = _compile(tmp_path, STRUCT_DEST_SRC, "Requests")
     fns = build_effects(contract)["functions"]
-    assert _out_flow(fns["claim(Requests.Request)"])["target_kind"]["kind"] == "param"
     assert _out_flow(fns["batchClaim(Requests.Request[])"])["target_kind"]["kind"] == "param"
 
 
@@ -330,12 +332,6 @@ def test_balance_minus_storage_is_a_delta_not_storage_bounded(tmp_path):
     amount = _out_flow(build_effects(contract)["functions"]["sweepStranded()"])["amount_kind"]
     assert amount["kind"] != "bounded_by_storage", amount
     assert amount == {"kind": "balance_delta", "tier": "static_trace"}, amount
-
-
-def test_bare_balance_read_still_whole_balance(tmp_path):
-    contract = _compile(tmp_path, BALANCE_DELTA_SRC, "Sweeper")
-    amount = _out_flow(build_effects(contract)["functions"]["drain(address)"])["amount_kind"]
-    assert amount["kind"] == "whole_balance", amount
 
 
 def test_non_subtractive_balance_arithmetic_is_not_a_delta(tmp_path):

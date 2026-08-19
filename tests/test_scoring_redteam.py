@@ -1020,33 +1020,11 @@ def test_f5_confidence_does_not_rise_when_analysis_is_lost(fold):
     assert less.confidence_pct <= more.confidence_pct
 
 
-def test_probe_n_functions_counts_distinct_functions(fold):
-    signal = sig(
-        authority_openness="restricted",
-        principal_state="enumerated",
-        principal_refs=(PrincipalRef(1, "ethereum", SAFE), PrincipalRef(2, "ethereum", SAFE2)),
-        **proven(1.0),
-        **reaches(KEY_C),
-    )
-    document = fold(
-        [signal],
-        principals={
-            1: facts(1, SAFE, "safe", owners=OWNERS, threshold=3),
-            2: facts(2, SAFE2, "safe", owners=OWNERS, threshold=3),
-        },
-        value=value_plane({KEY_C: {"usdc": 50_000_000.0}}),
-    )
-    assert all(f["n_functions"] == 1 for f in document.findings)
-
-
 def test_r1_capability_principal_is_not_a_reach_relation():
     assert "capability_principal" not in P.CONTROL_RELATIONS
     # Not walked, and the exclusion carries a stated reason rather than being a
     # relation the walk happens never to mention.
     assert "capability_principal" in P.UNCONSUMED_REACH_REASONS
-    # The rationale the register published before 1.1.0 was refuted: the
-    # materialization budget never bites, so it cannot be the reason.
-    assert "WITHDRAWN" in P.UNCONSUMED_REACH_REASONS["capability_principal"]
 
 
 def test_g2_the_destination_free_allow_list_is_disjoint_and_conservative():

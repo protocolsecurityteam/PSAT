@@ -3,12 +3,19 @@
 Names are randomized so detection can't rely on naming conventions.
 These test whether the detection works based on *what the code does*
 (AST structure, data flow, IR) rather than *what things are called*.
+
+Randomization strengthens a *positive* assertion and weakens a *negative*
+one: for an assertion-of-absence, conventional naming is the adversarial
+input. So the file ends with conventional-name controls (merged from the
+former ``test_effect_label_weaknesses.py``) — the pairs are what make the
+earned negatives falsifiable in both directions.
 """
 
 import random
 import string
 import sys
 import tempfile
+import textwrap
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -349,3 +356,239 @@ contract Target {{
         f"Random owner var '{var_name}', fn '{fn_name}': expected authorized_caller.rotate, got {claims}"
     )
     assert "ownership_transfer" not in labels
+
+
+# =========================================================================
+# Conventional-name controls (merged from tests/test_effect_label_weaknesses.py)
+#
+# Same pipeline, ordinary identifiers. Each is the paired control for a
+# randomized test above: together they prove a label comes from what the code
+# does, in both directions.
+# =========================================================================
+
+
+def test_nonstandard_impl_slot_name():
+    """Conventional-name control for ``test_random_impl_slot_with_delegatecall``.
+
+    The load-bearing assertion is an earned negative, so ordinary names
+    (``_logic`` / ``setLogic``) are the adversarial input here: a
+    reintroduced name-keyed impl-slot heuristic would pass the randomized
+    test and fail this one.
+    """
+    source = textwrap.dedent("""\
+        // SPDX-License-Identifier: MIT
+        pragma solidity ^0.8.20;
+
+        contract Target {
+            address private _logic;
+            address public owner;
+
+            modifier onlyOwner() {
+                require(msg.sender == owner, "not owner");
+                _;
+            }
+
+            function setLogic(address newLogic) external onlyOwner {
+                _logic = newLogic;
+            }
+
+            fallback() external payable {
+                address impl = _logic;
+                assembly {
+                    calldatacopy(0, 0, calldatasize())
+                    let result := delegatecall(gas(), impl, 0, calldatasize(), 0, 0)
+                    returndatacopy(0, 0, returndatasize())
+                    switch result
+                    case 0 { revert(0, returndatasize()) }
+                    default { return(0, returndatasize()) }
+                }
+            }
+        }
+    """)
+    analysis = _scaffold_and_analyze(source)
+    labels = _get_function_labels(analysis, "setLogic")
+    assert "implementation_update" not in labels, f"Expected NO implementation_update for setLogic, got: {labels}"
+    assert "delegatecall_execution" in _get_function_labels(analysis, "fallback")
+
+
+# =========================================================================
+# WEAKNESS 2: Non-standard naming for pause variables
+# Pause toggles should be found from guarded bool-state semantics, not
+# from the state-variable name.
+# =========================================================================
+
+
+def test_raw_eth_transfer():
+    source = textwrap.dedent("""\
+        // SPDX-License-Identifier: MIT
+        pragma solidity ^0.8.20;
+
+        contract Target {
+            address public owner;
+
+            modifier onlyOwner() {
+                require(msg.sender == owner, "not owner");
+                _;
+            }
+
+            function sweep(address payable to) external onlyOwner {
+                (bool ok,) = to.call{value: address(this).balance}("");
+                require(ok, "transfer failed");
+            }
+
+            receive() external payable {}
+        }
+    """)
+    analysis = _scaffold_and_analyze(source)
+    labels = _get_function_labels(analysis, "sweep")
+    assert "asset_send" in labels, f"Expected asset_send for sweep (raw ETH transfer), got: {labels}"
+
+
+# =========================================================================
+# WEAKNESS 4: ERC20 transfer() instead of safeTransfer()
+# Many contracts use IERC20(token).transfer() directly instead of
+# SafeERC20.safeTransfer(). Direct ERC20 calls should classify from the
+# called selector as asset movement.
+# =========================================================================
+
+
+def test_raw_erc20_transfer():
+    source = textwrap.dedent("""\
+        // SPDX-License-Identifier: MIT
+        pragma solidity ^0.8.20;
+
+        interface IERC20 {
+            function transfer(address to, uint256 amount) external returns (bool);
+            function balanceOf(address account) external view returns (uint256);
+        }
+
+        contract Target {
+            address public owner;
+            IERC20 public token;
+
+            modifier onlyOwner() {
+                require(msg.sender == owner, "not owner");
+                _;
+            }
+
+            function withdrawTokens(address to) external onlyOwner {
+                uint256 bal = token.balanceOf(address(this));
+                token.transfer(to, bal);
+            }
+        }
+    """)
+    analysis = _scaffold_and_analyze(source)
+    labels = _get_function_labels(analysis, "withdrawTokens")
+    assert "asset_send" in labels, f"Expected asset_send for withdrawTokens (ERC20.transfer), got: {labels}"
+
+
+# =========================================================================
+# WEAKNESS 5: Indirect mint through another contract
+# If contract A calls contract B.mint(), the semantic effect should carry
+# enough selector/callee evidence to classify the supply-changing action.
+# =========================================================================
+
+
+def test_standard_ownable_transfer():
+    """Standard ownership transfer via owner variable should be detected."""
+    source = textwrap.dedent("""\
+        // SPDX-License-Identifier: MIT
+        pragma solidity ^0.8.20;
+
+        contract Target {
+            address public owner;
+
+            modifier onlyOwner() {
+                require(msg.sender == owner, "not owner");
+                _;
+            }
+
+            function transferOwnership(address newOwner) external onlyOwner {
+                owner = newOwner;
+            }
+        }
+    """)
+    analysis = _scaffold_and_analyze(source)
+    labels = _get_function_labels(analysis, "transferOwnership")
+    assert "ownership_transfer" in labels, f"Expected ownership_transfer, got: {labels}"
+
+
+def test_standard_pause():
+    """A pause flag that gates another function should be detected."""
+    source = textwrap.dedent("""\
+        // SPDX-License-Identifier: MIT
+        pragma solidity ^0.8.20;
+
+        contract Target {
+            bool private _paused;
+            address public owner;
+
+            modifier onlyOwner() {
+                require(msg.sender == owner, "not owner");
+                _;
+            }
+
+            modifier whenNotPaused() {
+                require(!_paused, "paused");
+                _;
+            }
+
+            function pause() external onlyOwner {
+                _paused = true;
+            }
+
+            function unpause() external onlyOwner {
+                _paused = false;
+            }
+
+            function execute() external whenNotPaused {
+            }
+        }
+    """)
+    analysis = _scaffold_and_analyze(source)
+    labels_pause = _get_function_labels(analysis, "pause")
+    labels_unpause = _get_function_labels(analysis, "unpause")
+    assert "pause_toggle" in labels_pause, f"Expected pause_toggle for pause, got: {labels_pause}"
+    assert "pause_toggle" in labels_unpause, f"Expected pause_toggle for unpause, got: {labels_unpause}"
+
+
+def test_standard_mint_burn_names_are_not_inferred_without_semantic_evidence():
+    """Internal helper names alone should not produce mint/burn labels."""
+    source = textwrap.dedent("""\
+        // SPDX-License-Identifier: MIT
+        pragma solidity ^0.8.20;
+
+        contract Target {
+            mapping(address => uint256) public balances;
+            uint256 public totalSupply;
+            address public owner;
+
+            modifier onlyOwner() {
+                require(msg.sender == owner, "not owner");
+                _;
+            }
+
+            function mint(address to, uint256 amount) external onlyOwner {
+                _mint(to, amount);
+            }
+
+            function burn(address from, uint256 amount) external onlyOwner {
+                _burn(from, amount);
+            }
+
+            function _mint(address to, uint256 amount) internal {
+                balances[to] += amount;
+                totalSupply += amount;
+            }
+
+            function _burn(address from, uint256 amount) internal {
+                balances[from] -= amount;
+                totalSupply -= amount;
+            }
+        }
+    """)
+    analysis = _scaffold_and_analyze(source)
+    labels_mint = _get_function_labels(analysis, "mint")
+    labels_burn = _get_function_labels(analysis, "burn")
+    assert "mint" not in labels_mint, f"Did not expect mint label from helper name, got: {labels_mint}"
+    assert "burn" not in labels_burn, f"Did not expect burn label from helper name, got: {labels_burn}"

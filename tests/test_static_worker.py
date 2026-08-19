@@ -57,54 +57,24 @@ def test_resolve_proxy_queues_hidden_proxy_impl(monkeypatch):
     assert store_calls[0][0] == "contract_flags"
     assert store_calls[0][1]["is_proxy"] is True
     assert store_calls[0][1]["implementation"] == "0x2222222222222222222222222222222222222222"
-    # root_job_id falls back to the parent job's id when no upstream
-    # cascade was set on the request — preserves the within-cascade
-    # dedup semantics for top-level calls too.
+
+    assert len(created_jobs) == 1
+    child = created_jobs[0]
+    assert child["address"] == "0x2222222222222222222222222222222222222222"
+    assert child["proxy_address"] == "0x1111111111111111111111111111111111111111"
+    assert child["parent_job_id"] == "job-1"
+    # root_job_id falls back to the parent job's id when no upstream cascade was
+    # set on the request — preserves the within-cascade dedup semantics for
+    # top-level calls too.
+    assert child["root_job_id"] == "job-1"
     # ``discovery_relationship`` + ``parent_owns_high`` carry the
     # structural-ownership signal to the child's discovery worker.
-    # ``parent_owns_high`` is False here because session.execute returns
-    # None (no parent Contract row in this mock setup), so the parent
-    # has no discovery_sources to evaluate.
-    assert created_jobs == [
-        {
-            "address": "0x2222222222222222222222222222222222222222",
-            "name": "HiddenThing: (impl)",
-            "rpc_url": "http://127.0.0.1:8545",
-            "parent_job_id": "job-1",
-            "root_job_id": "job-1",
-            "proxy_address": "0x1111111111111111111111111111111111111111",
-            "proxy_type": "unknown",
-            "discovery_relationship": "implementation",
-            "parent_owns_high": False,
-            "chain": "ethereum",
-        }
-    ]
-
-
-def test_resolve_proxy_marks_regular_contract_without_proxy_flag(monkeypatch):
-    worker = StaticWorker()
-    session = MagicMock()
-    job = _job()
-    store_calls = []
-
-    monkeypatch.setattr(
-        "workers.static_worker.store_artifact",
-        lambda _session, _job_id, name, data=None, text_data=None: store_calls.append((name, data, text_data)),
-    )
-    monkeypatch.setattr(
-        "services.discovery.classifier.classify_single",
-        lambda address, rpc_url, **_kw: {"address": address, "type": "regular"},
-    )
-
-    worker._resolve_proxy(session, job, job.address, job.name)
-
-    assert store_calls == [
-        (
-            "contract_flags",
-            {"is_proxy": False, "classification_type": "regular"},
-            None,
-        )
-    ]
+    assert child["discovery_relationship"] == "implementation"
+    # False because session.execute returns None (no parent Contract row in this
+    # mock setup), so the parent has no discovery_sources to evaluate.
+    assert child["parent_owns_high"] is False
+    # Derived default: the request carries no chain.
+    assert child["chain"] == "ethereum"
 
 
 def test_process_attempts_semantic_proxy_classification_for_non_obvious_names(monkeypatch, tmp_path):

@@ -556,17 +556,29 @@ def _gen_for_shape(shape_name: str, rng: random.Random):
 # Shape name → fuzz-variant count. The shape names live here only to give
 # generators distinct seeds and to label test IDs for diagnostics; the
 # *assertion* itself is shape-agnostic — it does not branch on the name.
+#
+# One variant per shape. Each variant is a cold Foundry/solc compile in a fresh
+# ``tmp_path`` (no build-cache reuse), so the former 5-per-shape sweep cost ~120
+# compiles per offline run. Every variant is still gibberish-identifier
+# generated, so the substring ban this file exists to enforce is unchanged;
+# only the per-shape repetition is gone. Raise a count locally to re-run the
+# wider sweep when touching the generators.
 SHAPES: dict[str, int] = {
-    "caller_equals_argument": 5,
-    "role_member_dynamic_arg": 5,
-    "dynamic_role_admin": 5,
-    "mapping_member_dynamic_scope": 5,
-    "external_policy_dynamic_stdname": 3,
-    "external_policy_dynamic_renamed": 5,
-    "caller_equals_external_owner_stdname": 3,
-    "caller_equals_external_owner_renamed": 5,
-    "disjunction": 5,
+    "caller_equals_argument": 1,
+    "role_member_dynamic_arg": 1,
+    "dynamic_role_admin": 1,
+    "mapping_member_dynamic_scope": 1,
+    "external_policy_dynamic_stdname": 1,
+    "external_policy_dynamic_renamed": 1,
+    "caller_equals_external_owner_stdname": 1,
+    "caller_equals_external_owner_renamed": 1,
+    "disjunction": 1,
 }
+
+# The strict-xfail arm below ratchets: one variant flipping to XPASS is enough
+# to fail the suite and force the decorator's removal, so it does not need the
+# full shape sweep.
+XFAIL_RATCHET_CASE = ("caller_equals_argument", 0)
 
 TOP_SEED = 0xC0DE_BABE
 
@@ -784,7 +796,7 @@ def test_fuzz_fixtures_are_valid(shape_name: str, variant: int, tmp_path: Path):
 
 @pytest.mark.parametrize(
     "shape_name,variant",
-    [(name, v) for name, n in SHAPES.items() for v in range(n)],
+    [XFAIL_RATCHET_CASE],
     ids=lambda x: str(x),
 )
 @pytest.mark.xfail(

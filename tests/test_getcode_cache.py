@@ -207,24 +207,6 @@ def test_cache_eviction_under_ceiling(monkeypatch):
     assert len(rpc._GETCODE_CACHE) <= rpc._GETCODE_CACHE_MAX
 
 
-def test_get_code_uses_cached_value_with_unrelated_get_code_with_keccak(monkeypatch):
-    """Belt-and-suspenders cross-API check: any future split that gives
-    each function its own private cache would silently double RPC load."""
-    calls = []
-
-    def _fake_rpc(_url, _method, params, retries=1, *, chain_id=None):
-        calls.append(params[0])
-        return "0xdeadbeef"
-
-    monkeypatch.setattr(rpc, "rpc_request", _fake_rpc)
-    addr = "0x" + "11" * 20
-
-    rpc.get_code_with_keccak("https://rpc", addr)
-    rpc.get_code("https://rpc", addr)
-    rpc.get_code_with_keccak("https://rpc", addr)
-    assert len(calls) == 1
-
-
 # ---------------------------------------------------------------------------
 # Phase B Step 4: get_code_batch — batch eth_getCode for many addresses
 # ---------------------------------------------------------------------------

@@ -29,8 +29,10 @@ from tests.support.eq_tree import eq_tree as _eq_tree
 CONTRACT = "0x" + "11" * 20
 OWNER = "0x" + "ab" * 20
 GOVERNOR = "0x" + "cd" * 20
+AUTHORITY = "0x" + "ef" * 20
 OWNER_SELECTOR = "0x8da5cb5b"  # owner()
 GOVERNOR_SELECTOR = "0x0c340a24"  # governor()
+AUTHORITY_SELECTOR = "0xbf7e214f"  # authority()
 
 
 # --------------------------------------------------------------------------
@@ -201,32 +203,33 @@ def test_renounced_getter_resolves_to_exact_empty(monkeypatch: pytest.MonkeyPatc
 # --------------------------------------------------------------------------
 
 
-def test_underscore_owner_state_var_resolves_via_canonical_getter(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ("basename", "selector", "resolved"),
+    [
+        ("owner", OWNER_SELECTOR, OWNER),
+        ("governor", GOVERNOR_SELECTOR, GOVERNOR),
+        ("authority", AUTHORITY_SELECTOR, AUTHORITY),
+    ],
+)
+def test_underscore_authority_state_var_resolves_via_canonical_getter(
+    monkeypatch: pytest.MonkeyPatch, basename: str, selector: str, resolved: str
+) -> None:
+    """Every member of ``_AUTHORITY_GETTER_BASENAMES`` de-underscores on the
+    state_variable branch, not just ``owner``."""
     recorder: list = []
-    _stub_rpc_by_selector(monkeypatch, {OWNER_SELECTOR: OWNER}, recorder=recorder)
-    tree = _eq_tree({"source": "state_variable", "state_variable_name": "_owner"})
+    _stub_rpc_by_selector(monkeypatch, {selector: resolved}, recorder=recorder)
+    tree = _eq_tree({"source": "state_variable", "state_variable_name": f"_{basename}"})
 
     cap = evaluate_tree(tree, _ctx_with_rpc())
 
     assert cap.kind == "finite_set"
-    assert cap.members == [OWNER]
+    assert cap.members == [resolved]
     assert cap.membership_quality == "exact"
     # ``_owner()`` (the var's own dead selector) is tried and reverts; ``owner()``
     # (de-underscored) is what actually resolves the principal.
     selectors = [p[0]["data"] for m, p in recorder if m == "eth_call"]
-    assert _sel("_owner()") in selectors
-    assert OWNER_SELECTOR in selectors
-
-
-def test_underscore_governor_state_var_resolves_via_canonical_getter(monkeypatch: pytest.MonkeyPatch) -> None:
-    _stub_rpc_by_selector(monkeypatch, {GOVERNOR_SELECTOR: GOVERNOR})
-    tree = _eq_tree({"source": "state_variable", "state_variable_name": "_governor"})
-
-    cap = evaluate_tree(tree, _ctx_with_rpc())
-
-    assert cap.kind == "finite_set"
-    assert cap.members == [GOVERNOR]
-    assert cap.membership_quality == "exact"
+    assert _sel(f"_{basename}()") in selectors
+    assert selector in selectors
 
 
 def test_underscore_owner_renounced_resolves_to_exact_empty(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -346,22 +349,6 @@ def test_resolved_owner_surfaces_as_function_principal_row(monkeypatch: pytest.M
     assert all(r.get("principal_type") == "controller" for r in resolved_rows)
     # …whereas the unresolved placeholder emits none (the recall gap).
     assert unresolved_rows == []
-
-
-def test_resolved_owner_becomes_primary_controller() -> None:
-    """The downstream consumer: once the resolved owner is an FP caller on the
-    contract, assign_primary_controllers surfaces it as the primary — the
-    controller that was missing for SyncPool / LRTSquaredCore. With no FP
-    caller (the pre-fix state) the same Safe wins nothing."""
-    from services.governance.primary_controller import assign_primary_controllers
-
-    principals = [{"address": OWNER, "type": "safe"}]
-
-    post_fix = assign_primary_controllers(principals, {CONTRACT: {OWNER}})
-    assert post_fix[OWNER.lower()] == [CONTRACT.lower()]
-
-    pre_fix = assign_primary_controllers(principals, {CONTRACT: set()})
-    assert pre_fix[OWNER.lower()] == []
 
 
 # --------------------------------------------------------------------------

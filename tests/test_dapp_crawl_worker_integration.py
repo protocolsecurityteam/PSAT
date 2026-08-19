@@ -1,9 +1,11 @@
 """Integration tests for DAppCrawlWorker with a real Postgres-backed queue.
 
-These tests do not drive a real browser because Playwright is not part of the
-default test environment. Instead, they serve a local fake DApp page over HTTP
-and patch only the crawler entrypoint so the worker still runs against the real
-queue, job, artifact, and completion code paths.
+These tests deliberately stop short of the browser: they serve a local fake DApp
+page over HTTP and patch only the crawler entrypoint, so the worker still runs
+against the real queue, job, artifact and completion code paths. The browser leg
+itself is covered by ``test_dapp_browser_integration.py``, which drives real
+Playwright — it is provisioned in the offline CI job
+(``.github/workflows/_ci-checks.yml``, cached + retried + hard-failing).
 """
 
 from __future__ import annotations

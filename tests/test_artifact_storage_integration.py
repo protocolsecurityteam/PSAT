@@ -1321,3 +1321,68 @@ def test_hydrate_keeps_outage_absence_and_payload_apart(db_session, storage_buck
     assert set(absent.value.proven_absent) == {"analysis_blob_key"}
     assert absent.value.not_determined == {}
     assert classify(absent.value) == "terminal"
+
+
+# ---------------------------------------------------------------------------
+# Job lifecycle (merged from tests/test_queue.py)
+# ---------------------------------------------------------------------------
+
+
+def test_create_job_extracts_the_address_from_the_request(db_session):
+    """``create_job`` lifts ``request["address"]`` onto the column
+    (``db/queue.py:302-304``) — the extraction every address-keyed reader
+    depends on."""
+    from db.queue import create_job
+
+    job = create_job(db_session, {"address": "0xdAC17F958D2ee523a2206206994597C13D831ec7", "name": "test"})
+    assert job.id is not None
+    assert job.address == "0xdAC17F958D2ee523a2206206994597C13D831ec7"
+
+
+def test_claim_and_advance_job(db_session):
+    from db.models import JobStage, JobStatus
+    from db.queue import advance_job, claim_job, create_job
+
+    create_job(db_session, {"address": "0x0000000000000000000000000000000000000001"})
+
+    claimed = claim_job(db_session, JobStage.discovery, "test-worker")
+    assert claimed is not None
+    assert claimed.status == JobStatus.processing
+    assert claimed.worker_id == "test-worker"
+
+    # No more jobs to claim
+    assert claim_job(db_session, JobStage.discovery, "test-worker-2") is None
+
+    # Advance to next stage
+    advance_job(db_session, claimed.id, JobStage.static)
+    db_session.refresh(claimed)
+    assert claimed.stage == JobStage.static
+    assert claimed.status == JobStatus.queued
+
+
+def test_fail_job(db_session):
+    from db.models import JobStage, JobStatus
+    from db.queue import claim_job, create_job, fail_job
+
+    create_job(db_session, {"address": "0x0000000000000000000000000000000000000002"})
+    claimed = claim_job(db_session, JobStage.discovery, "test-worker")
+    assert claimed is not None
+
+    fail_job(db_session, claimed.id, "something went wrong")
+    db_session.refresh(claimed)
+    assert claimed.status == JobStatus.failed
+    assert claimed.error == "something went wrong"
+
+
+def test_complete_job(db_session):
+    from db.models import JobStage, JobStatus
+    from db.queue import claim_job, complete_job, create_job
+
+    create_job(db_session, {"address": "0x0000000000000000000000000000000000000003"})
+    claimed = claim_job(db_session, JobStage.discovery, "test-worker")
+    assert claimed is not None
+
+    complete_job(db_session, claimed.id)
+    db_session.refresh(claimed)
+    assert claimed.status == JobStatus.completed
+    assert claimed.stage == JobStage.done

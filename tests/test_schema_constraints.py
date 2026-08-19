@@ -1,8 +1,9 @@
-"""Schema-level invariants enforced at the DB layer.
+"""Schema-level invariants enforced at the DB layer: triggers, checks, indexes.
 
 These exist so that even a direct SQL INSERT (bypassing the Python
-matcher) cannot corrupt the dataset. If someone drops a trigger or
-relaxes the check, the corresponding assertion here fires and the
+matcher) cannot corrupt the dataset, and so that an index a hot path
+depends on cannot quietly disappear. If someone drops a trigger, relaxes
+a check or drops an index, the corresponding assertion here fires and the
 build breaks — a much louder failure than a silent data drift.
 """
 
@@ -117,3 +118,32 @@ def test_coverage_trigger_allows_non_proxy_insert(db_session):
         assert len(rows) == 1
     finally:
         _cleanup(db_session, protocol_id)
+
+
+# ---------------------------------------------------------------------------
+# Required indexes (merged from tests/test_schema_indexes.py)
+#
+# Postgres does NOT auto-create an index on a foreign-key column, and several
+# hot paths scan those columns.
+# ---------------------------------------------------------------------------
+
+
+def test_upgrade_events_contract_id_index_exists(db_session):
+    """``upgrade_events.contract_id`` must have an index.
+
+    Hit by services.audits.coverage._compute_impl_windows* and by
+    api.contract_audit_timeline on every request. The FK constraint alone
+    does not create one; we rely on ``ix_upgrade_events_contract_id``.
+    """
+    row = db_session.execute(
+        text(
+            "SELECT indexname FROM pg_indexes "
+            "WHERE tablename = 'upgrade_events' "
+            "AND indexname = 'ix_upgrade_events_contract_id'"
+        )
+    ).scalar_one_or_none()
+    assert row == "ix_upgrade_events_contract_id", (
+        "Missing index ix_upgrade_events_contract_id on upgrade_events(contract_id) — "
+        "this index is required by the coverage matcher and audit_timeline API; "
+        "re-add it via an Alembic revision."
+    )

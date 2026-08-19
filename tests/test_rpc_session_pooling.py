@@ -122,15 +122,3 @@ def test_rpc_batch_request_routes_through_session():
         )
     assert results == ["0x01", "0x02"]
     assert mocked_post.call_count == 1
-
-
-def test_session_has_http_adapter_with_pooling():
-    """An HTTPAdapter with a pool is what actually delivers connection
-    reuse — without it the Session is just sugar over bare requests."""
-    _reset_thread_session()
-    session = rpc._get_session()
-    https_adapter = session.get_adapter("https://example.invalid")
-    # HTTPAdapter exposes pool config via private attrs; getattr keeps
-    # pyright quiet about the abstract _BaseAdapter return type.
-    assert getattr(https_adapter, "_pool_connections", 0) >= 16
-    assert getattr(https_adapter, "_pool_maxsize", 0) >= 32

@@ -437,8 +437,14 @@ def test_protocol_tvl_caps_days(mock_session_cls) -> None:
 
     from routers import deps
 
-    assert hasattr(deps, "MAX_TVL_HISTORY_DAYS"), "routers.deps should define MAX_TVL_HISTORY_DAYS"
     assert deps.MAX_TVL_HISTORY_DAYS <= 365
+    # The clamp is only proven by the window the query actually asked for: the
+    # query param carries no ``le=``, so ``days = min(days, MAX)`` is the sole
+    # bound on an unauthenticated 9999-day scan.
+    stmt = mock_session.execute.call_args[0][0]
+    cutoffs = [v for v in stmt.compile().params.values() if isinstance(v, datetime)]
+    assert len(cutoffs) == 1
+    assert (datetime.now(timezone.utc) - cutoffs[0]).days == deps.MAX_TVL_HISTORY_DAYS
 
 
 # ---------------------------------------------------------------------------

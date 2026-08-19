@@ -387,13 +387,6 @@ def test_zero_value_call_does_not_pollute_real_send(tmp_path):
     assert flow["amount_kind"] == {"kind": "param", "tier": "static_trace"}
 
 
-def test_zero_value_only_function_has_no_value_flow(tmp_path):
-    contract = _compile(tmp_path, _ZERO_VALUE_SRC, "Mixed")
-    effects = build_effects(contract)
-    outs = [vf for vf in effects["functions"]["poke(bytes)"]["value_flows"] if vf["direction"] == "out"]
-    assert outs == [], outs
-
-
 # --- Witness bar: a COMPUTED operand must never recover a member of a union ---
 # The forwarded-param recovery drops the entrypoint-Phi echoes that sit beside a
 # DIRECTLY-read nested parameter (they can only be the parameter's own binding

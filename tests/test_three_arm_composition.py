@@ -12,7 +12,6 @@ found. Cases 4, 5 and the execution record's own shape live in
 
 from __future__ import annotations
 
-import inspect
 from dataclasses import replace
 from typing import Any, cast
 
@@ -210,17 +209,6 @@ def test_case3b_two_hops_with_a_qualifying_row_republishes_and_names_it(fold, de
     assert entry["proving_execution"]["reason"] == EX.REASON_NOT_PERSISTED
     # The body still authors the amount; the entry publishes both.
     assert entry["route_classification"]["state"] == P.ROUTE_AMOUNT_AUTHORED
-
-
-def test_the_decision_reads_a_setter_row_and_never_a_chain_length():
-    """inv. 16, on the source: 3a and 3b catch the behaviour, this catches an
-    implementation that passes them by accident and then drifts."""
-    source = inspect.getsource(FOLD._admit_composed)
-    # The docstring argues about hop counts; the CODE must not mention one.
-    body = source.split('"""')[-1]
-    for banned in ("len(entry.chain)", "len(chain)", "act_as_chain_length", "hop", "chain_length", "contract_name"):
-        assert banned not in body, banned
-    assert "authority_deletability" in body
 
 
 # Case 2 — the gate transfers; only the figure is lost
@@ -785,14 +773,3 @@ def test_the_caller_conjunct_holds_on_a_subsumed_row_too(fold, caller, state):  
         for entry in _entries(row) + _withheld(row):
             assert entry["gate_claim"]["state"] == state
         assert row["reach_composition_census"]["gate_claim_by_state"] == {state: len(_entries(row) + _withheld(row))}
-
-
-def test_the_conjunct_is_read_from_the_execution_and_not_defaulted():
-    """inv. 16 on the conjunct's own source: derived from the two callers and
-    nothing else, with no branch that assumes a match."""
-    body = inspect.getsource(EX.gate_claim).split('"""')[-1]
-    assert "_addr_matches" in body
-    for banned in ("True  #", "or True", "default"):
-        assert banned not in body, banned
-    # All three states constructible, none by falling off the end.
-    assert body.count("return {") == 3

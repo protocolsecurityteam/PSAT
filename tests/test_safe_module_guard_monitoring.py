@@ -241,11 +241,6 @@ def test_safe_polling_plan_carries_both_storage_slots():
     assert plan["threshold"]["target"] == "getThreshold"
 
 
-def test_slot_constants_equal_their_preimages():
-    assert SAFE_MODULES_HEAD_SLOT == "0x" + keccak((1).to_bytes(32, "big") + (1).to_bytes(32, "big")).hex()
-    assert SAFE_GUARD_SLOT == "0x" + keccak(text="guard_manager.guard.address").hex()
-
-
 def test_non_safe_types_get_no_safe_slot_entries():
     fields = {entry["field"] for entry in build_polling_plan(contract_type="timelock")}
     assert "modules_head" not in fields

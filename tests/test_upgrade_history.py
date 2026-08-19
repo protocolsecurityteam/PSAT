@@ -242,28 +242,6 @@ class TestBuildUpgradeHistory:
         assert result["proxies"] == {}
         assert result["total_upgrades"] == 0
 
-    def test_proxy_with_no_upgrade_events(self, monkeypatch, tmp_path):
-        """A target proxy that has never emitted Upgraded events still appears
-        in the output with its current implementation as the sole timeline entry."""
-        target = ADDR(1)
-        impl = ADDR(10)
-        deps_path = _write_deps_target_proxy(tmp_path, target, "eip1967", impl)
-        monkeypatch.setattr(uh, "_fetch_logs_etherscan", lambda addr, t, from_block=0, chain_id=1: [])
-        _mock_no_enrichment(monkeypatch)
-
-        result = uh.build_upgrade_history(deps_path)
-        assert target in result["proxies"]
-        h = result["proxies"][target]
-        assert h["proxy_type"] == "eip1967"
-        assert h["current_implementation"] == impl
-        assert h["upgrade_count"] == 0
-        assert h["first_upgrade_block"] is None
-        assert h["last_upgrade_block"] is None
-        assert len(h["implementations"]) == 1
-        assert h["implementations"][0].get("address") == impl
-        assert h["events"] == []
-        assert result["total_upgrades"] == 0
-
     def test_single_proxy_full_output(self, monkeypatch, tmp_path):
         """A target proxy with two Upgraded events produces correct timeline,
         timestamps, block ranges, and enriched contract names."""

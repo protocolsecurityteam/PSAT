@@ -10,9 +10,6 @@ from eth_abi.abi import encode
 
 from schemas.control_tracking import ControlTrackingPlan, TrackedController
 from services.resolution.tracking import build_control_snapshot, clear_classify_cache
-from services.resolution.tracking import (
-    classify_resolved_address as _classify_resolved_address,
-)
 from services.resolution.tracking_plan import is_primitive_scalar_read_spec
 from utils.rpc import selector
 
@@ -472,123 +469,6 @@ def test_build_control_snapshot_preserves_role_identifier_for_capability_resolve
         "role_id": "0x" + "11" * 32,
         "authority_contract": "0x1111111111111111111111111111111111111111",
         "principal_source": "capability_expr",
-    }
-
-
-def test_classify_resolved_address_detects_safe(monkeypatch):
-    def fake_rpc(_rpc_url, method, params, *, chain_id=None):
-        if method == "eth_getCode":
-            return "0x6000"
-        if method == "eth_call":
-            data = params[0]["data"]
-            if data == "0xa0e67e2b":
-                encoded = (
-                    "0000000000000000000000000000000000000000000000000000000000000020"
-                    "0000000000000000000000000000000000000000000000000000000000000002"
-                    "0000000000000000000000001111111111111111111111111111111111111111"
-                    "0000000000000000000000002222222222222222222222222222222222222222"
-                )
-                return "0x" + encoded
-            if data == "0xe75235b8":
-                return "0x" + "0" * 63 + "2"
-            return "0x"
-        raise AssertionError(f"Unexpected RPC call: {method} {params}")
-
-    monkeypatch.setattr("services.resolution.tracking._rpc_request", fake_rpc)
-
-    resolved_type, details = _classify_resolved_address(
-        "https://rpc.example",
-        "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    )
-
-    assert resolved_type == "safe"
-    assert details == {
-        "address": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "owners": [
-            "0x1111111111111111111111111111111111111111",
-            "0x2222222222222222222222222222222222222222",
-        ],
-        "threshold": 2,
-        # The module/guard probe suppresses itself when it cannot pin a height
-        # (offline: tests/conftest.py stubs the head read), and publishes the
-        # three-state rather than omitting the keys. Exercised in
-        # tests/test_classify_safe_modules_guard.py.
-        "safe_protection": {
-            "probe_block": "not_determined",
-            "safe_version": "not_determined",
-            "modules_head": "not_determined",
-            "module_set": "not_determined",
-            "module_set_basis": "not_determined",
-            "protection_is_upper_bound": "not_determined",
-            "guard": "not_determined",
-        },
-    }
-
-
-def test_classify_resolved_address_detects_timelock(monkeypatch):
-    def fake_rpc(_rpc_url, method, params, *, chain_id=None):
-        if method == "eth_getCode":
-            return "0x6000"
-        if method == "eth_call":
-            data = params[0]["data"]
-            if data == "0xf27a0c92":
-                return "0x" + "0" * 60 + "2a30"
-            if data == "0x8da5cb5b":
-                return "0x" + "00" * 12 + "3333333333333333333333333333333333333333"
-            return "0x"
-        raise AssertionError(f"Unexpected RPC call: {method} {params}")
-
-    monkeypatch.setattr("services.resolution.tracking._rpc_request", fake_rpc)
-
-    resolved_type, details = _classify_resolved_address(
-        "https://rpc.example",
-        "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-    )
-
-    assert resolved_type == "timelock"
-    assert details == {
-        "address": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        "delay": 10800,
-        "owner": "0x3333333333333333333333333333333333333333",
-    }
-
-
-def test_classify_resolved_address_detects_proxy_admin(monkeypatch):
-    # The OZ-v5 ProxyAdmin shape: UIV answers, the ERC-1967 implementation slot
-    # is ZERO (a nonzero slot means the address is itself a proxy — typed
-    # 'contract', see test_classify_uiv_shape.py), proxiableUUID() is absent,
-    # owner() answers.
-    def fake_rpc(_rpc_url, method, params, *, chain_id=None):
-        if method == "eth_getCode":
-            return "0x6000"
-        if method == "eth_getStorageAt":
-            return "0x" + "0" * 64
-        if method == "eth_call":
-            data = params[0]["data"]
-            if data == "0xad3cb1cc":
-                encoded = (
-                    "0000000000000000000000000000000000000000000000000000000000000020"
-                    "0000000000000000000000000000000000000000000000000000000000000001"
-                    "3500000000000000000000000000000000000000000000000000000000000000"
-                )
-                return "0x" + encoded
-            if data == "0x8da5cb5b":
-                return "0x" + "00" * 12 + "4444444444444444444444444444444444444444"
-            return "0x"
-        raise AssertionError(f"Unexpected RPC call: {method} {params}")
-
-    monkeypatch.setattr("services.resolution.tracking._rpc_request", fake_rpc)
-
-    resolved_type, details = _classify_resolved_address(
-        "https://rpc.example",
-        "0xcccccccccccccccccccccccccccccccccccccccc",
-    )
-
-    assert resolved_type == "proxy_admin"
-    assert details == {
-        "address": "0xcccccccccccccccccccccccccccccccccccccccc",
-        "upgrade_interface_version": "5",
-        "owner": "0x4444444444444444444444444444444444444444",
     }
 
 

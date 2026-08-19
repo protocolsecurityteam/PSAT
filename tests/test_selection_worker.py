@@ -487,6 +487,50 @@ def test_proxy_with_existing_job_is_re_queued(db_session, worker, seed_protocol)
 
 
 # ---------------------------------------------------------------------------
+# 6b. Within-cascade dedupe predicate: the JSON filters, against real SQL
+# ---------------------------------------------------------------------------
+
+
+@requires_postgres
+def test_existing_in_same_cascade_matches_only_the_address_cascade_and_chain(db_session, seed_protocol):
+    """``_existing_in_same_cascade`` is the ``--force`` in-cascade dedupe gate
+    (``selection_worker.py:357``). Its three filters — address, the
+    ``request->>'root_job_id'`` JSON predicate, and the *conditional* chain
+    predicate — are only meaningful against real SQL, so drive it on Postgres.
+    """
+    from db.models import Job, JobStage, JobStatus
+    from workers.selection_worker import _existing_in_same_cascade
+
+    _protocol_id, _company, addr = seed_protocol
+    target, unrelated = addr(), addr()
+
+    def _job(address: str, root_job_id: str, chain: str):
+        db_session.add(
+            Job(
+                address=address,
+                stage=JobStage.static,
+                status=JobStatus.queued,
+                request={"address": address, "root_job_id": root_job_id, "chain": chain},
+            )
+        )
+
+    _job(target, "root-1", "ethereum")
+    _job(target, "root-2", "base")
+    _job(unrelated, "root-1", "ethereum")
+    db_session.commit()
+
+    assert _existing_in_same_cascade(db_session, target, "ethereum", "root-1") is True
+    # root-2's only job is on base: the chain predicate is applied, not ignored.
+    assert _existing_in_same_cascade(db_session, target, "ethereum", "root-2") is False
+    # chain=None omits the filter entirely rather than matching a NULL chain.
+    assert _existing_in_same_cascade(db_session, target, None, "root-2") is True
+    # A cascade with no job for this address is not a match.
+    assert _existing_in_same_cascade(db_session, target, "ethereum", "root-3") is False
+    # Another address in the same cascade does not answer for this one.
+    assert _existing_in_same_cascade(db_session, unrelated, "ethereum", "root-2") is False
+
+
+# ---------------------------------------------------------------------------
 # 7. Readiness predicate: claim blocks while a dapp_crawl sibling is in flight
 # ---------------------------------------------------------------------------
 

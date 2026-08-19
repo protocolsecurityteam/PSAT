@@ -18,6 +18,7 @@ import shutil
 import sys
 import uuid
 from pathlib import Path
+from typing import NamedTuple
 from unittest.mock import MagicMock
 
 import pytest
@@ -611,6 +612,12 @@ def test_dsauth_log_set_owner_detected(anvil_env, test_db):
     Also exercises the *single-arg* decode + semantic-key fallback path:
     LogSetOwner only carries the new owner (no previous), so the
     decoder should fill ``new_owner`` without inventing an ``old_owner``.
+
+    Finally it pins ``_resolve_value_for_write_target``'s bare-name match:
+    with ``effect_tags: {"writes": ["owner"]}`` attached, the single arg named
+    ``owner`` must resolve to the state write without an OZ-style ``new``
+    prefix. That is the simplest path in the resolver, but the prior fallback
+    already handled it and we mustn't regress.
     """
     from eth_utils.crypto import keccak
 
@@ -623,6 +630,7 @@ def test_dsauth_log_set_owner_detected(anvil_env, test_db):
     topic0 = "0x" + keccak(text="LogSetOwner(address)").hex()
     monitoring_config = {
         "watch_ownership": True,
+        "polling_plan": [],
         "tracked_topics": [
             {
                 "topic0": topic0,
@@ -630,10 +638,17 @@ def test_dsauth_log_set_owner_detected(anvil_env, test_db):
                 "event_type": "ownership_transferred",
                 "controller_id": "state_variable:owner",
                 "inputs": [{"name": "owner", "type": "address", "indexed": True}],
+                # _WRITE_TARGET_TO_STATE catches "owner" via the canonical
+                # _extract_new_owner extractor, which reads parsed["new_owner"]
+                # — filled by parse_tracked_log's semantic-key assignment for
+                # the canonical ``ownership_transferred`` event_type.
+                "effect_tags": {"writes": ["owner"]},
             }
         ],
     }
-    _register_contract(test_db, addr, "regular", current_block, monitoring_config=monitoring_config)
+    mc = _register_contract(test_db, addr, "regular", current_block, monitoring_config=monitoring_config)
+    mc.last_known_state = {"owner": ACCOUNT0.lower()}
+    test_db.commit()
 
     new_owner = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
     _cast_send(addr, "setOwner(address)", [new_owner], rpc_url, PRIVATE_KEY)
@@ -648,6 +663,15 @@ def test_dsauth_log_set_owner_detected(anvil_env, test_db):
     # Single-arg event carries no previous-owner value; decoder must
     # not invent one.
     assert "old_owner" not in evt.data
+
+    owner_events = [e for e in events if e.event_type == "ownership_transferred"]
+    assert len(owner_events) == 1
+
+    test_db.refresh(mc)
+    state = dict(mc.last_known_state or {})
+    assert state.get("owner", "").lower() == new_owner.lower(), (
+        f"DSAuth single-arg event did not update state[owner] — got {state}"
+    )
 
 
 def test_compound_new_admin_detected(anvil_env, test_db):
@@ -1063,210 +1087,145 @@ def test_should_watch_filters_disabled_events(anvil_env, test_db):
     assert "paused" not in event_types
 
 
-def test_state_updated_after_ownership_transfer(anvil_env, test_db):
+# ---------------------------------------------------------------------------
+# last_known_state absorption, one case per tracked event shape.
+#
+# These were five separate tests, each paying its own anvil boot for the same
+# deploy -> act -> scan -> assert shape. They now share one anvil node: each
+# case deploys its own contract, registers it, asserts, then flips
+# ``is_active`` off so the next case's scan sees exactly one active contract
+# (``scan_for_events`` selects on ``is_active``) — the same isolation the five
+# separate tests had, at one fifth of the boot cost.
+# ---------------------------------------------------------------------------
+
+
+class _StateCase(NamedTuple):
+    address: str
+    contract_type: str
+    monitoring_config: dict | None
+    initial_state: dict
+    # (function signature, cast args, last_known_state key, expected value)
+    steps: list[tuple[str, list[str], str, object]]
+
+
+def _state_case_ownership_transfer(rpc_url: str, tmp_path: Path) -> _StateCase:
     """last_known_state is updated with new owner after OwnershipTransferred."""
-    rpc_url, tmp_path = anvil_env
-    from services.monitoring.unified_watcher import scan_for_events
-
     addr = _compile_and_deploy(OWNABLE_SOURCE, "TestOwnable", [], rpc_url, PRIVATE_KEY, tmp_path)
-    current_block = int(_cast(["block-number"], rpc_url))
-
-    mc = _register_contract(test_db, addr, "regular", current_block)
-    mc.last_known_state = {"owner": ACCOUNT0.lower()}
-    test_db.commit()
-
     new_owner = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
-    _cast_send(addr, "transferOwnership(address)", [new_owner], rpc_url, PRIVATE_KEY)
+    return _StateCase(
+        addr,
+        "regular",
+        None,
+        {"owner": ACCOUNT0.lower()},
+        [("transferOwnership(address)", [new_owner], "owner", new_owner)],
+    )
 
-    scan_for_events(test_db, rpc_url)
 
-    test_db.refresh(mc)
-    state = mc.last_known_state
-    assert state is not None
-    assert state.get("owner", "").lower() == new_owner.lower()
-
-
-def test_state_updated_after_pause(anvil_env, test_db):
+def _state_case_pause(rpc_url: str, tmp_path: Path) -> _StateCase:
     """last_known_state tracks paused=True after Paused and paused=False after Unpaused."""
-    rpc_url, tmp_path = anvil_env
-    from services.monitoring.unified_watcher import scan_for_events
-
     addr = _compile_and_deploy(PAUSABLE_SOURCE, "TestPausable", [], rpc_url, PRIVATE_KEY, tmp_path)
-    current_block = int(_cast(["block-number"], rpc_url))
-
-    mc = _register_contract(test_db, addr, "pausable", current_block)
-    mc.last_known_state = {}
-    test_db.commit()
-
-    # Pause
-    _cast_send(addr, "pause()", [], rpc_url, PRIVATE_KEY)
-    scan_for_events(test_db, rpc_url)
-    test_db.refresh(mc)
-    state = mc.last_known_state
-    assert state is not None
-    assert state.get("paused") is True
-
-    # Unpause
-    _cast_send(addr, "unpause()", [], rpc_url, PRIVATE_KEY)
-    scan_for_events(test_db, rpc_url)
-    test_db.refresh(mc)
-    state = mc.last_known_state
-    assert state is not None
-    assert state.get("paused") is False
+    return _StateCase(
+        addr,
+        "pausable",
+        None,
+        {},
+        [("pause()", [], "paused", True), ("unpause()", [], "paused", False)],
+    )
 
 
-def test_state_updated_after_proxy_upgrade(anvil_env, test_db):
+def _state_case_proxy_upgrade(rpc_url: str, tmp_path: Path) -> _StateCase:
     """last_known_state tracks implementation after Upgraded event."""
-    rpc_url, tmp_path = anvil_env
-    from services.monitoring.unified_watcher import scan_for_events
-
     impl_v1 = _compile_and_deploy(IMPL_V1_SOURCE, "ImplV1", [], rpc_url, PRIVATE_KEY, tmp_path)
     impl_v2 = _compile_and_deploy(IMPL_V2_SOURCE, "ImplV2", [], rpc_url, PRIVATE_KEY, tmp_path)
     proxy_addr = _compile_and_deploy(PROXY_SOURCE, "TestProxy", [impl_v1], rpc_url, PRIVATE_KEY, tmp_path)
-    current_block = int(_cast(["block-number"], rpc_url))
-
-    mc = _register_contract(
-        test_db,
+    return _StateCase(
         proxy_addr,
         "proxy",
-        current_block,
-        monitoring_config={"watch_upgrades": True, "watch_ownership": True},
+        {"watch_upgrades": True, "watch_ownership": True},
+        {"implementation": impl_v1.lower()},
+        [("upgradeTo(address)", [impl_v2], "implementation", impl_v2)],
     )
-    mc.last_known_state = {"implementation": impl_v1.lower()}
-    test_db.commit()
-
-    _cast_send(proxy_addr, "upgradeTo(address)", [impl_v2], rpc_url, PRIVATE_KEY)
-    scan_for_events(test_db, rpc_url)
-
-    test_db.refresh(mc)
-    state = mc.last_known_state
-    assert state is not None
-    assert state.get("implementation", "").lower() == impl_v2.lower()
 
 
-def test_dedup_multi_contract_overlap(anvil_env, test_db):
-    """When two contracts have different last_scanned_block values,
-    the overlap window is scanned once and events are not duplicated.
-
-    The scanner uses min(last_scanned_block) as the start, so a contract
-    with a lower block triggers a re-scan of blocks the other contract
-    already saw. Dedup ensures those already-recorded events aren't
-    created again.
-    """
-    rpc_url, tmp_path = anvil_env
-    from services.monitoring.unified_watcher import scan_for_events
-
-    addr1 = _compile_and_deploy(OWNABLE_SOURCE, "TestOwnable", [], rpc_url, PRIVATE_KEY, tmp_path)
-    addr2 = _compile_and_deploy(PAUSABLE_SOURCE, "TestPausable", [], rpc_url, PRIVATE_KEY, tmp_path)
-    block_after_deploy = int(_cast(["block-number"], rpc_url))
-
-    # Register both at the same starting point
-    mc1 = _register_contract(test_db, addr1, "regular", block_after_deploy)
-    mc2 = _register_contract(test_db, addr2, "pausable", block_after_deploy)
-
-    # Trigger events on both
-    new_owner = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
-    _cast_send(addr1, "transferOwnership(address)", [new_owner], rpc_url, PRIVATE_KEY)
-    _cast_send(addr2, "pause()", [], rpc_url, PRIVATE_KEY)
-
-    # First scan: both events detected
-    events1 = scan_for_events(test_db, rpc_url)
-    assert len(events1) == 2
-
-    # Now add a THIRD contract at an earlier block — this forces the
-    # scanner to re-scan the range where addr1 and addr2 events live
-    addr3 = _compile_and_deploy(OWNABLE_SOURCE, "TestOwnable", [], rpc_url, PRIVATE_KEY, tmp_path)
-    _register_contract(test_db, addr3, "regular", block_after_deploy)
-
-    # Second scan: re-scans the overlap range but should NOT re-create
-    # the ownership_transferred and paused events for addr1/addr2
-    events2 = scan_for_events(test_db, rpc_url)
-
-    # Only events for addr3 (if any) should be new — the constructor
-    # emits OwnershipTransferred(address(0), msg.sender) at deploy time,
-    # but that was before mc3's last_scanned_block (deploy block < register block).
-    # So events2 should be empty.
-    for e in events2:
-        # No event should belong to mc1 or mc2 (those were already recorded)
-        assert e.monitored_contract_id != mc1.id, "Duplicate event for contract 1"
-        assert e.monitored_contract_id != mc2.id, "Duplicate event for contract 2"
-
-    # Total events in DB for mc1 and mc2 should still be exactly 1 each
-    mc1_events = test_db.execute(
-        select(func.count()).select_from(MonitoredEvent).where(MonitoredEvent.monitored_contract_id == mc1.id)
-    ).scalar()
-    mc2_events = test_db.execute(
-        select(func.count()).select_from(MonitoredEvent).where(MonitoredEvent.monitored_contract_id == mc2.id)
-    ).scalar()
-    assert mc1_events == 1
-    assert mc2_events == 1
-
-
-def test_last_scanned_block_advances(anvil_env, test_db):
-    """last_scanned_block advances after scan; second scan returns empty."""
-    rpc_url, tmp_path = anvil_env
-    from services.monitoring.unified_watcher import scan_for_events
-
-    addr = _compile_and_deploy(OWNABLE_SOURCE, "TestOwnable", [], rpc_url, PRIVATE_KEY, tmp_path)
-    current_block = int(_cast(["block-number"], rpc_url))
-
-    mc = _register_contract(test_db, addr, "regular", current_block)
-
-    new_owner = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
-    _cast_send(addr, "transferOwnership(address)", [new_owner], rpc_url, PRIVATE_KEY)
-
-    events = scan_for_events(test_db, rpc_url)
-    assert len(events) == 1
-
-    test_db.refresh(mc)
-    assert mc.last_scanned_block > current_block
-    assert mc.last_scanned_block >= events[0].block_number
-
-    # Second scan with no new blocks should return empty
-    events2 = scan_for_events(test_db, rpc_url)
-    assert len(events2) == 0
-
-
-def test_state_updated_after_threshold_change(anvil_env, test_db):
+def _state_case_threshold_change(rpc_url: str, tmp_path: Path) -> _StateCase:
     """last_known_state tracks threshold after ChangedThreshold event."""
-    rpc_url, tmp_path = anvil_env
-    from services.monitoring.unified_watcher import scan_for_events
-
     addr = _compile_and_deploy(SAFE_SOURCE, "TestSafe", [], rpc_url, PRIVATE_KEY, tmp_path)
-    current_block = int(_cast(["block-number"], rpc_url))
-
-    mc = _register_contract(test_db, addr, "safe", current_block)
-    mc.last_known_state = {"threshold": 1}
-    test_db.commit()
-
-    _cast_send(addr, "changeThreshold(uint256)", ["3"], rpc_url, PRIVATE_KEY)
-    scan_for_events(test_db, rpc_url)
-
-    test_db.refresh(mc)
-    state = mc.last_known_state
-    assert state is not None
-    assert state.get("threshold") == 3
+    return _StateCase(
+        addr,
+        "safe",
+        None,
+        {"threshold": 1},
+        [("changeThreshold(uint256)", ["3"], "threshold", 3)],
+    )
 
 
-def test_state_updated_after_delay_change(anvil_env, test_db):
+def _state_case_delay_change(rpc_url: str, tmp_path: Path) -> _StateCase:
     """last_known_state tracks min_delay after MinDelayChange event."""
+    addr = _compile_and_deploy(TIMELOCK_SOURCE, "TestTimelock", ["3600"], rpc_url, PRIVATE_KEY, tmp_path)
+    return _StateCase(
+        addr,
+        "timelock",
+        None,
+        {"min_delay": 3600},
+        [("updateDelay(uint256)", ["7200"], "min_delay", 7200)],
+    )
+
+
+_STATE_UPDATE_CASES = (
+    _state_case_ownership_transfer,
+    _state_case_pause,
+    _state_case_proxy_upgrade,
+    _state_case_threshold_change,
+    _state_case_delay_change,
+)
+
+
+def _assert_state_value(case: str, state: dict, key: str, expected: object) -> None:
+    """Compare one ``last_known_state`` entry, preserving each original case's
+    comparison: identity for booleans, case-insensitive for addresses, equality
+    for numbers."""
+    actual = state.get(key)
+    detail = f"[{case}] last_known_state[{key!r}] is {actual!r}, expected {expected!r}"
+    if isinstance(expected, bool):
+        assert actual is expected, detail
+    elif isinstance(expected, str):
+        assert isinstance(actual, str) and actual.lower() == expected.lower(), detail
+    else:
+        assert actual == expected, detail
+
+
+def test_state_updated_after_event(anvil_env, test_db):
+    """last_known_state absorbs the event payload for every tracked shape:
+    owner, paused/unpaused, proxy implementation, safe threshold and timelock
+    min_delay."""
     rpc_url, tmp_path = anvil_env
     from services.monitoring.unified_watcher import scan_for_events
 
-    addr = _compile_and_deploy(TIMELOCK_SOURCE, "TestTimelock", ["3600"], rpc_url, PRIVATE_KEY, tmp_path)
-    current_block = int(_cast(["block-number"], rpc_url))
+    for build_case in _STATE_UPDATE_CASES:
+        name = build_case.__name__.removeprefix("_state_case_")
+        case = build_case(rpc_url, tmp_path)
+        current_block = int(_cast(["block-number"], rpc_url))
 
-    mc = _register_contract(test_db, addr, "timelock", current_block)
-    mc.last_known_state = {"min_delay": 3600}
-    test_db.commit()
+        mc = _register_contract(
+            test_db,
+            case.address,
+            case.contract_type,
+            current_block,
+            monitoring_config=case.monitoring_config,
+        )
+        mc.last_known_state = dict(case.initial_state)
+        test_db.commit()
 
-    _cast_send(addr, "updateDelay(uint256)", ["7200"], rpc_url, PRIVATE_KEY)
-    scan_for_events(test_db, rpc_url)
+        for signature, args, key, expected in case.steps:
+            _cast_send(case.address, signature, args, rpc_url, PRIVATE_KEY)
+            scan_for_events(test_db, rpc_url)
+            test_db.refresh(mc)
+            state = mc.last_known_state
+            assert state is not None, f"[{name}] last_known_state was cleared"
+            _assert_state_value(name, state, key, expected)
 
-    test_db.refresh(mc)
-    state = mc.last_known_state
-    assert state is not None
-    assert state.get("min_delay") == 7200
+        mc.is_active = False
+        test_db.commit()
 
 
 def test_enrollment_config_produces_correct_detection(anvil_env, test_db):
@@ -2285,70 +2244,6 @@ def test_event_state_write_resolves_compound_shape_custom_slot(anvil_env, test_d
     # No ghost arg-named keys.
     assert "newRecipient" not in state
     assert "newFeeRecipient" not in state
-
-
-def test_event_state_write_resolves_single_arg_dsauth_shape(anvil_env, test_db):
-    """``_resolve_value_for_write_target`` handles DSAuth single-arg
-    events via the bare-name match.
-
-    DSAuth's ``LogSetOwner(address indexed owner)`` has a single arg
-    named ``owner`` — bare-name match should resolve it directly even
-    without an OZ-style ``new`` prefix. This is the simplest path in
-    the resolver but worth pinning because the prior fallback already
-    handled it and we mustn't regress."""
-    from eth_utils.crypto import keccak
-
-    rpc_url, tmp_path = anvil_env
-    from services.monitoring.unified_watcher import scan_for_events
-
-    addr = _compile_and_deploy(DSAUTH_SOURCE, "TestDSAuth", [], rpc_url, PRIVATE_KEY, tmp_path)
-    current_block = int(_cast(["block-number"], rpc_url))
-
-    topic0 = "0x" + keccak(text="LogSetOwner(address)").hex()
-    # Even with effect_tags writes=["owner"], _WRITE_TARGET_TO_STATE
-    # catches "owner" via the canonical _extract_new_owner extractor
-    # which reads parsed["new_owner"]. The semantic-key assignment in
-    # parse_tracked_log fills that for the canonical
-    # ``ownership_transferred`` event_type — so attach that here.
-    tracked_topics = [
-        {
-            "topic0": topic0,
-            "signature": "LogSetOwner(address)",
-            "event_type": "ownership_transferred",
-            "controller_id": "state_variable:owner",
-            "inputs": [
-                {"name": "owner", "type": "address", "indexed": True},
-            ],
-            "effect_tags": {"writes": ["owner"]},
-        }
-    ]
-
-    mc = _register_contract(
-        test_db,
-        addr,
-        "regular",
-        current_block,
-        monitoring_config={
-            "polling_plan": [],
-            "tracked_topics": tracked_topics,
-            "watch_ownership": True,
-        },
-    )
-    mc.last_known_state = {"owner": ACCOUNT0.lower()}
-    test_db.commit()
-
-    new_owner = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
-    _cast_send(addr, "setOwner(address)", [new_owner], rpc_url, PRIVATE_KEY)
-
-    events = scan_for_events(test_db, rpc_url)
-    owner_events = [e for e in events if e.event_type == "ownership_transferred"]
-    assert len(owner_events) == 1
-
-    test_db.refresh(mc)
-    state = dict(mc.last_known_state or {})
-    assert state.get("owner", "").lower() == new_owner.lower(), (
-        f"DSAuth single-arg event did not update state[owner] — got {state}"
-    )
 
 
 def keccak_text(text: str) -> str:

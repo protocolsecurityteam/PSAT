@@ -166,37 +166,6 @@ def test_only_the_fully_disposed_asset_leaves_the_value_holder_set(db_session):
 
 
 @requires_postgres
-def test_a_mass_distributed_token_in_the_universe_is_never_pulled_from_the_holdings(db_session):
-    """The S5 regression, pinned on the plane it was measured on.
-
-    ``fan_out_all`` with no universe verdict at all, and ``fan_out_all`` with an
-    explicit ``in_universe``: both stay presented. Only the pair the producer
-    measured ABSENT comes out, which is the scorer's own predicate.
-    """
-    p = _protocol(db_session, "dispo-universe")
-    deployment = ADDR(0x5501)
-    c = _contract(db_session, p.id, deployment)
-    unmeasured, in_universe, absent = ADDR(0x5511), ADDR(0x5512), ADDR(0x5513)
-    fetch = _fetch(db_session, c, observed=deployment)
-    for token in (unmeasured, in_universe, absent):
-        _row(db_session, c, fetch, token, None, observed=deployment)
-        _evidence(db_session, holder=deployment, token=token, shape=DELIVERY_SHAPE_FAN_OUT_ALL)
-    _reference(db_session, protocol_id=p.id, token=in_universe, shape=TOKEN_REFERENCE_IN_UNIVERSE)
-    _reference(db_session, protocol_id=p.id, token=absent, shape=TOKEN_REFERENCE_ABSENT_FROM_UNIVERSE)
-    db_session.flush()
-
-    by_asset = {h.asset: h for h in _asset_holdings_by_deployment(db_session, p.id)[deployment.lower()]}
-    disposed = {
-        asset
-        for asset, h in by_asset.items()
-        if disposed_from_holdings(
-            delivery_shape=h.delivery_shape, reference_shape=h.reference_shape, usd_value=h.usd_value
-        )
-    }
-    assert disposed == {absent.lower()}
-
-
-@requires_postgres
 def test_a_priced_airdrop_delivered_token_is_still_offered_as_an_input_token(db_session):
     """A PRICED reading is never disposed — the disposition's own first conjunct.
 

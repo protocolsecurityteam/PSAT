@@ -6,10 +6,15 @@ to one silent ``lower_bound`` sink. P1 attaches a machine-readable ``empty_reaso
 to the labeled empty and threads it through the persisted ``capability_expr``,
 WITHOUT changing the outcome (kind / quality / members / surface status stay put).
 
-These cases use NON-pending operands on purpose: they isolate the labeling layer
+The P1 cases use NON-pending operands on purpose: they isolate the labeling layer
 (P1) from the empty-by-design promotion (P2, tested separately). On main the
 serialized capability carries no ``empty_reason`` key, so every assertion here
 fails — pinning that P1 is what adds it.
+
+The second half of the file is the claim-#3 characterization net (merged from
+``test_underresolution_claim3_characterization.py``): the REAL operand shapes
+behind the etherfi under-resolved functions, including the *pending* ones the
+P1 cases avoid. See its section header.
 
 Pure/offline, ``test_authority_live_getter_resolution`` pattern; the global
 ``_stub_live_authority`` fixture is deliberately not used.
@@ -80,6 +85,10 @@ def _status(cap_dict: dict[str, Any]) -> str | None:
     return capability_surface_status(cap_dict, project_capability_surface(cap_dict))
 
 
+def _principal_rows(cap_dict: dict[str, Any]) -> list[dict[str, Any]]:
+    return project_capability_surface(cap_dict).principal_rows
+
+
 def _assert_unchanged_empty(cap_dict: dict[str, Any]) -> None:
     """kind / quality / members / status are exactly the main-branch placeholder."""
     assert cap_dict["kind"] == "finite_set"
@@ -127,3 +136,79 @@ def test_empty_reason_absent_on_populated_set(monkeypatch: pytest.MonkeyPatch) -
 
     assert cap_dict["members"] == [addr]
     assert "empty_reason" not in cap_dict
+
+
+# ==========================================================================
+# Claim-#3 characterization net (merged from
+# tests/test_underresolution_claim3_characterization.py).
+#
+# Pins the lowering of the operand shapes behind the etherfi (protocol_id=1,
+# run ``1279e07382b24d32``) ``finite_set/lower_bound`` under-resolved
+# functions. Every operand is the REAL shape, taken by compiling the on-chain
+# source through the production static pipeline (not guessed):
+#
+#   * A ``claimGovernance`` — ``view_call _pendingGovernor()`` (internal,
+#     reverts/empties on every deployment).
+#   * B ``acceptDefaultAdminTransfer`` — ``state_variable _pendingDefaultAdmin``
+#     member ``newAdmin``. The provenance engine inlines OZ's public
+#     ``pendingDefaultAdmin()`` down to its storage struct read, so the operand
+#     is a struct member with NO getter to call — nothing is read at runtime.
+#
+# What this net locks (true on both main and the P1/P2 branch, so it never
+# goes stale): the A/B functions resolve to an EMPTY caller set with NO
+# principal rows — the under-resolution symptom. The status *flip* those
+# empties undergo (A/B → ``resolved_empty`` once the empty-by-design detector
+# lands) is pinned by ``test_pending_transfer_ceiling``, so this net stays a
+# stable scope witness: non-pending getter-less authorities (the guard) must
+# NOT flip.
+# ==========================================================================
+
+OWNER_SELECTOR = "0x8da5cb5b"  # owner()
+
+A_PENDING_GOVERNOR = {
+    "source": "view_call",
+    "callee": "_pendingGovernor()",
+    "callee_signature": "_pendingGovernor()",
+    "callee_selector": "0x638adcc8",
+}
+B_PENDING_DEFAULT_ADMIN = {
+    "source": "state_variable",
+    "state_variable_name": "_pendingDefaultAdmin",
+    "member_path": ["newAdmin"],
+}
+GUARD_OWNER = {"source": "view_call", "callee_signature": "owner()", "callee_selector": OWNER_SELECTOR}
+
+
+@pytest.mark.parametrize("mode", ["revert", "empty"])
+def test_group_a_pending_governor_yields_empty_caller_set(monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
+    _stub_rpc(monkeypatch, mode)
+    cap_dict = _expr_dict(evaluate_tree(_eq_tree(A_PENDING_GOVERNOR), _ctx_with_rpc()))
+
+    assert cap_dict["kind"] == "finite_set"
+    assert cap_dict["members"] == []
+    assert _principal_rows(cap_dict) == []
+
+
+def test_group_b_pending_default_admin_member_yields_empty_caller_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Struct member, no getter — recorder proves no read is attempted.
+    recorder: list = []
+    _stub_rpc(monkeypatch, "revert", recorder=recorder)
+    cap_dict = _expr_dict(evaluate_tree(_eq_tree(B_PENDING_DEFAULT_ADMIN), _ctx_with_rpc()))
+
+    assert cap_dict["kind"] == "finite_set"
+    assert cap_dict["members"] == []
+    assert _principal_rows(cap_dict) == []
+    assert recorder == []  # no getter exists to call
+
+
+def test_guard_non_pending_owner_revert_stays_unresolved(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Precision baseline: a non-pending ``view_call`` authority whose getter
+    reverts stays the lower_bound placeholder, proving the P1/P2 changes do not
+    over-reach onto non-pending authorities."""
+    _stub_rpc(monkeypatch, "revert")
+    cap_dict = _expr_dict(evaluate_tree(_eq_tree(GUARD_OWNER), _ctx_with_rpc()))
+
+    assert cap_dict["kind"] == "finite_set"
+    assert cap_dict["members"] == []
+    assert cap_dict["membership_quality"] == "lower_bound"
+    assert _status(cap_dict) != "resolved_empty"

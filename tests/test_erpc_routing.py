@@ -51,12 +51,12 @@ def test_default_rpc_url_does_not_invent_mainnet_for_unknown_chain(monkeypatch):
     assert rpc.default_rpc_url(chain="fantom") is None
 
 
-def test_default_rpc_url_treats_unknown_sentinel_as_mainnet(monkeypatch):
+def test_default_rpc_url_does_not_route_the_unknown_sentinel(monkeypatch):
     monkeypatch.setenv("ERPC_BASE_URL", "https://erpc-proxy.example")
 
-    # Discovery's "unknown" chain sentinel (and a hosted rpc_url pin) must fall
-    # back to the mainnet eRPC route — not raise. Regression: a chain="unknown"
-    # job otherwise resolved to no route once the ETH_RPC fallback was removed.
+    # Fail-closed: discovery's "unknown" chain sentinel names no chain, so it
+    # gets no route — not a silent mainnet one — even when a hosted explicit
+    # rpc_url is supplied alongside it.
     assert rpc.default_rpc_url(chain="unknown") is None
     assert rpc.default_rpc_url(explicit_rpc_url="https://eth-mainnet.g.alchemy.com/v2/key", chain="unknown") is None
 

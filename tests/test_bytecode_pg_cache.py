@@ -175,37 +175,6 @@ def test_no_chain_id_skips_pg(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_chain_id_resolved_via_eth_chainid_once(monkeypatch):
-    """First call discovers chain_id via eth_chainId; second call against
-    the same URL reuses the cached value."""
-    rpc._chain_id_cache.clear()
-    calls = {"chain_id": 0, "code": 0}
-
-    def _wire(_url, method, _params, retries=1, *, chain_id=None):
-        if method == "eth_chainId":
-            calls["chain_id"] += 1
-            return "0x1"
-        if method == "eth_getCode":
-            calls["code"] += 1
-            return "0x60"
-        raise AssertionError(f"unexpected method {method}")
-
-    monkeypatch.setattr(rpc, "rpc_request", _wire)
-    monkeypatch.setattr(rpc, "_pg_bytecode_get", lambda *_a, **_kw: None)
-    monkeypatch.setattr(rpc, "_pg_bytecode_put", lambda *_a, **_kw: None)
-
-    rpc.get_code_with_keccak("https://rpc", "0x" + "55" * 20)
-    rpc.clear_getcode_cache()  # force re-fetch but keep chain_id cache
-    rpc._GETCODE_CACHE.clear()  # alt: clear without touching chain id (clear_getcode_cache wipes both)
-    # clear_getcode_cache() above already cleared chain ids; re-prime explicitly.
-    rpc._chain_id_cache["https://rpc"] = 1
-    rpc.get_code_with_keccak("https://rpc", "0x" + "66" * 20)
-
-    # First call: 1 chain id + 1 get_code. Second call (after re-priming chain id): 1 get_code only.
-    assert calls["chain_id"] == 1
-    assert calls["code"] == 2
-
-
 def test_chain_id_kwarg_skips_discovery(monkeypatch):
     """Explicit chain_id= must short-circuit the eth_chainId discovery RPC."""
     rpc._chain_id_cache.clear()

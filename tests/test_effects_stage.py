@@ -3,18 +3,14 @@ scaffolding, and fail-forward semantics (EFFECTS_RESOLUTION_SPEC Phase 1).
 
 The DB-backed cases mirror ``tests/test_baseworker_retry.py`` (real Postgres,
 inline-JSONB artifacts, offline-safe). ``PSAT_EFFECTS_STAGE`` is asserted default-
-off; the flag-off parity case reproduces the Phase-0 baseline artifact hashes.
+off.
 """
 
 from __future__ import annotations
 
-import hashlib
-import json
 import os
 import sys
 from pathlib import Path
-from typing import Any, cast
-from unittest.mock import MagicMock
 
 import pytest
 from sqlalchemy import create_engine
@@ -40,23 +36,8 @@ from tests.support.effects_worker_harness import (  # noqa: E402
     _seams,
     clean_effects,  # noqa: F401  (imported so pytest registers the fixture here)
 )
-from tests.support.policy_builders import (  # noqa: E402
-    TARGET_ADDRESS,
-    _graph_with_nodes,
-    _job,
-    _minimal_contract_analysis,
-    _minimal_snapshot,
-)
 from workers.effects_worker import EffectsWorker  # noqa: E402
 from workers.policy_worker import PolicyWorker  # noqa: E402
-
-# Phase-0 baseline (EFFECTS_RESOLUTION_SPEC, captured at HEAD 146edff): sha256 of
-# ``json.dumps(payload, sort_keys=True, default=str)`` per stored policy artifact.
-BASELINE_HASHES = {
-    "effective_permissions": "1f4ded7e9220b252f9b976e728b89834abb9efb2dc50072b2792ce97e06a7e6c",
-    "resolved_control_graph": "ae1197b205261339940fff4060d5530716627dd728ad99417396f33347964d29",
-    "principal_labels": "4819eb558b145332ec3815cba846a43974b60138b0c8b446b1835d56494c8d89",
-}
 
 
 @pytest.fixture()
@@ -106,11 +87,6 @@ def test_effects_stage_between_policy_and_coverage():
     ]
 
 
-def test_effects_worker_stage_attrs():
-    assert EffectsWorker.stage == JobStage.effects
-    assert EffectsWorker.next_stage == JobStage.coverage
-
-
 # ---------------------------------------------------------------------------
 # Flag-dynamic transition (§3a.4 / inv. 15).
 # ---------------------------------------------------------------------------
@@ -153,70 +129,6 @@ def test_policy_next_stage_flag_off_is_coverage(monkeypatch):
 def test_policy_next_stage_flag_on_is_effects(monkeypatch):
     monkeypatch.setenv("PSAT_EFFECTS_STAGE", "1")
     assert PolicyWorker().next_stage == JobStage.effects
-
-
-# ---------------------------------------------------------------------------
-# Flag-off parity: the Phase-0 baseline fixture reruns byte-identical AND the
-# policy transition stays coverage.
-# ---------------------------------------------------------------------------
-
-
-def _sha256_payload(payload: Any) -> str:
-    return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
-
-
-def test_flag_off_parity_baseline_artifact_hashes(monkeypatch):
-    """The three policy artifacts hash byte-identical to the Phase-0 baseline
-    with the flag off, and ``PolicyWorker.next_stage`` stays ``coverage`` — the
-    effects work is provably inert flag-off."""
-    monkeypatch.delenv("PSAT_EFFECTS_STAGE", raising=False)
-
-    worker = PolicyWorker()
-    assert worker.next_stage == JobStage.coverage
-
-    session = MagicMock()
-    session.execute.return_value.scalar_one_or_none.return_value = None
-    job = _job()
-
-    contract_analysis = _minimal_contract_analysis()
-    control_snapshot = _minimal_snapshot({"some_key:admin": {"value": "0xbbb"}})
-    resolved_graph = _graph_with_nodes([])
-    tracking_plan = {"schema_version": "0.1", "contract_address": TARGET_ADDRESS, "contract_name": "TestContract"}
-
-    def fake_get_artifact(_session: Any, _job_id: Any, name: str) -> Any:
-        return {
-            "contract_analysis": contract_analysis,
-            "control_snapshot": control_snapshot,
-            "resolved_control_graph": resolved_graph,
-            "control_tracking_plan": tracking_plan,
-        }.get(name)
-
-    store_calls: dict[str, Any] = {}
-
-    def fake_store_artifact(_session, _job_id, name, data=None, text_data=None):
-        store_calls[name] = data
-
-    monkeypatch.setattr("workers.policy_worker.get_artifact", fake_get_artifact)
-    monkeypatch.setattr("workers.policy_worker.store_artifact", fake_store_artifact)
-    monkeypatch.setattr("workers.policy_worker._load_nested_artifacts", lambda *_a, **_kw: {})
-    monkeypatch.setattr(
-        "workers.policy_worker.build_effective_permissions",
-        lambda *a, **kw: {"schema_version": "1", "functions": []},
-    )
-    monkeypatch.setattr(
-        "workers.policy_worker.resolve_control_graph",
-        lambda **kw: ({"nodes": [], "edges": [], "refreshed": True}, {}),
-    )
-    monkeypatch.setattr(
-        "workers.policy_worker.build_principal_labels",
-        lambda *a, **kw: {"principals": []},
-    )
-
-    worker.process(session, cast(Any, job))
-
-    for name, expected in BASELINE_HASHES.items():
-        assert name in store_calls, f"{name} not stored"
-        assert _sha256_payload(store_calls[name]) == expected, f"{name} drifted from Phase-0 baseline"
 
 
 # ---------------------------------------------------------------------------

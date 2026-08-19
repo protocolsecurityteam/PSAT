@@ -325,60 +325,10 @@ def test_merge_uses_impl_name_and_propagates_company():
     assert merged[0].get("proxy_address_display") == PROXY
 
 
-def test_display_name_chain_suffix_and_generic_fallback():
-    """_display_name appends chain, prefers display_name, and falls back
-    to run_name for generic proxy contract names."""
-    from services.governance.proxies import _display_name
-
-    entry1 = {"contract_name": "Pool", "run_name": "x", "display_name": None, "chain": "base"}
-    assert _display_name(entry1) == "Pool (base)"
-    entry2 = {"contract_name": "ERC1967Proxy", "run_name": "Router", "display_name": None, "chain": None}
-    assert _display_name(entry2) == "Router"
-    entry3 = {"contract_name": "Proxy", "run_name": "r", "display_name": "Custom", "chain": None}
-    assert _display_name(entry3) == "Custom"
-
-
-def test_proxy_with_completed_impl_visible_after_merge():
-    """A proxy entry whose impl child has completed should appear as
-    a merged entry in the list (this is the normal end state)."""
-    from services.governance.proxies import _merge_proxy_impl_entries
-
-    proxy_entry = {
-        "run_name": "eETH",
-        "job_id": "j1",
-        "address": "0x3333333333333333333333333333333333333333",
-        "chain": "ethereum",
-        "company": "etherfi",
-        "parent_job_id": None,
-        "rank_score": 0.9,
-        "is_proxy": True,
-        "proxy_type": "eip1967",
-        "implementation_address": "0x4444444444444444444444444444444444444444",
-        "proxy_address": None,
-        "contract_name": "ERC1967Proxy",
-    }
-    impl_entry = {
-        "run_name": "eETH: (impl)",
-        "job_id": "j2",
-        "address": "0x4444444444444444444444444444444444444444",
-        "chain": "ethereum",
-        "company": None,
-        "parent_job_id": "j1",
-        "rank_score": None,
-        "is_proxy": False,
-        "proxy_type": None,
-        "implementation_address": None,
-        "proxy_address": "0x3333333333333333333333333333333333333333",
-        "contract_name": "EETH",
-    }
-    merged = _merge_proxy_impl_entries([proxy_entry, impl_entry])  # pyright: ignore[reportArgumentType]
-    assert len(merged) == 1
-    assert merged[0].get("display_name") == "EETH"
-    assert merged[0].get("proxy_address_display") == "0x3333333333333333333333333333333333333333"
-
-
 def test_orphan_impl_appears_in_merged_list():
-    """An impl whose proxy_address is not in the list still appears."""
+    """An impl whose proxy_address is not in the list still appears
+    (``services/governance/proxies.py:82-85``). Sole coverage of that branch:
+    the ``test_api_coverage.py`` twin was retired as a duplicate of this one."""
     from services.governance.proxies import _merge_proxy_impl_entries
 
     orphan = {
@@ -397,6 +347,20 @@ def test_orphan_impl_appears_in_merged_list():
     }
     merged = _merge_proxy_impl_entries([orphan])  # pyright: ignore[reportArgumentType]
     assert len(merged) == 1
+    assert merged[0]["address"] == IMPL
+
+
+def test_display_name_chain_suffix_and_generic_fallback():
+    """_display_name appends chain, prefers display_name, and falls back
+    to run_name for generic proxy contract names."""
+    from services.governance.proxies import _display_name
+
+    entry1 = {"contract_name": "Pool", "run_name": "x", "display_name": None, "chain": "base"}
+    assert _display_name(entry1) == "Pool (base)"
+    entry2 = {"contract_name": "ERC1967Proxy", "run_name": "Router", "display_name": None, "chain": None}
+    assert _display_name(entry2) == "Router"
+    entry3 = {"contract_name": "Proxy", "run_name": "r", "display_name": "Custom", "chain": None}
+    assert _display_name(entry3) == "Custom"
 
 
 # ===================================================================
@@ -510,119 +474,6 @@ def test_full_data_flow_unified_through_graph_and_upgrade_history(monkeypatch, t
     assert DEP_A not in uh["proxies"]
     assert uh["proxies"] == {}
     assert uh["total_upgrades"] == 0
-
-
-# ===================================================================
-# 7. Discovery -> Static: artifact name contract between workers
-# ===================================================================
-
-
-def test_discovery_artifact_names_match_static_worker_reads():
-    """The data that discovery stores must match what static reads.
-
-    Discovery writes to the Contract table and stores source files via
-    store_source_files.  Static reads from the Contract table via
-    session.execute(select(Contract)...) and source files via
-    get_source_files.  This test verifies both modules reference the
-    same DB model (Contract) and source-file helpers.
-    """
-    import inspect
-
-    import workers.discovery as disc
-    import workers.static_worker as sw
-
-    # Discovery writes to Contract table and stores source files
-    disc_source = inspect.getsource(disc.DiscoveryWorker._process_address)
-    assert "Contract(" in disc_source
-    assert "store_source_files" in disc_source
-
-    # Static reads from Contract table and source files
-    sw_source = inspect.getsource(sw.StaticWorker.process)
-    assert "Contract" in sw_source
-    assert "get_source_files" in sw_source
-
-
-# ===================================================================
-# 8. Static -> Resolution: artifact name contract between workers
-# ===================================================================
-
-
-def test_static_artifact_names_match_resolution_worker_reads():
-    """Static stores 'contract_analysis' and 'control_tracking_plan';
-    Resolution reads them back."""
-    import inspect
-
-    import workers.resolution_worker as rw
-    import workers.static_worker as sw
-
-    # Static stores
-    slither_source = inspect.getsource(sw.StaticWorker._run_analysis_phase)
-    plan_source = inspect.getsource(sw.StaticWorker._run_tracking_plan_phase)
-    assert '"contract_analysis"' in slither_source
-    assert '"control_tracking_plan"' in plan_source
-
-    # Resolution reads
-    rw_source = inspect.getsource(rw.ResolutionWorker.process)
-    assert '"control_tracking_plan"' in rw_source
-    assert '"contract_analysis"' in rw_source
-
-
-# ===================================================================
-# 9. Resolution -> Policy: artifact name contract between workers
-# ===================================================================
-
-
-def test_resolution_artifact_names_match_policy_worker_reads():
-    """Resolution stores 'control_snapshot' and 'resolved_control_graph';
-    Policy reads them back."""
-    import inspect
-
-    import workers.policy_worker as pw
-    import workers.resolution_worker as rw
-
-    # Resolution stores
-    rw_source = inspect.getsource(rw.ResolutionWorker.process)
-    assert '"control_snapshot"' in rw_source
-    assert '"resolved_control_graph"' in rw_source
-
-    # Policy reads
-    pw_source = inspect.getsource(pw.PolicyWorker.process)
-    assert '"contract_analysis"' in pw_source
-    assert '"control_snapshot"' in pw_source
-    assert '"resolved_control_graph"' in pw_source
-
-
-# ===================================================================
-# 10. Policy: stores final artifacts that API detail endpoint inlines
-# ===================================================================
-
-
-def test_policy_stores_all_artifacts_that_api_detail_inlines():
-    """Policy worker stores effective_permissions, principal_labels,
-    principal_history, and resolved_control_graph. The API detail aggregator
-    inlines each of these.
-    Verify the names match between producer and consumer."""
-    import inspect
-
-    import workers.policy_worker as pw
-    from services.aggregations import analysis_detail as detail_module
-
-    pw_source = inspect.getsource(pw.PolicyWorker.process)
-
-    # Policy stores these
-    assert '"effective_permissions"' in pw_source
-    assert '"principal_labels"' in pw_source
-    assert '"principal_history"' in pw_source
-    assert '"resolved_control_graph"' in pw_source
-
-    # API detail aggregator inlines these
-    detail_source = inspect.getsource(detail_module)
-    assert '"effective_permissions"' in detail_source
-    assert '"principal_labels"' in detail_source
-    assert '"principal_history"' in detail_source
-    assert '"resolved_control_graph"' in detail_source
-    assert '"contract_analysis"' in detail_source
-    assert '"control_snapshot"' in detail_source
 
 
 # ===================================================================

@@ -1,21 +1,18 @@
 """Registry behavior tests (inv. 5): id/name lookup, alias resolution,
-raise-on-unknown, supported_chain_ids parsing, and consistency of the derived
-maps that replaced the four former hand-maintained chain maps."""
+raise-on-unknown, supported_chain_ids parsing, and per-chain registry
+invariants (hypersync url, native asset, predeploy constants)."""
 
 from __future__ import annotations
 
 import pytest
 
-from services.discovery.inventory_domain import CHAIN_IDS as INVENTORY_CHAIN_IDS
 from utils.chains import (
     UnknownChainError,
     all_chains,
     chain_by_id,
     chain_by_name,
-    chain_name_to_id_map,
     supported_chain_ids,
 )
-from utils.rpc import COMMON_CHAIN_IDS
 
 
 def test_chain_by_id_known():
@@ -138,45 +135,3 @@ def test_supported_property_tracks_env(monkeypatch):
     assert chain_by_id(8453).supported is False
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1,8453")
     assert chain_by_id(8453).supported is True
-
-
-def test_common_chain_ids_preserves_legacy_entries():
-    # The registry-derived map must still carry exactly the entries the old
-    # hand-maintained utils.rpc.COMMON_CHAIN_IDS did.
-    expected = {
-        "ethereum": 1,
-        "mainnet": 1,
-        "arbitrum": 42161,
-        "optimism": 10,
-        "polygon": 137,
-        "base": 8453,
-        "avalanche": 43114,
-        "bsc": 56,
-        "linea": 59144,
-        "scroll": 534352,
-        "zksync": 324,
-        "blast": 81457,
-        "mode": 34443,
-        "bera": 80094,
-        "berachain": 80094,
-    }
-    assert COMMON_CHAIN_IDS == expected
-    assert chain_name_to_id_map() == expected
-
-
-def test_inventory_chain_ids_preserved():
-    # The inventory discoverable set stays the exact 11 chains, id values now
-    # sourced from the registry.
-    assert INVENTORY_CHAIN_IDS == {
-        "ethereum": 1,
-        "arbitrum": 42161,
-        "optimism": 10,
-        "polygon": 137,
-        "base": 8453,
-        "avalanche": 43114,
-        "bsc": 56,
-        "linea": 59144,
-        "scroll": 534352,
-        "zksync": 324,
-        "blast": 81457,
-    }

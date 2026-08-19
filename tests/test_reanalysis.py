@@ -889,6 +889,7 @@ contract ImplV3 { uint256 public version = 3; }
 # ---------------------------------------------------------------------------
 
 
+@requires_anvil
 class TestEventEmbedAnnotation:
     """Verify that the event webhook embed shows a reanalysis note."""
 
@@ -933,50 +934,55 @@ class TestEventEmbedAnnotation:
             data = evt.data or {}
             assert "reanalysis_job_id" not in data
 
-    @pytest.mark.usefixtures("anvil_env")
-    def test_embed_includes_reanalysis_field(self, db_session):
-        """_format_governance_embed adds a Re-analysis field when job ID is present."""
-        from services.monitoring.notifier import _format_governance_embed
 
-        mc = _make_monitored_contract(db_session, "0x" + "a1" * 20)
-        evt = MonitoredEvent(
-            id=uuid.uuid4(),
-            monitored_contract_id=mc.id,
-            event_type="upgraded",
-            block_number=100,
-            tx_hash="0x" + "ab" * 32,
-            data={"implementation": "0x" + "b2" * 20, "reanalysis_job_id": "abcd1234-0000-0000-0000-000000000000"},
-        )
-        db_session.add(evt)
-        db_session.commit()
-        db_session.refresh(evt)
+# ---------------------------------------------------------------------------
+# Embed shape only — no chain involved, so these stay outside the anvil class.
+# ---------------------------------------------------------------------------
 
-        embed = _format_governance_embed(evt, db_session)
-        field_map = {f["name"]: f["value"] for f in embed["fields"]}
-        assert "Re-analysis" in field_map
-        assert "abcd1234" in field_map["Re-analysis"]
 
-    @pytest.mark.usefixtures("anvil_env")
-    def test_embed_without_reanalysis_has_no_field(self, db_session):
-        """Normal event embed does NOT have a Re-analysis field."""
-        from services.monitoring.notifier import _format_governance_embed
+def test_embed_includes_reanalysis_field(db_session):
+    """_format_governance_embed adds a Re-analysis field when job ID is present."""
+    from services.monitoring.notifier import _format_governance_embed
 
-        mc = _make_monitored_contract(db_session, "0x" + "c3" * 20, "pausable")
-        evt = MonitoredEvent(
-            id=uuid.uuid4(),
-            monitored_contract_id=mc.id,
-            event_type="paused",
-            block_number=200,
-            tx_hash="0x" + "cd" * 32,
-            data={"account": "0x" + "d4" * 20},
-        )
-        db_session.add(evt)
-        db_session.commit()
-        db_session.refresh(evt)
+    mc = _make_monitored_contract(db_session, "0x" + "a1" * 20)
+    evt = MonitoredEvent(
+        id=uuid.uuid4(),
+        monitored_contract_id=mc.id,
+        event_type="upgraded",
+        block_number=100,
+        tx_hash="0x" + "ab" * 32,
+        data={"implementation": "0x" + "b2" * 20, "reanalysis_job_id": "abcd1234-0000-0000-0000-000000000000"},
+    )
+    db_session.add(evt)
+    db_session.commit()
+    db_session.refresh(evt)
 
-        embed = _format_governance_embed(evt, db_session)
-        field_names = [f["name"] for f in embed["fields"]]
-        assert "Re-analysis" not in field_names
+    embed = _format_governance_embed(evt, db_session)
+    field_map = {f["name"]: f["value"] for f in embed["fields"]}
+    assert "Re-analysis" in field_map
+    assert "abcd1234" in field_map["Re-analysis"]
+
+
+def test_embed_without_reanalysis_has_no_field(db_session):
+    """Normal event embed does NOT have a Re-analysis field."""
+    from services.monitoring.notifier import _format_governance_embed
+
+    mc = _make_monitored_contract(db_session, "0x" + "c3" * 20, "pausable")
+    evt = MonitoredEvent(
+        id=uuid.uuid4(),
+        monitored_contract_id=mc.id,
+        event_type="paused",
+        block_number=200,
+        tx_hash="0x" + "cd" * 32,
+        data={"account": "0x" + "d4" * 20},
+    )
+    db_session.add(evt)
+    db_session.commit()
+    db_session.refresh(evt)
+
+    embed = _format_governance_embed(evt, db_session)
+    field_names = [f["name"] for f in embed["fields"]]
+    assert "Re-analysis" not in field_names
 
 
 class TestSnapshotAndDiff:
