@@ -322,7 +322,7 @@ def _stub_live_authority(monkeypatch):
     the static badge" path, so the projection is unchanged without the wire.
     """
     monkeypatch.setattr(
-        "services.resolution.predicate_evaluator._live_resolve_authority",
+        "services.resolution.predicate_evaluator.authority._live_resolve_authority",
         lambda *a, **k: None,
     )
     # Disable the on-chain one-shot probe wholesale offline (its head-block read

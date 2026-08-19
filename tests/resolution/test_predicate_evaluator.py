@@ -669,7 +669,7 @@ def test_inlined_callee_msg_sender_equality_is_call_edge_condition(monkeypatch):
 
 
 def test_view_call_mapping_key_expands_to_returned_role_members(monkeypatch):
-    import services.resolution.predicate_evaluator as evaluator_mod
+    import services.resolution.predicate_evaluator.membership as evaluator_mod
     from services.resolution.capabilities import CapabilityExpr
     from services.resolution.predicate_evaluator import EvaluationContext, evaluate_tree
 
