@@ -47,7 +47,7 @@ from .trees import _gate_ref, guarded_functions
 if TYPE_CHECKING:
     from .executor import ExecutorCall
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("services.effects.calldata")
 
 # ---------------------------------------------------------------------------
 # Token-precondition seeding (blast-radius honesty)

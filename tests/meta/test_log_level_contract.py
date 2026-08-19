@@ -59,7 +59,7 @@ PIPELINE_SERVICE_GLOBS: tuple[str, ...] = (
     "services/scoring/distill/*.py",
     "services/discovery/**/*.py",
     "services/policy/*.py",
-    "services/static/contract_analysis_pipeline/*.py",
+    "services/static/contract_analysis_pipeline/**/*.py",
     "services/resolution/**/*.py",
     "services/monitoring/balance_reads.py",
 )

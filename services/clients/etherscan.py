@@ -34,7 +34,7 @@ _RATE_LIMIT_RETRIES = 5
 _RATE_LIMIT_BACKOFF = 1.0  # seconds, doubles each retry
 
 # Global Etherscan rate limit — applies to every call through get().
-load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 ETHERSCAN_RATE_LIMIT = int(os.getenv("ETHERSCAN_RATE_LIMIT", "5"))
 
 _min_interval = 1.0 / ETHERSCAN_RATE_LIMIT
@@ -54,7 +54,7 @@ def _wait_rate_limit() -> None:
 
 
 def _get_api_key() -> str:
-    load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+    load_dotenv(Path(__file__).resolve().parents[2] / ".env")
     key = os.getenv("ETHERSCAN_API_KEY")
     if not key:
         raise RuntimeError("ETHERSCAN_API_KEY not set in .env")

@@ -93,7 +93,7 @@ export function BalanceTable({ machine }) {
   if (!machine.balances || machine.balances.length === 0) {
     // An empty list is not "holds nothing": the fetch conflates no-tokens with a
     // failed read, and the failure is recorded only in the operational log
-    // (utils/etherscan.get_token_balances). Say what is known.
+    // (services/clients/etherscan.get_token_balances). Say what is known.
     return <div className="ps-lane-empty">No token balances recorded</div>;
   }
 

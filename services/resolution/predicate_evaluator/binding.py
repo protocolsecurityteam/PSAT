@@ -20,7 +20,7 @@ from .telemetry import _pass_live_read_memo, _state_var_lookup_key
 if TYPE_CHECKING:
     from .core import EvaluationContext
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("services.resolution.predicate_evaluator")
 
 
 def _callee_argument_operands(

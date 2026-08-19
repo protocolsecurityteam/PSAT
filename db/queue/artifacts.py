@@ -23,7 +23,7 @@ from db.storage import (
     source_file_key,
 )
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("db.queue")
 
 
 def count_analysis_children(session: Session, root_job_id: str) -> int:

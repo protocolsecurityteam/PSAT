@@ -17,7 +17,7 @@ from .flows import _selector_of
 from .plans import _AUTHORITY_ROLES, AuthorityPlanInputs
 from .trees import _authority_roles, _gate_ref, _mandatory_state_vars
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("services.effects.calldata")
 
 # ---------------------------------------------------------------------------
 # authority-change

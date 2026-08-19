@@ -55,7 +55,7 @@ def load_protocol_safe_owner_sets(session: Session, protocol_id: int) -> dict[st
 
     # Per-Safe accumulator: the first exact owner set seen, its threshold, and a
     # conflict flag. ``function_principals`` has no recency column (no
-    # updated_at/probe-block on the row — see db/models.py), so two exact rows
+    # updated_at/probe-block on the row — see db/models/contracts.py), so two exact rows
     # that DISAGREE on the owner set are contradictory witnesses with no
     # dispositive way to pick between them: fail closed. Identical
     # duplicate exact rows agree and are kept.

@@ -185,7 +185,7 @@ def resolve_trace_rpc(rpc_url: str | None = None) -> str:
     """
     if rpc_url:
         return rpc_url
-    load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+    load_dotenv(Path(__file__).resolve().parents[2] / ".env")
     from services.clients.rpc import default_rpc_url
 
     # Pipeline callers pass a chain-resolved rpc_url; this explicit-mainnet base

@@ -21,7 +21,7 @@ from .telemetry import _bump_resolve_counter
 if TYPE_CHECKING:
     from .core import EvaluationContext
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("services.resolution.predicate_evaluator")
 
 
 def _resolve_view_key_membership(descriptor: SetDescriptor, ctx: EvaluationContext) -> CapabilityExpr | None:

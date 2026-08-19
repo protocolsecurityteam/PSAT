@@ -113,7 +113,7 @@ def resolve_company_jobs(session: Session, name: str) -> tuple[Protocol | None, 
 
     if protocol_row:
         # Join Jobs to Contracts on the natural key. The address column on
-        # contracts is already stored lowercased (see db/queue.py); jobs
+        # contracts is already stored lowercased (see db/queue/discovery.py); jobs
         # store the address as-provided, so lowercase the job side for the
         # join. The SQL join stays address-only (a name-string ``Contract.chain``
         # can't be compared to the int ``Job.chain_id`` in SQL without a mapping,

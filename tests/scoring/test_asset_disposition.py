@@ -594,7 +594,7 @@ def test_the_fail_closed_universe_says_so_at_the_boundary(db_session, monkeypatc
     with caplog.at_level(logging.WARNING, logger="services.scoring.distill"):
         assert D.load_protocol_universe(db_session, protocol.id) is None
 
-    records = [r for r in caplog.records if r.name == "services.scoring.distill.universe"]
+    records = [r for r in caplog.records if r.name == "services.scoring.distill"]
     assert len(records) == 1
     assert records[0].levelno == logging.WARNING
     assert "fail-closed" in records[0].message

@@ -123,7 +123,7 @@ _SOLMATE_ROLE_TOPICS = [
 ]
 
 
-# Basis vocabulary lives in ``db/models.py`` with the columns it describes.
+# Basis vocabulary lives in ``db/models/balances.py`` with the columns it describes.
 # ``FIRST_INDEXED_BASIS_EXPLICIT`` has no production writer: every enrolment path
 # here witness-grades. It stays in the domain because the distinction between a
 # seed a caller supplied and a bound three reads agreed on is exactly what stops a

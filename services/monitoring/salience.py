@@ -68,7 +68,7 @@ SALIENCE_VALUES = frozenset(
 # Comparison order. ``not_determined`` deliberately sorts WITH ``notable``: an
 # event the classifier never rated must not be filtered out by a threshold it
 # was never measured against. Mirrored by ``notifier._SALIENCE_ORDER`` and by
-# ``site/src/monitoring/format.js``.
+# ``site/src/surface/sidebar/activity/eventClass.js``.
 SALIENCE_ORDER: dict[str, int] = {
     SALIENCE_ROUTINE: 0,
     SALIENCE_NOT_DETERMINED: 1,

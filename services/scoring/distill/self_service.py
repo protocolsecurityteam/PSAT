@@ -17,7 +17,7 @@ from utils.scoring_status import (
 
 from .claims import _considered_out_flows, _target_kinds
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("services.scoring.distill")
 
 # ---------------------------------------------------------- self-service (W1∧W2)
 

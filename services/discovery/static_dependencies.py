@@ -135,7 +135,7 @@ def find_dependencies(
     *chain_id* (the job's chain, threaded from the static worker) arms the inv-7
     URL↔chain_id guard on every ``eth_getCode`` read; None keeps it a no-op for
     the CLI ``main`` path below (which has no chain in scope)."""
-    load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+    load_dotenv(Path(__file__).resolve().parents[2] / ".env")
     from services.clients.rpc import default_rpc_url
 
     # The pipeline (static_worker) always passes a chain-resolved rpc_url; this

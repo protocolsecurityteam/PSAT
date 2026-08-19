@@ -21,7 +21,7 @@ def _sql_tuple(values: tuple[str, ...]) -> str:
     return "(" + ", ".join(f"'{value}'" for value in values) + ")"
 
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("db.models")
 
 
 class Base(DeclarativeBase):

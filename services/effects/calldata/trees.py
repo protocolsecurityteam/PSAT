@@ -10,7 +10,7 @@ if TYPE_CHECKING:  # typing-only: the effects plane stays off static's runtime i
     pass
 
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("services.effects.calldata")
 
 # ---------------------------------------------------------------------------
 # Predicate-tree walking (mirrors ``claims.matchers._facts._mandatory_operands``)

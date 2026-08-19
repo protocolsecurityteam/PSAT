@@ -13,7 +13,7 @@ from ..capabilities import (
     CapabilityExpr,
 )
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("services.resolution.predicate_evaluator")
 
 # ---------------------------------------------------------------------------
 # Adapter protocol (placeholder — week-5 fully-typed registry replaces this)

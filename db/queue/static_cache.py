@@ -27,7 +27,7 @@ from utils.logging import record_degraded
 from ._chains import _job_chain_name, _mainnet_coalesced_chain
 from .artifacts import get_artifact, store_artifact
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("db.queue")
 
 # ---------------------------------------------------------------------------
 # Static data caching

@@ -38,7 +38,7 @@ from .plans import (
 from .roles import integer_param_roles
 from .trees import _all_leaves, _authority_roles, _operands
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("services.effects.calldata")
 
 # ---------------------------------------------------------------------------
 # freeze/pause (Tier 2)

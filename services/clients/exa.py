@@ -152,7 +152,7 @@ def error_from_exception(exc: Exception) -> dict[str, Any]:
 
 
 def _get_api_key() -> str:
-    load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+    load_dotenv(Path(__file__).resolve().parents[2] / ".env")
     key = (os.environ.get("EXA_API_KEY") or "").strip()
     if not key:
         raise ExaError(

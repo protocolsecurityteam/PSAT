@@ -16,7 +16,7 @@ from ..capabilities import (
 if TYPE_CHECKING:
     from .core import EvaluationContext
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("services.resolution.predicate_evaluator")
 
 # Telemetry for the delegated-role-gate durability invariant (CONTROLLER_RESOLUTION_
 # SPEC §5): the guard closing a fail-open, and the broader tripwire of a caller gate

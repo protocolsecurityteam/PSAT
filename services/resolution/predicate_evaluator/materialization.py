@@ -9,7 +9,7 @@ from ..capabilities import (
     CapabilityExpr,
 )
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("services.resolution.predicate_evaluator")
 
 
 def _public_without_root_cofinites(cap: CapabilityExpr) -> bool:

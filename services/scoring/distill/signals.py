@@ -85,7 +85,7 @@ from .self_service import (
     _SelfServiceBound,
 )
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("services.scoring.distill")
 
 # ---------------------------------------------------------------- the signals
 

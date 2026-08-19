@@ -24,7 +24,7 @@ from .roles import _declared_param_names
 if TYPE_CHECKING:
     from .facts import FunctionFacts
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("services.effects.calldata")
 
 
 # Executor synthesis. ``exec.arbitrary`` is the static claim for "this

@@ -8,7 +8,7 @@ from typing import Any
 
 from .claims import _considered_out_flows
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("services.scoring.distill")
 
 # ------------------------------------------------------------------ msg_value
 

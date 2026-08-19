@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from db.models import SessionLocal, WorkerHeartbeat
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("db.queue")
 
 # How long a job can sit in ``status='processing'`` before we assume the
 # worker holding it crashed and return the row to the queue. ``updated_at``

@@ -18,7 +18,7 @@ from .telemetry import _bump_resolve_counter, _is_zero_address, _pass_live_read_
 if TYPE_CHECKING:
     from .core import EvaluationContext
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("services.resolution.predicate_evaluator")
 
 # ---------------------------------------------------------------------------
 # Operand resolution helpers

@@ -54,6 +54,9 @@ from .encoding import (
     _scalar_arg_value,
     encode_calldata,
 )
+from .entry import (
+    synthesize,
+)
 from .executor import (
     _ERC20_TRANSFER_SELECTOR,
     _EXEC_ARBITRARY_CLAIM,
@@ -159,9 +162,6 @@ from .seeding import (
     input_token_hints,
     seeded_calldata,
     synthesize_pause,
-)
-from .synthesize import (
-    synthesize,
 )
 from .synthesize_value import (
     _ERC20_BALANCE_OF_SIGNATURE,

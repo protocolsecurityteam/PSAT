@@ -9,7 +9,7 @@ from services.static.contract_analysis_pipeline.predicate_types import (
     LeafPredicate,
 )
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("services.resolution.predicate_evaluator")
 
 # Canonical signature-verification callees: the EVM ``ecrecover`` builtin, the
 # OZ ECDSA library (``recover``/``tryRecover``), and OZ SignatureChecker /

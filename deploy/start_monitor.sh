@@ -14,7 +14,7 @@
 #
 # Scaling above 1 is safe but wasteful: scan/poll passes are gated by the
 # per-chain 'protocol_scanner:<chain>' / 'protocol_poller:<chain>' daemon
-# leases (db/queue.py), so a duplicate machine acquires nothing and skips its
+# leases (db/queue/heartbeats.py), so a duplicate machine acquires nothing and skips its
 # passes. Independently on the scan path, the partial unique index on
 # monitored_events makes a duplicate insert a no-op. Extra machines burn RPC
 # for zero extra work — run 1.

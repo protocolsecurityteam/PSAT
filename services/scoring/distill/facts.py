@@ -27,7 +27,7 @@ from utils.scoring_status import (
 from .claims import _claim_ids
 from .self_service import _PROVENANCE_CALLER_GATE
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("services.scoring.distill")
 
 # Why the flow-asset plane produced no receiver map for a contract. A closed
 # vocabulary: the token is published on every refusal the empty map causes, so

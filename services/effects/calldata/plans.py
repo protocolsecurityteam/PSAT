@@ -17,7 +17,7 @@ from services.effects.config import (
 )
 from services.effects.selection import AssetHolding
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("services.effects.calldata")
 
 # The attacker identity substituted at a taint-identified address param.
 SENTINEL_ADDRESS = "0x" + "ee" * 20

@@ -14,7 +14,7 @@ from utils.scoring_status import (
     WITNESS_TIER_STANDARD_EXACT,
 )
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("services.scoring.distill")
 
 _TIER_TOKENS = {
     "behavioral_observed": WITNESS_TIER_BEHAVIORAL_OBSERVED,

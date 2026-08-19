@@ -23,7 +23,7 @@ from utils.scoring_status import (
 
 from .claims import _static_destination_shape, _tier
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("services.scoring.distill")
 
 # ---------------------------------------------------------------- destination
 

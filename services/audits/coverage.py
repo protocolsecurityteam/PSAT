@@ -96,11 +96,12 @@ def _publishable_block_bounds(window: ImplWindow | None) -> tuple[int | None, in
     """Block bounds for a coverage row, or ``(None, None)`` when they cannot
     be stated honestly.
 
-    ``site/src/auditMatching.js`` treats a NULL ``covered_to_block`` beside a
-    non-NULL ``covered_from_block`` as +infinity, so publishing a half-known
-    window would spread the audit across every later impl era. When either
-    bound is unknown we publish neither and let the consumer fall back to the
-    temporal comparison, whose bounds are known on this path.
+    A half-known window must not be published as a bound: a consumer reading a
+    NULL ``covered_to_block`` beside a non-NULL ``covered_from_block`` as
+    open-ended would spread the audit across every later impl era, and the
+    absence of a proven upper bound is not proof the coverage extends there.
+    When either bound is unknown we publish neither and let the consumer fall
+    back to the temporal comparison, whose bounds are known on this path.
     """
     if window is None:
         return None, None

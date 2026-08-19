@@ -29,7 +29,7 @@ from .telemetry import _is_zero_address, _record_delegated_gate_unresolved, _sta
 if TYPE_CHECKING:
     from .core import EvaluationContext
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("services.resolution.predicate_evaluator")
 
 
 def _stamp_caller_gate_check(cap: CapabilityExpr, leaf: LeafPredicate) -> CapabilityExpr:

@@ -25,7 +25,7 @@ from .plans import ARG_IDENTIFIER, ROLE_AMOUNT, ROLE_IDENTIFIER
 if TYPE_CHECKING:
     from .executor import ExecutorCall
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("services.effects.calldata")
 
 # ---------------------------------------------------------------------------
 # Encoding

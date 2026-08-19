@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from utils.logging import record_degraded
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("services.scoring.distill")
 
 # --- the protocol's discovered address universe (P4) --------------------------
 # Every 20-byte address this protocol's own analysis has ever named. It exists

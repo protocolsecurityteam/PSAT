@@ -28,7 +28,7 @@ from utils.scoring_status import (
 # ``record_degraded`` because no accumulator is bound here today: the fold runs
 # on the score loop's monitor thread and under the offline CLI, and the call
 # would be a permanent no-op rather than a record of anything.
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("services.scoring.planes")
 
 
 # Why each relation this scorer knows of is NOT walked as reach. The map is a

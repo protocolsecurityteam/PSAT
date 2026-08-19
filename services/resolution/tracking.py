@@ -113,7 +113,7 @@ def _classify_ttl(block_tag: str, details: dict[str, object]) -> float:
     return _CLASSIFY_CACHE_TTL_S
 
 
-# ``controller_values.value`` is ``String(66)`` (db/models.py): an address is
+# ``controller_values.value`` is ``String(66)`` (db/models/contracts.py): an address is
 # 42 chars, a single 32-byte word 66. A wider value is not a storable single
 # controller identity — almost always a struct/array getter whose raw multi-word
 # ABI return reaches the fallthrough below with no ``member_path`` to project

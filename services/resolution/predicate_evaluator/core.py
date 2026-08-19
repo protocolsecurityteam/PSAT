@@ -72,7 +72,7 @@ from .telemetry import (
     _tag_caller_subject,
 )
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("services.resolution.predicate_evaluator")
 
 # ---------------------------------------------------------------------------
 # Public API

@@ -24,7 +24,7 @@ from .plans import CandidatePlanInputs
 from .seeding import synthesize_pause
 from .synthesize_value import synthesize_supply, synthesize_timelock, synthesize_value_out
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("services.effects.calldata")
 
 # ---------------------------------------------------------------------------
 # Entry point

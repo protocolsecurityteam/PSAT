@@ -38,7 +38,7 @@ from .telemetry import _is_zero_address, _state_var_lookup_key
 if TYPE_CHECKING:
     from .core import EvaluationContext
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("services.resolution.predicate_evaluator")
 
 
 def _resolve_equality_principal(

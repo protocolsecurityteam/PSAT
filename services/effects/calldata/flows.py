@@ -28,7 +28,7 @@ from .trees import _param_index_by_name
 if TYPE_CHECKING:
     from .facts import FunctionFacts
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("services.effects.calldata")
 
 
 # Flow kinds that move NATIVE ETH out of the contract's OWN balance (as opposed

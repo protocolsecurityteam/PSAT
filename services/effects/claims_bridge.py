@@ -1,7 +1,7 @@
 """Effects → claims bridge.
 
 Turns a *proven* effect verdict into a registry claim so the frontend renders it
-through the one shared claims vocabulary (``site/src/claimsVocab.js``) with zero
+through the one shared claims vocabulary (``site/src/vocab/``) with zero
 duplicated display logic. This is the consumption boundary where the write-only
 verdict substrate becomes "labels-observable, scoring-deferred".
 

@@ -47,7 +47,7 @@ from .roles import _declared_param_names, address_param_roles, integer_param_rol
 from .seeding import input_token_hints, seeded_calldata
 from .trees import _gate_ref
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("services.effects.calldata")
 
 # ---------------------------------------------------------------------------
 # value-out / supply

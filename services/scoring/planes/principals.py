@@ -19,7 +19,7 @@ from services.scoring.schema import coalesce_chain, entity_key
 # ``record_degraded`` because no accumulator is bound here today: the fold runs
 # on the score loop's monitor thread and under the offline CLI, and the call
 # would be a permanent no-op rather than a record of anything.
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("services.scoring.planes")
 
 
 @dataclass

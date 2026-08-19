@@ -69,7 +69,7 @@ def _build_payload(
     search_depth: str,
     include_raw_content: bool,
 ) -> dict[str, Any]:
-    load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+    load_dotenv(Path(__file__).resolve().parents[2] / ".env")
     api_key = os.environ.get("TAVILY_API_KEY", "").strip()
     if not api_key:
         raise TavilyError(

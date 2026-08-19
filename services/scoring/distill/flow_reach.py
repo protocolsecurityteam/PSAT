@@ -34,7 +34,7 @@ from .facts import (
     _proven_number,
 )
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("services.scoring.distill")
 
 # ---------------------------------------------------------------- reach/value
 

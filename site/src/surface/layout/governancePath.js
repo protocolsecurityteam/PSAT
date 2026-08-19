@@ -84,7 +84,7 @@ export function buildControlEdgeIndex(fundFlows = [], activeChain = null) {
 
 // The witnessed claims on a control edge, normalized to one list. The payload
 // publishes the single-claim case as scalar relation/label and the multi-claim
-// case as `relations` (services/aggregations/company_overview.py); an edge the
+// case as `relations` (services/aggregations/company_overview/governance_view.py); an edge the
 // control graph never witnessed a relation for yields [] — the consumer shows
 // the flow type alone rather than inventing a name for the hop.
 export function edgeClaims(flow) {
@@ -102,7 +102,7 @@ export function edgeClaims(flow) {
 // arbitrary calls / delegatecalls) — so control witnessed one hop further
 // genuinely transfers. This is the chip-vocabulary projection of the scorer's
 // TRANSITIVE_CAPABILITIES (services/scoring/constants.py) through
-// _CLAIM_CAPABILITY (services/aggregations/company_overview.py); the payload
+// CLAIM_CAPABILITY (services/governance/primary_controller.py); the payload
 // publishes chips, not claim ids, so the chip is the witness granularity
 // available here. Chips are coarser than claims ("ownership" also covers
 // renounce/accept, "roles" also covers revoke), so the gate can admit a seed

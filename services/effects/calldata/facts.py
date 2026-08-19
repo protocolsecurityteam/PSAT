@@ -19,7 +19,7 @@ from utils.logging import record_degraded
 
 from .flows import _selector_of
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("services.effects.calldata")
 
 # ---------------------------------------------------------------------------
 # Fact loading

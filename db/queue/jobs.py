@@ -15,7 +15,7 @@ from db.models import Job, JobDependency, JobStage, JobStatus, derive_job_chain_
 
 from .heartbeats import DEFAULT_JOB_LEASE_TTL_S, DEFAULT_JOB_STALE_TIMEOUT, LeaseLost
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("db.queue")
 
 
 def reclaim_stuck_jobs(session: Session, stale_timeout_seconds: int = DEFAULT_JOB_STALE_TIMEOUT) -> list[str]:
