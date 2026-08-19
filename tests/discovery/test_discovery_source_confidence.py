@@ -34,13 +34,10 @@ adopted into the protocol).
 
 from __future__ import annotations
 
-import sys
 import uuid
 from pathlib import Path
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from services.discovery.source_confidence import (  # noqa: E402
     HIGH_CONFIDENCE_SOURCES,
@@ -999,7 +996,7 @@ class TestStructuralOrphanMigration:
         """
         import importlib.util
 
-        path = Path(__file__).resolve().parents[1] / "alembic" / "versions" / "3a8f4d1c9b07_adopt_structural_orphans.py"
+        path = Path(__file__).resolve().parents[2] / "alembic" / "versions" / "3a8f4d1c9b07_adopt_structural_orphans.py"
         spec = importlib.util.spec_from_file_location("_adopt_structural_orphans_mig", path)
         assert spec is not None and spec.loader is not None
         module = importlib.util.module_from_spec(spec)
@@ -1518,7 +1515,7 @@ class TestRemainingOrphanAdoption:
         import importlib.util
 
         path = (
-            Path(__file__).resolve().parents[1]
+            Path(__file__).resolve().parents[2]
             / "alembic"
             / "versions"
             / "4d72e9b1f035_adopt_remaining_orphan_classes.py"

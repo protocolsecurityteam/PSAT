@@ -5,13 +5,9 @@ logic end-to-end with realistic inputs.  No network calls — runs in CI
 without API keys.
 """
 
-import sys
-from pathlib import Path
 from typing import Any
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from services.discovery.activity import enrich_with_activity
 from services.discovery.chain_resolver import resolve_unknown_chains, validate_claimed_chains

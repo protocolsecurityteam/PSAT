@@ -6,11 +6,6 @@ bytecode-keyed materialization cache won't carry the hints until rebuilt).
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
 from types import SimpleNamespace  # noqa: E402
 from typing import Any, cast  # noqa: E402
 

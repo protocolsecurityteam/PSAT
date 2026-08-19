@@ -11,13 +11,7 @@ chain/on-chain-derived artifacts to be re-derived per chain.
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
-from cache_helpers import db_session, requires_postgres  # noqa: F401
 from sqlalchemy import select
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from db.contract_materializations import ANALYSIS_SCHEMA_VERSION  # noqa: E402
 from db.models import Contract, ContractSummary, JobStage, JobStatus, RoleDefinition  # noqa: E402
@@ -29,6 +23,7 @@ from db.queue import (  # noqa: E402
     store_artifact,
     store_source_files,
 )
+from tests.cache_helpers import db_session, requires_postgres  # noqa: F401
 
 pytestmark = requires_postgres
 

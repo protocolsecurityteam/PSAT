@@ -9,11 +9,6 @@ fall through to the residual sink (the old dead-end that left it under-resolved,
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
 from services.policy.capability_surface import (  # noqa: E402
     capability_surface_status,
     project_capability_surface,

@@ -9,14 +9,10 @@ pins. Offline/hermetic; the DB-touching cases carry ``@requires_postgres``.
 from __future__ import annotations
 
 import inspect
-import sys
 import uuid
 from decimal import Decimal
-from pathlib import Path
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from db import effect_cache  # noqa: E402
 from db.effect_cache import (  # noqa: E402

@@ -1,11 +1,7 @@
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from services.static.contract_analysis_pipeline.mapping_events import (  # noqa: E402
     discover_mapping_writer_events,

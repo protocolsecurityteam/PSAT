@@ -22,7 +22,6 @@ must *fail closed* without an event history rather than fabricate a set.
 
 from __future__ import annotations
 
-import sys
 import textwrap
 from pathlib import Path
 from typing import Any
@@ -31,8 +30,6 @@ import pytest
 
 slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from services.resolution.adapters import (  # noqa: E402
     AdapterRegistry,

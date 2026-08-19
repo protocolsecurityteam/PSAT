@@ -19,17 +19,13 @@ nothing an observation saw is written back into ``effect_behavior_cache``.
 
 from __future__ import annotations
 
-import sys
 import uuid
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from db.effect_cache import (  # noqa: E402
     AUDIT_PASSED,

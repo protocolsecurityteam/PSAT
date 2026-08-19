@@ -1,8 +1,4 @@
-import sys
-from pathlib import Path
 from typing import Any, cast
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from services.policy.effective_permissions import build_effective_permissions
 

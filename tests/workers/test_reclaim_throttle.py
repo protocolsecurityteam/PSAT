@@ -19,11 +19,7 @@ seconds. Recovery is still global (any worker can sweep) and still timely
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from unittest.mock import MagicMock, patch
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from db.models import JobStage
 from workers import base

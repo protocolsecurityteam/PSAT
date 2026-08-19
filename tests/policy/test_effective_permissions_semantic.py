@@ -34,8 +34,6 @@ suite runs offline.
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -50,8 +48,6 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 from sqlalchemy.types import JSON
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from services.policy.effective_permissions_writer import (
     _column_values_for_capability,

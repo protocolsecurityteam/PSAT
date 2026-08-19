@@ -8,16 +8,12 @@ Covers:
 
 from __future__ import annotations
 
-import sys
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 def _fake_artifact(job_id, name: str, data):

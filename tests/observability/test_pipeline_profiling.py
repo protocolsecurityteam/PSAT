@@ -18,12 +18,8 @@ live test run.
 from __future__ import annotations
 
 import logging
-import sys
-from pathlib import Path
 from typing import Any
 from unittest.mock import patch
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from services.static.contract_analysis_pipeline import predicate_artifacts  # noqa: E402
 

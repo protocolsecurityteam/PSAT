@@ -7,14 +7,11 @@ assert semantic sink discovery + label inference.
 from __future__ import annotations
 
 import json
-import sys
 import textwrap
 from pathlib import Path
 
 import pytest
 from eth_utils.crypto import keccak
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402

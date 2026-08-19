@@ -21,15 +21,11 @@ from __future__ import annotations
 
 import os
 import shutil
-import sys
 import uuid
-from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session as SASession
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from db.models import (
     Base,

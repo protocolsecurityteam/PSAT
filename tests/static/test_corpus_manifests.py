@@ -20,15 +20,12 @@ how to add a manifest.
 
 from __future__ import annotations
 
-import sys
 import textwrap
 from pathlib import Path
 from typing import Any
 
 import pytest
 import yaml
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
@@ -37,7 +34,7 @@ from services.static.contract_analysis_pipeline.predicate_artifacts import (  # 
     build_predicate_artifacts,
 )
 
-_MANIFESTS_DIR = Path(__file__).parent / "corpus_manifests"
+_MANIFESTS_DIR = Path(__file__).parents[1] / "corpus_manifests"
 
 
 def _all_manifests() -> list[Path]:

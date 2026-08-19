@@ -18,14 +18,10 @@ All tests stub the storage client and LLM call; no MinIO, no OpenRouter.
 from __future__ import annotations
 
 import json
-import sys
-from pathlib import Path
 from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from db.storage import StorageUnavailable  # noqa: E402
 from services.audits import scope_extraction as scope_pkg  # noqa: E402

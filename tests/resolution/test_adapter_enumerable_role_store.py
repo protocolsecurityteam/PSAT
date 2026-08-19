@@ -12,16 +12,12 @@ tests).
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from typing import Any
 
 import pytest
 from eth_abi.abi import decode as abi_decode
 from eth_abi.abi import encode as abi_encode
 from eth_utils.crypto import keccak
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import services.resolution.role_store_standards as rss  # noqa: E402
 from services.policy.capability_surface import project_capability_surface  # noqa: E402

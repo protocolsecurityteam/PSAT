@@ -22,13 +22,9 @@ via prefix scan over ``stage_timing_*`` and concatenates.
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import MagicMock
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from db.models import Job, JobStage
 from utils.logging import record_stage_metric, stage_metrics_var

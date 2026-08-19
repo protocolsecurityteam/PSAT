@@ -21,10 +21,8 @@ All tests run without live services (no RPC, no Etherscan, no database).
 from __future__ import annotations
 
 import json
-import sys
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -32,8 +30,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from tests.support.balance_stubs import page, pinned_native_unavailable
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 # offline: the dependency phase probes eth_getCode and company mode resolves the
 # protocol via DefiLlama — stub both so the cross-module wiring runs with no wire.

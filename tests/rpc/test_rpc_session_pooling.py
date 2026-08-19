@@ -20,13 +20,9 @@ What we pin here:
 
 from __future__ import annotations
 
-import sys
 import threading
-from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from utils import rpc
 

@@ -6,15 +6,11 @@ external-service functions (Tavily search, LLM domain/page selection).
 
 from __future__ import annotations
 
-import sys
 import time
-from pathlib import Path
 from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from services.discovery.inventory_domain import (
     ADDRESS_RE,

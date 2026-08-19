@@ -11,12 +11,8 @@ files respectively; this file owns the bridge's own contract.
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from services.effects import claims_bridge  # noqa: E402
 from services.effects.config import (  # noqa: E402

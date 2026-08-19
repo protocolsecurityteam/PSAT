@@ -42,7 +42,7 @@ PENDING_GOVERNOR = "0x" + "cd" * 20
 PENDING_GOVERNOR_SLOT = "0x0fe544e960ecab9b6f1eee0df869972d09c3c135c0d116422cce176351b52237"
 INTERNAL_PENDING_GOVERNOR_SELECTOR = "0x638adcc8"  # _pendingGovernor()
 
-FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures" / "contracts" / "authority"
+FIXTURES_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "contracts" / "authority"
 
 A_PENDING_GOVERNOR_SLOT: dict[str, Any] = {
     "source": "view_call",

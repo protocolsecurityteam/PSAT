@@ -29,10 +29,7 @@ original Problem 2.
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from sqlalchemy import func, select  # noqa: E402
 
@@ -69,7 +66,7 @@ from tests.conftest import requires_postgres  # noqa: E402
 
 _ROLE_SET_TOPIC0 = SOLADY_ENUMERABLE_ROLES.grant_events[0].topic0
 
-_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "solmate" / "roles_authority_3994741a.json"
+_FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "solmate" / "roles_authority_3994741a.json"
 _SAFE_4_6 = "0xcea8039076e35a825854c5c2f85659430b06ec96"
 _PAUSE = "0x8456cb59"
 

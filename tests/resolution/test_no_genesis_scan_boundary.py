@@ -18,19 +18,16 @@ addresses (the failure mode of the local run that motivated this fix):
 from __future__ import annotations
 
 import ast
-import sys
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
 import services.resolution.creation_block_floor as floor_mod  # noqa: E402
 from services.resolution import mapping_enumerator  # noqa: E402
 from services.resolution.repos.event_logs_hypersync import HyperSyncEventLogRepo  # noqa: E402
 
-_REPO = Path(__file__).resolve().parents[1]
+_REPO = Path(__file__).resolve().parents[2]
 
 
 # (a) required-arg structural guard ------------------------------------------

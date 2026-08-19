@@ -21,14 +21,10 @@ What we pin here:
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from typing import Any, cast
 
 import pytest
 from sqlalchemy import Table
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from services.resolution import recursive
 from services.resolution.recursive import _materialize_contract_artifacts

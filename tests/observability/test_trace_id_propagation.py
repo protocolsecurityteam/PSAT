@@ -18,13 +18,9 @@ What this pins:
 
 from __future__ import annotations
 
-import sys
 import uuid
-from pathlib import Path
 
 from sqlalchemy import select
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tests.cache_helpers import requires_postgres  # noqa: E402
 

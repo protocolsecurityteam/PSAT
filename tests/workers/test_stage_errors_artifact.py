@@ -8,14 +8,10 @@ configured here — inline JSONB is the offline path.
 from __future__ import annotations
 
 import os
-import sys
-from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from db.models import Artifact, JobStage  # noqa: E402
 from db.queue import create_job  # noqa: E402

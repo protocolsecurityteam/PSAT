@@ -15,18 +15,14 @@ behavior relies on.
 
 from __future__ import annotations
 
-import sys
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 from sqlalchemy import select
 from sqlalchemy import update as sa_update
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tests.conftest import requires_postgres  # noqa: E402
 from workers.base import JobHandledDirectly  # noqa: E402

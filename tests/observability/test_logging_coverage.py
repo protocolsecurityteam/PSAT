@@ -13,12 +13,8 @@ No DB / network: the methods under test are pure log/derivation helpers;
 from __future__ import annotations
 
 import logging
-import sys
-from pathlib import Path
 
 from sqlalchemy.orm.exc import StaleDataError
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import workers.coverage_verify as cv  # noqa: E402
 

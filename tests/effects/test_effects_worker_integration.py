@@ -17,11 +17,7 @@ Covers:
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from unittest.mock import MagicMock
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from db import effect_cache  # noqa: E402
 from db.models import (  # noqa: E402

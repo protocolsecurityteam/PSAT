@@ -18,13 +18,8 @@ Tests run against the real Postgres test DB (``db_session`` fixture in
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import pytest
 from sqlalchemy import select
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from db.models import Protocol  # noqa: E402
 from db.queue import get_or_create_protocol  # noqa: E402

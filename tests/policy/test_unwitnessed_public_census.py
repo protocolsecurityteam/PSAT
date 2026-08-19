@@ -14,13 +14,9 @@ census silently. These tests make the shape a contract:
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from typing import Any, cast
 
 from sqlalchemy import text
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from db.models import Contract  # noqa: E402
 from services.policy.effective_permissions import build_effective_permissions  # noqa: E402

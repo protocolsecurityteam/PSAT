@@ -13,15 +13,11 @@ construct them directly and stub the two HTTP calls
 
 from __future__ import annotations
 
-import sys
 import threading
-from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from services.audits.coverage import CoverageMatch, _apply_equivalence_http, _EquivalenceInputs
 from utils.concurrency import RpcExecutor

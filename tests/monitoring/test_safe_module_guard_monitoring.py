@@ -10,13 +10,9 @@ in the head/guard words; membership itself is decided in the resolution plane
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from typing import Any, cast
 
 from eth_utils.crypto import keccak
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from services.monitoring.event_topics import (  # noqa: E402
     ALL_EVENT_TOPICS,

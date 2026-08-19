@@ -13,12 +13,9 @@ earned negatives falsifiable in both directions.
 
 import random
 import string
-import sys
 import tempfile
 import textwrap
 from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from slither.slither import Slither
 

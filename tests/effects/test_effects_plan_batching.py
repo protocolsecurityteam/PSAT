@@ -17,15 +17,11 @@ executed here — ``_plan`` only builds the worklist)."""
 from __future__ import annotations
 
 import os
-import sys
 import uuid
-from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 from sqlalchemy import event
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from db.effect_cache import upsert_cached_verdict  # noqa: E402
 from db.models import (  # noqa: E402

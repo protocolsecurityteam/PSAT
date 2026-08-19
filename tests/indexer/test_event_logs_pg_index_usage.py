@@ -14,14 +14,9 @@ seeded.
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import pytest
 from sqlalchemy import select, text
 from sqlalchemy.dialects import postgresql
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from db.models import IndexedEventCursor, IndexedEventLog  # noqa: E402
 from services.resolution.repos.event_logs_pg import PostgresEventLogRepo  # noqa: E402

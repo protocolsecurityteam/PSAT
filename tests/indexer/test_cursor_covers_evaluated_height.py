@@ -23,13 +23,9 @@ Real ``psat_test`` Postgres + the production ``PostgresEventLogRepo`` /
 from __future__ import annotations
 
 import asyncio
-import sys
-from pathlib import Path
 from typing import Any
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from db.models import IndexedEventCursor, IndexedEventLog  # noqa: E402
 from services.resolution import capability_resolver  # noqa: E402

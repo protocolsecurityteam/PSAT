@@ -1,10 +1,7 @@
 import json
-import sys
 from pathlib import Path
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from schemas.contract_analysis import (
     ContractAnalysis,
@@ -13,7 +10,7 @@ from schemas.contract_analysis import (
 )
 from services.static import collect_contract_analysis
 
-FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures" / "contracts"
+FIXTURES_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "contracts"
 FIXTURE_INDEX_PATH = FIXTURES_DIR / "index.json"
 
 

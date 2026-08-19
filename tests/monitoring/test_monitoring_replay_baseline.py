@@ -32,7 +32,7 @@ from services.monitoring.salience import (
     SALIENCE_NOTABLE,
     SALIENCE_VALUES,
 )
-from tests.monitoring_replay import baseline_identities, build_replay, load_replay_fixture
+from tests.support.monitoring_replay import baseline_identities, build_replay, load_replay_fixture
 
 TRANSFER_TOPIC0 = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 GOV_TOKEN = "0xfe0c30065b384f05761f15d0cc899d4f9f9cc0eb"
@@ -111,7 +111,7 @@ def test_replay_reproduces_all_446_recorded_rows_when_every_spec_publishes(db_se
         for spec in contract["monitoring_config"].get("tracked_topics") or []:
             spec["witness_tier"] = WITNESS_TIER_SELF_DESCRIBING
 
-    from tests.monitoring_replay import ReplayEnv
+    from tests.support.monitoring_replay import ReplayEnv
 
     env = ReplayEnv(db_session, fixture).seed()
     env.run()
@@ -205,7 +205,7 @@ def test_every_replayed_publication_carries_an_auditable_salience(db_session):
         for spec in contract["monitoring_config"].get("tracked_topics") or []:
             spec["witness_tier"] = WITNESS_TIER_SELF_DESCRIBING
 
-    from tests.monitoring_replay import ReplayEnv
+    from tests.support.monitoring_replay import ReplayEnv
 
     env = ReplayEnv(db_session, fixture).seed()
     env.run()
@@ -253,7 +253,7 @@ def test_member_witness_qualification_republishes_the_transfers(db_session, open
                 if openness is not None:
                     spec["writer_openness"] = openness
 
-    from tests.monitoring_replay import ReplayEnv
+    from tests.support.monitoring_replay import ReplayEnv
 
     env = ReplayEnv(db_session, fixture).seed()
     env.run()

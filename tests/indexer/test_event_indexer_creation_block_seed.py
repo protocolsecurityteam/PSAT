@@ -14,15 +14,10 @@ before reaching its first real event. These tests pin that:
 
 from __future__ import annotations
 
-import sys
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
 from sqlalchemy import func, select  # noqa: E402
 
 from services.resolution.repos.event_logs_rpc import FetchedEventLog  # noqa: E402

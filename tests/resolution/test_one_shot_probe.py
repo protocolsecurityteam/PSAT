@@ -11,11 +11,6 @@ exists to kill).
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
 from eth_utils.crypto import keccak  # noqa: E402
 
 from services.resolution.one_shot_probe import (  # noqa: E402

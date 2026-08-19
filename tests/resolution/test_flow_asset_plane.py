@@ -21,16 +21,12 @@ data at the same height while ``getTokenOut()`` answered.
 
 from __future__ import annotations
 
-import sys
 import uuid
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from services.resolution import flow_asset_plane as fap  # noqa: E402
 from services.resolution.role_holder_plane import ProbeBlock  # noqa: E402

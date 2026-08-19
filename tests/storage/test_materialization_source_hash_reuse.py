@@ -14,13 +14,9 @@ new deployment's row instead of paying the forge+Slither build again. State
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from typing import Any
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from db import contract_materializations as cm  # noqa: E402
 from db.contract_materializations import ANALYSIS_SCHEMA_VERSION  # noqa: E402

@@ -9,15 +9,10 @@ lands at the proxy seeded at creation-1.
 
 from __future__ import annotations
 
-import sys
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, cast
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
 from sqlalchemy import func, select  # noqa: E402
 
 import services.resolution.role_store_standards as rss  # noqa: E402

@@ -15,12 +15,8 @@ stubbed, matching the on-chain log shapes of the audited run.
 from __future__ import annotations
 
 import asyncio
-import sys
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import services.resolution.mapping_enumerator as mapping_enumerator  # noqa: E402
 from services.resolution.adapters import AdapterRegistry, EvaluationContext  # noqa: E402

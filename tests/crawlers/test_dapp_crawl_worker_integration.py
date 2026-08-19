@@ -17,7 +17,6 @@ import sys
 import threading
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 from types import ModuleType
 from unittest.mock import MagicMock
 from urllib.request import urlopen
@@ -25,8 +24,6 @@ from urllib.request import urlopen
 import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from db.models import Base, Contract, DAppInteraction, Job, JobStage, JobStatus, Protocol
 from db.queue import create_job, get_artifact

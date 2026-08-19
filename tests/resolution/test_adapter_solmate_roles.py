@@ -19,11 +19,8 @@ fall back to a heuristic.
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 from types import SimpleNamespace
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from services.resolution.adapters import AdapterRegistry, CallFrame, EvaluationContext  # noqa: E402
 from services.resolution.adapters.event_indexed import EventIndexedAdapter  # noqa: E402
@@ -35,7 +32,7 @@ from services.resolution.adapters.solmate_roles import (  # noqa: E402
 )
 from services.resolution.capabilities import CapabilityExpr  # noqa: E402
 
-FIXTURE = Path(__file__).resolve().parent / "fixtures" / "solmate" / "roles_authority_3994741a.json"
+FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "solmate" / "roles_authority_3994741a.json"
 SAFE_4_6 = "0xcea8039076e35a825854c5c2f85659430b06ec96"
 PAUSE = "0x8456cb59"
 ADD_ASSET = "0x298410e5"

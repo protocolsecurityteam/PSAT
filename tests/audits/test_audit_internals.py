@@ -23,11 +23,6 @@ the text-extraction orchestrator). No DB, no HTTP, no object storage.
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
 from services.audits.text_extraction import (
     ExtractionOutcome,
     PdfDownloadError,

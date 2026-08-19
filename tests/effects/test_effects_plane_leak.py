@@ -15,16 +15,12 @@ value crossing between two deployments.
 
 from __future__ import annotations
 
-import sys
 import uuid
 from decimal import Decimal
-from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from db.models import (  # noqa: E402
     Contract,

@@ -9,15 +9,11 @@ build breaks — a much louder failure than a silent data drift.
 
 from __future__ import annotations
 
-import sys
 import uuid
-from pathlib import Path
 
 import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import InternalError, ProgrammingError
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tests.conftest import requires_postgres  # noqa: E402
 

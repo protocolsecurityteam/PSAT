@@ -40,7 +40,7 @@ CONTRACT = "0x" + "11" * 20
 PRINCIPAL = "0x" + "22" * 20
 CTX = SimContext(chain_id=1, block=1, hardfork="prague")
 
-FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "effects" / "pausable_fixture.json").read_text())
+FIXTURE = json.loads((Path(__file__).parents[1] / "fixtures" / "effects" / "pausable_fixture.json").read_text())
 
 
 def _entry_points():

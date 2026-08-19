@@ -15,18 +15,13 @@ Focuses on:
 
 from __future__ import annotations
 
-import sys
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
 from sqlalchemy import text
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
 
 # ---------------------------------------------------------------------------
 # Helpers

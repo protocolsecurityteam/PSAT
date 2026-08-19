@@ -12,17 +12,13 @@ write → row metadata → read → presigned URL → API redirect.
 from __future__ import annotations
 
 import json
-import sys
 import urllib.request
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tests.cache_helpers import requires_postgres  # noqa: E402
 from tests.conftest import SessionFactory, requires_storage  # noqa: E402

@@ -11,16 +11,11 @@ Pure unit tests — no DB queries, no Discord posts.
 
 from __future__ import annotations
 
-import sys
 import types
 import uuid
-from pathlib import Path
 from typing import Any, cast
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
 from sqlalchemy.orm import Session
 
 from db.models import MonitoredEvent

@@ -6,13 +6,8 @@ a hostile payload cannot reach a downstream link, fetch, or scan filter.
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import pytest
 from pydantic import ValidationError
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from schemas.api_requests import (  # noqa: E402
     AddAuditRequest,

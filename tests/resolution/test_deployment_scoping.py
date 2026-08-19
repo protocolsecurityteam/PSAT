@@ -17,12 +17,8 @@ Covers the structural fix for proxy/impl authority under-resolution:
 
 from __future__ import annotations
 
-import sys
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tests.conftest import requires_postgres  # noqa: E402
 

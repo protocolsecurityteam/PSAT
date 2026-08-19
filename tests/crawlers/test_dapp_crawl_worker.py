@@ -13,14 +13,11 @@ from __future__ import annotations
 import importlib
 import sys
 import uuid
-from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from workers.base import JobHandledDirectly
 

@@ -2,11 +2,7 @@
 
 from __future__ import annotations
 
-import sys
 from datetime import datetime, timezone
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from db.queue import create_job, store_artifact  # noqa: E402
 from schemas.stage_errors import StageError, StageErrors  # noqa: E402

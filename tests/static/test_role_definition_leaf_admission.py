@@ -40,13 +40,10 @@ below pins the misclassification so the ban stays evidence-backed.
 
 from __future__ import annotations
 
-import sys
 import textwrap
 from pathlib import Path
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from services.static.contract_analysis_pipeline.summaries import (  # noqa: E402
     _role_names_from_predicate_trees,

@@ -9,13 +9,8 @@ Pure unit tests — no DB, no Anvil, no RPC.
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 from eth_abi.abi import encode as eth_abi_encode
 from eth_utils.crypto import keccak
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from services.discovery.upgrade_history import (
     ADMIN_CHANGED_TOPIC0,

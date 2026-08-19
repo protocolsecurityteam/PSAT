@@ -45,8 +45,8 @@ from services.effects.harness import SimContext
 from services.effects.selection import Candidate
 from services.effects.simulate import SimCall, eth_simulate_v1
 
-_FIXTURE = Path(__file__).parent / "fixtures" / "effects" / "vault_value_supply.json"
-_BATCH_FIXTURE = Path(__file__).parent / "fixtures" / "effects" / "batch_executor_vault.json"
+_FIXTURE = Path(__file__).parents[1] / "fixtures" / "effects" / "vault_value_supply.json"
+_BATCH_FIXTURE = Path(__file__).parents[1] / "fixtures" / "effects" / "batch_executor_vault.json"
 
 # Clear of every other anvil in the suite — see the module docstring.
 _PORT = 8560

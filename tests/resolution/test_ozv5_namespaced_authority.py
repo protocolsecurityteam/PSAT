@@ -52,7 +52,7 @@ OWNER_SELECTOR = "0x8da5cb5b"  # owner()
 # _getAccessControlDefaultAdminRulesStorage() — the dead private accessor selector.
 DEAD_ACCESSOR_SELECTOR = "0xce49c281"
 
-FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures" / "contracts" / "authority"
+FIXTURES_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "contracts" / "authority"
 
 
 # --------------------------------------------------------------------------

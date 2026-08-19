@@ -21,13 +21,9 @@ in the integration test, not here.
 
 from __future__ import annotations
 
-import sys
 import time
-from pathlib import Path
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from services.discovery.audit_reports import merge_audit_reports
 from services.discovery.audit_reports_llm import _parse_json_array, _parse_json_object

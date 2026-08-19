@@ -9,19 +9,16 @@ id token, and a row whose target key is already occupied is left on its stale ke
 from __future__ import annotations
 
 import importlib.util
-import sys
 from pathlib import Path
 
 import pytest
 from sqlalchemy import select
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
 from db.models import ContractMaterialization  # noqa: E402
 from tests.conftest import requires_postgres  # noqa: E402
 
 _MIG_PATH = (
-    Path(__file__).resolve().parents[1]
+    Path(__file__).resolve().parents[2]
     / "alembic"
     / "versions"
     / "a3f7c9d21e08_materialization_source_hash_and_chain_token.py"

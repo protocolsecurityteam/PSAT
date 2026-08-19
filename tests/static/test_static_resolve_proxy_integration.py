@@ -7,15 +7,11 @@ creation, deduplication, error handling, and the no-RPC fallback.
 
 from __future__ import annotations
 
-import sys
 import uuid
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from services.discovery.classifier import ClassificationIncompleteError
 from workers.static_worker import StaticWorker

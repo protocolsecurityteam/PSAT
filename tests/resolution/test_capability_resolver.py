@@ -7,10 +7,8 @@ serialized CapabilityExpr per function.
 
 from __future__ import annotations
 
-import sys
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 
 import pytest
 
@@ -19,8 +17,6 @@ from tests.conftest import _can_connect, requires_postgres
 
 # offline: no live owner()/governor() eth_call during predicate evaluation
 pytestmark = pytest.mark.usefixtures("_stub_live_authority")
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 @pytest.fixture

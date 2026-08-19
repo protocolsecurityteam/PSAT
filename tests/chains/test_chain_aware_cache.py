@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import uuid
 
-from cache_helpers import (
+from tests.cache_helpers import (
     ADDR_A,
     _sqlite_compatible_store_artifact,
     db_session,  # noqa: F401

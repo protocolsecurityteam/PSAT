@@ -20,18 +20,15 @@ Marker: offline (PostgreSQL via requires_postgres). No live hypersync.
 from __future__ import annotations
 
 import ast
-import sys
 from pathlib import Path
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from db import mapping_enumeration_cache as db_cache  # noqa: E402
 from db.models import MappingEnumerationCache  # noqa: E402
 from tests.conftest import requires_postgres  # noqa: E402
 
-_PRODUCER = Path(__file__).resolve().parents[1] / "services" / "resolution" / "mapping_enumerator.py"
+_PRODUCER = Path(__file__).resolve().parents[2] / "services" / "resolution" / "mapping_enumerator.py"
 
 # A floor, not the vocabulary. If the scraper below breaks (a refactor moves
 # the emissions into a helper, say) it would otherwise return an empty set and

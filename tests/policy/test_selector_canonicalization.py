@@ -22,15 +22,12 @@ selector, on real compiled Solidity.
 
 from __future__ import annotations
 
-import sys
 import tempfile
 import textwrap
 from pathlib import Path
 
 import pytest
 from eth_utils.crypto import keccak
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402

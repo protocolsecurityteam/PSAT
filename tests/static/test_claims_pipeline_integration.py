@@ -11,20 +11,17 @@ the solc binary + Postgres are external; nothing under test is faked.
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 pytest.importorskip("slither")
 
 from tests.conftest import requires_postgres  # noqa: E402
 from tests.support.foundry_project import write_foundry_project  # noqa: E402
 
-FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures" / "contracts"
+FIXTURES_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "contracts"
 
 
 def _has_deploy_claim(claims: object) -> bool:

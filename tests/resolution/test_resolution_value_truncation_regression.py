@@ -26,15 +26,11 @@ against the live ``VARCHAR(66)`` constraint), so they're marked offline-safe via
 from __future__ import annotations
 
 import os
-import sys
-from pathlib import Path
 
 import pytest
 from eth_abi.abi import encode
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from db.models import Artifact, Contract, ControllerValue, Job, JobDependency, JobStage, JobStatus  # noqa: E402
 from db.queue import create_job  # noqa: E402

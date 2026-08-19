@@ -30,12 +30,7 @@ Branches covered (each tested in batched and sequential mode):
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from services.resolution import tracking
 from services.resolution.tracking import (

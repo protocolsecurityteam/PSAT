@@ -9,15 +9,11 @@ from __future__ import annotations
 import asyncio
 import importlib
 import secrets
-import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 from urllib.parse import urlparse
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 def _random_address() -> str:

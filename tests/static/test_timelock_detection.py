@@ -20,14 +20,11 @@ value lives. A defaulted delay would fabricate a protective credit.
 
 from __future__ import annotations
 
-import sys
 import textwrap
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 pytest.importorskip("slither")
 from slither import Slither  # noqa: E402

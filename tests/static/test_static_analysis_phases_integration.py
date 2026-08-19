@@ -11,12 +11,8 @@ here.
 from __future__ import annotations
 
 import json
-import sys
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from workers.static_worker import StaticWorker
 

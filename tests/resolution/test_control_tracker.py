@@ -1,9 +1,5 @@
-import sys
 import threading
-from pathlib import Path
 from typing import Any
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pytest
 from eth_abi.abi import encode

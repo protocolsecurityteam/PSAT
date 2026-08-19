@@ -5,15 +5,12 @@ Covers the bridge from week-2 (predicate builder) through week-3
 
 from __future__ import annotations
 
-import sys
 import textwrap
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402

@@ -10,12 +10,7 @@ minted implementation address). Mirrors the discipline of
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from services.resolution import tracking
 from services.resolution.tracking import _PROBE_ERROR, _read_erc1967_implementation

@@ -18,14 +18,10 @@ one-element list — a two-module Safe would otherwise be published as having on
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from typing import cast
 
 import pytest
 from eth_utils.crypto import keccak
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from services.resolution import tracking  # noqa: E402
 from services.resolution.tracking import (  # noqa: E402

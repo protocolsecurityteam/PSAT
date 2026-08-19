@@ -30,19 +30,15 @@ offline tier still runs the unit subset.
 
 from __future__ import annotations
 
-import sys
 import threading
 import time
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
 import pytest
 from sqlalchemy import text
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from db import contract_materializations as cm  # noqa: E402
 from db.models import ContractMaterialization  # noqa: E402

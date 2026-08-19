@@ -9,9 +9,8 @@ from __future__ import annotations
 
 from unittest.mock import call, patch
 
-from conftest import ADDR
-
 from services.monitoring.proxy_watcher import resolve_current_implementation
+from tests.conftest import ADDR
 
 EIP1967_IMPL_SLOT = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc"
 

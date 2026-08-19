@@ -18,7 +18,7 @@ from tests.conftest import DATABASE_URL, requires_postgres
 
 
 def _script_dir() -> ScriptDirectory:
-    repo_root = Path(__file__).resolve().parents[1]
+    repo_root = Path(__file__).resolve().parents[2]
     cfg = Config(str(repo_root / "alembic.ini"))
     cfg.set_main_option("script_location", str(repo_root / "alembic"))
     return ScriptDirectory.from_config(cfg)

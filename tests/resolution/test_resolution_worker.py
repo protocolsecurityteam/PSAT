@@ -2,16 +2,12 @@
 
 from __future__ import annotations
 
-import sys
 import uuid
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from db.models import ContractBalance, ContractBalanceFetch
 from tests.conftest import DATABASE_URL as _DB_URL  # noqa: E402

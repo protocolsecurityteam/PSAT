@@ -28,14 +28,10 @@ would be indistinguishable from the defect.
 
 from __future__ import annotations
 
-import sys
 import uuid
-from pathlib import Path
 from typing import Any
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from db.models import (  # noqa: E402
     EDGE_RELATION_CAPABILITY_PRINCIPAL,

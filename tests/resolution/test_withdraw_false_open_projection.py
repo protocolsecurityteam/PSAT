@@ -23,13 +23,10 @@ Ground truth (RolesAuthority ``0x3994741a`` @ block 25383512, ``isCapabilityPubl
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from services.policy.capability_surface import (  # noqa: E402
     capability_surface_status,
@@ -42,7 +39,7 @@ from services.resolution.adapters.solmate_roles import (  # noqa: E402
 )
 from services.resolution.capability_resolver import capability_to_dict  # noqa: E402
 
-FIXTURE = Path(__file__).resolve().parent / "fixtures" / "solmate" / "roles_authority_3994741a.json"
+FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "solmate" / "roles_authority_3994741a.json"
 # The LayerZeroTeller deployment governed by RolesAuthority 0x3994741a whose
 # ``withdraw`` is the audited false-open; PublicCapabilityUpdated keys to it.
 TELLER_TARGET = "0x35dd2463fa7a335b721400c5ad8ba40bd85c179b"

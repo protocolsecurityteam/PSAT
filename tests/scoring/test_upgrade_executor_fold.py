@@ -45,7 +45,7 @@ from services.discovery import upgrade_history as uh
 from services.monitoring.event_topics import CALL_EXECUTED_TOPIC0, EXECUTION_SUCCESS_TOPIC0
 
 _FIXTURES = json.loads(
-    (Path(__file__).parent / "fixtures" / "upgrade_receipts" / "protocol1_receipts.json").read_text()
+    (Path(__file__).parents[1] / "fixtures" / "upgrade_receipts" / "protocol1_receipts.json").read_text()
 )
 
 # --- the real measured transactions -----------------------------------------

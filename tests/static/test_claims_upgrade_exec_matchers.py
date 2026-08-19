@@ -25,7 +25,7 @@ pytest.importorskip("slither")
 from services.static.claims import build_claims  # noqa: E402
 from tests.support.foundry_project import write_foundry_project  # noqa: E402
 
-FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures" / "contracts" / "claims_upgrade_exec"
+FIXTURES_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "contracts" / "claims_upgrade_exec"
 
 # The claim families this task owns. Other matcher modules share the registry,
 # so every assertion scopes to these ids (a sibling ownership/authorized_caller

@@ -66,7 +66,7 @@ from services.effects.harness import SimContext  # noqa: E402
 from services.resolution.differential_probe import _parse_arg_types  # noqa: E402
 from services.static.contract_analysis_pipeline.token_slots import derive_token_slots  # noqa: E402
 
-_FIXTURE_DIR = Path(__file__).parent / "fixtures" / "effects"
+_FIXTURE_DIR = Path(__file__).parents[1] / "fixtures" / "effects"
 
 _TRANSFER_FROM = "transferFrom(address,address,uint256)"
 _PAUSE = "pause()"

@@ -7,13 +7,10 @@ from __future__ import annotations
 
 import sys
 import threading
-from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 import requests
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from utils import rpc as rpc_mod
 

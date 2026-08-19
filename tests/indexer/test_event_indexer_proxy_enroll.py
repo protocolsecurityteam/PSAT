@@ -18,16 +18,11 @@ routes the fallback through the same ``runtime_addr`` the resolver uses
 
 from __future__ import annotations
 
-import sys
 from datetime import datetime, timezone
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
 from eth_utils.crypto import keccak  # noqa: E402
 from sqlalchemy import func, select  # noqa: E402
 

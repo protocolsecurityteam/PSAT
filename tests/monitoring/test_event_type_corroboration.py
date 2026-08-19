@@ -11,13 +11,9 @@ initializer slots (published ``initialized`` before the gate).
 
 from __future__ import annotations
 
-import sys
 import uuid
-from pathlib import Path
 
 from eth_utils.crypto import keccak
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from services.monitoring.event_topics import (  # noqa: E402
     _event_corroborates,

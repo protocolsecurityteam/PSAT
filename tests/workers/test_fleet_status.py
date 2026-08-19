@@ -8,18 +8,14 @@ reconciler and event-log indexer.
 
 from __future__ import annotations
 
-import sys
 import time
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from threading import Event, Lock, Thread
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from db.models import (
     AuditContractCoverage,

@@ -22,15 +22,11 @@ from __future__ import annotations
 
 import logging
 import signal as _signal
-import sys
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from workers import audit_row_worker as arw_module  # noqa: E402
 from workers.audit_row_worker import AuditRowWorker  # noqa: E402

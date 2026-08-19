@@ -15,14 +15,11 @@ from __future__ import annotations
 
 import logging
 import subprocess
-import sys
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from services.effects import anvil as anvil_mod  # noqa: E402
 from services.effects import calldata as calldata_mod  # noqa: E402

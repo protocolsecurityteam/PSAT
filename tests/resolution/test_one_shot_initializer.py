@@ -23,14 +23,10 @@ separately (``test_one_shot_probe``) with a stubbed wire.
 
 from __future__ import annotations
 
-import sys
 import textwrap
-from pathlib import Path
 from typing import Any
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 slither = pytest.importorskip("slither")
 from eth_utils.crypto import keccak  # noqa: E402

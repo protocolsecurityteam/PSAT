@@ -20,7 +20,7 @@ AUTHORITY = "0x" + "aa" * 20
 TARGET = "0x" + "bb" * 20
 USER = "0x" + "cc" * 20
 SELECTOR = "0x12345678"
-_SOLMATE_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "solmate"
+_SOLMATE_FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "solmate"
 
 
 def _topic(signature: str) -> str:

@@ -12,14 +12,10 @@ stub ``requests.get`` and ``utils.etherscan.get`` at module scope.
 from __future__ import annotations
 
 import hashlib
-import sys
-from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 import requests
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from services.audits import source_equivalence  # noqa: E402
 from services.audits.source_equivalence import (  # noqa: E402

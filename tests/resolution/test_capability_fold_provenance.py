@@ -21,11 +21,6 @@ The three rules under test, each with its own failure mode:
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
 from services.resolution.capabilities import (  # noqa: E402
     CapabilityExpr,
     Condition,

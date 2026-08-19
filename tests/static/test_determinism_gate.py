@@ -33,7 +33,7 @@ import pytest
 
 pytest.importorskip("slither")
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[2]
 PROBE = REPO / "scripts" / "determinism_probe_taint.py"
 GATE = REPO / "scripts" / "determinism_gate.sh"
 

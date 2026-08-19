@@ -303,7 +303,7 @@ def test_start_local_launches_each_monitor_loop_exactly_once():
     so the poller and TVL loops each had two live instances — the TVL loop has no
     daemon lease, so both instances ran the full scan.
     """
-    root = pathlib.Path(__file__).resolve().parents[1]
+    root = pathlib.Path(__file__).resolve().parents[2]
     launched = _monitor_launch_flags((root / "start_local.sh").read_text())
 
     assert launched == ["default"], f"start_local.sh must launch default mode alone, got {launched}"

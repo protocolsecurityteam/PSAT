@@ -28,8 +28,6 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
 slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
 
@@ -995,7 +993,7 @@ def _digests_under_seed(seed: str) -> list[str]:
     import os
     import subprocess
 
-    repo = str(Path(__file__).resolve().parents[1])
+    repo = str(Path(__file__).resolve().parents[2])
     env = dict(os.environ, PYTHONHASHSEED=seed)
     out = subprocess.run(
         [sys.executable, "-c", _DIGEST_SNIPPET.format(repo=repo)],
@@ -1027,7 +1025,7 @@ def test_operand_tie_break_is_seed_independent():
     import os
     import subprocess
 
-    repo = str(Path(__file__).resolve().parents[1])
+    repo = str(Path(__file__).resolve().parents[2])
     snippet = """
 import sys
 sys.path.insert(0, {repo!r})

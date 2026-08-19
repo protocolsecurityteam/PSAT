@@ -198,7 +198,7 @@ def test_check_constraint_allows_address_with_chain_id(session):
 
 
 def _load_migration():
-    path = Path(__file__).resolve().parents[1] / "alembic" / "versions" / "f3a9c1d47b02_add_chain_id_to_jobs.py"
+    path = Path(__file__).resolve().parents[2] / "alembic" / "versions" / "f3a9c1d47b02_add_chain_id_to_jobs.py"
     spec = importlib.util.spec_from_file_location("_mig_chain_id", path)
     assert spec and spec.loader
     mod = importlib.util.module_from_spec(spec)

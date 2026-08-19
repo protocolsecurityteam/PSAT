@@ -10,15 +10,11 @@ from __future__ import annotations
 
 import copy
 import inspect
-import sys
 import uuid
-from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from db.models import Contract, EffectiveFunction, FunctionPrincipal, Protocol  # noqa: E402
 from db.queue import create_job, store_artifact  # noqa: E402

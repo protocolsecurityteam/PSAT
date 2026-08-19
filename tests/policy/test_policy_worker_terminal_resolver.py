@@ -2,11 +2,6 @@
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
 from workers.policy_worker import _make_terminal_controller_resolver
 
 CONTRACT = "0x" + "1" * 40

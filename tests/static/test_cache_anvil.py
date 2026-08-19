@@ -14,7 +14,8 @@ import subprocess
 import time as _time
 
 import pytest
-from cache_helpers import db_session, requires_postgres  # noqa: F401
+
+from tests.cache_helpers import db_session, requires_postgres  # noqa: F401
 
 _HAS_ANVIL = shutil.which("anvil") is not None
 

@@ -4,11 +4,6 @@ Covers the pure recognizer, its wiring into ``build_principal_labels`` and the
 FunctionPrincipal type resolver, and the mainnet byte-identity guarantee.
 """
 
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
 import pytest
 
 from services.policy.principal_enrichment import build_principal_labels

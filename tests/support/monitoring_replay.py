@@ -26,7 +26,7 @@ from db.models import Contract, MonitoredContract, MonitoredEvent, Protocol
 from services.monitoring.unified_watcher import _Cohort, _process_window
 from services.resolution.repos.event_logs_rpc import _decode_log
 
-FIXTURE_PATH = Path(__file__).resolve().parent / "fixtures" / "monitoring" / "replay_scan_window.json.gz"
+FIXTURE_PATH = Path(__file__).resolve().parents[1] / "fixtures" / "monitoring" / "replay_scan_window.json.gz"
 
 
 def load_replay_fixture() -> dict[str, Any]:

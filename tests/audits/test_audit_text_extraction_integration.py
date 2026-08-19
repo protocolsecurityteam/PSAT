@@ -17,15 +17,11 @@ suite runs there unconditionally.
 
 from __future__ import annotations
 
-import sys
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 from sqlalchemy import select
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tests.conftest import SessionFactory, requires_postgres, requires_storage  # noqa: E402
 from tests.support.pdf import minimal_pdf_with_text  # noqa: E402

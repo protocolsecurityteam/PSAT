@@ -19,12 +19,7 @@ production code under test.
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import services.resolution.repos.event_logs_rpc as event_logs_rpc  # noqa: E402
 from services.monitoring.event_topics import (  # noqa: E402

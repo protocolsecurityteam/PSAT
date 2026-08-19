@@ -259,10 +259,10 @@ def test_no_module_outside_the_plane_imports_the_position_model():
     no ``contracts`` row. That invisibility stops being structural the moment
     something else reads the model, so the import surface is asserted here.
     """
-    root = pathlib.Path(__file__).resolve().parents[1]
+    root = pathlib.Path(__file__).resolve().parents[2]
     allowed = {
         root / "db" / "models.py",
-        root / "tests" / "test_restaking_position.py",
+        root / "tests" / "monitoring" / "test_restaking_position.py",
         root / "services" / "monitoring" / "restaking_reads.py",
         root / "services" / "monitoring" / "restaking_enrollment.py",
         # The scorer's value plane: SCORER_INTEGRATION_STRATEGY §7.1 rules that

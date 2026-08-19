@@ -31,13 +31,10 @@ parametric principal — see todo.txt #7's deferred fix block.
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from services.static import collect_contract_analysis  # noqa: E402
 

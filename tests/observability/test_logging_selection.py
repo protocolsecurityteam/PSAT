@@ -20,15 +20,11 @@ else runs against the real worker + a real Postgres session.
 from __future__ import annotations
 
 import logging
-import sys
 import time
 import uuid
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tests.conftest import requires_postgres  # noqa: E402
 from utils.logging import bind_trace_context, stage_metrics_var  # noqa: E402

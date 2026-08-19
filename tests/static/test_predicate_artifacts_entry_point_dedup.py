@@ -34,15 +34,12 @@ asserts breaks before the next live test pays a 17-minute static stage.
 
 from __future__ import annotations
 
-import sys
 import textwrap
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402

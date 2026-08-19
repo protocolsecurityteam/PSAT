@@ -11,14 +11,9 @@ These tests are designed to FAIL on the buggy code and PASS after fixes.
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from cache_helpers import (  # noqa: E402
+from tests.cache_helpers import (  # noqa: E402
     ADDR_A,
     IMPL_ADDR,
     _create_source_job_with_proxy,

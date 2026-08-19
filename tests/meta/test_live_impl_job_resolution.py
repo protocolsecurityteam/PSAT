@@ -25,12 +25,8 @@ does not tag these as live.
 
 from __future__ import annotations
 
-import sys
 import time
-from pathlib import Path
 from typing import Any
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tests.support.live_helpers import _resolve_impl_job  # noqa: E402
 

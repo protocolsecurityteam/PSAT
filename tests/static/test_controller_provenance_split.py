@@ -17,14 +17,11 @@ including the proven gate, and no control edge is demoted.
 
 from __future__ import annotations
 
-import sys
 import textwrap
 from pathlib import Path
 from typing import Any
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402

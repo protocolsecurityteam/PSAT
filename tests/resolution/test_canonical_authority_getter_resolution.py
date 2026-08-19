@@ -51,7 +51,7 @@ GOVERNOR_SELECTOR = "0x0c340a24"  # governor()
 INTERNAL_GOVERNOR_SELECTOR = "0x95260843"  # _governor()
 OWNER_SLOT_SELECTOR = "0x12f93717"  # _OWNER_SLOT()
 
-FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures" / "contracts" / "authority"
+FIXTURES_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "contracts" / "authority"
 
 
 # --------------------------------------------------------------------------

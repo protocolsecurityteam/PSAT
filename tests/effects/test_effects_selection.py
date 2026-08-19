@@ -1137,7 +1137,7 @@ def test_reachable_value_is_identical_across_processes():
     import subprocess
     import sys
 
-    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     prog = (
         "import sys; sys.path.insert(0, %r)\n"
         "from services.effects.selection import AuthorityGraph\n"

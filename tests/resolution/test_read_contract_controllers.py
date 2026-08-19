@@ -5,11 +5,6 @@ control planes. Stubs the eth_call layer, never the transport."""
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
 from services.resolution import tracking
 from services.resolution.tracking import read_contract_controllers
 from utils.rpc import EthCallResult, selector

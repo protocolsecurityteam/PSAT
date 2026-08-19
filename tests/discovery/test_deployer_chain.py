@@ -7,11 +7,6 @@ default. Name resolution still routes through the shared
 ``resolve_names=False`` to isolate the chain-threaded wire calls.
 """
 
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
 from services.discovery import deployer
 
 _SEEDS = ["0x" + f"{n:040x}" for n in (0x11, 0x22, 0x33)]

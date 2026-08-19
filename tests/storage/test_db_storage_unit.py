@@ -9,11 +9,7 @@ failures as ``None`` rather than raising, so a flaky bucket can't take down
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from unittest.mock import MagicMock, patch
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pytest  # noqa: E402
 

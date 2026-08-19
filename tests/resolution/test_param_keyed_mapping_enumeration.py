@@ -48,7 +48,7 @@ CONTRACT = "0x" + "11" * 20
 R1 = "0x" + "a1" * 20
 R2 = "0x" + "b2" * 20
 
-FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures" / "contracts" / "authority"
+FIXTURES_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "contracts" / "authority"
 
 # The value-enumeration writer spec the static post-pass attaches for ``receivers``
 # (ReceiverSet(uint32 indexed originEid, address receiver) — key indexed in topic1,

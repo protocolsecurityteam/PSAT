@@ -15,16 +15,12 @@ unit-tested in ``tests/test_cross_contract_effects.py``.
 
 from __future__ import annotations
 
-import sys
 import uuid
-from pathlib import Path
 from typing import Any
 
 import pytest
 from eth_utils.crypto import keccak
 from sqlalchemy.orm import sessionmaker
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from db.models import Contract, EffectiveFunction, Job, JobStage, JobStatus
 from db.queue import store_artifact

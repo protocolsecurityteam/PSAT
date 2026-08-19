@@ -24,13 +24,9 @@ copied out of storage, a collection-typed receiver — never a named protocol.
 
 from __future__ import annotations
 
-import sys
 import textwrap
-from pathlib import Path
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 pytest.importorskip("slither")
 from eth_utils.crypto import keccak  # noqa: E402

@@ -19,14 +19,11 @@ against its own empty storage and rendered as an ownerless orphan.
 
 from __future__ import annotations
 
-import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from services.discovery.secondary_impl import (  # noqa: E402
     _address_from_storage_word,
@@ -52,7 +49,7 @@ def _compile(tmp_path, src: str, name: str):
 # Real on-chain contract data: ether.fi LRTSquaredCore (0x1cb489ef…) verified
 # source, fetched from Etherscan and saved as a repo-owned fixture (immune to
 # upstream rot, no network at test time).
-_LRT_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "contracts" / "lrtsquared_core.json"
+_LRT_FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "contracts" / "lrtsquared_core.json"
 
 
 def _analyze_real_contract(tmp_path, fixture: dict):

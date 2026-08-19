@@ -25,11 +25,7 @@ dispatch will run instead of being preempted.
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from types import SimpleNamespace
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import db.queue as DQ  # noqa: E402
 from services.resolution import capability_resolver as CR  # noqa: E402

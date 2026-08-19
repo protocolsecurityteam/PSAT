@@ -1,10 +1,5 @@
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
 from services.discovery.fetch import _detect_solc_version as detect_fetch_solc
 from workers.static_worker import _detect_solc_version as detect_static_solc
 

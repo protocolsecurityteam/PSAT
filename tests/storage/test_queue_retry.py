@@ -14,14 +14,10 @@ unset.
 
 from __future__ import annotations
 
-import sys
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 import pytest
 from sqlalchemy import text
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from db.models import Artifact, Job, JobStage, JobStatus  # noqa: E402
 from db.queue import (  # noqa: E402

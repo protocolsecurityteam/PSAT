@@ -8,13 +8,9 @@ struct whose members are not word-projectable, an ambiguous correspondence.
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from services.monitoring.event_topics import (  # noqa: E402
     MAX_EVENT_TYPE_LENGTH,

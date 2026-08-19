@@ -6,12 +6,7 @@ admin-key, status checks, and the artifact append are exercised end to end.
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from db.models import Artifact, Job, JobStatus  # noqa: E402
 from db.queue import create_job, fail_job_terminal  # noqa: E402

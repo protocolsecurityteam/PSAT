@@ -11,15 +11,11 @@ divergence; stub the network helpers directly.
 from __future__ import annotations
 
 import hashlib
-import sys
 import uuid
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 import pytest
 from sqlalchemy import select
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tests.conftest import requires_postgres  # noqa: E402
 

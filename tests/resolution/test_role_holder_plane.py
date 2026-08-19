@@ -18,14 +18,9 @@ re-verified on-chain at block 25643300 (20 protocol-1 probes, 20 agreeing).
 from __future__ import annotations
 
 import json
-import sys
-from pathlib import Path
 from typing import Any
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
 from eth_utils.crypto import keccak  # noqa: E402
 from sqlalchemy import text  # noqa: E402
 from sqlalchemy.exc import IntegrityError  # noqa: E402

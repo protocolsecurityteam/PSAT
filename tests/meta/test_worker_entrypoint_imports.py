@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-_ROOT = Path(__file__).resolve().parents[1]
+_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _import_in_fresh_interpreter(module: str) -> None:

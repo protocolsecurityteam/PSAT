@@ -27,15 +27,11 @@ real materializations table).
 from __future__ import annotations
 
 import json
-import sys
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from db import contract_materializations as cm  # noqa: E402
 from db.models import ContractMaterialization  # noqa: E402

@@ -1,15 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-import sys
 from collections.abc import Sequence
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from services.resolution import mapping_enumerator  # noqa: E402
 from services.resolution.mapping_enumerator import (  # noqa: E402

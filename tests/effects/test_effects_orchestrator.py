@@ -13,12 +13,8 @@ UpgradeEvent) and execute the returned plan's ``run`` — no anvil, no RPC.
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from db.models import Contract  # noqa: E402
 from services.effects.config import (  # noqa: E402

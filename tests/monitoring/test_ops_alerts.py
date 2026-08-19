@@ -11,15 +11,11 @@ lag ("behind") alert with its own dedupe key.
 
 from __future__ import annotations
 
-import sys
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from sqlalchemy.orm import Session as SASession
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from db.models import IndexedEventCursor, MonitoredContract, WorkerHeartbeat
 from db.queue import HEARTBEAT_PROTOCOL_POLLER, HEARTBEAT_PROTOCOL_SCANNER

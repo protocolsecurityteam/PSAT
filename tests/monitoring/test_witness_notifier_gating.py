@@ -197,7 +197,7 @@ def test_the_known_group_vocabulary_mirrors_the_frontend_table():
 
     from services.monitoring.notifier import _KNOWN_FILTER_GROUPS
 
-    meta = Path(__file__).resolve().parents[1] / "site" / "src" / "surface" / "meta.js"
+    meta = Path(__file__).resolve().parents[2] / "site" / "src" / "surface" / "meta.js"
     table = re.search(r"MONITOR_ALERT_GROUPS = \[(.*?)\n\];", meta.read_text(), re.S)
     assert table is not None
     assert set(re.findall(r'key:\s*"([^"]+)"', table.group(1))) == set(_KNOWN_FILTER_GROUPS)

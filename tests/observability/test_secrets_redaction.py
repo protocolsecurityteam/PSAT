@@ -8,15 +8,11 @@ mocked SessionLocal rather than a live Postgres.
 
 from __future__ import annotations
 
-import sys
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from utils.secrets import sanitize_obj, sanitize_string, sanitize_url
 

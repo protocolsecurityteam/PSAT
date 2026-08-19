@@ -5,7 +5,8 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import pytest
-from cache_helpers import (
+
+from tests.cache_helpers import (
     ADDR_A,
     IMPL_ADDR,
     IMPL_ADDR_NEW,

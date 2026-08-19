@@ -19,14 +19,11 @@ docker isn't running.
 
 from __future__ import annotations
 
-import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tests.conftest import SessionFactory, requires_postgres, requires_storage  # noqa: E402
 
@@ -38,7 +35,7 @@ pytestmark = [
 ]
 
 
-FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "scope_extraction"
+FIXTURE_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "scope_extraction"
 AUDITS_DIR = FIXTURE_DIR / "audits"
 STUB_DIR = FIXTURE_DIR / "llm_responses"
 

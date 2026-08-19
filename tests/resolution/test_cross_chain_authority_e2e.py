@@ -26,11 +26,6 @@ documented trigger), so the alias resolves; strip it from scope and the label
 must vanish (guarded in ``tests/test_cross_chain_authority.py``).
 """
 
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
 from types import SimpleNamespace
 from typing import Any
 

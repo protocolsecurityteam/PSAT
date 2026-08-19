@@ -15,13 +15,9 @@ DB-backed (real Postgres), offline-safe.
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from typing import Any
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from db import effect_cache  # noqa: E402
 from db.effect_cache import record_effect_verdict, upsert_cached_verdict  # noqa: E402

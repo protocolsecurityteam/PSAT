@@ -14,7 +14,8 @@ from contextlib import contextmanager
 from unittest.mock import patch
 
 import pytest
-from conftest import requires_postgres
+
+from tests.conftest import requires_postgres
 
 pytestmark = requires_postgres
 

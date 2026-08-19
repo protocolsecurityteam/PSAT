@@ -1,9 +1,5 @@
 import json
-import sys
 from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
 from typing import cast
 
 from schemas.contract_analysis import ContractAnalysis
@@ -11,7 +7,7 @@ from schemas.control_tracking import ControlTrackingPlan, TrackedController
 from services.resolution.tracking_plan import build_control_tracking_plan
 from services.static import collect_contract_analysis
 
-FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures" / "contracts"
+FIXTURES_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "contracts"
 
 
 def _write_project(tmp_path: Path, contract_name: str, source_code: str) -> Path:

@@ -3,14 +3,10 @@
 from __future__ import annotations
 
 import os
-import sys
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from db.models import Protocol
 from db.queue import get_or_create_protocol

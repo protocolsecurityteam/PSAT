@@ -18,15 +18,10 @@ fails here instead of silently in prod.
 
 from __future__ import annotations
 
-import sys
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Sequence
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
 from sqlalchemy import delete, func, select, update  # noqa: E402
 
 from services.resolution.repos.event_logs_rpc import FetchedEventLog  # noqa: E402

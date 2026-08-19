@@ -17,13 +17,9 @@ bleed). No data backfill — reads keep the NULL≡mainnet convention.
 
 from __future__ import annotations
 
-import sys
 import uuid
-from pathlib import Path
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tests.conftest import requires_postgres  # noqa: E402
 
@@ -164,9 +160,8 @@ def test_static_cache_hit_on_legacy_null_chain_contract(db_session):
     """A completed job (chain_id=1) whose Contract row was persisted
     ``chain=NULL`` (legacy) is now a mainnet cache hit; the raw
     ``Contract.chain == 'ethereum'`` predicate previously missed it."""
-    from cache_helpers import ADDR_A, _create_completed_job_with_static_data
-
     from db.queue import find_completed_static_cache
+    from tests.cache_helpers import ADDR_A, _create_completed_job_with_static_data
 
     job = _create_completed_job_with_static_data(db_session)  # Contract.chain is NULL
     found = find_completed_static_cache(db_session, ADDR_A, chain="ethereum")
@@ -177,9 +172,8 @@ def test_static_cache_hit_on_legacy_null_chain_contract(db_session):
 @requires_postgres
 def test_static_cache_miss_for_l2_against_legacy_null_contract(db_session):
     """The same legacy mainnet cache must not answer a Base request."""
-    from cache_helpers import ADDR_A, _create_completed_job_with_static_data
-
     from db.queue import find_completed_static_cache
+    from tests.cache_helpers import ADDR_A, _create_completed_job_with_static_data
 
     _create_completed_job_with_static_data(db_session)  # mainnet (chain_id=1) job + NULL Contract
     found = find_completed_static_cache(db_session, ADDR_A, chain="base")
@@ -230,10 +224,9 @@ def test_copy_static_cache_matches_legacy_null_source_row(db_session):
     With the source request on mainnet but the row persisted ``chain=NULL``,
     the coalesced predicate finds it; the raw equality previously returned
     None and the copy silently produced nothing."""
-    from cache_helpers import ADDR_A
-
     from db.models import Contract
     from db.queue import copy_static_cache, create_job
+    from tests.cache_helpers import ADDR_A
 
     src_job = _completed_source_with_null_contract(db_session, ADDR_A, "ethereum")
     target_job = create_job(db_session, {"address": ADDR_A, "chain": "ethereum", "name": "Target"})

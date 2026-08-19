@@ -203,13 +203,13 @@ def _enforced_paths(repo_root: Path) -> list[str]:
 
 def test_service_globs_still_match_files() -> None:
     """A renamed package would empty a glob and silently drop the perimeter."""
-    repo_root = Path(__file__).parent.parent
+    repo_root = Path(__file__).resolve().parents[2]
     empty = [pattern for pattern in PIPELINE_SERVICE_GLOBS if not list(repo_root.glob(pattern))]
     assert not empty, "PIPELINE_SERVICE_GLOBS entries match nothing: " + ", ".join(empty)
 
 
 def test_warning_in_swallowed_except_pairs_with_record_degraded() -> None:
-    repo_root = Path(__file__).parent.parent
+    repo_root = Path(__file__).resolve().parents[2]
     failures: list[str] = []
     for rel in _enforced_paths(repo_root):
         path = repo_root / rel
@@ -228,7 +228,7 @@ def test_warning_in_swallowed_except_pairs_with_record_degraded() -> None:
 def test_allow_list_entries_still_present() -> None:
     """If an allow-listed line moves or disappears, the entry rots silently —
     fail loudly so the next maintainer re-evaluates the exemption."""
-    repo_root = Path(__file__).parent.parent
+    repo_root = Path(__file__).resolve().parents[2]
     enforced = set(_enforced_paths(repo_root))
     outside = sorted(rel for rel in ALLOW_LIST if rel not in enforced)
     assert not outside, "ALLOW_LIST exempts files the check no longer covers, so the entries do nothing: " + ", ".join(

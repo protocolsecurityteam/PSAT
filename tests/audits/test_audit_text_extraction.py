@@ -16,14 +16,10 @@ the integration test, not here.
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 import requests
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from services.audits.text_extraction import (
     _ACCEPTED_CONTENT_TYPES,

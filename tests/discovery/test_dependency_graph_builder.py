@@ -1,10 +1,5 @@
 """Tests for services.discovery.dependency_graph_builder."""
 
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
 from services.discovery.dependency_graph_builder import build_dependency_visualization
 
 TARGET = "0x1111111111111111111111111111111111111111"

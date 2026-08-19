@@ -10,16 +10,12 @@ responsibilities: run the scan, persist artifacts, populate the
 
 from __future__ import annotations
 
-import sys
 import uuid
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from workers.base import JobHandledDirectly
 from workers.defillama_worker import DefiLlamaWorker

@@ -47,7 +47,7 @@ _VAULT_CONSULTS_AN_AUTHORITY = {("ethereum", KEY_V.partition("::")[2], COMPOSED_
 # make the assertion vacuous the day the symbol is deleted.
 RETIRED_CALLEE_TOKEN = "destination_callee_is_restricted_by_the_intermediate"
 
-ROOT = pathlib.Path(__file__).resolve().parent.parent
+ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 
 def _withheld(row: dict[str, Any]) -> list[dict[str, Any]]:

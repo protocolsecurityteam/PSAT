@@ -273,7 +273,7 @@ def test_consumer_referenced_ids_are_subset_of_registry():
 
 # The produced-side half of the coverage invariant: registry ids must
 # appear in the frozen-corpus fixture output or carry a documented exemption.
-_GOLDEN_PATH = Path(__file__).resolve().parent / "fixtures" / "label_corpus" / "golden.json"
+_GOLDEN_PATH = Path(__file__).resolve().parents[1] / "fixtures" / "label_corpus" / "golden.json"
 
 # Registry claim ids the reduced corpus does not exercise, each mapped to the
 # test that DOES cover it (positive + negative). Keep this minimal and honest: an

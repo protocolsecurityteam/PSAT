@@ -28,7 +28,6 @@ when docker isn't running; CI brings both up.
 
 from __future__ import annotations
 
-import sys
 import uuid
 from pathlib import Path
 from unittest.mock import patch
@@ -36,8 +35,6 @@ from unittest.mock import patch
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tests.conftest import DATABASE_URL, requires_postgres, requires_storage  # noqa: E402
 from tests.support.pdf import minimal_pdf_with_text  # noqa: E402
@@ -50,7 +47,7 @@ pytestmark = [
 ]
 
 
-FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "scope_extraction"
+FIXTURE_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "scope_extraction"
 STUB_DIR = FIXTURE_DIR / "llm_responses"
 AUDIT_FIXTURE = FIXTURE_DIR / "audits" / "spearbit_table.txt"
 

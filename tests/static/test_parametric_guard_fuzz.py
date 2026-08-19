@@ -72,13 +72,10 @@ from __future__ import annotations
 
 import random
 import re
-import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from services.static import collect_contract_analysis  # noqa: E402
 from tests.support.foundry_project import write_foundry_project  # noqa: E402

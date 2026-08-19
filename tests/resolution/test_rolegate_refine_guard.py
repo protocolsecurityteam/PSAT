@@ -31,7 +31,6 @@ faithful ``view_call`` callee tree directly (ROLEGATE_FIX_SPEC §1.2.2).
 
 from __future__ import annotations
 
-import sys
 import tempfile
 import textwrap
 import uuid
@@ -40,8 +39,6 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402

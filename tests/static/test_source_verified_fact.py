@@ -18,15 +18,14 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from cache_helpers import (  # noqa: F401
+from services.discovery.fetch import scaffold
+from services.static import collect_contract_analysis
+from services.static.contract_analysis_pipeline.core import _source_verified
+from tests.cache_helpers import (  # noqa: F401
     _patch_static_worker_phases,
     db_session,
     requires_postgres,
 )
-
-from services.discovery.fetch import scaffold
-from services.static import collect_contract_analysis
-from services.static.contract_analysis_pipeline.core import _source_verified
 
 _SOURCE = """
 // SPDX-License-Identifier: MIT

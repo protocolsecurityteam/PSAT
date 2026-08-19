@@ -28,7 +28,6 @@ event/state-var paths — all these fixtures need.
 from __future__ import annotations
 
 import json
-import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -38,9 +37,7 @@ import pytest
 from tests.conftest import DATABASE_URL as _DB_URL  # noqa: E402
 from tests.conftest import _can_connect, requires_postgres
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "cofinite"
+_FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "cofinite"
 _ZERO = "0x" + "0" * 40
 
 # Addresses this test seeds — cleanup is scoped to these so parallel workers / sibling

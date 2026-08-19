@@ -24,15 +24,11 @@ without docker; CI brings Postgres up so the suite runs there.
 from __future__ import annotations
 
 import json
-import sys
 import uuid
-from pathlib import Path
 from typing import Callable
 
 import pytest
 import responses
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tests.conftest import requires_postgres  # noqa: E402
 

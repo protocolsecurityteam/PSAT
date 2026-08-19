@@ -5,11 +5,7 @@ Same-deployer is a Tier-1 on-chain fact but NOT proof of same organization
 org-identity label. Pure fact + DB grouping + build_principal_labels integration.
 """
 
-import sys
-from pathlib import Path
 from typing import Any, cast
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pytest
 

@@ -20,15 +20,11 @@ this verdict is not exercised here.
 from __future__ import annotations
 
 import inspect
-import sys
 import uuid
 from collections import defaultdict
-from pathlib import Path
 from typing import Any
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from db.models import (  # noqa: E402
     Contract,

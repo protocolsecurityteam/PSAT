@@ -11,15 +11,11 @@ type end-to-end; the second must keep the controller claim.
 
 from __future__ import annotations
 
-import sys
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 
 import pytest
 from eth_utils.crypto import keccak
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from services.monitoring.event_topics import (  # noqa: E402
     _resolve_event_type,

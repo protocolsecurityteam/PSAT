@@ -7,13 +7,9 @@ All tests are CI-friendly -- network calls are mocked via monkeypatch.
 from __future__ import annotations
 
 import json
-import sys
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from workers.discovery import DiscoveryWorker
 

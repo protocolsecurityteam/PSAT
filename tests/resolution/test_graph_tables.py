@@ -12,14 +12,9 @@ and (c) leave other deployments' and other contracts' rows alone.
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tests.conftest import DATABASE_URL, requires_postgres
 

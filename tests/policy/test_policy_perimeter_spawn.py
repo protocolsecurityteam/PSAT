@@ -24,13 +24,9 @@ a disproof. See `probe_declared_vault_backlink`.
 
 from __future__ import annotations
 
-import sys
 import uuid
-from pathlib import Path
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from services.discovery.perimeter import (  # noqa: E402
     PERIMETER_DEPTH_KEY,

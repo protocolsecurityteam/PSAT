@@ -21,14 +21,10 @@ solely as a ``record_stage_metric`` count.
 
 from __future__ import annotations
 
-import sys
 import uuid
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tests.conftest import requires_postgres  # noqa: E402
 from workers.base import JobHandledDirectly  # noqa: E402

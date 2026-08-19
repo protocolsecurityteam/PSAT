@@ -22,15 +22,11 @@ After the fixes landed they were inverted into regression guards:
 from __future__ import annotations
 
 import os
-import sys
 import threading
-from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from db.models import Protocol  # noqa: E402
 from db.queue import get_or_create_protocol  # noqa: E402

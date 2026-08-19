@@ -33,7 +33,7 @@ from services.resolution.deferred_reconciler import DEFERRED_MARKER, _iter_defer
 from services.resolution.predicate_evaluator import evaluate_tree_with_registry
 from services.static.contract_analysis_pipeline.predicate_types import PredicateTree
 
-_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "solmate" / "veda_teller_stack.json"
+_FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "solmate" / "veda_teller_stack.json"
 _ZERO = "0x" + "0" * 40
 
 

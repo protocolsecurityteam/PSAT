@@ -19,14 +19,10 @@ Marker: offline (PostgreSQL via requires_postgres). No live hypersync.
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from db import mapping_enumeration_cache as db_cache  # noqa: E402
 from db.models import MappingEnumerationCache  # noqa: E402

@@ -27,14 +27,11 @@ resolver-independent subset; the eight are a live-run outcome.
 
 from __future__ import annotations
 
-import sys
 import tempfile
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tests.support import label_corpus  # noqa: E402
 

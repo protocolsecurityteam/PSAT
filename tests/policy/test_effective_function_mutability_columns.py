@@ -19,14 +19,10 @@ Every fixture below is copied from a production ``effects`` artifact in the
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from typing import Any
 
 import pytest
 from sqlalchemy import case, func, select, text
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from db.jsonb import JSONB_UNSET, JSONB_WRITTEN_NULL, jsonb_state  # noqa: E402
 from db.models import Contract, EffectiveFunction  # noqa: E402

@@ -4,7 +4,7 @@ _resolve_*/_merge_* helper functions."""
 
 from __future__ import annotations
 
-from cache_helpers import (
+from tests.cache_helpers import (
     ADDR_A,
     FAKE_CLS_OUTPUT,
     FAKE_DYN_DEPS_NEW,

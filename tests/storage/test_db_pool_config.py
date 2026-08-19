@@ -22,8 +22,6 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
 
 @pytest.fixture(autouse=True)
 def _pristine_db_models():
@@ -101,5 +99,5 @@ def test_connect_timeout_still_set():
     must not block a worker forever — keep the 10s ceiling. Source-level
     check (the kwarg is consumed by psycopg2 at connect time and not
     introspectable via the engine API once the engine is built)."""
-    src = (Path(__file__).resolve().parents[1] / "db" / "models.py").read_text()
+    src = (Path(__file__).resolve().parents[2] / "db" / "models.py").read_text()
     assert 'connect_args={"connect_timeout": 10}' in src

@@ -35,7 +35,7 @@ from sqlalchemy.orm import Session
 from db.jsonb import JSONB_UNSET, JSONB_WRITTEN_NULL, jsonb_has_payload, jsonb_state
 from db.models import Base, ContractMaterialization
 
-REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 # The audited scope, plus ``tests`` — a fixture that asserts an
 # inflated count is as wrong as production code that produces one.
