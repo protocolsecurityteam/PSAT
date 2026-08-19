@@ -6,16 +6,23 @@ Covers cohort split, most-behind rotation, per-cohort + per-pass window budgets,
 per-window durable commits, the behind-≠-skipped failure invariant, the
 confirmation-depth clamp, GREATEST cursor monotonicity, 36-day-gap convergence,
 the max_lag_blocks metric, the empty-address guard, and per-window notify.
+
+The two classes at the end cover the same scanner from the row side: the cohort
+split by scan block (``TestCohortScanBlock``) and batch-log persistence
+(``TestBatchTimelockDedupe``).
 """
 
 from __future__ import annotations
 
 import uuid
+from unittest.mock import patch
 
 from sqlalchemy import func, select
+from sqlalchemy.orm import Session as SASession
 
 from db.models import MonitoredContract, MonitoredEvent
 from services.monitoring.event_topics import OWNERSHIP_TRANSFERRED_TOPIC0
+from tests.conftest import requires_postgres
 
 MAX_BLOCK_RANGE = 2000
 
@@ -668,3 +675,314 @@ def test_catch_up_event_after_enrollment_is_notified(db_session, monkeypatch):
     )
     assert len(rows) == 1
     assert not (rows[0].data or {}).get("historical")
+
+
+# =========================================================================
+# Per-contract scan block filtering
+# =========================================================================
+
+
+@requires_postgres
+class TestCohortScanBlock:
+    """Verify the cohort scanner groups contracts by block bucket and never
+    re-scans a block range a cohort has already covered.
+
+    The scanner now issues eth_getLogs through the shared bisecting fetcher
+    (``services.resolution.repos.event_logs_rpc``), so both RPC entry points
+    are stubbed: the head read on ``unified_watcher.rpc_request`` and getLogs
+    on the fetcher's ``rpc_request``.
+    """
+
+    @staticmethod
+    def _install(monkeypatch, head, calls):
+        def mock_rpc(url, method, params, *, chain_id=None):
+            calls.append((method, params))
+            if method == "eth_blockNumber":
+                return hex(head)
+            if method == "eth_getLogs":
+                return []
+            return None
+
+        monkeypatch.setenv("PSAT_SCAN_CONFIRMATION_DEPTH", "0")
+        monkeypatch.setattr("services.monitoring.unified_watcher.rpc_request", mock_rpc)
+        monkeypatch.setattr("services.resolution.repos.event_logs_rpc.rpc_request", mock_rpc)
+
+    def test_contracts_at_different_heights_scan_in_separate_cohorts(self, db_session: SASession, monkeypatch):
+        """A contract at block 100 (bucket 0) and one at 5000 (bucket 2) land
+        in different cohorts; neither cohort's getLogs re-scans blocks the
+        other has already covered."""
+        from services.monitoring.unified_watcher import scan_for_events
+
+        behind = ADDR(1)
+        ahead = ADDR(2)
+        db_session.add_all(
+            [
+                MonitoredContract(
+                    id=uuid.uuid4(),
+                    address=behind,
+                    chain="ethereum",
+                    contract_type="regular",
+                    monitoring_config={},
+                    last_known_state={},
+                    last_scanned_block=100,
+                    needs_polling=False,
+                    is_active=True,
+                ),
+                MonitoredContract(
+                    id=uuid.uuid4(),
+                    address=ahead,
+                    chain="ethereum",
+                    contract_type="regular",
+                    monitoring_config={},
+                    last_known_state={},
+                    last_scanned_block=5000,
+                    needs_polling=False,
+                    is_active=True,
+                ),
+            ]
+        )
+        db_session.commit()
+
+        calls: list = []
+        self._install(monkeypatch, 6000, calls)
+        scan_for_events(db_session, "http://fake-rpc")
+
+        log_calls = [c for c in calls if c[0] == "eth_getLogs"]
+        # No getLogs ever mixes the two cohorts' addresses.
+        for _, params in log_calls:
+            addrs = {a.lower() for a in params[0]["address"]}
+            assert addrs in ({behind.lower()}, {ahead.lower()})
+
+        behind_calls = [c for c in log_calls if behind.lower() in {a.lower() for a in c[1][0]["address"]}]
+        ahead_calls = [c for c in log_calls if ahead.lower() in {a.lower() for a in c[1][0]["address"]}]
+        # The ahead cohort starts at 5001 — its already-scanned range is never re-read.
+        assert min(int(c[1][0]["fromBlock"], 16) for c in ahead_calls) == 5001
+        assert min(int(c[1][0]["fromBlock"], 16) for c in behind_calls) == 101
+
+    def test_same_block_contracts_share_one_cohort(self, db_session: SASession, monkeypatch):
+        """Contracts at the same block form one cohort scanned in a single
+        multi-address getLogs over only the new blocks."""
+        from services.monitoring.unified_watcher import scan_for_events
+
+        db_session.add_all(
+            [
+                MonitoredContract(
+                    id=uuid.uuid4(),
+                    address=ADDR(1),
+                    chain="ethereum",
+                    contract_type="regular",
+                    monitoring_config={},
+                    last_known_state={},
+                    last_scanned_block=1000,
+                    needs_polling=False,
+                    is_active=True,
+                ),
+                MonitoredContract(
+                    id=uuid.uuid4(),
+                    address=ADDR(2),
+                    chain="ethereum",
+                    contract_type="regular",
+                    monitoring_config={},
+                    last_known_state={},
+                    last_scanned_block=1000,
+                    needs_polling=False,
+                    is_active=True,
+                ),
+            ]
+        )
+        db_session.commit()
+
+        calls: list = []
+        self._install(monkeypatch, 1500, calls)
+        scan_for_events(db_session, "http://fake-rpc")
+
+        log_calls = [c for c in calls if c[0] == "eth_getLogs"]
+        assert len(log_calls) == 1
+        assert {a.lower() for a in log_calls[0][1][0]["address"]} == {ADDR(1).lower(), ADDR(2).lower()}
+        assert int(log_calls[0][1][0]["fromBlock"], 16) == 1001
+        assert int(log_calls[0][1][0]["toBlock"], 16) == 1500
+
+
+@requires_postgres
+class TestBatchTimelockDedupe:
+    """OZ TimelockController scheduleBatch / executeBatch emit one
+    CallScheduled / CallExecuted log per call in the batch, all sharing
+    tx_hash + block_number + event_type but with distinct logIndex.
+
+    Earlier dedupe used a 4-tuple key (mc, tx, block, type) and would
+    collapse those down to one MonitoredEvent row, hiding the rest of
+    the batch from the UI. The fix splits dedupe into a DB-level
+    4-tuple guard (no row dup against existing data) and an in-scan
+    5-tuple guard that includes log_index so batch logs land as
+    separate rows when scanned for the first time.
+    """
+
+    def test_batch_call_scheduled_logs_persist_separately(self, db_session: SASession):
+        from services.monitoring.event_topics import CALL_SCHEDULED_TOPIC0
+        from services.monitoring.unified_watcher import scan_for_events
+
+        timelock_addr = ADDR(7)
+        mc = MonitoredContract(
+            id=uuid.uuid4(),
+            address=timelock_addr,
+            chain="ethereum",
+            contract_type="timelock",
+            monitoring_config={"watch_timelock": True},
+            last_known_state={},
+            last_scanned_block=100,
+            needs_polling=False,
+            is_active=True,
+        )
+        db_session.add(mc)
+        db_session.commit()
+
+        # Two CallScheduled logs from the same tx — distinct logIndex.
+        # data layout: 5 head words (target/value/bytes_off/predecessor/delay)
+        # + bytes_len + selector. Bytes_off is 5*32 = 160 (0xa0).
+        head = (
+            "0" * 24
+            + "00" * 19
+            + "01"  # target = 0x...01
+            + "0" * 64  # value = 0
+            + format(160, "x").zfill(64)  # bytes_offset
+            + "0" * 64  # predecessor
+            + format(3600, "x").zfill(64)  # delay
+        )
+        cd_section = format(4, "x").zfill(64) + "deadbeef" + "0" * 56
+        log_data = "0x" + head + cd_section
+
+        def mock_rpc(_url, method, _params, *, chain_id=None):
+            if method == "eth_blockNumber":
+                return hex(200)
+            if method == "eth_getLogs":
+                return [
+                    {
+                        "address": timelock_addr,
+                        "topics": [
+                            CALL_SCHEDULED_TOPIC0,
+                            "0x" + "ab" * 32,
+                            "0x" + format(0, "x").zfill(64),
+                        ],
+                        "data": log_data,
+                        "blockNumber": "0x96",  # 150
+                        "transactionHash": "0x" + "fe" * 32,
+                        "blockHash": "0x" + "11" * 32,
+                        "transactionIndex": "0x0",
+                        "logIndex": "0x0",
+                    },
+                    {
+                        "address": timelock_addr,
+                        "topics": [
+                            CALL_SCHEDULED_TOPIC0,
+                            "0x" + "ab" * 32,
+                            "0x" + format(1, "x").zfill(64),  # index=1 (second call in batch)
+                        ],
+                        "data": log_data,
+                        "blockNumber": "0x96",
+                        "transactionHash": "0x" + "fe" * 32,
+                        "blockHash": "0x" + "11" * 32,
+                        "transactionIndex": "0x0",
+                        "logIndex": "0x1",
+                    },
+                ]
+            return None
+
+        with (
+            patch("services.monitoring.unified_watcher.rpc_request", side_effect=mock_rpc),
+            patch("services.resolution.repos.event_logs_rpc.rpc_request", side_effect=mock_rpc),
+        ):
+            new_events = scan_for_events(db_session, "http://fake-rpc")
+
+        assert len(new_events) == 2, f"expected 2 batch-event rows, got {len(new_events)}"
+        # Both rows should reference the same tx + block + type but be
+        # distinct rows (different ids) so the UI can render each call.
+        ids = {e.id for e in new_events}
+        assert len(ids) == 2
+        for e in new_events:
+            assert e.event_type == "timelock_scheduled"
+            assert e.tx_hash == "0x" + "fe" * 32
+            assert e.block_number == 150
+
+    def test_batch_call_executed_logs_persist_separately(self, db_session: SASession):
+        """Same batch-dedupe story for executeBatch as for scheduleBatch.
+
+        The dedupe path is event-type agnostic, but the CallExecuted code
+        path is what the UI will actually render in 'recent activity', so
+        a separate regression keeps both halves of the lifecycle pinned.
+        """
+        from services.monitoring.event_topics import CALL_EXECUTED_TOPIC0
+        from services.monitoring.unified_watcher import scan_for_events
+
+        timelock_addr = ADDR(8)
+        mc = MonitoredContract(
+            id=uuid.uuid4(),
+            address=timelock_addr,
+            chain="ethereum",
+            contract_type="timelock",
+            monitoring_config={"watch_timelock": True},
+            last_known_state={},
+            last_scanned_block=200,
+            needs_polling=False,
+            is_active=True,
+        )
+        db_session.add(mc)
+        db_session.commit()
+
+        # CallExecuted has 3 head words (target/value/bytes_off).
+        head = (
+            "0" * 24
+            + "00" * 19
+            + "02"  # target
+            + "0" * 64  # value
+            + format(96, "x").zfill(64)  # bytes_offset = 3*32
+        )
+        cd_section = format(4, "x").zfill(64) + "cafef00d" + "0" * 56
+        log_data = "0x" + head + cd_section
+
+        def mock_rpc(_url, method, _params, *, chain_id=None):
+            if method == "eth_blockNumber":
+                return hex(300)
+            if method == "eth_getLogs":
+                return [
+                    {
+                        "address": timelock_addr,
+                        "topics": [
+                            CALL_EXECUTED_TOPIC0,
+                            "0x" + "cd" * 32,
+                            "0x" + format(0, "x").zfill(64),
+                        ],
+                        "data": log_data,
+                        "blockNumber": "0xfa",  # 250
+                        "transactionHash": "0x" + "ba" * 32,
+                        "blockHash": "0x" + "22" * 32,
+                        "transactionIndex": "0x0",
+                        "logIndex": "0x0",
+                    },
+                    {
+                        "address": timelock_addr,
+                        "topics": [
+                            CALL_EXECUTED_TOPIC0,
+                            "0x" + "cd" * 32,
+                            "0x" + format(1, "x").zfill(64),
+                        ],
+                        "data": log_data,
+                        "blockNumber": "0xfa",
+                        "transactionHash": "0x" + "ba" * 32,
+                        "blockHash": "0x" + "22" * 32,
+                        "transactionIndex": "0x0",
+                        "logIndex": "0x1",
+                    },
+                ]
+            return None
+
+        with (
+            patch("services.monitoring.unified_watcher.rpc_request", side_effect=mock_rpc),
+            patch("services.resolution.repos.event_logs_rpc.rpc_request", side_effect=mock_rpc),
+        ):
+            new_events = scan_for_events(db_session, "http://fake-rpc")
+
+        assert len(new_events) == 2
+        for e in new_events:
+            assert e.event_type == "timelock_executed"
+            assert e.tx_hash == "0x" + "ba" * 32
+            assert e.block_number == 250

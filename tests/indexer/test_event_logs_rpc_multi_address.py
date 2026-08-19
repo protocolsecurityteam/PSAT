@@ -21,12 +21,16 @@ from __future__ import annotations
 
 import pytest
 
-import services.resolution.repos.event_logs_rpc as event_logs_rpc  # noqa: E402
-from services.monitoring.event_topics import (  # noqa: E402
+import services.resolution.repos.event_logs_rpc as event_logs_rpc
+from services.monitoring.asset_sweep import TRANSFER_TOPIC0
+from services.monitoring.event_topics import (
     OWNERSHIP_TRANSFERRED_TOPIC0,
     parse_any_log,
 )
-from services.resolution.repos.event_logs_rpc import RpcEventLogFetcher  # noqa: E402
+from services.resolution.repos.event_logs_rpc import (
+    RpcEventLogFetcher,
+    normalize_topic_filter,
+)
 
 _ADDR_A = "0x" + "1a" * 20
 _ADDR_B = "0x" + "2b" * 20
@@ -233,3 +237,81 @@ def test_raw_dict_decodes_through_governance_parser(monkeypatch):
     assert parsed["log_index"] == 7
     assert parsed["old_owner"].lower() == old_owner.lower()
     assert parsed["new_owner"].lower() == new_owner.lower()
+
+
+# ---------------------------------------------------------------------------
+# Topic-filter normalization and the request shapes it produces
+#
+# Same claim as the tests above — what goes on the wire — asserted at the
+# normalizer and at fetch_logs's payload directly.
+# ---------------------------------------------------------------------------
+
+HOLDER = "0x00000000000000000000000000000000000ho1de"[:42].ljust(42, "1")
+TOKEN = "0x000000000000000000000000000000000000c0de"
+
+
+def _pad(address: str) -> str:
+    return "0x" + address.lower().removeprefix("0x").rjust(64, "0")
+
+
+class _StubRpc:
+    """One eth_getLogs wire, scripted per call, with the requests recorded."""
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls: list[dict] = []
+
+    def __call__(self, url, method, params, **kwargs):
+        assert method == "eth_getLogs"
+        self.calls.append(params[0])
+        answer = self.responses.pop(0) if self.responses else []
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+
+class TestTopicFilter:
+    def test_a_flat_topic_sequence_is_still_the_topic0_or_set(self):
+        assert normalize_topic_filter(["0xAA", "0xBB"]) == [["0xaa", "0xbb"]]
+
+    def test_an_empty_flat_sequence_keeps_the_payload_it_always_had(self):
+        # ``[[]]`` and ``[]`` are different filters; the historical shape wins.
+        assert normalize_topic_filter([]) == [[]]
+
+    def test_a_positional_array_keeps_its_none_slots(self):
+        assert normalize_topic_filter([["0xAA"], None, ["0xBB", "0xCC"]]) == [["0xaa"], None, ["0xbb", "0xcc"]]
+
+    def test_an_empty_slot_is_refused_rather_than_sent(self):
+        # An empty list in a topic slot matches nothing at some upstreams and
+        # everything at others, so a batch that came out empty would silently read
+        # as either answer.
+        with pytest.raises(ValueError):
+            normalize_topic_filter([["0xAA"], None, []])
+
+
+class TestFetchLogsShapes:
+    def test_the_address_key_is_omitted_when_no_emitter_is_known(self, monkeypatch):
+        rpc = _StubRpc([[]])
+        monkeypatch.setattr("services.resolution.repos.event_logs_rpc.rpc_request", rpc)
+        fetcher = RpcEventLogFetcher("http://rpc.invalid", chain_id=1)
+        fetcher.fetch_logs(
+            event_address=None, topics=[[TRANSFER_TOPIC0], None, [_pad(HOLDER)]], from_block=0, to_block=9
+        )
+        assert "address" not in rpc.calls[0]
+        assert rpc.calls[0]["topics"] == [[TRANSFER_TOPIC0], None, [_pad(HOLDER)]]
+
+    def test_the_historical_call_shape_sends_the_historical_payload(self, monkeypatch):
+        rpc = _StubRpc([[]])
+        monkeypatch.setattr("services.resolution.repos.event_logs_rpc.rpc_request", rpc)
+        fetcher = RpcEventLogFetcher("http://rpc.invalid", chain_id=1)
+        fetcher.fetch_logs(event_address=[TOKEN], topics=[TRANSFER_TOPIC0], from_block=0, to_block=9)
+        assert rpc.calls[0]["address"] == [TOKEN]
+        assert rpc.calls[0]["topics"] == [[TRANSFER_TOPIC0]]
+
+    def test_a_filter_that_constrains_nothing_is_refused(self, monkeypatch):
+        rpc = _StubRpc([[]])
+        monkeypatch.setattr("services.resolution.repos.event_logs_rpc.rpc_request", rpc)
+        fetcher = RpcEventLogFetcher("http://rpc.invalid", chain_id=1)
+        with pytest.raises(ValueError):
+            fetcher.fetch_logs(event_address=None, topics=[None, None], from_block=0, to_block=9)
+        assert rpc.calls == []

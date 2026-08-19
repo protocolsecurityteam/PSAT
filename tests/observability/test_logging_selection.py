@@ -26,9 +26,9 @@ from unittest.mock import patch
 
 import pytest
 
-from tests.conftest import requires_postgres  # noqa: E402
-from utils.logging import bind_trace_context, stage_metrics_var  # noqa: E402
-from workers.base import JobHandledDirectly  # noqa: E402
+from tests.conftest import requires_postgres
+from utils.logging import bind_trace_context, stage_metrics_var
+from workers.base import JobHandledDirectly
 
 pytestmark = [requires_postgres]
 
@@ -107,11 +107,19 @@ def _seed(db_session):
     return job, fetched, neutral
 
 
-@requires_postgres
-def test_selection_emits_stage_metrics_and_extra_only_facts(db_session, worker, caplog):
+@pytest.fixture()
+def selection_pass(db_session, worker, caplog):
+    """Run one selection pass and hand back everything it emitted.
+
+    Three independent contracts are asserted below — the stage metrics, the
+    summary line, and the facts-in-``extra`` rule — and they used to share one
+    169-line test, so a break in any of them showed up as the same red line.
+    """
+    from types import SimpleNamespace
+
     from db.models import Job
 
-    job, fetched, _neutral = _seed(db_session)
+    job, fetched, neutral = _seed(db_session)
     protocol_id = job.protocol_id
 
     metrics: dict = {}
@@ -135,7 +143,13 @@ def test_selection_emits_stage_metrics_and_extra_only_facts(db_session, worker, 
         db_session.query(Job).filter(Job.id == job.id).delete(synchronize_session=False)
         db_session.commit()
 
+    return SimpleNamespace(metrics=metrics, records=list(caplog.records), fetched=fetched, neutral=neutral)
+
+
+@requires_postgres
+def test_selection_reports_progress_counts_as_stage_metrics(selection_pass):
     # Per-stage progress counts reach the monitor UI via record_stage_metric.
+    metrics = selection_pass.metrics
     assert metrics["candidates"] == 3
     assert metrics["eligible"] == 2
     assert metrics["dropped"] == 1
@@ -145,20 +159,26 @@ def test_selection_emits_stage_metrics_and_extra_only_facts(db_session, worker, 
     assert metrics["ranked_candidates"] == 2
     assert metrics["queued"] == 2
 
+
+@requires_postgres
+def test_selection_emits_exactly_one_summary_line(selection_pass):
     # Exactly one INFO summary describing what was selected and why.
-    summaries = [r for r in caplog.records if r.getMessage() == "Selection complete"]
+    summaries = [r for r in selection_pass.records if r.getMessage() == "Selection complete"]
     assert len(summaries) == 1
     summary = summaries[0]
     assert summary.levelno == logging.INFO
     assert summary.outcome == "queued"
     assert summary.queued_count == 2
-    assert {s["address"] for s in summary.selected} == {fetched, _neutral}
+    assert {s["address"] for s in summary.selected} == {selection_pass.fetched, selection_pass.neutral}
 
+
+@requires_postgres
+def test_selection_facts_live_in_extra_not_in_the_message(selection_pass):
     # Facts live in extra={}, not interpolated into the message string.
-    queued = [r for r in caplog.records if r.getMessage() == "Queued analysis child for candidate"]
+    queued = [r for r in selection_pass.records if r.getMessage() == "Queued analysis child for candidate"]
     assert len(queued) == 2
     for rec in queued:
-        assert rec.address in (fetched, _neutral)
+        assert rec.address in (selection_pass.fetched, selection_pass.neutral)
         assert hasattr(rec, "rank_score")
         assert hasattr(rec, "discovery_sources")
         # The address is a queryable field, never baked into the human message.

@@ -58,8 +58,6 @@ from services.monitoring.balance_observation import (
 from services.monitoring.balance_reads import ObservationSubject, winning_asset_fetches
 from services.resolution.repos.event_logs_rpc import (
     MIN_BISECT_SPAN,
-    RpcEventLogFetcher,
-    normalize_topic_filter,
 )
 from services.scoring.planes import typed_receipt_is_resolved
 from tests.conftest import requires_postgres
@@ -166,53 +164,6 @@ class _StubRpc:
         if isinstance(answer, Exception):
             raise answer
         return answer
-
-
-class TestTopicFilter:
-    def test_a_flat_topic_sequence_is_still_the_topic0_or_set(self):
-        assert normalize_topic_filter(["0xAA", "0xBB"]) == [["0xaa", "0xbb"]]
-
-    def test_an_empty_flat_sequence_keeps_the_payload_it_always_had(self):
-        # ``[[]]`` and ``[]`` are different filters; the historical shape wins.
-        assert normalize_topic_filter([]) == [[]]
-
-    def test_a_positional_array_keeps_its_none_slots(self):
-        assert normalize_topic_filter([["0xAA"], None, ["0xBB", "0xCC"]]) == [["0xaa"], None, ["0xbb", "0xcc"]]
-
-    def test_an_empty_slot_is_refused_rather_than_sent(self):
-        # An empty list in a topic slot matches nothing at some upstreams and
-        # everything at others, so a batch that came out empty would silently read
-        # as either answer.
-        with pytest.raises(ValueError):
-            normalize_topic_filter([["0xAA"], None, []])
-
-
-class TestFetchLogsShapes:
-    def test_the_address_key_is_omitted_when_no_emitter_is_known(self, monkeypatch):
-        rpc = _StubRpc([[]])
-        monkeypatch.setattr("services.resolution.repos.event_logs_rpc.rpc_request", rpc)
-        fetcher = RpcEventLogFetcher("http://rpc.invalid", chain_id=1)
-        fetcher.fetch_logs(
-            event_address=None, topics=[[TRANSFER_TOPIC0], None, [_pad(HOLDER)]], from_block=0, to_block=9
-        )
-        assert "address" not in rpc.calls[0]
-        assert rpc.calls[0]["topics"] == [[TRANSFER_TOPIC0], None, [_pad(HOLDER)]]
-
-    def test_the_historical_call_shape_sends_the_historical_payload(self, monkeypatch):
-        rpc = _StubRpc([[]])
-        monkeypatch.setattr("services.resolution.repos.event_logs_rpc.rpc_request", rpc)
-        fetcher = RpcEventLogFetcher("http://rpc.invalid", chain_id=1)
-        fetcher.fetch_logs(event_address=[TOKEN], topics=[TRANSFER_TOPIC0], from_block=0, to_block=9)
-        assert rpc.calls[0]["address"] == [TOKEN]
-        assert rpc.calls[0]["topics"] == [[TRANSFER_TOPIC0]]
-
-    def test_a_filter_that_constrains_nothing_is_refused(self, monkeypatch):
-        rpc = _StubRpc([[]])
-        monkeypatch.setattr("services.resolution.repos.event_logs_rpc.rpc_request", rpc)
-        fetcher = RpcEventLogFetcher("http://rpc.invalid", chain_id=1)
-        with pytest.raises(ValueError):
-            fetcher.fetch_logs(event_address=None, topics=[None, None], from_block=0, to_block=9)
-        assert rpc.calls == []
 
 
 class TestBatchFailureIsIsolatedToItsCause:

@@ -87,278 +87,300 @@ def test_helper_functions():
 # ---------------------------------------------------------------------------
 
 
-def test_full_classification_pipeline(monkeypatch):
-    """Single classify_contracts call exercising every detection path and phase.
+class _Pipeline:
+    """Addresses, wire stubs and the one ``classify_contracts`` result the
+    phase tests below read.
 
-    Phase 1 coverage:
-      - EIP-1167 (bytecode pattern), EIP-1967 (storage), beacon (storage),
-        EIP-1822 (storage), OZ legacy (storage), EIP-2535 diamond (facetAddresses),
-        custom (implementation() call), GnosisSafe (masterCopy()), Compound
-        (comptrollerImplementation()), Synthetix (target()), heuristic with
-        probe confirmed (Geth), heuristic with probe confirmed (Parity
-        fallback), heuristic with probe rejected (library), heuristic with
-        probe unavailable (static fallback), large bytecode with DELEGATECALL
-        (stays regular).
-    Phase 2: implementation/beacon discovery from proxy pointers + probe + facets.
-    Phase 3: factory, library, CALL+DELEGATECALL not-library, proxy priority.
-    needs_polling: known-event proxies get False, custom/unknown get True.
+    This used to be a single 274-line test with 63 assertions covering every
+    proxy type, all three phases and the polling rule — one red line named
+    seventeen distinct behaviours. The call is unchanged; only the assertions
+    are split, so a failure now names the pattern that broke.
     """
-    target = ADDR(1)
-    eip1167 = ADDR(2)
-    eip1967 = ADDR(3)
-    beacon_proxy = ADDR(4)
-    uups = ADDR(5)
-    oz = ADDR(6)
-    diamond = ADDR(7)
-    custom = ADDR(8)
-    geth_proxy = ADDR(9)  # short bytecode — probe confirms via Geth
-    parity_proxy = "0x" + "aa" * 20  # short bytecode — Geth fails, Parity confirms
-    lib_dep = "0x" + "bb" * 20  # short bytecode — probe rejects (library)
-    static_proxy = "0x" + "cc" * 20  # short bytecode — tracing unavailable
-    factory = "0x" + "dd" * 20
-    not_lib = "0x" + "ee" * 20  # CALL + DELEGATECALL — stays regular
-    large_dc = "0x" + "ff" * 20  # large bytecode with DELEGATECALL — regular
-    gnosis = ADDR(10)  # GnosisSafe — masterCopy()
-    compound = ADDR(11)  # Compound — comptrollerImplementation()
-    synthetix = ADDR(12)  # Synthetix — target()
 
-    # Implementation / facet addresses
-    eip1967_impl = "0x" + "01" * 20
-    eip1967_admin = "0x" + "02" * 20
-    beacon_addr = "0x" + "03" * 20
-    uups_impl = "0x" + "04" * 20
-    oz_impl = "0x" + "05" * 20
-    facet1 = "0x" + "06" * 20
-    facet2 = "0x" + "07" * 20
-    custom_impl = "0x" + "08" * 20
-    geth_impl = "0x" + "09" * 20
-    parity_impl = "0x" + "0a" * 20
-    beacon_impl = "0x" + "0b" * 20
-    gnosis_impl = "0x" + "0c" * 20
-    compound_impl = "0x" + "0d" * 20
-    synthetix_impl = "0x" + "0e" * 20
-    impl_hex = "aabbccddee11223344556677889900aabbccddee"
-    eip1167_bc = "0x" + cls.EIP1167_PREFIX + impl_hex + cls.EIP1167_SUFFIX
+    def __init__(self, monkeypatch):
+        self.target = ADDR(1)
+        self.eip1167 = ADDR(2)
+        self.eip1967 = ADDR(3)
+        self.beacon_proxy = ADDR(4)
+        self.uups = ADDR(5)
+        self.oz = ADDR(6)
+        self.diamond = ADDR(7)
+        self.custom = ADDR(8)
+        self.geth_proxy = ADDR(9)  # short bytecode — probe confirms via Geth
+        self.parity_proxy = "0x" + "aa" * 20  # short bytecode — Geth fails, Parity confirms
+        self.lib_dep = "0x" + "bb" * 20  # short bytecode — probe rejects (library)
+        self.static_proxy = "0x" + "cc" * 20  # short bytecode — tracing unavailable
+        self.factory = "0x" + "dd" * 20
+        self.not_lib = "0x" + "ee" * 20  # CALL + DELEGATECALL — stays regular
+        self.large_dc = "0x" + "ff" * 20  # large bytecode with DELEGATECALL — regular
+        self.gnosis = ADDR(10)  # GnosisSafe — masterCopy()
+        self.compound = ADDR(11)  # Compound — comptrollerImplementation()
+        self.synthetix = ADDR(12)  # Synthetix — target()
 
-    # Bytecode containing DELEGATECALL but longer than SHORT_BYTECODE_THRESHOLD
-    # so the heuristic won't fire — protocol-specific getters catch these instead.
-    MEDIUM_DC_BYTECODE = "0x" + "60" * 400 + "f4"
+        # Implementation / facet addresses
+        self.eip1967_impl = "0x" + "01" * 20
+        self.eip1967_admin = "0x" + "02" * 20
+        self.beacon_addr = "0x" + "03" * 20
+        self.uups_impl = "0x" + "04" * 20
+        self.oz_impl = "0x" + "05" * 20
+        self.facet1 = "0x" + "06" * 20
+        self.facet2 = "0x" + "07" * 20
+        self.custom_impl = "0x" + "08" * 20
+        self.geth_impl = "0x" + "09" * 20
+        self.parity_impl = "0x" + "0a" * 20
+        self.beacon_impl = "0x" + "0b" * 20
+        self.gnosis_impl = "0x" + "0c" * 20
+        self.compound_impl = "0x" + "0d" * 20
+        self.synthetix_impl = "0x" + "0e" * 20
+        self.impl_hex = "aabbccddee11223344556677889900aabbccddee"
+        eip1167_bc = "0x" + cls.EIP1167_PREFIX + self.impl_hex + cls.EIP1167_SUFFIX
 
-    # GnosisSafe proxy bytecode: contains the slot-0 pattern (PUSH20 mask + PUSH1(0) + SLOAD + AND)
-    # followed by DELEGATECALL.  Mirrors real GnosisSafe proxy deployed bytecode.
-    GNOSIS_BYTECODE = "0x6080604052" + cls.GNOSIS_SLOT0_PATTERN + "3660008037600080366000845af4" + "00" * 10
+        # Bytecode containing DELEGATECALL but longer than SHORT_BYTECODE_THRESHOLD
+        # so the heuristic won't fire — protocol-specific getters catch these instead.
+        MEDIUM_DC_BYTECODE = "0x" + "60" * 400 + "f4"
 
-    short_addrs = {geth_proxy, parity_proxy, lib_dep, static_proxy}
+        # GnosisSafe proxy bytecode: contains the slot-0 pattern (PUSH20 mask + PUSH1(0) + SLOAD + AND)
+        # followed by DELEGATECALL.  Mirrors real GnosisSafe proxy deployed bytecode.
+        GNOSIS_BYTECODE = "0x6080604052" + cls.GNOSIS_SLOT0_PATTERN + "3660008037600080366000845af4" + "00" * 10
 
-    def fake_code(_rpc, addr, chain_id=None):
-        if addr == eip1167:
-            return eip1167_bc
-        if addr in short_addrs:
-            return SHORT_BYTECODE
-        if addr == large_dc:
-            return "0x" + "60" * 400 + "f4"
-        if addr == gnosis:
-            return GNOSIS_BYTECODE
-        # Protocol-specific proxies: longer bytecode with DELEGATECALL
-        if addr in (compound, synthetix):
-            return MEDIUM_DC_BYTECODE
-        return BIG_BYTECODE
+        short_addrs = {self.geth_proxy, self.parity_proxy, self.lib_dep, self.static_proxy}
 
-    storage = {
-        (eip1967, cls.EIP1967_IMPL_SLOT): _slot_for(eip1967_impl),
-        (eip1967, cls.EIP1967_ADMIN_SLOT): _slot_for(eip1967_admin),
-        (beacon_proxy, cls.EIP1967_BEACON_SLOT): _slot_for(beacon_addr),
-        (uups, cls.EIP1822_LOGIC_SLOT): _slot_for(uups_impl),
-        (oz, cls.OZ_LEGACY_IMPL_SLOT): _slot_for(oz_impl),
-        (gnosis, "0x0"): _slot_for(gnosis_impl),  # GnosisSafe slot 0
-    }
+        def fake_code(_rpc, addr, chain_id=None):
+            if addr == self.eip1167:
+                return eip1167_bc
+            if addr in short_addrs:
+                return SHORT_BYTECODE
+            if addr == self.large_dc:
+                return "0x" + "60" * 400 + "f4"
+            if addr == self.gnosis:
+                return GNOSIS_BYTECODE
+            # Protocol-specific proxies: longer bytecode with DELEGATECALL
+            if addr in (self.compound, self.synthetix):
+                return MEDIUM_DC_BYTECODE
+            return BIG_BYTECODE
 
-    def fake_rpc(_rpc, method, params, retries=1, chain_id=None):
-        if method == "eth_getStorageAt":
-            return storage.get((params[0], params[1]), ZERO_SLOT)
-        if method == "eth_getCode":
-            return fake_code(_rpc, params[0])
-        if method == "eth_call":
-            addr = params[0].get("to", "")
-            sel = params[0].get("data", "")[:10]
-            if addr == diamond and sel == cls.FACET_ADDRESSES_SELECTOR:
-                return _abi_encode_address_array([facet1, facet2])
-            if addr == custom and sel == cls.IMPLEMENTATION_SELECTOR:
-                return _slot_for(custom_impl)
-            if addr == beacon_addr and sel == cls.IMPLEMENTATION_SELECTOR:
-                return _slot_for(beacon_impl)
-            # Protocol-specific getters
-            if addr == gnosis and sel == cls.MASTER_COPY_SELECTOR:
-                return _slot_for(gnosis_impl)
-            if addr == compound and sel == cls.COMPTROLLER_IMPL_SELECTOR:
-                return _slot_for(compound_impl)
-            if addr == synthetix and sel == cls.TARGET_SELECTOR:
-                return _slot_for(synthetix_impl)
-            raise RuntimeError("revert")
-        if method in ("debug_traceCall", "trace_call"):
-            addr = params[0].get("to", "")
-            if addr == geth_proxy and method == "debug_traceCall":
-                return {
-                    "type": "CALL",
-                    "calls": [{"type": "DELEGATECALL", "from": geth_proxy, "to": geth_impl}],
-                }
-            if addr == lib_dep and method == "debug_traceCall":
-                return {"type": "CALL", "calls": []}
-            if addr == parity_proxy:
-                if method == "debug_traceCall":
-                    raise RuntimeError("debug not available")
-                return [
-                    {
-                        "type": "call",
-                        "action": {
-                            "callType": "delegatecall",
-                            "from": parity_proxy,
-                            "to": parity_impl,
-                        },
+        storage = {
+            (self.eip1967, cls.EIP1967_IMPL_SLOT): _slot_for(self.eip1967_impl),
+            (self.eip1967, cls.EIP1967_ADMIN_SLOT): _slot_for(self.eip1967_admin),
+            (self.beacon_proxy, cls.EIP1967_BEACON_SLOT): _slot_for(self.beacon_addr),
+            (self.uups, cls.EIP1822_LOGIC_SLOT): _slot_for(self.uups_impl),
+            (self.oz, cls.OZ_LEGACY_IMPL_SLOT): _slot_for(self.oz_impl),
+            (self.gnosis, "0x0"): _slot_for(self.gnosis_impl),  # GnosisSafe slot 0
+        }
+
+        def fake_rpc(_rpc, method, params, retries=1, chain_id=None):
+            if method == "eth_getStorageAt":
+                return storage.get((params[0], params[1]), ZERO_SLOT)
+            if method == "eth_getCode":
+                return fake_code(_rpc, params[0])
+            if method == "eth_call":
+                addr = params[0].get("to", "")
+                sel = params[0].get("data", "")[:10]
+                if addr == self.diamond and sel == cls.FACET_ADDRESSES_SELECTOR:
+                    return _abi_encode_address_array([self.facet1, self.facet2])
+                if addr == self.custom and sel == cls.IMPLEMENTATION_SELECTOR:
+                    return _slot_for(self.custom_impl)
+                if addr == self.beacon_addr and sel == cls.IMPLEMENTATION_SELECTOR:
+                    return _slot_for(self.beacon_impl)
+                # Protocol-specific getters
+                if addr == self.gnosis and sel == cls.MASTER_COPY_SELECTOR:
+                    return _slot_for(self.gnosis_impl)
+                if addr == self.compound and sel == cls.COMPTROLLER_IMPL_SELECTOR:
+                    return _slot_for(self.compound_impl)
+                if addr == self.synthetix and sel == cls.TARGET_SELECTOR:
+                    return _slot_for(self.synthetix_impl)
+                raise RuntimeError("revert")
+            if method in ("debug_traceCall", "trace_call"):
+                addr = params[0].get("to", "")
+                if addr == self.geth_proxy and method == "debug_traceCall":
+                    return {
+                        "type": "CALL",
+                        "calls": [{"type": "DELEGATECALL", "from": self.geth_proxy, "to": self.geth_impl}],
                     }
-                ]
-            raise RuntimeError("tracing unavailable")
-        return ZERO_SLOT
+                if addr == self.lib_dep and method == "debug_traceCall":
+                    return {"type": "CALL", "calls": []}
+                if addr == self.parity_proxy:
+                    if method == "debug_traceCall":
+                        raise RuntimeError("debug not available")
+                    return [
+                        {
+                            "type": "call",
+                            "action": {
+                                "callType": "delegatecall",
+                                "from": self.parity_proxy,
+                                "to": self.parity_impl,
+                            },
+                        }
+                    ]
+                raise RuntimeError("tracing unavailable")
+            return ZERO_SLOT
 
-    monkeypatch.setattr(cls, "get_code", fake_code)
-    monkeypatch.setattr(cls, "rpc_call", fake_rpc)
+        monkeypatch.setattr(cls, "get_code", fake_code)
+        monkeypatch.setattr(cls, "rpc_call", fake_rpc)
 
-    edges = [
-        {"from": target, "to": lib_dep, "op": "DELEGATECALL"},
-        {"from": factory, "to": ADDR(1), "op": "CREATE2"},
-        {"from": target, "to": not_lib, "op": "DELEGATECALL"},
-        {"from": target, "to": not_lib, "op": "CALL"},
-        {
-            "from": geth_proxy,
-            "to": ADDR(1),
-            "op": "CREATE2",
-        },  # should NOT override proxy
-    ]
+        edges = [
+            {"from": self.target, "to": self.lib_dep, "op": "DELEGATECALL"},
+            {"from": self.factory, "to": ADDR(1), "op": "CREATE2"},
+            {"from": self.target, "to": self.not_lib, "op": "DELEGATECALL"},
+            {"from": self.target, "to": self.not_lib, "op": "CALL"},
+            {
+                "from": self.geth_proxy,
+                "to": ADDR(1),
+                "op": "CREATE2",
+            },  # should NOT override proxy
+        ]
 
-    deps = [
-        eip1167,
-        eip1967,
-        beacon_proxy,
-        uups,
-        oz,
-        diamond,
-        custom,
-        gnosis,
-        compound,
-        synthetix,
-        geth_proxy,
-        parity_proxy,
-        lib_dep,
-        static_proxy,
-        factory,
-        not_lib,
-        large_dc,
-    ]
-    result = cls.classify_contracts(target, deps, RPC, dynamic_edges=edges)
-    c = result["classifications"]
-
-    # --- Phase 1: every proxy type ---
-    assert c[eip1167]["proxy_type"] == "eip1167"
-    assert c[eip1167]["implementation"] == "0x" + impl_hex
-
-    assert c[eip1967]["proxy_type"] == "eip1967"
-    assert c[eip1967]["implementation"] == eip1967_impl
-    assert c[eip1967]["admin"] == eip1967_admin
-
-    assert c[beacon_proxy]["proxy_type"] == "beacon_proxy"
-    assert c[beacon_proxy]["beacon"] == beacon_addr
-    assert c[beacon_proxy]["implementation"] == beacon_impl  # resolved through beacon
-
-    assert c[uups]["proxy_type"] == "eip1822"
-    assert c[uups]["implementation"] == uups_impl
-
-    assert c[oz]["proxy_type"] == "oz_legacy"
-    assert c[oz]["implementation"] == oz_impl
-
-    assert c[diamond]["proxy_type"] == "eip2535"
-    assert set(c[diamond]["facets"]) == {facet1, facet2}
-
-    assert c[custom]["proxy_type"] == "custom"
-    assert c[custom]["implementation"] == custom_impl
-
-    # Protocol-specific: GnosisSafe
-    assert c[gnosis]["proxy_type"] == "gnosis_safe"
-    assert c[gnosis]["implementation"] == gnosis_impl
-
-    # Protocol-specific: Compound
-    assert c[compound]["proxy_type"] == "compound"
-    assert c[compound]["implementation"] == compound_impl
-
-    # Protocol-specific: Synthetix
-    assert c[synthetix]["proxy_type"] == "synthetix"
-    assert c[synthetix]["implementation"] == synthetix_impl
-
-    # Heuristic: probe confirmed (Geth), impl extracted
-    assert c[geth_proxy]["proxy_type"] == "unknown"
-    assert c[geth_proxy]["implementation"] == geth_impl
-
-    # Heuristic: probe confirmed (Parity fallback), impl extracted
-    assert c[parity_proxy]["proxy_type"] == "unknown"
-    assert c[parity_proxy]["implementation"] == parity_impl
-
-    # Heuristic: probe rejected — stays regular, Phase 3 marks library
-    assert c[lib_dep]["type"] == "library"
-
-    # Heuristic: probe unavailable — static fallback
-    assert c[static_proxy]["proxy_type"] == "unknown"
-
-    # Large bytecode with DELEGATECALL — still regular
-    assert c[large_dc]["type"] == "regular"
-
-    # --- Phase 2: relational discovery ---
-    assert c[eip1967_impl]["type"] == "implementation"
-    assert eip1967_impl in result["discovered_addresses"]
-    assert c[geth_impl]["type"] == "implementation"
-    assert c[parity_impl]["type"] == "implementation"
-    assert c[custom_impl]["type"] == "implementation"
-    # Protocol-specific implementations discovered
-    assert gnosis_impl in result["discovered_addresses"]
-    assert c[gnosis_impl]["type"] == "implementation"
-    assert compound_impl in result["discovered_addresses"]
-    assert c[compound_impl]["type"] == "implementation"
-    assert synthetix_impl in result["discovered_addresses"]
-    assert c[synthetix_impl]["type"] == "implementation"
-    # Beacon classified as beacon (not custom proxy), impl preserved from Phase 1
-    assert c[beacon_addr]["type"] == "beacon"
-    assert beacon_proxy in c[beacon_addr]["proxies"]
-    assert c[beacon_addr]["implementation"] == beacon_impl
-    assert "proxy_type" not in c[beacon_addr]  # cleaned up from Phase 1
-    # Diamond facets discovered and marked as implementations
-    assert facet1 in result["discovered_addresses"]
-    assert c[facet1]["type"] == "implementation"
-    assert c[facet2]["type"] == "implementation"
-
-    # --- Phase 3: behavioral ---
-    assert c[factory]["type"] == "factory"
-    assert c[not_lib]["type"] == "regular"  # CALL+DELEGATECALL — not library
-    # Proxy not overridden by CREATE2 edge
-    assert c[geth_proxy]["type"] == "proxy"
-
-    # --- needs_polling ---
-    # Known-event types: monitor detects their upgrade events → no polling
-    assert c[eip1167]["needs_polling"] is False
-    assert c[eip1967]["needs_polling"] is False
-    assert c[beacon_proxy]["needs_polling"] is False
-    assert c[uups]["needs_polling"] is False
-    assert c[oz]["needs_polling"] is False
-    assert c[diamond]["needs_polling"] is False
-    assert c[gnosis]["needs_polling"] is False
-    assert c[compound]["needs_polling"] is False
-    assert c[synthetix]["needs_polling"] is False
-    # Custom/unknown: no known event pattern → need polling
-    assert c[custom]["needs_polling"] is True
-    assert c[geth_proxy]["needs_polling"] is True
-    assert c[parity_proxy]["needs_polling"] is True
-    assert c[static_proxy]["needs_polling"] is True
+        deps = [
+            self.eip1167,
+            self.eip1967,
+            self.beacon_proxy,
+            self.uups,
+            self.oz,
+            self.diamond,
+            self.custom,
+            self.gnosis,
+            self.compound,
+            self.synthetix,
+            self.geth_proxy,
+            self.parity_proxy,
+            self.lib_dep,
+            self.static_proxy,
+            self.factory,
+            self.not_lib,
+            self.large_dc,
+        ]
+        self.result = cls.classify_contracts(self.target, deps, RPC, dynamic_edges=edges)
+        self.c = self.result["classifications"]
 
 
-# ---------------------------------------------------------------------------
-# Error handling
+@pytest.fixture()
+def pipeline(monkeypatch):
+    return _Pipeline(monkeypatch)
+
+
+# --- Phase 1: every proxy type ---
+
+
+@pytest.mark.parametrize(
+    "addr_attr,proxy_type,impl_attr",
+    [
+        ("eip1967", "eip1967", "eip1967_impl"),
+        ("beacon_proxy", "beacon_proxy", "beacon_impl"),  # resolved through beacon
+        ("uups", "eip1822", "uups_impl"),
+        ("oz", "oz_legacy", "oz_impl"),
+        ("custom", "custom", "custom_impl"),
+        ("gnosis", "gnosis_safe", "gnosis_impl"),
+        ("compound", "compound", "compound_impl"),
+        ("synthetix", "synthetix", "synthetix_impl"),
+    ],
+)
+def test_phase1_detects_proxy_type_and_implementation(pipeline, addr_attr, proxy_type, impl_attr):
+    entry = pipeline.c[getattr(pipeline, addr_attr)]
+    assert entry["proxy_type"] == proxy_type
+    assert entry["implementation"] == getattr(pipeline, impl_attr)
+
+
+def test_phase1_eip1167_implementation_comes_from_bytecode(pipeline):
+    assert pipeline.c[pipeline.eip1167]["proxy_type"] == "eip1167"
+    assert pipeline.c[pipeline.eip1167]["implementation"] == "0x" + pipeline.impl_hex
+
+
+def test_phase1_eip1967_admin_slot_is_read(pipeline):
+    assert pipeline.c[pipeline.eip1967]["admin"] == pipeline.eip1967_admin
+
+
+def test_phase1_beacon_pointer_is_recorded_alongside_the_impl(pipeline):
+    assert pipeline.c[pipeline.beacon_proxy]["beacon"] == pipeline.beacon_addr
+
+
+def test_phase1_diamond_reports_its_facets(pipeline):
+    assert pipeline.c[pipeline.diamond]["proxy_type"] == "eip2535"
+    assert set(pipeline.c[pipeline.diamond]["facets"]) == {pipeline.facet1, pipeline.facet2}
+
+
+def test_phase1_heuristic_probe_confirmed_by_geth_extracts_impl(pipeline):
+    assert pipeline.c[pipeline.geth_proxy]["proxy_type"] == "unknown"
+    assert pipeline.c[pipeline.geth_proxy]["implementation"] == pipeline.geth_impl
+
+
+def test_phase1_heuristic_probe_confirmed_by_parity_fallback_extracts_impl(pipeline):
+    assert pipeline.c[pipeline.parity_proxy]["proxy_type"] == "unknown"
+    assert pipeline.c[pipeline.parity_proxy]["implementation"] == pipeline.parity_impl
+
+
+def test_phase1_heuristic_probe_rejected_is_a_library(pipeline):
+    # Probe rejected — stays regular, Phase 3 marks library.
+    assert pipeline.c[pipeline.lib_dep]["type"] == "library"
+
+
+def test_phase1_heuristic_probe_unavailable_falls_back_to_static(pipeline):
+    assert pipeline.c[pipeline.static_proxy]["proxy_type"] == "unknown"
+
+
+def test_phase1_large_bytecode_with_delegatecall_stays_regular(pipeline):
+    assert pipeline.c[pipeline.large_dc]["type"] == "regular"
+
+
+# --- Phase 2: relational discovery ---
+
+
+@pytest.mark.parametrize(
+    "impl_attr",
+    ["eip1967_impl", "gnosis_impl", "compound_impl", "synthetix_impl", "facet1", "facet2"],
+)
+def test_phase2_pointer_targets_are_discovered_as_implementations(pipeline, impl_attr):
+    impl = getattr(pipeline, impl_attr)
+    assert impl in pipeline.result["discovered_addresses"]
+    assert pipeline.c[impl]["type"] == "implementation"
+
+
+@pytest.mark.parametrize("impl_attr", ["geth_impl", "parity_impl", "custom_impl"])
+def test_phase2_probe_and_getter_impls_are_classified(pipeline, impl_attr):
+    assert pipeline.c[getattr(pipeline, impl_attr)]["type"] == "implementation"
+
+
+def test_phase2_beacon_is_a_beacon_not_a_proxy(pipeline):
+    # Beacon classified as beacon (not custom proxy), impl preserved from Phase 1.
+    entry = pipeline.c[pipeline.beacon_addr]
+    assert entry["type"] == "beacon"
+    assert pipeline.beacon_proxy in entry["proxies"]
+    assert entry["implementation"] == pipeline.beacon_impl
+    assert "proxy_type" not in entry  # cleaned up from Phase 1
+
+
+# --- Phase 3: behavioral ---
+
+
+def test_phase3_create2_edge_makes_a_factory(pipeline):
+    assert pipeline.c[pipeline.factory]["type"] == "factory"
+
+
+def test_phase3_call_plus_delegatecall_is_not_a_library(pipeline):
+    assert pipeline.c[pipeline.not_lib]["type"] == "regular"
+
+
+def test_phase3_create2_edge_does_not_override_proxy(pipeline):
+    assert pipeline.c[pipeline.geth_proxy]["type"] == "proxy"
+
+
+# --- needs_polling ---
+
+
+@pytest.mark.parametrize(
+    "addr_attr",
+    ["eip1167", "eip1967", "beacon_proxy", "uups", "oz", "diamond", "gnosis", "compound", "synthetix"],
+)
+def test_needs_polling_false_for_known_event_proxy_types(pipeline, addr_attr):
+    # Known-event types: monitor detects their upgrade events → no polling.
+    assert pipeline.c[getattr(pipeline, addr_attr)]["needs_polling"] is False
+
+
+@pytest.mark.parametrize("addr_attr", ["custom", "geth_proxy", "parity_proxy", "static_proxy"])
+def test_needs_polling_true_for_custom_and_unknown(pipeline, addr_attr):
+    # No known event pattern → need polling.
+    assert pipeline.c[getattr(pipeline, addr_attr)]["needs_polling"] is True
+
+
 # ---------------------------------------------------------------------------
 
 

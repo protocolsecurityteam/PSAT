@@ -8,12 +8,15 @@ creation, deduplication, error handling, and the no-RPC fallback.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
 from services.discovery.classifier import ClassificationIncompleteError
+from tests.conftest import DATABASE_URL as _DB_URL
+from tests.conftest import _can_connect, requires_postgres
 from workers.static_worker import StaticWorker
 
 # ---------------------------------------------------------------------------
@@ -612,3 +615,132 @@ def test_classification_incomplete_fails_closed_and_reraises(monkeypatch):
     assert isinstance(degraded[0][1], ClassificationIncompleteError)
     assert all(name != "contract_flags" for name, _data, _text in store_calls)
     assert created_jobs == []
+
+
+# ---------------------------------------------------------------------------
+# Proxy → impl redirection at the job/dependency layer
+#
+# Both of these drive ``workers.static_worker`` — ``_redirect_proxy_policy_deps``
+# and the dependency-provider lookup the resolver calls into — against real
+# rows, so they need a Postgres session rather than the MagicMock above.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def session():
+    if not _can_connect():
+        pytest.skip("PostgreSQL not available")
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session
+
+    from db.models import Contract, Job, Protocol
+
+    engine = create_engine(_DB_URL)
+    s = Session(engine, expire_on_commit=False)
+    try:
+        yield s
+    finally:
+        s.rollback()
+        s.query(Contract).delete()
+        s.query(Job).delete()
+        s.query(Protocol).delete()
+        s.commit()
+        s.close()
+        engine.dispose()
+
+
+def _seed_job_with_artifact(session, *, address: str, predicate_trees: dict | None):
+    from db.models import Job, JobStage, JobStatus
+    from db.queue import store_artifact
+
+    job = Job(
+        address=address,
+        request={"address": address, "name": "T"},
+        status=JobStatus.completed,
+        stage=JobStage.done,
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+    session.add(job)
+    session.flush()
+    if predicate_trees is not None:
+        store_artifact(session, job.id, "predicate_trees", data=predicate_trees)
+    session.commit()
+    return job
+
+
+@requires_postgres
+def test_dependency_provider_lookup_returns_impl_child_for_proxy(session):
+    from db.models import Contract, Protocol
+    from db.queue import store_artifact
+    from services.resolution.capability_resolver import find_dependency_provider_job_for_address
+
+    proxy_addr = "0x" + uuid.uuid4().hex[:8] + "d4" * 16
+    impl_addr = "0x" + uuid.uuid4().hex[:8] + "e5" * 16
+
+    proto = Protocol(name=f"capres_dep_provider_{uuid.uuid4().hex[:8]}")
+    session.add(proto)
+    session.flush()
+
+    proxy_job = _seed_job_with_artifact(session, address=proxy_addr, predicate_trees=None)
+    proxy_job.request = {"address": proxy_addr, "name": "Registry", "chain": "ethereum"}
+    session.add(
+        Contract(
+            address=proxy_addr,
+            chain="ethereum",
+            protocol_id=proto.id,
+            job_id=proxy_job.id,
+            is_proxy=True,
+            implementation=impl_addr,
+        )
+    )
+
+    impl_job = _seed_job_with_artifact(session, address=impl_addr, predicate_trees=None)
+    impl_job.request = {
+        "address": impl_addr,
+        "name": "Registry: (impl)",
+        "chain": "ethereum",
+        "parent_job_id": str(proxy_job.id),
+        "proxy_address": proxy_addr,
+    }
+    store_artifact(session, impl_job.id, "effective_permissions", data={"functions": []})
+    session.commit()
+
+    lookup = find_dependency_provider_job_for_address(session, proxy_addr, chain="ethereum")
+    assert lookup is not None
+    assert lookup.runtime_job.id == proxy_job.id
+    assert lookup.analysis_job.id == impl_job.id
+
+
+@requires_postgres
+def test_static_proxy_resolution_redirects_pending_policy_dependency_to_impl(session):
+    from db.models import JobDependency, JobStage
+    from workers.static_worker import _redirect_proxy_policy_dependencies
+
+    depender_addr = "0x" + uuid.uuid4().hex[:8] + "f6" * 16
+    proxy_addr = "0x" + uuid.uuid4().hex[:8] + "a7" * 16
+    impl_addr = "0x" + uuid.uuid4().hex[:8] + "b8" * 16
+
+    depender = _seed_job_with_artifact(session, address=depender_addr, predicate_trees=None)
+    session.add(
+        JobDependency(
+            depender_job_id=depender.id,
+            provider_chain="ethereum",
+            provider_address=proxy_addr,
+            required_stage=JobStage.policy,
+            status="pending",
+        )
+    )
+    session.commit()
+
+    changed = _redirect_proxy_policy_dependencies(
+        session,
+        chain="ethereum",
+        proxy_addr=proxy_addr,
+        impl_addr=impl_addr,
+    )
+
+    assert changed == 1
+    row = session.query(JobDependency).filter_by(depender_job_id=depender.id).one()
+    assert row.provider_address == impl_addr.lower()
+    assert row.status == "pending"

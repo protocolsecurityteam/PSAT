@@ -24,8 +24,8 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy import update as sa_update
 
-from tests.conftest import requires_postgres  # noqa: E402
-from workers.base import JobHandledDirectly  # noqa: E402
+from tests.conftest import requires_postgres
+from workers.base import JobHandledDirectly
 
 pytestmark = [requires_postgres]
 
@@ -652,3 +652,94 @@ def test_stuck_job_escape_hatch_claims_past_timeout(db_session, worker, seed_pro
     claimed = worker._claim_stuck_job(db_session)
     assert claimed is not None
     assert claimed.id == job.id
+
+
+# ---------------------------------------------------------------------------
+# P2: analyze_limit must be filled after deduping
+# ---------------------------------------------------------------------------
+
+
+class TestAnalyzeLimitFilling:
+    def test_skipped_entries_dont_consume_limit(self, db_session, monkeypatch):
+        """When top-ranked entries are skipped (existing jobs), the remaining
+        slots should be filled from lower-ranked eligible entries.
+
+        This invariant used to live in ``DiscoveryWorker._process_company``.
+        It now lives in ``SelectionWorker._queue_top_n`` — the test was moved
+        here wholesale rather than duplicated so the exact failure signal
+        (``n >= 3`` children despite 3 dupes) still guards the same code path.
+        """
+        from sqlalchemy import select
+
+        from db.models import Contract, Job, JobStage, JobStatus, Protocol
+        from db.queue import create_job
+        from workers.selection_worker import SelectionWorker
+
+        # Stub Etherscan activity so enrich_with_activity doesn't hit the network.
+        monkeypatch.setattr(
+            "services.discovery.activity.etherscan.get",
+            lambda *a, **kw: {"result": []},
+        )
+
+        protocol = Protocol(name=f"fill-test-{uuid.uuid4().hex[:8]}")
+        db_session.add(protocol)
+        db_session.commit()
+
+        # Pre-create live jobs for the top 3 addresses so SelectionWorker
+        # has to skip them.
+        for i in range(3):
+            addr = f"0x{str(i).zfill(40)}"
+            create_job(db_session, {"address": addr, "chain": "ethereum"})
+
+        # Seed 6 contracts under this protocol with descending confidence —
+        # top 3 addresses overlap with the pre-created jobs above.
+        for i in range(6):
+            addr = f"0x{str(i).zfill(40)}"
+            db_session.add(
+                Contract(
+                    protocol_id=protocol.id,
+                    address=addr,
+                    chain="ethereum",
+                    contract_name=f"Contract{i}",
+                    confidence=0.9 - (i * 0.05),
+                    discovery_sources=["inventory"],
+                )
+            )
+        db_session.commit()
+
+        parent = Job(
+            company="TestProtocol",
+            protocol_id=protocol.id,
+            stage=JobStage.selection,
+            status=JobStatus.queued,
+            request={
+                "company": "TestProtocol",
+                "chain": "ethereum",
+                "analyze_limit": 5,
+                "protocol_id": protocol.id,
+            },
+        )
+        db_session.add(parent)
+        db_session.commit()
+
+        worker = SelectionWorker()
+        from workers.base import JobHandledDirectly
+
+        try:
+            worker.process(db_session, parent)
+        except JobHandledDirectly:
+            pass
+
+        child_jobs = (
+            db_session.execute(select(Job).where(Job.request["parent_job_id"].as_string() == str(parent.id)))
+            .scalars()
+            .all()
+        )
+
+        # With the bug: top 5 eligible are selected, 3 are skipped, only 2 jobs created
+        # With the fix: we iterate eligible, skip the 3 dupes, pick the next 3 → 3 jobs
+        # (remaining=5, but we only have 3 non-dupe eligible entries)
+        assert len(child_jobs) >= 3, (
+            f"Expected at least 3 child jobs (filling past skipped entries), "
+            f"got {len(child_jobs)}. Skipped entries consumed the analyze_limit."
+        )

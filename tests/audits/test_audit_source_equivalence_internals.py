@@ -17,8 +17,8 @@ from unittest.mock import MagicMock
 import pytest
 import requests
 
-from services.audits import source_equivalence  # noqa: E402
-from services.audits.source_equivalence import (  # noqa: E402
+from services.audits import source_equivalence
+from services.audits.source_equivalence import (
     EquivalenceMatch,
     VerifiedSource,
     _candidate_paths_for_name,
@@ -313,7 +313,7 @@ class TestFetchGithubRaw:
         actually reaches requests.get so rate-limit-evaders work."""
         captured = {}
 
-        def capture(url, headers=None, timeout=None):  # noqa: ARG001
+        def capture(url, headers=None, timeout=None):
             captured.update({"url": url, "headers": headers or {}})
             return _resp(text="contract X {}")
 
@@ -1109,3 +1109,31 @@ class TestFallbackReposBehavior:
             fallback_repos=["only-repo"],
         )
         assert out.status == "proven"
+
+
+def test_pinned_commit_overrides_reviewed_commits_in_verification(monkeypatch):
+    """specific_commit narrows verify_audit_covers_impl to exactly that SHA;
+    other commits in reviewed_commits are not attempted."""
+    from services.audits import source_equivalence
+
+    fetched_commits = []
+
+    def fake_github(repo, commit, path, *, token=None):
+        fetched_commits.append(commit)
+        return source_equivalence.GithubHashResult(sha256="matching", status="ok", detail="")
+
+    monkeypatch.setattr(source_equivalence, "fetch_github_source_hash", fake_github)
+
+    impl = source_equivalence.VerifiedSource(
+        contract_name="Pool", compiler_version="v0.8", files={"src/Pool.sol": "matching"}
+    )
+    out = source_equivalence.verify_audit_covers_impl(
+        reviewed_commits=["abc1234", "def5678", "fed9876"],
+        scope_name="Pool",
+        impl_source=impl,
+        source_repo="r/n",
+        specific_commit="def5678",  # narrow to this one
+    )
+    assert out.status == "proven"
+    # Only the specific commit was fetched, not the full list.
+    assert fetched_commits == ["def5678"]

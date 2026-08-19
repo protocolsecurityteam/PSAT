@@ -15,136 +15,25 @@ bucket.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
 
 import pytest
 from sqlalchemy import select
 
-from tests.conftest import requires_postgres  # noqa: E402
+from tests.conftest import requires_postgres
+from tests.support.audit_coverage_builders import (
+    _add_audit,
+    _add_contract,
+    _add_upgrade_event,
+    _stub_get_code,
+    _ts,
+    seed_protocol,  # noqa: F401  (fixture, registered by import)
+)
 
 pytestmark = [
     requires_postgres,
     # offline: no RPC for the coverage upsert's eth_getCode bytecode-drift anchor
     pytest.mark.usefixtures("_stub_rpc_bytecode"),
 ]
-
-
-# ---------------------------------------------------------------------------
-# Seeding helpers
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture()
-def seed_protocol(db_session):
-    """Fresh, unique-named Protocol + cascading cleanup."""
-    from db.models import AuditContractCoverage, AuditReport, Contract, Protocol, UpgradeEvent
-
-    name = f"cov-test-{uuid.uuid4().hex[:12]}"
-    p = Protocol(name=name)
-    db_session.add(p)
-    db_session.commit()
-    protocol_id = p.id
-    try:
-        yield protocol_id, name
-    finally:
-        # Cascade order matters: coverage refs contract+audit, upgrade
-        # refs contract, so delete children first.
-        db_session.query(AuditContractCoverage).filter_by(protocol_id=protocol_id).delete()
-        contract_ids = [c.id for c in db_session.query(Contract).filter_by(protocol_id=protocol_id).all()]
-        if contract_ids:
-            db_session.query(UpgradeEvent).filter(UpgradeEvent.contract_id.in_(contract_ids)).delete(
-                synchronize_session=False
-            )
-        db_session.query(Contract).filter_by(protocol_id=protocol_id).delete()
-        db_session.query(AuditReport).filter_by(protocol_id=protocol_id).delete()
-        db_session.query(Protocol).filter_by(id=protocol_id).delete()
-        db_session.commit()
-
-
-def _add_contract(
-    session,
-    protocol_id: int,
-    *,
-    address: str,
-    name: str,
-    is_proxy: bool = False,
-    implementation: str | None = None,
-    chain: str = "ethereum",
-):
-    """Create a Contract row and return it (already committed)."""
-    from db.models import Contract
-
-    c = Contract(
-        protocol_id=protocol_id,
-        address=address.lower(),
-        contract_name=name,
-        is_proxy=is_proxy,
-        implementation=implementation.lower() if implementation else None,
-        chain=chain,
-    )
-    session.add(c)
-    session.commit()
-    return c
-
-
-def _add_audit(
-    session,
-    protocol_id: int,
-    *,
-    auditor: str = "TestFirm",
-    title: str = "Audit",
-    date: str | None = None,
-    scope: list[str] | None = None,
-    status: str | None = "success",
-):
-    """Create an AuditReport with scope_contracts + status='success' by default."""
-    from db.models import AuditReport
-
-    ar = AuditReport(
-        protocol_id=protocol_id,
-        url=f"https://example.com/{uuid.uuid4().hex}.pdf",
-        auditor=auditor,
-        title=title,
-        date=date,
-        confidence=0.9,
-        scope_extraction_status=status,
-        scope_contracts=scope or [],
-    )
-    session.add(ar)
-    session.commit()
-    return ar
-
-
-def _add_upgrade_event(
-    session,
-    *,
-    contract_id: int,
-    proxy_address: str,
-    new_impl: str,
-    old_impl: str | None = None,
-    block_number: int,
-    timestamp: datetime | None = None,
-    tx_hash: str | None = None,
-):
-    """Append an UpgradeEvent row on the proxy's contract_id."""
-    from db.models import UpgradeEvent
-
-    ev = UpgradeEvent(
-        contract_id=contract_id,
-        proxy_address=proxy_address.lower(),
-        old_impl=old_impl.lower() if old_impl else None,
-        new_impl=new_impl.lower(),
-        block_number=block_number,
-        timestamp=timestamp,
-        tx_hash=tx_hash or f"0x{uuid.uuid4().hex[:64]}",
-    )
-    session.add(ev)
-    session.commit()
-    return ev
-
-
-def _ts(year: int, month: int = 1, day: int = 1) -> datetime:
-    return datetime(year, month, day, tzinfo=timezone.utc)
 
 
 # ---------------------------------------------------------------------------
@@ -1583,205 +1472,6 @@ def test_match_contracts_for_audit_is_not_n_plus_one(db_session, seed_protocol):
 # ---------------------------------------------------------------------------
 
 
-def test_audit_timeline_dedupe_prefers_reviewed_commit_over_impl_era(db_session, seed_protocol):
-    """``best_by_audit`` in api.contract_audit_timeline must prefer a
-    ``reviewed_commit`` row over an ``impl_era`` row when the audit
-    matched both at the same confidence. Source-equivalence is
-    cryptographic proof; impl_era is a temporal heuristic — the proof
-    should always win.
-
-    Regression: pre-fix, the dedupe ranked only on ``match_confidence``,
-    so two rows tied at 'high' fell through to first-iterated-wins (no
-    SQL ORDER BY). On EtherFi's LiquidityPool that flipped audits like
-    Certora "Priority Queue" off the current impl in the UI even though
-    the DB had a reviewed_commit row pinning it there — top banner said
-    "audited", per-impl chip said "no audit coverage" for the current
-    impl.
-    """
-    from fastapi.testclient import TestClient
-
-    import api as api_module
-    from db.models import AuditContractCoverage, UpgradeEvent
-    from tests.conftest import SessionFactory
-
-    protocol_id, _ = seed_protocol
-    proxy = _add_contract(
-        db_session,
-        protocol_id,
-        address="0x" + "1" * 40,
-        name="Proxy",
-        is_proxy=True,
-        implementation="0x" + "a" * 40,
-    )
-    impl_a = _add_contract(db_session, protocol_id, address="0x" + "a" * 40, name="Pool")
-    impl_b = _add_contract(db_session, protocol_id, address="0x" + "b" * 40, name="Pool")
-    # Two upgrade events: impl_b first, then upgraded to impl_a (current).
-    db_session.add(
-        UpgradeEvent(
-            contract_id=proxy.id,
-            proxy_address=proxy.address,
-            old_impl=None,
-            new_impl=impl_b.address,
-            block_number=100,
-            timestamp=_ts(2024, 1, 1),
-            tx_hash="0x" + "1" * 64,
-        )
-    )
-    db_session.add(
-        UpgradeEvent(
-            contract_id=proxy.id,
-            proxy_address=proxy.address,
-            old_impl=impl_b.address,
-            new_impl=impl_a.address,
-            block_number=200,
-            timestamp=_ts(2024, 6, 1),
-            tx_hash="0x" + "2" * 64,
-        )
-    )
-    audit = _add_audit(db_session, protocol_id, scope=["Pool"], date="2024-08-01")
-
-    # Two coverage rows at SAME confidence. With the buggy ranker, whichever
-    # row hits the cov_rows iteration first wins. We insert impl_b's
-    # impl_era row FIRST so the bug pins the chip to impl_b — the fix must
-    # still pick impl_a's reviewed_commit despite iteration order.
-    db_session.add(
-        AuditContractCoverage(
-            contract_id=impl_b.id,
-            audit_report_id=audit.id,
-            protocol_id=protocol_id,
-            matched_name="Pool",
-            match_type="impl_era",
-            match_confidence="high",
-            covered_from_block=100,
-            covered_to_block=200,
-        )
-    )
-    db_session.add(
-        AuditContractCoverage(
-            contract_id=impl_a.id,
-            audit_report_id=audit.id,
-            protocol_id=protocol_id,
-            matched_name="Pool",
-            match_type="reviewed_commit",
-            match_confidence="high",
-        )
-    )
-    db_session.commit()
-
-    # Hit the API on the proxy — it unions coverage from proxy + impls.
-    from routers import deps as routers_deps
-
-    SessionLocal_orig = routers_deps.SessionLocal
-    routers_deps.SessionLocal = SessionFactory(db_session)
-    try:
-        client = TestClient(api_module.app)
-        r = client.get(f"/api/contracts/{proxy.id}/audit_timeline")
-    finally:
-        routers_deps.SessionLocal = SessionLocal_orig
-
-    assert r.status_code == 200, r.text
-    body = r.json()
-    rows_for_audit = [c for c in body["coverage"] if c["audit_id"] == audit.id]
-    assert len(rows_for_audit) == 1, f"audit must dedupe to one row, got {rows_for_audit}"
-    chosen = rows_for_audit[0]
-    assert chosen["match_type"] == "reviewed_commit", (
-        f"Source-equivalence proof must beat impl_era at equal confidence; got {chosen['match_type']!r}. "
-        f"Full row: {chosen!r}"
-    )
-    assert chosen["impl_address"].lower() == impl_a.address.lower(), (
-        f"Chip must point to current impl (reviewed_commit target), got {chosen['impl_address']!r}"
-    )
-
-
-def test_audit_timeline_dedupe_prefers_impl_era_over_direct(db_session, seed_protocol):
-    """At equal confidence, ``impl_era`` (temporal window) beats
-    ``direct`` (pure name match) — impl_era carries strictly more
-    information. Defense-in-depth so the type-aware ranker remains
-    consistent across all three match types.
-    """
-    from fastapi.testclient import TestClient
-
-    import api as api_module
-    from db.models import AuditContractCoverage, UpgradeEvent
-    from tests.conftest import SessionFactory
-
-    protocol_id, _ = seed_protocol
-    proxy = _add_contract(
-        db_session,
-        protocol_id,
-        address="0x" + "3" * 40,
-        name="Proxy2",
-        is_proxy=True,
-        implementation="0x" + "c" * 40,
-    )
-    impl_c = _add_contract(db_session, protocol_id, address="0x" + "c" * 40, name="Pool")
-    impl_d = _add_contract(db_session, protocol_id, address="0x" + "d" * 40, name="Pool")
-    db_session.add(
-        UpgradeEvent(
-            contract_id=proxy.id,
-            proxy_address=proxy.address,
-            old_impl=None,
-            new_impl=impl_d.address,
-            block_number=300,
-            timestamp=_ts(2024, 1, 1),
-            tx_hash="0x" + "3" * 64,
-        )
-    )
-    db_session.add(
-        UpgradeEvent(
-            contract_id=proxy.id,
-            proxy_address=proxy.address,
-            old_impl=impl_d.address,
-            new_impl=impl_c.address,
-            block_number=400,
-            timestamp=_ts(2024, 6, 1),
-            tx_hash="0x" + "4" * 64,
-        )
-    )
-    audit = _add_audit(db_session, protocol_id, scope=["Pool"], date="2024-04-01")
-
-    # direct on current impl (no temporal info), impl_era on past impl
-    # (window match). impl_era should win.
-    db_session.add(
-        AuditContractCoverage(
-            contract_id=impl_c.id,
-            audit_report_id=audit.id,
-            protocol_id=protocol_id,
-            matched_name="Pool",
-            match_type="direct",
-            match_confidence="high",
-        )
-    )
-    db_session.add(
-        AuditContractCoverage(
-            contract_id=impl_d.id,
-            audit_report_id=audit.id,
-            protocol_id=protocol_id,
-            matched_name="Pool",
-            match_type="impl_era",
-            match_confidence="high",
-            covered_from_block=300,
-            covered_to_block=400,
-        )
-    )
-    db_session.commit()
-
-    from routers import deps as routers_deps
-
-    SessionLocal_orig = routers_deps.SessionLocal
-    routers_deps.SessionLocal = SessionFactory(db_session)
-    try:
-        client = TestClient(api_module.app)
-        r = client.get(f"/api/contracts/{proxy.id}/audit_timeline")
-    finally:
-        routers_deps.SessionLocal = SessionLocal_orig
-
-    assert r.status_code == 200, r.text
-    rows_for_audit = [c for c in r.json()["coverage"] if c["audit_id"] == audit.id]
-    assert len(rows_for_audit) == 1
-    assert rows_for_audit[0]["match_type"] == "impl_era"
-
-
 def test_match_contracts_for_audit_per_contract_dedupe_prefers_reviewed_commit(db_session, seed_protocol):
     """Symmetric ranking inside the matcher: ``by_contract`` in
     match_contracts_for_audit must use the same (confidence, match_type)
@@ -1844,20 +1534,6 @@ def test_match_contracts_for_audit_per_contract_dedupe_prefers_reviewed_commit(d
 # ---------------------------------------------------------------------------
 # Bytecode anchor (Phase 2)
 # ---------------------------------------------------------------------------
-
-
-def _stub_get_code(code_map: dict[str, str]):
-    """Return a ``get_code(rpc_url, address)`` stand-in served from a dict.
-
-    Lets tests exercise ``_fetch_bytecode_keccak`` / ``_apply_bytecode_anchor``
-    without an RPC. Keys are lowercased addresses; value is the code hex
-    string the RPC would return (including ``'0x'`` for EOAs).
-    """
-
-    def fake_get_code(rpc_url, addr):
-        return code_map.get((addr or "").lower(), "0x")
-
-    return fake_get_code
 
 
 def test_fetch_bytecode_keccak_returns_hex_hash(monkeypatch):
@@ -1956,56 +1632,6 @@ def test_upsert_coverage_keccak_null_when_rpc_fails(db_session, seed_protocol, m
 # ---------------------------------------------------------------------------
 # Findings / live_findings filter (Phase 3a)
 # ---------------------------------------------------------------------------
-
-
-def test_findings_filter_excludes_fixed_status(db_session, api_client, seed_protocol, monkeypatch):
-    """Timeline endpoint exposes non-'fixed' findings, hides 'fixed' ones."""
-    from db.models import AuditReport
-
-    protocol_id, _ = seed_protocol
-    addr = "0x" + "cc" * 20
-    contract = _add_contract(db_session, protocol_id, address=addr, name="Vault")
-    audit = _add_audit(db_session, protocol_id, date="2024-06-15", scope=["Vault"])
-
-    # Write a coverage row directly (bypass upsert to keep this test
-    # focused on the findings filter rather than the whole match path).
-    from db.models import AuditContractCoverage
-
-    db_session.add(
-        AuditContractCoverage(
-            contract_id=contract.id,
-            audit_report_id=audit.id,
-            protocol_id=protocol_id,
-            matched_name="Vault",
-            match_type="direct",
-            match_confidence="high",
-        )
-    )
-    # Set findings on the audit row — must update via SQLAlchemy so the
-    # JSONB serialization path runs.
-    audit_row = db_session.query(AuditReport).filter_by(id=audit.id).one()
-    audit_row.findings = [
-        {"title": "Fixed issue", "severity": "medium", "status": "fixed", "contract_hint": "Vault"},
-        {"title": "Acknowledged issue", "severity": "high", "status": "acknowledged", "contract_hint": "Vault"},
-        {"title": "Still mitigating", "severity": "low", "status": "mitigated", "contract_hint": "Vault"},
-    ]
-    db_session.commit()
-
-    from utils import rpc
-
-    monkeypatch.setattr(rpc, "get_code", _stub_get_code({addr: "0xbeef"}))
-
-    resp = api_client.get(f"/api/contracts/{contract.id}/audit_timeline")
-    assert resp.status_code == 200
-    payload = resp.json()
-
-    assert len(payload["coverage"]) == 1
-    live = payload["coverage"][0]["live_findings"]
-    # 'fixed' dropped, the other two survive.
-    titles = {f["title"] for f in live}
-    assert "Fixed issue" not in titles
-    assert "Acknowledged issue" in titles
-    assert "Still mitigating" in titles
 
 
 # ---------------------------------------------------------------------------
@@ -2266,34 +1892,6 @@ def test_match_audits_for_contract_address_anchor_honors_chain(db_session, seed_
     assert len(matches) == 1
     assert matches[0].audit_report_id == audit.id
     assert matches[0].match_type == "reviewed_address"
-
-
-def test_pinned_commit_overrides_reviewed_commits_in_verification(monkeypatch):
-    """specific_commit narrows verify_audit_covers_impl to exactly that SHA;
-    other commits in reviewed_commits are not attempted."""
-    from services.audits import source_equivalence
-
-    fetched_commits = []
-
-    def fake_github(repo, commit, path, *, token=None):
-        fetched_commits.append(commit)
-        return source_equivalence.GithubHashResult(sha256="matching", status="ok", detail="")
-
-    monkeypatch.setattr(source_equivalence, "fetch_github_source_hash", fake_github)
-
-    impl = source_equivalence.VerifiedSource(
-        contract_name="Pool", compiler_version="v0.8", files={"src/Pool.sol": "matching"}
-    )
-    out = source_equivalence.verify_audit_covers_impl(
-        reviewed_commits=["abc1234", "def5678", "fed9876"],
-        scope_name="Pool",
-        impl_source=impl,
-        source_repo="r/n",
-        specific_commit="def5678",  # narrow to this one
-    )
-    assert out.status == "proven"
-    # Only the specific commit was fetched, not the full list.
-    assert fetched_commits == ["def5678"]
 
 
 def test_reviewed_address_match_type_in_order_ranking():

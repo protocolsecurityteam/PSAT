@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from tests.conftest import DATABASE_URL as _DB_URL  # noqa: E402
+from tests.conftest import DATABASE_URL as _DB_URL
 from tests.conftest import _can_connect, requires_postgres
 
 # offline: no live owner()/governor() eth_call during predicate evaluation
@@ -1351,83 +1351,6 @@ def test_external_authority_inlining_uses_check_trees_and_call_frame(session):
     cap = out["guarded()"]
     assert cap["kind"] == "finite_set"
     assert cap.get("members") == [member]
-
-
-@requires_postgres
-def test_dependency_provider_lookup_returns_impl_child_for_proxy(session):
-    from db.models import Contract, Protocol
-    from db.queue import store_artifact
-    from services.resolution.capability_resolver import find_dependency_provider_job_for_address
-
-    proxy_addr = "0x" + uuid.uuid4().hex[:8] + "d4" * 16
-    impl_addr = "0x" + uuid.uuid4().hex[:8] + "e5" * 16
-
-    proto = Protocol(name=f"capres_dep_provider_{uuid.uuid4().hex[:8]}")
-    session.add(proto)
-    session.flush()
-
-    proxy_job = _seed_job_with_artifact(session, address=proxy_addr, predicate_trees=None)
-    proxy_job.request = {"address": proxy_addr, "name": "Registry", "chain": "ethereum"}
-    session.add(
-        Contract(
-            address=proxy_addr,
-            chain="ethereum",
-            protocol_id=proto.id,
-            job_id=proxy_job.id,
-            is_proxy=True,
-            implementation=impl_addr,
-        )
-    )
-
-    impl_job = _seed_job_with_artifact(session, address=impl_addr, predicate_trees=None)
-    impl_job.request = {
-        "address": impl_addr,
-        "name": "Registry: (impl)",
-        "chain": "ethereum",
-        "parent_job_id": str(proxy_job.id),
-        "proxy_address": proxy_addr,
-    }
-    store_artifact(session, impl_job.id, "effective_permissions", data={"functions": []})
-    session.commit()
-
-    lookup = find_dependency_provider_job_for_address(session, proxy_addr, chain="ethereum")
-    assert lookup is not None
-    assert lookup.runtime_job.id == proxy_job.id
-    assert lookup.analysis_job.id == impl_job.id
-
-
-@requires_postgres
-def test_static_proxy_resolution_redirects_pending_policy_dependency_to_impl(session):
-    from db.models import JobDependency, JobStage
-    from workers.static_worker import _redirect_proxy_policy_dependencies
-
-    depender_addr = "0x" + uuid.uuid4().hex[:8] + "f6" * 16
-    proxy_addr = "0x" + uuid.uuid4().hex[:8] + "a7" * 16
-    impl_addr = "0x" + uuid.uuid4().hex[:8] + "b8" * 16
-
-    depender = _seed_job_with_artifact(session, address=depender_addr, predicate_trees=None)
-    session.add(
-        JobDependency(
-            depender_job_id=depender.id,
-            provider_chain="ethereum",
-            provider_address=proxy_addr,
-            required_stage=JobStage.policy,
-            status="pending",
-        )
-    )
-    session.commit()
-
-    changed = _redirect_proxy_policy_dependencies(
-        session,
-        chain="ethereum",
-        proxy_addr=proxy_addr,
-        impl_addr=impl_addr,
-    )
-
-    assert changed == 1
-    row = session.query(JobDependency).filter_by(depender_job_id=depender.id).one()
-    assert row.provider_address == impl_addr.lower()
-    assert row.status == "pending"
 
 
 # ---------------------------------------------------------------------------

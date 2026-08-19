@@ -2,7 +2,8 @@
 
 Covers ``extract_governance_topics`` (consumes a tracking_plan and produces
 per-contract topic specs) and ``parse_tracked_log`` (generic ABI-driven
-decoder for events not in the hand-rolled global registry).
+decoder for events not in the hand-rolled global registry), plus the
+hand-rolled ``parse_governance_log`` timelock decode (``TestTimelockEventDecode``).
 
 Pure unit tests — no DB, no Anvil, no RPC.
 """
@@ -865,3 +866,95 @@ def test_parse_any_log_handrolled_tags_isolated_from_module_state():
     assert ev2["effect_tags"]["writes"] == ["owner"], (
         "module-level synthesis map was mutated by a consumer — _attach_effect_tags must copy the writes list"
     )
+
+
+# ---------------------------------------------------------------------------
+# Timelock event decode (CallScheduled / CallExecuted)
+# ---------------------------------------------------------------------------
+
+
+class TestTimelockEventDecode:
+    """Verify the parser pulls target/value/calldata/predecessor/delay out
+    of the static + dynamic regions of CallScheduled/CallExecuted log data.
+
+    The watcher used to keep only operation_id + index, dropping everything
+    that would actually let the UI say 'queued: setX on AuctionManager
+    (delay 3d)'. These tests pin the new decode shape so a future regression
+    that re-narrows the parser fails loudly.
+    """
+
+    def test_call_scheduled_decodes_static_fields(self):
+        from services.monitoring.event_topics import CALL_SCHEDULED_TOPIC0, parse_governance_log
+
+        target_word = "0" * 24 + "0" * 38 + "01"
+        value_word = "0" * 64
+        bytes_offset = format(160, "x").zfill(64)  # 5 head words * 32B
+        predecessor_word = "0" * 64
+        delay_word = format(3600, "x").zfill(64)
+        calldata = "12345678abcd"  # selector 0x12345678 + 2-byte tail
+        cd_len = format(6, "x").zfill(64)
+        cd_padded = calldata + "0" * (64 - len(calldata))
+        data_hex = "0x" + target_word + value_word + bytes_offset + predecessor_word + delay_word + cd_len + cd_padded
+
+        log = {
+            "topics": [CALL_SCHEDULED_TOPIC0, "0x" + "ab" * 32, "0x" + format(0, "x").zfill(64)],
+            "data": data_hex,
+            "blockNumber": "0x100",
+            "transactionHash": "0xfeed",
+        }
+        ev = parse_governance_log(log)
+        assert ev is not None
+        assert ev["event_type"] == "timelock_scheduled"
+        assert ev["operation_id"] == "0x" + "ab" * 32
+        assert ev["index"] == 0
+        assert ev["target"] == "0x" + "00" * 19 + "01"
+        assert ev["value"] == 0
+        assert ev["predecessor"] == "0x" + "00" * 32
+        assert ev["delay"] == 3600
+        assert ev["calldata_length"] == 6
+        assert ev["selector"] == "0x12345678"
+
+    def test_call_executed_decodes_static_fields(self):
+        from services.monitoring.event_topics import CALL_EXECUTED_TOPIC0, parse_governance_log
+
+        target_word = "0" * 24 + "0" * 38 + "02"
+        value_word = format(1000000000000000000, "x").zfill(64)  # 1 ETH
+        bytes_offset = format(96, "x").zfill(64)  # 3 head words
+        cd_len = format(4, "x").zfill(64)
+        selector_word = "deadbeef" + "0" * 56
+        data_hex = "0x" + target_word + value_word + bytes_offset + cd_len + selector_word
+
+        log = {
+            "topics": [CALL_EXECUTED_TOPIC0, "0x" + "cd" * 32, "0x" + format(7, "x").zfill(64)],
+            "data": data_hex,
+            "blockNumber": "0x200",
+            "transactionHash": "0xbabe",
+        }
+        ev = parse_governance_log(log)
+        assert ev is not None
+        assert ev["event_type"] == "timelock_executed"
+        assert ev["operation_id"] == "0x" + "cd" * 32
+        assert ev["index"] == 7
+        assert ev["target"] == "0x" + "00" * 19 + "02"
+        assert ev["value"] == 10**18
+        assert ev["calldata_length"] == 4
+        assert ev["selector"] == "0xdeadbeef"
+
+    def test_short_data_field_does_not_crash(self):
+        """Defensive: a malformed log with a short data field shouldn't
+        raise — the parser should set the indexed fields and skip the
+        rest. Catches RPCs that occasionally truncate before the body."""
+        from services.monitoring.event_topics import CALL_SCHEDULED_TOPIC0, parse_governance_log
+
+        log = {
+            "topics": [CALL_SCHEDULED_TOPIC0, "0x" + "ab" * 32, "0x" + format(0, "x").zfill(64)],
+            "data": "0x" + "00" * 32,  # only 1 word — way too short
+            "blockNumber": "0x1",
+            "transactionHash": "0xa",
+        }
+        ev = parse_governance_log(log)
+        assert ev is not None
+        assert ev["operation_id"] == "0x" + "ab" * 32
+        assert ev["index"] == 0
+        assert "target" not in ev
+        assert "delay" not in ev

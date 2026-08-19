@@ -22,6 +22,7 @@ in the integration test, not here.
 from __future__ import annotations
 
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -606,3 +607,34 @@ class TestResolveBranchCommit:
         _github.clear_branch_sha_cache()
         assert _github._BRANCH_SHA_CACHE == {}
         assert "branch_sha" not in memory._CACHE_PRESSURE_STATE
+
+
+# ── audit serializer error fields ────────────────────────────────────────────
+
+
+def test_audit_serializer_includes_extraction_errors():
+    from services.audits.serializers import _audit_report_to_dict
+
+    ar = SimpleNamespace(
+        id=1,
+        url="u",
+        pdf_url=None,
+        auditor="a",
+        title="t",
+        date="2026-01-01",
+        confidence=None,
+        text_extraction_status="failed",
+        text_extracted_at=None,
+        text_size_bytes=None,
+        text_extraction_error="boom-text",
+        scope_extraction_status=None,
+        scope_extracted_at=None,
+        scope_contracts=None,
+        scope_extraction_error="boom-scope",
+        reviewed_commits=None,
+        classified_commits=None,
+        referenced_repos=None,
+    )
+    out = _audit_report_to_dict(ar)
+    assert out["text_extraction_error"] == "boom-text"
+    assert out["scope_extraction_error"] == "boom-scope"
