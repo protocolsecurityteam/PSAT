@@ -43,6 +43,8 @@ from tests.support.anvil import (
     _cast_send,
     _compile_and_deploy,
     anvil_env,  # noqa: F401
+    materialization_keys,
+    purge_materializations,
 )
 
 # ---------------------------------------------------------------------------
@@ -331,9 +333,11 @@ def test_db():
     Base.metadata.create_all(engine)
 
     session = SASession(engine, expire_on_commit=False)
+    pre_materializations = materialization_keys(session)
     try:
         yield session
     finally:
+        purge_materializations(session, pre_materializations)
         session.rollback()
         from db.models import Protocol, ProtocolSubscription
 

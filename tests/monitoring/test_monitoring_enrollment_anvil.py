@@ -72,6 +72,8 @@ from tests.support.anvil import (
     _cast_send,
     _compile_and_deploy,
     anvil_env,  # noqa: F401
+    materialization_keys,
+    purge_materializations,
 )
 
 _has_anvil = shutil.which("anvil") is not None
@@ -195,9 +197,11 @@ def test_db():
     engine = create_engine(DATABASE_URL)
     Base.metadata.create_all(engine)
     session = SASession(engine, expire_on_commit=False)
+    pre_materializations = materialization_keys(session)
     try:
         yield session
     finally:
+        purge_materializations(session, pre_materializations)
         session.rollback()
         # Delete in FK-respecting order; everything else cascades via Contract /
         # Protocol deletion (EF→FP cascades on EF.id).

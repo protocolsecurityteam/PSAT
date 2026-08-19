@@ -77,6 +77,36 @@ def anvil_env(tmp_path):
         _terminate(proc)
 
 
+def materialization_keys(session) -> set[tuple[str, str]]:
+    """Snapshot the ``(chain, address)`` keys already in ``contract_materializations``."""
+    from sqlalchemy import select
+
+    from db.models import ContractMaterialization
+
+    return set(session.execute(select(ContractMaterialization.chain, ContractMaterialization.address)).all())
+
+
+def purge_materializations(session, keep: set[tuple[str, str]]) -> None:
+    """Drop the ``contract_materializations`` rows a test added, keeping the pre-existing ones.
+
+    Every anvil module deploys from the same funded account into a fresh node, so
+    contract #1 always lands on the same address — and the table is keyed
+    ``(chain, address)``. A row one module leaves behind is a unique violation for
+    the next module that deploys, which makes the two anvil files order-dependent
+    on a shared database. The per-module ``test_db`` cleanups do not reach this
+    table, so it is swept here.
+    """
+    from sqlalchemy import select
+
+    from db.models import ContractMaterialization
+
+    session.rollback()
+    for row in session.execute(select(ContractMaterialization)).scalars().all():
+        if (row.chain, row.address) not in keep:
+            session.delete(row)
+    session.commit()
+
+
 def _cast(args: list[str], rpc_url: str) -> str:
     result = subprocess.run(
         ["cast"] + args + ["--rpc-url", rpc_url],
