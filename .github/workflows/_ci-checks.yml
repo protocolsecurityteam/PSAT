@@ -98,7 +98,7 @@ jobs:
       - run: npm test
       # install-deps is best-effort: it apt-installs from azure.archive.ubuntu.com,
       # which has recurring outages, and the runner image already ships the libraries.
-      - run: npx playwright install-deps chromium || echo "::warning::playwright install-deps failed (apt mirror outage?); relying on runner-image libraries"
+      - run: timeout 210 npx playwright install-deps chromium || echo "::warning::playwright install-deps failed or stalled (apt mirror outage?); relying on runner-image libraries"
       - run: npx playwright install chromium
       - run: npx playwright test
 
