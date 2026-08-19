@@ -28,39 +28,9 @@ from sqlalchemy import select
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tests.conftest import SessionFactory, requires_postgres, requires_storage  # noqa: E402
+from tests.support.pdf import minimal_pdf_with_text  # noqa: E402
 
 pytestmark = [requires_postgres, requires_storage]
-
-
-# ---------------------------------------------------------------------------
-# PDF fixture (same shape as the unit-test fixture — kept local to avoid
-# cross-test coupling)
-# ---------------------------------------------------------------------------
-
-
-def _minimal_pdf_with_text(text: str) -> bytes:
-    escaped = text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
-    content_stream = f"BT\n/F1 12 Tf\n50 750 Td\n({escaped}) Tj\nET\n".encode("ascii")
-    objects: list[bytes] = [
-        b"<</Type/Catalog/Pages 2 0 R>>",
-        b"<</Type/Pages/Count 1/Kids[3 0 R]>>",
-        b"<</Type/Page/MediaBox[0 0 612 792]/Parent 2 0 R/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>",
-        (f"<</Length {len(content_stream)}>>\nstream\n".encode("ascii") + content_stream + b"endstream"),
-        b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>",
-    ]
-    buf = bytearray(b"%PDF-1.4\n")
-    xref_offsets: list[int] = []
-    for idx, obj in enumerate(objects, start=1):
-        xref_offsets.append(len(buf))
-        buf += f"{idx} 0 obj\n".encode("ascii") + obj + b"\nendobj\n"
-    xref_start = len(buf)
-    buf += b"xref\n0 " + str(len(objects) + 1).encode("ascii") + b"\n"
-    buf += b"0000000000 65535 f \n"
-    for offset in xref_offsets:
-        buf += f"{offset:010d} 00000 n \n".encode("ascii")
-    buf += b"trailer\n<</Size " + str(len(objects) + 1).encode("ascii") + b"/Root 1 0 R>>\n"
-    buf += b"startxref\n" + str(xref_start).encode("ascii") + b"\n%%EOF\n"
-    return bytes(buf)
 
 
 # Text long enough to clear the 500-char min-useful-text threshold.
@@ -174,7 +144,7 @@ def test_worker_processes_pending_rows_end_to_end(db_session, storage_bucket, se
     with every text-extraction column populated correctly."""
     from db.models import AuditReport
 
-    pdf_bytes = _minimal_pdf_with_text(_PADDED_SCOPE)
+    pdf_bytes = minimal_pdf_with_text(_PADDED_SCOPE)
     url = "https://example.com/real.pdf"
     audit_id = _seed_audit(db_session, seed_protocol, url=url, pdf_url=url)
     _mock_download(monkeypatch, {url: pdf_bytes})
@@ -303,7 +273,7 @@ def test_worker_skips_short_text_pdfs(db_session, storage_bucket, seed_protocol,
     skipped (OCR required) rather than stored as empty text."""
     from db.models import AuditReport
 
-    pdf_bytes = _minimal_pdf_with_text("tiny")  # far below 500 char threshold
+    pdf_bytes = minimal_pdf_with_text("tiny")  # far below 500 char threshold
     url = "https://example.com/image-only.pdf"
     audit_id = _seed_audit(db_session, seed_protocol, url=url, pdf_url=url)
     _mock_download(monkeypatch, {url: pdf_bytes})
@@ -407,7 +377,7 @@ def test_api_get_audit_returns_full_metadata(
 ):
     """After successful extraction, GET /api/audits/{id} returns every
     stored metadata field including has_text + text_size_bytes."""
-    pdf_bytes = _minimal_pdf_with_text(_PADDED_SCOPE)
+    pdf_bytes = minimal_pdf_with_text(_PADDED_SCOPE)
     url = "https://example.com/for-api.pdf"
     audit_id = _seed_audit(
         db_session,
@@ -443,7 +413,7 @@ def test_api_get_audit_text_streams_body_from_storage(
 ):
     """GET /api/audits/{id}/text returns the full extracted text body,
     served from object storage with the right content-type."""
-    pdf_bytes = _minimal_pdf_with_text(_PADDED_SCOPE)
+    pdf_bytes = minimal_pdf_with_text(_PADDED_SCOPE)
     url = "https://example.com/for-text-api.pdf"
     audit_id = _seed_audit(db_session, seed_protocol, url=url, pdf_url=url)
     _mock_download(monkeypatch, {url: pdf_bytes})

@@ -28,7 +28,7 @@ from services.effects.config import EFFECT_CLASS_SUPPLY, VERDICT_PROVEN, effects
 from services.effects.exceptions import ForkRpcTimeoutError  # noqa: E402
 from services.effects.harness import proven  # noqa: E402
 from tests.cache_helpers import requires_postgres  # noqa: E402
-from tests.test_effects_worker_integration import (  # noqa: E402
+from tests.support.effects_worker_harness import (  # noqa: E402
     CONTRACT_A,
     CONTRACT_B,
     CONTRACT_C,
@@ -40,7 +40,7 @@ from tests.test_effects_worker_integration import (  # noqa: E402
     _seams,
     clean_effects,  # noqa: F401  (imported so pytest registers the fixture here)
 )
-from tests.test_policy_worker_integration import (  # noqa: E402
+from tests.support.policy_builders import (  # noqa: E402
     TARGET_ADDRESS,
     _graph_with_nodes,
     _job,

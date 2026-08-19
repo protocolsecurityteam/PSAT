@@ -45,14 +45,11 @@ from __future__ import annotations
 
 import os
 import shutil
-import socket
-import subprocess
 import sys
-import time
 from pathlib import Path
 
 import pytest
-from sqlalchemy import create_engine, delete, select, text
+from sqlalchemy import create_engine, delete, select
 from sqlalchemy.orm import Session as SASession
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -71,6 +68,15 @@ from db.models import (
     Protocol,
     WatchedProxy,
 )
+from tests.conftest import requires_postgres
+from tests.support.anvil import (
+    ACCOUNT0,
+    OWNABLE_SOURCE,
+    PRIVATE_KEY,
+    _cast_send,
+    _compile_and_deploy,
+    anvil_env,  # noqa: F401
+)
 
 _has_anvil = shutil.which("anvil") is not None
 _has_cast = shutil.which("cast") is not None
@@ -78,29 +84,13 @@ _has_forge = shutil.which("forge") is not None
 
 DATABASE_URL = os.environ.get("TEST_DATABASE_URL", "")
 
-
-def _can_connect() -> bool:
-    if not DATABASE_URL:
-        return False
-    try:
-        engine = create_engine(DATABASE_URL)
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-        engine.dispose()
-        return True
-    except Exception:
-        return False
-
-
 pytestmark = [
     pytest.mark.skipif(not _has_anvil, reason="anvil not found on PATH"),
     pytest.mark.skipif(not _has_cast, reason="cast not found on PATH"),
     pytest.mark.skipif(not _has_forge, reason="forge not found on PATH"),
-    pytest.mark.skipif(not _can_connect(), reason="PostgreSQL not available"),
+    requires_postgres,
 ]
 
-PRIVATE_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
-ACCOUNT0 = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
 ACCOUNT1 = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
 
 # Distinct protocol name namespaces this test module's rows; teardown
@@ -113,84 +103,6 @@ def _disable_scan_confirmation_depth(monkeypatch):
     # These anvil chains are only a handful of blocks long; the production
     # 12-block confirmation clamp would hide every just-emitted event.
     monkeypatch.setenv("PSAT_SCAN_CONFIRMATION_DEPTH", "0")
-
-
-# ---------------------------------------------------------------------------
-# Anvil helpers
-# ---------------------------------------------------------------------------
-
-
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
-def _wait_for_port(port: int, timeout: float = 10.0) -> bool:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            with socket.create_connection(("127.0.0.1", port), timeout=0.5):
-                return True
-        except OSError:
-            time.sleep(0.1)
-    return False
-
-
-def _cast(args: list[str], rpc_url: str) -> str:
-    result = subprocess.run(
-        ["cast"] + args + ["--rpc-url", rpc_url],
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"cast failed: {result.stderr}")
-    return result.stdout.strip()
-
-
-def _cast_send(to: str, sig: str, args: list[str], rpc_url: str, private_key: str = PRIVATE_KEY) -> str:
-    cmd = ["cast", "send", to, sig] + args + ["--rpc-url", rpc_url, "--private-key", private_key]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-    if result.returncode != 0:
-        raise RuntimeError(f"cast send failed: {result.stderr}")
-    return result.stdout.strip()
-
-
-def _compile_and_deploy(
-    source: str,
-    contract_name: str,
-    constructor_args: list[str],
-    rpc_url: str,
-    tmp_path: Path,
-    private_key: str = PRIVATE_KEY,
-) -> str:
-    src_file = tmp_path / f"{contract_name}.sol"
-    src_file.write_text(source)
-
-    cmd = [
-        "forge",
-        "create",
-        f"{src_file}:{contract_name}",
-        "--rpc-url",
-        rpc_url,
-        "--private-key",
-        private_key,
-        "--broadcast",
-        "--no-cache",
-    ]
-    if constructor_args:
-        cmd += ["--constructor-args"] + constructor_args
-
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60, cwd=str(tmp_path))
-    if result.returncode != 0:
-        raise RuntimeError(f"forge create failed for {contract_name}: {result.stderr}\n{result.stdout}")
-
-    for line in result.stdout.split("\n"):
-        if "Deployed to:" in line or "deployed to:" in line.lower():
-            return line.split(":")[-1].strip().lower()
-
-    raise RuntimeError(f"Could not parse address from forge create output:\n{result.stdout}")
 
 
 # ---------------------------------------------------------------------------
@@ -240,31 +152,6 @@ contract TestSafe {
 }
 """
 
-# Minimal stand-in for a protocol contract that tracks an owner and emits
-# the canonical OZ event on rotation. The integration tests don't exercise
-# the contract's behavior — they only need a deployed address that emits
-# the right log when ownership transfers.
-OWNABLE_SOURCE = """
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
-contract TestOwnable {
-    address public owner;
-    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
-
-    constructor() {
-        owner = msg.sender;
-        emit OwnershipTransferred(address(0), msg.sender);
-    }
-
-    function transferOwnership(address newOwner) external {
-        require(msg.sender == owner, "not owner");
-        address old = owner;
-        owner = newOwner;
-        emit OwnershipTransferred(old, newOwner);
-    }
-}
-"""
-
 # Stand-in for a contract that delegates upgrade authority to a separate
 # ``ProxyAdmin``-like address. Doesn't need to be a real proxy shell —
 # enrollment only cares about the CGN classification.
@@ -299,33 +186,6 @@ contract TestSolmateOwned {
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
-
-
-@pytest.fixture()
-def anvil_env(tmp_path):
-    """Start anvil and yield ``(rpc_url, tmp_path)``."""
-    port = _free_port()
-    rpc_url = f"http://127.0.0.1:{port}"
-
-    anvil_proc = subprocess.Popen(
-        ["anvil", "--port", str(port), "--silent"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-
-    try:
-        if not _wait_for_port(port, timeout=15):
-            raise RuntimeError("anvil did not start in time")
-        foundry_toml = tmp_path / "foundry.toml"
-        foundry_toml.write_text("[profile.default]\nsrc = '.'\nout = 'out'\n")
-        yield rpc_url, tmp_path
-    finally:
-        anvil_proc.terminate()
-        try:
-            anvil_proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            anvil_proc.kill()
-            anvil_proc.wait()
 
 
 @pytest.fixture()
@@ -467,9 +327,9 @@ def test_bug1_state_variable_destination_safe_not_enrolled_and_not_scanned(anvil
     from services.monitoring.unified_watcher import scan_for_events
 
     rpc_url, tmp_path = anvil_env
-    real_safe = _compile_and_deploy(SAFE_SOURCE, "TestSafe", [], rpc_url, tmp_path)
-    fee_safe = _compile_and_deploy(SAFE_SOURCE, "TestSafe", [], rpc_url, tmp_path)
-    vault = _compile_and_deploy(OWNABLE_SOURCE, "TestOwnable", [], rpc_url, tmp_path)
+    real_safe = _compile_and_deploy(SAFE_SOURCE, "TestSafe", [], rpc_url, PRIVATE_KEY, tmp_path)
+    fee_safe = _compile_and_deploy(SAFE_SOURCE, "TestSafe", [], rpc_url, PRIVATE_KEY, tmp_path)
+    vault = _compile_and_deploy(OWNABLE_SOURCE, "TestOwnable", [], rpc_url, PRIVATE_KEY, tmp_path)
 
     proto = _make_protocol(test_db)
     vault_contract = _add_protocol_contract(test_db, proto.id, vault, contract_name="TestVault")
@@ -543,8 +403,8 @@ def test_bug5_zombie_safe_demoted_and_skipped_by_scanner(anvil_env, test_db):
     from services.monitoring.unified_watcher import scan_for_events
 
     rpc_url, tmp_path = anvil_env
-    safe_addr = _compile_and_deploy(SAFE_SOURCE, "TestSafe", [], rpc_url, tmp_path)
-    host_addr = _compile_and_deploy(OWNABLE_SOURCE, "TestOwnable", [], rpc_url, tmp_path)
+    safe_addr = _compile_and_deploy(SAFE_SOURCE, "TestSafe", [], rpc_url, PRIVATE_KEY, tmp_path)
+    host_addr = _compile_and_deploy(OWNABLE_SOURCE, "TestOwnable", [], rpc_url, PRIVATE_KEY, tmp_path)
 
     proto = _make_protocol(test_db)
     host_contract = _add_protocol_contract(test_db, proto.id, host_addr, contract_name="Host")
@@ -613,8 +473,8 @@ def test_bug6_proxy_admin_controller_survives_re_enrollment(anvil_env, test_db):
     from services.monitoring.enrollment import enroll_protocol_contracts
 
     rpc_url, tmp_path = anvil_env
-    admin_addr = _compile_and_deploy(OWNABLE_SOURCE, "TestOwnable", [], rpc_url, tmp_path)
-    host_addr = _compile_and_deploy(OWNABLE_SOURCE, "TestOwnable", [], rpc_url, tmp_path)
+    admin_addr = _compile_and_deploy(OWNABLE_SOURCE, "TestOwnable", [], rpc_url, PRIVATE_KEY, tmp_path)
+    host_addr = _compile_and_deploy(OWNABLE_SOURCE, "TestOwnable", [], rpc_url, PRIVATE_KEY, tmp_path)
 
     proto = _make_protocol(test_db)
     host_contract = _add_protocol_contract(test_db, proto.id, host_addr, contract_name="Host")
@@ -659,7 +519,7 @@ def test_substring_pending_owner_not_latched_into_initial_state(anvil_env, test_
     from services.monitoring.enrollment import enroll_protocol_contracts
 
     rpc_url, tmp_path = anvil_env
-    addr = _compile_and_deploy(OWNABLE_SOURCE, "TestOwnable", [], rpc_url, tmp_path)
+    addr = _compile_and_deploy(OWNABLE_SOURCE, "TestOwnable", [], rpc_url, PRIVATE_KEY, tmp_path)
     active_owner = ACCOUNT0
     pending_owner = ACCOUNT1
 
@@ -728,7 +588,7 @@ def test_in_flight_sibling_job_does_not_block_enrollment(anvil_env, test_db):
     from services.monitoring.enrollment import maybe_enroll_protocol
 
     rpc_url, tmp_path = anvil_env
-    completed_addr = _compile_and_deploy(OWNABLE_SOURCE, "TestOwnable", [], rpc_url, tmp_path)
+    completed_addr = _compile_and_deploy(OWNABLE_SOURCE, "TestOwnable", [], rpc_url, PRIVATE_KEY, tmp_path)
 
     proto = _make_protocol(test_db)
     _add_protocol_contract(test_db, proto.id, completed_addr, contract_name="Completed")
@@ -803,7 +663,7 @@ def test_tracking_plan_drives_enrollment_and_scan_detection(anvil_env, test_db):
 
     rpc_url, tmp_path = anvil_env
 
-    addr = _compile_and_deploy(SOLMATE_OWNED_SOURCE, "TestSolmateOwned", [], rpc_url, tmp_path)
+    addr = _compile_and_deploy(SOLMATE_OWNED_SOURCE, "TestSolmateOwned", [], rpc_url, PRIVATE_KEY, tmp_path)
 
     # ContractMaterialization isn't protocol-scoped, so the fixture's
     # PROTO_NAME teardown doesn't reach it. anvil's CREATE address is

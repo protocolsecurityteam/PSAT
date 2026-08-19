@@ -28,8 +28,8 @@ from services.effects.selection import (
 )
 from services.effects.simulate import SimCallResult, SimResult
 from tests.conftest import ADDR, requires_postgres
-from tests.test_effects_harness import RecordingStore, transfer_log
-from tests.test_effects_selection import _balance, _contract, _fn, _principal, _protocol
+from tests.support.effects_builders import _balance, _contract, _fn, _principal, _protocol
+from tests.support.effects_stubs import RecordingStore, transfer_log
 from utils.execution_record import PROVING_EXECUTION_KEY
 
 CTX = SimContext(chain_id=1, block=1000, hardfork="prague")

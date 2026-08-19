@@ -30,7 +30,7 @@ from services.effects import recipes
 from services.effects.config import VERDICT_PROVEN, VERDICT_UNKNOWN
 from services.effects.harness import SimContext, unknown
 from services.effects.simulate import SimCallResult, SimResult
-from tests.test_effects_harness import RecordingStore, transfer_log
+from tests.support.effects_stubs import RecordingStore, transfer_log
 from workers.effects_worker import _CACHEABLE_UNKNOWN_REASONS, _is_cacheable
 
 VAULT = "0x" + "c0" * 20

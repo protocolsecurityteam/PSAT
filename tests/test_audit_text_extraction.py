@@ -37,37 +37,7 @@ from services.audits.text_extraction import (
     extract_text_from_pdf,
     process_audit_report,
 )
-
-# ---------------------------------------------------------------------------
-# Minimal valid PDF fixture — kept pure-Python so the test doesn't pull in
-# reportlab / fpdf2 as dev deps just for a roundtrip.
-# ---------------------------------------------------------------------------
-
-
-def _minimal_pdf_with_text(text: str) -> bytes:
-    escaped = text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
-    content_stream = f"BT\n/F1 12 Tf\n50 750 Td\n({escaped}) Tj\nET\n".encode("ascii")
-    objects: list[bytes] = [
-        b"<</Type/Catalog/Pages 2 0 R>>",
-        b"<</Type/Pages/Count 1/Kids[3 0 R]>>",
-        b"<</Type/Page/MediaBox[0 0 612 792]/Parent 2 0 R/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>",
-        (f"<</Length {len(content_stream)}>>\nstream\n".encode("ascii") + content_stream + b"endstream"),
-        b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>",
-    ]
-    buf = bytearray(b"%PDF-1.4\n")
-    xref_offsets: list[int] = []
-    for idx, obj in enumerate(objects, start=1):
-        xref_offsets.append(len(buf))
-        buf += f"{idx} 0 obj\n".encode("ascii") + obj + b"\nendobj\n"
-    xref_start = len(buf)
-    buf += b"xref\n0 " + str(len(objects) + 1).encode("ascii") + b"\n"
-    buf += b"0000000000 65535 f \n"
-    for offset in xref_offsets:
-        buf += f"{offset:010d} 00000 n \n".encode("ascii")
-    buf += b"trailer\n<</Size " + str(len(objects) + 1).encode("ascii") + b"/Root 1 0 R>>\n"
-    buf += b"startxref\n" + str(xref_start).encode("ascii") + b"\n%%EOF\n"
-    return bytes(buf)
-
+from tests.support.pdf import minimal_pdf_with_text
 
 # ---------------------------------------------------------------------------
 # extract_text_from_pdf — real pypdf roundtrip, no mocks
@@ -76,7 +46,7 @@ def _minimal_pdf_with_text(text: str) -> bytes:
 
 class TestExtractTextFromPdf:
     def test_roundtrips_simple_ascii(self):
-        body = _minimal_pdf_with_text("Audit scope covers Pool.sol and Vault.sol.")
+        body = minimal_pdf_with_text("Audit scope covers Pool.sol and Vault.sol.")
         text = extract_text_from_pdf(body)
         assert "Pool.sol" in text
         assert "Vault.sol" in text
@@ -224,7 +194,7 @@ class TestExtractTextFromPdf:
     def test_pdf_without_any_annotations_still_extracts_cleanly(self):
         """Regression guard: the new path must be a pure addition and
         leave annotation-free PDFs byte-identical to the old behaviour."""
-        body = _minimal_pdf_with_text("No links here, just scope contracts.")
+        body = minimal_pdf_with_text("No links here, just scope contracts.")
         text = extract_text_from_pdf(body)
         assert "No links here" in text
         # No stray URI placeholders, empty sections, or duplicated markers.
@@ -453,7 +423,7 @@ class TestDownloadAuditBodyRetry:
         is absorbed by retry and the audit ends as 'success'."""
         monkeypatch.setattr("services.audits.text_extraction._retry_sleep", lambda _s: None, raising=False)
 
-        pdf = _minimal_pdf_with_text("Audits covering Pool.sol Vault.sol Strategy.sol Registry.sol. " * 20)
+        pdf = minimal_pdf_with_text("Audits covering Pool.sol Vault.sol Strategy.sol Registry.sol. " * 20)
         session = MagicMock()
         session.get.side_effect = [
             requests.exceptions.ConnectionError(
@@ -656,7 +626,7 @@ class TestProcessAuditReportTextFiles:
     def test_pdf_url_still_uses_pypdf_path(self, monkeypatch):
         """Regression: a .pdf URL must go through the pypdf extraction path,
         not the text decode path."""
-        body = _minimal_pdf_with_text("Audits covering Pool.sol Vault.sol Strategy.sol Registry.sol. " * 20)
+        body = minimal_pdf_with_text("Audits covering Pool.sol Vault.sol Strategy.sol Registry.sol. " * 20)
 
         monkeypatch.setattr(
             "services.audits.text_extraction.download_pdf",
@@ -689,7 +659,7 @@ class TestProcessAuditReportTextFiles:
             "services.audits.text_extraction.download_pdf",
             lambda url, session=None: (
                 captured.setdefault("url", url),
-                _minimal_pdf_with_text("Audits covering Pool.sol Vault.sol Strategy.sol Registry.sol. " * 20),
+                minimal_pdf_with_text("Audits covering Pool.sol Vault.sol Strategy.sol Registry.sol. " * 20),
             )[1],
         )
         monkeypatch.setattr(

@@ -127,8 +127,8 @@ def composed_document(
     """Fold the one-hop composing case. ``deletability`` and ``routes`` are the
     two axes the composition rule decides an arm from, so they are what callers
     vary; ``case``/``signals`` swap in the two-hop or tied shape."""
-    # Deferred: test_scoring_redteam imports this module.
-    from tests import test_scoring_redteam as RT
+    # Deferred: scoring_builders imports this module.
+    from tests.support import scoring_builders as RT
 
     return fold(
         RT._composing_signals() if signals is None else signals,

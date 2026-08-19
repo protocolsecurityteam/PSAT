@@ -24,7 +24,7 @@ import pytest
 from services.scoring import fold as FOLD
 from services.scoring.schema import Tri
 from tests import composition_admission_fixtures as CA
-from tests.test_scoring_redteam import (
+from tests.support.scoring_builders import (
     KEY_V,
     _composing_signals,
     fold,  # noqa: F401  — the fold fixture, reused rather than forked

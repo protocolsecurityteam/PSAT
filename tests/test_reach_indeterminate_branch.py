@@ -47,7 +47,7 @@ from services.effects.recipes import _add_reach
 from services.effects.selection import AssetHolding
 from services.effects.simulate import SimCallResult
 from tests.conftest import ADDR
-from tests.test_effects_harness import transfer_log
+from tests.support.effects_stubs import transfer_log
 
 HOLDER = ADDR(0x4001)
 OUTSIDER = ADDR(0x4002)

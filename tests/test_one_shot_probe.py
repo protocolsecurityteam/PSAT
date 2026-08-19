@@ -23,37 +23,11 @@ from services.resolution.one_shot_probe import (  # noqa: E402
     annotate_capability_one_shot,
     resolve_one_shot_state,
 )
+from tests.support.rpc_stubs import FakeRpc, _word  # noqa: E402
 
 PROXY = "0x" + "11" * 20
 IMPL = "0x" + "22" * 20
 _ZERO = "0x" + "0" * 64
-
-
-def _word(value: int) -> str:
-    return "0x" + format(value, "064x")
-
-
-class FakeRpc:
-    """Canned JSON-RPC: ``storage[(address, slot)]`` and ``calls[(address,
-    selector)]`` drive eth_getStorageAt / eth_call; everything else reads
-    zero / empty."""
-
-    def __init__(self, storage=None, calls=None):
-        self.storage = storage or {}
-        self.calls = calls or {}
-        self.log: list[tuple] = []
-
-    def __call__(self, rpc_url, method, params, retries=1):
-        if method == "eth_getStorageAt":
-            address, slot, _block = params
-            self.log.append(("storage", address.lower(), slot.lower()))
-            return self.storage.get((address.lower(), slot.lower()), _ZERO)
-        if method == "eth_call":
-            address = params[0]["to"].lower()
-            data = params[0]["data"].lower()
-            self.log.append(("call", address, data))
-            return self.calls.get((address, data), "0x")
-        raise AssertionError(f"unexpected method {method}")
 
 
 def _v4_latch(slot="0x" + "0" * 64, expected=1):

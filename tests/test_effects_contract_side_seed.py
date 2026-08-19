@@ -16,8 +16,7 @@ from services.effects.config import VERDICT_PROVEN, VERDICT_UNKNOWN
 from services.effects.harness import SimContext
 from services.effects.seeding import SeedBudget, SimulateSeeder
 from services.effects.simulate import SimCallResult
-from tests.test_effects_harness import RecordingStore, ok, transfer_log
-from tests.test_effects_input_seeding import ASSET, PRINCIPAL, VAULT, FakeChain, sel
+from tests.support.effects_stubs import ASSET, PRINCIPAL, VAULT, FakeChain, RecordingStore, ok, sel, transfer_log
 
 CTX = SimContext(chain_id=1, block=1000, hardfork="prague")
 SWEEP = sel("sweep(uint256)")

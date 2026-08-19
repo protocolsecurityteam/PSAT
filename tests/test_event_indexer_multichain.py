@@ -31,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from sqlalchemy import func, select  # noqa: E402
 
 from services.resolution.repos.event_logs_rpc import FetchedEventLog  # noqa: E402
+from tests.support.solmate_trees import _SOLMATE_CANCALL_TREES  # noqa: E402
 from utils.chains import ChainInfo, chain_by_id  # noqa: E402
 from workers.event_log_indexer import (  # noqa: E402
     _SOLMATE_ROLE_TOPICS,
@@ -143,23 +144,6 @@ def test_build_fetchers_skips_chains_without_hypersync_url(monkeypatch):
 # --------------------------------------------------------------------------- #
 # Enrollment — cursor chain_id comes from the job's chain
 # --------------------------------------------------------------------------- #
-
-_SOLMATE_CANCALL_TREES = {
-    "trees": {
-        "pause()": {
-            "op": "LEAF",
-            "leaf": {
-                "set_descriptor": {
-                    "kind": "external_set",
-                    "callee_signature": "canCall(address,address,bytes4)",
-                    "authority_contract": {
-                        "address_source": {"source": "state_variable", "state_variable_name": "authority"}
-                    },
-                }
-            },
-        }
-    }
-}
 
 
 @pytest.fixture()

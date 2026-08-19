@@ -60,14 +60,12 @@ from services.effects.config import (  # noqa: E402
 )
 from services.effects.harness import SimContext, new_transcript  # noqa: E402
 from services.effects.orchestrator import ProbeContext  # noqa: E402
-from tests.test_effects_anvil import (  # noqa: E402
+from tests.support.effects_stubs import (  # noqa: E402
     GUARDED,
     PAUSE,
-    StubAnvil,
-)
-from tests.test_effects_harness import (  # noqa: E402
     RecordingStore,
     ScriptedSimulate,
+    StubAnvil,
     ok,
     transfer_log,
     uint_ret,

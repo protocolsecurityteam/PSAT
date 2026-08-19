@@ -9,8 +9,6 @@ is in ``test_section8_*`` below.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-
 from services.effects import calldata as calldata_mod
 from services.effects import recipes
 from services.effects.config import (
@@ -23,7 +21,6 @@ from services.effects.config import (
     VERDICT_UNKNOWN,
 )
 from services.effects.harness import (
-    SimContext,
     authorization_opened,
     select_identities,
 )
@@ -33,77 +30,26 @@ from services.effects.preflight import (
 )
 from services.effects.selection import AssetHolding
 from services.effects.simulate import (
-    TRANSFER_TOPIC,
-    SimCall,
-    SimCallResult,
-    SimLog,
     SimResult,
     SimulateUnsupportedError,
     transfers_out,
 )
+from tests.support.effects_stubs import (
+    _REVERT_A,
+    CONTRACT,
+    CTX,
+    PRINCIPAL,
+    SENTINEL,
+    TOKEN,
+    RecordingStore,
+    ScriptedSimulate,
+    _addr_topic,
+    ok,
+    rv,
+    transfer_log,
+    uint_ret,
+)
 from utils.rpc import EthCallResult
-
-CONTRACT = "0x" + "11" * 20
-PRINCIPAL = "0x" + "22" * 20
-SENTINEL = "0x" + "ee" * 20
-TOKEN = "0x" + "33" * 20
-CTX = SimContext(chain_id=1, block=1000, hardfork="prague")
-
-_REVERT_A = "0x08c379a0" + "00" * 4
-
-
-# --- stubs ------------------------------------------------------------------
-
-
-class ScriptedSimulate:
-    """Returns pre-programmed ``SimResult``s in order; records every block."""
-
-    def __init__(self, *results: SimResult) -> None:
-        self._results = list(results)
-        self.blocks: list[tuple[Sequence[SimCall], str, dict | None]] = []
-        self._i = 0
-
-    def __call__(self, calls, block_tag, overrides):
-        self.blocks.append((list(calls), block_tag, overrides))
-        res = self._results[self._i]
-        self._i += 1
-        return res
-
-
-class RecordingStore:
-    """Injected transcript store: records each dict, hands back a fake key."""
-
-    def __init__(self) -> None:
-        self.stored: list[dict] = []
-
-    def __call__(self, transcript: dict) -> str:
-        self.stored.append(transcript)
-        return f"artifact://transcript/{len(self.stored)}"
-
-
-def transfer_log(token: str, frm: str, to: str, value: int) -> SimLog:
-    return SimLog(
-        address=token.lower(),
-        topics=(TRANSFER_TOPIC, _addr_topic(frm), _addr_topic(to)),
-        data="0x" + value.to_bytes(32, "big").hex(),
-    )
-
-
-def _addr_topic(addr: str) -> str:
-    return "0x" + addr[2:].rjust(64, "0").lower()
-
-
-def ok(ret: str = "0x", logs=()) -> SimCallResult:
-    return SimCallResult(True, ret, None, tuple(logs))
-
-
-def rv(data: str = _REVERT_A) -> SimCallResult:
-    return SimCallResult(False, "0x", data, ())
-
-
-def uint_ret(n: int) -> str:
-    return "0x" + n.to_bytes(32, "big").hex()
-
 
 # ---------------------------------------------------------------------------
 # transfers_out — raw-log extraction, no name inference

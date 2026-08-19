@@ -12,7 +12,7 @@ a locator naming two different roles.
 
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import Any
 
 import pytest
 
@@ -22,7 +22,7 @@ from services.resolution.predicate_evaluator import (
     _canonical_authority_selector_for_slot,
     evaluate_tree,
 )
-from services.static.contract_analysis_pipeline.predicate_types import PredicateTree
+from tests.support.eq_tree import eq_tree as _eq_tree
 
 CONTRACT = "0x" + "11" * 20
 GOVERNOR = "0x" + "ab" * 20
@@ -45,25 +45,6 @@ class _Adapter:
 
 def _ctx() -> EvaluationContext:
     return EvaluationContext(contract_address=CONTRACT, adapter=_Adapter())
-
-
-def _eq_tree(operand: dict[str, Any]) -> PredicateTree:
-    return cast(
-        PredicateTree,
-        {
-            "op": "LEAF",
-            "leaf": {
-                "kind": "equality",
-                "operator": "eq",
-                "authority_role": "caller_authority",
-                "operands": [{"source": "msg_sender"}, operand],
-                "references_msg_sender": True,
-                "parameter_indices": [],
-                "expression": "msg.sender == X",
-                "basis": [],
-            },
-        },
-    )
 
 
 def _basis_steps(cap: CapabilityExpr, step: str) -> list[dict[str, Any]]:

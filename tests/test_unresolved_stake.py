@@ -11,7 +11,7 @@ from __future__ import annotations
 from services.scoring import fold as FOLD
 from services.scoring import planes as P
 from services.scoring.schema import PrincipalRef
-from tests.test_scoring_redteam import (
+from tests.support.scoring_builders import (
     EOA,
     KEY_C,
     KEY_V,
@@ -92,7 +92,7 @@ def test_a_refused_sheet_is_a_counted_refusal_never_a_zero():
 
 
 def test_a_proven_empty_sheet_contributes_an_earned_zero():
-    from tests.test_scoring_redteam import SCANNED
+    from tests.support.scoring_builders import SCANNED
 
     plane = value_plane(
         per_asset_state={REACHED: {"weth": P.ASSET_PROVEN_ZERO}},

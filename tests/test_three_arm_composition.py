@@ -23,7 +23,7 @@ from services.scoring import fold as FOLD
 from services.scoring import planes as P
 from services.scoring.schema import PrincipalRef, Tri
 from tests import composition_admission_fixtures as CA
-from tests.test_scoring_redteam import (
+from tests.support.scoring_builders import (
     CALLING_SELECTOR,
     COMPOSED_SELECTOR,
     EOA,

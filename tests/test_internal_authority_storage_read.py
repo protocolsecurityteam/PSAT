@@ -29,7 +29,7 @@ global ``_stub_live_authority`` fixture is deliberately not used.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import pytest
 
@@ -38,6 +38,7 @@ from services.resolution.capabilities import CapabilityExpr
 from services.resolution.capability_resolver import capability_to_dict
 from services.resolution.predicate_evaluator import EvaluationContext, evaluate_tree
 from services.static.contract_analysis_pipeline.predicate_types import PredicateTree
+from tests.support.eq_tree import eq_tree
 
 CONTRACT = "0x" + "11" * 20
 MANAGER = "0x" + "ab" * 20
@@ -89,22 +90,7 @@ def _ctx_with_rpc(rpc_url: str = "http://rpc.test", address: str = CONTRACT) -> 
 
 
 def _eq_tree(other_operand: dict[str, Any]) -> PredicateTree:
-    return cast(
-        PredicateTree,
-        {
-            "op": "LEAF",
-            "leaf": {
-                "kind": "equality",
-                "operator": "eq",
-                "authority_role": "caller_authority",
-                "operands": [{"source": "msg_sender"}, other_operand],
-                "references_msg_sender": True,
-                "parameter_indices": [],
-                "expression": "msg.sender == address(membershipManager)",
-                "basis": [],
-            },
-        },
-    )
+    return eq_tree(other_operand, "msg.sender == address(membershipManager)")
 
 
 def _stub(monkeypatch: pytest.MonkeyPatch, *, slot: str, getter: str = "revert", recorder: list | None = None) -> None:
@@ -252,24 +238,7 @@ from services.static.contract_analysis_pipeline.internal_authority_slot import (
     _slots_for_vars,
 )
 from services.static.contract_analysis_pipeline.predicate_artifacts import build_predicate_artifacts  # noqa: E402
-
-
-def _solc_path_for(floor: tuple[int, int, int]) -> str | None:
-    try:
-        from solc_select import solc_select as ss
-    except Exception:
-        return None
-    best: tuple[int, int, int] | None = None
-    for version in ss.installed_versions():
-        try:
-            parsed = cast(tuple[int, int, int], tuple(int(x) for x in version.split(".")))
-        except ValueError:
-            continue
-        if parsed[:2] == floor[:2] and parsed >= floor and (best is None or parsed > best):
-            best = parsed
-    if best is None:
-        return None
-    return str(ss.artifact_path(".".join(str(x) for x in best)))
+from tests.support.solc import solc_path_for as _solc_path_for  # noqa: E402
 
 
 def _membership_nft() -> Any:

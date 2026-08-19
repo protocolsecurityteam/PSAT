@@ -25,7 +25,7 @@ Pure/offline, ``test_authority_live_getter_resolution`` pattern; the global
 
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import Any
 
 import pytest
 
@@ -41,7 +41,7 @@ from services.resolution.predicate_evaluator import (
     _is_pending_authority_accessor_operand,
     evaluate_tree,
 )
-from services.static.contract_analysis_pipeline.predicate_types import PredicateTree
+from tests.support.eq_tree import eq_tree as _eq_tree
 
 CONTRACT = "0x" + "11" * 20
 OWNER_SELECTOR = "0x8da5cb5b"  # owner()
@@ -85,25 +85,6 @@ class _Adapter:
 
 def _ctx_with_rpc(rpc_url: str = "http://rpc.test") -> EvaluationContext:
     return EvaluationContext(contract_address=CONTRACT, adapter=_Adapter(_Outer(rpc_url, CONTRACT)))
-
-
-def _eq_tree(other_operand: dict[str, Any]) -> PredicateTree:
-    return cast(
-        PredicateTree,
-        {
-            "op": "LEAF",
-            "leaf": {
-                "kind": "equality",
-                "operator": "eq",
-                "authority_role": "caller_authority",
-                "operands": [{"source": "msg_sender"}, other_operand],
-                "references_msg_sender": True,
-                "parameter_indices": [],
-                "expression": "msg.sender == X",
-                "basis": [],
-            },
-        },
-    )
 
 
 def _stub_rpc(monkeypatch: pytest.MonkeyPatch, mode: str) -> None:

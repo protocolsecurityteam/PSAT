@@ -14,28 +14,15 @@ import sys
 from pathlib import Path
 
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+# Re-exported: modules import the gate from here alongside the fixtures below.
+from tests.conftest import requires_postgres as requires_postgres  # noqa: E402
+
 DATABASE_URL = os.environ.get("TEST_DATABASE_URL", "")
-
-
-def _can_connect() -> bool:
-    if not DATABASE_URL:
-        return False
-    try:
-        engine = create_engine(DATABASE_URL)
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-        engine.dispose()
-        return True
-    except Exception:
-        return False
-
-
-requires_postgres = pytest.mark.skipif(not _can_connect(), reason="PostgreSQL not available (set TEST_DATABASE_URL)")
 
 
 # ---------------------------------------------------------------------------

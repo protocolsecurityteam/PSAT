@@ -30,7 +30,7 @@ from services.effects.selection import (
     select_candidates,
 )
 from tests.conftest import ADDR, requires_postgres
-from tests.test_effects_selection import _contract, _fn, _principal, _protocol
+from tests.support.effects_builders import _contract, _fn, _principal, _protocol
 from utils.balance_status import (
     ASSET_SET_STATUS_RETURNED_ASSETS,
     BALANCE_WRITER_TVL,

@@ -29,7 +29,7 @@ from services.effects.harness import SimContext
 from services.effects.seeding import SEED_CONTRACT_ETH_BALANCE, SEED_ETH_VALUE, SeedBudget
 from services.effects.selection import Candidate
 from services.effects.simulate import SimCallResult, SimResult
-from tests.test_effects_harness import RecordingStore, ok, transfer_log
+from tests.support.effects_stubs import RecordingStore, ok, transfer_log
 
 CONTRACT = "0x" + "c0" * 20
 PRINCIPAL = "0x" + "22" * 20

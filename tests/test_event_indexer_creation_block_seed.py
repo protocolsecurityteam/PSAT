@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from sqlalchemy import func, select  # noqa: E402
 
 from services.resolution.repos.event_logs_rpc import FetchedEventLog  # noqa: E402
+from tests.support.solmate_trees import _SOLMATE_CANCALL_TREES  # noqa: E402
 from workers.event_log_indexer import (  # noqa: E402
     _SOLMATE_ROLE_TOPICS,
     enroll_event_cursor,
@@ -214,24 +215,6 @@ def test_block0_seed_scans_pre_deploy_range(session):
         max_windows_per_cursor=5,
     )
     assert fetcher.from_blocks and min(fetcher.from_blocks) == 1
-
-
-_SOLMATE_CANCALL_TREES = {
-    "trees": {
-        "pause()": {
-            "op": "LEAF",
-            "leaf": {
-                "set_descriptor": {
-                    "kind": "external_set",
-                    "callee_signature": "canCall(address,address,bytes4)",
-                    "authority_contract": {
-                        "address_source": {"source": "state_variable", "state_variable_name": "authority"}
-                    },
-                }
-            },
-        }
-    }
-}
 
 
 @requires_postgres

@@ -25,9 +25,9 @@ from services.scoring import distill as D
 from services.scoring import fold as FOLD
 from services.scoring import planes as P
 from services.scoring.schema import FunctionSignal, PrincipalRef, Tri
-from tests import test_scoring_redteam as RT
-from tests.test_effects_harness import RecordingStore, transfer_log
-from tests.test_scoring_redteam import (
+from tests.support import scoring_builders as RT
+from tests.support.effects_stubs import RecordingStore, transfer_log
+from tests.support.scoring_builders import (
     COMPOSED_SELECTOR,
     EOA,
     KEY_C,

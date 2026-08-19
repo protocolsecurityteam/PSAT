@@ -70,7 +70,6 @@ decorator — ratcheting against silent regression.
 
 from __future__ import annotations
 
-import json
 import random
 import re
 import sys
@@ -82,6 +81,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from services.static import collect_contract_analysis  # noqa: E402
+from tests.support.foundry_project import write_foundry_project  # noqa: E402
 
 # Reserved substrings from legacy classifier terms. Any generated
 # identifier containing one is rejected, so a detected result cannot be
@@ -165,26 +165,6 @@ def _gen_identifier(rng: random.Random, prefix: str = "") -> str:
         candidate = f"{prefix}{body}{rng.randint(0, 99)}"
         if _is_clean_identifier(candidate):
             return candidate
-
-
-def _write_project(tmp_path: Path, contract_name: str, source: str) -> Path:
-    project_dir = tmp_path / contract_name
-    (project_dir / "src").mkdir(parents=True)
-    (project_dir / "foundry.toml").write_text(
-        '[profile.default]\nsrc = "src"\nout = "out"\nlibs = ["lib"]\nsolc_version = "0.8.19"\n'
-    )
-    (project_dir / "src" / f"{contract_name}.sol").write_text(source)
-    (project_dir / "contract_meta.json").write_text(
-        json.dumps(
-            {
-                "address": "0x1111111111111111111111111111111111111111",
-                "contract_name": contract_name,
-                "compiler_version": "v0.8.19+commit.7dd6d404",
-            }
-        )
-        + "\n"
-    )
-    return project_dir
 
 
 def _semantic_entry(analysis: Any, signature: str) -> dict | None:
@@ -762,7 +742,7 @@ def test_fuzz_fixtures_are_valid(shape_name: str, variant: int, tmp_path: Path):
     )
 
     # 3. Compilation: analysis pipeline must not throw on either source.
-    project_g = _write_project(tmp_path / "g", "C", guarded_src)
+    project_g = write_foundry_project(tmp_path / "g", "C", guarded_src)
     collect_contract_analysis(project_g)  # exception → fixture broken
 
     # 3. Negative control: unguarded twin must NOT carry a caller-authority
@@ -773,7 +753,7 @@ def test_fuzz_fixtures_are_valid(shape_name: str, variant: int, tmp_path: Path):
     # unguarded twin has them) are included even without a gate, so the
     # negative control is "no caller_authority / delegated_authority leaf
     # in the predicate tree", not "absent from semantic_functions".
-    project_u = _write_project(tmp_path / "u", "C", unguarded_src)
+    project_u = write_foundry_project(tmp_path / "u", "C", unguarded_src)
     from services.static.contract_analysis_pipeline import collect_contract_analysis_with_artifacts
 
     _analysis_u, predicate_trees_u, _effects_u = collect_contract_analysis_with_artifacts(project_u)
@@ -832,7 +812,7 @@ def test_parametric_guard_emits_predicate_signal(shape_name: str, variant: int, 
     rng = _rng(shape_name, variant)
     gen = _gen_for_shape(shape_name, rng)
     guarded_src, sig_g = gen[0], gen[2]
-    project = _write_project(tmp_path, "C", guarded_src)
+    project = write_foundry_project(tmp_path, "C", guarded_src)
     analysis = collect_contract_analysis(project)
     entry = _semantic_entry(analysis, sig_g)
 

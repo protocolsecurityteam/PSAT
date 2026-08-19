@@ -37,8 +37,8 @@ from services.effects.seeding import Seeding
 from services.effects.selection import Candidate, select_candidates
 from services.effects.simulate import SimCallResult, SimResult
 from tests.conftest import ADDR, requires_postgres
-from tests.test_effects_harness import RecordingStore, transfer_log
-from tests.test_effects_selection import _contract, _fn, _protocol
+from tests.support.effects_builders import _contract, _fn, _protocol
+from tests.support.effects_stubs import RecordingStore, transfer_log
 
 VAULT = "0x" + "c0" * 20
 PRINCIPAL = "0x" + "22" * 20

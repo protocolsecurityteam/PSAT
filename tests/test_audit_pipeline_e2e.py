@@ -40,6 +40,7 @@ from sqlalchemy.orm import sessionmaker
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tests.conftest import DATABASE_URL, requires_postgres, requires_storage  # noqa: E402
+from tests.support.pdf import minimal_pdf_with_text  # noqa: E402
 
 pytestmark = [
     requires_postgres,
@@ -52,36 +53,6 @@ pytestmark = [
 FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "scope_extraction"
 STUB_DIR = FIXTURE_DIR / "llm_responses"
 AUDIT_FIXTURE = FIXTURE_DIR / "audits" / "spearbit_table.txt"
-
-
-# ---------------------------------------------------------------------------
-# Minimal valid PDF carrying the Spearbit scope text
-# ---------------------------------------------------------------------------
-
-
-def _pdf_from_text(text: str) -> bytes:
-    escaped = text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
-    content_stream = f"BT\n/F1 12 Tf\n50 750 Td\n({escaped}) Tj\nET\n".encode("ascii")
-    objects: list[bytes] = [
-        b"<</Type/Catalog/Pages 2 0 R>>",
-        b"<</Type/Pages/Count 1/Kids[3 0 R]>>",
-        b"<</Type/Page/MediaBox[0 0 612 792]/Parent 2 0 R/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>",
-        (f"<</Length {len(content_stream)}>>\nstream\n".encode("ascii") + content_stream + b"endstream"),
-        b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>",
-    ]
-    buf = bytearray(b"%PDF-1.4\n")
-    xref_offsets: list[int] = []
-    for idx, obj in enumerate(objects, start=1):
-        xref_offsets.append(len(buf))
-        buf += f"{idx} 0 obj\n".encode("ascii") + obj + b"\nendobj\n"
-    xref_start = len(buf)
-    buf += b"xref\n0 " + str(len(objects) + 1).encode("ascii") + b"\n"
-    buf += b"0000000000 65535 f \n"
-    for offset in xref_offsets:
-        buf += f"{offset:010d} 00000 n \n".encode("ascii")
-    buf += b"trailer\n<</Size " + str(len(objects) + 1).encode("ascii") + b"/Root 1 0 R>>\n"
-    buf += b"startxref\n" + str(xref_start).encode("ascii") + b"\n%%EOF\n"
-    return bytes(buf)
 
 
 # ---------------------------------------------------------------------------
@@ -230,7 +201,7 @@ def test_full_audit_pipeline_from_discovery_row_to_coverage(
     # Stub ``download_pdf`` to return a real PDF body carrying the
     # Spearbit scope fixture text. Everything else — pypdf, MinIO, DB
     # writes — runs for real.
-    pdf_body = _pdf_from_text(AUDIT_FIXTURE.read_text())
+    pdf_body = minimal_pdf_with_text(AUDIT_FIXTURE.read_text())
     monkeypatch.setattr(
         "services.audits.text_extraction.download_pdf",
         lambda url, session=None: pdf_body,
@@ -321,7 +292,7 @@ def test_e2e_pipeline_is_idempotent_on_reextract(
 
     monkeypatch.setattr(
         "services.audits.text_extraction.download_pdf",
-        lambda url, session=None: _pdf_from_text(AUDIT_FIXTURE.read_text()),
+        lambda url, session=None: minimal_pdf_with_text(AUDIT_FIXTURE.read_text()),
     )
 
     _drive_batch(text_worker, db_session)

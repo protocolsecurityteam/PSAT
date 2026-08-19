@@ -14,7 +14,7 @@ block 25643300 — the height every investigation read reproduces at.
 
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import Any
 
 import pytest
 from eth_utils.crypto import keccak
@@ -23,7 +23,7 @@ from services.policy.capability_surface import project_capability_surface
 from services.resolution.capabilities import CapabilityExpr
 from services.resolution.capability_resolver import capability_to_dict
 from services.resolution.predicate_evaluator import EvaluationContext, evaluate_tree
-from services.static.contract_analysis_pipeline.predicate_types import PredicateTree
+from tests.support.eq_tree import eq_tree as _eq_tree
 
 CONTRACT = "0x62247d29b4b9becf4bb73e0c722cf6445cfc7ce9"
 GOVERNOR = "0xf46d3734564ef9a5a16fc3b1216831a28f78e2b5"
@@ -52,25 +52,6 @@ class _Adapter:
 
 def _ctx(block: int | None = PINNED_BLOCK) -> EvaluationContext:
     return EvaluationContext(contract_address=CONTRACT, adapter=_Adapter(block))
-
-
-def _eq_tree(operand: dict[str, Any]) -> PredicateTree:
-    return cast(
-        PredicateTree,
-        {
-            "op": "LEAF",
-            "leaf": {
-                "kind": "equality",
-                "operator": "eq",
-                "authority_role": "caller_authority",
-                "operands": [{"source": "msg_sender"}, operand],
-                "references_msg_sender": True,
-                "parameter_indices": [],
-                "expression": "msg.sender == X",
-                "basis": [],
-            },
-        },
-    )
 
 
 def _word(addr: str) -> str:

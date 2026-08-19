@@ -48,10 +48,10 @@ from services.effects.preflight import (  # noqa: E402
 )
 from services.effects.selection import AuthorityGraph, select_candidates  # noqa: E402
 from tests.cache_helpers import requires_postgres  # noqa: E402
+from tests.support.effects_ir import _fn, _ir, _node, _var  # noqa: E402
 
 # Shared structural doubles + scripted stubs from the harness tests.
-from tests.test_effects_harness import CTX, RecordingStore, ScriptedSimulate, ok, transfer_log, uint_ret  # noqa: E402
-from tests.test_effects_hashing import _fn, _ir, _node, _var  # noqa: E402
+from tests.support.effects_stubs import CTX, RecordingStore, ScriptedSimulate, ok, transfer_log, uint_ret  # noqa: E402
 from workers.base import _resolve_job_concurrency  # noqa: E402
 from workers.effects_worker import EffectsWorker  # noqa: E402
 

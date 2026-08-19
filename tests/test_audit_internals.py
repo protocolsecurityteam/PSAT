@@ -48,6 +48,7 @@ from services.discovery.audit_reports_llm import (
     extract_report_details,
     generate_followup_query,
 )
+from tests.support.pdf import minimal_pdf_with_text
 
 # ---------------------------------------------------------------------------
 # _collapse_same_audit_mirrors — heuristic fallback when LLM is unavailable.
@@ -483,11 +484,9 @@ class TestProcessAuditReportErrorPaths:
     def test_short_text_returns_skipped(self, monkeypatch):
         """Image-only PDFs return near-empty text — worker marks skipped so
         OCR can be handled separately later."""
-        from tests.test_audit_text_extraction import _minimal_pdf_with_text
-
         monkeypatch.setattr(
             "services.audits.text_extraction.download_pdf",
-            lambda *_a, **_kw: _minimal_pdf_with_text("tiny"),
+            lambda *_a, **_kw: minimal_pdf_with_text("tiny"),
         )
         out = process_audit_report(audit_report_id=1, url="https://x/a.pdf")
         assert out.status == "skipped"
@@ -496,9 +495,7 @@ class TestProcessAuditReportErrorPaths:
     def test_storage_failure_returns_failed(self, monkeypatch):
         """When download+parse succeed but object storage rejects the write,
         the outcome must surface as ``failed`` so the worker can retry."""
-        from tests.test_audit_text_extraction import _minimal_pdf_with_text
-
-        pdf = _minimal_pdf_with_text("Audits covering Pool.sol Vault.sol Strategy.sol Registry.sol. " * 20)
+        pdf = minimal_pdf_with_text("Audits covering Pool.sol Vault.sol Strategy.sol Registry.sol. " * 20)
         monkeypatch.setattr(
             "services.audits.text_extraction.download_pdf",
             lambda *_a, **_kw: pdf,
@@ -515,9 +512,7 @@ class TestProcessAuditReportErrorPaths:
     def test_success_returns_all_metadata(self, monkeypatch):
         """Happy path — verify the outcome object carries every field the
         worker persists to the row."""
-        from tests.test_audit_text_extraction import _minimal_pdf_with_text
-
-        pdf = _minimal_pdf_with_text("Audits covering Pool.sol Vault.sol Strategy.sol Registry.sol. " * 20)
+        pdf = minimal_pdf_with_text("Audits covering Pool.sol Vault.sol Strategy.sol Registry.sol. " * 20)
         monkeypatch.setattr(
             "services.audits.text_extraction.download_pdf",
             lambda *_a, **_kw: pdf,

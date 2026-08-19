@@ -27,28 +27,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-# ---------------------------------------------------------------------------
-# Postgres skip condition (shared with test_queue.py)
-# ---------------------------------------------------------------------------
+from tests.conftest import requires_postgres
 
 DATABASE_URL = os.environ.get("TEST_DATABASE_URL", "")
-
-
-def _can_connect() -> bool:
-    if not DATABASE_URL:
-        return False
-    try:
-        from sqlalchemy import create_engine, text
-
-        engine = create_engine(DATABASE_URL)
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-        return True
-    except Exception:
-        return False
-
-
-requires_postgres = pytest.mark.skipif(not _can_connect(), reason="PostgreSQL not available")
 
 
 # ---------------------------------------------------------------------------

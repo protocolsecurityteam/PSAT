@@ -32,7 +32,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any
 
 import pytest
 
@@ -42,6 +42,7 @@ from services.resolution.capabilities import CapabilityExpr
 from services.resolution.capability_resolver import capability_to_dict
 from services.resolution.predicate_evaluator import EvaluationContext, evaluate_tree
 from services.static.contract_analysis_pipeline.predicate_types import PredicateTree
+from tests.support.eq_tree import eq_tree
 
 CONTRACT = "0x" + "11" * 20
 R1 = "0x" + "a1" * 20
@@ -182,22 +183,7 @@ def _seeded_meta(*logs: SimpleNamespace) -> dict[str, Any]:
 
 
 def _eq_tree(other_operand: dict[str, Any]) -> PredicateTree:
-    return cast(
-        PredicateTree,
-        {
-            "op": "LEAF",
-            "leaf": {
-                "kind": "equality",
-                "operator": "eq",
-                "authority_role": "caller_authority",
-                "operands": [{"source": "msg_sender"}, other_operand],
-                "references_msg_sender": True,
-                "parameter_indices": [],
-                "expression": "msg.sender == receivers[originEid]",
-                "basis": [],
-            },
-        },
-    )
+    return eq_tree(other_operand, "msg.sender == receivers[originEid]")
 
 
 def _status(cap: CapabilityExpr) -> str | None:
@@ -355,24 +341,7 @@ pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
 
 from services.static.contract_analysis_pipeline.predicate_artifacts import build_predicate_artifacts  # noqa: E402
-
-
-def _solc_path_for(floor: tuple[int, int, int]) -> str | None:
-    try:
-        from solc_select import solc_select as ss
-    except Exception:
-        return None
-    best: tuple[int, int, int] | None = None
-    for version in ss.installed_versions():
-        try:
-            parsed = cast(tuple[int, int, int], tuple(int(x) for x in version.split(".")))
-        except ValueError:
-            continue
-        if parsed[:2] == floor[:2] and parsed >= floor and (best is None or parsed > best):
-            best = parsed
-    if best is None:
-        return None
-    return str(ss.artifact_path(".".join(str(x) for x in best)))
+from tests.support.solc import solc_path_for as _solc_path_for  # noqa: E402
 
 
 def _receiver_contract() -> Any:

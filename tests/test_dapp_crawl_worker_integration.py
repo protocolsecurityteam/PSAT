@@ -21,13 +21,14 @@ from unittest.mock import MagicMock
 from urllib.request import urlopen
 
 import pytest
-from sqlalchemy import create_engine, select, text
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from db.models import Base, Contract, DAppInteraction, Job, JobStage, JobStatus, Protocol
 from db.queue import create_job, get_artifact
+from tests.conftest import requires_postgres
 from workers.base import JobHandledDirectly
 
 # offline: stub the DefiLlama protocol-list fetch done during company resolution
@@ -55,20 +56,6 @@ _FAKE_DAPP_HTML = f"""\
   </body>
 </html>
 """
-
-
-def _can_connect() -> bool:
-    try:
-        engine = create_engine(DATABASE_URL)
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-        engine.dispose()
-        return True
-    except Exception:
-        return False
-
-
-requires_postgres = pytest.mark.skipif(not _can_connect(), reason="PostgreSQL not available")
 
 
 class _FakeDappHandler(BaseHTTPRequestHandler):

@@ -717,7 +717,7 @@ def test_a_failing_writer_degrades_the_step_not_the_stage(monkeypatch: pytest.Mo
     """The step is isolated exactly as the dependency-edge and role-holder steps
     are: it records a degradation and the stage still completes."""
     import workers.resolution_worker as rw
-    from tests.test_resolution_worker import _job, _patch_all
+    from tests.support.resolution_worker_stubs import _job, _patch_all
 
     ctx = _patch_all(monkeypatch)
     degraded: list[dict] = []

@@ -34,7 +34,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from tests.live.test_proxy_flow import _resolve_impl_job  # noqa: E402
+from tests.support.live_helpers import _resolve_impl_job  # noqa: E402
 
 
 class _StubClient:

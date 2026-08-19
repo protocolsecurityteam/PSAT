@@ -30,7 +30,7 @@ unevaluable guard, an unread latch, a 255 that is not a sentinel, an unpinned
 read height, a legacy descriptor with no ``expected_version`` provenance, and
 two decisive latches that must not blur into one witness.
 
-Hermetic: the wire is the ``FakeRpc`` stub from ``test_one_shot_probe``; the AST
+Hermetic: the wire is the ``FakeRpc`` stub from ``tests.support.rpc_stubs``; the AST
 controls compile through the production Slither toolchain. No live marker.
 """
 
@@ -39,7 +39,7 @@ from __future__ import annotations
 import sys
 import textwrap
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import pytest
 
@@ -51,7 +51,7 @@ from services.resolution.one_shot_probe import (  # noqa: E402
     latch_descriptor_digest,
     resolve_one_shot_state,
 )
-from tests.test_one_shot_probe import FakeRpc, _word  # noqa: E402
+from tests.support.rpc_stubs import FakeRpc, _word  # noqa: E402
 
 # Pinned probe height. Every on-chain value below was re-read here; the
 # resolver's own runtime height is head-12 and is not persisted, so this pins
@@ -518,6 +518,7 @@ from services.resolution.one_shot_probe import collect_one_shot_latches  # noqa:
 from services.static.contract_analysis_pipeline.predicate_artifacts import (  # noqa: E402
     build_predicate_artifacts,
 )
+from tests.support.solc import solc_path_for as _solc_path_for  # noqa: E402
 
 AST_SOURCE = """
 pragma solidity ^0.8.19;
@@ -570,24 +571,6 @@ contract OnlyInitializingHelper is Initializable {
     function helper(address m) external onlyInitializing { manager = m; }
 }
 """
-
-
-def _solc_path_for(floor: tuple[int, int, int]) -> str | None:
-    try:
-        from solc_select import solc_select as ss
-    except Exception:
-        return None
-    best: tuple[int, int, int] | None = None
-    for version in ss.installed_versions():
-        try:
-            parsed = cast(tuple[int, int, int], tuple(int(x) for x in version.split(".")))
-        except ValueError:
-            continue
-        if parsed[:2] == floor[:2] and parsed >= floor and (best is None or parsed > best):
-            best = parsed
-    if best is None:
-        return None
-    return str(ss.artifact_path(".".join(str(x) for x in best)))
 
 
 @pytest.fixture(scope="module")

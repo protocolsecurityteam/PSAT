@@ -14,7 +14,7 @@ from services.effects import recipes
 from services.effects.config import VERDICT_PROVEN, VERDICT_UNKNOWN
 from services.effects.harness import SimContext
 from services.effects.simulate import SimResult
-from tests.test_effects_harness import RecordingStore, ok, transfer_log, uint_ret
+from tests.support.effects_stubs import RecordingStore, ok, transfer_log, uint_ret
 from workers.effects_worker import _is_cacheable
 
 TOKEN = "0x" + "11" * 20

@@ -21,15 +21,12 @@ from __future__ import annotations
 
 import os
 import shutil
-import socket
-import subprocess
 import sys
-import time
 import uuid
 from pathlib import Path
 
 import pytest
-from sqlalchemy import create_engine, func, select, text
+from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session as SASession
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -54,6 +51,18 @@ from services.monitoring.reanalysis import (
     REANALYSIS_POLL_FIELDS_VENDORED,
     maybe_queue_reanalysis,
     should_trigger_reanalysis,
+)
+from tests.conftest import requires_postgres
+from tests.support.anvil import (
+    IMPL_V1_SOURCE,
+    IMPL_V2_SOURCE,
+    OWNABLE_SOURCE,
+    PRIVATE_KEY,
+    PROXY_SOURCE,
+    _cast,
+    _cast_send,
+    _compile_and_deploy,
+    anvil_env,  # noqa: F401
 )
 
 # Poll fields that should trigger reanalysis post-tag-migration: vendored
@@ -94,32 +103,12 @@ _has_forge = shutil.which("forge") is not None
 
 DATABASE_URL = os.environ.get("TEST_DATABASE_URL", "")
 
-
-def _can_connect() -> bool:
-    if not DATABASE_URL:
-        return False
-    try:
-        engine = create_engine(DATABASE_URL)
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-        engine.dispose()
-        return True
-    except Exception:
-        return False
-
-
-requires_postgres = pytest.mark.skipif(not _can_connect(), reason="PostgreSQL not available")
-
 requires_anvil = pytest.mark.skipif(
     not (_has_anvil and _has_cast and _has_forge),
     reason="Foundry tools (anvil/cast/forge) not found on PATH",
 )
 
 pytestmark = requires_postgres
-
-# Anvil default accounts
-PRIVATE_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
-ACCOUNT0 = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
 
 
 @pytest.fixture(autouse=True)
@@ -130,108 +119,8 @@ def _disable_scan_confirmation_depth(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
-def _wait_for_port(port: int, timeout: float = 10.0) -> bool:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            with socket.create_connection(("127.0.0.1", port), timeout=0.5):
-                return True
-        except OSError:
-            time.sleep(0.1)
-    return False
-
-
-def _cast(args: list[str], rpc_url: str) -> str:
-    result = subprocess.run(
-        ["cast"] + args + ["--rpc-url", rpc_url],
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"cast failed: {result.stderr}")
-    return result.stdout.strip()
-
-
-def _cast_send(to: str, sig: str, args: list[str], rpc_url: str, private_key: str) -> str:
-    cmd = ["cast", "send", to, sig] + args + ["--rpc-url", rpc_url, "--private-key", private_key]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-    if result.returncode != 0:
-        raise RuntimeError(f"cast send failed: {result.stderr}")
-    return result.stdout.strip()
-
-
-def _compile_and_deploy(
-    source: str,
-    contract_name: str,
-    constructor_args: list[str],
-    rpc_url: str,
-    private_key: str,
-    tmp_path: Path,
-) -> str:
-    src_file = tmp_path / f"{contract_name}.sol"
-    src_file.write_text(source)
-
-    cmd = [
-        "forge",
-        "create",
-        f"{src_file}:{contract_name}",
-        "--rpc-url",
-        rpc_url,
-        "--private-key",
-        private_key,
-        "--broadcast",
-        "--no-cache",
-    ]
-    if constructor_args:
-        cmd += ["--constructor-args"] + constructor_args
-
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60, cwd=str(tmp_path))
-    if result.returncode != 0:
-        raise RuntimeError(f"forge create failed for {contract_name}: {result.stderr}\n{result.stdout}")
-
-    for line in result.stdout.split("\n"):
-        if "Deployed to:" in line or "deployed to:" in line.lower():
-            addr = line.split(":")[-1].strip()
-            return addr.lower()
-
-    raise RuntimeError(f"Could not parse address from forge create output:\n{result.stdout}")
-
-
-# ---------------------------------------------------------------------------
 # Solidity test contracts
 # ---------------------------------------------------------------------------
-
-OWNABLE_SOURCE = """
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
-contract TestOwnable {
-    address public owner;
-    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
-
-    constructor() {
-        owner = msg.sender;
-        emit OwnershipTransferred(address(0), msg.sender);
-    }
-
-    function transferOwnership(address newOwner) external {
-        require(msg.sender == owner, "not owner");
-        address old = owner;
-        owner = newOwner;
-        emit OwnershipTransferred(old, newOwner);
-    }
-}
-"""
 
 PAUSABLE_SOURCE = """
 // SPDX-License-Identifier: MIT
@@ -255,50 +144,6 @@ contract TestPausable {
         emit Unpaused(msg.sender);
     }
 }
-"""
-
-PROXY_SOURCE = """
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
-contract TestProxy {
-    bytes32 internal constant _IMPLEMENTATION_SLOT =
-        0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc;
-    event Upgraded(address indexed implementation);
-
-    constructor(address impl) {
-        _setImplementation(impl);
-    }
-
-    function upgradeTo(address newImpl) external {
-        _setImplementation(newImpl);
-    }
-
-    function _setImplementation(address impl) internal {
-        assembly { sstore(_IMPLEMENTATION_SLOT, impl) }
-        emit Upgraded(impl);
-    }
-
-    fallback() external payable {
-        address impl;
-        assembly { impl := sload(_IMPLEMENTATION_SLOT) }
-        (bool ok, bytes memory data) = impl.delegatecall(msg.data);
-        require(ok);
-        assembly { return(add(data, 0x20), mload(data)) }
-    }
-    receive() external payable {}
-}
-"""
-
-IMPL_V1_SOURCE = """
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
-contract ImplV1 { uint256 public version = 1; }
-"""
-
-IMPL_V2_SOURCE = """
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
-contract ImplV2 { uint256 public version = 2; }
 """
 
 ADMIN_PROXY_SOURCE = """
@@ -360,35 +205,6 @@ def db_session():
         session.commit()
         session.close()
         engine.dispose()
-
-
-@pytest.fixture()
-def anvil_env(tmp_path):
-    """Start an anvil node and yield (rpc_url, tmp_path)."""
-    port = _free_port()
-    rpc_url = f"http://127.0.0.1:{port}"
-
-    anvil_proc = subprocess.Popen(
-        ["anvil", "--port", str(port), "--silent"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-
-    try:
-        if not _wait_for_port(port, timeout=15):
-            raise RuntimeError("anvil did not start in time")
-
-        foundry_toml = tmp_path / "foundry.toml"
-        foundry_toml.write_text("[profile.default]\nsrc = '.'\nout = 'out'\n")
-
-        yield rpc_url, tmp_path
-    finally:
-        anvil_proc.terminate()
-        try:
-            anvil_proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            anvil_proc.kill()
-            anvil_proc.wait()
 
 
 def _make_protocol(session: SASession, name: str = "TestProtocol") -> Protocol:

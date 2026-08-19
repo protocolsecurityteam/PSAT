@@ -43,7 +43,7 @@ from services.effects.orchestrator import ProbePlan  # noqa: E402
 from services.effects.selection import AssetHolding, Candidate  # noqa: E402
 from services.effects.simulate import SimCallResult, SimResult  # noqa: E402
 from tests.cache_helpers import requires_postgres  # noqa: E402
-from tests.test_effects_harness import RecordingStore, ok, transfer_log  # noqa: E402
+from tests.support.effects_stubs import RecordingStore, ok, transfer_log  # noqa: E402
 from utils.execution_record import PROVING_EXECUTION_KEY  # noqa: E402
 from utils.logging import degraded_errors_var, stage_metrics_var  # noqa: E402
 from workers.effects_worker import EffectsWorker, _Seams  # noqa: E402
@@ -336,7 +336,7 @@ def test_no_tier1_recipe_puts_per_deployment_data_in_cacheable_details():
     )
 
     # Freeze/pause on the fork tier — the class with the richest ``details``.
-    from tests.test_effects_anvil import GUARDED, PAUSE, StubAnvil
+    from tests.support.effects_stubs import GUARDED, PAUSE, StubAnvil
 
     p = anvil.pause_recipe(
         transport=StubAnvil(guarded={GUARDED}, pause_calldata=PAUSE, duration=3600),

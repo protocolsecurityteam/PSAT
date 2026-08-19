@@ -23,7 +23,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine
 from sqlalchemy.orm import Session as SASession
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -37,24 +37,11 @@ from db.models import (
     Protocol,
     WatchedProxy,
 )
+from tests.conftest import requires_postgres
 
 DATABASE_URL = os.environ.get("TEST_DATABASE_URL", "")
 
-
-def _can_connect() -> bool:
-    if not DATABASE_URL:
-        return False
-    try:
-        engine = create_engine(DATABASE_URL)
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-        engine.dispose()
-        return True
-    except Exception:
-        return False
-
-
-pytestmark = pytest.mark.skipif(not _can_connect(), reason="PostgreSQL not available (set TEST_DATABASE_URL)")
+pytestmark = requires_postgres
 
 
 def ADDR(n: int) -> str:

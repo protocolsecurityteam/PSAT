@@ -19,23 +19,9 @@ from sqlalchemy.orm import Session
 
 from db.models import Job, JobStage, derive_job_chain_id
 from db.queue import create_job
+from tests.conftest import requires_postgres
 
 DATABASE_URL = os.environ.get("TEST_DATABASE_URL", "")
-
-
-def _can_connect() -> bool:
-    if not DATABASE_URL:
-        return False
-    try:
-        engine = create_engine(DATABASE_URL)
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-        return True
-    except Exception:
-        return False
-
-
-requires_postgres = pytest.mark.skipif(not _can_connect(), reason="PostgreSQL not available")
 
 
 @pytest.fixture()

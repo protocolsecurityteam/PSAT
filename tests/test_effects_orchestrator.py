@@ -28,7 +28,7 @@ from services.effects.config import (  # noqa: E402
 )
 from services.effects.orchestrator import ProbeContext, _code_upgrade_plans  # noqa: E402
 from services.effects.selection import Candidate  # noqa: E402
-from tests.test_effects_anvil import RecordingStore  # noqa: E402
+from tests.support.effects_stubs import RecordingStore  # noqa: E402
 
 IMPL = "0x" + "d1" * 20
 PROXY = "0x" + "35" * 20

@@ -8,7 +8,6 @@ with no guarded functions" (``{}``).
 
 from __future__ import annotations
 
-import os
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -21,25 +20,7 @@ pytestmark = pytest.mark.usefixtures("_stub_live_authority")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-DATABASE_URL = os.environ.get("TEST_DATABASE_URL", "")
-
-
-def _can_connect() -> bool:
-    if not DATABASE_URL:
-        return False
-    try:
-        from sqlalchemy import create_engine, text
-
-        engine = create_engine(DATABASE_URL)
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-        engine.dispose()
-        return True
-    except Exception:
-        return False
-
-
-requires_postgres = pytest.mark.skipif(not _can_connect(), reason="PostgreSQL not available")
+from tests.conftest import requires_postgres  # noqa: E402
 
 
 def _seed_protocol_with_jobs(db_session, *, name: str, addresses_with_artifacts):

@@ -24,7 +24,7 @@ from services.scoring import fold as FOLD
 from services.scoring import planes as P
 from services.scoring.schema import PrincipalRef
 from tests.conftest import requires_postgres
-from tests.test_scoring_redteam import (
+from tests.support.scoring_builders import (
     EOA,
     bounded_by_sheet,
     facts,
@@ -559,7 +559,7 @@ def test_an_unconfigured_object_store_builds_no_universe_and_condemns_nothing(db
     from db import queue as Q
     from db.models import Job
     from services.scoring import distill as D
-    from tests.test_effects_selection import _protocol
+    from tests.support.effects_builders import _protocol
 
     protocol = _protocol(db_session, "dispo-universe-failclosed")
     db_session.add(Job(protocol_id=protocol.id))
@@ -581,7 +581,7 @@ def test_the_fail_closed_universe_says_so_at_the_boundary(db_session, monkeypatc
     from db import queue as Q
     from db.models import Job
     from services.scoring import distill as D
-    from tests.test_effects_selection import _protocol
+    from tests.support.effects_builders import _protocol
 
     protocol = _protocol(db_session, "dispo-universe-failclosed-logged")
     db_session.add(Job(protocol_id=protocol.id))

@@ -16,7 +16,7 @@ they pin the behaviour without the analysis pipeline or MinIO artifacts.
 
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import Any
 
 import pytest
 
@@ -24,7 +24,7 @@ from services.policy.capability_surface import project_capability_surface
 from services.resolution.capabilities import CapabilityExpr
 from services.resolution.capability_resolver import capability_to_dict
 from services.resolution.predicate_evaluator import EvaluationContext, evaluate_tree
-from services.static.contract_analysis_pipeline.predicate_types import PredicateTree
+from tests.support.eq_tree import eq_tree as _eq_tree
 
 CONTRACT = "0x" + "11" * 20
 OWNER = "0x" + "ab" * 20
@@ -71,25 +71,6 @@ def _ctx_with_rpc(rpc_url: str = "http://rpc.test") -> EvaluationContext:
 def _ctx_no_rpc() -> EvaluationContext:
     # An adapter with no _outer_ctx — the pure-unit path, no RPC reachable.
     return EvaluationContext(contract_address=CONTRACT, adapter=_Adapter(None))
-
-
-def _eq_tree(other_operand: dict[str, Any]) -> PredicateTree:
-    return cast(
-        PredicateTree,
-        {
-            "op": "LEAF",
-            "leaf": {
-                "kind": "equality",
-                "operator": "eq",
-                "authority_role": "caller_authority",
-                "operands": [{"source": "msg_sender"}, other_operand],
-                "references_msg_sender": True,
-                "parameter_indices": [],
-                "expression": "msg.sender == X",
-                "basis": [],
-            },
-        },
-    )
 
 
 def _stub_rpc(monkeypatch: pytest.MonkeyPatch, return_addr: str | None, *, recorder: list | None = None) -> None:

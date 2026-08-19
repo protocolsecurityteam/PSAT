@@ -33,13 +33,13 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import pytest
 
 from services.resolution.capabilities import CapabilityExpr
 from services.resolution.predicate_evaluator import EvaluationContext, evaluate_tree
-from services.static.contract_analysis_pipeline.predicate_types import PredicateTree
+from tests.support.eq_tree import eq_tree as _eq_tree
 
 CONTRACT = "0x" + "11" * 20
 OWNER = "0x" + "ab" * 20
@@ -83,26 +83,6 @@ def _ctx_with_rpc(rpc_url: str = "http://rpc.test") -> EvaluationContext:
 
 def _ctx_no_rpc() -> EvaluationContext:
     return EvaluationContext(contract_address=CONTRACT, adapter=_Adapter(None))
-
-
-def _eq_tree(other_operand: dict[str, Any]) -> PredicateTree:
-    """A ``msg.sender == X`` caller-authority equality leaf."""
-    return cast(
-        PredicateTree,
-        {
-            "op": "LEAF",
-            "leaf": {
-                "kind": "equality",
-                "operator": "eq",
-                "authority_role": "caller_authority",
-                "operands": [{"source": "msg_sender"}, other_operand],
-                "references_msg_sender": True,
-                "parameter_indices": [],
-                "expression": "msg.sender == X",
-                "basis": [],
-            },
-        },
-    )
 
 
 def _stub_rpc_map(monkeypatch: pytest.MonkeyPatch, returns: dict[str, str | None], recorder: list) -> None:
@@ -306,26 +286,7 @@ from services.static.contract_analysis_pipeline.summaries import (  # noqa: E402
     _build_semantic_control_summary,
 )
 from services.static.contract_analysis_pipeline.tracking import build_controller_tracking  # noqa: E402
-
-
-def _solc_path_for(floor: tuple[int, int, int]) -> str | None:
-    """Highest installed solc in the same major.minor line as ``floor`` whose
-    patch is >= floor (i.e. a ``^floor`` match). None if nothing satisfies it."""
-    try:
-        from solc_select import solc_select as ss
-    except Exception:
-        return None
-    best: tuple[int, int, int] | None = None
-    for version in ss.installed_versions():
-        try:
-            parsed = cast(tuple[int, int, int], tuple(int(x) for x in version.split(".")))
-        except ValueError:
-            continue
-        if parsed[:2] == floor[:2] and parsed >= floor and (best is None or parsed > best):
-            best = parsed
-    if best is None:
-        return None
-    return str(ss.artifact_path(".".join(str(x) for x in best)))
+from tests.support.solc import solc_path_for as _solc_path_for  # noqa: E402
 
 
 def _compile_fixture(rel_path: str, floor: tuple[int, int, int]):

@@ -33,7 +33,7 @@ from services.effects.config import (  # noqa: E402
 from services.effects.orchestrator import ProbeContext, default_prober  # noqa: E402
 from services.effects.selection import Candidate  # noqa: E402
 from tests.cache_helpers import requires_postgres  # noqa: E402
-from tests.test_effects_anvil import GUARDED, PAUSE, RecordingStore, StubAnvil  # noqa: E402
+from tests.support.effects_stubs import GUARDED, PAUSE, RecordingStore, StubAnvil  # noqa: E402
 from workers.effects_worker import EffectsWorker, _Seams  # noqa: E402
 
 TRANSFER = "0xa9059cbb"  # transfer(address,uint256)

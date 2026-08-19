@@ -32,6 +32,7 @@ from services.effects.config import (
     VERDICT_UNKNOWN,
 )
 from services.effects.harness import SimContext
+from tests.support.effects_stubs import GUARDED, PAUSE, UNGATED, RecordingStore, StubAnvil
 from utils.rpc import EthCallResult
 from workers.effects_worker import _is_cacheable
 
@@ -40,94 +41,6 @@ PRINCIPAL = "0x" + "22" * 20
 CTX = SimContext(chain_id=1, block=1, hardfork="prague")
 
 FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "effects" / "pausable_fixture.json").read_text())
-
-
-class RecordingStore:
-    def __init__(self) -> None:
-        self.stored: list[dict] = []
-
-    def __call__(self, transcript: dict) -> str:
-        self.stored.append(transcript)
-        return f"artifact://transcript/{len(self.stored)}"
-
-
-class StubAnvil:
-    """Models a pausable contract on a fork: ``guarded`` entry points revert while
-    paused-and-unexpired; ``send(pause_calldata)`` flips the latch; ``increase_time``
-    past the duration auto-expires it. snapshot/revert restore the latch state."""
-
-    def __init__(
-        self, *, guarded: set[str], pause_calldata: str, duration: int | None, hardfork: str = "prague"
-    ) -> None:
-        self._guarded = guarded
-        self._pause_calldata = pause_calldata
-        self._duration = duration
-        self._hf = hardfork
-        self.paused = False
-        self.time = 0
-        self.expiry: int | None = None
-        self._snaps: dict[str, tuple] = {}
-        self._n = 0
-        self.impersonated: list[str] = []
-        self.log: list[str] = []
-        self.balances: dict[str, str] = {}
-        self.storage: dict[tuple[str, str], str] = {}
-        self.warped = 0
-
-    def hardfork(self) -> str:
-        return self._hf
-
-    def versions(self) -> dict[str, str]:
-        return {"anvil": "anvil 1.5.1-stable", "foundry": "anvil 1.5.1-stable"}
-
-    def snapshot(self) -> str:
-        self._n += 1
-        sid = f"0x{self._n}"
-        self._snaps[sid] = (self.paused, self.time, self.expiry)
-        return sid
-
-    def revert(self, snapshot_id: str) -> bool:
-        self.paused, self.time, self.expiry = self._snaps[snapshot_id]
-        return True
-
-    def impersonate(self, address: str) -> None:
-        self.impersonated.append(address)
-
-    def stop_impersonate(self, address: str) -> None:
-        self.log.append(f"stop:{address}")
-
-    def call(self, tx: dict) -> EthCallResult:
-        data = tx.get("data", "")
-        frozen = self.paused and (self.expiry is None or self.time < self.expiry)
-        if data in self._guarded and frozen:
-            return EthCallResult(False, "0x", "0x" + "paused".encode().hex(), "paused")
-        return EthCallResult(True, "0x", None, None)
-
-    def send(self, tx: dict) -> str:
-        if tx.get("data") == self._pause_calldata:
-            self.paused = True
-            self.expiry = None if self._duration is None else self.time + self._duration
-        return "0xhash"
-
-    def increase_time(self, seconds: int) -> None:
-        self.time += seconds
-        # Counted, not just applied: "the recipe did not warp at all" is a distinct
-        # assertion from "it warped and nothing expired" (A7's two None states).
-        self.warped += 1
-
-    def mine(self) -> None:
-        pass
-
-    def set_balance(self, address: str, value: str) -> None:
-        self.balances[address.lower()] = value
-
-    def set_storage_at(self, address: str, slot: str, value: str) -> None:
-        self.storage[(address.lower(), slot.lower())] = value
-
-
-GUARDED = "0xc2985578"  # foo()
-UNGATED = "0xffffffff"
-PAUSE = "0x8456cb59"
 
 
 def _entry_points():

@@ -42,6 +42,7 @@ from services.static.contract_analysis_pipeline.tracking import (
     _oz_v5_ownership_getter_for_accessor,
     _oz_v5_ownership_getter_for_slot_constant,
 )
+from tests.support.eq_tree import eq_tree
 
 CONTRACT = "0x" + "11" * 20
 SAFE = "0xa000244b4a36d57ea1ecb39b5f02f255e4c8cd52"  # CumulativeMerkleDrop owner()/defaultAdmin()
@@ -84,22 +85,7 @@ def _ctx_no_rpc() -> EvaluationContext:
 
 
 def _eq_tree(other_operand: dict[str, Any]) -> PredicateTree:
-    return cast(
-        PredicateTree,
-        {
-            "op": "LEAF",
-            "leaf": {
-                "kind": "equality",
-                "operator": "eq",
-                "authority_role": "caller_authority",
-                "operands": [{"source": "msg_sender"}, other_operand],
-                "references_msg_sender": True,
-                "parameter_indices": [],
-                "expression": "owner() != _msgSender()",
-                "basis": [],
-            },
-        },
-    )
+    return eq_tree(other_operand, "owner() != _msgSender()")
 
 
 def _stub_rpc_map(monkeypatch: pytest.MonkeyPatch, returns: dict[str, str | None], recorder: list) -> None:
@@ -318,27 +304,10 @@ from services.static.contract_analysis_pipeline.predicate_artifacts import (  # 
     build_predicate_artifacts,
 )
 from services.static.contract_analysis_pipeline.tracking import build_controller_tracking  # noqa: E402
+from tests.support.solc import solc_path_for as _solc_path_for  # noqa: E402
 
 FIXTURE = "OzV5NamespacedOwnable.sol"
 FLOOR = (0, 8, 25)
-
-
-def _solc_path_for(floor: tuple[int, int, int]) -> str | None:
-    try:
-        from solc_select import solc_select as ss
-    except Exception:
-        return None
-    best: tuple[int, int, int] | None = None
-    for version in ss.installed_versions():
-        try:
-            parsed = cast(tuple[int, int, int], tuple(int(x) for x in version.split(".")))
-        except ValueError:
-            continue
-        if parsed[:2] == floor[:2] and parsed >= floor and (best is None or parsed > best):
-            best = parsed
-    if best is None:
-        return None
-    return str(ss.artifact_path(".".join(str(x) for x in best)))
 
 
 @pytest.fixture(scope="module")
