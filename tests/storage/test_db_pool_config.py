@@ -1,4 +1,4 @@
-"""Regression tests for DB engine pool sizing in ``db/models.py``.
+"""Regression tests for DB engine pool sizing in ``db/models/session.py``.
 
 The pool was previously left at SQLAlchemy defaults (5+10). At 10 worker
 processes per VM that caps out at 150 connections per VM under load,
@@ -34,6 +34,7 @@ def _pristine_db_models():
     session, and stale identity-map reads for whoever mixes them.
     """
     original = sys.modules.get("db.models")
+    original_session = sys.modules.get("db.models.session")
     yield
     for mod in _RELOADED:
         if mod is not original:
@@ -41,15 +42,23 @@ def _pristine_db_models():
     _RELOADED.clear()
     if original is not None:
         sys.modules["db.models"] = original
+    if original_session is not None:
+        sys.modules["db.models.session"] = original_session
 
 
 _RELOADED: list = []
 
 
 def _reload_models():
-    """Re-import db.models so module-level engine picks up current env."""
-    if "db.models" in sys.modules:
-        del sys.modules["db.models"]
+    """Re-import db.models so module-level engine picks up current env.
+
+    Only ``db.models.session`` is evicted alongside the package: the engine
+    lives there, and leaving the mapper submodules cached means the reload
+    never re-registers mappers (no duplicate-mapper poisoning).
+    """
+    for name in ("db.models", "db.models.session"):
+        if name in sys.modules:
+            del sys.modules[name]
     mod = importlib.import_module("db.models")
     _RELOADED.append(mod)
     return mod
@@ -99,5 +108,5 @@ def test_connect_timeout_still_set():
     must not block a worker forever — keep the 10s ceiling. Source-level
     check (the kwarg is consumed by psycopg2 at connect time and not
     introspectable via the engine API once the engine is built)."""
-    src = (Path(__file__).resolve().parents[2] / "db" / "models.py").read_text()
+    src = (Path(__file__).resolve().parents[2] / "db" / "models" / "session.py").read_text()
     assert 'connect_args={"connect_timeout": 10}' in src

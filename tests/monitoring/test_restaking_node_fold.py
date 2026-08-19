@@ -261,7 +261,9 @@ def test_no_module_outside_the_plane_imports_the_position_model():
     """
     root = pathlib.Path(__file__).resolve().parents[2]
     allowed = {
-        root / "db" / "models.py",
+        # The model's home and the package re-export surface.
+        root / "db" / "models" / "balances.py",
+        root / "db" / "models" / "__init__.py",
         root / "tests" / "monitoring" / "test_restaking_position.py",
         root / "services" / "monitoring" / "restaking_reads.py",
         root / "services" / "monitoring" / "restaking_enrollment.py",
@@ -285,6 +287,9 @@ def test_no_module_outside_the_plane_imports_the_position_model():
         root / "services" / "scoring" / "distill.py",
         # This file: the needle appears in the assertion below.
         pathlib.Path(__file__).resolve(),
+        # Metadata-registration guard: carries the table NAME in its snapshot
+        # of ``Base.metadata`` but reads no rows and imports no model.
+        root / "tests" / "storage" / "test_models_metadata.py",
     }
     offenders = []
     for path in root.rglob("*.py"):
