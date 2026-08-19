@@ -188,7 +188,7 @@ def _build_effective_permissions(
     # → capability_surface → permissionless_shapes → resolution.__init__ →
     # here), which import-crashes any process that touches services.policy
     # first — policy_worker died on boot and took the whole worker pool with
-    # it (start_workers.sh exits on first death).
+    # it (deploy/start_workers.sh exits on first death).
     from services.policy.effective_permissions import build_effective_permissions
 
     try:

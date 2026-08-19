@@ -20,7 +20,7 @@
 # for zero extra work — run 1.
 set -e
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 export PYTHONUNBUFFERED=1
 

@@ -50,8 +50,8 @@ COPY api.py serve.py alembic.ini ./
 COPY alembic/ alembic/
 COPY db/ db/
 COPY workers/ workers/
-COPY start_workers.sh start_container.sh start_web.sh start_browser.sh start_monitor.sh ./
-RUN chmod +x start_workers.sh start_container.sh start_web.sh start_browser.sh start_monitor.sh
+COPY deploy/start_workers.sh deploy/start_container.sh deploy/start_web.sh deploy/start_browser.sh deploy/start_monitor.sh deploy/
+RUN chmod +x deploy/start_workers.sh deploy/start_container.sh deploy/start_web.sh deploy/start_browser.sh deploy/start_monitor.sh
 COPY services/ services/
 COPY schemas/ schemas/
 COPY routers/ routers/
@@ -60,4 +60,4 @@ COPY --from=site-builder /site/dist /app/site/dist
 
 EXPOSE 8000
 
-CMD ["./start_container.sh"]
+CMD ["./deploy/start_container.sh"]

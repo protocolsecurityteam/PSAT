@@ -7,12 +7,12 @@ kill_signal = "SIGTERM"
 kill_timeout = 30
 
 [build]
-  dockerfile = "Dockerfile"
+  dockerfile = "deploy/Dockerfile"
 
 [env]
   PORT = "8000"
   PYTHONUNBUFFERED = "1"
-  # Bumped from start_workers.sh defaults (2/1/1). Sized for the workers VM
+  # Bumped from deploy/start_workers.sh defaults (2/1/1). Sized for the workers VM
   # (shared-cpu-8x:16GB) — 8 cores fit ~12 always-on Python procs plus
   # forge subprocess bursts without queueing. Policy bumped to 3 procs ×
   # K=2 (=6 concurrent jobs) now that the static-stage predicate fix has
@@ -28,7 +28,7 @@ kill_timeout = 30
   PSAT_EXA_CACHE = "1"
   PSAT_TAVILY_CACHE = "1"
   # Arm the policy->effects stage transition (EFFECTS_RESOLUTION_SPEC §5.1). The
-  # effects worker already launches unconditionally from start_workers.sh, so the
+  # effects worker already launches unconditionally from deploy/start_workers.sh, so the
   # flag only gates the transition, never a parked-job hazard.
   PSAT_EFFECTS_STAGE = "1"
 
@@ -42,10 +42,10 @@ kill_timeout = 30
 # monitor scan/poll passes are daemon-lease-gated singletons: scaling above 1
 # is safe (duplicates acquire nothing and skip) but wasteful — run 1.
 [processes]
-  web     = "./start_web.sh"
-  workers = "./start_workers.sh"
-  browser = "./start_browser.sh"
-  monitor = "./start_monitor.sh"
+  web     = "./deploy/start_web.sh"
+  workers = "./deploy/start_workers.sh"
+  browser = "./deploy/start_browser.sh"
+  monitor = "./deploy/start_monitor.sh"
 
 # HTTP routing + health checks only apply to the API group.
 [http_service]

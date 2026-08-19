@@ -1842,11 +1842,6 @@ dependencies = [
     { name = "vyper" },
 ]
 
-[package.optional-dependencies]
-dapp-crawler = [
-    { name = "playwright" },
-]
-
 [package.dev-dependencies]
 dev = [
     { name = "coverage" },
@@ -1870,7 +1865,6 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.135.1" },
     { name = "hypersync", specifier = ">=0.8.5" },
     { name = "playwright", specifier = ">=1.58.0" },
-    { name = "playwright", marker = "extra == 'dapp-crawler'", specifier = ">=1.40.0" },
     { name = "psycopg2-binary", specifier = ">=2.9" },
     { name = "pydantic", specifier = ">=2.12" },
     { name = "pypdf", specifier = ">=5.0" },
@@ -1885,7 +1879,6 @@ requires-dist = [
     { name = "uvicorn", specifier = ">=0.42.0" },
     { name = "vyper", specifier = "==0.3.10" },
 ]
-provides-extras = ["dapp-crawler"]
 
 [package.metadata.requires-dev]
 dev = [

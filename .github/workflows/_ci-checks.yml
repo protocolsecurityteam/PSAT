@@ -53,10 +53,8 @@ jobs:
               - 'site/**'
             ci-config:
               - '.github/workflows/**'
-              - 'Dockerfile'
-              - 'docker/**'
+              - 'deploy/**'
               - 'fly.toml'
-              - 'start_*.sh'
               - 'docker-compose.yml'
 
   lint:

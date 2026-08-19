@@ -2,7 +2,7 @@
 # `web` process group: FastAPI only.
 set -e
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 # --limit-concurrency gives the event loop backpressure before Fly's
 # hard_limit=100 piles connections on us. No --workers: uvicorn's

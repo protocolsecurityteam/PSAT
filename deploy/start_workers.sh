@@ -4,12 +4,12 @@
 # dapp_crawl_worker lives in `browser`; protocol_monitor in `monitor`.
 set -e
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 export PYTHONUNBUFFERED=1
 
-# This script's stdout is redirected into the JSONL log stream (start_local.sh,
-# start_container.sh), so a bare `echo` lands there as a line no JSON reader can
+# This script's stdout is redirected into the JSONL log stream (deploy/start_local.sh,
+# deploy/start_container.sh), so a bare `echo` lands there as a line no JSON reader can
 # parse. Emit the launcher's own lines in the same one-object-per-line shape the
 # Python processes use. Level is the first argument; the rest is the message.
 log_json() {

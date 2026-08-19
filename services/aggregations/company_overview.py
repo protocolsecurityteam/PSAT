@@ -388,7 +388,7 @@ def _secondary_impl_contracts(
 
 # Read the pool sizing from the same env vars db.models reads, rather than
 # importing the (private) constants. The fan-out cap derives from
-# pool_size + max_overflow so prod (start_workers.sh tightens to 2+3=5) and
+# pool_size + max_overflow so prod (deploy/start_workers.sh tightens to 2+3=5) and
 # dev (5+10=15) both stay below ~half the pool: one in-flight /api/company
 # never claims more than ~half the engine's connections, leaving room for
 # /functions, /audit_coverage, etc. on the same worker process. The hard

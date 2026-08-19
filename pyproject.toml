@@ -26,16 +26,9 @@ dependencies = [
   "typing-extensions>=4.15",
   "urllib3>=2.6",
   # Never imported: CLI compiler consumed by crytic-compile for *.vy sources
-  # (Dockerfile installs the same pin on PATH).
+  # (deploy/Dockerfile installs the same pin on PATH).
   "vyper==0.3.10",
   "uvicorn>=0.42.0",
-]
-
-[project.optional-dependencies]
-# Kept for docker/dapp-crawler.Dockerfile's ``--extra dapp-crawler``; its former
-# eth-* entries are core imports and live in the main dependency list.
-dapp-crawler = [
-  "playwright>=1.40.0",
 ]
 
 [dependency-groups]

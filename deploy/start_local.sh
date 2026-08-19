@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 # Load .env
 if [ ! -f .env ]; then
@@ -13,18 +13,18 @@ source .env
 set +a
 
 # Unbuffered Python so each process's JSON logs flush to the log file promptly
-# (block buffering would otherwise delay them). start_workers.sh sets this for the
+# (block buffering would otherwise delay them). deploy/start_workers.sh sets this for the
 # worker fleet; here it also covers the API, monitors, and dapp worker below.
 export PYTHONUNBUFFERED=1
 
 # Guardrail only — `error` is already env_logger's default with RUST_LOG unset,
 # so hypersync's Rust 429 retry lines still reach the JSONL file below as
-# plaintext (see start_workers.sh; fd-level capture is deferred).
+# plaintext (see deploy/start_workers.sh; fd-level capture is deferred).
 export RUST_LOG="${RUST_LOG:-error}"
 
 # Silence requests' import-time dependency-skew warning, which fires before any
 # process can configure logging. Scoped to the requests module (see
-# start_workers.sh), not a blanket ignore.
+# deploy/start_workers.sh), not a blanket ignore.
 export PYTHONWARNINGS="${PYTHONWARNINGS:-ignore::Warning:requests}"
 
 WORKER_PATTERN='workers\.(discovery|static_worker|resolution_worker|policy_worker|effects_worker|coverage_worker|coverage_verify|selection_worker|dapp_crawl_worker|defillama_worker|audit_text_extraction|audit_scope_extraction|event_log_indexer|protocol_monitor)'
@@ -171,10 +171,10 @@ sleep 2
 
 # Start workers
 echo "Starting workers..."
-bash start_workers.sh >>"$LOG_FILE" 2>&1 &
+bash deploy/start_workers.sh >>"$LOG_FILE" 2>&1 &
 WORKERS_PID=$!
 
-# Start dapp crawl worker — the `browser` process group (start_browser.sh).
+# Start dapp crawl worker — the `browser` process group (deploy/start_browser.sh).
 # Prod isolates it on its own RAM-heavy VM for Chromium; locally it runs
 # alongside. Playwright chromium was ensured above.
 echo "Starting dapp crawl worker (browser)..."
@@ -186,7 +186,7 @@ BROWSER_PID=$!
 # process. The --poll/--tvl flag modes are rollback levers for running a single
 # loop ALONE — launching them alongside default mode gives every one of those
 # loops two live instances. The enrollment reconciler is not a default-mode
-# loop; start_workers.sh (started above) is what runs it.
+# loop; deploy/start_workers.sh (started above) is what runs it.
 echo "Starting protocol monitor..."
 uv run python -m workers.protocol_monitor >>"$LOG_FILE" 2>&1 &
 MONITOR_PID=$!

@@ -4,7 +4,7 @@
 # other queue workers — sharing a VM risks OOMing everything together.
 set -e
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 export PYTHONUNBUFFERED=1
 

@@ -6,7 +6,7 @@ which can blow past Neon's pool ceiling and surface as
 ``OperationalError: too many connections`` from random workers.
 
 Pool size is now env-tunable via ``PSAT_DB_POOL_SIZE`` /
-``PSAT_DB_MAX_OVERFLOW`` / ``PSAT_DB_POOL_RECYCLE``. ``start_workers.sh``
+``PSAT_DB_MAX_OVERFLOW`` / ``PSAT_DB_POOL_RECYCLE``. ``deploy/start_workers.sh``
 ships tight defaults (2+3) for workers; api/scripts keep 5+10 by default.
 
 These tests pin the defaults *and* verify env overrides take effect, so a
@@ -68,7 +68,7 @@ def test_default_pool_size_matches_sqlalchemy_baseline(monkeypatch):
 
 
 def test_pool_size_env_override_honored(monkeypatch):
-    """start_workers.sh sets PSAT_DB_POOL_SIZE=2 PSAT_DB_MAX_OVERFLOW=3.
+    """deploy/start_workers.sh sets PSAT_DB_POOL_SIZE=2 PSAT_DB_MAX_OVERFLOW=3.
     A regression here would silently re-balloon worker DB connections."""
     monkeypatch.setenv("PSAT_DB_POOL_SIZE", "2")
     monkeypatch.setenv("PSAT_DB_MAX_OVERFLOW", "3")

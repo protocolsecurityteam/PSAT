@@ -5,7 +5,7 @@ A services.policy↔services.resolution package-init cycle (introduced with
 that touched ``services.policy`` FIRST. The offline suite never saw it —
 pytest's collection order happens to initialize ``services.resolution``
 before ``services.policy`` — but ``workers.policy_worker`` starts with the
-policy package, so on deploy it died at import and ``start_workers.sh``'s
+policy package, so on deploy it died at import and ``deploy/start_workers.sh``'s
 exit-on-first-death took the entire worker pool down with it, in a loop.
 
 These tests import in a FRESH interpreter per case (the only way import
