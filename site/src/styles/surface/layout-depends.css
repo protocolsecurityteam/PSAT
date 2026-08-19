@@ -1,0 +1,166 @@
+/* Depends-on tab — the contract's outbound call surface. Chips reuse
+   .ps-ctrl-fnchip at the same 11px the Governs tab scopes them to, so function
+   chips are byte-identical across the two tabs; the read/write/delegatecall
+   distinction is carried by the colored .ps-depends-verb-lbl, not the chip. */
+.ps-depends {
+  display: flex;
+  flex-direction: column;
+}
+
+.ps-depends .ps-ctrl-fnchip {
+  font-size: 11px;
+  padding: 2px 8px;
+}
+
+.ps-depends-sec-hdr {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.ps-depends-sec-sub {
+  margin-left: auto;
+  font-size: 10px;
+  font-weight: 600;
+  color: #475569;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+/* Verb line: a small colored label (writes / reads / delegatecall) followed by
+   its chips or a note. Shared by internal rows and external cards. */
+.ps-depends-verb {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 7px;
+}
+
+.ps-depends-verb-lbl {
+  flex: 0 0 44px;
+  text-align: right;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding-top: 3px;
+}
+
+.ps-depends-chips {
+  flex: 1 1 auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.ps-depends-note {
+  flex: 1 1 auto;
+  font-size: 11px;
+  color: #94a3b8;
+  padding-top: 1px;
+}
+
+/* Internal call row — collapsed by default. Head layout mirrors .ps-governs-head
+   (name previews on canvas, → commits); the count doubles as the expand toggle. */
+.ps-depends-row {
+  border-top: 1px solid rgba(148, 163, 184, 0.06);
+  padding: 4px 0;
+}
+
+.ps-depends-row:first-of-type {
+  border-top: none;
+}
+
+.ps-depends-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: 4px;
+}
+
+.ps-depends-preview {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex: 0 1 auto;
+  min-width: 0;
+  cursor: pointer;
+  padding: 2px 4px;
+  margin: -2px -4px;
+  border-radius: 4px;
+}
+
+/* Gold wash = the "browse/preview" affordance, matching the canvas peek. */
+.ps-depends-preview:hover {
+  background: rgba(212, 160, 23, 0.08);
+}
+
+.ps-depends-name {
+  font-size: 12px;
+  font-weight: 700;
+  color: #cbd5e1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ps-depends-preview:hover .ps-depends-name {
+  color: #e2e8f0;
+}
+
+.ps-depends-addr {
+  font-size: 10px;
+  color: #475569;
+  font-family: "JetBrains Mono", monospace;
+  flex-shrink: 0;
+}
+
+.ps-depends-spacer {
+  flex: 1 1 auto;
+}
+
+/* Count summary doubles as the expand toggle — ghost button, zeroing the
+   global forms.css chrome the same way .ps-governs-expand does. */
+.ps-depends-toggle {
+  flex: 0 0 auto;
+  margin-left: auto;
+  display: inline-flex;
+  align-items: baseline;
+  justify-content: flex-end;
+  gap: 4px;
+  background: none;
+  border: none;
+  box-shadow: none;
+  border-radius: 3px;
+  padding: 0 2px;
+  color: #64748b;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.ps-depends-toggle:hover {
+  color: #94a3b8;
+  background: none;
+  box-shadow: none;
+  transform: none;
+}
+
+.ps-depends-caret {
+  font-size: 9px;
+  color: #475569;
+}
+
+.ps-depends-row.open .ps-depends-caret {
+  color: #94a3b8;
+}
+
+.ps-depends-body {
+  padding: 2px 6px 6px;
+}
+

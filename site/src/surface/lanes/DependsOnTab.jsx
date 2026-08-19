@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 
-import { blockExplorerAddressUrl, blockExplorerName } from "../../blockExplorer.js";
+import { blockExplorerAddressUrl, blockExplorerName } from "../blockExplorer.js";
 import { fnChipClass, shortAddr } from "../format.js";
 import { GotoArrow } from "../GotoArrow.jsx";
 import { buildDependencyView, fetchDependencyGraphViz } from "../layout/dependencies.js";

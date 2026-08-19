@@ -1,7 +1,7 @@
 import { useState } from "react";
 
-import { isBytecodeVerifiedAudit } from "../../auditCoverage.js";
-import { formatAuditDate } from "../../auditUi.jsx";
+import { isBytecodeVerifiedAudit } from "../../audits/auditCoverage.js";
+import { formatAuditDate } from "../../audits/auditUi.jsx";
 import { AuditReadModal } from "../modals/AuditReadModal.jsx";
 import { GotoArrow } from "../GotoArrow.jsx";
 import { entityKey } from "../entityKey.js";

@@ -4,7 +4,7 @@
 // leaves unwitnessed comes back as `null` and must render as not-determined,
 // never as zero and never as blank.
 
-import { capabilityPhrase } from "../claimsVocab.js";
+import { capabilityPhrase } from "../vocab/capabilityPhrase.js";
 import { entityKey } from "../surface/entityKey.js";
 import {
   countWord,

@@ -1,9 +1,11 @@
 // Pure formatters + small predicates used across the surface tree.
 // No React, no closures — safe to import from anywhere.
 
+import { middleSlice } from "../shared/format.js";
+
 export function shortAddr(address) {
   if (!address || address.length < 12) return address || "";
-  return address.slice(0, 6) + ".." + address.slice(-4);
+  return middleSlice(address, "..");
 }
 
 // Display name for a principal. The server label is sometimes just the bare

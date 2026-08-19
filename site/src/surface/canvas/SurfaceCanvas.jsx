@@ -15,93 +15,15 @@ import { ChanneledStepEdge } from "./ChanneledStepEdge.jsx";
 import { ContractNode } from "./ContractNode.jsx";
 import { FocusOnNode } from "./FocusOnNode.jsx";
 import { GroupNode } from "./GroupNode.jsx";
+import { buildControlsDetailMap } from "./controlsDetail.js";
+import { SelectionLegend } from "./SelectionLegend.jsx";
+import { REACH_EDGE_STROKE, edgeOnReachPath, reachChipText } from "./reachOverlay.js";
 
 // Co-controllers live inside the owning group's Controllers accordion now, so
 // the canvas only renders contract cards and their owning group boxes — there
 // is no standalone "principal"/guardian-rail node type any more.
 const nodeTypes = { contract: ContractNode, group: GroupNode };
 const edgeTypes = { channeled: ChanneledStepEdge };
-
-// Controls-detail rows keyed by each row's OWN chain when present — twin rows
-// share a bare address, so keying them all to the active chain would last-wins
-// one chain's functions onto the other (inv. 13). Rows without a chain (legacy
-// payloads) fall back to the active chain and attach exactly as before.
-export function buildControlsDetailMap(rows, chain) {
-  const map = new Map();
-  for (const d of rows || []) {
-    if (d?.address) map.set(entityKey(d.chain ?? chain, d.address), d);
-  }
-  return map;
-}
-
-// Selection-time legend. Renders only while a contract is selected so
-// the chip-color convention (warm = selected acts outward, cool =
-// other acts on selected) doesn't have to be memorised — the legend
-// is right there with the chips it explains. Uses "acts on" because
-// the edges represent any directed relationship (controls / calls /
-// sends value / owns / proxies-to); the chip text spells out which
-// specifically.
-//
-// The reach row appears only when the selection HAS transitive reach: a legend
-// entry for a chip nothing on the canvas is wearing would name a relationship
-// this selection does not have.
-export function SelectionLegend({ onClear, hasReach = false }) {
-  return (
-    <div className="ps-selection-legend">
-      <div className="ps-selection-legend-row">
-        <span className="ps-selection-legend-swatch ps-selection-legend-swatch--out" />
-        <span>selected acts on this contract</span>
-      </div>
-      <div className="ps-selection-legend-row">
-        <span className="ps-selection-legend-swatch ps-selection-legend-swatch--in" />
-        <span>this contract acts on selected</span>
-      </div>
-      {hasReach && (
-        <div className="ps-selection-legend-row">
-          <span className="ps-selection-legend-swatch ps-selection-legend-swatch--reach" />
-          <span>selected reaches this contract</span>
-        </div>
-      )}
-      {/* Explicit deselect — the pane-click clear exists but is invisible;
-          this makes it discoverable and teaches the Esc shortcut. */}
-      <button className="ps-selection-clear" onClick={onClear} title="Clear selection (Esc)">
-        <kbd>esc</kbd> deselect
-      </button>
-    </div>
-  );
-}
-
-// Hop distance → the chip a reached node wears, or null for no chip. Hop 1 is
-// deliberately absent: the directly-connected node already carries the acts-on
-// chip naming the concrete capability, and a reach chip beside it would state
-// the same relationship a second time, more weakly. The hop count is exact at
-// every distance — an overlay that stopped counting past some tier would be
-// saying less than the walk proved.
-export function reachChipText(hop) {
-  if (!hop || hop < 2) return null;
-  return `reach · ${hop} hops`;
-}
-
-// Violet of the reach chips (--ps-node-chip--reach border / legend swatch), so a
-// highlighted route and the chips it ends at read as one overlay.
-const REACH_EDGE_STROKE = "#a78bfa";
-
-// Whether a drawn edge carries one of the reach-route pairs in `pathEdges`
-// (a Set of "from>to", lowercased). Cross-group edges are aggregated into
-// group→group bundles that keep the underlying contract pairs in `data.samples`,
-// so the samples are the truth about what a bundle carries; an unaggregated edge
-// is its own single pair. ANY matching sample lights the bundle — the same rule
-// that decides whether a bundle earns a connection chip.
-export function edgeOnReachPath(edge, pathEdges) {
-  if (!edge || !pathEdges || pathEdges.size === 0) return false;
-  const samples = edge.data?.samples;
-  const pairs = samples && samples.length
-    ? samples.map((s) => [s.from, s.to])
-    : [[edge.source, edge.target]];
-  return pairs.some(
-    ([from, to]) => from && to && pathEdges.has(`${from.toLowerCase()}>${to.toLowerCase()}`),
-  );
-}
 
 // Multichain (inv. 13): every entity this canvas receives — machines,
 // principals, fund-flow endpoints — belongs to the single active `chain` (the

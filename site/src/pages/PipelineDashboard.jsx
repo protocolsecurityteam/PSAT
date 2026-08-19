@@ -2,9 +2,11 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "../api/client.js";
 import { entityKey } from "../surface/entityKey.js";
-import { shortenAddress } from "../graph.js";
+import { shortenAddress } from "../shared/format.js";
 import { JobDetail } from "./JobDetailPanel.jsx";
-import { FleetStrip, DaemonDetail, computeFleetRates } from "./FleetStrip.jsx";
+import { FleetStrip } from "./fleet/FleetStrip.jsx";
+import { DaemonDetail } from "./fleet/DaemonDetail.jsx";
+import { computeFleetRates } from "./fleet/fleetHealth.js";
 import { CORE_STAGES, STAGE_COLORS, STATUS_COLORS, coreIndexForStage, formatStageLabel } from "./jobStages.js";
 
 // Time-window selector universe. Only truly live work (queued/processing) is

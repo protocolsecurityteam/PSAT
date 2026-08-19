@@ -17,10 +17,10 @@ import {
   hasClaims,
   laneForClaims,
   priorityForClaims,
-  qualifierForClaims,
   sentenceForClaims,
   toneForClaims,
-} from "../claimsVocab.js";
+} from "../vocab/claimProjection.js";
+import { qualifierForClaims } from "../vocab/claimQualifiers.js";
 
 export function laneForFunction(fn) {
   // Claims (Plane 1) decide the lane when present; name-hints stay layout-only

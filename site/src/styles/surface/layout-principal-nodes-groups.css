@@ -1,0 +1,294 @@
+/* Principal nodes (Safe, EOA, Timelock) */
+/* Shared with the sidebar InspectorCard. The canvas principal/guardian-rail
+   node that also used the other .ps-principal-* node styles was removed with
+   the Controllers accordion, so only this one remains. */
+.ps-principal-addr {
+  font-size: 9px;
+  color: #64748b;
+  font-family: "JetBrains Mono", monospace;
+}
+
+/* Owner-group container — a labeled box that holds every contract a
+   single principal (Safe/Timelock/EOA/proxy admin) owns. Replaces the
+   N principal→child edges that used to fan out across the canvas. The
+   container body is pointer-events:none so clicks fall through to the
+   contract children inside; only the header is interactive. */
+.ps-group-node {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  border-radius: 10px;
+  background: var(--principal-bg, rgba(20, 24, 32, 0.4));
+  border: 2px solid var(--principal-color, #64748b);
+  box-shadow:
+    inset 0 0 0 1px rgba(15, 18, 24, 0.55),
+    0 0 0 1px rgba(0, 0, 0, 0.25);
+  pointer-events: none;
+}
+
+.ps-group-node .ps-handle {
+  pointer-events: none;
+}
+
+.ps-group-selected {
+  border-color: var(--principal-color, #94a3b8);
+  border-style: solid;
+  box-shadow:
+    inset 0 0 0 1px rgba(15, 18, 24, 0.6),
+    0 0 0 1px var(--principal-color, #94a3b8);
+}
+
+/* Browsed (not committed) group box: dotted gold, matching ps-node-focused —
+   solid gold is reserved for the committed selection. */
+.ps-group-focused {
+  border-color: #d4a017 !important;
+  border-style: dotted;
+}
+
+/* Header band: an absolutely-positioned strip at the top of the group,
+   pinned by GroupNode to exactly the height the layout reserved
+   (data.headerHeight). Holds the colored primary bar + the Controllers
+   accordion (with the open row's detail rendered in-flow below it). The
+   reserved height grows when a row is open and ELK re-packs to match, so the
+   in-flow content fits; overflow:hidden clips only the brief frame before the
+   measured height converges, never letting the accordion bleed onto a card.
+   pointer-events:none here lets the inert gaps fall through; the interactive
+   children opt back in. */
+.ps-group-head {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  border-top-left-radius: 8px;
+  border-top-right-radius: 8px;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+/* Auto-height wrapper holding the colored bar + accordion. GroupNode measures
+   this (not the clipped outer band) to get the true content height, so wrapped
+   capability summaries and open-row detail are reserved exactly. */
+.ps-group-head-inner {
+  display: flex;
+  flex-direction: column;
+  /* React Flow defaults nodes to text-align:center; the accordion reads as
+     left-aligned text (badges, addresses, the comma-separated cap summary). */
+  text-align: left;
+}
+
+.ps-group-header {
+  flex: 0 0 auto;
+  height: 62px;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  padding: 0 14px;
+  overflow: hidden;
+  background: linear-gradient(180deg, var(--principal-header-bg-top, rgba(15, 18, 24, 0.92)) 0%, var(--principal-header-bg-bot, rgba(15, 18, 24, 0.55)) 100%);
+  border-bottom: 2px solid var(--principal-color, rgba(148, 163, 184, 0.12));
+  border-top-left-radius: 8px;
+  border-top-right-radius: 8px;
+  cursor: pointer;
+  pointer-events: auto;
+  user-select: none;
+  transition: filter 120ms ease;
+}
+
+.ps-group-header:hover {
+  filter: brightness(1.12);
+}
+
+.ps-group-header-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+}
+
+.ps-group-badge {
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  padding: 3px 9px;
+  border-radius: 4px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  background: var(--principal-color, #475569);
+  color: #0f1218;
+}
+
+.ps-group-addr {
+  font-size: 11px;
+  font-family: "JetBrains Mono", monospace;
+  color: #f1f5f9;
+  flex-shrink: 0;
+}
+
+.ps-group-count {
+  font-size: 12px;
+  color: #f8fafc;
+  font-weight: 700;
+  white-space: nowrap;
+  margin-left: auto;
+  padding-left: 10px;
+}
+
+/* ── Controllers accordion ──────────────────────────────────────────────
+   Lives in the header band below the colored primary bar. Lists every
+   controller with authority inside the box (primary + co-controllers); each
+   row expands to the exact functions it can call per contract. */
+.ps-group-controllers {
+  padding: 0 10px;
+  background: rgba(13, 17, 23, 0.92);
+  border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+  pointer-events: auto;
+}
+
+.ps-group-controllers-label {
+  height: 26px;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: #94a3b8;
+}
+
+.ps-ctrl-row {
+  border-radius: 5px;
+  border-left: 2px solid var(--ctrl-accent, transparent);
+  background: rgba(255, 255, 255, 0.015);
+  margin-bottom: 2px;
+}
+
+.ps-ctrl-row--primary {
+  background: color-mix(in srgb, var(--ctrl-accent, #6a9e94) 10%, transparent);
+}
+
+/* Selected controller (its governed contracts are highlighted on the canvas):
+   a soft accent fill + ring so it reads as the active one. */
+.ps-ctrl-row--selected {
+  background: color-mix(in srgb, var(--ctrl-accent, #6a9e94) 16%, transparent);
+  box-shadow: inset 0 0 0 1px var(--ctrl-accent, #6a9e94);
+}
+
+/* Browsed controller (search ▲/▼ preview — no commit): gold marker matching
+   the node-level browse ring, distinct from --selected so a browsed row and
+   the committed one never read as the same state. */
+.ps-ctrl-row--focused {
+  background-color: rgba(212, 160, 23, 0.12);
+  /* Browse marker, not selection. CSS dotted at 1px reads as solid, so the
+     dashes are an inline-SVG rect with an explicit dash/gap (4 on, 7 off);
+     rx matches the row's 5px radius. Background layer → no layout shift. */
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'%3E%3Crect width='100%25' height='100%25' fill='none' rx='5' stroke='%23d4a017' stroke-width='2' stroke-dasharray='4 7'/%3E%3C/svg%3E");
+}
+
+/* min-height (not a fixed height) so the row grows when the full capability
+   summary wraps to more than one line — we never truncate the tags. */
+.ps-ctrl-head {
+  min-height: 30px;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.ps-ctrl-head:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.ps-ctrl-tag {
+  font-size: 7.5px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  padding: 1px 4px;
+  border-radius: 3px;
+  text-transform: uppercase;
+  flex-shrink: 0;
+}
+
+.ps-ctrl-tag--primary {
+  background: #6a9e94;
+  color: #0f1218;
+}
+
+.ps-ctrl-tag--co {
+  background: rgba(217, 154, 78, 0.18);
+  color: #d99a4e;
+}
+
+.ps-ctrl-badge {
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  padding: 2px 6px;
+  border-radius: 3px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.ps-ctrl-addr {
+  font-size: 9px;
+  color: #64748b;
+  font-family: "JetBrains Mono", monospace;
+  flex-shrink: 0;
+}
+
+/* Full capability summary — every tag, comma-separated, never truncated.
+   Wraps to as many lines as it needs (the row grows; the band is measured).
+   overflow-wrap:break-word is a safety net so a lone long tag breaks rather
+   than overflowing + clipping if a group is unusually tight. */
+.ps-ctrl-caps {
+  font-size: 10px;
+  color: #c9b08a;
+  flex: 1 1 auto;
+  min-width: 0;
+  line-height: 1.45;
+  overflow-wrap: break-word;
+}
+
+.ps-ctrl-governs {
+  font-size: 10px;
+  color: #94a3b8;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+/* Shared with the sidebar GovernsTab's expandable function lists (see the
+   .ps-governs overrides above). The canvas Controllers accordion no longer
+   renders these directly. */
+.ps-ctrl-fns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.ps-ctrl-fnchip {
+  font-size: 9px;
+  font-family: "JetBrains Mono", monospace;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: rgba(148, 163, 184, 0.12);
+  color: #aeb9cc;
+}
+
+.ps-ctrl-fnchip--upgrade {
+  background: rgba(138, 106, 158, 0.2);
+  color: #c0a0d4;
+}
+
+.ps-ctrl-fnchip--pause {
+  background: rgba(201, 138, 138, 0.18);
+  color: #d8a3a3;
+}
+
+.ps-ctrl-fnchip--fund {
+  background: rgba(201, 176, 138, 0.16);
+  color: #d6bd8c;
+}
+

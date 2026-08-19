@@ -1,0 +1,10 @@
+/* React Flow stacks nodes in DOM order. Group containers go behind
+   their children so the contract nodes inside read above the dashed
+   border (and a selected group, elevated +1000 by React Flow, can't
+   cover its own cards). The Controllers accordion grows the group's
+   reserved header band in-flow and the canvas re-packs to fit, so the
+   group never needs to be lifted above its cards. */
+.react-flow__node-group {
+  z-index: 0 !important;
+}
+
