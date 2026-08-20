@@ -36,10 +36,57 @@ def test_parse_sources_rejects_parent_traversal():
         fetch.parse_sources(result)
 
 
-def test_parse_sources_rejects_absolute():
-    result = _standard_json_result({"/tmp/evil.sol": {"content": "x"}})
+def test_parse_sources_relativizes_absolute():
+    # Verified standard-json bundles routinely carry absolute keys rooted in
+    # the verifying developer's machine (e.g. Circle's EURC FiatTokenV2_2);
+    # the root anchor is stripped so the source scaffolds project-relative.
+    eurc_key = (
+        "/Users/aloysius.chan/Repositories/circlefin/"
+        "stablecoin-evm-private-eurc-mainnet-eth/contracts/v2/FiatTokenV2_2.sol"
+    )
+    result = _standard_json_result({eurc_key: {"content": "x"}})
+    parsed = fetch.parse_sources(result)
+    assert parsed == {eurc_key.lstrip("/"): "x"}
+
+
+def test_parse_sources_rejects_absolute_with_traversal():
+    # Relativizing the anchor must not open a traversal hole: an absolute key
+    # with an embedded ".." segment is still refused.
+    result = _standard_json_result({"/tmp/../../etc/evil.sol": {"content": "x"}})
     with pytest.raises(ValueError):
         fetch.parse_sources(result)
+
+
+def test_parse_sources_rejects_double_slash_absolute_with_traversal():
+    # "//"-anchored paths keep a distinct anchor part in PurePosixPath; the
+    # anchor strip and the ".." refusal must both still apply.
+    result = _standard_json_result({"//tmp/../../etc/evil.sol": {"content": "x"}})
+    with pytest.raises(ValueError):
+        fetch.parse_sources(result)
+
+
+def test_parse_sources_windows_style_keys_stay_confined():
+    # Windows-style keys are not treated as absolute by the POSIX-path
+    # normalizer: a backslash key stays one opaque component, a drive-prefixed
+    # forward-slash key stays a relative multi-segment path. Both remain
+    # inside the project dir.
+    result = _standard_json_result(
+        {
+            "C:\\Users\\dev\\A.sol": {"content": "a"},
+            "C:/Users/dev/B.sol": {"content": "b"},
+        }
+    )
+    parsed = fetch.parse_sources(result)
+    assert parsed == {"C:\\Users\\dev\\A.sol": "a", "C:/Users/dev/B.sol": "b"}
+
+
+def test_scaffold_writes_relativized_absolute_source(tmp_path):
+    # End-to-end: an absolute key scaffolds to a project-relative file that
+    # passes the _confine containment check, so analysis proceeds.
+    result = _standard_json_result({"/Users/dev/repo/contracts/v2/Token.sol": {"content": "pragma solidity 0.8.24;"}})
+    project = tmp_path / "proj"
+    fetch.scaffold("0xabc", result, project)
+    assert (project / "Users/dev/repo/contracts/v2/Token.sol").exists()
 
 
 def test_parse_sources_accepts_legit_relative():

@@ -15,7 +15,10 @@ def test_analyze_without_admin_key_rejected(live_base_url: str):
 
 
 def test_analyze_malformed_address_rejected(live_base_url: str, live_admin_key: str):
-    # 42 chars (passes Pydantic length) but no 0x prefix — fails the handler's explicit check.
+    # 42 chars (passes the length bound) but no 0x prefix — fails the
+    # AnalyzeRequest field validator, so FastAPI rejects at the schema layer
+    # with a standard 422 before the handler runs. That schema-layer contract
+    # is what we pin here.
     bad_address = "ab" + "c" * 40
     assert len(bad_address) == 42 and not bad_address.startswith("0x")
     r = requests.post(
@@ -24,7 +27,7 @@ def test_analyze_malformed_address_rejected(live_base_url: str, live_admin_key: 
         headers={"X-PSAT-Admin-Key": live_admin_key},
         timeout=15,
     )
-    assert r.status_code == 400, f"malformed address should 400, got {r.status_code}: {r.text}"
+    assert r.status_code == 422, f"malformed address should 422, got {r.status_code}: {r.text}"
 
 
 def test_unknown_job_id_returns_404(live_base_url: str, live_admin_key: str):

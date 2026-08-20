@@ -48,8 +48,8 @@ def list_jobs() -> list[JobDict]:
 
 @router.post("/api/analyze", dependencies=[Depends(deps.require_admin_key)], response_model=None)
 def analyze_address(request: AnalyzeRequest) -> JobDict:
-    if request.address and not request.address.startswith("0x"):
-        raise HTTPException(status_code=400, detail="Address must start with 0x")
+    # Address shape is enforced by the ``AnalyzeRequest`` field validator (422);
+    # any address reaching here is a canonical 0x-prefixed 20-byte hex string.
     # Allowlist enforcement (inv. 14): the edge keeps its mainnet default, but a
     # submission that resolves to a chain this deployment has not enabled is
     # rejected before a job is spawned. Enforce on the *resolved* chain — the same

@@ -40,14 +40,17 @@ def sanitize_evm_version(raw: object) -> str:
 def _normalize_source_path(filename: str) -> str:
     """Confine a verified-source key to a project-relative path.
 
-    Invariant: a scaffolded source key stays inside the project dir. Etherscan
-    source keys are attacker-controlled, so an absolute path or any ``..``
-    segment is rejected rather than silently rewritten.
+    Invariant: a scaffolded source key stays inside the project dir. Verified
+    standard-json bundles routinely carry absolute keys rooted in the verifying
+    developer's machine (common on mainnet), so a leading root anchor is
+    stripped — relativized, not refused. Any ``..`` segment is still rejected
+    rather than rewritten, before and after the anchor strip alike, and
+    ``_confine`` re-checks containment at write time.
     """
     pure = PurePosixPath(filename)
-    if pure.is_absolute():
-        raise ValueError(f"Refusing absolute source path: {filename!r}")
-    parts = [p for p in pure.parts if p != "."]
+    # ``pure.parts`` puts the root anchor ("/" or "//") first when absolute;
+    # dropping it and "." segments leaves only real path components.
+    parts = [p for p in pure.parts if p != "." and not p.startswith("/")]
     if any(p == ".." for p in parts):
         raise ValueError(f"Refusing source path with parent traversal: {filename!r}")
     normalized = "/".join(parts)
