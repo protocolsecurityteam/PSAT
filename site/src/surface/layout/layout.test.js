@@ -17,7 +17,10 @@ import {
 } from "./controlGraph.js";
 import { guardSummary } from "./guardSummary.js";
 import { buildSearchResults } from "./search.js";
-import { aggregateEdges, assignGroups, buildGraphLayout, groupHeaderHeight, layoutGroupInterior } from "./elkLayout.js";
+import { buildGraphLayout } from "./elkLayout.js";
+import { assignGroups } from "./groupAssignment.js";
+import { aggregateEdges } from "./edgeAggregation.js";
+import { groupHeaderHeight, layoutGroupInterior } from "./nodeSizing.js";
 import { buildControlAdjacency, flowOnChain } from "./governancePath.js";
 import { entityKey } from "../entityKey.js";
 

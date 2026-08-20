@@ -6,7 +6,7 @@ exact"; there are 19 Safe principals and one of them
 (``0x21f73d42eb58ba49ddb685dc29d3bf5c0f0373ca``) has an enabled module, so k/n is
 an upper bound on its protection.
 
-Every pinned word below was re-read at block 25643300 through ``utils.rpc``
+Every pinned word below was re-read at block 25643300 through ``services.clients.rpc``
 (eRPC) while writing these tests; both scenarios are real Safes from the
 ``function_principals.resolved_type='safe'`` set.
 

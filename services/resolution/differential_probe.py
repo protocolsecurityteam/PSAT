@@ -28,7 +28,7 @@ unrelated reason. Two rules make it sound:
      moved away from positive recognition of authority patterns).
 
 This module is PURE given an injected ``call_batch`` callable (a thin wrapper
-over :func:`utils.rpc.eth_call_batch`), so it is testable against a stubbed wire
+over :func:`services.clients.rpc.eth_call_batch`), so it is testable against a stubbed wire
 with recorded transcripts. The wiring (predicate resolution) supplies the
 callable, the pinned block, and applies the verdict to the capability (§3.6).
 """
@@ -42,7 +42,7 @@ from typing import Any, Literal
 
 from eth_utils.crypto import keccak
 
-from utils.rpc import EthCallResult
+from services.clients.rpc import EthCallResult
 
 # A call batch issues N eth_calls (each ``{from?, to, data}``) at one block tag and
 # returns per-call results PRESERVING revert data. Injected so the probe is hermetic.

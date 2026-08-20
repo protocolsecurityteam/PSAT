@@ -471,7 +471,7 @@ class _Job:
 
 
 def test_contracts_with_no_protocol_are_counted_not_silently_skipped(monkeypatch, caplog):
-    monkeypatch.setattr(distill, "distill_contract_signals", lambda session, contract, job_id: [])
+    monkeypatch.setattr(distill.facts, "distill_contract_signals", lambda session, contract, job_id: [])
     session = _ContractSession([_Contract(1, 7), _Contract(2, None), _Contract(3, None)])
     metrics: dict[str, object] = {}
     token = stage_metrics_var.set(metrics)
@@ -490,7 +490,7 @@ def test_contracts_with_no_protocol_are_counted_not_silently_skipped(monkeypatch
 
 
 def test_no_orphans_means_no_warning(monkeypatch, caplog):
-    monkeypatch.setattr(distill, "distill_contract_signals", lambda session, contract, job_id: [])
+    monkeypatch.setattr(distill.facts, "distill_contract_signals", lambda session, contract, job_id: [])
     session = _ContractSession([_Contract(1, 7)])
     metrics: dict[str, object] = {}
     token = stage_metrics_var.set(metrics)

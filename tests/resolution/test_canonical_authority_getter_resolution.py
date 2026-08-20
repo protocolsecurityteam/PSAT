@@ -86,7 +86,7 @@ def _ctx_no_rpc() -> EvaluationContext:
 
 
 def _stub_rpc_map(monkeypatch: pytest.MonkeyPatch, returns: dict[str, str | None], recorder: list) -> None:
-    """Stub ``utils.rpc.rpc_request`` from a selector→address map. A value of
+    """Stub ``services.clients.rpc.rpc_request`` from a selector→address map. A value of
     ``None`` (or a selector absent from the map) raises — i.e. the eth_call
     reverts, exactly like calling a function the contract doesn't expose."""
 
@@ -98,7 +98,7 @@ def _stub_rpc_map(monkeypatch: pytest.MonkeyPatch, returns: dict[str, str | None
             raise RuntimeError("execution reverted")
         return "0x" + value[2:].rjust(64, "0")
 
-    monkeypatch.setattr("utils.rpc.rpc_request", fake)
+    monkeypatch.setattr("services.clients.rpc.rpc_request", fake)
 
 
 def _called(recorder: list, selector: str) -> bool:

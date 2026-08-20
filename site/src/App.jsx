@@ -14,7 +14,7 @@ import RunsPage from "./pages/RunsPage.jsx";
 // The control surface is heavy — keep it lazy so the home page bundle
 // stays slim. ProtocolSurface is also imported separately by
 // CompanyOverview; Vite/Rollup dedupe to a single chunk.
-const ProtocolSurface = lazy(() => import("./ProtocolSurface.jsx"));
+const ProtocolSurface = lazy(() => import("./surface/ProtocolSurface.jsx"));
 
 // TODO: replace this with a real sign-in page + session-based auth. Options
 // that fit our Fly deployment: (a) an identity-aware proxy sidecar such as

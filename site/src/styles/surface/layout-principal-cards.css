@@ -1,0 +1,164 @@
+/* Clickable principal cards */
+.ps-principal-clickable {
+  cursor: pointer;
+  transition: background 100ms ease;
+}
+
+.ps-principal-clickable:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+/* Shared "go to" commit arrow — the one control that commits an in-card entity
+   reference (lane caller buttons, Governs rows, Guard Inspector principal
+   cards); the reference body only previews. Neutral-gray ghost that brightens on
+   hover; zeroes the global forms.css button chrome (teal gradient + drop shadow
+   + hover lift), same pattern as .ps-governs-expand / .ps-selection-clear.
+   margin-left:auto pins it to the row's right edge. */
+.ps-goto-arrow {
+  flex-shrink: 0;
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 2px;
+  background: none;
+  border: none;
+  box-shadow: none;
+  border-radius: 3px;
+  color: #475569;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  transition: color 100ms ease;
+}
+
+.ps-goto-arrow:hover {
+  color: #cbd5e1;
+  background: none;
+  box-shadow: none;
+  transform: none;
+}
+
+/* Hovering the reference body hints its arrow is the commit target. */
+.ps-principal-clickable:hover .ps-goto-arrow,
+.ps-caller-btn:hover .ps-goto-arrow,
+.ps-governs-head:hover .ps-goto-arrow {
+  color: #94a3b8;
+}
+
+/* Principal detail sidebar */
+/* Reached-from route block (score-page click-through on a transitive target).
+   Violet, matching the canvas reach chips — the same relationship in both
+   places. */
+.ps-reach {
+  margin-top: 8px;
+  padding: 7px 9px;
+  border: 1px solid rgba(124, 58, 237, 0.35);
+  border-left: 2px solid rgba(124, 58, 237, 0.75);
+  border-radius: 4px;
+  background: rgba(124, 58, 237, 0.07);
+}
+
+.ps-reach-hdr {
+  font-size: 10px;
+  color: #94a3b8;
+  letter-spacing: 0.02em;
+}
+
+.ps-reach-hdr b {
+  color: #c4b5fd;
+  font-weight: 600;
+}
+
+.ps-reach-nd {
+  margin-top: 4px;
+  font-size: 10px;
+  font-style: italic;
+  color: #64748b;
+}
+
+.ps-reach-hops {
+  list-style: none;
+  margin: 5px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.ps-reach-hop {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+/* The sidebar is narrow and contract names are long, so the hop stacks: the
+   pair on its own line, what witnessed it underneath. Nothing is allowed to
+   run off the card — a clipped role label is a withheld one. */
+.ps-reach-body {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.ps-reach-step {
+  flex-shrink: 0;
+  min-width: 13px;
+  height: 13px;
+  border-radius: 3px;
+  background: rgba(124, 58, 237, 0.22);
+  color: #c4b5fd;
+  font-size: 8px;
+  font-weight: 700;
+  text-align: center;
+  line-height: 13px;
+}
+
+.ps-reach-pair {
+  color: #cbd5e1;
+  overflow-wrap: anywhere;
+}
+
+.ps-reach-arrow {
+  margin: 0 4px;
+  color: rgba(124, 58, 237, 0.85);
+}
+
+/* The relation/label the control graph witnessed for this hop; the flow type
+   leads and stands alone when nothing witnessed a relation. */
+.ps-reach-kind {
+  font-size: 9px;
+  color: #64748b;
+  overflow-wrap: anywhere;
+}
+
+.ps-reach-claim b {
+  color: #a78bfa;
+  font-weight: 600;
+}
+
+.ps-principal-section {
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(148, 163, 184, 0.08);
+}
+
+.ps-principal-section-hdr {
+  font-size: 9px;
+  font-weight: 700;
+  color: #64748b;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 4px;
+}
+
+.ps-principal-signer {
+  font-size: 10px;
+  font-family: "JetBrains Mono", monospace;
+  color: #94a3b8;
+  padding: 2px 0;
+  word-break: break-all;
+}
+

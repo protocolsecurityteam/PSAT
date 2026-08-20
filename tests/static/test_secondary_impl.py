@@ -299,7 +299,7 @@ def test_resolve_secondary_impl_addresses_reads_proxy_storage(monkeypatch):
             return "0x6080" if params[0] == admin else "0x"  # only `admin` is a deployed contract
         return "0x"
 
-    monkeypatch.setattr("utils.rpc.rpc_request", fake_rpc)
+    monkeypatch.setattr("services.clients.rpc.rpc_request", fake_rpc)
 
     addrs = resolve_secondary_impl_addresses(
         "http://stub",
@@ -332,7 +332,7 @@ def test_resolve_handles_256bit_constant_slot(monkeypatch):
             return "0x6080"
         return "0x"
 
-    monkeypatch.setattr("utils.rpc.rpc_request", fake_rpc)
+    monkeypatch.setattr("services.clients.rpc.rpc_request", fake_rpc)
     addrs = resolve_secondary_impl_addresses(
         "http://stub", proxy, [{"name": "adminImplPosition", "slot": big_slot, "offset": 0}]
     )
@@ -483,7 +483,7 @@ def test_static_cache_hit_still_resolves_secondary_impls(db_session, monkeypatch
             return "0x6080" if params[0] == admin else "0x"
         return "0x"
 
-    monkeypatch.setattr("utils.rpc.rpc_request", fake_rpc)
+    monkeypatch.setattr("services.clients.rpc.rpc_request", fake_rpc)
 
     worker = StaticWorker()
     # Stub the heavy, unrelated phases so the test exercises the cache branch only.

@@ -5,9 +5,9 @@ import pytest
 from eth_abi.abi import encode
 
 from schemas.control_tracking import ControlTrackingPlan, TrackedController
+from services.clients.rpc import selector
 from services.resolution.tracking import build_control_snapshot, clear_classify_cache
 from services.resolution.tracking_plan import is_primitive_scalar_read_spec
-from utils.rpc import selector
 
 
 @pytest.fixture(autouse=True)
@@ -799,7 +799,7 @@ def test_build_control_snapshot_keeps_non_primitive_controllers(monkeypatch):
 # ---------------------------------------------------------------------------
 # Multicall3 snapshot-getter prewarm parity: PSAT_SNAPSHOT_MULTICALL on/off must
 # produce identical controller_values. With prewarm ON, every {target}() getter
-# is pre-read in ONE aggregate3 (utils.rpc.rpc_request) and _read_polling_source
+# is pre-read in ONE aggregate3 (services.clients.rpc.rpc_request) and _read_polling_source
 # consumes the cached raw; OFF, each is read per-controller via tracking._rpc_request.
 # Both wires return the same bytes, so the snapshot is byte-identical.
 # ---------------------------------------------------------------------------
@@ -836,7 +836,7 @@ def _multi_controller_plan(target: str) -> ControlTrackingPlan:
 def test_build_control_snapshot_multicall_prewarm_parity(monkeypatch):
     from eth_abi.abi import decode, encode
 
-    import utils.rpc as rpc_mod
+    import services.clients.rpc as rpc_mod
 
     target = "0x1111111111111111111111111111111111111111"
     getters = {
@@ -897,7 +897,7 @@ def test_snapshot_prewarm_reverting_getter_falls_through(monkeypatch):
     through to the live per-controller read + impl fallback exactly as without prewarm."""
     from eth_abi.abi import decode, encode
 
-    import utils.rpc as rpc_mod
+    import services.clients.rpc as rpc_mod
 
     target = "0x1111111111111111111111111111111111111111"
     plan = _multi_controller_plan(target)

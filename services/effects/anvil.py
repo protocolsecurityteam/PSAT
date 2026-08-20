@@ -29,6 +29,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from services.clients.rpc import EthCallResult
 from services.effects.config import (
     BLOCK_SOURCE_INVOCATION_PIN,
     DURATION_BOUND_NOT_DETERMINED,
@@ -53,7 +54,6 @@ from services.effects.harness import (
     unknown,
 )
 from utils.memory import rss_bytes_for_pid
-from utils.rpc import EthCallResult
 
 logger = logging.getLogger(__name__)
 

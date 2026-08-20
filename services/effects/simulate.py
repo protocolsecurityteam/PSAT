@@ -5,7 +5,7 @@ simulated block) or *value tracing* (balance / ``Transfer`` diffs) cannot use
 plain ``eth_call``, which returns neither carried state nor logs. This module
 defines the injectable ``Simulate`` seam and its dataclasses, plus the single
 real-I/O implementation (:func:`eth_simulate_v1`) mirroring
-``utils.rpc.eth_call_batch`` — so recipes stay pure/testable against stubbed
+``services.clients.rpc.eth_call_batch`` — so recipes stay pure/testable against stubbed
 wires exactly like ``differential_probe``. Tests never call the real
 wrapper; they inject recorded :class:`SimResult`s.
 
@@ -217,7 +217,7 @@ def eth_simulate_v1(
     logs alongside ERC-20 ones; ``validation`` stays off (state-override probes
     routinely skip nonce/balance checks). Raises :class:`SimulateUnsupportedError`
     when the node rejects the method so the caller routes to Tier 2."""
-    from utils.rpc import rpc_request
+    from services.clients.rpc import rpc_request
 
     block_state_call: dict[str, Any] = {
         "calls": [_encode_call(c) for c in calls],

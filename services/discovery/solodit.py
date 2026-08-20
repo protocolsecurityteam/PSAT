@@ -421,29 +421,3 @@ def _derive_title(firm: str, protocol: str, finding: dict[str, Any]) -> str:
     if contest_id:
         base = f"{firm} {protocol} Contest"
     return base
-
-
-# --- CLI --------------------------------------------------------------------
-
-
-def _cli() -> None:
-    """``python -m services.discovery.solodit <company>``"""
-    import argparse
-    import sys
-
-    parser = argparse.ArgumentParser(description="Search Solodit for audit reports")
-    parser.add_argument("company", help="Protocol or company name")
-    parser.add_argument("--max-pages", type=int, default=_MAX_PAGES)
-    parser.add_argument("--debug", action="store_true")
-    args = parser.parse_args()
-
-    if args.debug:
-        logging.basicConfig(level=logging.INFO, format="%(message)s")
-
-    results = search(args.company, max_pages=args.max_pages, debug=args.debug)
-    json.dump(results, sys.stdout, indent=2)
-    sys.stdout.write("\n")
-
-
-if __name__ == "__main__":
-    _cli()

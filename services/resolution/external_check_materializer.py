@@ -19,15 +19,15 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from db.models import IndexedEventLog
-from services.resolution.caller_sources import CALLER_SOURCES as _CALLER_SOURCES
-from services.resolution.capabilities import CapabilityExpr
-from services.resolution.repos.event_logs_pg import _word_to_address
-from utils.rpc import (
+from services.clients.rpc import (
     decode_bool_word,
     encode_address_word,
     multicall3_aggregate3,
     rpc_batch_request_with_status,
 )
+from services.resolution.caller_sources import CALLER_SOURCES as _CALLER_SOURCES
+from services.resolution.capabilities import CapabilityExpr
+from services.resolution.repos.event_logs_pg import _word_to_address
 
 logger = logging.getLogger(__name__)
 

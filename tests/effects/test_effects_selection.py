@@ -770,7 +770,7 @@ def test_holdings_the_fetch_recorded_at_the_page_cap_are_marked_incomplete(db_se
     ARMED POPULATION, honestly: ``at_page_cap`` fires on ZERO local holders today
     (U2's de-capping retired every truncated list), so this is reachable by
     construction and covered here rather than measured on the corpus."""
-    from utils.etherscan import TOKEN_BALANCE_PAGE_SIZE
+    from services.clients.etherscan import TOKEN_BALANCE_PAGE_SIZE
 
     p = _protocol(db_session, "holdings-cap")
     capped = _contract(db_session, p.id, ADDR(0x9600))
@@ -2039,7 +2039,7 @@ def test_the_page_cap_signal_is_read_off_the_response_not_the_filtered_rows(monk
     zero-balance entry read as "not truncated", one line below the filter that destroyed
     the signal. The check now asks how many entries the ENDPOINT returned.
     """
-    from utils import etherscan
+    from services.clients import etherscan
 
     cap = etherscan.TOKEN_BALANCE_PAGE_SIZE
     page = [

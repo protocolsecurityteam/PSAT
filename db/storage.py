@@ -191,8 +191,8 @@ _KEY_ROOTS = frozenset(
         "source_files",  # source_file_key()
         "contract_materializations",  # services/static materialization blobs
         "audits",  # services/audits/** (never prefixed — the control)
-        "exa-cache",  # utils/exa._CACHE_KEY_PREFIX
-        "tavily-cache",  # utils/tavily._CACHE_KEY_PREFIX
+        "exa-cache",  # services/clients/exa._CACHE_KEY_PREFIX
+        "tavily-cache",  # services/clients/tavily._CACHE_KEY_PREFIX
         "protocol_scores",  # protocol_score_document_key()
     }
 )

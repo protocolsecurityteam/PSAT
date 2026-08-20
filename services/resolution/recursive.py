@@ -188,7 +188,7 @@ def _build_effective_permissions(
     # → capability_surface → permissionless_shapes → resolution.__init__ →
     # here), which import-crashes any process that touches services.policy
     # first — policy_worker died on boot and took the whole worker pool with
-    # it (start_workers.sh exits on first death).
+    # it (deploy/start_workers.sh exits on first death).
     from services.policy.effective_permissions import build_effective_permissions
 
     try:
@@ -490,7 +490,7 @@ def _materialize_contract_artifacts(
     # at different addresses share one row.
     bytecode_keccak: str | None = None
     try:
-        from utils.rpc import get_code_with_keccak
+        from services.clients.rpc import get_code_with_keccak
 
         _code, bytecode_keccak = get_code_with_keccak(rpc_url, effective_address)
     except Exception as exc:
@@ -1245,7 +1245,7 @@ def resolve_control_graph(
                 if addr and addr != root_address:
                     processed.add(addr)
 
-    from utils.concurrency import parallel_map
+    from services.concurrency import parallel_map
 
     def _materialize_for_pending(pending: PendingContract) -> tuple[LoadedArtifacts | None, BaseException | None]:
         """Materialize one pending contract's artifacts. Returns

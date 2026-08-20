@@ -1,4 +1,4 @@
-"""Covers the sanitized-exception branches in ``utils/rpc`` and the
+"""Covers the sanitized-exception branches in ``services/clients/rpc`` and the
 ``protocol_monitor`` startup logging that runs URLs through
 ``sanitize_url`` before they reach the log stream.
 """
@@ -12,7 +12,7 @@ from unittest.mock import MagicMock
 import pytest
 import requests
 
-from utils import rpc as rpc_mod
+from services.clients import rpc as rpc_mod
 
 _ALCHEMY = "https://eth-mainnet.g.alchemy.com/v2/FAKE_ALCHEMY_KEY_FOR_TESTS"
 

@@ -215,8 +215,8 @@ def _unit_key(unit: Any) -> str:
 def _is_zero_constant(value: Any) -> bool:
     """A literal zero — the numeric one only. ``False`` is a different ruling
     (the flag-flip subclass) and must not enter through this door."""
-    # Deferred: effects.py imports this module, so the reuse cannot be a
-    # module-scope import.
+    # Deferred: the ``effects`` package imports this module, so the reuse
+    # cannot be a module-scope import.
     from .effects import _is_zero_literal
 
     if _var_kind(value) != "Constant":

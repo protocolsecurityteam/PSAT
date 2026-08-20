@@ -11,7 +11,8 @@ import React from "react";
 import { render, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 
-import { SurfaceCanvas, edgeOnReachPath } from "./SurfaceCanvas.jsx";
+import { SurfaceCanvas } from "./SurfaceCanvas.jsx";
+import { edgeOnReachPath } from "./reachOverlay.js";
 
 const captured = { edges: null, nodes: null };
 

@@ -101,7 +101,7 @@ def _stub_rpc(monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
             return "0x" + "00" * 64
         raise AssertionError(f"unexpected mode {mode}")
 
-    monkeypatch.setattr("utils.rpc.rpc_request", fake)
+    monkeypatch.setattr("services.clients.rpc.rpc_request", fake)
 
 
 def _status(cap: CapabilityExpr) -> str | None:
@@ -177,7 +177,7 @@ def test_pending_governor_with_active_transfer_resolves_to_principal(monkeypatch
     """A pending accessor that DOES read a live address (a transfer in flight)
     resolves to that principal — empty-by-design only kicks in on an empty read."""
     pending = "0x" + "cd" * 20
-    monkeypatch.setattr("utils.rpc.rpc_request", lambda *a, **k: "0x" + pending[2:].rjust(64, "0"))
+    monkeypatch.setattr("services.clients.rpc.rpc_request", lambda *a, **k: "0x" + pending[2:].rjust(64, "0"))
     cap = evaluate_tree(_eq_tree(A_PENDING_GOVERNOR), _ctx_with_rpc())
 
     assert cap.members == [pending]

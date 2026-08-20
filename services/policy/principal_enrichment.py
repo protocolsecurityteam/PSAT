@@ -21,9 +21,9 @@ from db.models import (
 )
 from schemas.control_tracking import ResolvedControllerType, coerce_resolved_controller_type
 from schemas.principal_labels import LabelConfidence, PrincipalLabels, PrincipalPermission, PrincipalProfile
+from services.concurrency import parallel_map
 from services.governance.principals import is_terminal_principal_type, resolve_terminal_principal
 from services.resolution.tracking import classify_resolved_address_with_status
-from utils.concurrency import parallel_map
 from utils.logging import record_stage_metric
 
 logger = logging.getLogger(__name__)
@@ -55,7 +55,7 @@ def load_protocol_safe_owner_sets(session: Session, protocol_id: int) -> dict[st
 
     # Per-Safe accumulator: the first exact owner set seen, its threshold, and a
     # conflict flag. ``function_principals`` has no recency column (no
-    # updated_at/probe-block on the row — see db/models.py), so two exact rows
+    # updated_at/probe-block on the row — see db/models/contracts.py), so two exact rows
     # that DISAGREE on the owner set are contradictory witnesses with no
     # dispositive way to pick between them: fail closed. Identical
     # duplicate exact rows agree and are kept.

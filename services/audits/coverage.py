@@ -96,11 +96,12 @@ def _publishable_block_bounds(window: ImplWindow | None) -> tuple[int | None, in
     """Block bounds for a coverage row, or ``(None, None)`` when they cannot
     be stated honestly.
 
-    ``site/src/auditMatching.js`` treats a NULL ``covered_to_block`` beside a
-    non-NULL ``covered_from_block`` as +infinity, so publishing a half-known
-    window would spread the audit across every later impl era. When either
-    bound is unknown we publish neither and let the consumer fall back to the
-    temporal comparison, whose bounds are known on this path.
+    A half-known window must not be published as a bound: a consumer reading a
+    NULL ``covered_to_block`` beside a non-NULL ``covered_from_block`` as
+    open-ended would spread the audit across every later impl era, and the
+    absence of a proven upper bound is not proof the coverage extends there.
+    When either bound is unknown we publish neither and let the consumer fall
+    back to the temporal comparison, whose bounds are known on this path.
     """
     if window is None:
         return None, None
@@ -969,7 +970,7 @@ def _rpc_url(chain: str) -> str:
     unknown or eRPC is unconfigured; the caller catches that and records "drift
     unknown" rather than hitting the wrong chain or a direct provider.
     """
-    from utils.rpc import require_rpc_url
+    from services.clients.rpc import require_rpc_url
 
     return require_rpc_url(chain=chain, context="audit coverage bytecode anchor")
 
@@ -984,7 +985,7 @@ def _fetch_bytecode_keccak(address: str, chain: str) -> str | None:
     """
     from eth_utils.crypto import keccak
 
-    from utils.rpc import get_code
+    from services.clients.rpc import get_code
 
     if not address:
         return None
@@ -1231,7 +1232,7 @@ def _apply_equivalence_http(
         fetch_etherscan_source_files,
         verify_audit_covers_impl,
     )
-    from utils.concurrency import parallel_map
+    from services.concurrency import parallel_map
 
     gh_token = os.environ.get("GITHUB_TOKEN") or None
     # Per-address cache so two audit rows pointing at the same impl only

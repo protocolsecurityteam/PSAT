@@ -379,9 +379,10 @@ def test_undated_audit_does_not_attach_to_a_superseded_impl():
 
 
 def test_half_known_block_window_is_not_published_as_open_ended():
-    """``site/src/auditMatching.js`` reads a NULL ``covered_to_block`` beside a
-    non-NULL ``covered_from_block`` as +infinity. A window whose upper bound is
-    unknown must therefore publish neither bound."""
+    """A NULL ``covered_to_block`` beside a non-NULL ``covered_from_block``
+    reads as an open-ended bound, but absence of a proven upper bound is not
+    proof the coverage extends forward. A window whose upper bound is unknown
+    must therefore publish neither bound."""
     from services.audits.coverage import ImplWindow, _publishable_block_bounds
 
     closed = ImplWindow(

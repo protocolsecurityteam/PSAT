@@ -564,7 +564,7 @@ contract Shared {
 
 def test_shared_helper_engine_built_once(tmp_path, monkeypatch):
     contract = _compile(tmp_path, _SHARED_HELPER_SRC, "Shared")
-    import services.static.contract_analysis_pipeline.effects as eff_mod
+    import services.static.contract_analysis_pipeline.effects.origins as eff_mod
 
     real_engine = eff_mod.ProvenanceEngine
     counts: dict[str, int] = {}

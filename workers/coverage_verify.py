@@ -529,7 +529,7 @@ class CoverageVerifyWorker:
                     except Exception:
                         # Defense in depth: any DB failure during the claim/
                         # recover phase used to propagate out of run_loop and
-                        # crash the worker — start_workers.sh's ``wait -n``
+                        # crash the worker — deploy/start_workers.sh's ``wait -n``
                         # then takes the whole VM down. Roll back the broken
                         # transaction, log the trace, and let the next poll
                         # try again. Specific failure modes we've hit:

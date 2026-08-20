@@ -63,7 +63,7 @@ def _only_governor_reads(monkeypatch: pytest.MonkeyPatch) -> None:
             raise RuntimeError("execution reverted")
         return "0x" + GOVERNOR[2:].rjust(64, "0")
 
-    monkeypatch.setattr("utils.rpc.rpc_request", fake)
+    monkeypatch.setattr("services.clients.rpc.rpc_request", fake)
 
 
 def test_slot_keyword_principal_declares_its_name_basis(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -108,7 +108,7 @@ def test_pending_ceiling_records_that_it_was_never_read(monkeypatch: pytest.Monk
     def revert(*_a: Any, **_k: Any) -> str:
         raise RuntimeError("execution reverted")
 
-    monkeypatch.setattr("utils.rpc.rpc_request", revert)
+    monkeypatch.setattr("services.clients.rpc.rpc_request", revert)
     cap = evaluate_tree(
         _eq_tree({"source": "view_call", "callee_signature": "_pendingGovernor()"}),
         _ctx(),
@@ -130,7 +130,7 @@ def test_struct_member_pending_ceiling_records_no_read_attempt(monkeypatch: pyte
     def revert(*_a: Any, **_k: Any) -> str:
         raise RuntimeError("execution reverted")
 
-    monkeypatch.setattr("utils.rpc.rpc_request", revert)
+    monkeypatch.setattr("services.clients.rpc.rpc_request", revert)
     cap = evaluate_tree(
         _eq_tree(
             {

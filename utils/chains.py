@@ -114,7 +114,7 @@ class UnsupportedChainError(ValueError):
 class ChainInfo:
     """Immutable per-chain facts. The eRPC route is NOT stored — it is derived
     from ``chain_id`` (``{ERPC_BASE_URL}/main/evm/{chain_id}``) by
-    :func:`utils.rpc.erpc_url_for_chain_id`."""
+    :func:`services.clients.rpc.erpc_url_for_chain_id`."""
 
     chain_id: int
     name: str
@@ -152,7 +152,7 @@ class ChainInfo:
     bridge_executors: tuple[str, ...]
     cross_domain_messengers: tuple[str, ...]
     # Etherscan v2 stats action that returns this chain's native-coin USD price
-    # (utils.etherscan.get_native_price). Defaults to "ethprice", which the v2
+    # (services.clients.etherscan.get_native_price). Defaults to "ethprice", which the v2
     # endpoint serves for every chain whose native coin is priced under that
     # action — including the L2s whose native asset is ETH and the EVM L1s whose
     # native asset is not (polygon/avalanche return their own coin's price via
@@ -171,7 +171,7 @@ class ChainInfo:
 
 # Initial chain set (inv. 5): the 11 inventory chains
 # (``services/discovery/inventory_domain.py``) plus ``mode``/``berachain`` from
-# the ``utils/rpc.py`` alias map. HyperSync URL is set only where the codebase
+# the ``services/clients/rpc.py`` alias map. HyperSync URL is set only where the codebase
 # already demonstrates one in use (mainnet); every other chain is None =
 # indexer-disabled until coverage is proven per inv. 14. Explorer URLs are the
 # well-known canonical bases. Finality depth / getLogs range use the current
@@ -571,7 +571,7 @@ def chain_name_to_id_map() -> dict[str, int]:
     """``{name_or_alias: chain_id}`` for every registered name and alias.
 
     This is the registry-backed replacement for the hand-maintained
-    ``COMMON_CHAIN_IDS`` map in ``utils/rpc.py``.
+    ``COMMON_CHAIN_IDS`` map in ``services/clients/rpc.py``.
     """
     out: dict[str, int] = {}
     for info in _CHAINS:

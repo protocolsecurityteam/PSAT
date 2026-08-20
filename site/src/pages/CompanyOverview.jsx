@@ -4,14 +4,14 @@ import { api } from "../api/client.js";
 import { useIsAdmin } from "../api/useIsAdmin.js";
 import { chainLabel } from "../surface/chainMeta.js";
 import { entityKey } from "../surface/entityKey.js";
-import { bytecodeVerifiedAudits } from "../auditCoverage.js";
+import { bytecodeVerifiedAudits } from "../audits/auditCoverage.js";
 import LoadingFallback from "../LoadingFallback.jsx";
 import ProtocolLogo from "../ProtocolLogo.jsx";
 import ScoreBand from "../score/ScoreBand.jsx";
 
-const ProtocolSurface = lazy(() => import("../ProtocolSurface.jsx"));
-const AddressesModal = lazy(() => import("../AddressesModal.jsx"));
-const AuditsAdminModal = lazy(() => import("../AuditsAdminModal.jsx"));
+const ProtocolSurface = lazy(() => import("../surface/ProtocolSurface.jsx"));
+const AddressesModal = lazy(() => import("../addresses/AddressesModal.jsx"));
+const AuditsAdminModal = lazy(() => import("../audits/AuditsAdminModal.jsx"));
 
 const SELECT_NOTICE_MS = 4000;
 

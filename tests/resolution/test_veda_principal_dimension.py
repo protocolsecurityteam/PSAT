@@ -111,10 +111,10 @@ def session():
 @pytest.fixture(autouse=True)
 def _no_network(monkeypatch):
     """Keep the suite offline: the Solmate adapter's bytecode confirmation and any
-    owner()/getter probe go through utils.rpc — fail them so the resolver falls back to
+    owner()/getter probe go through services.clients.rpc — fail them so the resolver falls back to
     its event-only / state-var paths (which is all these fixtures need) rather than
     touching the network."""
-    import utils.rpc as rpc
+    import services.clients.rpc as rpc
 
     def _boom(*_a, **_k):
         raise RuntimeError("network disabled in test")

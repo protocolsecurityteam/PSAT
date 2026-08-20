@@ -189,9 +189,9 @@ def test_fetch_balances_passes_chain_id_to_etherscan(monkeypatch):
         captured["price_chain"] = chain_id
         return 0.0
 
-    monkeypatch.setattr("utils.etherscan.get_eth_balance", _bal)
-    monkeypatch.setattr("utils.etherscan.get_token_balances_page", _tokens)
-    monkeypatch.setattr("utils.etherscan.get_native_price", _price)
+    monkeypatch.setattr("services.clients.etherscan.get_eth_balance", _bal)
+    monkeypatch.setattr("services.clients.etherscan.get_token_balances_page", _tokens)
+    monkeypatch.setattr("services.clients.etherscan.get_native_price", _price)
     monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
     # The chain id under test is the one on the Etherscan reads; the pinned
     # native read is a separate wire on the same path, stubbed to its
@@ -303,7 +303,7 @@ def test_audit_timeline_bytecode_read_uses_contract_chain(monkeypatch):
         captured["chain_id"] = chain_id
         return ("0xdead", "0x" + "ab" * 32)
 
-    monkeypatch.setattr("utils.rpc._pg_bytecode_get", _fake_pg_get)
+    monkeypatch.setattr("services.clients.rpc._pg_bytecode_get", _fake_pg_get)
 
     out = contract_audit_timeline._bytecode_keccak_now_batch({"0x" + "33" * 20}, chain_id=_BASE_ID)
     assert captured["chain_id"] == _BASE_ID

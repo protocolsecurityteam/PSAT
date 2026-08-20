@@ -489,7 +489,7 @@ def extract_inventory_entries_from_pages(
     to a different host so there's no shared rate limit to respect. Iteration
     over results stays in input order so downstream entry ordering is stable.
     """
-    from utils.concurrency import parallel_map
+    from services.concurrency import parallel_map
 
     fetch_results = parallel_map(lambda u: _fetch_page(u, debug=debug), urls, max_workers=8)
     out: list[dict[str, Any]] = []

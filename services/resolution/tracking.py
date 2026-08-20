@@ -19,25 +19,25 @@ from schemas.control_tracking import (
     ResolvedControllerType,
     TrackedController,
 )
+from services.clients.rpc import (
+    eth_call_batch as _eth_call_batch,
+)
+from services.clients.rpc import (
+    normalize_hex as _normalize_hex,
+)
+from services.clients.rpc import (
+    rpc_batch_request_with_status as _rpc_batch_request_with_status,
+)
+from services.clients.rpc import (
+    rpc_request as _rpc_request,
+)
+from services.clients.rpc import (
+    selector as _selector,
+)
 from services.monitoring.restaking_reads import decode_word as _decode_word
 from services.resolution.tracking_plan import is_primitive_scalar_read_spec
 from utils.evm import EIP1967_IMPL_SLOT, SAFE_GUARD_SLOT, SAFE_MODULES_HEAD_SLOT
 from utils.logging import record_degraded
-from utils.rpc import (
-    eth_call_batch as _eth_call_batch,
-)
-from utils.rpc import (
-    normalize_hex as _normalize_hex,
-)
-from utils.rpc import (
-    rpc_batch_request_with_status as _rpc_batch_request_with_status,
-)
-from utils.rpc import (
-    rpc_request as _rpc_request,
-)
-from utils.rpc import (
-    selector as _selector,
-)
 from utils.scoring_status import NOT_DETERMINED
 
 logger = logging.getLogger(__name__)
@@ -113,7 +113,7 @@ def _classify_ttl(block_tag: str, details: dict[str, object]) -> float:
     return _CLASSIFY_CACHE_TTL_S
 
 
-# ``controller_values.value`` is ``String(66)`` (db/models.py): an address is
+# ``controller_values.value`` is ``String(66)`` (db/models/contracts.py): an address is
 # 42 chars, a single 32-byte word 66. A wider value is not a storable single
 # controller identity — almost always a struct/array getter whose raw multi-word
 # ABI return reaches the fallthrough below with no ``member_path`` to project
@@ -862,7 +862,7 @@ def _multicall_probe(rpc_url: str, address: str, block_tag: str, *, chain_id: in
     so routing them through Multicall3 (which becomes msg.sender) returns identical values. A reverting probe
     → ``success=False`` → ``_PROBE_ERROR``, the same sentinel a JSON-RPC per-call error yields. Raises on
     transport/malformed response so ``_probe_classify`` can fall back to the JSON-RPC batch."""
-    from utils.rpc import multicall3_aggregate3
+    from services.clients.rpc import multicall3_aggregate3
 
     calls = [(address, _selector(sig)) for sig, _abi in _CLASSIFY_PROBE_SIGS]
     raw_results = multicall3_aggregate3(rpc_url, calls, block_tag, chain_id=chain_id)
@@ -904,7 +904,7 @@ def _classify_uncached_batched(
     # Bytecode-keccak shortcut: skip the batch round trip when bytecode matches a canonical impl.
     if _KNOWN_BYTECODE_IMPLS:
         try:
-            from utils.rpc import get_code_with_keccak
+            from services.clients.rpc import get_code_with_keccak
 
             _, bytecode_keccak = get_code_with_keccak(rpc_url, normalized, chain_id=chain_id)
         except Exception:
@@ -1011,7 +1011,7 @@ def _classify_uncached(
     # Bytecode-keccak shortcut: skip the 6-probe sequence when bytecode matches a registered canonical impl.
     if _KNOWN_BYTECODE_IMPLS:
         try:
-            from utils.rpc import get_code_with_keccak
+            from services.clients.rpc import get_code_with_keccak
 
             _, bytecode_keccak = get_code_with_keccak(rpc_url, normalized, chain_id=chain_id)
         except Exception:
@@ -1156,7 +1156,7 @@ def _prewarm_snapshot_getters(
             selectors.append(sel)
     if not selectors:
         return {}
-    from utils.rpc import multicall3_aggregate3
+    from services.clients.rpc import multicall3_aggregate3
 
     try:
         results = multicall3_aggregate3(
@@ -1202,7 +1202,7 @@ def build_control_snapshot(
     the instance's own state, so it is read live here and recorded as a
     ``beacon_owner`` controller. Defaults to ``None`` (no beacon attribution).
     """
-    from utils.concurrency import parallel_map
+    from services.concurrency import parallel_map
 
     def _call_with_heartbeat(fn: Callable[[], int]) -> int:
         if heartbeat is None:

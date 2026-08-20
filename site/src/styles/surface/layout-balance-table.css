@@ -1,0 +1,161 @@
+/* Balance section in sidebar */
+.ps-balance-section {
+  margin-top: 4px;
+}
+
+.ps-balance-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  color: #94a3b8;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.ps-balance-total {
+  color: #f59e0b;
+  font-size: 11px;
+}
+
+.ps-balance-filter {
+  background: none;
+  border: 1px solid rgba(148, 163, 184, 0.15);
+  border-radius: 4px;
+  color: #64748b;
+  font-size: 9px;
+  font-weight: 600;
+  padding: 2px 8px;
+  cursor: pointer;
+  margin-bottom: 6px;
+  transition: color 120ms, border-color 120ms;
+}
+
+.ps-balance-filter:hover {
+  color: #94a3b8;
+  border-color: rgba(148, 163, 184, 0.3);
+}
+
+.ps-balance-filter.active {
+  color: #f59e0b;
+  border-color: rgba(245, 158, 11, 0.3);
+}
+
+.ps-balance-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.ps-balance-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 0;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.05);
+}
+
+.ps-balance-token {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.ps-balance-symbol {
+  font-weight: 600;
+  color: #e2e8f0;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.ps-balance-name {
+  color: #475569;
+  font-size: 9px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ps-balance-values {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.ps-balance-amount {
+  color: #64748b;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 10px;
+}
+
+.ps-balance-usd {
+  color: #f59e0b;
+  font-weight: 600;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 10px;
+  min-width: 48px;
+  text-align: right;
+}
+
+/* Additive. A holding whose USD value was never determined is not a money
+   figure, so it does not take the money colour. Higher specificity than the
+   rule above by one class, and reachable only from the new `unpriced` marker —
+   no existing element gains or loses a declaration. */
+.ps-balance-usd.unpriced {
+  color: #64748b;
+  font-weight: 500;
+}
+
+/* Additive. Coverage/asymmetry disclosure lines under the balances header. */
+.ps-balance-coverage {
+  color: #64748b;
+  font-size: 9px;
+  line-height: 1.35;
+  padding: 2px 0;
+}
+
+/* Withheld (mass-distributed) balances: one summary line by default, the rows
+   one click away. */
+.ps-balance-withheld {
+  margin-top: 6px;
+  border-top: 1px solid rgba(148, 163, 184, 0.12);
+  padding-top: 4px;
+}
+
+.ps-balance-withheld-toggle {
+  display: flex;
+  width: 100%;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+  background: none;
+  border: none;
+  box-shadow: none;
+  padding: 2px 0;
+  text-align: left;
+  color: #64748b;
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 1.35;
+  cursor: pointer;
+  transition: color 120ms;
+}
+
+.ps-balance-withheld-toggle:hover {
+  color: #94a3b8;
+  background: none;
+  box-shadow: none;
+  transform: none;
+}
+
+.ps-balance-caret {
+  flex: 0 0 auto;
+  font-size: 9px;
+  color: #475569;
+}
+

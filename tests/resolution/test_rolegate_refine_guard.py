@@ -673,8 +673,8 @@ def _install_adapter_live_wire(monkeypatch, callee_sig: str, members: set[str]) 
     from eth_abi.abi import encode as abi_encode
     from eth_utils.crypto import keccak
 
+    import services.clients.rpc as _rpc
     import services.resolution.role_store_standards as rss
-    import utils.rpc as _rpc
 
     marker_code = "0x" + "".join("63" + s.removeprefix("0x") for s in SOLADY_ENUMERABLE_ROLES.marker_selectors)
 
@@ -695,7 +695,7 @@ def _install_adapter_live_wire(monkeypatch, callee_sig: str, members: set[str]) 
         if method == "eth_blockNumber":
             return hex(25_000_000)
         to = (params[0].get("to") if params and isinstance(params[0], dict) else None) if method == "eth_call" else None
-        from utils.rpc import MULTICALL3_ADDRESS
+        from services.clients.rpc import MULTICALL3_ADDRESS
 
         if method != "eth_call" or (to or "").lower() != MULTICALL3_ADDRESS.lower():
             raise RuntimeError("only the Multicall3 gate probe is stubbed")
@@ -714,7 +714,7 @@ def _install_adapter_live_wire(monkeypatch, callee_sig: str, members: set[str]) 
         return "0x" + abi_encode(["(bool,bytes)[]"], [results]).hex()
 
     # Patch the adapter's imported reference too, so its pin-once eth_blockNumber
-    # read reaches the stub (the adapter did ``from utils.rpc import rpc_request``).
+    # read reaches the stub (the adapter did ``from services.clients.rpc import rpc_request``).
     import services.resolution.adapters.enumerable_role_store as _ers
 
     monkeypatch.setattr(_rpc, "rpc_request", _stub)

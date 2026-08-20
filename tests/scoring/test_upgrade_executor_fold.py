@@ -159,9 +159,9 @@ def wire():
 
 def _run_fold(session, wire_stub, contract_ids, chain_id=1):
     with (
-        patch("utils.rpc.rpc_url_for_chain_id", return_value="https://stub.invalid"),
-        patch("utils.rpc.rpc_request", side_effect=wire_stub.rpc_request),
-        patch("utils.etherscan.get", side_effect=wire_stub.etherscan_get),
+        patch("services.clients.rpc.rpc_url_for_chain_id", return_value="https://stub.invalid"),
+        patch("services.clients.rpc.rpc_request", side_effect=wire_stub.rpc_request),
+        patch("services.clients.etherscan.get", side_effect=wire_stub.etherscan_get),
     ):
         stats = uh.fold_upgrade_transactions(session, chain_id=chain_id, contract_ids=contract_ids)
     session.commit()

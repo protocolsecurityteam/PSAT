@@ -1,19 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { api } from "../../../api/client.js";
-import { proxyDisplayName } from "../../../displayName.js";
+import { proxyDisplayName } from "../../../shared/displayName.js";
 import { coalesceChain, entityKey } from "../../entityKey.js";
-import { shortenAddress } from "../../../graph.js";
-import {
-  decodeEvent,
-  eventKind,
-  eventKindLabel,
-  eventSalience,
-  relativeTime,
-  salienceAllows,
-  scannerHealth,
-  targetText,
-} from "../../../monitoring/format.js";
+import { shortenAddress } from "../../../shared/format.js";
+import { eventKind, eventKindLabel, eventSalience, salienceAllows } from "./eventClass.js";
+import { decodeEvent, relativeTime, scannerHealth, targetText } from "./format.js";
 
 const POLL_MS = 30_000;
 

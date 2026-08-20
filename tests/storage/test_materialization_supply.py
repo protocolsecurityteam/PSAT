@@ -392,7 +392,7 @@ def captured_publish(monkeypatch):
         "db.contract_materializations.publish_materialization",
         lambda **kwargs: calls.append(kwargs) or PUBLISH_WRITTEN,
     )
-    monkeypatch.setattr("utils.rpc.get_code_with_keccak", lambda *a, **k: ("0xfeed", KECCAK))
+    monkeypatch.setattr("services.clients.rpc.get_code_with_keccak", lambda *a, **k: ("0xfeed", KECCAK))
     return calls
 
 
@@ -501,7 +501,7 @@ def test_static_stage_publishes_nothing_without_a_keccak(monkeypatch, captured_p
     def _boom(*_a, **_k):
         raise RuntimeError("rpc down")
 
-    monkeypatch.setattr("utils.rpc.get_code_with_keccak", _boom)
+    monkeypatch.setattr("services.clients.rpc.get_code_with_keccak", _boom)
     _FakeStaticWorker()._publish_materialization(None, _fake_job(), ADDR, "C")
     assert captured_publish == []
 

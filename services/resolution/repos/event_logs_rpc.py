@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Sequence
 
-from utils.rpc import RpcClientTimeout, rpc_request
+from services.clients.rpc import RpcClientTimeout, rpc_request
 
 logger = logging.getLogger(__name__)
 

@@ -24,10 +24,10 @@ import pytest
 from sqlalchemy import func, select, update
 
 import services.resolution.repos.event_logs_rpc as event_logs_rpc
+from services.clients.rpc import RpcClientTimeout
 from services.resolution.repos.event_logs_rpc import FetchedEventLog, RpcEventLogFetcher
 from tests.conftest import DATABASE_URL as _DB_URL
 from tests.conftest import _can_connect, requires_postgres
-from utils.rpc import RpcClientTimeout
 from workers.event_log_indexer import enroll_event_cursor, scan_enrolled_events
 
 _CONFIRMATIONS = 12

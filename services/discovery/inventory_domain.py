@@ -20,7 +20,8 @@ from urllib.parse import urlparse
 
 import requests as _requests
 
-from utils import llm, tavily
+from services.clients import tavily
+from utils import llm
 from utils.chains import chain_by_name
 
 from .static_dependencies import normalize_address as _normalize_address

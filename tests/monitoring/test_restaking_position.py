@@ -24,6 +24,7 @@ import pytest
 from sqlalchemy import inspect, select, text
 
 from db.models import Contract, Protocol, RestakingPosition, RestakingPositionLatest
+from services.clients.rpc import selector
 from services.monitoring import restaking_reads
 from services.monitoring.restaking_reads import (
     PINNED_FINALITY_MARGIN,
@@ -55,7 +56,6 @@ from utils.restaking_status import (
     SHARES_BASIS_NOT_DETERMINED,
     SHARES_BASIS_READ_FAILED,
 )
-from utils.rpc import selector
 
 BLOCK = 25643300
 BLOCK_HASH = "0x" + "ab" * 32

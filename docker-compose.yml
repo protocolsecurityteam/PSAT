@@ -50,7 +50,7 @@ services:
   api:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: deploy/Dockerfile
     image: psat-api:latest
     env_file:
       - .env
@@ -72,7 +72,7 @@ services:
   workers:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: deploy/Dockerfile
     image: psat-api:latest
     env_file:
       - .env
@@ -82,7 +82,7 @@ services:
       ARTIFACT_STORAGE_BUCKET: psat-artifacts
       ARTIFACT_STORAGE_ACCESS_KEY: psat-minio
       ARTIFACT_STORAGE_SECRET_KEY: psat-minio-secret
-    command: ["bash", "start_workers.sh"]
+    command: ["bash", "deploy/start_workers.sh"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -95,7 +95,7 @@ services:
   protocol-scanner:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: deploy/Dockerfile
     image: psat-api:latest
     env_file:
       - .env
@@ -110,7 +110,7 @@ services:
   protocol-poller:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: deploy/Dockerfile
     image: psat-api:latest
     env_file:
       - .env
@@ -125,7 +125,7 @@ services:
   tvl-tracker:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: deploy/Dockerfile
     image: psat-api:latest
     env_file:
       - .env
@@ -137,30 +137,10 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
-  dapp-crawler:
-    build:
-      context: .
-      dockerfile: docker/dapp-crawler.Dockerfile
-    image: psat-dapp-crawler:latest
-    env_file:
-      - .env
-    environment:
-      DATABASE_URL: postgresql://psat:psat@postgres:5432/psat
-      ARTIFACT_STORAGE_ENDPOINT: http://minio:9000
-      ARTIFACT_STORAGE_BUCKET: psat-artifacts
-      ARTIFACT_STORAGE_ACCESS_KEY: psat-minio
-      ARTIFACT_STORAGE_SECRET_KEY: psat-minio-secret
-    depends_on:
-      postgres:
-        condition: service_healthy
-      minio-init:
-        condition: service_completed_successfully
-    restart: unless-stopped
-
   site:
     build:
       context: .
-      dockerfile: docker/site.Dockerfile
+      dockerfile: deploy/site.Dockerfile
     image: psat-site:latest
     environment:
       VITE_DEV_HOST: 0.0.0.0

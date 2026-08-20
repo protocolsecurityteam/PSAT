@@ -491,7 +491,7 @@ def test_partial_batch_failure_does_not_trigger_fallback(monkeypatch):
 # getters, so routing them through Multicall3 (which becomes msg.sender) cannot
 # change a value; a reverting probe → success=False → _PROBE_ERROR, exactly the
 # sentinel a per-call JSON-RPC error yields. Wire is stubbed at
-# utils.rpc.rpc_request (the aggregate3 eth_call) so the REAL _multicall_probe +
+# services.clients.rpc.rpc_request (the aggregate3 eth_call) so the REAL _multicall_probe +
 # multicall3_aggregate3 run hermetically.
 # ---------------------------------------------------------------------------
 
@@ -511,7 +511,7 @@ def _run_multicall(
     JSON-RPC-batch mocks model an absent function — so (kind, details, cacheable) are directly
     comparable. ``revert_sigs`` forces specific probe selectors to report success=False (revert).
     """
-    import utils.rpc as rpc_mod
+    import services.clients.rpc as rpc_mod
 
     revert_selectors = {tracking._selector(sig) for sig in revert_sigs}
     sel_to_sig = {tracking._selector(sig): sig for sig, _abi in tracking._CLASSIFY_PROBE_SIGS}
@@ -547,7 +547,7 @@ def _run_multicall(
         return "0x" + encode(["(bool,bytes)[]"], [out]).hex()
 
     # The lazy negative-control probe goes through _eth_call_raw (module-bound
-    # _rpc_request, not the utils.rpc attribute patched above) — stub it at the
+    # _rpc_request, not the services.clients.rpc attribute patched above) — stub it at the
     # same probe_map layer so control behavior is scenario-driven.
     def _fake_eth_call_raw(_rpc_url, _addr, signature, _block, chain_id=None):
         raw = probe_map.get(signature, "0x")
@@ -579,7 +579,7 @@ def test_multicall_matches_sequential(monkeypatch, scenario):
 
 def test_multicall_eoa_short_circuits_without_aggregate3(monkeypatch):
     """No code → 'eoa' before any probe; the aggregate3 wire must never be hit."""
-    import utils.rpc as rpc_mod
+    import services.clients.rpc as rpc_mod
 
     monkeypatch.setattr(tracking, "_CLASSIFY_MULTICALL_ENABLED", True)
     monkeypatch.setattr(tracking, "_get_code", lambda *_a, **_k: "0x")
@@ -603,7 +603,7 @@ def test_multicall_revert_maps_to_probe_error(monkeypatch):
 def test_multicall_failure_falls_back_to_batch(monkeypatch):
     """If the aggregate3 eth_call raises (chain lacks Multicall3 / provider rejects it),
     _probe_classify falls back to the JSON-RPC batch, which classifies correctly. No accuracy loss."""
-    import utils.rpc as rpc_mod
+    import services.clients.rpc as rpc_mod
 
     monkeypatch.setattr(tracking, "_CLASSIFY_MULTICALL_ENABLED", True)
     monkeypatch.setattr(tracking, "_get_code", lambda *_a, **_k: "0x60")

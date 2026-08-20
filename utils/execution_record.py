@@ -20,7 +20,7 @@ and neither imports the other:
 
 **State plane, never the code plane.** A caller address, a block height and a
 seeding decision are one deployment's observation of one fork. The record must
-never enter ``effect_behavior_cache`` (``db/models.py``), which is keyed on
+never enter ``effect_behavior_cache`` (``db/models/ops.py``), which is keyed on
 ``behavior_hash`` with no address by design — a cache hit would republish some
 OTHER deployment's caller as this one's proof. ``concrete`` is the half that
 never reaches that table, which is why the payload rides there and not on

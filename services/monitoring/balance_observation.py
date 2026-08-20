@@ -33,6 +33,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from db.models import Contract, ContractBalance, ContractBalanceFetch
+from services.clients.etherscan import TokenBalancePage
 
 # The two wire-reaching functions are called through the MODULE, not bound here:
 # one indirection point means a stub (the offline suite's, or a test's) holds no
@@ -59,7 +60,6 @@ from utils.balance_status import (
     SWEEP_STATUS_COMPLETED,
     SWEEP_STATUS_FAILED,
 )
-from utils.etherscan import TokenBalancePage
 
 logger = logging.getLogger(__name__)
 
@@ -254,7 +254,7 @@ def fetch_asset_page(address: str, *, chain_id: int) -> TokenBalancePage:
     # Imported at call time, not bound at import time: this is the single wire
     # both producers reach Etherscan through, and a module-level binding would
     # make it unstubbable from the outside.
-    from utils.etherscan import get_token_balances_page
+    from services.clients.etherscan import get_token_balances_page
 
     try:
         return get_token_balances_page(address, chain_id=chain_id)

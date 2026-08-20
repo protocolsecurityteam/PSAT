@@ -4,7 +4,7 @@ No DB required. Pins the four properties downstream code depends on:
 
 1. ``bind_trace_context`` survives ``ThreadPoolExecutor.submit`` when
    wrapped with ``contextvars.copy_context().run`` (the standard pattern
-   workers/base.py + utils/concurrency.parallel_map use).
+   workers/base.py + services/concurrency.parallel_map use).
 2. ``parallel_map`` propagates ``trace_id`` to its worker threads.
 3. The JSON formatter emits set context fields and omits unset ones
    cleanly (no ``"trace_id": null`` spam).
@@ -21,7 +21,7 @@ import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
-from utils.concurrency import RpcExecutor, parallel_map
+from services.concurrency import RpcExecutor, parallel_map
 from utils.logging import (
     JsonFormatter,
     bind_trace_context,

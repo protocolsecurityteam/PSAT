@@ -99,7 +99,7 @@ def _stub(monkeypatch: pytest.MonkeyPatch, *, slot: str, getter: str = "revert",
             raise RuntimeError("execution reverted")
         return getter
 
-    monkeypatch.setattr("utils.rpc.rpc_request", fake)
+    monkeypatch.setattr("services.clients.rpc.rpc_request", fake)
 
 
 def _word(addr: str) -> str:

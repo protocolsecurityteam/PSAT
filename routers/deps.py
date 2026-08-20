@@ -33,8 +33,8 @@ from db.storage import (
     deserialize_artifact,
     get_storage_client,
 )
+from services.clients.rpc import default_rpc_url
 from utils.logging import trace_id_var
-from utils.rpc import default_rpc_url
 
 logger = logging.getLogger(__name__)
 

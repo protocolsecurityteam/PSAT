@@ -76,7 +76,7 @@ def _ctx_no_rpc() -> EvaluationContext:
 
 
 def _stub_rpc(monkeypatch: pytest.MonkeyPatch, return_addr: str | None, *, recorder: list | None = None) -> None:
-    """Patch utils.rpc.rpc_request to return ``return_addr`` left-padded to a
+    """Patch services.clients.rpc.rpc_request to return ``return_addr`` left-padded to a
     32-byte word (the eth_call ABI shape for a single address return)."""
 
     def fake(rpc_url: str, method: str, params: list, retries: int = 1, **_: Any) -> str:
@@ -86,7 +86,7 @@ def _stub_rpc(monkeypatch: pytest.MonkeyPatch, return_addr: str | None, *, recor
             raise RuntimeError("rpc unavailable")
         return "0x" + return_addr[2:].rjust(64, "0")
 
-    monkeypatch.setattr("utils.rpc.rpc_request", fake)
+    monkeypatch.setattr("services.clients.rpc.rpc_request", fake)
 
 
 def _sel(signature: str) -> str:
@@ -112,7 +112,7 @@ def _stub_rpc_by_selector(
                 return "0x" + returns[data][2:].rjust(64, "0")
         raise RuntimeError("execution reverted")
 
-    monkeypatch.setattr("utils.rpc.rpc_request", fake)
+    monkeypatch.setattr("services.clients.rpc.rpc_request", fake)
 
 
 # --------------------------------------------------------------------------
@@ -464,7 +464,7 @@ def test_static_external_operand_memo_dedups(monkeypatch: pytest.MonkeyPatch) ->
         recorder.append(params)
         return "0x" + "11" * 32
 
-    monkeypatch.setattr("utils.rpc.rpc_request", fake)
+    monkeypatch.setattr("services.clients.rpc.rpc_request", fake)
     operand = {"source": "external_call", "callee_signature": "someGetter()", "callee_selector": "0x12345678"}
     memo: dict = {}
 
@@ -490,7 +490,7 @@ def test_static_external_operand_failure_not_cached(monkeypatch: pytest.MonkeyPa
             raise RuntimeError("transient")
         return "0x" + "11" * 32
 
-    monkeypatch.setattr("utils.rpc.rpc_request", flaky)
+    monkeypatch.setattr("services.clients.rpc.rpc_request", flaky)
     operand = {"source": "external_call", "callee_signature": "someGetter()", "callee_selector": "0x12345678"}
     memo: dict = {}
 

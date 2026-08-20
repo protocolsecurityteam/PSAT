@@ -204,7 +204,7 @@ def test_the_worker_spawns_its_fork_at_the_preflight_pin(monkeypatch):
             pass
 
     monkeypatch.setattr("services.effects.anvil.SubprocessAnvil", _FakeAnvil)
-    monkeypatch.setattr("utils.rpc.rpc_headers", lambda url, extra=None: {})
+    monkeypatch.setattr("services.clients.rpc.rpc_headers", lambda url, extra=None: {})
     monkeypatch.setenv("PSAT_EFFECTS_FORK", "1")
 
     worker = EffectsWorker()
@@ -245,7 +245,7 @@ def test_a_failed_head_pin_leaves_the_fork_unpinned(monkeypatch):
             pass
 
     monkeypatch.setattr("services.effects.anvil.SubprocessAnvil", _FakeAnvil)
-    monkeypatch.setattr("utils.rpc.rpc_headers", lambda url, extra=None: {})
+    monkeypatch.setattr("services.clients.rpc.rpc_headers", lambda url, extra=None: {})
     monkeypatch.setenv("PSAT_EFFECTS_FORK", "1")
 
     def _boom() -> int:
@@ -535,9 +535,9 @@ def test_a_readable_window_is_still_published_as_not_determined(address, readabl
 
 def test_the_inspector_calls_an_unread_window_not_determined():
     """The rendered LABEL for the four rows above. Pinned here as well as in
-    ``site/src/claimsVocab.test.js`` because the Python side is what decides the
+    ``site/src/vocab/witnessFacts.test.js`` because the Python side is what decides the
     three-state the string is chosen from, and the two must not drift apart."""
-    vocab = (Path(__file__).resolve().parents[2] / "site" / "src" / "claimsVocab.js").read_text()
+    vocab = (Path(__file__).resolve().parents[2] / "site" / "src" / "vocab" / "witnessFacts.js").read_text()
     assert 'value: "window not determined"' in vocab
     # POSITIVE CONTROL: the proven-indefinite sentence is a PROVEN positive about
     # a different state (``no_time_reference``) and must survive intact — the

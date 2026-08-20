@@ -351,7 +351,7 @@ def test_artifact_endpoint_publishes_a_keyless_row_as_the_third_state(api_with, 
     the never-produced artifact asserted below as the negative control, which is
     the substitution the third state exists to remove.
     """
-    import db.queue as queue_mod
+    import db.queue.artifacts as queue_mod
     from db.models import Artifact
     from db.queue import store_artifact
 

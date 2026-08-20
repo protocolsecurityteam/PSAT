@@ -58,7 +58,7 @@ Threading note: ``contextvars`` are per-thread by default. When fanning
 out via :class:`concurrent.futures.ThreadPoolExecutor`, wrap every
 submission with :func:`contextvars.copy_context().run` so the worker
 threads see the parent job's ``trace_id`` instead of an empty context.
-:mod:`utils.concurrency.parallel_map` already does this for callers, so
+:mod:`services.concurrency.parallel_map` already does this for callers, so
 prefer it over a bare ``executor.submit`` whenever possible.
 """
 

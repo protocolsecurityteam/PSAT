@@ -278,7 +278,7 @@ def test_inv10_duration_bound_from_source_constant():
             pass
 
         def call(self, tx):
-            from utils.rpc import EthCallResult
+            from services.clients.rpc import EthCallResult
 
             # Every entry point succeeds pre-pause; the paused one reverts after.
             paused = getattr(self, "_paused", False)

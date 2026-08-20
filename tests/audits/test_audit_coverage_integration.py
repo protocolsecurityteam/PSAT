@@ -1261,7 +1261,7 @@ def test_findings_filter_excludes_fixed_status(db_session, api_client, seed_prot
     ]
     db_session.commit()
 
-    from utils import rpc
+    from services.clients import rpc
 
     monkeypatch.setattr(rpc, "get_code", _stub_get_code({addr: "0xbeef"}))
 

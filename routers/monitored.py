@@ -12,10 +12,10 @@ from sqlalchemy import func, select
 from db.models import Contract, MonitoredContract, MonitoredEvent, Protocol
 from schemas.api_requests import UpdateMonitoredContractRequest, UpsertMonitoredContractRequest
 from schemas.api_responses import MonitoredContractItem, MonitoredEventItem
+from services.clients.rpc import rpc_request
 from services.monitoring.chain_rpc import chain_id_for, rpc_for_chain
 from services.monitoring.tracking_plan_state import CONFIG_SUPPLIED_BY_CALLER, preserve_scan_plane_facts
 from utils.chains import UnsupportedChainError, require_supported_chain
-from utils.rpc import rpc_request
 
 from . import deps
 

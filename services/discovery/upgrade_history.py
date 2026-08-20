@@ -277,7 +277,7 @@ def parse_upgrade_log(log: dict) -> _ParsedUpgradeLog | None:
 
 def _fetch_logs_etherscan(proxy_address: str, topic0: str, from_block: int = 0, chain_id: int = 1) -> list[dict]:
     """Fetch all logs for a given address and topic0 via Etherscan getLogs."""
-    from utils.etherscan import get
+    from services.clients.etherscan import get
 
     try:
         data = get(
@@ -300,7 +300,7 @@ def fetch_upgrade_events(proxy_addresses: list[str], from_block: int = 0, chain_
 
     Queries each proxy for all three event types (Upgraded, AdminChanged,
     BeaconUpgraded). Returns a chronologically sorted list of parsed events.
-    Rate-limited centrally by ``utils.etherscan``.
+    Rate-limited centrally by ``services.clients.etherscan``.
 
     Args:
         proxy_addresses: List of proxy contract addresses to query.
@@ -322,7 +322,7 @@ def fetch_upgrade_events(proxy_addresses: list[str], from_block: int = 0, chain_
             tasks.append((addr, topic0))
 
     if tasks:
-        from utils.etherscan import parallel_get
+        from services.clients.etherscan import parallel_get
 
         calls = {
             f"{addr}|{topic0}": (
@@ -391,7 +391,7 @@ def _enrich_implementations(
     implementations: list[ImplementationRecord], known_names: dict[str, str], *, chain_id: int
 ) -> None:
     """Add contract names to historical implementations not already named in dependencies.json."""
-    from utils.etherscan import get_contract_info, parallel_get
+    from services.clients.etherscan import get_contract_info, parallel_get
 
     addrs_to_fetch = sorted({impl["address"] for impl in implementations if impl["address"] not in known_names})
     fetched: dict[str, str | None] = {}
@@ -704,9 +704,9 @@ def backfill_historical_impl_contracts(
     from sqlalchemy import func, select
 
     from db.models import Contract
+    from services.clients.etherscan import get_contract_info, parallel_get
     from services.discovery.ranking import CURRENT_IMPLEMENTATION_SOURCE
     from services.discovery.source_confidence import asserts_ownership
-    from utils.etherscan import get_contract_info, parallel_get
 
     if not impl_addrs:
         return
@@ -1215,7 +1215,7 @@ def _fetch_receipt(rpc_url: str, tx_hash: str, *, chain_id: int) -> dict | None:
     trust this observation; the observed heights are ~10.7M-25.5M, far beyond
     any plausible reorg depth.
     """
-    from utils.rpc import rpc_request
+    from services.clients.rpc import rpc_request
 
     try:
         receipt = rpc_request(rpc_url, "eth_getTransactionReceipt", [tx_hash], chain_id=chain_id)
@@ -1410,8 +1410,8 @@ def _fetch_creation_witnesses(session, *, chain_id: int, candidates: dict[str, t
     proving the address held no code yet. Neither alone is admitted.
     """
     from db.models import ContractCreationWitness
-    from utils.etherscan import get as etherscan_get
-    from utils.rpc import rpc_request
+    from services.clients.etherscan import get as etherscan_get
+    from services.clients.rpc import rpc_request
 
     addresses = sorted(candidates)
     written = 0
@@ -1515,7 +1515,7 @@ def fold_upgrade_transactions(
     from sqlalchemy import select
 
     from db.models import ContractCreationWitness, UpgradeEvent, UpgradeTransaction
-    from utils.rpc import rpc_url_for_chain_id
+    from services.clients.rpc import rpc_url_for_chain_id
 
     out = {
         "tx_in_scope": 0,
@@ -1679,7 +1679,7 @@ def _chain_id_for_contract(chain_name: str | None) -> int | None:
     thing from a NULL one and resolves to ``None`` — never to 1. Guessing here
     would reintroduce exactly the cross-chain twin aliasing #158 closed.
     """
-    from utils.rpc import chain_id_for_chain_name
+    from services.clients.rpc import chain_id_for_chain_name
 
     return chain_id_for_chain_name(canonical_chain(chain_name) or "ethereum")
 

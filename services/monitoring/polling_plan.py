@@ -291,7 +291,7 @@ def decode_poll_outcome(raw: str | None, type_kind: str | None, type_str: str | 
 
     kind = (type_kind or "").lower()
     if kind in ("address", "contract"):
-        # parse_address_result lives in utils.rpc but its shape is
+        # parse_address_result lives in services.clients.rpc but its shape is
         # tiny — inlined here to keep this module decoupled.
         body = raw_str[2:] if raw_str.startswith("0x") else raw_str
         if len(body) < 40:

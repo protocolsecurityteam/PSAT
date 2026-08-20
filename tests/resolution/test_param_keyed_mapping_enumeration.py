@@ -207,7 +207,7 @@ def _isolated_cache(monkeypatch: pytest.MonkeyPatch) -> Any:
     def _revert(*_args: Any, **_kwargs: Any) -> str:
         raise RuntimeError("execution reverted")
 
-    monkeypatch.setattr("utils.rpc.rpc_request", _revert)
+    monkeypatch.setattr("services.clients.rpc.rpc_request", _revert)
 
     # The live param-keyed value scan now floors from_block via the shared
     # floor-or-defer helper; stub it to a known floor so the fold runs over the

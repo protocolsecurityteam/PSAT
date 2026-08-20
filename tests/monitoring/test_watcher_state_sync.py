@@ -42,7 +42,7 @@ class TestRevertedEthCallPolling:
 
     def test_revert_error_data_not_treated_as_address(self):
         """Revert ABI data should not be parsed as a valid address."""
-        from utils.rpc import parse_address_result
+        from services.clients.rpc import parse_address_result
 
         # Solidity revert: Error(string) selector + ABI-encoded "nope"
         revert_data = (
@@ -56,7 +56,7 @@ class TestRevertedEthCallPolling:
 
     def test_short_revert_returns_none(self):
         """Short revert responses (< 66 chars) must return None."""
-        from utils.rpc import parse_address_result
+        from services.clients.rpc import parse_address_result
 
         assert parse_address_result("0x") is None
         assert parse_address_result("0x08c379a0") is None

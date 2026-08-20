@@ -29,12 +29,12 @@ from db.queue import (
     store_artifact,
     store_source_files,
 )
+from services.clients import etherscan
 from services.discovery.audit_reports import merge_audit_reports, search_audit_reports
 from services.discovery.deployer import _batch_get_creators
 from services.discovery.fetch import fetch, is_vyper_result, parse_remappings, parse_sources, source_content_hash
 from services.discovery.inventory import merge_inventory, search_protocol_inventory
 from services.discovery.protocol_resolver import pick_family_slug, resolve_protocol
-from utils import etherscan
 from utils.chains import UnknownChainError, canonical_chain, canonical_chain_list, chain_by_name, require_chain
 from utils.logging import log_timed_phase, record_degraded, record_stage_metric
 from workers.base import BaseWorker, JobHandledDirectly

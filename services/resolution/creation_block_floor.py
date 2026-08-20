@@ -40,7 +40,7 @@ import os
 import threading
 import time
 
-from utils.etherscan import get_contract_creation_block
+from services.clients.etherscan import get_contract_creation_block
 
 logger = logging.getLogger(__name__)
 

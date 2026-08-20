@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import pytest
 
-import utils.etherscan as etherscan
+import services.clients.etherscan as etherscan
 from utils.balance_status import (
     ASSET_SET_STATUS_AT_PAGE_CAP,
     ASSET_SET_STATUS_FETCH_FAILED,
@@ -175,7 +175,7 @@ class TestGetNativePrice:
     from the ``*usd`` field, never inferring the asset from the response key."""
 
     def test_eth_native_uses_ethprice_action(self, monkeypatch):
-        import utils.etherscan as es
+        import services.clients.etherscan as es
 
         captured: dict[str, object] = {}
 
@@ -201,7 +201,7 @@ class TestGetNativePrice:
     def test_polygon_pol_priced_under_lying_ethusd_key(self, monkeypatch):
         # Polygon's POL price comes back under "ethusd"; generic *usd parse must
         # read it without inferring "ETH" from the key.
-        import utils.etherscan as es
+        import services.clients.etherscan as es
 
         captured: dict[str, object] = {}
 
@@ -218,7 +218,7 @@ class TestGetNativePrice:
     def test_bsc_uses_bnbprice_action(self, monkeypatch):
         # BSC rejects "ethprice": the registry override must drive the call to
         # "bnbprice", whose value is (mislabeled) under "ethusd".
-        import utils.etherscan as es
+        import services.clients.etherscan as es
 
         captured: dict[str, object] = {}
 
@@ -233,14 +233,14 @@ class TestGetNativePrice:
         assert captured == {"module": "stats", "action": "bnbprice", "chain_id": 56}
 
     def test_missing_usd_field_raises(self, monkeypatch):
-        import utils.etherscan as es
+        import services.clients.etherscan as es
 
         monkeypatch.setattr(es, "get", lambda *a, **k: {"result": {"ethbtc": "0.05"}})
         with pytest.raises(RuntimeError):
             es.get_native_price(1)
 
     def test_get_eth_price_delegates_to_native(self, monkeypatch):
-        import utils.etherscan as es
+        import services.clients.etherscan as es
 
         monkeypatch.setattr(es, "get", lambda *a, **k: {"result": {"ethusd": "2000.0"}})
         assert es.get_eth_price(1) == 2000.0

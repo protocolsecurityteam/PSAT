@@ -77,7 +77,7 @@ from db.models import (  # noqa: E402
 # transport chokepoint fences off exactly the paid surface and leaves Postgres,
 # MinIO and the in-process API untouched.
 #
-# Tests must stub their wire (the `utils.rpc` / `utils.etherscan` / `utils.llm`
+# Tests must stub their wire (the `services.clients.rpc` / `services.clients.etherscan` / `utils.llm`
 # / github / defillama helpers). Anything left unmocked trips this guard and
 # fails loudly in-process. `local_netguard.py` is the socket-level backstop
 # that also catches any non-`requests` egress.
@@ -302,9 +302,9 @@ def _stub_rpc_bytecode(monkeypatch):
     from eth_utils.crypto import keccak
 
     empty_keccak = "0x" + keccak(b"").hex()
-    monkeypatch.setattr("utils.rpc.get_code_with_keccak", lambda *a, **k: ("0x", empty_keccak))
-    monkeypatch.setattr("utils.rpc.get_code", lambda *a, **k: "0x")
-    monkeypatch.setattr("utils.rpc.get_code_batch", lambda rpc_url, addresses, **k: {})
+    monkeypatch.setattr("services.clients.rpc.get_code_with_keccak", lambda *a, **k: ("0x", empty_keccak))
+    monkeypatch.setattr("services.clients.rpc.get_code", lambda *a, **k: "0x")
+    monkeypatch.setattr("services.clients.rpc.get_code_batch", lambda rpc_url, addresses, **k: {})
 
 
 @pytest.fixture
@@ -322,7 +322,7 @@ def _stub_live_authority(monkeypatch):
     the static badge" path, so the projection is unchanged without the wire.
     """
     monkeypatch.setattr(
-        "services.resolution.predicate_evaluator._live_resolve_authority",
+        "services.resolution.predicate_evaluator.authority._live_resolve_authority",
         lambda *a, **k: None,
     )
     # Disable the on-chain one-shot probe wholesale offline (its head-block read
@@ -417,7 +417,7 @@ def _force_resolution_multicall_off(monkeypatch):
 
     The three flags default ON in code so real runs (local + prod) need no env, but
     offline tests stub only the per-call wire (``tracking._rpc_request`` /
-    ``_rpc_batch_request_with_status``) — NOT ``utils.rpc.rpc_request``, which
+    ``_rpc_batch_request_with_status``) — NOT ``services.clients.rpc.rpc_request``, which
     ``multicall3_aggregate3`` calls. With the default ON, in-process resolution tests
     would fire REAL aggregate3 eth_calls and then fall back: non-hermetic, slow, flaky.
     Forcing the constants False routes the general suite through the stubbed per-call

@@ -1,6 +1,6 @@
 """Balance-provenance status vocabularies, and the one money threshold they share.
 
-A leaf module on purpose. The producer (``utils.etherscan``), the schema
+A leaf module on purpose. The producer (``services.clients.etherscan``), the schema
 (``db.models``), the writers and the readers must agree on the exact strings,
 and a second copy of any of them is a divergence vector. Nothing here imports
 from the project (``decimal`` is the whole import list), so every layer can

@@ -59,7 +59,7 @@ def test_enumerators_raise_typeerror_when_from_block_omitted():
 _KNOWN_QUERY_MODULES = {
     "services/resolution/mapping_enumerator.py",
     "services/resolution/external_check_materializer.py",
-    "services/resolution/predicate_evaluator.py",
+    "services/resolution/predicate_evaluator/membership.py",
     "services/resolution/repos/event_logs_hypersync.py",
 }
 
@@ -210,7 +210,7 @@ def test_inline_query_sites_resolve_a_floor():
     by the required-arg + AST-default guards instead and are excluded here.
     """
     inline_modules = {
-        "services/resolution/predicate_evaluator.py",
+        "services/resolution/predicate_evaluator/membership.py",
         "services/resolution/external_check_materializer.py",
     }
     for rel in inline_modules:

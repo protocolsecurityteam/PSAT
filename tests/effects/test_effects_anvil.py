@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from services.clients.rpc import EthCallResult
 from services.effects.anvil import (
     EntryPoint,
     SubprocessAnvil,
@@ -33,7 +34,6 @@ from services.effects.config import (
 )
 from services.effects.harness import SimContext
 from tests.support.effects_stubs import GUARDED, PAUSE, UNGATED, RecordingStore, StubAnvil
-from utils.rpc import EthCallResult
 from workers.effects_worker import _is_cacheable
 
 pytestmark = pytest.mark.anvil

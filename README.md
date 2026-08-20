@@ -108,7 +108,7 @@ Tabs:
 
 Submit an address via the API (`POST /api/analyze` with `{"address": "0x..."}`)
 or a protocol via `POST /api/protocols/{name}/discover`. The API enqueues
-a job in Postgres; the worker pool (see `start_workers.sh`) advances it
+a job in Postgres; the worker pool (see `deploy/start_workers.sh`) advances it
 through the stages defined in `db.models.JobStage`:
 
 1. `discovery` — fetch verified source, scaffold Foundry project, seed dependency graph

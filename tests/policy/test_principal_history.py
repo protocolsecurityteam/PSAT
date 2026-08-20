@@ -249,7 +249,7 @@ def test_build_principal_history_ok_path_records_summary_metrics(monkeypatch):
         public_cap_topic: [],
     }
 
-    monkeypatch.setattr("utils.etherscan.get", lambda *a, **k: {"result": _ROLES_AUTHORITY_ABI})
+    monkeypatch.setattr("services.clients.etherscan.get", lambda *a, **k: {"result": _ROLES_AUTHORITY_ABI})
 
     def _fake_requests_get(url, params=None, timeout=None):
         topic0 = (params or {}).get("topic0")
@@ -296,7 +296,7 @@ def test_build_principal_history_degraded_on_authority_fetch_failure(monkeypatch
     def _boom(*a, **k):
         raise RuntimeError("etherscan 500")
 
-    monkeypatch.setattr("utils.etherscan.get", _boom)
+    monkeypatch.setattr("services.clients.etherscan.get", _boom)
 
     metrics: dict = {}
     errors: list = []

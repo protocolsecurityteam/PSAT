@@ -20,7 +20,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from services.audits.coverage import CoverageMatch, _apply_equivalence_http, _EquivalenceInputs
-from utils.concurrency import RpcExecutor
+from services.concurrency import RpcExecutor
 
 
 @pytest.fixture(autouse=True)

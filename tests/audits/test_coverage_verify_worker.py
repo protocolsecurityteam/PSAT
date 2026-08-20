@@ -335,7 +335,7 @@ def test_claim_batch_skips_rows_whose_contract_was_reclassified_as_proxy(db_sess
     INSERT/UPDATE that targets a proxy. Without filtering on the claim
     side, the worker's UPDATE-to-``verifying`` raised, the exception
     propagated out of ``run_loop``, the process exited 1, and
-    ``start_workers.sh``'s ``wait -n`` brought the whole VM down with it
+    ``deploy/start_workers.sh``'s ``wait -n`` brought the whole VM down with it
     — Fly retried, the same row was still bad, the machine stayed
     stopped.
 
@@ -389,7 +389,7 @@ def test_run_loop_survives_claim_batch_exception(db_session, worker, seed_protoc
     phase must not crash the worker process.
 
     Earlier behaviour: an exception from ``_claim_batch`` propagated
-    straight out of ``run_loop`` → process exits 1 → ``start_workers.sh``
+    straight out of ``run_loop`` → process exits 1 → ``deploy/start_workers.sh``
     ``wait -n`` ends the whole VM. Now ``run_loop`` catches the failure,
     rolls back, logs, and continues to the next poll.
     """

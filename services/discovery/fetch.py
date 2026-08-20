@@ -8,7 +8,7 @@ import re
 import textwrap
 from pathlib import Path, PurePosixPath
 
-from utils.etherscan import get_source
+from services.clients.etherscan import get_source
 
 # EVMVersion comes from attacker-controlled Etherscan metadata and is
 # interpolated into foundry.toml; an off-allowlist value could inject TOML keys.

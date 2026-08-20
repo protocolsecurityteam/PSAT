@@ -304,13 +304,13 @@ def test_start_local_launches_each_monitor_loop_exactly_once():
     daemon lease, so both instances ran the full scan.
     """
     root = pathlib.Path(__file__).resolve().parents[2]
-    launched = _monitor_launch_flags((root / "start_local.sh").read_text())
+    launched = _monitor_launch_flags((root / "deploy/start_local.sh").read_text())
 
     assert launched == ["default"], f"start_local.sh must launch default mode alone, got {launched}"
 
     # The reconciler is not a default-mode loop, so it needs its own process —
-    # and start_workers.sh, which start_local.sh runs, is the one that owns it.
-    workers_launched = _monitor_launch_flags((root / "start_workers.sh").read_text())
+    # and deploy/start_workers.sh, which start_local.sh runs, is the one that owns it.
+    workers_launched = _monitor_launch_flags((root / "deploy/start_workers.sh").read_text())
     assert workers_launched == ["--reconcile"], workers_launched
 
 

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 
-import { formatAuditDate } from "../../auditUi.jsx";
+import { formatAuditDate } from "../../audits/auditUi.jsx";
 import { dedupeShas } from "../format.js";
 
 // Proof-first read modal (Prototype C, C5). A light, single-column view of the

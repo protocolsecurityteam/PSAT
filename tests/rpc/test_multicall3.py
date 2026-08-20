@@ -1,7 +1,7 @@
-"""Unit tests for the ``utils.rpc.multicall3_aggregate3`` primitive.
+"""Unit tests for the ``services.clients.rpc.multicall3_aggregate3`` primitive.
 
 The Multicall3 ``aggregate3`` helper collapses N read-only ``eth_call``s into one
-billable call. These tests stub only the wire (``utils.rpc.rpc_request``) with a
+billable call. These tests stub only the wire (``services.clients.rpc.rpc_request``) with a
 fake that behaves like a real Multicall3 endpoint — decoding the ``aggregate3``
 calldata and re-encoding ``(bool,bytes)[]`` — so they exercise the real ABI
 encode/decode in the helper and pin:
@@ -19,8 +19,8 @@ from __future__ import annotations
 import pytest
 from eth_abi.abi import decode, encode
 
-import utils.rpc as rpc_mod
-from utils.rpc import MULTICALL3_ADDRESS, multicall3_aggregate3, selector
+import services.clients.rpc as rpc_mod
+from services.clients.rpc import MULTICALL3_ADDRESS, multicall3_aggregate3, selector
 
 
 def _fake_multicall_chain(state: dict[tuple[str, str], tuple[bool, str]], *, recorder: list | None = None):

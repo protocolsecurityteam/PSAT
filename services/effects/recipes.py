@@ -18,6 +18,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from services.clients.rpc import EthCallResult
 from services.effects.calldata import NEUTRAL_CALLER, SENTINEL_ADDRESS, substitute_address_arg
 from services.effects.config import (
     EFFECT_CLASS_AUTHORITY_CHANGE,
@@ -74,7 +75,6 @@ from services.effects.simulate import (
 )
 from utils.evm import EIP1967_IMPL_SLOT
 from utils.execution_record import PROVING_EXECUTION_KEY, residue_payload
-from utils.rpc import EthCallResult
 
 logger = logging.getLogger(__name__)
 

@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import re
 import shutil
 import tempfile
 import textwrap
@@ -24,6 +23,7 @@ from db.queue import (
     store_artifact,
 )
 from schemas.contract_analysis import ContractAnalysis
+from services.clients.rpc import default_rpc_url, normalize_hex  # used for address comparison
 from services.discovery import (
     build_dependency_visualization,
     build_unified_dependencies,
@@ -33,14 +33,25 @@ from services.discovery import (
     find_dynamic_dependencies,
 )
 from services.discovery.dynamic_dependencies import NoNewTransactionsError
-from services.discovery.fetch import _MIN_SOLC, _confine, _remapping_target_is_safe, sanitize_evm_version
+from services.discovery.fetch import _confine, sanitize_evm_version
 from services.monitoring.proxy_watcher import resolve_current_implementation
 from services.resolution.tracking_plan import build_control_tracking_plan
 from services.static.contract_analysis_pipeline import collect_contract_analysis_with_artifacts
 from utils.chains import UnknownChainError, chain_by_id, chain_enabled, require_chain
 from utils.logging import log_timed_phase, record_degraded, record_stage_metric
-from utils.rpc import default_rpc_url, normalize_hex  # used for address comparison
 from workers.base import BaseWorker, JobHandledDirectly
+from workers.static_support.dynamic_deps import _merge_dynamic_deps, _start_block_from_prev_dyn
+from workers.static_support.source_prep import (
+    _detect_solc_version,
+    _detect_src_dir,
+    _prune_remappings,
+    _relax_pragmas,
+)
+from workers.static_support.upgrade_history import (
+    _apply_known_names_to_uh,
+    _from_block_for_upgrade_history,
+    _merge_upgrade_history,
+)
 
 logger = logging.getLogger("workers.static_worker")
 
@@ -242,84 +253,6 @@ def _contract_label_from_meta(project_dir: Path) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _merge_dynamic_deps(prev: dict, new: dict) -> dict:
-    """Merge previous and new dynamic dependency results (append-only).
-
-    Unions dependencies, provenance, edges, transactions, trace methods,
-    and trace errors — deduplicating where appropriate.
-    """
-    # Union dependencies (sorted, deduplicated)
-    prev_deps = set(prev.get("dependencies", []))
-    new_deps = set(new.get("dependencies", []))
-    merged_deps = sorted(prev_deps | new_deps)
-
-    # Union provenance dicts (merge per-address lists, deduplicate)
-    merged_provenance: dict[str, list[dict]] = {}
-    for prov_dict in [prev.get("provenance", {}), new.get("provenance", {})]:
-        for addr, records in prov_dict.items():
-            existing = merged_provenance.setdefault(addr, [])
-            for record in records:
-                if record not in existing:
-                    existing.append(record)
-
-    # Union dependency_graph edges (deduplicate by from+to+op+selector)
-    seen_edges: set[tuple[str, str, str, str]] = set()
-    merged_graph: list[dict] = []
-    for graph_list in [prev.get("dependency_graph", []), new.get("dependency_graph", [])]:
-        for edge in graph_list:
-            key = (edge["from"], edge["to"], edge["op"], edge.get("selector", ""))
-            if key in seen_edges:
-                # Merge provenance into existing edge
-                for existing_edge in merged_graph:
-                    existing_key = (
-                        existing_edge["from"],
-                        existing_edge["to"],
-                        existing_edge["op"],
-                        existing_edge.get("selector", ""),
-                    )
-                    if existing_key == key:
-                        for prov in edge.get("provenance", []):
-                            if prov not in existing_edge.get("provenance", []):
-                                existing_edge.setdefault("provenance", []).append(prov)
-                        break
-                continue
-            seen_edges.add(key)
-            merged_graph.append(dict(edge))
-
-    # Concatenate transactions_analyzed (deduplicate by tx_hash)
-    seen_tx_hashes: set[str] = set()
-    merged_txs: list[dict] = []
-    for tx_list in [prev.get("transactions_analyzed", []), new.get("transactions_analyzed", [])]:
-        for tx in tx_list:
-            tx_hash = tx.get("tx_hash", "")
-            if tx_hash not in seen_tx_hashes:
-                seen_tx_hashes.add(tx_hash)
-                merged_txs.append(tx)
-
-    # Union trace_methods
-    merged_methods = sorted(set(prev.get("trace_methods", [])) | set(new.get("trace_methods", [])))
-
-    # Concatenate trace_errors (deduplicate by tx_hash)
-    seen_error_hashes: set[str] = set()
-    merged_errors: list[dict] = []
-    for err_list in [prev.get("trace_errors", []), new.get("trace_errors", [])]:
-        for err in err_list:
-            err_hash = err.get("tx_hash", "")
-            if err_hash not in seen_error_hashes:
-                seen_error_hashes.add(err_hash)
-                merged_errors.append(err)
-
-    return {
-        "address": new.get("address") or prev.get("address"),
-        "transactions_analyzed": merged_txs,
-        "trace_methods": merged_methods,
-        "dependencies": merged_deps,
-        "provenance": merged_provenance,
-        "dependency_graph": merged_graph,
-        "trace_errors": merged_errors,
-    }
-
-
 def _load_prev_dynamic_deps(session, job, tx_hashes: list[str] | None) -> dict | None:
     """Read the persisted dynamic_dependencies artifact, if any. Tx-hash overrides skip the cache."""
     if tx_hashes:
@@ -328,122 +261,9 @@ def _load_prev_dynamic_deps(session, job, tx_hashes: list[str] | None) -> dict |
     return raw if isinstance(raw, dict) else None
 
 
-def _start_block_from_prev_dyn(prev_dyn: dict | None) -> int | None:
-    """Compute the next-block start point for an incremental dynamic-deps fetch."""
-    if not prev_dyn:
-        return None
-    prev_txs = prev_dyn.get("transactions_analyzed", [])
-    last_block = max((tx.get("block_number") or 0 for tx in prev_txs), default=0)
-    return last_block + 1 if last_block > 0 else None
-
-
 # ---------------------------------------------------------------------------
 # Upgrade history merge helper
 # ---------------------------------------------------------------------------
-
-
-def _merge_upgrade_history(prev: dict, new: dict) -> dict:
-    """Merge previous and new upgrade history results (append-only).
-
-    For each proxy present in both, events are unioned (deduplicated by
-    block_number + tx_hash + event_type) and timelines rebuilt.  Proxies
-    appearing in only one side are kept as-is.
-    """
-    from services.discovery.upgrade_history import _build_implementation_timeline
-
-    merged_proxies: dict[str, dict] = {}
-
-    all_proxy_addrs = set(prev.get("proxies", {}).keys()) | set(new.get("proxies", {}).keys())
-
-    total_upgrades = 0
-    for addr in all_proxy_addrs:
-        prev_proxy = prev.get("proxies", {}).get(addr)
-        new_proxy = new.get("proxies", {}).get(addr)
-
-        if prev_proxy and not new_proxy:
-            merged_proxies[addr] = prev_proxy
-            total_upgrades += prev_proxy.get("upgrade_count", 0)
-            continue
-        if new_proxy and not prev_proxy:
-            merged_proxies[addr] = new_proxy
-            total_upgrades += new_proxy.get("upgrade_count", 0)
-            continue
-
-        # Both exist — merge events
-        prev_events = prev_proxy.get("events", [])
-        new_events = new_proxy.get("events", [])
-
-        # Deduplicate by (block_number, tx_hash, event_type)
-        seen: set[tuple[int, str, str]] = set()
-        merged_events: list[dict] = []
-        for event in prev_events + new_events:
-            key = (event.get("block_number", 0), event.get("tx_hash", ""), event.get("event_type", ""))
-            if key not in seen:
-                seen.add(key)
-                merged_events.append(event)
-
-        merged_events.sort(key=lambda e: (e.get("block_number", 0), e.get("log_index", 0)))
-
-        # Rebuild timeline from merged events
-        current_impl = new_proxy.get("current_implementation") or prev_proxy.get("current_implementation")
-        implementations = _build_implementation_timeline(merged_events, current_impl)
-        upgrade_events = [e for e in merged_events if e["event_type"] == "upgraded"]
-
-        merged_proxies[addr] = {
-            "proxy_address": addr,
-            "proxy_type": new_proxy.get("proxy_type") or prev_proxy.get("proxy_type"),
-            "current_implementation": current_impl,
-            "upgrade_count": len(upgrade_events),
-            "first_upgrade_block": upgrade_events[0]["block_number"] if upgrade_events else None,
-            "last_upgrade_block": upgrade_events[-1]["block_number"] if upgrade_events else None,
-            "implementations": implementations,
-            "events": merged_events,
-        }
-        total_upgrades += len(upgrade_events)
-
-    return {
-        "schema_version": new.get("schema_version") or prev.get("schema_version", "0.1"),
-        "target_address": new.get("target_address") or prev.get("target_address"),
-        "proxies": merged_proxies,
-        "total_upgrades": total_upgrades,
-    }
-
-
-def _from_block_for_upgrade_history(prev_uh: dict | None) -> int:
-    """Compute the next-block start point for an incremental upgrade-history fetch."""
-    if not prev_uh or not prev_uh.get("proxies"):
-        return 0
-    max_block = 0
-    for proxy_info in prev_uh["proxies"].values():
-        for event in proxy_info.get("events", []):
-            block = event.get("block_number", 0)
-            if block > max_block:
-                max_block = block
-    return max_block + 1 if max_block > 0 else 0
-
-
-def _apply_known_names_to_uh(uh: dict, unified: dict) -> None:
-    """Backfill ``contract_name`` on historical implementations using the unified deps' name lookup.
-
-    The parallel ``build_upgrade_history`` call ran with an empty deps dict, so
-    impl names that were already known via the static/dynamic deps are missing
-    here. Apply them in place to avoid per-impl Etherscan lookups downstream.
-    """
-    known_names: dict[str, str] = {}
-    for addr, info in unified.get("dependencies", {}).items():
-        if isinstance(info, dict) and info.get("contract_name"):
-            known_names[addr] = info["contract_name"]
-        impl = info.get("implementation") if isinstance(info, dict) else None
-        if isinstance(impl, dict) and impl.get("contract_name"):
-            known_names[impl["address"]] = impl["contract_name"]
-
-    for proxy_info in uh.get("proxies", {}).values():
-        for impl in proxy_info.get("implementations", []):
-            if impl.get("contract_name"):
-                continue
-            name = known_names.get(impl["address"])
-            if name:
-                impl["contract_name"] = name
 
 
 def _finalize_upgrade_history(
@@ -551,8 +371,8 @@ def _finalize_upgrade_history(
     # never the event rows that were just written.
     if contract_row is not None and stats_proxy_ids:
         try:
+            from services.clients.rpc import chain_id_for_chain_name
             from services.discovery.upgrade_history import fold_upgrade_transactions
-            from utils.rpc import chain_id_for_chain_name
 
             chain_id = chain_id_for_chain_name(contract_row.chain or "ethereum")
             if chain_id is not None:
@@ -587,107 +407,6 @@ def _finalize_upgrade_history(
             )
 
     return uh
-
-
-# ---------------------------------------------------------------------------
-# Source / project helpers
-# ---------------------------------------------------------------------------
-# Minimum solc floor: services.discovery.fetch owns the value (imported above).
-
-
-def _detect_solc_version(sources: dict[str, str]) -> str:
-    min_tuple = tuple(int(x) for x in _MIN_SOLC.split("."))
-    versions = []
-    for content in sources.values():
-        for m in re.finditer(r"pragma\s+solidity\s+(<=|>=|[<>^~=]?)\s*(0\.\d+\.\d+)", content):
-            op, ver = m.group(1), m.group(2)
-            # ``<``/``<=`` is a *ceiling* (e.g. ``pragma solidity <0.9.0``), not a
-            # target. Treating it as the compiler version pins a solc that may
-            # not exist — 0.9.0 has no release artifact, so ``forge build`` dies
-            # with "version not found in artifacts for this platform: 0.9.0".
-            # Keep ^ ~ >= = and bare versions; drop upper bounds.
-            if op in ("<", "<="):
-                continue
-            versions.append(ver)
-    if not versions:
-        return _MIN_SOLC
-    detected = max(versions, key=lambda v: tuple(int(x) for x in v.split(".")))
-    detected_tuple = tuple(int(x) for x in detected.split("."))
-    # Enforce the minimum only for the 0.8.x line that is affected by the bug.
-    if detected_tuple[:2] == min_tuple[:2] and detected_tuple < min_tuple:
-        return _MIN_SOLC
-    return detected
-
-
-def _relax_pragmas(sources: dict[str, str]) -> dict[str, str]:
-    """Rewrite exact pragma constraints to '^X.Y.Z'.
-
-    Foundry nightly validates pragma constraints against solc_version even with
-    auto_detect_solc = false. Both bare '0.8.28' and '=0.8.28' are exact
-    constraints that prevent using a newer patch-level compiler.
-    """
-    relaxed = {}
-    for path, content in sources.items():
-        # Match 'pragma solidity =0.8.28' or bare 'pragma solidity 0.8.28'
-        relaxed[path] = re.sub(
-            r"(pragma\s+solidity\s+)=?\s*(0\.\d+\.\d+)",
-            r"\1^\2",
-            content,
-        )
-    return relaxed
-
-
-def _detect_src_dir(sources: dict[str, str]) -> str:
-    """Pick the foundry `src` directory based on where source files live.
-
-    Priority:
-      1. "src" if any file starts with src/
-      2. "contracts" if any file starts with contracts/
-      3. "." to catch files at root or under lib/
-    """
-    for path in sources:
-        if path.startswith("src/"):
-            return "src"
-    for path in sources:
-        if path.startswith("contracts/"):
-            return "contracts"
-    return "."
-
-
-def _prune_remappings(remappings: list[str], source_paths: set[str]) -> list[str]:
-    """Keep only remappings whose target directory actually contains files in the source bundle.
-
-    A remapping like ``@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/``
-    is only useful if we have files under ``lib/openzeppelin-contracts/contracts/``.
-    Remappings pointing to dirs with zero files just confuse solc/Slither.
-    """
-    kept: list[str] = []
-    dropped: list[str] = []
-    for entry in remappings:
-        # Targets that escape the project tree would let solc/Slither read
-        # outside the scaffold — drop before any existence check.
-        if not _remapping_target_is_safe(entry):
-            dropped.append(entry)
-            continue
-        # Parse "prefix=target" (Foundry remapping format)
-        if "=" not in entry:
-            kept.append(entry)
-            continue
-        _prefix, target = entry.split("=", 1)
-        target = target.rstrip("/")
-        # Check if any source file lives under this target path
-        if any(p == target or p.startswith(target + "/") for p in source_paths):
-            kept.append(entry)
-        else:
-            dropped.append(entry)
-    if dropped:
-        logger.info(
-            "Pruned %d/%d remappings with no matching source files: %s",
-            len(dropped),
-            len(remappings),
-            ", ".join(d.split("=")[0] for d in dropped),
-        )
-    return kept
 
 
 # Proxy types where the implementation is baked into bytecode (immutable) —
@@ -1587,7 +1306,7 @@ class StaticWorker(BaseWorker):
 
         # ---- Parallel section: 3 RPC/Etherscan-bound sub-phases. ----
         # Each sub-phase gets its own ``code_cache`` dict; the global locked
-        # ``_GETCODE_CACHE`` in utils.rpc dedups across them so the only cost
+        # ``_GETCODE_CACHE`` in services.clients.rpc dedups across them so the only cost
         # is independent dict lookups per thread.
         proxy_addr = request.get("proxy_address")
 
@@ -1623,7 +1342,7 @@ class StaticWorker(BaseWorker):
             # Rebuilt as a plain dict: the worker merges prior history into it.
             return dict(build_upgrade_history(minimal_deps, from_block=uh_from_block, chain_id=phase_chain_id))
 
-        from utils.concurrency import parallel_map
+        from services.concurrency import parallel_map
 
         def _hb() -> None:
             self._heartbeat(session, job)
@@ -2134,7 +1853,7 @@ class StaticWorker(BaseWorker):
         # says nothing about which of two same-era bundles is the later record.
         produced_here = not request.get("static_cached")
         try:
-            from utils.rpc import get_code_with_keccak
+            from services.clients.rpc import get_code_with_keccak
 
             _code, keccak = get_code_with_keccak(_request_rpc_url(job) or "", address, chain_id=_parent_chain_id(job))
         except Exception as exc:

@@ -1,0 +1,101 @@
+/* Chain switcher row — pills reuse the role-chip shape (see ChainSwitcher.jsx).
+   Renders only for multi-chain protocols, so single-chain pages never show it. */
+.ps-chain-bar {
+  display: flex;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.ps-chain-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(148, 163, 184, 0.15);
+  background: rgba(20, 24, 32, 0.6);
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 120ms ease;
+}
+
+.ps-chain-chip:hover {
+  border-color: rgba(148, 163, 184, 0.3);
+}
+
+.ps-chain-chip-on {
+  border-color: var(--chain-color);
+  color: #e2e8f0;
+  background: color-mix(in srgb, var(--chain-color) 12%, #141820);
+}
+
+.ps-chain-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--chain-color);
+  opacity: 0.4;
+  flex-shrink: 0;
+}
+
+.ps-chain-chip-on .ps-chain-dot {
+  opacity: 1;
+}
+
+.ps-chain-count {
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.6;
+}
+
+/* Deployment (chain) badge on entity cards — the ps-badge shape with a leading
+   dot in the chain accent. Rendered only in multi-chain protocols. */
+.ps-badge-chain {
+  gap: 5px;
+}
+
+.ps-badge-chain .ps-chain-dot {
+  width: 7px;
+  height: 7px;
+  opacity: 0.9;
+}
+
+.ps-machine-header {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 0;
+}
+
+.ps-machine-header-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.ps-machine-title-wrap {
+  min-width: 0;
+}
+
+.ps-machine-tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+  margin: 10px 0 0;
+  /* Safety net: if the sidebar is dragged narrow enough that even
+     content-width tabs can't fit, scroll instead of overlapping. At the
+     default width they fit and this never engages. Scrollbar hidden to keep
+     the underlined-tab look clean (trackpad/shift-wheel still scrolls). */
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.ps-machine-tabs::-webkit-scrollbar {
+  display: none;
+}
+

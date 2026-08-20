@@ -112,7 +112,7 @@ _TRANSIENT_TYPES: tuple[type[BaseException], ...] = (
     # so the bucket was never asked at all. All three mean "we did not find out",
     # and a stage that re-runs is the only thing that can turn that into a fact.
     # ``StorageKeyAbsent`` in particular is written by the inline path when the
-    # backend is unconfigured (``db/queue.py`` ``store_artifact``) — the same
+    # backend is unconfigured (``db/queue/artifacts.py`` ``store_artifact``) — the same
     # condition ``StorageUnavailable`` already retries on, one row later.
     #
     # ``StorageKeyMissing`` and ``StorageContentAbsent`` are deliberately NOT

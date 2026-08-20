@@ -34,6 +34,7 @@ from sqlalchemy import select, tuple_
 from sqlalchemy.orm import Session
 
 from db.models import Contract, ContractBalance, ContractBalanceFetch
+from services.clients.rpc import MULTICALL3_ADDRESS, multicall3_aggregate3, rpc_request, rpc_url_for_chain_id, selector
 from utils.balance_status import (
     NATIVE_STATUS_FETCH_FAILED,
     NATIVE_STATUS_NOT_DETERMINED,
@@ -42,7 +43,6 @@ from utils.balance_status import (
     STATUS_FETCH_FAILED,
 )
 from utils.logging import record_degraded
-from utils.rpc import MULTICALL3_ADDRESS, multicall3_aggregate3, rpc_request, rpc_url_for_chain_id, selector
 
 logger = logging.getLogger(__name__)
 

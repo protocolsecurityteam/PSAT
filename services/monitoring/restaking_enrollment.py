@@ -40,7 +40,7 @@ from sqlalchemy import distinct, func, select
 from sqlalchemy.orm import Session
 
 from db.models import ENROLLMENT_BASIS_TRACKED_TOPICS, Contract, IndexedEventLog
-from utils.etherscan import get_contract_creation_block
+from services.clients.etherscan import get_contract_creation_block
 from workers.event_log_indexer import enroll_event_cursor
 
 logger = logging.getLogger(__name__)

@@ -83,7 +83,7 @@ def resolve_secondary_impl_addresses(
     resolves to the primary impl would only double-list its functions), and —
     when ``require_code`` is set — any address with no deployed bytecode.
     """
-    from utils.rpc import rpc_request
+    from services.clients.rpc import rpc_request
 
     if not rpc_url or not proxy_address or not pointers:
         return []

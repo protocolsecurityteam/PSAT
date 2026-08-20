@@ -298,7 +298,7 @@ def test_enroll_from_completed_jobs_skips_zero_authority(session, monkeypatch):
 
 
 def test_get_contract_creation_block_prefers_blocknumber(monkeypatch):
-    import utils.etherscan as es
+    import services.clients.etherscan as es
 
     monkeypatch.setattr(
         es,
@@ -314,8 +314,8 @@ def test_get_contract_creation_block_prefers_blocknumber(monkeypatch):
 
 
 def test_get_contract_creation_block_falls_back_to_txhash(monkeypatch):
-    import utils.etherscan as es
-    import utils.rpc as rpc
+    import services.clients.etherscan as es
+    import services.clients.rpc as rpc
 
     monkeypatch.setattr(
         es,
@@ -327,7 +327,7 @@ def test_get_contract_creation_block_falls_back_to_txhash(monkeypatch):
 
 
 def test_get_contract_creation_block_returns_none_on_failure(monkeypatch):
-    import utils.etherscan as es
+    import services.clients.etherscan as es
 
     def _raise(*_a, **_k):
         raise RuntimeError("etherscan down")
@@ -337,7 +337,7 @@ def test_get_contract_creation_block_returns_none_on_failure(monkeypatch):
 
 
 def test_get_contract_creation_block_accepts_int_blocknumber(monkeypatch):
-    import utils.etherscan as es
+    import services.clients.etherscan as es
 
     monkeypatch.setattr(
         es, "get", lambda module, action, **params: {"status": "1", "result": [{"blockNumber": 18_500_000}]}
@@ -346,13 +346,13 @@ def test_get_contract_creation_block_accepts_int_blocknumber(monkeypatch):
 
 
 def test_get_contract_creation_block_rejects_non_address():
-    import utils.etherscan as es
+    import services.clients.etherscan as es
 
     assert es.get_contract_creation_block("not-an-address", chain_id=1) is None
 
 
 def test_get_contract_creation_block_none_when_no_block_and_no_txhash(monkeypatch):
-    import utils.etherscan as es
+    import services.clients.etherscan as es
 
     # Neither blockNumber nor a usable txHash → None (caller defers enrollment).
     monkeypatch.setattr(

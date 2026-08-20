@@ -38,7 +38,7 @@ def proto_id(db_session):
 @pytest.fixture()
 def stub_etherscan(monkeypatch):
     """``get_contract_info`` returns a deterministic name; nothing leaves the box."""
-    import utils.etherscan as etherscan_mod
+    import services.clients.etherscan as etherscan_mod
 
     monkeypatch.setattr(etherscan_mod, "get_contract_info", lambda address, **_kw: (f"Impl-{address[2:6]}", {}))
 

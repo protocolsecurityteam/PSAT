@@ -8,7 +8,7 @@ even have come from the zero branch, because its ``pendingOwner()`` reverts on
 mainnet. Separately, the accessor BASIS a principal rests on was recorded only
 inside ``details->'trace'``, beside strength fields that read as maximal.
 
-Every read here is stubbed at the wire (``utils.rpc.rpc_request``) and pinned to
+Every read here is stubbed at the wire (``services.clients.rpc.rpc_request``) and pinned to
 block 25643300 — the height every investigation read reproduces at.
 """
 
@@ -70,7 +70,7 @@ def _stub_getter(monkeypatch: pytest.MonkeyPatch, *, returns: str, only: str | N
             raise RuntimeError("execution reverted")
         return returns
 
-    monkeypatch.setattr("utils.rpc.rpc_request", fake)
+    monkeypatch.setattr("services.clients.rpc.rpc_request", fake)
     return calls
 
 
@@ -234,7 +234,7 @@ def _stub_slot(monkeypatch: pytest.MonkeyPatch, word: str) -> list[list[Any]]:
             raise RuntimeError("execution reverted")
         return word
 
-    monkeypatch.setattr("utils.rpc.rpc_request", fake)
+    monkeypatch.setattr("services.clients.rpc.rpc_request", fake)
     return calls
 
 

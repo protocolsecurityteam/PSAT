@@ -319,7 +319,7 @@ def stub_etherscan(monkeypatch):
     duplicated here to keep this file self-contained and runnable in
     isolation.
     """
-    import utils.etherscan as etherscan_mod
+    import services.clients.etherscan as etherscan_mod
 
     def fake(address: str):
         return (f"StubImpl-{address[2:6]}", {})

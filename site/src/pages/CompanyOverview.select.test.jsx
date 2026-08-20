@@ -18,7 +18,7 @@ const { selectExample, mountSurface } = vi.hoisted(() => ({
   mountSurface: { current: true },
 }));
 
-vi.mock("../ProtocolSurface.jsx", () => ({
+vi.mock("../surface/ProtocolSurface.jsx", () => ({
   default: React.forwardRef(function MockSurface(props, ref) {
     // The real surface is a lazy chunk; `mountSurface` lets a test render the
     // band with no handle attached yet, which is the loading race.

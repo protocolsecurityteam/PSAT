@@ -37,6 +37,7 @@ from typing import Any
 
 from eth_utils.crypto import keccak
 
+from services.clients.rpc import _MULTICALL3_CHUNK, MULTICALL3_ADDRESS, multicall3_aggregate3, rpc_request, selector
 from services.monitoring import warn_degraded_once
 from services.resolution.repos.event_logs_rpc import (
     MAX_BLOCK_RANGE,
@@ -57,7 +58,6 @@ from utils.balance_status import (
     TYPED_STANDARD_TRANSFER_NO_ID,
     TYPED_STANDARDS,
 )
-from utils.rpc import _MULTICALL3_CHUNK, MULTICALL3_ADDRESS, multicall3_aggregate3, rpc_request, selector
 
 logger = logging.getLogger(__name__)
 

@@ -213,7 +213,7 @@ def test_reclaim_stuck_jobs_ignores_terminal_states(session):
 # that flips a processing job back to queued is reclaim_stuck_jobs, which
 # fires when updated_at < NOW() - stale_timeout. The heartbeat that keeps
 # updated_at fresh runs from inside parallel_map's per-task callback
-# (utils/concurrency.py:82-86, 122-126). A single nested forge build
+# (services/concurrency.py:82-86, 122-126). A single nested forge build
 # longer than PSAT_JOB_STALE_TIMEOUT (900s in prod) silently expires the
 # lease — and a sibling worker then claims the same job. From that point
 # both workers process the same row in parallel.

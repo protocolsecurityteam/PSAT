@@ -36,6 +36,8 @@ from db.models import (
     exactness_eligible_cursor_clause,
 )
 from db.queue import HEARTBEAT_EVENT_INDEXER, get_artifact, record_heartbeat
+from services.clients.etherscan import get_contract_creation_block
+from services.clients.rpc import require_rpc_url, rpc_request
 from services.resolution.caller_sources import CALLER_SOURCES as _CALLER_SOURCES
 from services.resolution.deferred_reconciler import reconcile_deferred_resolutions, reconcile_role_set_drift
 from services.resolution.repos.event_logs_rpc import FetchedEventLog, FetchWindowStat
@@ -48,9 +50,7 @@ from utils.chains import (
     chain_by_name,
     supported_chain_ids,
 )
-from utils.etherscan import get_contract_creation_block
 from utils.logging import bind_trace_context, configure_logging, log_timed_phase
-from utils.rpc import require_rpc_url, rpc_request
 from utils.secrets import sanitize_string
 
 logger = logging.getLogger("workers.event_log_indexer")
@@ -123,7 +123,7 @@ _SOLMATE_ROLE_TOPICS = [
 ]
 
 
-# Basis vocabulary lives in ``db/models.py`` with the columns it describes.
+# Basis vocabulary lives in ``db/models/balances.py`` with the columns it describes.
 # ``FIRST_INDEXED_BASIS_EXPLICIT`` has no production writer: every enrolment path
 # here witness-grades. It stays in the domain because the distinction between a
 # seed a caller supplied and a bound three reads agreed on is exactly what stops a

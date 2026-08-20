@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """Discover dynamic runtime dependencies by tracing representative transactions."""
 
-import argparse
-import json
 import logging
 from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
 
-from utils.etherscan import get as etherscan_get
+from services.clients.etherscan import get as etherscan_get
 from utils.logging import record_degraded, record_stage_metric
 
 from .static_dependencies import (
@@ -187,8 +185,8 @@ def resolve_trace_rpc(rpc_url: str | None = None) -> str:
     """
     if rpc_url:
         return rpc_url
-    load_dotenv(Path(__file__).resolve().parent.parent / ".env")
-    from utils.rpc import default_rpc_url
+    load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+    from services.clients.rpc import default_rpc_url
 
     # Pipeline callers pass a chain-resolved rpc_url; this explicit-mainnet base
     # is only reached from the trace CLI when no --dynamic-rpc is given — a
@@ -384,7 +382,7 @@ def find_dynamic_dependencies(
     if not selected_txs:
         raise NoNewTransactionsError(f"No representative transactions found for {tx_source}")
 
-    from utils.concurrency import parallel_map
+    from services.concurrency import parallel_map
 
     all_edges = []
     trace_methods = set()
@@ -499,28 +497,3 @@ def find_dynamic_dependencies(
         "dependency_graph": _build_graph(direct_edges),
         "trace_errors": trace_errors,
     }
-
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("address")
-    parser.add_argument("--rpc")
-    parser.add_argument("--tx-limit", type=int, default=5)
-    parser.add_argument("--tx-hash", action="append", dest="tx_hashes")
-    args = parser.parse_args()
-
-    try:
-        output = find_dynamic_dependencies(
-            args.address.strip(),
-            rpc_url=args.rpc,
-            tx_limit=args.tx_limit,
-            tx_hashes=args.tx_hashes,
-        )
-    except RuntimeError as exc:
-        raise SystemExit(str(exc)) from exc
-
-    print(json.dumps(output))
-
-
-if __name__ == "__main__":
-    main()

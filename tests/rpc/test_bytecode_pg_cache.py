@@ -1,5 +1,5 @@
 """Regression tests for the Postgres-backed eth_getCode cache layer in
-``utils.rpc``.
+``services.clients.rpc``.
 
 The in-memory ``_GETCODE_CACHE`` is per-process; this PG layer
 (``bytecode_cache`` table) lets workers share bytecode hits across the
@@ -29,7 +29,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from utils import rpc
+from services.clients import rpc
 
 
 @pytest.fixture(autouse=True)
@@ -133,7 +133,7 @@ def test_pg_miss_writes_back(monkeypatch):
 
 def test_rpc_error_not_persisted_to_pg(monkeypatch):
     """Wire failures must NOT be persisted to PG — matches the in-memory
-    behaviour at utils/rpc.py:105-107. Cementing a transient RPC error
+    behaviour at services/clients/rpc.py:105-107. Cementing a transient RPC error
     would poison the cross-process cache for every other worker."""
     monkeypatch.setattr(rpc, "_PG_BYTECODE_CACHE_ENABLED", True)
     monkeypatch.setattr(rpc, "_resolve_chain_id", lambda *_a, **_kw: 1)

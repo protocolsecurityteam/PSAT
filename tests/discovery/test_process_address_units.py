@@ -429,7 +429,7 @@ def test_runs_custom_value(monkeypatch):
 def test_process_address_fanout_invokes_fetch_and_creators(monkeypatch):
     """Both Etherscan calls fire under the parallel_get fan-out; deployer
     derived from creators is recorded on the Contract row."""
-    from utils.concurrency import RpcExecutor
+    from services.concurrency import RpcExecutor
 
     RpcExecutor.reset_for_tests()
     result = _etherscan_result()
@@ -469,7 +469,7 @@ def test_process_address_fanout_invokes_fetch_and_creators(monkeypatch):
 def test_process_address_fanout_swallows_creators_exception(monkeypatch):
     """A failing creators lookup must not abort the discovery pipeline —
     parallel_get returns the exception in-place; deployer stays None."""
-    from utils.concurrency import RpcExecutor
+    from services.concurrency import RpcExecutor
 
     RpcExecutor.reset_for_tests()
     result = _etherscan_result()
@@ -498,7 +498,7 @@ def test_cache_hit_adopts_existing_row_from_request_sources(monkeypatch):
     """The static-cache-hit early return must still run the ownership gate:
     an explicit address+company submit carries the ``inventory`` source, and
     that grant holds even when the address was already analyzed."""
-    from utils.concurrency import RpcExecutor
+    from services.concurrency import RpcExecutor
 
     RpcExecutor.reset_for_tests()
     result = _etherscan_result()
@@ -538,7 +538,7 @@ def test_cache_hit_adopts_existing_row_from_request_sources(monkeypatch):
 def test_fetch_path_adopts_existing_row_from_request_sources(monkeypatch):
     """The fetch path's existing-row branch honors a HIGH source carried by
     the request, not only sources already recorded on the row."""
-    from utils.concurrency import RpcExecutor
+    from services.concurrency import RpcExecutor
 
     RpcExecutor.reset_for_tests()
     result = _etherscan_result()
@@ -574,7 +574,7 @@ def test_fetch_path_leaves_low_confidence_orphan_unadopted(monkeypatch):
     The existing row is an orphan whose only discovery source is LOW
     (``dapp_crawl``) and whose deployer is unwitnessed, so no branch of the
     adoption gate applies: ownership must stay unclaimed."""
-    from utils.concurrency import RpcExecutor
+    from services.concurrency import RpcExecutor
 
     RpcExecutor.reset_for_tests()
     result = _etherscan_result()
@@ -607,7 +607,7 @@ def test_process_address_failed_creators_keeps_prior_deployer(monkeypatch):
     """A failed creators refetch must not erase a previously-witnessed
     deployer on an existing Contract row — None means the lookup answered
     nothing, never that the contract has no deployer."""
-    from utils.concurrency import RpcExecutor
+    from services.concurrency import RpcExecutor
 
     RpcExecutor.reset_for_tests()
     result = _etherscan_result()
@@ -638,7 +638,7 @@ def test_process_address_failed_creators_keeps_prior_deployer(monkeypatch):
 def test_process_address_fanout_propagates_fetch_exception(monkeypatch):
     """A failing source fetch must propagate so the worker marks the job
     failed; partial state is not committed."""
-    from utils.concurrency import RpcExecutor
+    from services.concurrency import RpcExecutor
 
     RpcExecutor.reset_for_tests()
     monkeypatch.setattr(

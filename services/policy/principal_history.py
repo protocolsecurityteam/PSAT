@@ -14,9 +14,9 @@ from typing import Any
 import requests
 from eth_utils.crypto import keccak
 
+from services.clients.etherscan import ETHERSCAN_API
 from services.resolution.caller_sources import CALLER_SOURCES
 from services.resolution.capability_resolver import _selector_for_signature
-from utils.etherscan import ETHERSCAN_API
 from utils.logging import record_degraded, record_stage_metric
 
 logger = logging.getLogger(__name__)
@@ -537,9 +537,9 @@ def _event_base(log: dict[str, Any]) -> dict[str, Any]:
 
 
 def _fetch_abi(address: str, chain_id: int) -> list[dict[str, Any]]:
-    # ABI is served by utils.etherscan.get, which carries the durable PG layer
+    # ABI is served by services.clients.etherscan.get, which carries the durable PG layer
     # and a bounded in-memory LRU — no third copy here.
-    from utils.etherscan import get
+    from services.clients.etherscan import get
 
     data = get("contract", "getabi", chain_id=chain_id, address=address)
     raw = data.get("result")

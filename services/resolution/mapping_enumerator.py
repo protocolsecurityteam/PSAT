@@ -13,9 +13,9 @@ from typing import Any, TypedDict
 
 from eth_utils.crypto import keccak
 
+from services.clients.rpc import normalize_hex as _normalize_hex
 from services.static.contract_analysis_pipeline.mapping_events import WriterEventSpec
 from utils.logging import record_degraded
-from utils.rpc import normalize_hex as _normalize_hex
 
 logger = logging.getLogger(__name__)
 

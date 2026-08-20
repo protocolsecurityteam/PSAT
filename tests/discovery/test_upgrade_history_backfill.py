@@ -4,7 +4,7 @@ Exercises the artifact → ``UpgradeEvent`` projection and the historical
 impl ``Contract`` backfill against a real test Postgres so the SQL
 uniqueness constraints, case handling, and idempotency all run.
 Etherscan is stubbed — every test monkeypatches
-``utils.etherscan.get_contract_info`` so nothing leaves the machine.
+``services.clients.etherscan.get_contract_info`` so nothing leaves the machine.
 
 The actual functions under test live in
 ``services.discovery.upgrade_history``:
@@ -167,7 +167,7 @@ def stub_etherscan(monkeypatch):
             return (f"StubImpl-{address[2:6]}", {})
         return (val, {})
 
-    import utils.etherscan as etherscan_mod
+    import services.clients.etherscan as etherscan_mod
 
     monkeypatch.setattr(etherscan_mod, "get_contract_info", fake)
     return types_namespace(names=names, RAISE=_RAISE)

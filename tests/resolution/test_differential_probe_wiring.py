@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from services.clients.rpc import EthCallResult
 from services.policy.capability_surface import capability_surface_status, project_capability_surface
 from services.resolution import differential_probe as dp
 from services.resolution.capabilities import CapabilityExpr, ExternalCheck
@@ -19,7 +20,6 @@ from services.resolution.capability_resolver import (
     _should_differential_probe,
     capability_to_dict,
 )
-from utils.rpc import EthCallResult
 
 
 def ok(ret: str = "0x") -> EthCallResult:

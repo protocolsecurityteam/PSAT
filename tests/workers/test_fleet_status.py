@@ -72,7 +72,7 @@ def _clean_heartbeats(db_session):
 
 @requires_postgres
 def test_record_heartbeat_insert_then_upsert(db_session, monkeypatch, _clean_heartbeats):
-    import db.queue as queue_mod
+    import db.queue.heartbeats as queue_mod
 
     monkeypatch.setattr(queue_mod, "SessionLocal", SessionFactory(db_session))
 
@@ -95,7 +95,7 @@ def test_record_heartbeat_insert_then_upsert(db_session, monkeypatch, _clean_hea
 
 def test_record_heartbeat_is_best_effort(monkeypatch):
     """A DB failure must be swallowed — a heartbeat write can't crash a loop."""
-    import db.queue as queue_mod
+    import db.queue.heartbeats as queue_mod
 
     def _boom():
         raise RuntimeError("db down")

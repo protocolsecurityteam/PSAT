@@ -385,7 +385,7 @@ def test_proxy_watcher_warn_once_is_keyed_per_proxy(caplog):
 
 def test_heartbeat_write_failure_warns_then_rate_limits(caplog, monkeypatch):
     """A silent heartbeat failure shows every daemon dead while they all run."""
-    from db import queue as dbq
+    from db.queue import heartbeats as dbq
 
     def _no_session():
         raise RuntimeError("could not connect to server")

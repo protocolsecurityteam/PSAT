@@ -36,6 +36,7 @@ from typing import Any, Callable
 
 from eth_utils.crypto import keccak
 
+from services.clients.rpc import rpc_request
 from utils.evm import (
     EIP1967_ADMIN_SLOT,
     EIP1967_BEACON_SLOT,
@@ -43,7 +44,6 @@ from utils.evm import (
     IMPLEMENTATION_SELECTOR,
     OZ_LEGACY_IMPL_SLOT,
 )
-from utils.rpc import rpc_request
 
 logger = logging.getLogger(__name__)
 

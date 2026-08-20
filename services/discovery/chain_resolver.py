@@ -33,9 +33,9 @@ from typing import Any
 
 from dotenv import load_dotenv
 
+from services.clients.rpc import erpc_url_for_chain_id, rpc_headers
 from utils.chains import canonical_chain, canonical_chain_list
 from utils.logging import record_degraded
-from utils.rpc import erpc_url_for_chain_id, rpc_headers
 
 from .inventory_domain import CHAIN_IDS, RateLimiter, _debug_log
 from .static_dependencies import RPC_TIMEOUT_SECONDS, has_deployed_code

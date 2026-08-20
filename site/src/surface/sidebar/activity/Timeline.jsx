@@ -2,9 +2,10 @@ import { useState } from "react";
 
 import { TargetRef } from "./TargetRef.jsx";
 
-import { blockExplorerAddressUrl } from "../../../blockExplorer.js";
-import { shortenAddress } from "../../../graph.js";
-import { SALIENCE_ROUTINE, relativeTime } from "../../../monitoring/format.js";
+import { blockExplorerAddressUrl } from "../../blockExplorer.js";
+import { shortenAddress } from "../../../shared/format.js";
+import { SALIENCE_ROUTINE } from "./eventClass.js";
+import { relativeTime } from "./format.js";
 
 // Lean on blockExplorerAddressUrl's chain mapping by swapping the path segment.
 function txUrl(txHash, chain = "ethereum") {

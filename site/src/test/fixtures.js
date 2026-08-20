@@ -83,7 +83,7 @@ export const ADDRESS_LABELS = { labels: {} };
 // every lane (control / ops / inflow / outflow), guard kind (safe / timelock
 // / eoa / unknown / open), and the cross-contract caller walk that drives
 // `collectDirectCallers` + `guardSummary` + lane categorization. Used by the
-// state-variant tests in src/ProtocolSurface.test.jsx.
+// state-variant tests in src/surface/ProtocolSurface.test.jsx.
 const SAFE_ADDR = "0xaaaa000000000000000000000000000000000aaa";
 const TIMELOCK_ADDR = "0xbbbb000000000000000000000000000000000bbb";
 const EOA_ADDR = "0xcccc000000000000000000000000000000000ccc";
@@ -174,7 +174,8 @@ export const ETHERFI_COMPANY_RICH = {
   ],
   all_addresses_count: 5,
   // Top-level governance principals — the exact shape /api/company emits
-  // (company_overview.py builds `principals` with type/label/details/controls
+  // (services/aggregations/company_overview/governance_view.py builds
+  // `principals` with type/label/details/controls
   // /primary_for/co_controls/controls_detail). ProtocolSurface reads
   // companyData.principals directly (visiblePrincipals filter → SearchNavigator
   // + EntityCard + SurfaceCanvas), so these fields drive the safe/timelock

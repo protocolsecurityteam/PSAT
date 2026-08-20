@@ -298,8 +298,8 @@ def fetch_etherscan_source_files(address: str, *, chain_id: int) -> EtherscanFet
     DB. Distinguishes three outcomes: parsed (``ok``), contract-not-verified
     (``unverified``), transport/API failure (``fetch_failed``).
     """
+    from services.clients.etherscan import get
     from services.discovery.fetch import parse_sources
-    from utils.etherscan import get
 
     try:
         data = get("contract", "getsourcecode", address=address, chain_id=chain_id)
@@ -772,7 +772,7 @@ def _verify_single_repo(
     # paid one RTT per pair (5 commits × 20 paths = 100 sequential GitHub
     # round-trips per scope name). Skips pairs whose Etherscan path is
     # missing so ``candidate_path_missing`` stays accurate.
-    from utils.concurrency import parallel_map
+    from services.concurrency import parallel_map
 
     fetch_pairs: list[tuple[str, str]] = []
     for commit in reviewed_commits:
