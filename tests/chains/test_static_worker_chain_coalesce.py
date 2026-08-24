@@ -8,11 +8,11 @@ compared it with a raw ``chain == <value>`` predicate:
     ``request["chain"]``, so a chainless L2 submission (chain only in the
     first-class ``jobs.chain_id`` column) dropped the filter and could bind a
     mainnet row.
-  - ``_resolve_proxy`` structural adoption — the impl lookup was chain-
-    unqualified, so a same-address impl on another chain could stand in as the
-    HIGH-owned anchor.
+  - ``_resolve_proxy`` membership on classification — the membership gate's
+    W2 proxy-edge verification is chain-scoped, so a same-address member impl
+    on another chain can never stand in as the admitting anchor.
 
-Both now derive the chain from ``jobs.chain_id`` (``_parent_chain_name``) and
+Both derive the chain from ``jobs.chain_id`` (``_parent_chain_name``) and
 coalesce (NULL≡mainnet). Proven both directions: mainnet finds legacy NULL
 rows; a non-mainnet job stays isolated.
 """
@@ -91,28 +91,30 @@ def test_load_contract_row_l2_job_does_not_bind_mainnet_row(db_session):
 
 
 def _seed_adoption_graph(session, proto_id, *, impl_chain):
-    """Proxy (unowned, on mainnet) + a HIGH-owned impl on *impl_chain* +
-    a HIGH-owned contract that references the proxy. Returns (job, proxy_addr).
-    """
-    from db.models import Contract, ContractDependency
+    """Nominated candidate proxy (mainnet, code fact persisted) + a MEMBER
+    impl on *impl_chain*. Returns (job, proxy_addr, impl_addr)."""
+    from db.models import Contract, ContractCreationWitness
     from db.queue import create_job
 
     proxy_addr = _addr()
     impl_addr = _addr()
-    ref_addr = _addr()
 
     job = create_job(session, {"address": proxy_addr, "name": "Proxy", "rpc_url": "http://stub"})  # chain_id=1
-    proxy = Contract(address=proxy_addr.lower(), chain="ethereum", protocol_id=None, is_proxy=True, job_id=job.id)
-    impl = Contract(address=impl_addr.lower(), chain=impl_chain, protocol_id=proto_id, is_proxy=False)
-    ref = Contract(
-        address=ref_addr.lower(),
+    proxy = Contract(
+        address=proxy_addr.lower(),
         chain="ethereum",
-        protocol_id=proto_id,
-        discovery_sources=["inventory"],  # HIGH
+        protocol_id=None,
+        nominated_protocol_id=proto_id,
+        is_proxy=True,
+        job_id=job.id,
     )
-    session.add_all([proxy, impl, ref])
-    session.flush()
-    session.add(ContractDependency(contract_id=ref.id, dependency_address=proxy_addr.lower()))
+    impl = Contract(address=impl_addr.lower(), chain=impl_chain, protocol_id=proto_id, is_proxy=False)
+    session.add_all([proxy, impl])
+    session.add(
+        ContractCreationWitness(
+            chain_id=1, address=proxy_addr.lower(), code_probe_block=10, code_absent_at_probe=False
+        )
+    )
     session.commit()
     return job, proxy_addr, impl_addr
 
@@ -120,16 +122,16 @@ def _seed_adoption_graph(session, proto_id, *, impl_chain):
 @pytest.fixture()
 def _stub_resolve_proxy_seams(monkeypatch):
     """Neutralize the child-spawn tail of ``_resolve_proxy`` so the test targets
-    only the structural-adoption block (which commits before the tail runs)."""
+    only the membership-gate hook (which commits before the tail runs)."""
     monkeypatch.setattr("workers.static_worker.store_artifact", lambda *a, **kw: None)
     monkeypatch.setattr("workers.static_worker.reconcile_impl_job_for_proxy", lambda *a, **kw: "skip")
     monkeypatch.setattr("workers.static_worker._redirect_proxy_policy_dependencies", lambda *a, **kw: None)
 
 
 @requires_postgres
-def test_resolve_proxy_adopts_when_impl_on_same_chain(db_session, proto_id, monkeypatch, _stub_resolve_proxy_seams):
-    """Mainnet job: the HIGH-owned impl is on ethereum, so the coalesced impl
-    lookup finds it and the proxy is structurally adopted."""
+def test_resolve_proxy_promotes_when_impl_on_same_chain(db_session, proto_id, monkeypatch, _stub_resolve_proxy_seams):
+    """Mainnet job: the member impl is on ethereum, so the gate's
+    chain-scoped W2 proxy edge verifies and the nominated proxy promotes."""
     from db.models import Contract
     from workers.static_worker import StaticWorker
 
@@ -145,16 +147,15 @@ def test_resolve_proxy_adopts_when_impl_on_same_chain(db_session, proto_id, monk
         db_session.query(Contract).filter(Contract.address == proxy_addr.lower(), Contract.chain == "ethereum").one()
     )
     assert proxy.protocol_id == proto_id
-    assert "structural_adoption" in (proxy.discovery_sources or [])
 
 
 @requires_postgres
-def test_resolve_proxy_does_not_adopt_when_impl_only_on_other_chain(
+def test_resolve_proxy_does_not_promote_when_impl_only_on_other_chain(
     db_session, proto_id, monkeypatch, _stub_resolve_proxy_seams
 ):
-    """Mainnet job: the same-address HIGH-owned impl exists only on Base. The
-    chain-qualified lookup finds no mainnet impl, so no adoption — the fix
-    against cross-chain evidence bleed."""
+    """Mainnet job: the same-address member impl exists only on Base. The
+    chain-scoped W2 verification finds no mainnet member, so no promotion —
+    the fix against cross-chain evidence bleed."""
     from db.models import Contract
     from workers.static_worker import StaticWorker
 
@@ -170,4 +171,3 @@ def test_resolve_proxy_does_not_adopt_when_impl_only_on_other_chain(
         db_session.query(Contract).filter(Contract.address == proxy_addr.lower(), Contract.chain == "ethereum").one()
     )
     assert proxy.protocol_id is None
-    assert "structural_adoption" not in (proxy.discovery_sources or [])

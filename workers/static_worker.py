@@ -916,9 +916,13 @@ class StaticWorker(BaseWorker):
                     }
                 )
             )
+            row_id = getattr(contract_row, "id", None)
             evaluate_committed(
                 session,
-                FactsDelta(new_edge_addresses=edge_addrs, recheck_contract_ids=(contract_row.id,)),
+                FactsDelta(
+                    new_edge_addresses=edge_addrs,
+                    recheck_contract_ids=(row_id,) if isinstance(row_id, int) else (),
+                ),
                 context=f"static_proxy_classification:{job.id}",
             )
 

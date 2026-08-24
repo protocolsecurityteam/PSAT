@@ -104,8 +104,7 @@ def test_backfill_tags_current_impl_live_create(db_session, monkeypatch):
         protocol_id=p.id,
         chain="ethereum",
         impl_addrs={current, superseded},
-        parent_proxy_sources=["dapp_crawl"],  # low-confidence → no ownership/coverage churn
-        parent_proxy_current_impl_address=current,
+        current_impl_address=current,
     )
     db_session.commit()
 
@@ -154,8 +153,7 @@ def test_backfill_tags_current_impl_live_adopt(db_session, monkeypatch):
         protocol_id=p.id,
         chain="ethereum",
         impl_addrs={current},
-        parent_proxy_sources=["dapp_crawl"],
-        parent_proxy_current_impl_address=current,
+        current_impl_address=current,
     )
     db_session.commit()
 
