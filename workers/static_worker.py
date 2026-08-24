@@ -499,6 +499,27 @@ def _apply_proxy_cache(session, src_contract, contract_row, proxy_state: dict | 
             setattr(contract_row, field, getattr(src_contract, field))
     session.commit()
 
+    # §3.4 event 2a also fires on the cache path: the copied pointers are the
+    # same fact delta a fresh classification would have committed.
+    from services.discovery.membership_gate import FactsDelta, evaluate_committed
+
+    own_address = (getattr(contract_row, "address", None) or "").lower()
+    edge_addrs = tuple(
+        sorted(
+            {
+                value.lower()
+                for value in (getattr(contract_row, f, None) for f in ("implementation", "beacon", "admin"))
+                if isinstance(value, str) and value.startswith("0x") and value.lower() != own_address
+            }
+        )
+    )
+    row_id = getattr(contract_row, "id", None)
+    evaluate_committed(
+        session,
+        FactsDelta(new_edge_addresses=edge_addrs, recheck_contract_ids=(row_id,) if isinstance(row_id, int) else ()),
+        context="static_proxy_cache_reuse",
+    )
+
     is_proxy = proxy_state["is_proxy"] if proxy_state else src_contract.is_proxy
     if not is_proxy:
         return {"type": "regular"}
