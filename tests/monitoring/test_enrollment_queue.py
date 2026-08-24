@@ -480,18 +480,28 @@ def test_policy_worker_marks_dirty(qsession, monkeypatch):
     assert row.reason == "policy_complete"
 
 
-def test_discovery_adoption_marks_dirty(qsession, monkeypatch):
+def test_discovery_gate_promotion_marks_dirty(qsession, monkeypatch):
+    """The fetch path routes membership through the gate: a candidate whose
+    witnesses already satisfy W1 + an admitting rule is promoted during intake,
+    and the PROMOTION (not the worker) marks the enrollment queue dirty."""
+    from db.models import WITNESS_RULE_W1_CODE, WITNESS_RULE_W2_STRUCTURAL, ContractProbeAttempt
+    from services.discovery import membership_gate as gate
     from workers.discovery import DiscoveryWorker
 
     proto = _make_protocol(qsession)
     addr = DISCOVERY_ADDR
-    # An already-existing, unowned contract row with a HIGH-confidence source so
-    # the structural-adoption branch fires when the job carries a protocol_id.
-    # Chain must match the job's request chain for the (address, chain) lookup.
+    anchor = Contract(
+        address="0x" + "d5" * 20,
+        chain="ethereum",
+        protocol_id=proto.id,
+        contract_name="Anchor",
+        implementation=addr.lower(),
+    )
     existing = Contract(
         address=addr.lower(),
         chain="ethereum",
         protocol_id=None,
+        nominated_protocol_id=proto.id,
         contract_name="Old",
         discovery_sources=["deployer_expansion"],
     )
@@ -502,9 +512,34 @@ def test_discovery_adoption_marks_dirty(qsession, monkeypatch):
         stage=JobStage.discovery,
         request={"chain": "ethereum"},
     )
-    qsession.add_all([existing, session_job])
+    qsession.add_all([anchor, existing, session_job])
     qsession.commit()
     existing_id = existing.id
+    # Probe already ran (event 1) — the intake must not re-probe.
+    qsession.add(
+        ContractProbeAttempt(contract_id=existing_id, chain_id=1, block_number=100, results={"status": "probed"})
+    )
+    gate.write_witness(
+        qsession,
+        contract_id=existing_id,
+        protocol_id=proto.id,
+        rule=WITNESS_RULE_W1_CODE,
+        evidence=gate.w1_evidence(chain_id=1, code_probe_block=100),
+    )
+    gate.write_witness(
+        qsession,
+        contract_id=existing_id,
+        protocol_id=proto.id,
+        rule=WITNESS_RULE_W2_STRUCTURAL,
+        evidence=gate.w2_evidence(
+            edge_kind="implementation",
+            member_contract_id=anchor.id,
+            member_address=anchor.address,
+            resolved_pointer=addr.lower(),
+        ),
+        via_address=anchor.address,
+    )
+    qsession.commit()
 
     etherscan_result = {
         "ContractName": "AdoptedContract",
@@ -527,12 +562,12 @@ def test_discovery_adoption_marks_dirty(qsession, monkeypatch):
     worker._process_address(qsession, session_job)
 
     adopted = qsession.execute(select(Contract.protocol_id).where(Contract.id == existing_id)).scalar_one()
-    assert adopted == proto.id, "structural-adoption branch should have run"
+    assert adopted == proto.id, "gate promotion should have fired during intake"
     row = qsession.execute(
         select(MonitoringEnrollmentQueue).where(MonitoringEnrollmentQueue.protocol_id == proto.id)
     ).scalar_one_or_none()
     assert row is not None
-    assert row.reason == "discovery_adoption"
+    assert row.reason == gate.MEMBERSHIP_DIRTY_REASON
 
 
 def test_reenroll_route_marks_dirty(api_client, db_session, monkeypatch):

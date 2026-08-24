@@ -1368,9 +1368,10 @@ class TestStructuralOrphanMigration:
 class TestRemainingOrphanAdoption:
     """Both branches of ``4d72e9b1f035_adopt_remaining_orphan_classes``:
 
-    Branch A (deployer-cascade) — runtime helper lives in
-    ``workers.discovery._deployer_cascade_protocol_id``; migration
-    sweeps the same shape across the historical orphan set.
+    Branch A (deployer-cascade) — migration-only sweep of the historical
+    orphan set. The runtime helper it mirrored
+    (``workers.discovery._deployer_cascade_protocol_id``) is replaced by the
+    membership gate's deployer trust ladder (spec §3.3).
 
     Branch B (historical-impl behind HIGH-impl proxy) — migration-only.
     Anchors on the proxy's current implementation's HIGH source, not
@@ -1393,117 +1394,6 @@ class TestRemainingOrphanAdoption:
             )
         )
         db_session.commit()
-
-    # ----- runtime helper ----------------------------------------------------
-
-    def test_runtime_helper_returns_protocol_when_high_sibling_shares_deployer(self, db_session, seed_protocol):
-        from workers.discovery import _deployer_cascade_protocol_id
-
-        deployer = _addr(0xC001)
-        self._seed_high_sibling(
-            db_session,
-            protocol_id=seed_protocol,
-            deployer=deployer,
-            sibling_addr=_addr(0xC101),
-            sibling_sources=["ai_inventory"],  # HIGH
-        )
-
-        result = _deployer_cascade_protocol_id(db_session, deployer)
-        assert result == seed_protocol
-
-    def test_runtime_helper_returns_none_when_sibling_is_low_only(self, db_session, seed_protocol):
-        """LOW-only sibling must NOT trigger adoption — that's how WETH
-        with only ``dapp_crawl`` stays unattributed."""
-        from workers.discovery import _deployer_cascade_protocol_id
-
-        deployer = _addr(0xC002)
-        self._seed_high_sibling(
-            db_session,
-            protocol_id=seed_protocol,
-            deployer=deployer,
-            sibling_addr=_addr(0xC102),
-            sibling_sources=["dapp_crawl", "upgrade_history"],  # both LOW
-        )
-
-        assert _deployer_cascade_protocol_id(db_session, deployer) is None
-
-    def test_runtime_helper_returns_none_when_no_sibling_shares_deployer(self, db_session, seed_protocol):
-        from workers.discovery import _deployer_cascade_protocol_id
-
-        # Sibling exists for a DIFFERENT deployer.
-        self._seed_high_sibling(
-            db_session,
-            protocol_id=seed_protocol,
-            deployer=_addr(0xC003),
-            sibling_addr=_addr(0xC103),
-            sibling_sources=["deployer_expansion"],
-        )
-
-        result = _deployer_cascade_protocol_id(db_session, _addr(0xC004))
-        assert result is None
-
-    def test_runtime_helper_returns_none_when_deployer_is_none(self, db_session):
-        """Defensive — an orphan with no recorded deployer can't cascade."""
-        from workers.discovery import _deployer_cascade_protocol_id
-
-        assert _deployer_cascade_protocol_id(db_session, None) is None
-        assert _deployer_cascade_protocol_id(db_session, "") is None
-
-    def test_runtime_helper_picks_dominant_protocol_on_split(self, db_session, seed_protocol):
-        """If a deployer has HIGH-sourced contracts across two protocols
-        (rare but possible — shared dev team operating multiple protocols
-        from one EOA), pick the one with the most siblings."""
-        from db.models import Contract, Protocol
-        from workers.discovery import _deployer_cascade_protocol_id
-
-        other_proto = Protocol(name=f"dep-cascade-other-{uuid.uuid4().hex[:10]}")
-        db_session.add(other_proto)
-        db_session.commit()
-
-        deployer = _addr(0xC005)
-        # Three HIGH siblings on seed_protocol, one on other_proto.
-        for n, addr_n in enumerate((0xC105, 0xC106, 0xC107)):
-            db_session.add(
-                Contract(
-                    address=_addr(addr_n),
-                    chain="ethereum",
-                    deployer=deployer,
-                    protocol_id=seed_protocol,
-                    discovery_sources=["deployer_expansion"],
-                )
-            )
-        db_session.add(
-            Contract(
-                address=_addr(0xC108),
-                chain="ethereum",
-                deployer=deployer,
-                protocol_id=other_proto.id,
-                discovery_sources=["ai_inventory"],
-            )
-        )
-        db_session.commit()
-
-        # The HIGH-sibling count is 3 for seed_protocol vs 1 for other_proto.
-        assert _deployer_cascade_protocol_id(db_session, deployer) == seed_protocol
-
-    def test_runtime_helper_is_case_insensitive_on_deployer(self, db_session, seed_protocol):
-        """Contract.deployer addresses can land in either case; the lookup
-        must match regardless."""
-        from workers.discovery import _deployer_cascade_protocol_id
-
-        # Sibling row uses lowercase, query uses uppercase.
-        deployer_lc = _addr(0xC006)
-        self._seed_high_sibling(
-            db_session,
-            protocol_id=seed_protocol,
-            deployer=deployer_lc,
-            sibling_addr=_addr(0xC109),
-            sibling_sources=["deployer_expansion"],
-        )
-
-        # Same address, mixed case.
-        deployer_mixed = "0x" + deployer_lc[2:].upper()
-        assert _deployer_cascade_protocol_id(db_session, deployer_mixed) == seed_protocol
 
     # ----- migration --------------------------------------------------------
 
