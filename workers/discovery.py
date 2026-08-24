@@ -18,11 +18,9 @@ from sqlalchemy import func, null, select
 from sqlalchemy.orm import Session
 
 from db.models import (
-    WITNESS_RULE_W1_CODE,
     WITNESS_RULE_W4_DEPLOYER,
     Contract,
     ContractCreationWitness,
-    ContractProbeAttempt,
     Job,
     JobStage,
     JobStatus,
@@ -51,8 +49,8 @@ from services.discovery.audit_reports import merge_audit_reports, search_audit_r
 from services.discovery.deployer import _batch_get_creators
 from services.discovery.fetch import fetch, is_vyper_result, parse_remappings, parse_sources, source_content_hash
 from services.discovery.inventory import merge_inventory, search_protocol_inventory
-from services.discovery.perimeter import produce_structural_witness
-from services.discovery.probes import ProbeResult, fetch_creations
+from services.discovery.perimeter import needs_probe, produce_structural_witness, record_code_witness
+from services.discovery.probes import fetch_creations
 from services.discovery.protocol_resolver import pick_family_slug, resolve_protocol
 from utils.chains import (
     UnknownChainError,
@@ -192,9 +190,11 @@ def _job_assertion(job: Job) -> dict[str, str] | None:
     return {"actor": actor.strip(), "asserted_at": asserted_at}
 
 
-def _enumerate_deployer_creations(deployer: str) -> tuple[list[str], bool]:
-    """(direct creations, history_complete) for one EOA, enumerated on every
-    enabled chain (EOAs are chain-agnostic, spec §3.3/§4.3).
+def _enumerate_deployer_creations(deployer: str) -> tuple[list[str], list[int], bool]:
+    """(direct creations, enumerated chain scope, history_complete) for one
+    EOA, enumerated on every enabled chain (EOAs are chain-agnostic, spec
+    §3.3/§4.3). The scope is recorded so the registry evidence names WHAT was
+    enumerated, never a bare ``complete: True``.
 
     Completeness is POSITIVE evidence: any chain whose ``txlist`` fails, fills
     the :data:`DEPLOYER_ENUMERATION_CAP` window, or answers nothing at all
@@ -204,6 +204,7 @@ def _enumerate_deployer_creations(deployer: str) -> tuple[list[str], bool]:
     """
     addr = deployer.lower()
     created: set[str] = set()
+    scope: list[int] = []
     complete = True
     for chain_id in sorted(supported_chain_ids()):
         try:
@@ -236,6 +237,7 @@ def _enumerate_deployer_creations(deployer: str) -> tuple[list[str], bool]:
         if len(result) >= DEPLOYER_ENUMERATION_CAP:
             complete = False
             continue
+        scope.append(chain_id)
         for tx in result:
             if not isinstance(tx, dict):
                 continue
@@ -243,17 +245,67 @@ def _enumerate_deployer_creations(deployer: str) -> tuple[list[str], bool]:
             if not tx.get("to") and isinstance(target, str) and target:
                 created.add(target.lower())
     if not created:
-        return [], False
-    return sorted(created), complete
+        return [], scope, False
+    return sorted(created), scope, complete
 
 
-def _register_protocol_deployer(session: Session, *, protocol_id: int, deployer: str) -> ProtocolDeployer | None:
+#: Class C verdict reasons that are COUNTEREVIDENCE against an existing A/B
+#: registry row (not mere absence of proof) — they revoke it (invariant 8).
+_DEPLOYER_COUNTEREVIDENCE_REASONS = frozenset({"cross_protocol_collision", "foreign_or_unknown_creations"})
+
+
+def _snapshot_covers(row: ProtocolDeployer, contract_address: str) -> bool:
+    """Whether the registry row's recorded enumeration snapshot already names
+    *contract_address* as one of the EOA's creations."""
+    evidence = row.evidence if isinstance(row.evidence, dict) else {}
+    enumeration = evidence.get("enumeration")
+    addresses = enumeration.get("addresses") if isinstance(enumeration, dict) else None
+    return isinstance(addresses, list) and contract_address.lower() in addresses
+
+
+def _enumeration_coverage_gap(
+    session: Session, *, deployer: str, created: set[str], scope_chain_ids: set[int]
+) -> str | None:
+    """Class B soundness check: every KNOWN creation of the EOA — any contracts
+    row recording it as deployer, member or candidate, any protocol — must lie
+    on an enumerated chain AND appear in the enumerated creation set. A gap is
+    an incomplete enumeration (→ Class C), whether from chain scope or from a
+    ``contractCreator``-vs-``txlist`` attribution mismatch."""
+    rows = session.execute(select(Contract.address, Contract.chain).where(func.lower(Contract.deployer) == deployer))
+    for address, chain in rows:
+        chain_id = chain_id_for_chain_name(chain or "ethereum")
+        if chain_id is None or chain_id not in scope_chain_ids:
+            return f"known_creation_on_unenumerated_chain:{(chain or 'ethereum').lower()}"
+        if (address or "").lower() not in created:
+            return f"known_creation_missing_from_enumeration:{(address or '').lower()}"
+    return None
+
+
+def _register_protocol_deployer(
+    session: Session, *, protocol_id: int, deployer: str, contract_address: str | None = None
+) -> ProtocolDeployer | None:
     """§3.3 ladder wire: classify the EOA; register A/B; Class C registers
-    nothing. The Etherscan enumeration is paid only when Class B is reachable
-    (≥2 member rows already claim the deployer) — a recall-only pre-check; the
+    nothing. An unrevoked Class B row whose recorded enumeration snapshot
+    already covers *contract_address* is reused without re-enumerating; any
+    other path re-classifies, and a Class C verdict carrying counterevidence
+    revokes the stale row (``gate.demote``). The Etherscan enumeration is paid
+    only when Class B is reachable (≥2 member rows already claim the deployer,
+    or a registry row exists to re-verify) — a recall-only pre-check; the
     verdict is ``classify_deployer``'s alone."""
     addr = deployer.lower()
+    existing = session.execute(
+        select(ProtocolDeployer).where(
+            ProtocolDeployer.protocol_id == protocol_id,
+            ProtocolDeployer.address == addr,
+            ProtocolDeployer.revoked_at.is_(None),
+        )
+    ).scalar_one_or_none()
+    if existing is not None and contract_address is not None and _snapshot_covers(existing, contract_address):
+        return existing
+
     verdict = gate.classify_deployer(session, protocol_id=protocol_id, address=addr)
+    history: list[str] = []
+    scope: list[int] = []
     if verdict.trust_class is None and verdict.evidence.get("reason") == "no_complete_enumeration":
         sibling_count = session.execute(
             select(func.count(Contract.id)).where(
@@ -261,8 +313,18 @@ def _register_protocol_deployer(session: Session, *, protocol_id: int, deployer:
                 Contract.protocol_id == protocol_id,
             )
         ).scalar_one()
-        if sibling_count >= 2:
-            history, complete = _enumerate_deployer_creations(addr)
+        if existing is not None or sibling_count >= 2:
+            history, scope, complete = _enumerate_deployer_creations(addr)
+            if complete:
+                gap = _enumeration_coverage_gap(
+                    session, deployer=addr, created=set(history), scope_chain_ids=set(scope)
+                )
+                if gap is not None:
+                    logger.warning(
+                        "Class B refused: enumeration coverage gap",
+                        extra={"deployer": addr, "protocol_id": protocol_id, "gap": gap},
+                    )
+                    complete = False
             verdict = gate.classify_deployer(
                 session,
                 protocol_id=protocol_id,
@@ -271,8 +333,19 @@ def _register_protocol_deployer(session: Session, *, protocol_id: int, deployer:
                 history_complete=complete,
             )
     if verdict.trust_class is None:
+        reason = verdict.evidence.get("reason")
+        if existing is not None and reason in _DEPLOYER_COUNTEREVIDENCE_REASONS:
+            gate.demote(session, deployer_row=existing, reason=str(reason))
         return None
-    return gate.register_deployer(session, protocol_id=protocol_id, address=addr, classification=verdict)
+
+    evidence = dict(verdict.evidence)
+    if verdict.trust_class == "B":
+        enumeration = dict(evidence.get("enumeration") or {})
+        enumeration["chain_ids"] = scope
+        enumeration["addresses"] = history
+        evidence["enumeration"] = enumeration
+    classification = gate.DeployerClassification(trust_class=verdict.trust_class, evidence=evidence)
+    return gate.register_deployer(session, protocol_id=protocol_id, address=addr, classification=classification)
 
 
 def _write_deployer_witness(session: Session, *, contract: Contract, registry_row: ProtocolDeployer) -> bool:
@@ -317,43 +390,6 @@ def _write_deployer_witness(session: Session, *, contract: Contract, registry_ro
     return True
 
 
-def _record_code_witness(session: Session, *, contract: Contract, protocol_id: int, probe_result: ProbeResult) -> bool:
-    """W1 from a fresh probe — only a code-present verdict block-stamped on the
-    contract's OWN chain mints the witness (invariant 3)."""
-    if probe_result.code_present is not True or probe_result.block_number is None or probe_result.chain_id is None:
-        return False
-    expected_chain = chain_id_for_chain_name(contract.chain)
-    if expected_chain is None or probe_result.chain_id != expected_chain:
-        return False
-    gate.write_witness(
-        session,
-        contract_id=contract.id,
-        protocol_id=protocol_id,
-        rule=WITNESS_RULE_W1_CODE,
-        evidence=gate.w1_evidence(chain_id=probe_result.chain_id, code_probe_block=probe_result.block_number),
-    )
-    return True
-
-
-def _needs_probe(session: Session, contract: Contract) -> bool:
-    """No probe attempt yet, or a pruned row seen again — re-nomination re-runs
-    W1 (§3.4 event 1: pruned is evidence-at-a-block, not terminal)."""
-    has_attempt = (
-        session.execute(
-            select(ContractProbeAttempt.contract_id).where(ContractProbeAttempt.contract_id == contract.id).limit(1)
-        ).first()
-        is not None
-    )
-    if not has_attempt:
-        return True
-    chain_id = chain_id_for_chain_name(contract.chain)
-    address = (contract.address or "").lower()
-    if chain_id is None or not address:
-        return False
-    witness = session.get(ContractCreationWitness, (chain_id, address))
-    return witness is not None and witness.code_absent_at_probe is True
-
-
 def run_probe_pass(session: Session, protocol_id: int) -> gate.PromotionResult:
     """§3.4 event 1: settle the protocol's fresh candidates near-line. Bounded
     to the current protocol's candidates; commits before evaluating."""
@@ -368,11 +404,11 @@ def run_probe_pass(session: Session, protocol_id: int) -> gate.PromotionResult:
     probed: list[Contract] = []
     resolved: set[str] = set()
     for contract in candidates:
-        if not _needs_probe(session, contract):
+        if not needs_probe(session, contract):
             continue
         result = gate.probe(session, contract)
         probed.append(contract)
-        _record_code_witness(session, contract=contract, protocol_id=protocol_id, probe_result=result)
+        record_code_witness(session, contract=contract, protocol_id=protocol_id, probe_result=result)
         resolved.update(result.resolved_addresses)
     promoted: list[int] = []
     for contract in probed:
@@ -447,13 +483,18 @@ def _gate_intake(session: Session, job: Job, contract: Contract | None, request:
     registry_row: ProtocolDeployer | None = None
     deployer = (contract.deployer or "").lower() or None
     if deployer:
-        registry_row = _register_protocol_deployer(session, protocol_id=protocol_id, deployer=deployer)
+        registry_row = _register_protocol_deployer(
+            session,
+            protocol_id=protocol_id,
+            deployer=deployer,
+            contract_address=(contract.address or "").lower() or None,
+        )
         if registry_row is not None:
             _write_deployer_witness(session, contract=contract, registry_row=registry_row)
 
-    if _needs_probe(session, contract):
+    if needs_probe(session, contract):
         result = gate.probe(session, contract)
-        _record_code_witness(session, contract=contract, protocol_id=protocol_id, probe_result=result)
+        record_code_witness(session, contract=contract, protocol_id=protocol_id, probe_result=result)
 
     promoted = gate.promote(session, contract=contract, protocol_id=protocol_id)
     session.commit()
@@ -524,7 +565,16 @@ def run_chain_enable_sweep(session: Session) -> None:
     enabled = sorted(supported_chain_ids())
     marker = session.get(OpsKv, ENABLED_CHAINS_SEEN_KEY)
     if marker is None:
-        session.add(OpsKv(key=ENABLED_CHAINS_SEEN_KEY, value=enabled))
+        # Race-safe first-boot seed: a concurrent boot's insert wins and this
+        # one no-ops (a doubled sweep is the accepted residual, an
+        # IntegrityError crash is not).
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+        session.execute(
+            pg_insert(OpsKv)
+            .values(key=ENABLED_CHAINS_SEEN_KEY, value=enabled)
+            .on_conflict_do_nothing(index_elements=["key"])
+        )
         session.commit()
         logger.info("enabled-chains marker seeded", extra={"chains": enabled})
         return
@@ -545,7 +595,7 @@ def run_chain_enable_sweep(session: Session) -> None:
             if protocol_id is None:
                 continue
             result = gate.probe(session, contract)
-            _record_code_witness(session, contract=contract, protocol_id=protocol_id, probe_result=result)
+            record_code_witness(session, contract=contract, protocol_id=protocol_id, probe_result=result)
             resolved.update(result.resolved_addresses)
             if gate.promote(session, contract=contract, protocol_id=protocol_id):
                 promoted_by_protocol.setdefault(protocol_id, []).append(contract.id)
@@ -1066,6 +1116,9 @@ class DiscoveryWorker(BaseWorker):
                 address=address.lower(),
                 chain=chain_name,
                 protocol_id=None,
+                # Nomination recorded at write so a terminal intake failure
+                # cannot strand an unclaimed row (spec §3.1 orphan amnesia).
+                nominated_protocol_id=job.protocol_id,
                 contract_name=contract_name,
                 compiler_version=result.get("CompilerVersion", ""),
                 language="vyper" if is_vyper_result(result) else "solidity",

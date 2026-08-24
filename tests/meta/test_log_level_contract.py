@@ -76,15 +76,7 @@ ALLOW_LIST: dict[str, dict[int, str]] = {
     "workers/discovery.py": {
         # Boot-time chain-enable sweep in main(): no job is claimed yet, so no
         # accumulator is bound and record_degraded would be a no-op.
-        1149: "Boot-time sweep failure; runs before any job context exists.",
-    },
-    "services/discovery/probes.py": {
-        # Probe outcomes are persisted in their own domain tables
-        # (contract_probe_attempts / contract_creation_witnesses), which is the
-        # durable record invariant 5 requires; probes also run outside job
-        # contexts (boot sweep), where record_degraded is a no-op.
-        136: "Creation-fetch failure is visible via the probe/creation rows; also runs outside job contexts.",
-        244: "Creation-fetch failure lands on the persisted probe attempt; also runs outside job contexts.",
+        1202: "Boot-time sweep failure; runs before any job context exists.",
     },
     "workers/policy_worker.py": {
         # Reanalysis-completion notifier: the reanalysis itself completed

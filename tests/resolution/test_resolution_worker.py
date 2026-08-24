@@ -1114,6 +1114,18 @@ class TestStructuralOwnershipPropagation:
         )
         session.commit()
 
+        # The witness pass runs the event-1 probe for unprobed candidates;
+        # this test pins the W2 edge logic, so mark the dep already probed
+        # (chain is NULL here → the unresolvable-chain attempt key).
+        from db.models import ContractProbeAttempt
+        from services.discovery.probes import UNRESOLVABLE_CHAIN_ID
+
+        dep_row_id = session.query(Contract).filter_by(address=dep_addr).one().id
+        session.add(
+            ContractProbeAttempt(contract_id=dep_row_id, chain_id=UNRESOLVABLE_CHAIN_ID, results={"status": "probed"})
+        )
+        session.commit()
+
         from db.models import Job, JobStage, JobStatus
 
         real_job = Job(

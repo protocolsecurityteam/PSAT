@@ -151,38 +151,42 @@ def test_enumeration_collects_direct_creations(monkeypatch):
         monkeypatch,
         {1: [_creation_tx(ADDR(0x201)), {"to": ADDR(0x999), "contractAddress": ""}, _creation_tx(ADDR(0x202))]},
     )
-    created, complete = _enumerate_deployer_creations(ADDR(0x200))
+    created, scope, complete = _enumerate_deployer_creations(ADDR(0x200))
     assert created == sorted([ADDR(0x201), ADDR(0x202)])
+    assert scope == [1]
     assert complete is True
 
 
 def test_enumeration_cap_exceeded_is_incomplete(monkeypatch):
-    # A full txlist window is a truncation, never a complete history.
+    # A full txlist window is a truncation, never a complete history — and the
+    # truncated chain never enters the recorded scope.
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     window = [_creation_tx(ADDR(0x300 + n)) for n in range(3)] + [{"to": ADDR(0x999), "contractAddress": ""}] * (
         DEPLOYER_ENUMERATION_CAP - 3
     )
     _stub_txlist(monkeypatch, {1: window})
-    created, complete = _enumerate_deployer_creations(ADDR(0x2FF))
+    created, scope, complete = _enumerate_deployer_creations(ADDR(0x2FF))
     assert complete is False
     assert created == []
+    assert scope == []
 
 
 def test_enumeration_empty_or_failed_is_incomplete(monkeypatch):
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     _stub_txlist(monkeypatch, {1: []})
-    assert _enumerate_deployer_creations(ADDR(0x210)) == ([], False)
+    assert _enumerate_deployer_creations(ADDR(0x210)) == ([], [1], False)
     _stub_txlist(monkeypatch, {1: RuntimeError("etherscan down")})
-    assert _enumerate_deployer_creations(ADDR(0x210)) == ([], False)
+    assert _enumerate_deployer_creations(ADDR(0x210)) == ([], [], False)
 
 
 def test_enumeration_any_enabled_chain_failing_is_incomplete(monkeypatch):
     # EOAs are chain-agnostic: completeness requires every enabled chain's
-    # window to come back clean.
+    # window to come back clean, and the failed chain stays out of scope.
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1,8453")
     _stub_txlist(monkeypatch, {1: [_creation_tx(ADDR(0x220))], 8453: RuntimeError("boom")})
-    created, complete = _enumerate_deployer_creations(ADDR(0x221))
+    created, scope, complete = _enumerate_deployer_creations(ADDR(0x221))
     assert created == [ADDR(0x220)]
+    assert scope == [1]
     assert complete is False
 
 
@@ -201,7 +205,7 @@ def _seed_class_b_shape(db_session, protocol, eoa: str) -> list[Contract]:
     return members
 
 
-def test_ladder_wire_registers_class_b(db_session, monkeypatch):
+def test_ladder_wire_registers_class_b_with_scope_and_snapshot(db_session, monkeypatch):
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     protocol = _protocol(db_session)
     eoa = ADDR(0x240)
@@ -211,7 +215,10 @@ def test_ladder_wire_registers_class_b(db_session, monkeypatch):
     row = _register_protocol_deployer(db_session, protocol_id=protocol.id, deployer=eoa)
 
     assert row is not None and row.trust_class == "B"
+    # The evidence names WHAT was enumerated — never a bare complete flag.
     assert row.evidence["enumeration"]["complete"] is True
+    assert row.evidence["enumeration"]["chain_ids"] == [1]
+    assert sorted(row.evidence["enumeration"]["addresses"]) == sorted(m.address for m in members)
     assert len(calls) == 1
 
 
@@ -264,6 +271,115 @@ def test_ladder_wire_skips_enumeration_without_sibling_members(db_session, monke
     calls = _stub_txlist(monkeypatch, {})
     assert _register_protocol_deployer(db_session, protocol_id=protocol.id, deployer=ADDR(0x280)) is None
     assert calls == []
+
+
+def test_ladder_wire_refuses_b_when_own_member_is_on_unenumerated_chain(db_session, monkeypatch):
+    # Coverage refusal (scope): a KNOWN creation on a chain outside the
+    # enumerated scope makes the enumeration incomplete — Class C.
+    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
+    protocol = _protocol(db_session)
+    eoa = ADDR(0x2B8)
+    members = _seed_class_b_shape(db_session, protocol, eoa)
+    _contract(db_session, ADDR(0x2B9), chain="base", protocol_id=protocol.id, deployer=eoa)
+    _stub_txlist(monkeypatch, {1: [_creation_tx(m.address) for m in members]})
+
+    assert _register_protocol_deployer(db_session, protocol_id=protocol.id, deployer=eoa) is None
+    assert db_session.execute(select(ProtocolDeployer).where(ProtocolDeployer.address == eoa)).first() is None
+
+
+def test_ladder_wire_refuses_b_when_any_protocols_row_is_out_of_scope(db_session, monkeypatch):
+    # The scope check spans ANY contracts row claiming the deployer — a
+    # foreign protocol's CANDIDATE on an unenumerated chain refuses too
+    # (classify's collision check only sees foreign MEMBERS).
+    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
+    protocol = _protocol(db_session)
+    other = _protocol(db_session)
+    eoa = ADDR(0x2BA)
+    members = _seed_class_b_shape(db_session, protocol, eoa)
+    _contract(db_session, ADDR(0x2BB), chain="base", nominated_protocol_id=other.id, deployer=eoa)
+    _stub_txlist(monkeypatch, {1: [_creation_tx(m.address) for m in members]})
+
+    assert _register_protocol_deployer(db_session, protocol_id=protocol.id, deployer=eoa) is None
+
+
+def test_ladder_wire_refuses_b_when_known_creation_missing_from_enumeration(db_session, monkeypatch):
+    # Coverage refusal (consistency): a member recorded as this EOA's creation
+    # that the enumeration does not contain is an attribution mismatch
+    # (contractCreator vs txlist) — Class C, never B.
+    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
+    protocol = _protocol(db_session)
+    eoa = ADDR(0x2BC)
+    members = _seed_class_b_shape(db_session, protocol, eoa)
+    _stub_txlist(monkeypatch, {1: [_creation_tx(members[0].address)]})  # members[1] missing
+
+    assert _register_protocol_deployer(db_session, protocol_id=protocol.id, deployer=eoa) is None
+
+
+def test_ladder_wire_counterevidence_revokes_stale_b_row(db_session, monkeypatch):
+    # A registered B row does not survive a Class C verdict carrying
+    # counterevidence: the row is revoked and lineage-only members demote
+    # (invariant 8).
+    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
+    protocol = _protocol(db_session)
+    eoa = ADDR(0x2C4)
+    members = _seed_class_b_shape(db_session, protocol, eoa)
+    lineage_only = _contract(db_session, ADDR(0x2C5), protocol_id=protocol.id, deployer=eoa)
+    known = [*members, lineage_only]
+    _stub_txlist(monkeypatch, {1: [_creation_tx(c.address) for c in known]})
+    registry = _register_protocol_deployer(db_session, protocol_id=protocol.id, deployer=eoa)
+    assert registry is not None and registry.trust_class == "B"
+    gate.write_witness(
+        db_session,
+        contract_id=lineage_only.id,
+        protocol_id=protocol.id,
+        rule=WITNESS_RULE_W4_DEPLOYER,
+        evidence=gate.w4_evidence(
+            deployer_address=eoa, deployer_registry_id=registry.id, creation_tx_hash=_TX, creation_block=7
+        ),
+        via_address=eoa,
+    )
+    db_session.commit()
+
+    # A foreign creation is later observed; the reuse shortcut must not mask
+    # it (the triggering contract is outside the recorded snapshot).
+    _stub_txlist(monkeypatch, {1: [_creation_tx(c.address) for c in known] + [_creation_tx(ADDR(0x998))]})
+    row = _register_protocol_deployer(db_session, protocol_id=protocol.id, deployer=eoa, contract_address=ADDR(0x997))
+
+    assert row is None
+    db_session.refresh(registry)
+    assert registry.revoked_at is not None
+    assert registry.revocation_reason == "foreign_or_unknown_creations"
+    assert lineage_only.protocol_id is None
+    assert lineage_only.nominated_protocol_id == protocol.id
+    # Independently witnessed members are untouched.
+    assert all(m.protocol_id == protocol.id for m in members)
+
+
+def test_ladder_wire_snapshot_reuse_skips_reenumeration(db_session, monkeypatch):
+    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
+    protocol = _protocol(db_session)
+    eoa = ADDR(0x2C6)
+    members = _seed_class_b_shape(db_session, protocol, eoa)
+    calls = _stub_txlist(monkeypatch, {1: [_creation_tx(m.address) for m in members]})
+    first = _register_protocol_deployer(db_session, protocol_id=protocol.id, deployer=eoa)
+    assert first is not None and len(calls) == 1
+
+    # Address inside the recorded snapshot: reuse, no re-enumeration.
+    again = _register_protocol_deployer(
+        db_session, protocol_id=protocol.id, deployer=eoa, contract_address=members[0].address
+    )
+    assert again is not None and again.id == first.id
+    assert len(calls) == 1
+
+    # Address outside the snapshot: full re-enumeration (fix-2's revocation
+    # opportunity), snapshot refreshed to cover the newcomer.
+    newcomer = _contract(db_session, ADDR(0x2C7), nominated_protocol_id=protocol.id, deployer=eoa)
+    _stub_txlist(monkeypatch, {1: [_creation_tx(m.address) for m in members] + [_creation_tx(newcomer.address)]})
+    refreshed = _register_protocol_deployer(
+        db_session, protocol_id=protocol.id, deployer=eoa, contract_address=newcomer.address
+    )
+    assert refreshed is not None and refreshed.id == first.id
+    assert newcomer.address in refreshed.evidence["enumeration"]["addresses"]
 
 
 # ---------------------------------------------------------------------------
@@ -475,6 +591,26 @@ def test_probe_pass_promotes_when_probe_completes_the_witness_set(db_session, mo
 
     assert candidate.protocol_id == protocol.id
     assert candidate.id in result.promoted_contract_ids
+
+
+def test_probe_pass_reprobes_error_attempts(db_session, monkeypatch, erpc_env):
+    # An rpc_error / not_routable attempt is an attempt, never a verdict —
+    # the next pass must re-probe instead of parking the row forever.
+    protocol = _protocol(db_session)
+    stuck = _contract(db_session, ADDR(0x2C8), nominated_protocol_id=protocol.id)
+    db_session.add(
+        ContractProbeAttempt(
+            contract_id=stuck.id, chain_id=1, block_number=None, results={"status": "rpc_error", "error": "boom"}
+        )
+    )
+    db_session.flush()
+    seen = _stub_probe_wire(monkeypatch)
+
+    run_probe_pass(db_session, protocol.id)
+
+    assert seen["probed"] == [stuck.address]
+    w1 = db_session.query(ContractMembershipWitness).filter_by(contract_id=stuck.id, rule=WITNESS_RULE_W1_CODE).one()
+    assert w1.evidence["code_probe_block"] == 120
 
 
 def test_probe_pass_reprobes_renominated_pruned_rows(db_session, monkeypatch, erpc_env):

@@ -49,15 +49,19 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Collection, Mapping, TypedDict
+from typing import TYPE_CHECKING, Any, Collection, Mapping, TypedDict
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from db.models import Contract, ContractDependency, Job, JobStage
+from db.models import Contract, ContractCreationWitness, ContractDependency, ContractProbeAttempt, Job, JobStage
 from db.queue import _mainnet_coalesced_chain, create_job, find_existing_job_for_address
+from services.clients.rpc import chain_id_for_chain_name
 from utils.chains import canonical_chain, chain_enabled
 from utils.logging import record_degraded
+
+if TYPE_CHECKING:
+    from services.discovery.probes import ProbeResult
 
 logger = logging.getLogger(__name__)
 
@@ -316,6 +320,50 @@ def produce_structural_witness(
     return edge_kind
 
 
+def needs_probe(session: Session, contract: Contract) -> bool:
+    """§3.4 event 1 trigger: no probe attempt persisted for the row's OWN
+    chain, an attempt that never completed (``status != probed`` — an error or
+    unroutable outcome is an attempt, never a verdict), or a pruned row seen
+    again — re-nomination re-runs W1 (pruned is evidence-at-a-block, not
+    terminal)."""
+    from services.discovery.probes import STATUS_PROBED, UNRESOLVABLE_CHAIN_ID
+
+    chain_id = chain_id_for_chain_name(contract.chain)
+    key_chain = UNRESOLVABLE_CHAIN_ID if chain_id is None else chain_id
+    attempt = session.get(ContractProbeAttempt, (contract.id, key_chain))
+    if attempt is None:
+        return True
+    results = attempt.results if isinstance(attempt.results, dict) else {}
+    if results.get("status") != STATUS_PROBED:
+        return True
+    address = (contract.address or "").lower()
+    if chain_id is None or not address:
+        return False
+    witness = session.get(ContractCreationWitness, (chain_id, address))
+    return witness is not None and witness.code_absent_at_probe is True
+
+
+def record_code_witness(session: Session, *, contract: Contract, protocol_id: int, probe_result: "ProbeResult") -> bool:
+    """W1 from a fresh probe — only a code-present verdict block-stamped on the
+    contract's OWN chain mints the witness (invariant 3)."""
+    from db.models import WITNESS_RULE_W1_CODE
+    from services.discovery import membership_gate as gate
+
+    if probe_result.code_present is not True or probe_result.block_number is None or probe_result.chain_id is None:
+        return False
+    expected_chain = chain_id_for_chain_name(contract.chain)
+    if expected_chain is None or probe_result.chain_id != expected_chain:
+        return False
+    gate.write_witness(
+        session,
+        contract_id=contract.id,
+        protocol_id=protocol_id,
+        rule=WITNESS_RULE_W1_CODE,
+        evidence=gate.w1_evidence(chain_id=probe_result.chain_id, code_probe_block=probe_result.block_number),
+    )
+    return True
+
+
 def _produce_structural_witnesses(
     session: Session,
     parent: Contract,
@@ -324,7 +372,10 @@ def _produce_structural_witnesses(
     """W2 production for structurally-linked deps that already have Contract
     rows on the parent's chain; a dep with no row yet earns its witness at
     fetch time from the child request's edge hint (re-verified there).
-    Promotion still requires W1 + the gate's own checks."""
+
+    A witnessed candidate lacking a probe attempt gets the event-1 probe
+    near-line, so a dep that never re-enters the fetch path (existing row +
+    existing job) can still complete W2+W1 and promote."""
     from services.discovery import membership_gate as gate
 
     protocol_id = parent.protocol_id
@@ -344,7 +395,7 @@ def _produce_structural_witnesses(
         relationship = rel_by_addr.get((row.address or "").lower())
         if relationship is None:
             continue
-        gate.nominate(session, contract=row, protocol_id=protocol_id, source_tag="structural_adoption")
+        gate.nominate(session, contract=row, protocol_id=protocol_id, source_tag="structural_witness")
         if (
             produce_structural_witness(
                 session, candidate=row, parent=parent, protocol_id=protocol_id, relationship=relationship
@@ -352,8 +403,10 @@ def _produce_structural_witnesses(
             is None
         ):
             continue
-        was_candidate = row.protocol_id is None
-        if was_candidate and gate.promote(session, contract=row, protocol_id=protocol_id):
+        if row.protocol_id is None and needs_probe(session, row):
+            probe_result = gate.probe(session, row)
+            record_code_witness(session, contract=row, protocol_id=protocol_id, probe_result=probe_result)
+        if row.protocol_id is None and gate.promote(session, contract=row, protocol_id=protocol_id):
             promoted.append(row.id)
     session.commit()
     if promoted:

@@ -31,6 +31,7 @@ from utils.evm import (
     EIP1967_IMPL_SLOT,
     OWNER_SELECTOR,
 )
+from utils.logging import record_degraded
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
@@ -136,6 +137,11 @@ def fetch_creations(
             logger.warning(
                 "getcontractcreation failed",
                 extra={"batch_size": len(batch), "chain_id": chain_id, "exc_type": type(exc).__name__},
+            )
+            record_degraded(
+                phase="creation_fetch",
+                exc=exc,
+                context={"batch_size": len(batch), "chain_id": chain_id},
             )
             continue
         result = data.get("result") if isinstance(data, dict) else None
@@ -244,6 +250,11 @@ def run_probe(session: Session, contract: Contract) -> ProbeResult:
         logger.warning(
             "creation fetch failed",
             extra={"address": address, "chain_id": chain_id, "exc_type": type(exc).__name__},
+        )
+        record_degraded(
+            phase="probe_creation_fetch",
+            exc=exc,
+            context={"address": address, "chain_id": chain_id},
         )
         creations = {}
     if address in creations:
