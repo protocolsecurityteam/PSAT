@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from db.models import Contract, ContractMembershipWitness, Protocol, ProtocolDeployer
 from services.discovery.membership_gate import MEMBERSHIP_DIRTY_REASON, nominate
+from services.discovery.membership_gate import demote as gate_demote_deployer
 from utils.chains import canonical_chain, canonical_chain_list
 
 from ._chains import _mainnet_coalesced_chain
@@ -220,11 +221,12 @@ def upsert_discovered_contract(
 
 
 _PROTOCOL_FK_TABLES = (
-    # (table, column) for every FK referencing protocols.id. Listed
-    # explicitly so the merge step touches every dependent table without
-    # depending on a model registry walk. Includes both CASCADE and SET NULL
-    # FKs — the orphan row is being deleted, not nulled, so the destination
-    # protocol takes ownership of all children.
+    # (table, column) pairs the merge rewrites — an explicit list, not a
+    # model-registry walk, and NOT every protocols.id FK in the schema:
+    # tables absent here keep whatever their FK's delete action does when the
+    # src row is deleted. Includes both CASCADE and SET NULL FKs — the src
+    # row is deleted, not nulled, so the destination protocol takes ownership
+    # of the enumerated children.
     ("jobs", "protocol_id"),
     ("audit_reports", "protocol_id"),
     ("audit_contract_coverage", "protocol_id"),
@@ -241,9 +243,11 @@ _PROTOCOL_FK_TABLES = (
 
 def _merge_witness_rows(session: Session, *, src_id: int, dst_id: int) -> int:
     """Rewrite src witness rows to dst. Where both protocols hold the same
-    (contract, rule, via_address) key, the destination row survives; an active
-    observation is preferred over a revoked one, so a live src fact re-arms a
-    revoked dst row rather than being dropped. Returns dropped-src-row count."""
+    (contract, rule, via_address) key, the destination row survives. A revoked
+    dst row is re-armed only by a src observation that POSTDATES the
+    revocation — an older observation cannot overturn negative evidence; a
+    fresh one re-earns later via ``write_witness``. Returns dropped-src-row
+    count."""
     dropped = 0
     src_rows = (
         session.execute(select(ContractMembershipWitness).where(ContractMembershipWitness.protocol_id == src_id))
@@ -267,7 +271,7 @@ def _merge_witness_rows(session: Session, *, src_id: int, dst_id: int) -> int:
         if dst_row is None:
             src_row.protocol_id = dst_id
             continue
-        if dst_row.revoked_at is not None and src_row.revoked_at is None:
+        if dst_row.revoked_at is not None and src_row.revoked_at is None and src_row.observed_at > dst_row.revoked_at:
             dst_row.revoked_at = None
             dst_row.evidence = src_row.evidence
             dst_row.observed_at = src_row.observed_at
@@ -276,12 +280,16 @@ def _merge_witness_rows(session: Session, *, src_id: int, dst_id: int) -> int:
     return dropped
 
 
-def _merge_deployer_rows(session: Session, *, src_id: int, dst_id: int) -> int:
+def _merge_deployer_rows(session: Session, *, src_id: int, dst_id: int) -> tuple[int, list[ProtocolDeployer]]:
     """Rewrite src deployer-registry rows to dst. A same-address row under
     both protocols survives as one row (invariant 7 collision resolved by the
     merge itself: src and dst are the same protocol afterwards) — dst's row is
-    kept, src's dropped. Returns dropped-src-row count."""
+    kept and revocation resolves conservatively: a revoked side keeps (or
+    makes) the survivor revoked, carrying the negative evidence. Returns the
+    dropped-src-row count and the surviving revoked rows whose invariant-8
+    demotion cascade the caller must run after the FK rewrite."""
     dropped = 0
+    cascade: list[ProtocolDeployer] = []
     src_rows = session.execute(select(ProtocolDeployer).where(ProtocolDeployer.protocol_id == src_id)).scalars().all()
     for src_row in src_rows:
         dst_row = session.execute(
@@ -293,9 +301,34 @@ def _merge_deployer_rows(session: Session, *, src_id: int, dst_id: int) -> int:
         if dst_row is None:
             src_row.protocol_id = dst_id
             continue
+        src_revoked = src_row.revoked_at is not None
+        dst_revoked = dst_row.revoked_at is not None
+        discarded_evidence = src_row.evidence
+        if src_revoked and not dst_revoked:
+            # Negative evidence survives the merge: the surviving row adopts
+            # src's revocation, and dst's active evidence is the discard.
+            discarded_evidence = dst_row.evidence
+            dst_row.revoked_at = src_row.revoked_at
+            dst_row.revocation_reason = src_row.revocation_reason
+            dst_row.evidence = src_row.evidence
+            cascade.append(dst_row)
+        elif dst_revoked and not src_revoked:
+            cascade.append(dst_row)
+        logger.info(
+            "protocol merge dropped duplicate deployer row",
+            extra={
+                "address": src_row.address,
+                "src_protocol_id": src_id,
+                "dst_protocol_id": dst_id,
+                "src_revoked_at": src_row.revoked_at.isoformat() if src_row.revoked_at else None,
+                "dst_revoked_at": dst_row.revoked_at.isoformat() if dst_row.revoked_at else None,
+                "survivor_revocation_reason": dst_row.revocation_reason,
+                "discarded_evidence": discarded_evidence,
+            },
+        )
         session.delete(src_row)
         dropped += 1
-    return dropped
+    return dropped, cascade
 
 
 def _merge_protocol_into(session: Session, src: Protocol, dst: Protocol) -> None:
@@ -306,10 +339,11 @@ def _merge_protocol_into(session: Session, src: Protocol, dst: Protocol) -> None
     operation (invariant 1): contract membership, witness rows, and deployer
     rows all move to dst in the same transaction, with the (protocol_id, …)
     unique keys on ``contract_membership_witnesses`` / ``protocol_deployers``
-    resolved before the blind FK rewrite. ``nominated_protocol_id`` is in
-    ``_PROTOCOL_FK_TABLES`` and is rewritten here — never left for the src
-    delete's SET NULL. The remaining tables carry no protocol-keyed
-    uniqueness.
+    resolved before the blind FK rewrite. A deployer collision whose survivor
+    is revoked runs the invariant-8 demotion cascade after the rewrite.
+    ``nominated_protocol_id`` is in ``_PROTOCOL_FK_TABLES`` and is rewritten
+    here — never left for the src delete's SET NULL. The remaining enumerated
+    tables carry no protocol-keyed uniqueness.
     """
     src_id, dst_id = src.id, dst.id
     if src_id == dst_id:
@@ -318,12 +352,31 @@ def _merge_protocol_into(session: Session, src: Protocol, dst: Protocol) -> None
         select(func.count()).select_from(Contract).where(Contract.protocol_id == src_id)
     ).scalar_one()
     witness_dropped = _merge_witness_rows(session, src_id=src_id, dst_id=dst_id)
-    deployer_dropped = _merge_deployer_rows(session, src_id=src_id, dst_id=dst_id)
+    deployer_dropped, cascade_rows = _merge_deployer_rows(session, src_id=src_id, dst_id=dst_id)
     session.flush()
     for table, col in _PROTOCOL_FK_TABLES:
         session.execute(
             text(f"UPDATE {table} SET {col} = :dst WHERE {col} = :src"),
             {"src": src_id, "dst": dst_id},
+        )
+    # The raw rewrite bypasses the identity map; without this, an in-session
+    # Contract still reads its src-era ids (e.g. the member branch in
+    # ``nominate``) for the rest of the transaction.
+    session.expire_all()
+    for deployer_row in cascade_rows:
+        # Invariant 8 for the surviving revoked registry row: W4 witnesses
+        # resting on it are revoked and members left without an admitting
+        # witness are demoted, so reconcile reports zero drift post-merge.
+        result = gate_demote_deployer(session, deployer_row=deployer_row, reason="protocol_merge_revoked_deployer")
+        logger.info(
+            "protocol merge deployer demotion cascade",
+            extra={
+                "address": deployer_row.address,
+                "dst_protocol_id": dst_id,
+                "revoked_witness_ids": list(result.revoked_witness_ids),
+                "demoted_contract_ids": list(result.demoted_contract_ids),
+                "reprobe_contract_ids": list(result.reprobe_contract_ids),
+            },
         )
     session.delete(src)
     session.flush()
