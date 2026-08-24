@@ -9,7 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from db.models import Contract, Protocol
-from services.discovery.source_confidence import asserts_ownership
+from services.discovery.membership_gate import nominate
 from utils.chains import canonical_chain, canonical_chain_list
 
 from ._chains import _mainnet_coalesced_chain
@@ -72,18 +72,14 @@ def bulk_upsert_discovered_contracts(
     for address, chain, entry in norm_entries:
         key = (address, _mainnet_coalesced_chain(chain))
         clean_sources = [s for s in (entry.get("new_sources") or []) if s]
-        # Only high-confidence sources may assert protocol ownership.
-        # Low-confidence sources (dapp_crawl scraping, upgrade_history
-        # traversal of unconfirmed proxies) populate discovery_sources
-        # but leave protocol_id NULL until a high-confidence source
-        # corroborates. See services/discovery/source_confidence.py.
-        owning_protocol_id = protocol_id if asserts_ownership(clean_sources) else None
+        # Invariant 1: no discovery source stamps protocol_id — every write
+        # is a nomination and the membership gate is the sole promoter.
+        source_tag = clean_sources[0] if clean_sources else ""
         existing = existing_by_key.get(key)
         if existing is None:
             row = Contract(
                 address=address,
                 chain=chain,
-                protocol_id=owning_protocol_id,
                 contract_name=entry.get("contract_name"),
                 confidence=entry.get("confidence"),
                 discovery_sources=list(clean_sources) or None,
@@ -91,6 +87,8 @@ def bulk_upsert_discovered_contracts(
                 discovery_url=entry.get("discovery_url"),
             )
             session.add(row)
+            if protocol_id is not None:
+                nominate(session, contract=row, protocol_id=protocol_id, source_tag=source_tag)
             existing_by_key[key] = row
             out.append(row)
             continue
@@ -101,8 +99,8 @@ def bulk_upsert_discovered_contracts(
                 merged.append(src)
         if merged:
             existing.discovery_sources = merged
-        if existing.protocol_id is None and owning_protocol_id is not None:
-            existing.protocol_id = owning_protocol_id
+        if protocol_id is not None:
+            nominate(session, contract=existing, protocol_id=protocol_id, source_tag=source_tag)
         if not existing.contract_name and entry.get("contract_name"):
             existing.contract_name = entry["contract_name"]
         if existing.confidence is None and entry.get("confidence") is not None:
@@ -140,7 +138,9 @@ def upsert_discovered_contract(
     When the row exists already:
         - ``discovery_sources`` is unioned (new entries appended, dedup
           preserves order so the first discoverer stays first).
-        - ``protocol_id`` is backfilled if null (orphan adoption).
+        - the nomination is recorded via the membership gate
+          (``nominated_protocol_id``); ``protocol_id`` is never written here
+          — promotion is the gate's job (invariant 1).
         - ``contract_name`` / ``confidence`` / ``chains`` /
           ``discovery_url`` are first-writer-wins: later writers only
           fill them if the stored value is missing, so a later
@@ -177,15 +177,13 @@ def upsert_discovered_contract(
     )
 
     clean_sources = [s for s in new_sources if s]
-    # See bulk_upsert_discovered_contracts — only high-confidence sources
-    # may assert protocol ownership.
-    owning_protocol_id = protocol_id if asserts_ownership(clean_sources) else None
+    # See bulk_upsert_discovered_contracts — writes nominate, never stamp.
+    source_tag = clean_sources[0] if clean_sources else ""
 
     if existing is None:
         row = Contract(
             address=normalized,
             chain=chain,
-            protocol_id=owning_protocol_id,
             contract_name=contract_name,
             confidence=confidence,
             discovery_sources=list(clean_sources) or None,
@@ -193,6 +191,8 @@ def upsert_discovered_contract(
             discovery_url=discovery_url,
         )
         session.add(row)
+        if protocol_id is not None:
+            nominate(session, contract=row, protocol_id=protocol_id, source_tag=source_tag)
         return row
 
     merged = list(existing.discovery_sources or [])
@@ -202,8 +202,8 @@ def upsert_discovered_contract(
     if merged:
         existing.discovery_sources = merged
 
-    if existing.protocol_id is None and owning_protocol_id is not None:
-        existing.protocol_id = owning_protocol_id
+    if protocol_id is not None:
+        nominate(session, contract=existing, protocol_id=protocol_id, source_tag=source_tag)
     if not existing.contract_name and contract_name:
         existing.contract_name = contract_name
     if existing.confidence is None and confidence is not None:

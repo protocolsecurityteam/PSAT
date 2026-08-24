@@ -166,9 +166,11 @@ def seed_protocol(db_session):
 
 @requires_postgres
 class TestBulkUpsertOwnershipGate:
-    """Path-1 leak: dapp_crawl + similar low-confidence writers must
-    create Contract rows but leave ``protocol_id`` NULL until a high-
-    confidence source corroborates."""
+    """Membership-gate model (DISCOVERY_MEMBERSHIP_GATE_SPEC.md): NO source
+    tag stamps ``protocol_id`` at the persistence boundary — every write is a
+    nomination (``nominated_protocol_id``) and promotion is the gate's job.
+    The path-1 leak stays closed a fortiori; the old HIGH tier no longer
+    stamps either."""
 
     def test_dapp_crawl_only_entry_stays_orphan(self, db_session, seed_protocol):
         """Pre-fix: this row landed with ``protocol_id=etherfi`` — that's
@@ -196,14 +198,14 @@ class TestBulkUpsertOwnershipGate:
             "this is the dapp_crawl leak that pulled WETH/Lido into etherfi"
         )
         # Discovery trail is still preserved — the row exists, just not
-        # attributed to the protocol.
+        # attributed to the protocol; the nominator is recorded.
+        assert row.nominated_protocol_id == seed_protocol
         assert "dapp_crawl" in (row.discovery_sources or [])
         assert row.discovery_url == "https://example.com/cash"
 
-    def test_high_confidence_source_does_stamp(self, db_session, seed_protocol):
-        """Sanity counterpart: high-confidence sources still own the row.
-        Without this assertion the gate could be a stuck-open valve and
-        the other tests would still pass."""
+    def test_high_confidence_source_no_longer_stamps(self, db_session, seed_protocol):
+        """The retired HIGH tier: a deployer_expansion tag now yields a
+        nomination, never a member — invariant 1."""
         from db.models import Contract
         from db.queue import bulk_upsert_discovered_contracts
 
@@ -215,11 +217,12 @@ class TestBulkUpsertOwnershipGate:
         )
         db_session.commit()
         row = db_session.query(Contract).filter_by(address=addr, chain="ethereum").one()
-        assert row.protocol_id == seed_protocol
+        assert row.protocol_id is None
+        assert row.nominated_protocol_id == seed_protocol
 
-    def test_mixed_sources_promote_to_owned(self, db_session, seed_protocol):
-        """A single high-confidence tag in a mixed source list is enough
-        to assert ownership — corroboration is the whole point."""
+    def test_mixed_sources_nominate_without_stamping(self, db_session, seed_protocol):
+        """A formerly-HIGH tag in a mixed source list changes nothing:
+        one nomination, all tags kept as provenance."""
         from db.models import Contract
         from db.queue import bulk_upsert_discovered_contracts
 
@@ -237,17 +240,18 @@ class TestBulkUpsertOwnershipGate:
         )
         db_session.commit()
         row = db_session.query(Contract).filter_by(address=addr, chain="ethereum").one()
-        assert row.protocol_id == seed_protocol
+        assert row.protocol_id is None
+        assert row.nominated_protocol_id == seed_protocol
+        assert set(row.discovery_sources or []) >= {"dapp_crawl", "ai_inventory"}
 
-    def test_later_high_confidence_source_promotes_orphan(self, db_session, seed_protocol):
-        """Models the real-world cycle: dapp_crawl finds an address first
-        (no ownership), then a deployer_expansion run corroborates →
-        the existing row gets adopted into the protocol."""
+    def test_later_source_corroborates_but_never_promotes(self, db_session, seed_protocol):
+        """The real-world cycle: dapp_crawl first, deployer_expansion later.
+        Corroboration accumulates in ``discovery_sources``; promotion stays
+        with the gate."""
         from db.models import Contract
         from db.queue import bulk_upsert_discovered_contracts
 
         addr = _addr(0xDE03)
-        # First pass: dapp_crawl only → orphan.
         bulk_upsert_discovered_contracts(
             db_session,
             protocol_id=seed_protocol,
@@ -255,7 +259,6 @@ class TestBulkUpsertOwnershipGate:
         )
         db_session.commit()
         assert db_session.query(Contract).filter_by(address=addr).one().protocol_id is None
-        # Second pass: deployer_expansion → adopted.
         bulk_upsert_discovered_contracts(
             db_session,
             protocol_id=seed_protocol,
@@ -263,13 +266,13 @@ class TestBulkUpsertOwnershipGate:
         )
         db_session.commit()
         row = db_session.query(Contract).filter_by(address=addr).one()
-        assert row.protocol_id == seed_protocol
+        assert row.protocol_id is None
+        assert row.nominated_protocol_id == seed_protocol
         # Both sources retained — discovery history is union, not overwrite.
         assert set(row.discovery_sources or []) >= {"dapp_crawl", "deployer_expansion"}
 
     def test_low_confidence_update_does_not_adopt_existing_orphan(self, db_session, seed_protocol):
-        """An orphan row stays orphan when only a low-confidence source
-        shows up — otherwise the gate is just a slower leak."""
+        """An orphan row gains a nomination, never a stamp."""
         from db.models import Contract
         from db.queue import bulk_upsert_discovered_contracts
 
@@ -285,6 +288,7 @@ class TestBulkUpsertOwnershipGate:
         db_session.commit()
         row = db_session.query(Contract).filter_by(address=addr).one()
         assert row.protocol_id is None
+        assert row.nominated_protocol_id == seed_protocol
 
     def test_singular_upsert_helper_is_also_gated(self, db_session, seed_protocol):
         """``upsert_discovered_contract`` (single-row variant) goes through
@@ -304,6 +308,7 @@ class TestBulkUpsertOwnershipGate:
         db_session.commit()
         row = db_session.query(Contract).filter_by(address=addr).one()
         assert row.protocol_id is None
+        assert row.nominated_protocol_id == seed_protocol
 
 
 # ---------------------------------------------------------------------------
