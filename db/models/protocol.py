@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import (
     BigInteger,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
@@ -41,7 +42,9 @@ class Protocol(Base):
     chains: Mapped[list[str] | None] = mapped_column(ARRAY(String(100)), server_default="{}")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
-    contracts: Mapped[list["Contract"]] = relationship("Contract", back_populates="protocol")
+    contracts: Mapped[list["Contract"]] = relationship(
+        "Contract", back_populates="protocol", foreign_keys="Contract.protocol_id"
+    )
     monitored_contracts: Mapped[list["MonitoredContract"]] = relationship(
         "MonitoredContract", backref="protocol", foreign_keys="MonitoredContract.protocol_id"
     )
@@ -209,4 +212,38 @@ class AuditContractCoverage(Base):
             "id",
             postgresql_where=text("equivalence_status = 'pending'"),
         ),
+    )
+
+
+# ``ProtocolDeployer.trust_class`` vocabulary (membership gate, spec §3.3).
+# Class C is the ABSENCE of a row — never a row with a third value.
+DEPLOYER_TRUST_CLASS_A = "A"
+DEPLOYER_TRUST_CLASS_B = "B"
+DEPLOYER_TRUST_CLASSES = frozenset({DEPLOYER_TRUST_CLASS_A, DEPLOYER_TRUST_CLASS_B})
+
+
+class ProtocolDeployer(Base):
+    """A witnessed, dated, revocable deployer-trust fact — never a bare flag.
+
+    EOAs are keyed by address only (chain-agnostic: the same key signs on
+    every chain). ``evidence`` carries the perimeter fact (Class A) or the
+    corroborating member ids + enumeration snapshot + check date (Class B).
+    Revocation preserves the row (``revoked_at`` + ``revocation_reason``).
+    """
+
+    __tablename__ = "protocol_deployers"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    protocol_id: Mapped[int] = mapped_column(Integer, ForeignKey("protocols.id", ondelete="CASCADE"), nullable=False)
+    address: Mapped[str] = mapped_column(String(42), nullable=False)
+    trust_class: Mapped[str] = mapped_column(String(1), nullable=False)
+    evidence: Mapped[Any] = mapped_column(JSONB, nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revocation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        CheckConstraint("trust_class IN ('A', 'B')", name="ck_protocol_deployers_trust_class"),
+        UniqueConstraint("protocol_id", "address", name="uq_protocol_deployers_protocol_address"),
+        Index("ix_protocol_deployers_address", "address"),
     )

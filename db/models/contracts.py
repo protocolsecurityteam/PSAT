@@ -49,6 +49,12 @@ class Contract(Base):
     protocol_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("protocols.id", ondelete="SET NULL"), nullable=True
     )
+    # Which protocol NOMINATED this address (membership gate, spec §3.1).
+    # Never a membership claim: ``protocol_id`` stays the single member stamp,
+    # and only ``services.discovery.membership_gate`` may write it.
+    nominated_protocol_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("protocols.id", ondelete="SET NULL"), nullable=True
+    )
     address: Mapped[str] = mapped_column(String(42), nullable=False)
     source_verified: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     chain: Mapped[str | None] = mapped_column(String(100), nullable=True)
@@ -88,7 +94,7 @@ class Contract(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     job: Mapped[Job] = relationship("Job")
-    protocol: Mapped[Protocol | None] = relationship("Protocol", back_populates="contracts")
+    protocol: Mapped[Protocol | None] = relationship("Protocol", back_populates="contracts", foreign_keys=[protocol_id])
     summary: Mapped["ContractSummary | None"] = relationship(
         "ContractSummary", back_populates="contract", uselist=False, cascade="all, delete-orphan"
     )
@@ -123,6 +129,7 @@ class Contract(Base):
     __table_args__ = (
         Index("ix_contracts_job_id", "job_id"),
         Index("ix_contracts_protocol_id", "protocol_id"),
+        Index("ix_contracts_nominated_protocol_id", "nominated_protocol_id"),
         UniqueConstraint("address", "chain", name="uq_contract_address_chain"),
     )
 
@@ -485,6 +492,117 @@ class ContractCreationWitness(Base):
         CheckConstraint(
             "(code_probe_block IS NULL) = (code_absent_at_probe IS NULL)",
             name="ck_contract_creation_witnesses_code_probe_paired",
+        ),
+    )
+
+
+# ``ContractMembershipWitness.rule`` vocabulary (membership gate, spec §3.2).
+# Deterministic evidence only; no rule may ever be produced from LLM output.
+WITNESS_RULE_W1_CODE = "w1_code"
+WITNESS_RULE_W2_STRUCTURAL = "w2_structural"
+WITNESS_RULE_W3_CONTROL = "w3_control"
+WITNESS_RULE_W4_DEPLOYER = "w4_deployer"
+WITNESS_RULE_W5_HUMAN = "w5_human"
+WITNESS_RULE_W6_LLAMA_SEED = "w6_llama_seed"
+WITNESS_RULES = frozenset(
+    {
+        WITNESS_RULE_W1_CODE,
+        WITNESS_RULE_W2_STRUCTURAL,
+        WITNESS_RULE_W3_CONTROL,
+        WITNESS_RULE_W4_DEPLOYER,
+        WITNESS_RULE_W5_HUMAN,
+        WITNESS_RULE_W6_LLAMA_SEED,
+    }
+)
+# Rules that admit membership on their own. W1 is the code precondition for
+# every promotion (invariant 3) and alone admits nothing.
+ADMITTING_WITNESS_RULES = frozenset(WITNESS_RULES - {WITNESS_RULE_W1_CODE})
+
+
+class ContractMembershipWitness(Base):
+    """One recorded reason a contract is (or was) a member of a protocol.
+
+    Member ⇔ ``contracts.protocol_id`` set AND ≥1 row here with
+    ``revoked_at IS NULL``. Rows are revoked, never deleted (invariant 4).
+    """
+
+    __tablename__ = "contract_membership_witnesses"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    contract_id: Mapped[int] = mapped_column(Integer, ForeignKey("contracts.id", ondelete="CASCADE"), nullable=False)
+    protocol_id: Mapped[int] = mapped_column(Integer, ForeignKey("protocols.id", ondelete="CASCADE"), nullable=False)
+    rule: Mapped[str] = mapped_column(String(32), nullable=False)
+    # The via-fact the witness rests on (member proxy, perimeter controller,
+    # deployer EOA). NULL for rules with no via-fact (w1/w5/w6).
+    via_address: Mapped[str | None] = mapped_column(String(42), nullable=True)
+    evidence: Mapped[Any] = mapped_column(JSONB, nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    contract: Mapped[Contract] = relationship("Contract")
+
+    __table_args__ = (
+        CheckConstraint(
+            "rule IN ('w1_code', 'w2_structural', 'w3_control', 'w4_deployer', 'w5_human', 'w6_llama_seed')",
+            name="ck_contract_membership_witnesses_rule",
+        ),
+        Index("ix_contract_membership_witnesses_contract_id", "contract_id"),
+        Index("ix_contract_membership_witnesses_protocol_id", "protocol_id"),
+        # Uniqueness on (contract, protocol, rule, via_address) — as a partial
+        # pair because Postgres treats NULL ≠ NULL: a plain composite unique
+        # would admit duplicate via-less (w1/w5/w6) rows (same trap
+        # ``uq_contract_address_chain`` already hit; see ``AddressLabel``).
+        Index(
+            "uq_membership_witness_with_via",
+            "contract_id",
+            "protocol_id",
+            "rule",
+            "via_address",
+            unique=True,
+            postgresql_where=text("via_address IS NOT NULL"),
+        ),
+        Index(
+            "uq_membership_witness_no_via",
+            "contract_id",
+            "protocol_id",
+            "rule",
+            unique=True,
+            postgresql_where=text("via_address IS NULL"),
+        ),
+    )
+
+
+class ContractProbeAttempt(Base):
+    """Latest corroboration-probe attempt per (contract, chain) — spec §3.5.
+
+    Exists so a candidate's parked state is explainable from persisted rows
+    (invariant 5): which reads ran, at what block, and what each resolved.
+    Code/creation facts stay in ``contract_creation_witnesses``; this row
+    carries the owner/authority/EIP-1967 reads that table cannot express.
+    """
+
+    __tablename__ = "contract_probe_attempts"
+
+    contract_id: Mapped[int] = mapped_column(Integer, ForeignKey("contracts.id", ondelete="CASCADE"), primary_key=True)
+    chain_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # Height the reads were pinned at. NULL = the probe never reached the wire
+    # (unroutable chain), which ``results.status`` states explicitly.
+    block_number: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # {"status": "probed"|"not_routable", "reads": {read: {ok, value, error}},
+    #  "resolved_addresses": [..]} — the address list feeds the gate's targeted
+    # candidate lookups (spec §3.4 event 2).
+    results: Mapped[Any] = mapped_column(JSONB, nullable=False)
+    probed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    contract: Mapped[Contract] = relationship("Contract")
+
+    __table_args__ = (
+        Index(
+            "ix_contract_probe_attempts_resolved",
+            text("(results->'resolved_addresses')"),
+            postgresql_using="gin",
         ),
     )
 
