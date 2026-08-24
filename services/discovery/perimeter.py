@@ -57,6 +57,7 @@ from sqlalchemy.orm import Session
 from db.models import Contract, ContractDependency, Job, JobStage
 from db.queue import _mainnet_coalesced_chain, create_job, find_existing_job_for_address
 from utils.chains import canonical_chain, chain_enabled
+from utils.logging import record_degraded
 
 logger = logging.getLogger(__name__)
 
@@ -150,23 +151,36 @@ def _parent_company(session: Session, job: Job) -> str | None:
         current_req = parent_job.request if isinstance(parent_job.request, dict) else {}
 
 
-def _structural_ownership(session: Session, job: Job) -> tuple[bool, dict[str, str]]:
-    """``(parent_owns_high, {dep_address: relationship})`` for structural
-    same-protocol components of the parent.
+def _structural_ownership(session: Session, job: Job) -> tuple[bool, dict[str, str], Contract | None]:
+    """``(parent_is_member, {dep_address: relationship}, parent_contract)`` for
+    structural same-protocol components of the parent — the W2 producer's edge
+    walk (spec §3.2).
 
     ``cd.relationship_type`` alone isn't sufficient — it's the classifier's
-    verdict on what kind of contract the dep IS, not the edge semantics. A HIGH
-    ether.fi contract calling Lido stETH has ``relationship_type='proxy'``
-    because stETH is a proxy — that doesn't make stETH ether.fi's structural
-    proxy. We require the proxy/impl/beacon fields on the Contract row to
-    actually link the two.
+    verdict on what kind of contract the dep IS, not the edge semantics. A
+    member ether.fi contract calling Lido stETH has
+    ``relationship_type='proxy'`` because stETH is a proxy — that doesn't make
+    stETH ether.fi's structural proxy. We require the proxy/impl/beacon fields
+    on the Contract row to actually link the two.
+
+    ``library`` is intentionally excluded because the bucket is
+    *heterogeneous*: the classifier's DELEGATECALL-only heuristic correctly
+    identifies real libraries (verified — it does NOT mis-tag the primary
+    proxy→impl edge), but the *targets* mix protocol-internal helpers with
+    shared infrastructure. In a single sample dataset ``BucketLimiter``
+    (etherfi-internal rate limiter) and ``SignatureChecker`` (Circle's USDC
+    helper, shared across protocols) both land in the ``library`` bucket.
+    Admitting either way would be wrong for the other. Until there's a
+    downstream signal that splits "internal helper" from "shared lib,"
+    structural admission skips this relationship type and those rows stay
+    candidates. Same-name address pairs (e.g. two different contracts both
+    called ``EtherFiOracle``) are common — never assume the
+    ``dependency_name`` string equals the parent's identity without checking
+    addresses.
 
     Best-effort: a failure falls back to "no propagation" (the safe default)
     rather than blocking discovery.
     """
-    from services.discovery.source_confidence import asserts_ownership
-
-    parent_owns_high = False
     structural_rel_by_addr: dict[str, str] = {}
     try:
         parent_contract = session.execute(
@@ -174,19 +188,20 @@ def _structural_ownership(session: Session, job: Job) -> tuple[bool, dict[str, s
         ).scalar_one_or_none()
     except Exception as exc:
         logger.debug("Job %s: structural-propagation parent lookup failed: %s", job.id, exc)
-        return False, {}
+        return False, {}, None
     if parent_contract is None:
-        return False, {}
+        return False, {}, None
 
-    parent_sources = getattr(parent_contract, "discovery_sources", None)
-    parent_owns_high = asserts_ownership(list(parent_sources) if parent_sources else None)
+    # Membership, never a source tag: only a member parent's stored resolution
+    # can admit (spec §3.2 W2; supersedes the HIGH-source shortcut).
+    parent_owns_high = getattr(parent_contract, "protocol_id", None) is not None
     parent_id = getattr(parent_contract, "id", None)
     parent_impl = (getattr(parent_contract, "implementation", None) or "").lower() or None
     parent_beacon = (getattr(parent_contract, "beacon", None) or "").lower() or None
     parent_addr_lower = (getattr(parent_contract, "address", None) or "").lower() or None
     parent_chain = _mainnet_coalesced_chain(canonical_chain(getattr(parent_contract, "chain", None)))
     if parent_id is None:
-        return parent_owns_high, {}
+        return parent_owns_high, {}, parent_contract
 
     try:
         dep_rows = list(
@@ -194,7 +209,7 @@ def _structural_ownership(session: Session, job: Job) -> tuple[bool, dict[str, s
         )
     except Exception as exc:
         logger.debug("Job %s: structural-propagation dep-rows lookup failed: %s", job.id, exc)
-        return parent_owns_high, {}
+        return parent_owns_high, {}, parent_contract
 
     # For proxy-direction edges we need to verify the dep's Contract.implementation
     # back-links to the parent. Batch so the loop stays O(deps) not O(deps×SELECTs).
@@ -236,7 +251,115 @@ def _structural_ownership(session: Session, job: Job) -> tuple[bool, dict[str, s
             structurally_linked = parent_beacon is not None and parent_beacon == dep_addr
         if structurally_linked:
             structural_rel_by_addr[dep_addr] = rel
-    return parent_owns_high, structural_rel_by_addr
+    return parent_owns_high, structural_rel_by_addr, parent_contract
+
+
+def produce_structural_witness(
+    session: Session,
+    *,
+    candidate: Contract,
+    parent: Contract,
+    protocol_id: int | None,
+    relationship: str,
+) -> str | None:
+    """W2 producer (spec §3.2, invariant 6): write the witness only when the
+    stored resolution on the rows themselves carries the edge — the parent's
+    ``implementation``/``beacon`` pointer, or the candidate proxy's back-link
+    — never a bare ``relationship_type`` or a request flag.
+
+    Returns the verified edge kind, or None (no witness written). The witness
+    protocol is the PARENT's membership; a parent that is not a member (or is
+    a member of a different protocol than *protocol_id* claims) admits nothing.
+    """
+    from db.models import WITNESS_RULE_W2_STRUCTURAL
+    from services.discovery import membership_gate as gate
+
+    if parent.protocol_id is None:
+        return None
+    if protocol_id is not None and parent.protocol_id != protocol_id:
+        return None
+    # Chain-scoped: a CREATE2 twin on another chain satisfies the bare
+    # address match, so the edge only holds within one chain.
+    parent_chain = _mainnet_coalesced_chain(canonical_chain(parent.chain))
+    candidate_chain = _mainnet_coalesced_chain(canonical_chain(candidate.chain))
+    if parent_chain != candidate_chain:
+        return None
+    candidate_addr = (candidate.address or "").lower()
+    parent_addr = (parent.address or "").lower()
+    if not candidate_addr or not parent_addr:
+        return None
+
+    edge_kind: str | None = None
+    resolved_pointer: str | None = None
+    if relationship == "implementation" and (parent.implementation or "").lower() == candidate_addr:
+        edge_kind, resolved_pointer = "implementation", candidate_addr
+    elif relationship == "beacon" and (parent.beacon or "").lower() == candidate_addr:
+        edge_kind, resolved_pointer = "beacon", candidate_addr
+    elif relationship == "proxy" and (candidate.implementation or "").lower() == parent_addr:
+        edge_kind, resolved_pointer = "proxy", parent_addr
+    if edge_kind is None or resolved_pointer is None:
+        return None
+
+    gate.write_witness(
+        session,
+        contract_id=candidate.id,
+        protocol_id=parent.protocol_id,
+        rule=WITNESS_RULE_W2_STRUCTURAL,
+        evidence=gate.w2_evidence(
+            edge_kind=edge_kind,
+            member_contract_id=parent.id,
+            member_address=parent_addr,
+            resolved_pointer=resolved_pointer,
+        ),
+        via_address=parent_addr,
+    )
+    return edge_kind
+
+
+def _produce_structural_witnesses(
+    session: Session,
+    parent: Contract,
+    rel_by_addr: Mapping[str, str],
+) -> None:
+    """W2 production for structurally-linked deps that already have Contract
+    rows on the parent's chain; a dep with no row yet earns its witness at
+    fetch time from the child request's edge hint (re-verified there).
+    Promotion still requires W1 + the gate's own checks."""
+    from services.discovery import membership_gate as gate
+
+    protocol_id = parent.protocol_id
+    if protocol_id is None or not rel_by_addr:
+        return
+    parent_chain = _mainnet_coalesced_chain(canonical_chain(parent.chain))
+    rows = list(
+        session.execute(
+            select(Contract).where(
+                func.lower(Contract.address).in_(sorted(rel_by_addr)),
+                func.lower(func.coalesce(Contract.chain, "ethereum")) == parent_chain,
+            )
+        ).scalars()
+    )
+    promoted: list[int] = []
+    for row in rows:
+        relationship = rel_by_addr.get((row.address or "").lower())
+        if relationship is None:
+            continue
+        gate.nominate(session, contract=row, protocol_id=protocol_id, source_tag="structural_adoption")
+        if (
+            produce_structural_witness(
+                session, candidate=row, parent=parent, protocol_id=protocol_id, relationship=relationship
+            )
+            is None
+        ):
+            continue
+        was_candidate = row.protocol_id is None
+        if was_candidate and gate.promote(session, contract=row, protocol_id=protocol_id):
+            promoted.append(row.id)
+    session.commit()
+    if promoted:
+        # A promotion is itself new evidence (spec §3.4 event 2d).
+        gate.evaluate(session, gate.FactsDelta(new_member_contract_ids=tuple(promoted)))
+        session.commit()
 
 
 def new_spawn_result(*, site: str, budget: int | None, spawn_depth: int = 0) -> PerimeterSpawnResult:
@@ -358,7 +481,24 @@ def queue_discovered_contracts(
     fp_minted = {a.lower() for a in (fp_materialized_addresses or ()) if a}
 
     parent_company = _parent_company(session, job)
-    parent_owns_high, structural_rel_by_addr = _structural_ownership(session, job)
+    parent_owns_high, structural_rel_by_addr, parent_contract = _structural_ownership(session, job)
+    if getattr(parent_contract, "protocol_id", None) is not None:
+        assert parent_contract is not None
+        # Witness production is evidence recording, not spawn control — a
+        # failure degrades the gate's recall, never the walk.
+        try:
+            _produce_structural_witnesses(session, parent_contract, structural_rel_by_addr)
+        except Exception as exc:
+            session.rollback()
+            logger.warning(
+                "structural witness production failed",
+                extra={"job_id": str(job.id), "exc_type": type(exc).__name__},
+            )
+            record_degraded(
+                phase="structural_witness_production",
+                exc=exc,
+                context={"job_id": str(job.id), "site": site},
+            )
 
     nodes = resolved_graph.get("nodes", []) or []
     root_address = str(resolved_graph.get("root_contract_address", "") or "").lower()
