@@ -31,6 +31,7 @@ from utils.evm import (
     EIP1967_IMPL_SLOT,
     OWNER_SELECTOR,
 )
+from utils.logging import record_degraded
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
@@ -133,6 +134,7 @@ def fetch_creations(
         except Exception as exc:
             # WARNING: a systematic auth/quota failure here silently starves
             # W4 lineage — it must be visible, not per-line DEBUG.
+            record_degraded(phase="membership_probe_creation_fetch", exc=exc, context={"chain_id": chain_id})
             logger.warning(
                 "getcontractcreation failed",
                 extra={"batch_size": len(batch), "chain_id": chain_id, "exc_type": type(exc).__name__},
@@ -241,6 +243,7 @@ def run_probe(session: Session, contract: Contract) -> ProbeResult:
     try:
         creations = fetch_creations(session, [address], chain_id=chain_id)
     except Exception as exc:
+        record_degraded(phase="membership_probe_creation_fetch", exc=exc, context={"address": address})
         logger.warning(
             "creation fetch failed",
             extra={"address": address, "chain_id": chain_id, "exc_type": type(exc).__name__},

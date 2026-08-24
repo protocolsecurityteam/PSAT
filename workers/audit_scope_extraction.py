@@ -343,7 +343,7 @@ class AuditScopeExtractionWorker(AuditRowWorker):
 
     @staticmethod
     def _maybe_backfill_date(audit: AuditReport, candidate: str | None) -> None:
-        """Overwrite ``audit.date`` when the existing value is null or partial.
+        """Overwrite ``audit.date`` when the existing value is missing or partial.
 
         Discovery-time dates are best-effort (filename parsing), so nulls
         and ``YYYY-MM-00`` placeholders are common. When the extractor

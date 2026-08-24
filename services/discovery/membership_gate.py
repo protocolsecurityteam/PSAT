@@ -21,6 +21,7 @@ from sqlalchemy import any_ as sql_any_
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from db.jsonb import jsonb_has_payload
 from db.models import (
     ADMITTING_WITNESS_RULES,
     DEPLOYER_TRUST_CLASS_A,
@@ -45,6 +46,7 @@ from db.models import (
 )
 from services.clients.rpc import chain_id_for_chain_name
 from utils.chains import canonical_chain
+from utils.logging import record_degraded
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
@@ -885,7 +887,7 @@ def _perimeter_fact(session: Session, *, protocol_id: int, address: str) -> dict
         .where(
             EffectiveFunction.contract_id.in_(members),
             FunctionPrincipal.resolved_type == "safe",
-            FunctionPrincipal.details.is_not(None),
+            jsonb_has_payload(FunctionPrincipal.details),
         )
     ).all()
     for fp_id, safe_address, details in safe_rows:
@@ -1397,6 +1399,7 @@ def evaluate_committed(
         session.commit()
     except Exception as exc:
         session.rollback()
+        record_degraded(phase="membership_gate_evaluate", exc=exc, context={"context": context})
         logger.warning(
             "membership gate evaluation failed",
             extra={"context": context, "exc_type": type(exc).__name__, "error": str(exc)[:300]},
@@ -1565,6 +1568,7 @@ def _reclassify_deployers(
                 try:
                     enum_cache[deployer] = deployer_enumerator(deployer)
                 except Exception as exc:
+                    record_degraded(phase="membership_deployer_enumeration", exc=exc, context={"address": deployer})
                     logger.warning(
                         "deployer enumeration failed",
                         extra={"address": deployer, "exc_type": type(exc).__name__},
@@ -1802,11 +1806,10 @@ def _derive_admitting_facts(
     # entity (the gate proves transitivity here; a caller cannot assert it).
     own_controllers: list[tuple[str, str]] = []
     for (value,) in session.execute(
-        select(ControllerValue.value)
-        .where(ControllerValue.contract_id == contract.id, ControllerValue.value.is_not(None))
-        .distinct()
+        select(ControllerValue.value).where(ControllerValue.contract_id == contract.id).distinct()
     ):
-        own_controllers.append(("controller_values", (value or "").lower()))
+        if value:
+            own_controllers.append(("controller_values", value.lower()))
     admin_pointer = (contract.admin or "").lower()
     if admin_pointer:
         own_controllers.append(("proxy_admin_slot", admin_pointer))

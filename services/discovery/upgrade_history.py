@@ -788,6 +788,7 @@ def backfill_historical_impl_contracts(
                 session.commit()
             except Exception as exc:
                 session.rollback()
+                record_degraded(phase="historical_impl_probe", exc=exc, context={"address": addr})
                 logger.warning("Historical-impl probe failed for %s: %s", addr, exc)
 
     membership_gate.evaluate_committed(

@@ -111,9 +111,7 @@ def _seed_adoption_graph(session, proto_id, *, impl_chain):
     impl = Contract(address=impl_addr.lower(), chain=impl_chain, protocol_id=proto_id, is_proxy=False)
     session.add_all([proxy, impl])
     session.add(
-        ContractCreationWitness(
-            chain_id=1, address=proxy_addr.lower(), code_probe_block=10, code_absent_at_probe=False
-        )
+        ContractCreationWitness(chain_id=1, address=proxy_addr.lower(), code_probe_block=10, code_absent_at_probe=False)
     )
     session.commit()
     return job, proxy_addr, impl_addr
