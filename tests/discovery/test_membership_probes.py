@@ -211,6 +211,62 @@ def test_probe_reads_resolving_nowhere_keep_parked_explainable(db_session, monke
     assert attempt.results["resolved_addresses"] == []
 
 
+@pytest.mark.parametrize("bad_code", [None, 42, "not-hex", "0xzz", "0x123"])
+def test_probe_malformed_getcode_never_mints_a_verdict(db_session, monkeypatch, erpc_env, bad_code):
+    # Only a well-formed hex string is a code verdict; None / missing /
+    # garbage / odd-length hex must never prove presence OR absence.
+    protocol = _protocol(db_session)
+    row = _contract(db_session, ADDR(0x110), nominated=protocol.id)
+    _stub_wire(monkeypatch, code=bad_code)
+
+    result = gate.probe(db_session, row)
+
+    assert result.routable is True
+    assert result.code_present is None
+    assert db_session.get(ContractCreationWitness, (1, row.address)) is None
+    attempt = db_session.get(ContractProbeAttempt, (row.id, 1))
+    assert attempt is not None and attempt.results["status"] == "rpc_error"
+    assert gate.resolve_membership_state(db_session, row) == "candidate"
+
+
+def test_probe_real_bytecode_is_a_present_verdict(db_session, monkeypatch, erpc_env):
+    protocol = _protocol(db_session)
+    row = _contract(db_session, ADDR(0x111), nominated=protocol.id)
+    _stub_wire(monkeypatch, code="0x608060405234801561001057600080fd5b50")
+
+    result = gate.probe(db_session, row)
+
+    assert result.code_present is True
+    witness = db_session.get(ContractCreationWitness, (1, row.address))
+    assert witness is not None and witness.code_absent_at_probe is False
+
+
+def test_failed_reprobe_preserves_last_good_results(db_session, monkeypatch, erpc_env):
+    protocol = _protocol(db_session)
+    row = _contract(db_session, ADDR(0x112), nominated=protocol.id)
+    _stub_wire(monkeypatch, owner_result=EthCallResult(True, _word(_OWNER), None, None))
+    gate.probe(db_session, row)
+    attempt = db_session.get(ContractProbeAttempt, (row.id, 1))
+    assert attempt is not None and _OWNER in attempt.results["resolved_addresses"]
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("RPC request failed")
+
+    monkeypatch.setattr(probes, "rpc_request", boom)
+    gate.probe(db_session, row)
+
+    # The failed attempt lands as last_error; the good reads survive.
+    attempt = db_session.get(ContractProbeAttempt, (row.id, 1))
+    assert attempt is not None
+    assert attempt.results["status"] == "probed"
+    assert _OWNER in attempt.results["resolved_addresses"]
+    assert attempt.results["last_error"]["status"] == "rpc_error"
+    assert attempt.block_number == 100
+    # Targeted lookup still reaches the candidate through the preserved reads.
+    result = gate.evaluate(db_session, gate.FactsDelta(new_edge_addresses=(_OWNER,)))
+    assert row.id in result.targeted_contract_ids
+
+
 def test_fetch_creations_batches_five_per_call(db_session, monkeypatch):
     addresses = [ADDR(0x200 + n) for n in range(7)]
     calls: list[str] = []

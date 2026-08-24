@@ -182,6 +182,18 @@ def test_nominate_sets_nominated_never_protocol_id(db_session):
     assert "defillama" in (row.discovery_sources or [])
 
 
+def test_nominate_member_keeps_own_protocol_in_empty_slot(db_session):
+    # A foreign nomination may never claim a member's NULL nominated slot —
+    # that slot is the member's own demotion provenance (invariant 4).
+    p1 = _protocol(db_session)
+    p2 = _protocol(db_session)
+    row = _contract(db_session, ADDR(22), protocol_id=p1.id)
+    gate.nominate(db_session, contract=row, protocol_id=p2.id, source_tag="defillama")
+    assert row.protocol_id == p1.id
+    assert row.nominated_protocol_id == p1.id
+    assert "defillama" in (row.discovery_sources or [])
+
+
 def test_nominate_first_nominator_wins(db_session):
     p1 = _protocol(db_session)
     p2 = _protocol(db_session)
@@ -221,6 +233,26 @@ def test_write_witness_rejects_unknown_rule_and_empty_evidence(db_session):
         gate.write_witness(
             db_session, contract_id=row.id, protocol_id=protocol.id, rule=WITNESS_RULE_W1_CODE, evidence={}
         )
+
+
+def test_write_witness_refuses_hand_rolled_evidence(db_session):
+    # Invariant 2: only constructor-shaped evidence is admissible per rule.
+    protocol = _protocol(db_session)
+    row = _contract(db_session, ADDR(34), nominated_protocol_id=protocol.id)
+    good = gate.w1_evidence(chain_id=1, code_probe_block=5)
+    for bad in (
+        {"code_present": True},  # missing the block-stamp + chain
+        {**good, "note": "extra"},  # extra field
+        {**good, "code_present": False},  # non-canonical value
+        gate.w2_evidence(
+            edge_kind="implementation", member_contract_id=1, member_address=ADDR(1), resolved_pointer=ADDR(2)
+        ),  # wrong rule's shape
+    ):
+        with pytest.raises(ValueError):
+            gate.write_witness(
+                db_session, contract_id=row.id, protocol_id=protocol.id, rule=WITNESS_RULE_W1_CODE, evidence=bad
+            )
+    assert db_session.query(ContractMembershipWitness).filter_by(contract_id=row.id).count() == 0
 
 
 def test_revoke_preserves_row_and_reobservation_rearms(db_session):
@@ -332,6 +364,51 @@ def test_promote_with_w1_and_admitting_marks_dirty(db_session):
     enrollment, scoring = _dirty_protocols(db_session)
     assert protocol.id in enrollment
     assert protocol.id in scoring
+
+
+def test_promote_requires_w1_on_contracts_own_chain(db_session):
+    protocol = _protocol(db_session)
+    member = _contract(db_session, ADDR(47), protocol_id=protocol.id)
+
+    def _admit(row: Contract) -> None:
+        gate.write_witness(
+            db_session,
+            contract_id=row.id,
+            protocol_id=protocol.id,
+            rule=WITNESS_RULE_W2_STRUCTURAL,
+            evidence=gate.w2_evidence(
+                edge_kind="implementation",
+                member_contract_id=member.id,
+                member_address=member.address,
+                resolved_pointer=row.address,
+            ),
+            via_address=member.address,
+        )
+
+    # W1 probed on a DIFFERENT chain than the contract's own row proves nothing.
+    wrong_chain = _contract(db_session, ADDR(48), nominated_protocol_id=protocol.id)
+    gate.write_witness(
+        db_session,
+        contract_id=wrong_chain.id,
+        protocol_id=protocol.id,
+        rule=WITNESS_RULE_W1_CODE,
+        evidence=gate.w1_evidence(chain_id=8453, code_probe_block=5),
+    )
+    _admit(wrong_chain)
+    assert gate.promote(db_session, contract=wrong_chain, protocol_id=protocol.id) is False
+    assert wrong_chain.protocol_id is None
+
+    # A row whose chain never resolves can never satisfy W1.
+    no_chain = _contract(db_session, ADDR(49), chain="unknown", nominated_protocol_id=protocol.id)
+    gate.write_witness(
+        db_session,
+        contract_id=no_chain.id,
+        protocol_id=protocol.id,
+        rule=WITNESS_RULE_W1_CODE,
+        evidence=gate.w1_evidence(chain_id=1, code_probe_block=5),
+    )
+    _admit(no_chain)
+    assert gate.promote(db_session, contract=no_chain, protocol_id=protocol.id) is False
 
 
 def test_promote_never_overwrites_other_membership(db_session):

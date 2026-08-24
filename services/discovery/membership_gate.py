@@ -16,8 +16,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Literal, Sequence
 
-from sqlalchemy import Text, cast, func, literal, select
-from sqlalchemy.dialects.postgresql import ARRAY, JSONB
+from sqlalchemy import Text, case, cast, func, select, text
+from sqlalchemy.dialects.postgresql import ARRAY
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from db.models import (
     ADMITTING_WITNESS_RULES,
@@ -29,6 +30,7 @@ from db.models import (
     WITNESS_RULE_W3_CONTROL,
     WITNESS_RULE_W4_DEPLOYER,
     WITNESS_RULE_W5_HUMAN,
+    WITNESS_RULE_W6_LLAMA_SEED,
     WITNESS_RULES,
     Contract,
     ContractCreationWitness,
@@ -200,6 +202,50 @@ def w6_evidence(
     return evidence
 
 
+def _rebuild_evidence(rule: str, evidence: dict[str, Any]) -> dict[str, Any]:
+    """Round-trip *evidence* through its rule's constructor. Raises on any
+    field the constructor would refuse; the caller compares the result for
+    equality so extra/misplaced fields are refused too."""
+
+    def picked(*keys: str) -> dict[str, Any]:
+        return {key: evidence.get(key) for key in keys}
+
+    if rule == WITNESS_RULE_W1_CODE:
+        return w1_evidence(**picked("chain_id", "code_probe_block"))
+    if rule == WITNESS_RULE_W2_STRUCTURAL:
+        return w2_evidence(**picked("edge_kind", "member_contract_id", "member_address", "resolved_pointer"))
+    if rule == WITNESS_RULE_W3_CONTROL:
+        kwargs = picked("direction", "source")
+        kwargs["via_address"] = evidence.get("via")
+        if evidence.get("direction") == W3_DIRECTION_D1:
+            kwargs["via_transitive"] = evidence.get("via_transitive")
+        return w3_evidence(**kwargs)
+    if rule == WITNESS_RULE_W4_DEPLOYER:
+        return w4_evidence(**picked("deployer_address", "deployer_registry_id", "creation_tx_hash", "creation_block"))
+    if rule == WITNESS_RULE_W5_HUMAN:
+        raw = evidence.get("asserted_at")
+        if not isinstance(raw, str):
+            raise ValueError("asserted_at must be an ISO-8601 string")
+        return w5_evidence(**picked("actor"), asserted_at=datetime.fromisoformat(raw))
+    if rule == WITNESS_RULE_W6_LLAMA_SEED:
+        return w6_evidence(**picked("adapter_slug", "chain_id", "code_probe_block", "listing_url"))
+    raise ValueError(f"no evidence constructor for rule {rule!r}")
+
+
+def _validate_evidence(rule: str, evidence: Any) -> dict[str, Any]:
+    """Invariant 2: a witness row's evidence must be exactly what its rule's
+    constructor produces — a hand-rolled dict with the wrong shape is refused."""
+    if not isinstance(evidence, dict) or not evidence:
+        raise ValueError("evidence must be a non-empty dict built by a rule constructor")
+    try:
+        rebuilt = _rebuild_evidence(rule, evidence)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"evidence shape invalid for {rule}: {exc}") from exc
+    if rebuilt != evidence:
+        raise ValueError(f"evidence shape invalid for {rule}: unexpected or non-canonical fields")
+    return evidence
+
+
 # ---------------------------------------------------------------------------
 # Membership state (spec §3.1) — derived, never a parallel status column
 # ---------------------------------------------------------------------------
@@ -240,10 +286,25 @@ def nominate(session: Session, *, contract: Contract, protocol_id: int, source_t
 
     Sets ``nominated_protocol_id``, never ``protocol_id``. The first
     nomination wins; a differing later one is logged and kept as provenance in
-    ``discovery_sources`` only.
+    ``discovery_sources`` only. An existing MEMBER's empty nomination slot
+    belongs to its own protocol (demotion provenance, invariant 4) — a foreign
+    nomination may never claim it.
     """
     _require_positive_int(protocol_id, "protocol_id")
-    if contract.nominated_protocol_id is None:
+    if contract.protocol_id is not None:
+        if contract.nominated_protocol_id is None:
+            contract.nominated_protocol_id = contract.protocol_id
+        if protocol_id != contract.protocol_id:
+            logger.info(
+                "foreign nomination of an existing member recorded as provenance only",
+                extra={
+                    "contract_id": contract.id,
+                    "member_of": contract.protocol_id,
+                    "late_protocol_id": protocol_id,
+                    "source_tag": source_tag,
+                },
+            )
+    elif contract.nominated_protocol_id is None:
         contract.nominated_protocol_id = protocol_id
     elif contract.nominated_protocol_id != protocol_id:
         logger.info(
@@ -276,46 +337,48 @@ def write_witness(
     evidence: dict[str, Any],
     via_address: str | None = None,
 ) -> ContractMembershipWitness:
-    """Idempotent witness upsert on (contract, protocol, rule, via_address).
+    """Race-safe idempotent witness upsert on (contract, protocol, rule, via_address).
 
-    The unique key admits one row per fact, so a re-observation of a revoked
-    fact re-arms the SAME row (revocation cleared, evidence refreshed) — the
-    revocation itself stays in the log, never in a second row.
+    One ``INSERT .. ON CONFLICT`` against the partial unique index the key
+    lands on. The unique key admits one row per fact, so a re-observation of a
+    REVOKED fact re-arms the SAME row (revocation cleared, evidence refreshed)
+    — the revocation itself stays in the log, never in a second row; an
+    ACTIVE row keeps its original evidence and ``observed_at``.
     """
     if rule not in WITNESS_RULES:
         raise ValueError(f"rule must be one of {sorted(WITNESS_RULES)}, got {rule!r}")
-    if not isinstance(evidence, dict) or not evidence:
-        raise ValueError("evidence must be a non-empty dict built by a rule constructor")
+    _validate_evidence(rule, evidence)
     via = _require_address(via_address, "via_address") if via_address is not None else None
-    stmt = select(ContractMembershipWitness).where(
-        ContractMembershipWitness.contract_id == contract_id,
-        ContractMembershipWitness.protocol_id == protocol_id,
-        ContractMembershipWitness.rule == rule,
-        ContractMembershipWitness.via_address.is_(None)
-        if via is None
-        else ContractMembershipWitness.via_address == via,
+    was_revoked = ContractMembershipWitness.revoked_at.is_not(None)
+    stmt = pg_insert(ContractMembershipWitness).values(
+        contract_id=contract_id,
+        protocol_id=protocol_id,
+        rule=rule,
+        via_address=via,
+        evidence=evidence,
+        observed_at=func.now(),
     )
-    row = session.execute(stmt).scalar_one_or_none()
-    if row is None:
-        row = ContractMembershipWitness(
-            contract_id=contract_id,
-            protocol_id=protocol_id,
-            rule=rule,
-            via_address=via,
-            evidence=evidence,
-            observed_at=_utcnow(),
+    set_ = {
+        "revoked_at": None,
+        "evidence": case((was_revoked, stmt.excluded.evidence), else_=ContractMembershipWitness.evidence),
+        "observed_at": case((was_revoked, func.now()), else_=ContractMembershipWitness.observed_at),
+    }
+    if via is None:
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["contract_id", "protocol_id", "rule"],
+            index_where=text("via_address IS NULL"),
+            set_=set_,
         )
-        session.add(row)
-        session.flush()
-        return row
-    if row.revoked_at is not None:
-        row.revoked_at = None
-        row.evidence = evidence
-        row.observed_at = _utcnow()
-        logger.info(
-            "witness re-earned",
-            extra={"witness_id": row.id, "contract_id": contract_id, "rule": rule, "via_address": via},
+    else:
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["contract_id", "protocol_id", "rule", "via_address"],
+            index_where=text("via_address IS NOT NULL"),
+            set_=set_,
         )
+    witness_id = session.execute(stmt.returning(ContractMembershipWitness.id)).scalar_one()
+    row = session.get(ContractMembershipWitness, witness_id)
+    assert row is not None  # the upsert just returned this id
+    session.refresh(row)
     return row
 
 
@@ -379,7 +442,15 @@ def promote(session: Session, *, contract: Contract, protocol_id: int) -> bool:
         return False
     rows = active_witnesses(session, contract_id=contract.id, protocol_id=protocol_id)
     rules = {row.rule for row in rows}
-    has_w1 = WITNESS_RULE_W1_CODE in rules
+    # W1 must be a code proof on the CONTRACT'S OWN chain — a witness probed
+    # elsewhere (or a row whose chain never resolves) satisfies nothing.
+    expected_chain = chain_id_for_chain_name(contract.chain)
+    has_w1 = expected_chain is not None and any(
+        row.rule == WITNESS_RULE_W1_CODE
+        and isinstance(row.evidence, dict)
+        and row.evidence.get("chain_id") == expected_chain
+        for row in rows
+    )
     admitting = sorted(rules & ADMITTING_WITNESS_RULES)
     if not has_w1 or not admitting:
         logger.info(
@@ -387,7 +458,8 @@ def promote(session: Session, *, contract: Contract, protocol_id: int) -> bool:
             extra={
                 "contract_id": contract.id,
                 "protocol_id": protocol_id,
-                "missing": "w1_code" if not has_w1 else "admitting_witness",
+                "missing": "w1_code_for_contract_chain" if not has_w1 else "admitting_witness",
+                "contract_chain": contract.chain,
                 "active_rules": sorted(rules),
             },
         )
@@ -467,18 +539,23 @@ def _perimeter_fact(session: Session, *, protocol_id: int, address: str) -> dict
     ).first()
     if fp is not None:
         return {"kind": "function_principal", "function_principal_id": fp[0], "function_id": fp[1]}
-    safe = session.execute(
-        select(FunctionPrincipal.id, FunctionPrincipal.address)
+    # Owner matching happens in Python so stored casing can never hide a
+    # signer: the persisted owner strings are lowercased on read.
+    safe_rows = session.execute(
+        select(FunctionPrincipal.id, FunctionPrincipal.address, FunctionPrincipal.details)
         .join(EffectiveFunction, FunctionPrincipal.function_id == EffectiveFunction.id)
         .where(
             EffectiveFunction.contract_id.in_(members),
             FunctionPrincipal.resolved_type == "safe",
-            FunctionPrincipal.details.op("->")("owners").op("@>")(literal([address], JSONB)),
+            FunctionPrincipal.details.is_not(None),
         )
-        .limit(1)
-    ).first()
-    if safe is not None:
-        return {"kind": "safe_owner", "function_principal_id": safe[0], "safe_address": (safe[1] or "").lower()}
+    ).all()
+    for fp_id, safe_address, details in safe_rows:
+        owners = details.get("owners") if isinstance(details, dict) else None
+        if not isinstance(owners, list):
+            continue
+        if any(isinstance(owner, str) and owner.lower() == address for owner in owners):
+            return {"kind": "safe_owner", "function_principal_id": fp_id, "safe_address": (safe_address or "").lower()}
     return None
 
 
@@ -628,30 +705,27 @@ def register_deployer(
     if classification.trust_class not in DEPLOYER_TRUST_CLASSES:
         raise ValueError("Class C is the absence of a registry row; nothing to register")
     addr = _require_address(address, "address")
-    row = session.execute(
-        select(ProtocolDeployer).where(ProtocolDeployer.protocol_id == protocol_id, ProtocolDeployer.address == addr)
-    ).scalar_one_or_none()
-    if row is None:
-        row = ProtocolDeployer(
-            protocol_id=protocol_id,
-            address=addr,
-            trust_class=classification.trust_class,
-            evidence=classification.evidence,
-            observed_at=_utcnow(),
-        )
-        session.add(row)
-        session.flush()
-        return row
-    row.trust_class = classification.trust_class
-    row.evidence = classification.evidence
-    row.observed_at = _utcnow()
-    if row.revoked_at is not None:
-        logger.info(
-            "deployer registry row re-earned",
-            extra={"protocol_id": protocol_id, "address": addr, "trust_class": classification.trust_class},
-        )
-        row.revoked_at = None
-        row.revocation_reason = None
+    stmt = pg_insert(ProtocolDeployer).values(
+        protocol_id=protocol_id,
+        address=addr,
+        trust_class=classification.trust_class,
+        evidence=classification.evidence,
+        observed_at=func.now(),
+    )
+    stmt = stmt.on_conflict_do_update(
+        constraint="uq_protocol_deployers_protocol_address",
+        set_={
+            "trust_class": classification.trust_class,
+            "evidence": classification.evidence,
+            "observed_at": func.now(),
+            "revoked_at": None,
+            "revocation_reason": None,
+        },
+    )
+    row_id = session.execute(stmt.returning(ProtocolDeployer.id)).scalar_one()
+    row = session.get(ProtocolDeployer, row_id)
+    assert row is not None  # the upsert just returned this id
+    session.refresh(row)
     return row
 
 
@@ -795,9 +869,10 @@ def _target_candidates(session: Session, facts_delta: FactsDelta) -> set[int]:
                 .join(ContractProbeAttempt, ContractProbeAttempt.contract_id == Contract.id)
                 .where(
                     *candidate,
-                    func.jsonb_exists_any(
-                        ContractProbeAttempt.results.op("->")("resolved_addresses"),
-                        cast(perimeter_delta, ARRAY(Text())),
+                    # ``?|`` (not jsonb_exists_any): only the operator form is
+                    # served by the GIN index on results->'resolved_addresses'.
+                    ContractProbeAttempt.results.op("->")("resolved_addresses").op("?|")(
+                        cast(perimeter_delta, ARRAY(Text()))
                     ),
                 )
             ).scalars()

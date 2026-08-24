@@ -86,14 +86,25 @@ def _persist_attempt(
     block_number: int | None,
     results: dict[str, Any],
 ) -> None:
+    """Latest-wins for a successful probe; a FAILED attempt never destroys the
+    last good ``probed`` results (their ``resolved_addresses`` still feed the
+    gate's targeted lookups) — it lands as ``last_error`` on top of them."""
     key_chain = UNRESOLVABLE_CHAIN_ID if chain_id is None else chain_id
     row = session.get(ContractProbeAttempt, (contract_id, key_chain))
     if row is None:
         row = ContractProbeAttempt(contract_id=contract_id, chain_id=key_chain, results=results)
+        row.block_number = block_number
         session.add(row)
-    else:
+    elif results.get("status") == STATUS_PROBED:
         row.results = results
-    row.block_number = block_number
+        row.block_number = block_number
+    else:
+        prev = row.results if isinstance(row.results, dict) else {}
+        if prev.get("status") == STATUS_PROBED:
+            row.results = {**prev, "last_error": results}
+        else:
+            row.results = results
+            row.block_number = block_number
     session.flush()
 
 
@@ -120,7 +131,12 @@ def fetch_creations(
                 contractaddresses=",".join(batch),
             )
         except Exception as exc:
-            logger.debug("getcontractcreation failed for %s: %s", batch, exc)
+            # WARNING: a systematic auth/quota failure here silently starves
+            # W4 lineage — it must be visible, not per-line DEBUG.
+            logger.warning(
+                "getcontractcreation failed",
+                extra={"batch_size": len(batch), "chain_id": chain_id, "exc_type": type(exc).__name__},
+            )
             continue
         result = data.get("result") if isinstance(data, dict) else None
         if not isinstance(result, list):
@@ -164,6 +180,21 @@ def _coerce_block(value: Any) -> int | None:
     return None
 
 
+def _code_verdict(code: Any) -> bool | None:
+    """``eth_getCode`` result → code-present verdict, or None for no verdict.
+
+    Only a well-formed hex string proves anything: ``"0x"`` proves absence,
+    non-empty even-length hex proves presence. None / missing / malformed is a
+    transport artifact and must never mint a code verdict either way.
+    """
+    if not isinstance(code, str) or not code.startswith("0x"):
+        return None
+    body = code[2:].lower()
+    if body and (len(body) % 2 or set(body) - set("0123456789abcdef")):
+        return None
+    return bool(body)
+
+
 def _record_code_probe(session: Session, *, chain_id: int, address: str, block_number: int, code_absent: bool) -> None:
     row = session.get(ContractCreationWitness, (chain_id, address))
     if row is None:
@@ -196,7 +227,12 @@ def run_probe(session: Session, contract: Contract) -> ProbeResult:
         _persist_attempt(session, contract_id=contract.id, chain_id=chain_id, block_number=None, results=results)
         return ProbeResult(contract_id=contract.id, chain_id=chain_id, routable=True, attempts=results)
 
-    code_absent = not isinstance(code, str) or code in ("0x", "0x0", "")
+    code_present = _code_verdict(code)
+    if code_present is None:
+        results = {"status": STATUS_RPC_ERROR, "error": f"malformed eth_getCode result: {str(code)[:100]!r}"}
+        _persist_attempt(session, contract_id=contract.id, chain_id=chain_id, block_number=None, results=results)
+        return ProbeResult(contract_id=contract.id, chain_id=chain_id, routable=True, attempts=results)
+    code_absent = not code_present
     _record_code_probe(session, chain_id=chain_id, address=address, block_number=block_number, code_absent=code_absent)
 
     creation_tx: str | None = None
@@ -205,7 +241,10 @@ def run_probe(session: Session, contract: Contract) -> ProbeResult:
     try:
         creations = fetch_creations(session, [address], chain_id=chain_id)
     except Exception as exc:
-        logger.debug("creation fetch failed for %s: %s", address, exc)
+        logger.warning(
+            "creation fetch failed",
+            extra={"address": address, "chain_id": chain_id, "exc_type": type(exc).__name__},
+        )
         creations = {}
     if address in creations:
         creation_tx, creation_block, deployer = creations[address]

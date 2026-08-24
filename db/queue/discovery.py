@@ -240,9 +240,11 @@ def _merge_protocol_into(session: Session, src: Protocol, dst: Protocol) -> None
     """Reassign every protocols.id FK from ``src`` to ``dst``, then delete src.
 
     Used when ``get_or_create_protocol`` discovers that a pre-resolver row
-    (NULL canonical_slug) is a duplicate of a freshly-resolved family. None
-    of the dependent tables have a UNIQUE(protocol_id, …) constraint, so the
-    bulk UPDATE never conflicts.
+    (NULL canonical_slug) is a duplicate of a freshly-resolved family.
+    ``contract_membership_witnesses`` and ``protocol_deployers`` DO carry
+    (protocol_id, …) uniqueness, so a src+dst pair holding the same key can
+    conflict here; the merge becomes a membership-gate operation (spec §5.2)
+    in a later change. The remaining tables have no such constraint.
     """
     if src.id == dst.id:
         return
