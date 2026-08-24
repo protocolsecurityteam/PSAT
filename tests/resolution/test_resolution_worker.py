@@ -891,10 +891,21 @@ class TestStructuralOwnershipPropagation:
     These tests pin the exact behaviour the PR-87 review surfaced as
     correct: only edges whose recorded proxy/beacon fields actually
     link parent and dep grant structural propagation. The Lido stETH
-    shape (HIGH parent has a ``relationship_type='proxy'`` dep edge,
+    shape (member parent has a ``relationship_type='proxy'`` dep edge,
     but the parent's ``implementation`` field doesn't point to the
-    dep) must NOT propagate ownership.
+    dep) must NOT propagate ownership. Under the membership gate,
+    ``parent_owns_high`` is derived from the parent's MEMBERSHIP
+    (``protocol_id`` set), never its source tags.
     """
+
+    @staticmethod
+    def _member_protocol(db_session) -> int:
+        from db.models import Protocol
+
+        row = Protocol(name=f"struct-prop-{uuid.uuid4().hex[:12]}")
+        db_session.add(row)
+        db_session.commit()
+        return row.id
 
     @staticmethod
     def _make_parent(
@@ -979,7 +990,7 @@ class TestStructuralOwnershipPropagation:
     def test_implementation_edge_grants_structural_ownership(
         self, db_session_for_resolution, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """HIGH parent + ``relationship_type='implementation'`` edge +
+        """Member parent + ``relationship_type='implementation'`` edge +
         ``parent.implementation == dep_addr`` → child request carries
         ``discovery_relationship='implementation'`` and
         ``parent_owns_high=True``. This is the strongest case for
@@ -988,7 +999,7 @@ class TestStructuralOwnershipPropagation:
         dep_addr = ("0x" + uuid.uuid4().hex[:40].zfill(40)).lower()
         parent = self._make_parent(
             session,
-            protocol_id=None,
+            protocol_id=self._member_protocol(session),
             sources=["deployer_expansion"],
             implementation=dep_addr,
         )
@@ -1030,13 +1041,13 @@ class TestStructuralOwnershipPropagation:
     def test_beacon_edge_grants_structural_ownership(
         self, db_session_for_resolution, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """HIGH parent + ``relationship_type='beacon'`` edge +
+        """Member parent + ``relationship_type='beacon'`` edge +
         ``parent.beacon == dep_addr`` → child inherits."""
         session = db_session_for_resolution
         dep_addr = ("0x" + uuid.uuid4().hex[:40].zfill(40)).lower()
         parent = self._make_parent(
             session,
-            protocol_id=None,
+            protocol_id=self._member_protocol(session),
             sources=["ai_inventory"],
             beacon=dep_addr,
         )
@@ -1071,12 +1082,13 @@ class TestStructuralOwnershipPropagation:
         session = db_session_for_resolution
         parent_addr = ("0x" + uuid.uuid4().hex[:40].zfill(40)).lower()
         dep_addr = ("0x" + uuid.uuid4().hex[:40].zfill(40)).lower()
+        protocol_id = self._member_protocol(session)
 
         from db.models import Contract, ContractDependency
 
         parent = Contract(
             address=parent_addr,
-            protocol_id=None,
+            protocol_id=protocol_id,
             contract_name="ImplParent",
             discovery_sources=["defillama"],
         )
@@ -1099,6 +1111,18 @@ class TestStructuralOwnershipPropagation:
                 relationship_type="proxy",
                 source=["dynamic"],
             )
+        )
+        session.commit()
+
+        # The witness pass runs the event-1 probe for unprobed candidates;
+        # this test pins the W2 edge logic, so mark the dep already probed
+        # (chain is NULL here → the unresolvable-chain attempt key).
+        from db.models import ContractProbeAttempt
+        from services.discovery.probes import UNRESOLVABLE_CHAIN_ID
+
+        dep_row_id = session.query(Contract).filter_by(address=dep_addr).one().id
+        session.add(
+            ContractProbeAttempt(contract_id=dep_row_id, chain_id=UNRESOLVABLE_CHAIN_ID, results={"status": "probed"})
         )
         session.commit()
 
@@ -1132,6 +1156,23 @@ class TestStructuralOwnershipPropagation:
         assert create_calls[0]["discovery_relationship"] == "proxy"
         assert create_calls[0]["parent_owns_high"] is True
 
+        # The perimeter is the W2 producer now: the back-linked dep row was
+        # nominated and earned a structural witness via the member parent —
+        # but no protocol_id stamp (W1 is still missing).
+        from db.models import WITNESS_RULE_W2_STRUCTURAL, ContractMembershipWitness
+
+        dep_row = session.query(Contract).filter_by(address=dep_addr).one()
+        assert dep_row.protocol_id is None
+        assert dep_row.nominated_protocol_id == protocol_id
+        witness = (
+            session.query(ContractMembershipWitness)
+            .filter_by(contract_id=dep_row.id, rule=WITNESS_RULE_W2_STRUCTURAL)
+            .one()
+        )
+        assert witness.via_address == parent_addr
+        assert witness.revoked_at is None
+        assert witness.evidence["edge_kind"] == "proxy"
+
     @requires_postgres
     def test_proxy_back_link_on_another_chain_does_not_propagate(
         self, db_session_for_resolution, monkeypatch: pytest.MonkeyPatch
@@ -1148,7 +1189,7 @@ class TestStructuralOwnershipPropagation:
         parent = Contract(
             address=parent_addr,
             chain="ethereum",
-            protocol_id=None,
+            protocol_id=self._member_protocol(session),
             contract_name="ImplParent",
             discovery_sources=["defillama"],
         )
@@ -1211,19 +1252,19 @@ class TestStructuralOwnershipPropagation:
     def test_relationship_type_alone_does_not_propagate(
         self, db_session_for_resolution, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Regression for the PR-87 review bug: HIGH parent has an edge
+        """Regression for the PR-87 review bug: member parent has an edge
         with ``relationship_type='proxy'`` but the parent's stored
         ``implementation`` does NOT equal the dep address (Lido stETH
         shape — etherfi calls stETH, stETH is *a* proxy, but stETH is
         not etherfi's proxy). The child must NOT receive
-        ``discovery_relationship`` or ``parent_owns_high``."""
+        ``discovery_relationship``."""
         session = db_session_for_resolution
         dep_addr = ("0x" + uuid.uuid4().hex[:40].zfill(40)).lower()
         unrelated_impl = ("0x" + uuid.uuid4().hex[:40].zfill(40)).lower()
         # Parent has SOME implementation set but it's not dep_addr.
         parent = self._make_parent(
             session,
-            protocol_id=None,
+            protocol_id=self._member_protocol(session),
             sources=["deployer_expansion"],
             implementation=unrelated_impl,
         )
@@ -1250,20 +1291,19 @@ class TestStructuralOwnershipPropagation:
         assert "parent_owns_high" not in create_calls[0]
 
     @requires_postgres
-    def test_low_confidence_parent_blocks_propagation(
+    def test_non_member_parent_blocks_propagation(
         self, db_session_for_resolution, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Parent has only LOW discovery sources. Even with a perfect
-        structural link, ``parent_owns_high`` lands False — the
-        downstream gate's structural branch needs that flag, so a
-        structurally-adopted parent can't seed further propagation.
-        This is the one-hop limit pinned at the spawn site."""
+        """Parent is not a member (``protocol_id`` NULL) — its source tags are
+        irrelevant. Even with a perfect structural link, ``parent_owns_high``
+        lands False and no witness can be produced: only a member's stored
+        resolution admits (spec §3.2 W2)."""
         session = db_session_for_resolution
         dep_addr = ("0x" + uuid.uuid4().hex[:40].zfill(40)).lower()
         parent = self._make_parent(
             session,
             protocol_id=None,
-            sources=["dapp_crawl"],  # LOW
+            sources=["deployer_expansion"],
             implementation=dep_addr,
         )
         self._make_dep_edge(session, parent=parent, dep_addr=dep_addr, relationship_type="implementation")

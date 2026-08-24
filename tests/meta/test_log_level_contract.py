@@ -73,6 +73,11 @@ PIPELINE_SERVICE_GLOBS: tuple[str, ...] = (
 # ``test_allow_list_entries_still_present`` below fails loudly when an entry
 # stops matching a real violation.
 ALLOW_LIST: dict[str, dict[int, str]] = {
+    "workers/discovery.py": {
+        # Boot-time chain-enable sweep in main(): no job is claimed yet, so no
+        # accumulator is bound and record_degraded would be a no-op.
+        1202: "Boot-time sweep failure; runs before any job context exists.",
+    },
     "workers/policy_worker.py": {
         # Reanalysis-completion notifier: the reanalysis itself completed
         # before the notifier ran, so its failure is a side-effect that
