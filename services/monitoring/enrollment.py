@@ -55,6 +55,7 @@ ENROLLMENT_DIRTY_REASONS = frozenset(
         "discovery_adoption",
         "audit_added",
         "manual",
+        "membership_change",
         "sweep",
         "governance_rotation",
         HEAD_NOT_DETERMINED_REASON,

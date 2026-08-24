@@ -36,6 +36,8 @@ SCORE_DIRTY_COVERAGE = "coverage_refresh"
 SCORE_DIRTY_COVERAGE_VERIFY = "coverage_equivalence_flip"
 SCORE_DIRTY_REANALYSIS = "reanalysis_queued"
 SCORE_DIRTY_MANUAL = "manual"
+# Membership gate promotion/demotion — the member set the fold reads changed.
+SCORE_DIRTY_MEMBERSHIP = "membership_change"
 # Not a mark site: the loop writes this itself when a protocol selected by the
 # staleness sweep FAILS to fold, because a failure needs a queue row to hold its
 # backoff and that row's reason must come from the same vocabulary as every
@@ -48,6 +50,7 @@ SCORE_DIRTY_REASONS = frozenset(
         SCORE_DIRTY_COVERAGE_VERIFY,
         SCORE_DIRTY_REANALYSIS,
         SCORE_DIRTY_MANUAL,
+        SCORE_DIRTY_MEMBERSHIP,
         SCORE_DIRTY_STALENESS_SWEEP,
     }
 )
