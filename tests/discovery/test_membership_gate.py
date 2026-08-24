@@ -337,7 +337,9 @@ def test_promote_requires_admitting_witness(db_session):
 
 def test_promote_with_w1_and_admitting_marks_dirty(db_session):
     protocol = _protocol(db_session)
-    member = _contract(db_session, ADDR(43), protocol_id=protocol.id)
+    # The member's STORED pointer must actually resolve to the candidate:
+    # promote re-verifies the W2 edge, never trusting the witness row alone.
+    member = _contract(db_session, ADDR(43), protocol_id=protocol.id, implementation=ADDR(44))
     row = _contract(db_session, ADDR(44), nominated_protocol_id=protocol.id)
     gate.write_witness(
         db_session,
@@ -622,7 +624,9 @@ def test_demote_deployer_single_level(db_session):
     registry = ProtocolDeployer(protocol_id=protocol.id, address=eoa, trust_class="B", evidence={"x": 1})
     db_session.add(registry)
     db_session.flush()
-    anchor = _contract(db_session, ADDR(81), protocol_id=protocol.id)
+    # Stored pointer backs the survivor's W2 edge — the cascade's survival
+    # check re-verifies the edge, not mere witness presence.
+    anchor = _contract(db_session, ADDR(81), protocol_id=protocol.id, implementation=ADDR(83))
 
     def _w4(member: Contract) -> None:
         gate.write_witness(
@@ -710,6 +714,9 @@ def test_evaluate_targets_only_reachable_candidates(db_session):
     assert unreachable.id not in targeted
     assert unclaimed.id not in targeted
     assert member_at_edge.id not in targeted  # already a member; not a candidate
-    # Wave 0 stub: targeting only, no state changes yet.
+    # No candidate here carries a code probe, so nothing may promote
+    # (invariant 3); the W2-reachable candidate parks on a NAMED missing
+    # piece — its W1 probe (invariant 5).
     assert result.promoted_contract_ids == ()
     assert result.demoted_contract_ids == ()
+    assert by_pointer.id in result.reprobe_contract_ids
