@@ -651,105 +651,44 @@ def backfill_historical_impl_contracts(
     protocol_id: int,
     chain: str | None,
     impl_addrs: set[str],
-    parent_proxy_sources: list[str] | None,
-    parent_proxy_current_impl_address: str | None = None,
+    current_impl_address: str | None = None,
 ) -> None:
-    """Ensure a Contract row exists for each historical impl address.
+    """Ensure a Contract row exists for each historical impl address, routed
+    through the membership gate.
 
     Companion to ``project_to_events`` — every impl referenced by the
     artifact's events should be present as a Contract row so the audit
     coverage matcher can link audits whose scope names a past impl.
 
-    ``parent_proxy_sources`` is the discovery_sources of the proxy whose
-    upgrade history produced these impls. If the parent doesn't assert
-    ownership (only low-confidence sources, e.g. ``dapp_crawl``), the
-    impls are not stamped with ``protocol_id`` — orphan Contract rows
-    are created so the coverage matcher still has names to resolve, but
-    the protocol's inventory is not polluted. The whole point: a foreign
-    proxy (EigenLayer, OP-Stack) that snuck into inventory via a low-
-    confidence source must not multiply itself into N "owned" impls. See
-    services/discovery/source_confidence.py.
+    Rows are NOMINATED, never stamped (membership gate invariant 1): the
+    gate admits an impl via W2 ``historical_implementation`` — a member
+    proxy's stored ``UpgradeEvent`` names it, the observed upgrade tx in the
+    evidence — once its W1 code probe lands. A row already owned by a
+    DIFFERENT protocol is left alone with a warning (stomping a foreign
+    inventory is worse than an unresolved coverage link). Coverage refresh
+    fires only for rows that are members after evaluation.
 
-    ``parent_proxy_current_impl_address`` is the proxy's
-    ``Contract.implementation`` field — the CURRENT impl address. Pass
-    it when the proxy is itself LOW-sourced (e.g. ``structural_adoption``
-    after 3a8f4d1c9b07's branch 4 adopted it) so the gate can consult
-    the impl's sources too. If the current impl is HIGH-sourced and
-    shares the protocol_id, that's the same one-hop-from-HIGH evidence
-    that 4d72e9b1f035's branch B uses against the historical orphan
-    set. Runtime counterpart to the migration: the LRTSquare* shape
-    (LOW UUPSProxy + HIGH LRTSquaredCore impl) gets handled at write
-    time instead of only at the next catch-up migration.
-
-    For each address, three cases (when ownership IS asserted):
-      1. No Contract row exists → create one tagged
-         ``discovery_source='upgrade_history'`` with Etherscan-resolved
-         name. Normal path for newly-surfaced impls.
-      2. Row exists with ``protocol_id`` NULL or equal to ours → adopt.
-         Sets the upgrade_history tag if empty, sets protocol_id. Keeps
-         existing name/analysis fields intact.
-      3. Row exists in a DIFFERENT protocol → leave alone, log a warning.
-         Rare (impl bytecode is usually protocol-specific) but possible;
-         silently stomping another protocol's inventory would be worse
-         than an unresolved coverage link.
-
-    When ownership is NOT asserted, branch (1) drops ``protocol_id``
-    from the new row and branch (2) becomes a no-op (orphan adoption
-    is the leak we're closing). Branch (3) is unchanged.
+    ``current_impl_address`` is the subject proxy's live implementation; it
+    lands in ``impl_addrs`` via its own last ``Upgraded`` event and is tagged
+    as the live implementation rather than a superseded anchor so it stays
+    analyzable (see ranking.is_superseded_impl).
 
     Etherscan name resolution uses the shared ``get_contract_info`` cache,
     so re-analyzing a protocol re-hits only new impls. Per-address errors
     are swallowed so one flaky lookup doesn't wreck the whole backfill.
     """
-    from sqlalchemy import func, select
+    from sqlalchemy import select
 
-    from db.models import Contract
+    from db.models import Contract, ContractCreationWitness
     from services.clients.etherscan import get_contract_info, parallel_get
+    from services.clients.rpc import chain_id_for_chain_name
+    from services.discovery import membership_gate
     from services.discovery.ranking import CURRENT_IMPLEMENTATION_SOURCE
-    from services.discovery.source_confidence import asserts_ownership
 
     if not impl_addrs:
         return
 
-    # The proxy's CURRENT impl appears in its own last ``Upgraded`` event, so it
-    # lands in ``impl_addrs`` alongside genuinely-superseded impls. Tag it as the
-    # live implementation rather than a superseded anchor so it stays analyzable
-    # (see ranking.is_superseded_impl) — the live impl is where the proxy's real
-    # functions + principals live.
-    current_impl_lc = (parent_proxy_current_impl_address or "").lower()
-
-    # Historical impls are structural same-protocol components of the
-    # parent proxy. Route through the unified gate so this path uses
-    # the same logic as the resolution / static-worker cascades: direct
-    # evidence (parent has a HIGH source) OR structural evidence (the
-    # relationship to the parent is ``implementation``). The two
-    # branches collapse into a single ``asserts_ownership`` call when
-    # the structural relationship is fixed and ``parent_owns`` carries
-    # the parent's direct-evidence state.
-    parent_owns = asserts_ownership(parent_proxy_sources)
-
-    # Anchor on the proxy's CURRENT impl when the proxy itself is LOW.
-    # Mirrors 4d72e9b1f035 branch B: the impl is the authoritative HIGH
-    # source in the LRTSquare* shape (LOW-adopted UUPSProxy with
-    # HIGH-sourced LRTSquaredCore implementation). Belt-and-suspenders
-    # mismatch guard: if the impl belongs to a different protocol, the
-    # chain isn't ours — leave the historical impls orphan.
-    if not parent_owns and parent_proxy_current_impl_address:
-        impl_row = session.execute(
-            select(Contract).where(
-                func.lower(Contract.address) == parent_proxy_current_impl_address.lower(),
-                _contract_chain_filter(chain),
-            )
-        ).scalar_one_or_none()
-        if (
-            impl_row is not None
-            and (impl_row.protocol_id is None or impl_row.protocol_id == protocol_id)
-            and asserts_ownership(impl_row.discovery_sources)
-        ):
-            parent_owns = True
-
-    owns = asserts_ownership(None, parent_owns=parent_owns, parent_relationship="implementation")
-    owning_protocol_id = protocol_id if owns else None
+    current_impl_lc = (current_impl_address or "").lower()
 
     # Match the natural (address, chain) uniqueness grain. Cross-chain
     # protocols (rare but real — CREATE2 / deterministic deployments can
@@ -785,37 +724,15 @@ def backfill_historical_impl_contracts(
 
     created = 0
     adopted = 0
-    refresh_ids: list[int] = []
-    for addr in impl_addrs:
-        existing = existing_rows.get(addr)
+    rows_by_addr: dict[str, Contract] = {}
+    for addr in sorted(impl_addrs):
         is_current = bool(current_impl_lc) and addr == current_impl_lc
+        # Live impl keeps the analyzable marker; superseded impls get the
+        # anchor tag (see ranking.is_superseded_impl).
+        source_tag = CURRENT_IMPLEMENTATION_SOURCE if is_current else "upgrade_history"
+        existing = existing_rows.get(addr)
         if existing is not None:
-            if existing.protocol_id is None or existing.protocol_id == protocol_id:
-                was_orphan = existing.protocol_id is None
-                existing_sources = list(existing.discovery_sources or [])
-                # Without ownership assertion from the parent, don't
-                # adopt orphans into this protocol — that's exactly the
-                # leak we're closing. The tag append still happens so
-                # the source trail is preserved for later corroboration.
-                if was_orphan and owns:
-                    existing.protocol_id = protocol_id
-                if is_current:
-                    # Live impl: mark current (keeps it analyzable) instead of
-                    # stamping the superseded-anchor ``upgrade_history`` tag.
-                    had_no_tag = CURRENT_IMPLEMENTATION_SOURCE not in existing_sources
-                    if had_no_tag:
-                        existing.discovery_sources = existing_sources + [CURRENT_IMPLEMENTATION_SOURCE]
-                else:
-                    had_no_tag = "upgrade_history" not in existing_sources
-                    if had_no_tag:
-                        existing.discovery_sources = existing_sources + ["upgrade_history"]
-                adopted += 1
-                # Only schedule coverage refresh when the row is actually
-                # in our protocol — refresh on an orphan is wasted work
-                # since the matcher filters by protocol_id.
-                if owns and (was_orphan or had_no_tag):
-                    refresh_ids.append(existing.id)
-            else:
+            if existing.protocol_id is not None and existing.protocol_id != protocol_id:
                 logger.warning(
                     "Job protocol %s: historical impl %s already owned by protocol %s — "
                     "coverage link will not be created against this impl",
@@ -823,28 +740,26 @@ def backfill_historical_impl_contracts(
                     addr,
                     existing.protocol_id,
                 )
+                continue
+            membership_gate.nominate(session, contract=existing, protocol_id=protocol_id, source_tag=source_tag)
+            adopted += 1
+            rows_by_addr[addr] = existing
             continue
 
         name = name_results.get(addr)
-
         new_row = Contract(
-            protocol_id=owning_protocol_id,
             address=addr,
             chain=chain,
             contract_name=name or "UnknownImpl",
             is_proxy=False,
             job_id=None,
-            # Current impl → live marker (stays analyzable); superseded → anchor.
-            discovery_sources=[CURRENT_IMPLEMENTATION_SOURCE] if is_current else ["upgrade_history"],
             source_verified=bool(name),
         )
         session.add(new_row)
-        created += 1
         session.flush()
-        # Same reasoning as above — coverage refresh only fires for rows
-        # that actually belong to the protocol.
-        if owns:
-            refresh_ids.append(new_row.id)
+        membership_gate.nominate(session, contract=new_row, protocol_id=protocol_id, source_tag=source_tag)
+        created += 1
+        rows_by_addr[addr] = new_row
 
     if created or adopted:
         session.commit()
@@ -855,6 +770,35 @@ def backfill_historical_impl_contracts(
             created,
             adopted,
         )
+
+    if not rows_by_addr:
+        return
+
+    # §3.4 event 1 near-line probe: W1 fuel for rows with no persisted code
+    # verdict yet. Best-effort — a failed probe leaves the row an explainable
+    # candidate, never a member (invariants 3+5).
+    probe_chain_id = chain_id_for_chain_name(chain or "ethereum")
+    if probe_chain_id is not None:
+        for addr in sorted(rows_by_addr):
+            witness = session.get(ContractCreationWitness, (probe_chain_id, addr))
+            if witness is not None and witness.code_probe_block is not None:
+                continue
+            try:
+                membership_gate.probe(session, rows_by_addr[addr])
+                session.commit()
+            except Exception as exc:
+                session.rollback()
+                logger.warning("Historical-impl probe failed for %s: %s", addr, exc)
+
+    membership_gate.evaluate_committed(
+        session,
+        membership_gate.FactsDelta(recheck_contract_ids=tuple(sorted(row.id for row in rows_by_addr.values()))),
+        context=f"upgrade_history_backfill:{protocol_id}",
+    )
+
+    # Coverage refresh only for rows the gate settled as members — refresh on
+    # a candidate is wasted work since the matcher filters by protocol_id.
+    refresh_ids = sorted(row.id for row in rows_by_addr.values() if row.protocol_id == protocol_id)
 
     if refresh_ids:
         # Lazy import keeps this module importable from contexts that don't

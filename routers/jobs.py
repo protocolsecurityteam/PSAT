@@ -22,6 +22,11 @@ from schemas.api_responses import (
     QueuedJobRef,
 )
 from schemas.stage_errors import StageError, StageErrors
+from services.discovery.membership_gate import (
+    HUMAN_ASSERTION_REQUEST_KEY,
+    HumanAssertion,
+    human_assertion_request_payload,
+)
 from services.discovery.ranking import not_superseded_impl_clause
 from utils.chains import (
     UnknownChainError,
@@ -36,6 +41,11 @@ from . import deps
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+#: W5 actor identity at this edge. Admin auth is one shared key
+#: (``deps.require_admin_key``), so the key itself is the only provable actor
+#: — never a fabricated per-person identity.
+W5_ADMIN_ACTOR = "admin_api_key"
 
 
 @router.get("/api/jobs", dependencies=[Depends(deps.require_admin_key)], response_model=None)
@@ -82,9 +92,10 @@ def analyze_address(request: AnalyzeRequest) -> JobDict:
         # company links to the EXISTING protocol row — lookup-only, so a typo'd
         # name 404s instead of minting a duplicate protocol (company-only
         # submissions keep resolving/creating theirs during discovery). The
-        # ``"inventory"`` source records the admin's explicit membership
-        # assertion so the fetched contract row passes the ownership gate and
-        # adopts the protocol. Address-only submissions stay standalone.
+        # admin's membership claim rides on the request as an ATTRIBUTED W5
+        # human assertion (membership gate, invariant 14) — never a source
+        # tag; the gate consumes it at nomination time. Address-only
+        # submissions stay standalone.
         if request.address and request.company:
             protocol_row = session.execute(
                 select(Protocol).where(func.lower(Protocol.name) == request.company.lower()).limit(1)
@@ -92,10 +103,9 @@ def analyze_address(request: AnalyzeRequest) -> JobDict:
             if protocol_row is None:
                 raise HTTPException(status_code=404, detail="Company not found")
             req_dict["protocol_id"] = protocol_row.id
-            sources = list(req_dict.get("discovery_sources") or [])
-            if "inventory" not in sources:
-                sources.append("inventory")
-            req_dict["discovery_sources"] = sources
+            req_dict[HUMAN_ASSERTION_REQUEST_KEY] = human_assertion_request_payload(
+                HumanAssertion(actor=W5_ADMIN_ACTOR, asserted_at=datetime.now(timezone.utc))
+            )
         if request.dapp_urls:
             job = deps.create_job(session, req_dict, initial_stage=JobStage.dapp_crawl)
         elif request.defillama_protocol:

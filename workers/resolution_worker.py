@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -134,6 +135,28 @@ def _build_root_artifacts(
     }
 
 
+_HEX_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
+_ZERO_ADDRESS = "0x" + "0" * 40
+
+
+def _membership_gate_controller_hook(session: Session, contract_row: Contract, controller_values: dict) -> None:
+    """Membership-gate event-2 hook for the resolution stage's ControllerValue
+    commit (spec §3.4 event 2b). Targeted delta, best-effort — a gate failure
+    never fails the stage."""
+    from services.discovery.membership_gate import FactsDelta, evaluate_committed
+
+    values: set[str] = set()
+    for cv in controller_values.values():
+        value = cv.get("value") if isinstance(cv, dict) else None
+        if isinstance(value, str) and _HEX_ADDRESS_RE.match(value) and value.lower() != _ZERO_ADDRESS:
+            values.add(value.lower())
+    evaluate_committed(
+        session,
+        FactsDelta(new_edge_addresses=tuple(sorted(values)), recheck_contract_ids=(contract_row.id,)),
+        context=f"resolution_controller_values:{contract_row.id}",
+    )
+
+
 class ResolutionWorker(BaseWorker):
     stage = JobStage.resolution
     next_stage = JobStage.policy
@@ -244,6 +267,11 @@ class ResolutionWorker(BaseWorker):
                     )
                 )
             session.commit()
+            # §3.4 event 2b: the freshly committed ControllerValue rows are the
+            # gate's W3 fuel — resolved controller addresses as a fact delta,
+            # plus the subject itself (its own controllers may now resolve to
+            # perimeter entities). The static stage never sees these.
+            _membership_gate_controller_hook(session, contract_row, snapshot.get("controller_values", {}))
 
         logger.info(
             "Resolution stage control snapshot complete for job %s address=%s name=%s",

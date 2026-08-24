@@ -14,9 +14,10 @@ import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Literal, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Literal, Mapping, Sequence
 
-from sqlalchemy import Text, case, cast, func, select, text
+from sqlalchemy import Text, case, cast, func, literal, select, text
+from sqlalchemy import any_ as sql_any_
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
@@ -40,8 +41,10 @@ from db.models import (
     EffectiveFunction,
     FunctionPrincipal,
     ProtocolDeployer,
+    UpgradeEvent,
 )
 from services.clients.rpc import chain_id_for_chain_name
+from utils.chains import canonical_chain
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
@@ -58,7 +61,11 @@ MEMBERSHIP_DIRTY_REASON = "membership_change"
 
 # W2 edge kinds — each names a verified structural link against STORED
 # resolution, never a bare ``relationship_type`` (spec §3.2, invariant 6).
-W2_EDGE_KINDS = frozenset({"implementation", "proxy", "beacon", "proxy_admin", "secondary_implementation"})
+# ``historical_implementation`` verifies against the member proxy's stored
+# ``UpgradeEvent`` rows (the observed upgrade tx rides in the evidence).
+W2_EDGE_KINDS = frozenset(
+    {"implementation", "proxy", "beacon", "proxy_admin", "secondary_implementation", "historical_implementation"}
+)
 
 W3_DIRECTION_D1 = "d1"
 W3_DIRECTION_D2 = "d2"
@@ -116,17 +123,30 @@ def w2_evidence(
     member_contract_id: int,
     member_address: str,
     resolved_pointer: str,
+    upgrade_tx_hash: str | None = None,
 ) -> dict[str, Any]:
     """W2 structural edge, verified against stored resolution (the pointer the
-    member's own row carries), never a bare ``relationship_type``."""
+    member's own row carries), never a bare ``relationship_type``.
+    ``upgrade_tx_hash`` belongs to ``historical_implementation`` only — the
+    upgrade tx the stored ``UpgradeEvent`` row observed (may be unrecorded)."""
     if edge_kind not in W2_EDGE_KINDS:
         raise ValueError(f"edge_kind must be one of {sorted(W2_EDGE_KINDS)}, got {edge_kind!r}")
-    return {
+    evidence: dict[str, Any] = {
         "edge_kind": edge_kind,
         "member_contract_id": _require_positive_int(member_contract_id, "member_contract_id"),
         "member_address": _require_address(member_address, "member_address"),
         "resolved_pointer": _require_address(resolved_pointer, "resolved_pointer"),
     }
+    if edge_kind == "historical_implementation":
+        if upgrade_tx_hash is not None:
+            if not isinstance(upgrade_tx_hash, str) or not re.match(r"^0x[0-9a-fA-F]{64}$", upgrade_tx_hash):
+                raise ValueError(f"upgrade_tx_hash must be a 32-byte hex hash, got {upgrade_tx_hash!r}")
+            evidence["upgrade_tx_hash"] = upgrade_tx_hash.lower()
+        else:
+            evidence["upgrade_tx_hash"] = None
+    elif upgrade_tx_hash is not None:
+        raise ValueError("upgrade_tx_hash is historical_implementation evidence only")
+    return evidence
 
 
 def w3_evidence(
@@ -213,7 +233,10 @@ def _rebuild_evidence(rule: str, evidence: dict[str, Any]) -> dict[str, Any]:
     if rule == WITNESS_RULE_W1_CODE:
         return w1_evidence(**picked("chain_id", "code_probe_block"))
     if rule == WITNESS_RULE_W2_STRUCTURAL:
-        return w2_evidence(**picked("edge_kind", "member_contract_id", "member_address", "resolved_pointer"))
+        kwargs = picked("edge_kind", "member_contract_id", "member_address", "resolved_pointer")
+        if evidence.get("edge_kind") == "historical_implementation":
+            kwargs["upgrade_tx_hash"] = evidence.get("upgrade_tx_hash")
+        return w2_evidence(**kwargs)
     if rule == WITNESS_RULE_W3_CONTROL:
         kwargs = picked("direction", "source")
         kwargs["via_address"] = evidence.get("via")
@@ -277,11 +300,58 @@ def resolve_membership_state(session: Session, contract: Contract) -> Membership
 
 
 # ---------------------------------------------------------------------------
-# Nomination (spec §3.4 event 1)
+# Nomination (spec §3.4 event 1) + W5 human assertion (spec §5.2, invariant 14)
 # ---------------------------------------------------------------------------
 
+#: ``jobs.request`` key carrying a serialized :class:`HumanAssertion` from the
+#: admin submission edge to the discovery fetch path.
+HUMAN_ASSERTION_REQUEST_KEY = "human_assertion"
 
-def nominate(session: Session, *, contract: Contract, protocol_id: int, source_tag: str) -> None:
+
+@dataclass(frozen=True)
+class HumanAssertion:
+    """An admin's explicit membership assertion: actor + timestamp, never a
+    source tag (invariant 14)."""
+
+    actor: str
+    asserted_at: datetime
+
+
+def human_assertion_request_payload(assertion: HumanAssertion) -> dict[str, str]:
+    """The JSON shape :data:`HUMAN_ASSERTION_REQUEST_KEY` carries on a job request."""
+    if not isinstance(assertion.actor, str) or not assertion.actor.strip():
+        raise ValueError("actor is required for a human assertion")
+    return {"actor": assertion.actor.strip(), "asserted_at": assertion.asserted_at.isoformat()}
+
+
+def human_assertion_from_request(request: Any) -> HumanAssertion | None:
+    """Parse :data:`HUMAN_ASSERTION_REQUEST_KEY` off a job request dict.
+    Returns ``None`` — never a defaulted actor/timestamp — when the payload is
+    absent or malformed."""
+    if not isinstance(request, Mapping):
+        return None
+    payload = request.get(HUMAN_ASSERTION_REQUEST_KEY)
+    if not isinstance(payload, Mapping):
+        return None
+    actor = payload.get("actor")
+    raw_ts = payload.get("asserted_at")
+    if not isinstance(actor, str) or not actor.strip() or not isinstance(raw_ts, str):
+        return None
+    try:
+        asserted_at = datetime.fromisoformat(raw_ts)
+    except ValueError:
+        return None
+    return HumanAssertion(actor=actor.strip(), asserted_at=asserted_at)
+
+
+def nominate(
+    session: Session,
+    *,
+    contract: Contract,
+    protocol_id: int,
+    source_tag: str,
+    human_assertion: HumanAssertion | None = None,
+) -> None:
     """Record that a discovery source nominated *contract* for *protocol_id*.
 
     Sets ``nominated_protocol_id``, never ``protocol_id``. The first
@@ -289,6 +359,11 @@ def nominate(session: Session, *, contract: Contract, protocol_id: int, source_t
     ``discovery_sources`` only. An existing MEMBER's empty nomination slot
     belongs to its own protocol (demotion provenance, invariant 4) — a foreign
     nomination may never claim it.
+
+    ``human_assertion`` (spec §5.2 W5) writes the W5 witness for
+    *protocol_id* and attempts promotion — which still requires W1
+    (invariant 3): an assertion on an unprobed/unroutable chain yields a
+    candidate-with-W5-witness, not a member.
     """
     _require_positive_int(protocol_id, "protocol_id")
     if contract.protocol_id is not None:
@@ -321,6 +396,17 @@ def nominate(session: Session, *, contract: Contract, protocol_id: int, source_t
         if source_tag not in merged:
             merged.append(source_tag)
             contract.discovery_sources = merged
+    if human_assertion is not None:
+        if contract.id is None:
+            session.flush()
+        write_witness(
+            session,
+            contract_id=contract.id,
+            protocol_id=protocol_id,
+            rule=WITNESS_RULE_W5_HUMAN,
+            evidence=w5_evidence(actor=human_assertion.actor, asserted_at=human_assertion.asserted_at),
+        )
+        promote(session, contract=contract, protocol_id=protocol_id)
 
 
 # ---------------------------------------------------------------------------
@@ -415,6 +501,242 @@ def active_witnesses(session: Session, *, contract_id: int, protocol_id: int) ->
 
 
 # ---------------------------------------------------------------------------
+# Witness-fact verification (spec §3.2 witness invalidation; invariant 6).
+# Admission and cascade both re-check the EDGE, never mere witness presence —
+# a caller-written witness row is a claim the gate re-verifies, not a license.
+# ---------------------------------------------------------------------------
+
+
+def _chain_key(chain: str | None) -> str:
+    """Mainnet-coalesced, canonicalized chain key — the same NULL≡'ethereum'
+    dedup convention as ``db.queue._mainnet_coalesced_chain``."""
+    return ((canonical_chain(chain) or chain) or "ethereum").lower()
+
+
+def _member_rows_at(session: Session, *, protocol_id: int, address: str, chain_key: str) -> list[Contract]:
+    return list(
+        session.execute(
+            select(Contract)
+            .where(
+                Contract.protocol_id == protocol_id,
+                func.lower(Contract.address) == address,
+                func.lower(func.coalesce(Contract.chain, "ethereum")) == chain_key,
+            )
+            .order_by(Contract.id)
+        ).scalars()
+    )
+
+
+_PROBE_CONTROLLER_READS = ("owner", "authority", "admin")
+
+
+def _probe_controller_values(session: Session, contract: Contract) -> set[str]:
+    """Controller addresses the latest §3.5 probe of *contract* resolved
+    (owner/authority/admin reads only — impl/beacon reads are W2-shaped facts,
+    not control edges)."""
+    chain_id = chain_id_for_chain_name(contract.chain)
+    row = session.get(ContractProbeAttempt, (contract.id, chain_id if chain_id is not None else 0))
+    if row is None or not isinstance(row.results, dict) or row.results.get("status") != "probed":
+        return set()
+    reads = row.results.get("reads")
+    if not isinstance(reads, dict):
+        return set()
+    out: set[str] = set()
+    for name in _PROBE_CONTROLLER_READS:
+        read = reads.get(name)
+        value = read.get("value") if isinstance(read, dict) else None
+        if isinstance(value, str) and _ADDRESS_RE.match(value):
+            out.add(value.lower())
+    return out
+
+
+def _has_controller_value(session: Session, *, contract_id: int, value: str) -> bool:
+    return (
+        session.execute(
+            select(ControllerValue.id)
+            .where(ControllerValue.contract_id == contract_id, func.lower(ControllerValue.value) == value)
+            .limit(1)
+        ).first()
+        is not None
+    )
+
+
+def _w2_edge_holds(session: Session, *, contract: Contract, member: Contract, edge_kind: str, evidence: dict) -> bool:
+    addr = (contract.address or "").lower()
+    if not addr or member.id == contract.id:
+        return False
+    if edge_kind == "implementation":
+        return (member.implementation or "").lower() == addr
+    if edge_kind == "beacon":
+        return (member.beacon or "").lower() == addr
+    if edge_kind == "proxy_admin":
+        return (member.admin or "").lower() == addr
+    if edge_kind == "secondary_implementation":
+        return addr in {(s or "").lower() for s in (member.secondary_implementations or [])}
+    if edge_kind == "proxy":
+        member_addr = (member.address or "").lower()
+        return bool(member_addr) and member_addr in {
+            (contract.implementation or "").lower(),
+            (contract.beacon or "").lower(),
+        }
+    if edge_kind == "historical_implementation":
+        tx = evidence.get("upgrade_tx_hash")
+        conditions = [UpgradeEvent.contract_id == member.id, func.lower(UpgradeEvent.new_impl) == addr]
+        if isinstance(tx, str):
+            conditions.append(func.lower(UpgradeEvent.tx_hash) == tx)
+        return session.execute(select(UpgradeEvent.id).where(*conditions).limit(1)).first() is not None
+    return False
+
+
+def _via_is_transitive(
+    session: Session,
+    *,
+    protocol_id: int,
+    via_address: str,
+    chain_key: str,
+    exclude_contract_id: int | None = None,
+) -> bool:
+    """§3.2 W3-D1: TRANSITIVE ⇔ the via is a member through an INDEPENDENT
+    witness (w2/w4/w5/w6 or w3-d1), or a D2 controller proven exclusive —
+    every contract it is observed to control belongs to this protocol.
+    The candidate under evaluation never counts toward its own license."""
+    for member in _member_rows_at(session, protocol_id=protocol_id, address=via_address, chain_key=chain_key):
+        rows = active_witnesses(session, contract_id=member.id, protocol_id=protocol_id)
+        has_d2 = False
+        for row in rows:
+            if row.rule not in ADMITTING_WITNESS_RULES:
+                continue
+            if row.rule != WITNESS_RULE_W3_CONTROL:
+                return True
+            direction = row.evidence.get("direction") if isinstance(row.evidence, dict) else None
+            if direction == W3_DIRECTION_D1:
+                return True
+            has_d2 = True
+        if has_d2 and _controller_is_exclusive(
+            session,
+            protocol_id=protocol_id,
+            controller_address=via_address,
+            exclude_contract_ids={member.id} | ({exclude_contract_id} if exclude_contract_id is not None else set()),
+        ):
+            return True
+    return False
+
+
+def _controller_is_exclusive(
+    session: Session,
+    *,
+    protocol_id: int,
+    controller_address: str,
+    exclude_contract_ids: set[int],
+) -> bool:
+    """Shared-operator kill (spec §3.2): every contract the controller is
+    observed to control (resolved controller values + proxy-admin pointers)
+    maps into this protocol's member/candidate set, with ≥1 proven member.
+    Any foreign or unclaimed observation refuses — revocable, mirroring
+    Class B."""
+    controlled: dict[int, Contract] = {}
+    for row in session.execute(
+        select(Contract)
+        .join(ControllerValue, ControllerValue.contract_id == Contract.id)
+        .where(func.lower(ControllerValue.value) == controller_address)
+        .distinct()
+    ).scalars():
+        controlled[row.id] = row
+    for row in session.execute(select(Contract).where(func.lower(Contract.admin) == controller_address)).scalars():
+        controlled[row.id] = row
+    member_seen = False
+    for cid in sorted(controlled):
+        if cid in exclude_contract_ids:
+            continue
+        row = controlled[cid]
+        if (row.address or "").lower() == controller_address:
+            continue
+        if row.protocol_id == protocol_id:
+            member_seen = True
+            continue
+        if row.protocol_id is None and row.nominated_protocol_id == protocol_id:
+            continue
+        return False
+    return member_seen
+
+
+def _witness_fact_holds(
+    session: Session,
+    *,
+    contract: Contract,
+    protocol_id: int,
+    rule: str,
+    evidence: Any,
+    via_address: str | None,
+) -> bool:
+    """Does the via-fact this witness rests on still hold? W1 (block-stamped
+    probe), W5 (attributed assertion) and W6 (externally revocable seed) have
+    no via-fact and hold as recorded."""
+    if rule in (WITNESS_RULE_W1_CODE, WITNESS_RULE_W5_HUMAN, WITNESS_RULE_W6_LLAMA_SEED):
+        return True
+    evidence = evidence if isinstance(evidence, dict) else {}
+    via = (via_address or "").lower()
+    if rule == WITNESS_RULE_W4_DEPLOYER:
+        if not via or (contract.deployer or "").lower() != via:
+            return False
+        return (
+            session.execute(
+                select(ProtocolDeployer.id)
+                .where(
+                    ProtocolDeployer.protocol_id == protocol_id,
+                    ProtocolDeployer.address == via,
+                    ProtocolDeployer.revoked_at.is_(None),
+                )
+                .limit(1)
+            ).first()
+            is not None
+        )
+    chain_key = _chain_key(contract.chain)
+    if rule == WITNESS_RULE_W2_STRUCTURAL:
+        member = session.get(Contract, evidence.get("member_contract_id"))
+        if member is None or member.protocol_id != protocol_id or _chain_key(member.chain) != chain_key:
+            return False
+        return _w2_edge_holds(
+            session, contract=contract, member=member, edge_kind=evidence.get("edge_kind"), evidence=evidence
+        )
+    if rule == WITNESS_RULE_W3_CONTROL:
+        if not via:
+            return False
+        direction = evidence.get("direction")
+        source = evidence.get("source")
+        addr = (contract.address or "").lower()
+        if direction == W3_DIRECTION_D2:
+            for member in _member_rows_at(session, protocol_id=protocol_id, address=via, chain_key=chain_key):
+                if member.id == contract.id:
+                    continue
+                if source == "controller_values" and _has_controller_value(session, contract_id=member.id, value=addr):
+                    return True
+                if source == "proxy_admin_slot" and (member.admin or "").lower() == addr:
+                    return True
+                if source == "probe" and addr in _probe_controller_values(session, member):
+                    return True
+            return False
+        if direction == W3_DIRECTION_D1:
+            if not _via_is_transitive(
+                session,
+                protocol_id=protocol_id,
+                via_address=via,
+                chain_key=chain_key,
+                exclude_contract_id=contract.id,
+            ):
+                return False
+            if source == "controller_values":
+                return _has_controller_value(session, contract_id=contract.id, value=via)
+            if source == "proxy_admin_slot":
+                return (contract.admin or "").lower() == via
+            if source == "probe":
+                return via in _probe_controller_values(session, contract)
+            return False
+        return False
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Promotion / demotion primitives
 # ---------------------------------------------------------------------------
 
@@ -429,8 +751,10 @@ def _mark_membership_dirty(session: Session, protocol_id: int) -> None:
 
 def promote(session: Session, *, contract: Contract, protocol_id: int) -> bool:
     """Promote to member iff W1 holds (invariant 3) AND ≥1 admitting witness
-    is active. Returns whether the contract is a member of *protocol_id* on
-    exit; a refusal logs the named missing piece (invariant 5)."""
+    is active AND its via-fact verifies against stored resolution — a witness
+    row a caller wrote is a claim, not a license. Returns whether the contract
+    is a member of *protocol_id* on exit; a refusal logs the named missing
+    piece (invariant 5)."""
     _require_positive_int(protocol_id, "protocol_id")
     if contract.protocol_id == protocol_id:
         return True
@@ -451,14 +775,28 @@ def promote(session: Session, *, contract: Contract, protocol_id: int) -> bool:
         and row.evidence.get("chain_id") == expected_chain
         for row in rows
     )
-    admitting = sorted(rules & ADMITTING_WITNESS_RULES)
+    admitting = sorted(
+        {
+            row.rule
+            for row in rows
+            if row.rule in ADMITTING_WITNESS_RULES
+            and _witness_fact_holds(
+                session,
+                contract=contract,
+                protocol_id=protocol_id,
+                rule=row.rule,
+                evidence=row.evidence,
+                via_address=row.via_address,
+            )
+        }
+    )
     if not has_w1 or not admitting:
         logger.info(
             "promotion withheld",
             extra={
                 "contract_id": contract.id,
                 "protocol_id": protocol_id,
-                "missing": "w1_code_for_contract_chain" if not has_w1 else "admitting_witness",
+                "missing": "w1_code_for_contract_chain" if not has_w1 else "verified_admitting_witness",
                 "contract_chain": contract.chain,
                 "active_rules": sorted(rules),
             },
@@ -559,6 +897,28 @@ def _perimeter_fact(session: Session, *, protocol_id: int, address: str) -> dict
     return None
 
 
+def _nonlineage_corroborating_member_ids(session: Session, *, protocol_id: int, address: str) -> list[int]:
+    """Members deployed by *address* whose membership rests on a NON-lineage
+    witness (§3.3 Class B condition 1)."""
+    return sorted(
+        row[0]
+        for row in session.execute(
+            select(ContractMembershipWitness.contract_id)
+            .join(Contract, ContractMembershipWitness.contract_id == Contract.id)
+            .where(
+                Contract.protocol_id == protocol_id,
+                func.lower(Contract.deployer) == address,
+                ContractMembershipWitness.protocol_id == protocol_id,
+                ContractMembershipWitness.revoked_at.is_(None),
+                ContractMembershipWitness.rule.in_(
+                    [WITNESS_RULE_W2_STRUCTURAL, WITNESS_RULE_W3_CONTROL, WITNESS_RULE_W5_HUMAN]
+                ),
+            )
+            .distinct()
+        )
+    )
+
+
 def classify_deployer(
     session: Session,
     *,
@@ -633,23 +993,7 @@ def classify_deployer(
             evidence={"reason": "no_complete_enumeration", "checked_at": checked_at},
         )
 
-    corroborating = [
-        row[0]
-        for row in session.execute(
-            select(ContractMembershipWitness.contract_id)
-            .join(Contract, ContractMembershipWitness.contract_id == Contract.id)
-            .where(
-                Contract.protocol_id == protocol_id,
-                func.lower(Contract.deployer) == addr,
-                ContractMembershipWitness.protocol_id == protocol_id,
-                ContractMembershipWitness.revoked_at.is_(None),
-                ContractMembershipWitness.rule.in_(
-                    [WITNESS_RULE_W2_STRUCTURAL, WITNESS_RULE_W3_CONTROL, WITNESS_RULE_W5_HUMAN]
-                ),
-            )
-            .distinct()
-        )
-    ]
+    corroborating = _nonlineage_corroborating_member_ids(session, protocol_id=protocol_id, address=addr)
     if len(corroborating) < 2:
         return DeployerClassification(
             trust_class=None,
@@ -737,11 +1081,47 @@ class DemotionResult:
     reprobe_contract_ids: tuple[int, ...] = ()
 
 
-def demote(session: Session, *, deployer_row: ProtocolDeployer, reason: str) -> DemotionResult:
-    """Single-level deployer revocation (invariant 8): revoke the registry
-    row, revoke its dependent W4 witnesses, demote exactly the members left
-    with no unrevoked witness. Contracts to re-probe are returned; the
-    recursive cascade to quiescence is ``_cascade_deployer_demotions``."""
+def _demote_if_no_verified_witness(
+    session: Session,
+    *,
+    contract_id: int,
+    protocol_id: int,
+    reason: str,
+    evidence: dict[str, Any] | None = None,
+) -> tuple[list[int], bool]:
+    """Invariant 8: demote exactly the members left with no admitting witness
+    whose via-fact still verifies; a remaining witness that fails verification
+    is revoked in the same pass. Returns (extra revoked ids, demoted?)."""
+    contract = session.get(Contract, contract_id)
+    if contract is None or contract.protocol_id != protocol_id:
+        return [], False
+    revoked: list[int] = []
+    keep = False
+    for row in sorted(active_witnesses(session, contract_id=contract_id, protocol_id=protocol_id), key=lambda r: r.id):
+        if row.rule not in ADMITTING_WITNESS_RULES:
+            continue
+        if _witness_fact_holds(
+            session,
+            contract=contract,
+            protocol_id=protocol_id,
+            rule=row.rule,
+            evidence=row.evidence,
+            via_address=row.via_address,
+        ):
+            keep = True
+        elif revoke_witness(session, row, reason=reason):
+            revoked.append(row.id)
+    if keep:
+        return revoked, False
+    demote_member(session, contract=contract, reason=reason, evidence=evidence)
+    return revoked, True
+
+
+def _revoke_deployer_registry_row(
+    session: Session, deployer_row: ProtocolDeployer, reason: str
+) -> tuple[list[int], list[int]]:
+    """Single-level deployer revocation: revoke the registry row, revoke its
+    dependent W4 witnesses, demote members left with no verifying witness."""
     if deployer_row.revoked_at is None:
         deployer_row.revoked_at = _utcnow()
         deployer_row.revocation_reason = reason
@@ -756,12 +1136,14 @@ def demote(session: Session, *, deployer_row: ProtocolDeployer, reason: str) -> 
         )
     dependents = list(
         session.execute(
-            select(ContractMembershipWitness).where(
+            select(ContractMembershipWitness)
+            .where(
                 ContractMembershipWitness.protocol_id == deployer_row.protocol_id,
                 ContractMembershipWitness.rule == WITNESS_RULE_W4_DEPLOYER,
                 ContractMembershipWitness.via_address == deployer_row.address,
                 ContractMembershipWitness.revoked_at.is_(None),
             )
+            .order_by(ContractMembershipWitness.contract_id, ContractMembershipWitness.id)
         ).scalars()
     )
     revoked: list[int] = []
@@ -772,19 +1154,25 @@ def demote(session: Session, *, deployer_row: ProtocolDeployer, reason: str) -> 
             affected.add(witness.contract_id)
     demoted: list[int] = []
     for contract_id in sorted(affected):
-        remaining = active_witnesses(session, contract_id=contract_id, protocol_id=deployer_row.protocol_id)
-        if any(row.rule in ADMITTING_WITNESS_RULES for row in remaining):
-            continue
-        contract = session.get(Contract, contract_id)
-        if contract is None or contract.protocol_id != deployer_row.protocol_id:
-            continue
-        demote_member(
+        extra, was_demoted = _demote_if_no_verified_witness(
             session,
-            contract=contract,
+            contract_id=contract_id,
+            protocol_id=deployer_row.protocol_id,
             reason=f"deployer_revoked:{reason}",
             evidence={"deployer_address": deployer_row.address, "revoked_witness_ids": revoked},
         )
-        demoted.append(contract_id)
+        revoked.extend(extra)
+        if was_demoted:
+            demoted.append(contract_id)
+    return revoked, demoted
+
+
+def demote(session: Session, *, deployer_row: ProtocolDeployer, reason: str) -> DemotionResult:
+    """Deployer revocation (invariant 8), cascaded to quiescence: dependent
+    W4 witnesses are revoked, members left without a verifying witness are
+    demoted, and each demotion recursively invalidates the W2/W3 witnesses
+    resting on it. All demoted contracts are re-probe candidates."""
+    revoked, demoted = _revoke_deployer_registry_row(session, deployer_row, reason)
     result = DemotionResult(
         revoked_witness_ids=tuple(revoked),
         demoted_contract_ids=tuple(demoted),
@@ -794,9 +1182,77 @@ def demote(session: Session, *, deployer_row: ProtocolDeployer, reason: str) -> 
 
 
 def _cascade_deployer_demotions(session: Session, result: DemotionResult) -> DemotionResult:
-    """Extension point (invariant 8, spec §3.2 witness invalidation): recursive
-    via-fact invalidation to quiescence — a later lane. Single level passes through."""
-    return result
+    """§3.2 witness invalidation: each demoted member is itself a via-fact —
+    recurse the invalidation to quiescence. Terminates because revocations
+    only shrink the active witness set."""
+    seed: set[str] = set()
+    for contract_id in result.demoted_contract_ids:
+        contract = session.get(Contract, contract_id)
+        addr = (contract.address or "").lower() if contract is not None else ""
+        if addr:
+            seed.add(addr)
+    if not seed:
+        return result
+    revoked, demoted = _revocation_quiescence(session, seed)
+    all_demoted = tuple(sorted(set(result.demoted_contract_ids) | set(demoted)))
+    return DemotionResult(
+        revoked_witness_ids=tuple(sorted(set(result.revoked_witness_ids) | set(revoked))),
+        demoted_contract_ids=all_demoted,
+        reprobe_contract_ids=all_demoted,
+    )
+
+
+def _revocation_quiescence(session: Session, seed_vias: Sequence[str] | set[str]) -> tuple[list[int], list[int]]:
+    """Stratum (i): revoke every active W2/W3/W4 witness whose via-fact no
+    longer holds, demote members left with no verifying admitting witness,
+    and follow each demotion's own dependents until nothing changes.
+    Deterministic (sorted vias, then contract id); terminates because each
+    frontier addition consumes a fresh demotion and revocations only shrink."""
+    revoked: list[int] = []
+    demoted: list[int] = []
+    frontier = {a.lower() for a in seed_vias if a}
+    while frontier:
+        batch = sorted(frontier)
+        frontier = set()
+        witnesses = list(
+            session.execute(
+                select(ContractMembershipWitness)
+                .where(
+                    ContractMembershipWitness.via_address.in_(batch),
+                    ContractMembershipWitness.revoked_at.is_(None),
+                    ContractMembershipWitness.rule.in_(
+                        [WITNESS_RULE_W2_STRUCTURAL, WITNESS_RULE_W3_CONTROL, WITNESS_RULE_W4_DEPLOYER]
+                    ),
+                )
+                .order_by(ContractMembershipWitness.contract_id, ContractMembershipWitness.id)
+            ).scalars()
+        )
+        affected: set[tuple[int, int]] = set()
+        for witness in witnesses:
+            contract = session.get(Contract, witness.contract_id)
+            holds = contract is not None and _witness_fact_holds(
+                session,
+                contract=contract,
+                protocol_id=witness.protocol_id,
+                rule=witness.rule,
+                evidence=witness.evidence,
+                via_address=witness.via_address,
+            )
+            if not holds and revoke_witness(session, witness, reason="via_fact_no_longer_holds"):
+                revoked.append(witness.id)
+                affected.add((witness.contract_id, witness.protocol_id))
+        for contract_id, protocol_id in sorted(affected):
+            extra, was_demoted = _demote_if_no_verified_witness(
+                session, contract_id=contract_id, protocol_id=protocol_id, reason="via_fact_no_longer_holds"
+            )
+            revoked.extend(extra)
+            if was_demoted:
+                demoted.append(contract_id)
+                contract = session.get(Contract, contract_id)
+                addr = (contract.address or "").lower() if contract is not None else ""
+                if addr:
+                    frontier.add(addr)
+    return revoked, demoted
 
 
 # ---------------------------------------------------------------------------
@@ -815,6 +1271,10 @@ class FactsDelta:
     new_edge_addresses: tuple[str, ...] = ()
     #: Deployer EOAs whose registry row was just written, reclassified, or revoked.
     changed_deployer_addresses: tuple[str, ...] = ()
+    #: Contracts whose OWN stored facts just changed (a proxy that gained
+    #: pointers, a subject whose controllers were rewritten) — re-checked
+    #: directly when they are candidates.
+    recheck_contract_ids: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -822,6 +1282,17 @@ class PromotionResult:
     targeted_contract_ids: tuple[int, ...] = ()
     promoted_contract_ids: tuple[int, ...] = ()
     demoted_contract_ids: tuple[int, ...] = ()
+    #: Candidates whose settled verdict is blocked on a probe fact (missing W1
+    #: code proof or creation witness) plus demoted members re-queued per
+    #: invariant 8. The caller schedules probes; the gate never touches the wire.
+    reprobe_contract_ids: tuple[int, ...] = ()
+
+
+#: Etherscan-style FULL-creation-history provider for §3.3 Class B:
+#: ``enumerator(eoa) -> (created_addresses, history_complete)``. Optional —
+#: without one the fixpoint can register Class A but never mint Class B
+#: (positive exclusivity evidence cannot be derived from the DB alone).
+DeployerEnumerator = Callable[[str], "tuple[Sequence[str], bool]"]
 
 
 def _target_candidates(session: Session, facts_delta: FactsDelta) -> set[int]:
@@ -858,6 +1329,13 @@ def _target_candidates(session: Session, facts_delta: FactsDelta) -> set[int]:
             ).scalars()
         )
 
+    if facts_delta.recheck_contract_ids:
+        targeted.update(
+            session.execute(
+                select(Contract.id).where(*candidate, Contract.id.in_(sorted(set(facts_delta.recheck_contract_ids))))
+            ).scalars()
+        )
+
     # Candidates whose PROBED reads resolved to an address that just became a
     # member or a fresh edge value (the probe persisted the resolved set for
     # exactly this lookup).
@@ -880,23 +1358,502 @@ def _target_candidates(session: Session, facts_delta: FactsDelta) -> set[int]:
     return targeted
 
 
-def evaluate(session: Session, facts_delta: FactsDelta) -> PromotionResult:
-    """Targeted gate check for one fact delta. Wave 0 delivers the candidate
-    targeting; the stratified fixpoint is ``_stratified_fixpoint``."""
+def evaluate(
+    session: Session,
+    facts_delta: FactsDelta,
+    *,
+    deployer_enumerator: DeployerEnumerator | None = None,
+) -> PromotionResult:
+    """Targeted gate check for one fact delta (spec §3.4 events 2–3):
+    indexed candidate lookup, then the stratified fixpoint. Mutates the
+    session without committing — the caller commits."""
     targeted = _target_candidates(session, facts_delta)
-    settled = _stratified_fixpoint(session, targeted)
+    settled = _stratified_fixpoint(
+        session,
+        targeted,
+        dirty_via_addresses=facts_delta.changed_deployer_addresses,
+        deployer_enumerator=deployer_enumerator,
+    )
     return PromotionResult(
         targeted_contract_ids=tuple(sorted(targeted)),
         promoted_contract_ids=settled.promoted_contract_ids,
         demoted_contract_ids=settled.demoted_contract_ids,
+        reprobe_contract_ids=settled.reprobe_contract_ids,
     )
 
 
-def _stratified_fixpoint(session: Session, candidate_ids: set[int]) -> PromotionResult:
-    """Extension point (spec §3.4 event 3): fixed-order rounds — (i)
-    revocations to quiescence, (ii) deployer/perimeter reclassification,
-    (iii) admissions — implemented by a later lane. Changes no state here."""
-    return PromotionResult(targeted_contract_ids=tuple(sorted(candidate_ids)))
+def evaluate_committed(
+    session: Session,
+    facts_delta: FactsDelta,
+    *,
+    context: str,
+    deployer_enumerator: DeployerEnumerator | None = None,
+) -> PromotionResult | None:
+    """Event-2 hook wrapper: ``evaluate`` + commit, best-effort. A failure
+    rolls back and returns None — membership settles at a later event or via
+    reconcile; a pipeline stage never fails on the gate."""
+    try:
+        result = evaluate(session, facts_delta, deployer_enumerator=deployer_enumerator)
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        logger.warning(
+            "membership gate evaluation failed",
+            extra={"context": context, "exc_type": type(exc).__name__, "error": str(exc)[:300]},
+        )
+        return None
+    if result.promoted_contract_ids or result.demoted_contract_ids or result.reprobe_contract_ids:
+        logger.info(
+            "membership gate settled",
+            extra={
+                "context": context,
+                "targeted": len(result.targeted_contract_ids),
+                "promoted_contract_ids": list(result.promoted_contract_ids),
+                "demoted_contract_ids": list(result.demoted_contract_ids),
+                "reprobe_contract_ids": list(result.reprobe_contract_ids),
+            },
+        )
+    return result
+
+
+#: Loud-failure guard only: the fixpoint's own argument bounds rounds by the
+#: finite witness/registry space, so hitting this cap is a bug, never load.
+_FIXPOINT_ROUND_CAP = 1000
+
+
+def _stratified_fixpoint(
+    session: Session,
+    candidate_ids: set[int],
+    *,
+    dirty_via_addresses: Sequence[str] = (),
+    deployer_enumerator: DeployerEnumerator | None = None,
+) -> PromotionResult:
+    """Stratified fixpoint (spec §3.4 event 3, invariants 8+9). Each round
+    runs fixed strata — (i) revocations/invalidations to quiescence,
+    (ii) deployer registry reclassification, (iii) admissions — iterating in
+    stable sorted order, so the settled state is a deterministic function of
+    stored evidence, independent of event arrival order (confluence).
+    Terminates: admissions consume strictly new witnesses and revocations
+    only shrink the witness set (a collision-revoked registry row is never
+    re-registered within a run)."""
+    targeted = set(candidate_ids)
+    pending: set[int] = set(targeted)
+    dirty_vias: set[str] = {a.lower() for a in dirty_via_addresses if a}
+    promoted: set[int] = set()
+    demoted: set[int] = set()
+    reprobe: set[int] = set()
+    enum_cache: dict[str, tuple[Sequence[str], bool]] = {}
+
+    for _round in range(_FIXPOINT_ROUND_CAP):
+        changed = False
+
+        if dirty_vias:
+            revoked_ids, demoted_ids = _revocation_quiescence(session, dirty_vias)
+            dirty_vias = set()
+            if revoked_ids or demoted_ids:
+                changed = True
+            demoted.update(demoted_ids)
+            promoted.difference_update(demoted_ids)
+            reprobe.update(demoted_ids)
+            pending.update(demoted_ids)
+
+        recl_changed, recl_pending, recl_demotion = _reclassify_deployers(
+            session, pending, deployer_enumerator, enum_cache
+        )
+        if recl_changed:
+            changed = True
+        pending.update(recl_pending)
+        demoted.update(recl_demotion.demoted_contract_ids)
+        promoted.difference_update(recl_demotion.demoted_contract_ids)
+        reprobe.update(recl_demotion.reprobe_contract_ids)
+        pending.update(recl_demotion.demoted_contract_ids)
+
+        round_promoted: set[int] = set()
+        for contract_id in sorted(pending):
+            contract = session.get(Contract, contract_id)
+            if contract is None or contract.protocol_id is not None:
+                continue
+            protocol_id = contract.nominated_protocol_id
+            if protocol_id is None:
+                continue
+            outcome = _attempt_admission(session, contract, protocol_id)
+            if outcome == "promoted":
+                round_promoted.add(contract_id)
+            elif outcome == "needs_probe":
+                reprobe.add(contract_id)
+        if round_promoted:
+            changed = True
+            promoted.update(round_promoted)
+            pending.difference_update(round_promoted)
+            deployer_addrs: set[str] = set()
+            for contract_id in sorted(round_promoted):
+                contract = session.get(Contract, contract_id)
+                dep = (contract.deployer or "").lower() if contract is not None else ""
+                if dep:
+                    deployer_addrs.add(dep)
+            pending.update(
+                _target_candidates(
+                    session,
+                    FactsDelta(
+                        new_member_contract_ids=tuple(sorted(round_promoted)),
+                        changed_deployer_addresses=tuple(sorted(deployer_addrs)),
+                    ),
+                )
+            )
+
+        if not changed:
+            break
+    else:
+        raise RuntimeError("membership fixpoint exceeded the round cap — stored evidence did not settle")
+
+    reprobe.update(demoted - promoted)
+    reprobe.difference_update(promoted)
+    return PromotionResult(
+        targeted_contract_ids=tuple(sorted(targeted)),
+        promoted_contract_ids=tuple(sorted(promoted)),
+        demoted_contract_ids=tuple(sorted(demoted - promoted)),
+        reprobe_contract_ids=tuple(sorted(reprobe)),
+    )
+
+
+def _reclassify_deployers(
+    session: Session,
+    pending: set[int],
+    deployer_enumerator: DeployerEnumerator | None,
+    enum_cache: dict[str, tuple[Sequence[str], bool]],
+) -> tuple[bool, set[int], DemotionResult]:
+    """Stratum (ii): re-run the §3.3 ladder for every (protocol, deployer)
+    pair the pending candidates name. Registers fresh A/B verdicts; revokes an
+    existing row only on POSITIVE counterevidence (collision, perimeter fact
+    lost, corroboration lost) — an absent enumeration never revokes."""
+    if not pending:
+        return False, set(), DemotionResult()
+    pairs = sorted(
+        {
+            (int(protocol_id), deployer.lower())
+            for protocol_id, deployer in session.execute(
+                select(Contract.nominated_protocol_id, Contract.deployer).where(
+                    Contract.id.in_(sorted(pending)),
+                    Contract.protocol_id.is_(None),
+                    Contract.nominated_protocol_id.is_not(None),
+                    Contract.deployer.is_not(None),
+                )
+            )
+            if deployer and _ADDRESS_RE.match(deployer)
+        }
+    )
+    changed = False
+    new_pending: set[int] = set()
+    revoked: set[int] = set()
+    demotion_demoted: set[int] = set()
+    demotion_reprobe: set[int] = set()
+    for protocol_id, deployer in pairs:
+        existing = session.execute(
+            select(ProtocolDeployer).where(
+                ProtocolDeployer.protocol_id == protocol_id,
+                ProtocolDeployer.address == deployer,
+                ProtocolDeployer.revoked_at.is_(None),
+            )
+        ).scalar_one_or_none()
+        verdict = classify_deployer(session, protocol_id=protocol_id, address=deployer)
+        if (
+            verdict.trust_class is None
+            and deployer_enumerator is not None
+            and verdict.evidence.get("reason") == "no_complete_enumeration"
+        ):
+            if deployer not in enum_cache:
+                try:
+                    enum_cache[deployer] = deployer_enumerator(deployer)
+                except Exception as exc:
+                    logger.warning(
+                        "deployer enumeration failed",
+                        extra={"address": deployer, "exc_type": type(exc).__name__},
+                    )
+                    enum_cache[deployer] = ((), False)
+            history, complete = enum_cache[deployer]
+            if complete:
+                verdict = classify_deployer(
+                    session,
+                    protocol_id=protocol_id,
+                    address=deployer,
+                    creation_history=history,
+                    history_complete=True,
+                )
+        if verdict.trust_class is not None:
+            if existing is None or existing.trust_class != verdict.trust_class:
+                register_deployer(session, protocol_id=protocol_id, address=deployer, classification=verdict)
+                changed = True
+                new_pending.update(
+                    session.execute(
+                        select(Contract.id).where(
+                            Contract.protocol_id.is_(None),
+                            Contract.nominated_protocol_id == protocol_id,
+                            func.lower(Contract.deployer) == deployer,
+                        )
+                    ).scalars()
+                )
+        elif existing is not None:
+            reason: str | None = None
+            if verdict.evidence.get("reason") == "cross_protocol_collision":
+                reason = "cross_protocol_collision"
+            elif (
+                existing.trust_class == DEPLOYER_TRUST_CLASS_A
+                and _perimeter_fact(session, protocol_id=protocol_id, address=deployer) is None
+            ):
+                reason = "perimeter_fact_lost"
+            elif (
+                existing.trust_class == DEPLOYER_TRUST_CLASS_B
+                and len(_nonlineage_corroborating_member_ids(session, protocol_id=protocol_id, address=deployer)) < 2
+            ):
+                reason = "corroboration_lost"
+            if reason is not None:
+                result = demote(session, deployer_row=existing, reason=reason)
+                changed = True
+                revoked.update(result.revoked_witness_ids)
+                demotion_demoted.update(result.demoted_contract_ids)
+                demotion_reprobe.update(result.reprobe_contract_ids)
+    return (
+        changed,
+        new_pending,
+        DemotionResult(
+            revoked_witness_ids=tuple(sorted(revoked)),
+            demoted_contract_ids=tuple(sorted(demotion_demoted)),
+            reprobe_contract_ids=tuple(sorted(demotion_reprobe)),
+        ),
+    )
+
+
+def _attempt_admission(session: Session, contract: Contract, protocol_id: int) -> str | None:
+    """Stratum (iii) for one candidate: derive admitting witnesses from stored
+    facts (each verified at derivation AND again in ``promote``), bind W1 from
+    the persisted code probe, promote. Returns ``"promoted"``,
+    ``"needs_probe"`` (verdict blocked on a probe fact — invariant 5's named
+    missing piece), or ``None`` (no admissible evidence / proven-absent)."""
+    addr = (contract.address or "").lower()
+    if not addr:
+        return None
+    chain_id = chain_id_for_chain_name(contract.chain)
+    code_row = session.get(ContractCreationWitness, (chain_id, addr)) if chain_id is not None else None
+    code_absent = code_row.code_absent_at_probe if code_row is not None else None
+    if code_absent is True:
+        return None
+    derived, w4_blocked_on_creation = _derive_admitting_facts(session, contract, protocol_id)
+    has_admitting = bool(derived) or any(
+        row.rule in ADMITTING_WITNESS_RULES
+        for row in active_witnesses(session, contract_id=contract.id, protocol_id=protocol_id)
+    )
+    if not has_admitting:
+        return "needs_probe" if w4_blocked_on_creation else None
+    if chain_id is None:
+        return None
+    if code_absent is None:
+        return "needs_probe"
+    assert code_row is not None and code_row.code_probe_block is not None  # paired columns (schema CHECK)
+    write_witness(
+        session,
+        contract_id=contract.id,
+        protocol_id=protocol_id,
+        rule=WITNESS_RULE_W1_CODE,
+        evidence=w1_evidence(chain_id=chain_id, code_probe_block=code_row.code_probe_block),
+    )
+    for rule, evidence, via_address in derived:
+        write_witness(
+            session,
+            contract_id=contract.id,
+            protocol_id=protocol_id,
+            rule=rule,
+            evidence=evidence,
+            via_address=via_address,
+        )
+    if promote(session, contract=contract, protocol_id=protocol_id):
+        return "promoted"
+    return "needs_probe" if w4_blocked_on_creation else None
+
+
+_TX_HASH_RE = re.compile(r"^0x[0-9a-fA-F]{64}$")
+
+
+def _derive_admitting_facts(
+    session: Session, contract: Contract, protocol_id: int
+) -> tuple[list[tuple[str, dict[str, Any], str]], bool]:
+    """W2/W3/W4 facts provable from stored resolution for one candidate,
+    in deterministic order. Only control/lineage edges are consulted —
+    control-graph presence and dependency rows never appear here
+    (invariant 6). Returns ``(facts, w4_blocked_on_creation_witness)``."""
+    addr = (contract.address or "").lower()
+    chain_key = _chain_key(contract.chain)
+    derived: list[tuple[str, dict[str, Any], str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add(rule: str, evidence: dict[str, Any], via: str) -> None:
+        key = (rule, via)
+        if key not in seen:
+            seen.add(key)
+            derived.append((rule, evidence, via))
+
+    member_scope = (
+        Contract.protocol_id == protocol_id,
+        Contract.id != contract.id,
+        func.lower(func.coalesce(Contract.chain, "ethereum")) == chain_key,
+    )
+
+    # W2 — members whose stored pointers resolve to the candidate.
+    pointer_members = list(
+        session.execute(
+            select(Contract)
+            .where(
+                *member_scope,
+                (func.lower(Contract.implementation) == addr)
+                | (func.lower(Contract.beacon) == addr)
+                | (func.lower(Contract.admin) == addr)
+                | (literal(addr) == sql_any_(Contract.secondary_implementations)),
+            )
+            .order_by(Contract.id)
+        ).scalars()
+    )
+    for member in pointer_members:
+        for edge_kind in ("implementation", "beacon", "proxy_admin", "secondary_implementation"):
+            if _w2_edge_holds(session, contract=contract, member=member, edge_kind=edge_kind, evidence={}):
+                add(
+                    WITNESS_RULE_W2_STRUCTURAL,
+                    w2_evidence(
+                        edge_kind=edge_kind,
+                        member_contract_id=member.id,
+                        member_address=member.address,
+                        resolved_pointer=addr,
+                    ),
+                    (member.address or "").lower(),
+                )
+                break
+
+    # W2 — the candidate is a proxy whose resolved impl/beacon is a member.
+    for pointer in ((contract.implementation or "").lower(), (contract.beacon or "").lower()):
+        if not pointer or not _ADDRESS_RE.match(pointer):
+            continue
+        for member in _member_rows_at(session, protocol_id=protocol_id, address=pointer, chain_key=chain_key):
+            if member.id == contract.id:
+                continue
+            add(
+                WITNESS_RULE_W2_STRUCTURAL,
+                w2_evidence(
+                    edge_kind="proxy",
+                    member_contract_id=member.id,
+                    member_address=member.address,
+                    resolved_pointer=(member.address or "").lower(),
+                ),
+                (member.address or "").lower(),
+            )
+
+    # W2 — historical impl of a member proxy, per stored UpgradeEvent rows.
+    seen_event_members: set[int] = set()
+    for event, member in session.execute(
+        select(UpgradeEvent, Contract)
+        .join(Contract, UpgradeEvent.contract_id == Contract.id)
+        .where(*member_scope, func.lower(UpgradeEvent.new_impl) == addr)
+        .order_by(Contract.id, UpgradeEvent.block_number.asc().nulls_last(), UpgradeEvent.id)
+    ):
+        if member.id in seen_event_members:
+            continue
+        seen_event_members.add(member.id)
+        tx = event.tx_hash if isinstance(event.tx_hash, str) and _TX_HASH_RE.match(event.tx_hash) else None
+        add(
+            WITNESS_RULE_W2_STRUCTURAL,
+            w2_evidence(
+                edge_kind="historical_implementation",
+                member_contract_id=member.id,
+                member_address=member.address,
+                resolved_pointer=addr,
+                upgrade_tx_hash=tx.lower() if tx else None,
+            ),
+            (member.address or "").lower(),
+        )
+
+    # W3 D2 — the candidate is a resolved controller of a member.
+    for member in session.execute(
+        select(Contract)
+        .join(ControllerValue, ControllerValue.contract_id == Contract.id)
+        .where(*member_scope, func.lower(ControllerValue.value) == addr)
+        .distinct()
+        .order_by(Contract.id)
+    ).scalars():
+        add(
+            WITNESS_RULE_W3_CONTROL,
+            w3_evidence(direction=W3_DIRECTION_D2, source="controller_values", via_address=member.address),
+            (member.address or "").lower(),
+        )
+    for member in session.execute(
+        select(Contract)
+        .join(ContractProbeAttempt, ContractProbeAttempt.contract_id == Contract.id)
+        .where(
+            *member_scope,
+            ContractProbeAttempt.results.op("->")("resolved_addresses").op("?|")(cast([addr], ARRAY(Text()))),
+        )
+        .distinct()
+        .order_by(Contract.id)
+    ).scalars():
+        if addr in _probe_controller_values(session, member):
+            add(
+                WITNESS_RULE_W3_CONTROL,
+                w3_evidence(direction=W3_DIRECTION_D2, source="probe", via_address=member.address),
+                (member.address or "").lower(),
+            )
+
+    # W3 D1 — the candidate's resolved controller is a TRANSITIVE perimeter
+    # entity (the gate proves transitivity here; a caller cannot assert it).
+    own_controllers: list[tuple[str, str]] = []
+    for (value,) in session.execute(
+        select(ControllerValue.value)
+        .where(ControllerValue.contract_id == contract.id, ControllerValue.value.is_not(None))
+        .distinct()
+    ):
+        own_controllers.append(("controller_values", (value or "").lower()))
+    admin_pointer = (contract.admin or "").lower()
+    if admin_pointer:
+        own_controllers.append(("proxy_admin_slot", admin_pointer))
+    for value in sorted(_probe_controller_values(session, contract)):
+        own_controllers.append(("probe", value))
+    for source, via in sorted(own_controllers):
+        if not _ADDRESS_RE.match(via) or via == addr or int(via, 16) == 0:
+            continue
+        if ("w3_control", via) in seen:
+            continue
+        if _via_is_transitive(
+            session, protocol_id=protocol_id, via_address=via, chain_key=chain_key, exclude_contract_id=contract.id
+        ):
+            add(
+                WITNESS_RULE_W3_CONTROL,
+                w3_evidence(direction=W3_DIRECTION_D1, source=source, via_address=via, via_transitive=True),
+                via,
+            )
+
+    # W4 — deployer lineage through the registry.
+    w4_blocked = False
+    deployer = (contract.deployer or "").lower()
+    if deployer and _ADDRESS_RE.match(deployer):
+        registry = session.execute(
+            select(ProtocolDeployer).where(
+                ProtocolDeployer.protocol_id == protocol_id,
+                ProtocolDeployer.address == deployer,
+                ProtocolDeployer.revoked_at.is_(None),
+            )
+        ).scalar_one_or_none()
+        if registry is not None:
+            chain_id = chain_id_for_chain_name(contract.chain)
+            creation = session.get(ContractCreationWitness, (chain_id, addr)) if chain_id is not None else None
+            if creation is not None and creation.creation_tx_hash:
+                add(
+                    WITNESS_RULE_W4_DEPLOYER,
+                    w4_evidence(
+                        deployer_address=deployer,
+                        deployer_registry_id=registry.id,
+                        creation_tx_hash=creation.creation_tx_hash,
+                        creation_block=creation.creation_block,
+                    ),
+                    deployer,
+                )
+            else:
+                w4_blocked = True
+    return derived, w4_blocked
 
 
 # ---------------------------------------------------------------------------
