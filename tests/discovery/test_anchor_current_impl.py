@@ -78,10 +78,12 @@ def test_not_superseded_impl_clause_filters(db_session):
 
 
 def _stub_backfill_io(monkeypatch):
-    """Backfill resolves impl names via Etherscan and refreshes audit coverage.
-    Stub both so the test stays offline + hermetic."""
+    """Backfill resolves impl names via Etherscan, runs the near-line §3.5
+    probe, and refreshes audit coverage. Stub all three so the test stays
+    offline + hermetic."""
     monkeypatch.setattr("services.clients.etherscan.parallel_get", lambda calls: {k: fn() for k, fn in calls.items()})
     monkeypatch.setattr("services.clients.etherscan.get_contract_info", lambda addr, **_kw: (f"Impl_{addr[-4:]}", True))
+    monkeypatch.setattr("services.discovery.membership_gate.probe", lambda session, contract: None)
     monkeypatch.setattr("services.audits.coverage.upsert_coverage_for_contract", lambda *a, **k: 0)
 
 

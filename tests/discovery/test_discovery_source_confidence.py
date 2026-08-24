@@ -313,9 +313,10 @@ class TestBulkUpsertOwnershipGate:
 
 @pytest.fixture()
 def stub_etherscan(monkeypatch):
-    """Stub etherscan name lookup so the backfill works offline.
+    """Stub etherscan name lookup AND the backfill's near-line §3.5 probe so
+    the tests stay offline + hermetic (stub-the-wire rule).
 
-    Matches the helper in ``test_upgrade_history_backfill.py`` —
+    Matches the helpers in ``test_upgrade_history_backfill.py`` —
     duplicated here to keep this file self-contained and runnable in
     isolation.
     """
@@ -325,6 +326,7 @@ def stub_etherscan(monkeypatch):
         return (f"StubImpl-{address[2:6]}", {})
 
     monkeypatch.setattr(etherscan_mod, "get_contract_info", fake)
+    monkeypatch.setattr("services.discovery.membership_gate.probe", lambda session, contract: None)
 
 
 @requires_postgres

@@ -43,6 +43,13 @@ pytestmark = [
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _stub_membership_probe(monkeypatch):
+    """Stub-the-wire: the backfill's near-line §3.5 probe never leaves the
+    machine — tests seed code facts directly via ``_seed_code_fact``."""
+    monkeypatch.setattr("services.discovery.membership_gate.probe", lambda session, contract: None)
+
+
 @pytest.fixture()
 def worker():
     """No-op fixture kept for source-compatibility with existing tests.

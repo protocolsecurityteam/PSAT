@@ -16,8 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, Literal, Mapping, Sequence
 
-from sqlalchemy import Text, case, cast, func, literal, select, text
-from sqlalchemy import any_ as sql_any_
+from sqlalchemy import Text, case, cast, false, func, or_, select, text
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
@@ -399,6 +398,19 @@ def nominate(
             merged.append(source_tag)
             contract.discovery_sources = merged
     if human_assertion is not None:
+        # A member of ANOTHER protocol accepts no foreign W5 row — the
+        # assertion is provenance in the log only (invariant 1 posture).
+        if contract.protocol_id not in (None, protocol_id):
+            logger.info(
+                "human assertion for a foreign protocol not recorded on a member",
+                extra={
+                    "contract_id": contract.id,
+                    "member_of": contract.protocol_id,
+                    "asserted_protocol_id": protocol_id,
+                    "actor": human_assertion.actor,
+                },
+            )
+            return
         if contract.id is None:
             session.flush()
         write_witness(
@@ -771,6 +783,23 @@ def promote(session: Session, *, contract: Contract, protocol_id: int) -> bool:
     # W1 must be a code proof on the CONTRACT'S OWN chain — a witness probed
     # elsewhere (or a row whose chain never resolves) satisfies nothing.
     expected_chain = chain_id_for_chain_name(contract.chain)
+    # The LATEST persisted probe verdict outranks any stale active W1 row: a
+    # later code-absent probe is proven-absent (§3.1), and proven-absent can
+    # never promote.
+    if expected_chain is not None and contract.address:
+        code_row = session.get(ContractCreationWitness, (expected_chain, contract.address.lower()))
+        if code_row is not None and code_row.code_absent_at_probe is True:
+            logger.info(
+                "promotion withheld",
+                extra={
+                    "contract_id": contract.id,
+                    "protocol_id": protocol_id,
+                    "missing": "code_present_at_latest_probe",
+                    "contract_chain": contract.chain,
+                    "active_rules": sorted(rules),
+                },
+            )
+            return False
     has_w1 = expected_chain is not None and any(
         row.rule == WITNESS_RULE_W1_CODE
         and isinstance(row.evidence, dict)
@@ -1297,6 +1326,46 @@ class PromotionResult:
 DeployerEnumerator = Callable[[str], "tuple[Sequence[str], bool]"]
 
 
+def _secondary_pointer_named(addresses: Sequence[str]):
+    """Array-membership predicate over ``secondary_implementations``,
+    case-folded. A full 0x-address can only match at an element boundary
+    ('x' is not a hex digit), so the joined-LIKE form is element-exact."""
+    joined = func.lower(func.array_to_string(Contract.secondary_implementations, ","))
+    conditions = [joined.like(f"%{address.lower()}%") for address in addresses]
+    return or_(*conditions) if conditions else false()
+
+
+def _standing_vias_named_by_edges(session: Session, edge_addresses: Sequence[str]) -> set[str]:
+    """Fresh edge values that name a STANDING via-fact — an active W2/W3/W4
+    witness's via or an unrevoked deployer-registry EOA. A new observation of
+    such an address (a foreign controller value, a new admin pointer) can
+    invalidate the exclusivity/perimeter facts resting on it, so these vias
+    seed the revocation stratum (§3.2 witness invalidation)."""
+    addrs = sorted({a.lower() for a in edge_addresses if a})
+    if not addrs:
+        return set()
+    touched = {
+        (via or "").lower()
+        for via in session.execute(
+            select(ContractMembershipWitness.via_address)
+            .where(
+                ContractMembershipWitness.via_address.in_(addrs),
+                ContractMembershipWitness.revoked_at.is_(None),
+            )
+            .distinct()
+        ).scalars()
+    }
+    touched |= {
+        address.lower()
+        for address in session.execute(
+            select(ProtocolDeployer.address)
+            .where(ProtocolDeployer.address.in_(addrs), ProtocolDeployer.revoked_at.is_(None))
+            .distinct()
+        ).scalars()
+    }
+    return {t for t in touched if t}
+
+
 def _target_candidates(session: Session, facts_delta: FactsDelta) -> set[int]:
     """Indexed candidate lookups per §3.4 event 2."""
     candidate = (Contract.protocol_id.is_(None), Contract.nominated_protocol_id.is_not(None))
@@ -1328,6 +1397,32 @@ def _target_candidates(session: Session, facts_delta: FactsDelta) -> set[int]:
         targeted.update(
             session.execute(
                 select(Contract.id).where(*candidate, func.lower(Contract.deployer).in_(sorted(deployer_addrs)))
+            ).scalars()
+        )
+
+    # Candidates REACHING a new member through their OWN stored facts — a
+    # candidate proxy whose pointer resolves to the member (W2 proxy shape),
+    # or a candidate whose stored resolved controller is the member (W3 D1).
+    # Both directions must target, or the settled state would depend on which
+    # side's fact arrived last (invariant 9).
+    if member_addrs:
+        member_list = sorted(member_addrs)
+        targeted.update(
+            session.execute(
+                select(Contract.id).where(
+                    *candidate,
+                    func.lower(Contract.implementation).in_(member_list)
+                    | func.lower(Contract.beacon).in_(member_list)
+                    | func.lower(Contract.admin).in_(member_list)
+                    | _secondary_pointer_named(member_list),
+                )
+            ).scalars()
+        )
+        targeted.update(
+            session.execute(
+                select(Contract.id)
+                .join(ControllerValue, ControllerValue.contract_id == Contract.id)
+                .where(*candidate, func.lower(ControllerValue.value).in_(member_list))
             ).scalars()
         )
 
@@ -1370,10 +1465,12 @@ def evaluate(
     indexed candidate lookup, then the stratified fixpoint. Mutates the
     session without committing — the caller commits."""
     targeted = _target_candidates(session, facts_delta)
+    dirty_vias = {a.lower() for a in facts_delta.changed_deployer_addresses if a}
+    dirty_vias |= _standing_vias_named_by_edges(session, facts_delta.new_edge_addresses)
     settled = _stratified_fixpoint(
         session,
         targeted,
-        dirty_via_addresses=facts_delta.changed_deployer_addresses,
+        dirty_via_addresses=sorted(dirty_vias),
         deployer_enumerator=deployer_enumerator,
     )
     return PromotionResult(
@@ -1583,6 +1680,24 @@ def _reclassify_deployers(
                     creation_history=history,
                     history_complete=True,
                 )
+        if verdict.trust_class is None and verdict.evidence.get("reason") == "cross_protocol_collision":
+            # Invariant 7: a collision is Class C for EVERY party, never a
+            # vote — every protocol's standing registry row for this EOA
+            # falls in the same pass, each with its full demote cascade.
+            standing = list(
+                session.execute(
+                    select(ProtocolDeployer)
+                    .where(ProtocolDeployer.address == deployer, ProtocolDeployer.revoked_at.is_(None))
+                    .order_by(ProtocolDeployer.protocol_id)
+                ).scalars()
+            )
+            for row in standing:
+                result = demote(session, deployer_row=row, reason="cross_protocol_collision")
+                changed = True
+                revoked.update(result.revoked_witness_ids)
+                demotion_demoted.update(result.demoted_contract_ids)
+                demotion_reprobe.update(result.reprobe_contract_ids)
+            continue
         if verdict.trust_class is not None:
             if existing is None or existing.trust_class != verdict.trust_class:
                 register_deployer(session, protocol_id=protocol_id, address=deployer, classification=verdict)
@@ -1598,13 +1713,18 @@ def _reclassify_deployers(
                 )
         elif existing is not None:
             reason: str | None = None
-            if verdict.evidence.get("reason") == "cross_protocol_collision":
-                reason = "cross_protocol_collision"
-            elif (
+            if (
                 existing.trust_class == DEPLOYER_TRUST_CLASS_A
                 and _perimeter_fact(session, protocol_id=protocol_id, address=deployer) is None
             ):
                 reason = "perimeter_fact_lost"
+            elif existing.trust_class == DEPLOYER_TRUST_CLASS_B and verdict.evidence.get("reason") == (
+                "foreign_or_unknown_creations"
+            ):
+                # A FRESH enumeration surfaced a creation outside the
+                # member/candidate set — the §3.3 later-foreign-observation
+                # revocation; the run can mint no new W4 on this EOA after it.
+                reason = "foreign_or_unknown_creations"
             elif (
                 existing.trust_class == DEPLOYER_TRUST_CLASS_B
                 and len(_nonlineage_corroborating_member_ids(session, protocol_id=protocol_id, address=deployer)) < 2
@@ -1710,7 +1830,7 @@ def _derive_admitting_facts(
                 (func.lower(Contract.implementation) == addr)
                 | (func.lower(Contract.beacon) == addr)
                 | (func.lower(Contract.admin) == addr)
-                | (literal(addr) == sql_any_(Contract.secondary_implementations)),
+                | _secondary_pointer_named([addr]),
             )
             .order_by(Contract.id)
         ).scalars()
