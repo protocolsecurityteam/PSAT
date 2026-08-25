@@ -1034,7 +1034,7 @@ class StaticWorker(BaseWorker):
             # parent signal the child carries is the proxy's MEMBERSHIP —
             # the earned stamp the evaluate above may have just set — never
             # a source tag.
-            parent_owns_high = bool(contract_row is not None and contract_row.protocol_id is not None)
+            parent_is_member = bool(contract_row is not None and contract_row.protocol_id is not None)
             child_request = {
                 "address": impl_addr,
                 "name": impl_name,
@@ -1044,7 +1044,7 @@ class StaticWorker(BaseWorker):
                 "proxy_address": address,
                 "proxy_type": proxy_type,
                 "discovery_relationship": "implementation",
-                "parent_owns_high": parent_owns_high,
+                "parent_is_member": parent_is_member,
             }
             # Always stamp the child's chain from the parent (inv. 6): a None here
             # used to cascade and let the impl child derive its own default chain,

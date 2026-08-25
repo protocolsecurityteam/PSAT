@@ -894,7 +894,7 @@ class TestStructuralOwnershipPropagation:
     shape (member parent has a ``relationship_type='proxy'`` dep edge,
     but the parent's ``implementation`` field doesn't point to the
     dep) must NOT propagate ownership. Under the membership gate,
-    ``parent_owns_high`` is derived from the parent's MEMBERSHIP
+    ``parent_is_member`` is derived from the parent's MEMBERSHIP
     (``protocol_id`` set), never its source tags.
     """
 
@@ -993,7 +993,7 @@ class TestStructuralOwnershipPropagation:
         """Member parent + ``relationship_type='implementation'`` edge +
         ``parent.implementation == dep_addr`` → child request carries
         ``discovery_relationship='implementation'`` and
-        ``parent_owns_high=True``. This is the strongest case for
+        ``parent_is_member=True``. This is the strongest case for
         propagation."""
         session = db_session_for_resolution
         dep_addr = ("0x" + uuid.uuid4().hex[:40].zfill(40)).lower()
@@ -1035,7 +1035,7 @@ class TestStructuralOwnershipPropagation:
 
         assert len(create_calls) == 1
         assert create_calls[0]["discovery_relationship"] == "implementation"
-        assert create_calls[0]["parent_owns_high"] is True
+        assert create_calls[0]["parent_is_member"] is True
 
     @requires_postgres
     def test_beacon_edge_grants_structural_ownership(
@@ -1069,7 +1069,7 @@ class TestStructuralOwnershipPropagation:
 
         assert len(create_calls) == 1
         assert create_calls[0]["discovery_relationship"] == "beacon"
-        assert create_calls[0]["parent_owns_high"] is True
+        assert create_calls[0]["parent_is_member"] is True
 
     @requires_postgres
     def test_proxy_edge_grants_when_dep_implementation_back_links(
@@ -1154,7 +1154,7 @@ class TestStructuralOwnershipPropagation:
 
         assert len(create_calls) == 1
         assert create_calls[0]["discovery_relationship"] == "proxy"
-        assert create_calls[0]["parent_owns_high"] is True
+        assert create_calls[0]["parent_is_member"] is True
 
         # The perimeter is the W2 producer now: the back-linked dep row was
         # nominated and earned a structural witness via the member parent —
@@ -1246,7 +1246,7 @@ class TestStructuralOwnershipPropagation:
         assert "discovery_relationship" not in create_calls[0], (
             "a cross-chain twin's back-link satisfied the structural check — the lookup is no longer chain-scoped"
         )
-        assert "parent_owns_high" not in create_calls[0]
+        assert "parent_is_member" not in create_calls[0]
 
     @requires_postgres
     def test_relationship_type_alone_does_not_propagate(
@@ -1288,14 +1288,14 @@ class TestStructuralOwnershipPropagation:
         assert "discovery_relationship" not in create_calls[0], (
             "structural propagation fired on relationship_type alone — Lido stETH shape is no longer being filtered out"
         )
-        assert "parent_owns_high" not in create_calls[0]
+        assert "parent_is_member" not in create_calls[0]
 
     @requires_postgres
     def test_non_member_parent_blocks_propagation(
         self, db_session_for_resolution, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Parent is not a member (``protocol_id`` NULL) — its source tags are
-        irrelevant. Even with a perfect structural link, ``parent_owns_high``
+        irrelevant. Even with a perfect structural link, ``parent_is_member``
         lands False and no witness can be produced: only a member's stored
         resolution admits (spec §3.2 W2)."""
         session = db_session_for_resolution
@@ -1324,9 +1324,9 @@ class TestStructuralOwnershipPropagation:
 
         assert len(create_calls) == 1
         # The relationship is still passed (parent IS structurally linked),
-        # but parent_owns_high is False — gate's structural branch will
+        # but parent_is_member is False — gate's structural branch will
         # decline to adopt.
-        assert create_calls[0].get("parent_owns_high") is False
+        assert create_calls[0].get("parent_is_member") is False
 
 
 class TestResolvedGraphEmpty:

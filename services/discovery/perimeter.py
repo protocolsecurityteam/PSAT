@@ -206,14 +206,14 @@ def _structural_ownership(session: Session, job: Job) -> tuple[bool, dict[str, s
 
     # Membership, never a source tag: only a member parent's stored resolution
     # can admit (spec §3.2 W2; supersedes the HIGH-source shortcut).
-    parent_owns_high = getattr(parent_contract, "protocol_id", None) is not None
+    parent_is_member = getattr(parent_contract, "protocol_id", None) is not None
     parent_id = getattr(parent_contract, "id", None)
     parent_impl = (getattr(parent_contract, "implementation", None) or "").lower() or None
     parent_beacon = (getattr(parent_contract, "beacon", None) or "").lower() or None
     parent_addr_lower = (getattr(parent_contract, "address", None) or "").lower() or None
     parent_chain = _mainnet_coalesced_chain(canonical_chain(getattr(parent_contract, "chain", None)))
     if parent_id is None:
-        return parent_owns_high, {}, parent_contract
+        return parent_is_member, {}, parent_contract
 
     try:
         dep_rows = list(
@@ -221,7 +221,7 @@ def _structural_ownership(session: Session, job: Job) -> tuple[bool, dict[str, s
         )
     except Exception as exc:
         logger.debug("Job %s: structural-propagation dep-rows lookup failed: %s", job.id, exc)
-        return parent_owns_high, {}, parent_contract
+        return parent_is_member, {}, parent_contract
 
     # For proxy-direction edges we need to verify the dep's Contract.implementation
     # back-links to the parent. Batch so the loop stays O(deps) not O(deps×SELECTs).
@@ -263,7 +263,7 @@ def _structural_ownership(session: Session, job: Job) -> tuple[bool, dict[str, s
             structurally_linked = parent_beacon is not None and parent_beacon == dep_addr
         if structurally_linked:
             structural_rel_by_addr[dep_addr] = rel
-    return parent_owns_high, structural_rel_by_addr, parent_contract
+    return parent_is_member, structural_rel_by_addr, parent_contract
 
 
 def produce_structural_witness(
@@ -565,7 +565,7 @@ def queue_discovered_contracts(
     fp_minted = {a.lower() for a in (fp_materialized_addresses or ()) if a}
 
     parent_company = _parent_company(session, job)
-    parent_owns_high, structural_rel_by_addr, parent_contract = _structural_ownership(session, job)
+    parent_is_member, structural_rel_by_addr, parent_contract = _structural_ownership(session, job)
     if getattr(parent_contract, "protocol_id", None) is not None:
         assert parent_contract is not None
         # Witness production is evidence recording, not spawn control — a
@@ -684,7 +684,7 @@ def queue_discovered_contracts(
         structural_rel = structural_rel_by_addr.get(addr)
         if structural_rel is not None:
             child_request["discovery_relationship"] = structural_rel
-            child_request["parent_owns_high"] = parent_owns_high
+            child_request["parent_is_member"] = parent_is_member
 
         child_job = create_job(session, child_request, initial_stage=JobStage.discovery)
         if parent_company:

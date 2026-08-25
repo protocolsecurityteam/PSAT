@@ -549,7 +549,7 @@ def test_gate_intake_structural_hint_is_reverified_not_trusted(db_session):
     db_session.flush()
     request = {
         "discovery_relationship": "implementation",
-        "parent_owns_high": True,
+        "parent_is_member": True,
         "parent_job_id": str(liar_job.id),
     }
     _gate_intake(db_session, liar_job, candidate, request)
@@ -570,7 +570,7 @@ def test_gate_intake_structural_hint_is_reverified_not_trusted(db_session):
     _seed_w1(db_session, candidate, protocol.id)
     request = {
         "discovery_relationship": "implementation",
-        "parent_owns_high": True,
+        "parent_is_member": True,
         "parent_job_id": str(honest_job.id),
     }
     _gate_intake(db_session, honest_job, candidate, request)
