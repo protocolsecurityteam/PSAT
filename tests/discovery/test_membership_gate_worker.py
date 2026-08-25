@@ -29,15 +29,18 @@ from db.models import (
     ProtocolDeployer,
 )
 from services.clients.rpc import EthCallResult
+from services.discovery import deployer_enumeration
 from services.discovery import membership_gate as gate
 from services.discovery import probes
+from services.discovery.deployer_enumeration import (
+    DEPLOYER_ENUMERATION_CAP,
+    enumerate_deployer_creations,
+    session_deployer_enumerator,
+)
 from tests.conftest import ADDR, requires_postgres
 from utils.evm import OWNER_SELECTOR
-from workers import discovery as worker_mod
 from workers.discovery import (
-    DEPLOYER_ENUMERATION_CAP,
     ENABLED_CHAINS_SEEN_KEY,
-    _enumerate_deployer_creations,
     _gate_intake,
     _register_protocol_deployer,
     run_chain_enable_sweep,
@@ -135,7 +138,7 @@ def _stub_txlist(monkeypatch, txs_by_chain: dict[int, list | Exception]) -> list
             raise entry
         return {"result": entry}
 
-    monkeypatch.setattr(worker_mod.etherscan, "get", fake_get)
+    monkeypatch.setattr(deployer_enumeration.etherscan, "get", fake_get)
     return calls
 
 
@@ -154,7 +157,7 @@ def test_enumeration_collects_direct_creations(monkeypatch):
         monkeypatch,
         {1: [_creation_tx(ADDR(0x201)), {"to": ADDR(0x999), "contractAddress": ""}, _creation_tx(ADDR(0x202))]},
     )
-    created, scope, complete = _enumerate_deployer_creations(ADDR(0x200))
+    created, scope, complete = enumerate_deployer_creations(ADDR(0x200))
     assert created == sorted([ADDR(0x201), ADDR(0x202)])
     assert scope == [1]
     assert complete is True
@@ -168,7 +171,7 @@ def test_enumeration_cap_exceeded_is_incomplete(monkeypatch):
         DEPLOYER_ENUMERATION_CAP - 3
     )
     _stub_txlist(monkeypatch, {1: window})
-    created, scope, complete = _enumerate_deployer_creations(ADDR(0x2FF))
+    created, scope, complete = enumerate_deployer_creations(ADDR(0x2FF))
     assert complete is False
     assert created == []
     assert scope == []
@@ -177,9 +180,9 @@ def test_enumeration_cap_exceeded_is_incomplete(monkeypatch):
 def test_enumeration_empty_or_failed_is_incomplete(monkeypatch):
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     _stub_txlist(monkeypatch, {1: []})
-    assert _enumerate_deployer_creations(ADDR(0x210)) == ([], [1], False)
+    assert enumerate_deployer_creations(ADDR(0x210)) == ([], [1], False)
     _stub_txlist(monkeypatch, {1: RuntimeError("etherscan down")})
-    assert _enumerate_deployer_creations(ADDR(0x210)) == ([], [], False)
+    assert enumerate_deployer_creations(ADDR(0x210)) == ([], [], False)
 
 
 def test_enumeration_any_enabled_chain_failing_is_incomplete(monkeypatch):
@@ -187,7 +190,7 @@ def test_enumeration_any_enabled_chain_failing_is_incomplete(monkeypatch):
     # window to come back clean, and the failed chain stays out of scope.
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1,8453")
     _stub_txlist(monkeypatch, {1: [_creation_tx(ADDR(0x220))], 8453: RuntimeError("boom")})
-    created, scope, complete = _enumerate_deployer_creations(ADDR(0x221))
+    created, scope, complete = enumerate_deployer_creations(ADDR(0x221))
     assert created == [ADDR(0x220)]
     assert scope == [1]
     assert complete is False
@@ -383,6 +386,78 @@ def test_ladder_wire_snapshot_reuse_skips_reenumeration(db_session, monkeypatch)
     )
     assert refreshed is not None and refreshed.id == first.id
     assert newcomer.address in refreshed.evidence["enumeration"]["addresses"]
+
+
+# ---------------------------------------------------------------------------
+# §3.3 Class B through the gate fixpoint (worker adapter)
+# ---------------------------------------------------------------------------
+
+
+def test_fixpoint_mints_class_b_through_worker_adapter(db_session, monkeypatch):
+    """The fixpoint reaches Class B with the worker's Etherscan-backed
+    adapter — the same enumeration+coverage path the ladder wire uses."""
+    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
+    protocol = _protocol(db_session)
+    eoa = ADDR(0x310)
+    members = _seed_class_b_shape(db_session, protocol, eoa)
+    sibling = _contract(db_session, ADDR(0x312), nominated_protocol_id=protocol.id, deployer=eoa)
+    db_session.add(
+        ContractCreationWitness(
+            chain_id=1,
+            address=sibling.address,
+            creation_tx_hash=_TX,
+            creation_block=5,
+            code_probe_block=100,
+            code_absent_at_probe=False,
+        )
+    )
+    db_session.flush()
+    _stub_txlist(monkeypatch, {1: [_creation_tx(c.address) for c in (*members, sibling)]})
+
+    result = gate.evaluate(
+        db_session,
+        gate.FactsDelta(recheck_contract_ids=(sibling.id,)),
+        deployer_enumerator=session_deployer_enumerator(db_session),
+    )
+    db_session.commit()
+
+    registry = db_session.execute(
+        select(ProtocolDeployer).where(ProtocolDeployer.address == eoa, ProtocolDeployer.protocol_id == protocol.id)
+    ).scalar_one()
+    assert registry.trust_class == "B" and registry.revoked_at is None
+    assert sibling.id in result.promoted_contract_ids
+    assert sibling.protocol_id == protocol.id
+
+
+def test_class_b_verdict_parity_between_ladder_wire_and_fixpoint(db_session, monkeypatch):
+    """One Class-B evidence path: for the same fixture the ladder wire and the
+    fixpoint adapter agree — refusal on a coverage gap, Class B once the
+    enumeration covers every known creation."""
+    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
+    protocol = _protocol(db_session)
+    eoa = ADDR(0x316)
+    members = _seed_class_b_shape(db_session, protocol, eoa)
+    stray = _contract(db_session, ADDR(0x317), nominated_protocol_id=protocol.id, deployer=eoa)
+    # The enumerated window misses the stray known creation → coverage gap.
+    _stub_txlist(monkeypatch, {1: [_creation_tx(m.address) for m in members]})
+
+    assert _register_protocol_deployer(db_session, protocol_id=protocol.id, deployer=eoa) is None
+    history, complete = session_deployer_enumerator(db_session)(eoa)
+    verdict = gate.classify_deployer(
+        db_session, protocol_id=protocol.id, address=eoa, creation_history=history, history_complete=complete
+    )
+    assert verdict.trust_class is None
+    assert db_session.execute(select(ProtocolDeployer).where(ProtocolDeployer.address == eoa)).first() is None
+
+    # A window covering the stray flips BOTH paths to Class B.
+    _stub_txlist(monkeypatch, {1: [_creation_tx(c.address) for c in (*members, stray)]})
+    history, complete = session_deployer_enumerator(db_session)(eoa)
+    parity_verdict = gate.classify_deployer(
+        db_session, protocol_id=protocol.id, address=eoa, creation_history=history, history_complete=complete
+    )
+    row = _register_protocol_deployer(db_session, protocol_id=protocol.id, deployer=eoa)
+    assert parity_verdict.trust_class == "B"
+    assert row is not None and row.trust_class == "B"
 
 
 # ---------------------------------------------------------------------------

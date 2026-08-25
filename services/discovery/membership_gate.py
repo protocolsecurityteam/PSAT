@@ -1018,12 +1018,10 @@ def classify_deployer(
             evidence={"perimeter_fact": perimeter, "checked_at": checked_at},
         )
 
-    if creation_history is None or not history_complete:
-        return DeployerClassification(
-            trust_class=None,
-            evidence={"reason": "no_complete_enumeration", "checked_at": checked_at},
-        )
-
+    # Corroboration before completeness: an EOA that cannot reach Class B
+    # regardless of its creation history must never cost an enumeration —
+    # ``no_complete_enumeration`` is the one reason that invites callers (and
+    # the fixpoint's ``deployer_enumerator``) to pay for one.
     corroborating = _nonlineage_corroborating_member_ids(session, protocol_id=protocol_id, address=addr)
     if len(corroborating) < 2:
         return DeployerClassification(
@@ -1033,6 +1031,12 @@ def classify_deployer(
                 "corroborating_member_ids": sorted(corroborating),
                 "checked_at": checked_at,
             },
+        )
+
+    if creation_history is None or not history_complete:
+        return DeployerClassification(
+            trust_class=None,
+            evidence={"reason": "no_complete_enumeration", "checked_at": checked_at},
         )
 
     created = {_require_address(a, "creation_history entry") for a in creation_history}

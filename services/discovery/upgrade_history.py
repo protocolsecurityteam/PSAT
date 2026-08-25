@@ -791,10 +791,13 @@ def backfill_historical_impl_contracts(
                 record_degraded(phase="historical_impl_probe", exc=exc, context={"address": addr})
                 logger.warning("Historical-impl probe failed for %s: %s", addr, exc)
 
+    from services.discovery.deployer_enumeration import session_deployer_enumerator
+
     membership_gate.evaluate_committed(
         session,
         membership_gate.FactsDelta(recheck_contract_ids=tuple(sorted(row.id for row in rows_by_addr.values()))),
         context=f"upgrade_history_backfill:{protocol_id}",
+        deployer_enumerator=session_deployer_enumerator(session),
     )
 
     # Coverage refresh only for rows the gate settled as members — refresh on

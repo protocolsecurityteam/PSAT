@@ -46,6 +46,7 @@ from services.clients.rpc import chain_id_for_chain_name
 from services.discovery import membership_gate as gate
 from services.discovery.audit_reports import merge_audit_reports, search_audit_reports
 from services.discovery.deployer import _batch_get_creators
+from services.discovery.deployer_enumeration import enumerate_with_coverage, session_deployer_enumerator
 from services.discovery.fetch import fetch, is_vyper_result, parse_remappings, parse_sources, source_content_hash
 from services.discovery.inventory import merge_inventory, search_protocol_inventory
 from services.discovery.perimeter import needs_probe, produce_structural_witness, record_code_witness
@@ -169,70 +170,6 @@ def _sync_audit_reports_to_db(session: Session, protocol_id: int, reports: list[
 #: ``ops_kv`` key for the chain-enable boot sweep (spec §3.4 event 4).
 ENABLED_CHAINS_SEEN_KEY = "enabled_chains_seen"
 
-#: One Etherscan ``txlist`` window. A result that fills the window is a
-#: truncation, never a complete creation history → ``history_complete=False``
-#: → Class C (spec §3.3).
-DEPLOYER_ENUMERATION_CAP = 10_000
-
-
-def _enumerate_deployer_creations(deployer: str) -> tuple[list[str], list[int], bool]:
-    """(direct creations, enumerated chain scope, history_complete) for one
-    EOA, enumerated on every enabled chain (EOAs are chain-agnostic, spec
-    §3.3/§4.3). The scope is recorded so the registry evidence names WHAT was
-    enumerated, never a bare ``complete: True``.
-
-    Completeness is POSITIVE evidence: any chain whose ``txlist`` fails, fills
-    the :data:`DEPLOYER_ENUMERATION_CAP` window, or answers nothing at all
-    yields ``history_complete=False`` — an empty enumeration can never license
-    exclusivity (it is also the factory-address shape: a contract "deployer"
-    sends no transactions of its own).
-    """
-    addr = deployer.lower()
-    created: set[str] = set()
-    scope: list[int] = []
-    complete = True
-    for chain_id in sorted(supported_chain_ids()):
-        try:
-            data = etherscan.get(
-                "account",
-                "txlist",
-                chain_id=chain_id,
-                empty_result_ok=True,
-                address=addr,
-                startblock="0",
-                endblock="99999999",
-                sort="asc",
-            )
-        except Exception as exc:
-            logger.warning(
-                "deployer txlist enumeration failed",
-                extra={"deployer": addr, "chain_id": chain_id, "exc_type": type(exc).__name__},
-            )
-            record_degraded(
-                phase="deployer_enumeration",
-                exc=exc,
-                context={"deployer": addr, "chain_id": chain_id},
-            )
-            complete = False
-            continue
-        result = data.get("result") if isinstance(data, dict) else None
-        if not isinstance(result, list):
-            complete = False
-            continue
-        if len(result) >= DEPLOYER_ENUMERATION_CAP:
-            complete = False
-            continue
-        scope.append(chain_id)
-        for tx in result:
-            if not isinstance(tx, dict):
-                continue
-            target = tx.get("contractAddress")
-            if not tx.get("to") and isinstance(target, str) and target:
-                created.add(target.lower())
-    if not created:
-        return [], scope, False
-    return sorted(created), scope, complete
-
 
 #: Class C verdict reasons that are COUNTEREVIDENCE against an existing A/B
 #: registry row (not mere absence of proof) — they revoke it (invariant 8).
@@ -246,24 +183,6 @@ def _snapshot_covers(row: ProtocolDeployer, contract_address: str) -> bool:
     enumeration = evidence.get("enumeration")
     addresses = enumeration.get("addresses") if isinstance(enumeration, dict) else None
     return isinstance(addresses, list) and contract_address.lower() in addresses
-
-
-def _enumeration_coverage_gap(
-    session: Session, *, deployer: str, created: set[str], scope_chain_ids: set[int]
-) -> str | None:
-    """Class B soundness check: every KNOWN creation of the EOA — any contracts
-    row recording it as deployer, member or candidate, any protocol — must lie
-    on an enumerated chain AND appear in the enumerated creation set. A gap is
-    an incomplete enumeration (→ Class C), whether from chain scope or from a
-    ``contractCreator``-vs-``txlist`` attribution mismatch."""
-    rows = session.execute(select(Contract.address, Contract.chain).where(func.lower(Contract.deployer) == deployer))
-    for address, chain in rows:
-        chain_id = chain_id_for_chain_name(chain or "ethereum")
-        if chain_id is None or chain_id not in scope_chain_ids:
-            return f"known_creation_on_unenumerated_chain:{(chain or 'ethereum').lower()}"
-        if (address or "").lower() not in created:
-            return f"known_creation_missing_from_enumeration:{(address or '').lower()}"
-    return None
 
 
 def _register_protocol_deployer(
@@ -299,17 +218,7 @@ def _register_protocol_deployer(
             )
         ).scalar_one()
         if existing is not None or sibling_count >= 2:
-            history, scope, complete = _enumerate_deployer_creations(addr)
-            if complete:
-                gap = _enumeration_coverage_gap(
-                    session, deployer=addr, created=set(history), scope_chain_ids=set(scope)
-                )
-                if gap is not None:
-                    logger.warning(
-                        "Class B refused: enumeration coverage gap",
-                        extra={"deployer": addr, "protocol_id": protocol_id, "gap": gap},
-                    )
-                    complete = False
+            history, scope, complete = enumerate_with_coverage(session, addr)
             verdict = gate.classify_deployer(
                 session,
                 protocol_id=protocol_id,
@@ -404,7 +313,7 @@ def run_probe_pass(session: Session, protocol_id: int) -> gate.PromotionResult:
         new_member_contract_ids=tuple(promoted),
         new_edge_addresses=tuple(sorted(resolved)),
     )
-    cascade = gate.evaluate(session, delta)
+    cascade = gate.evaluate(session, delta, deployer_enumerator=session_deployer_enumerator(session))
     session.commit()
     return gate.PromotionResult(
         targeted_contract_ids=cascade.targeted_contract_ids,
@@ -487,7 +396,7 @@ def _gate_intake(session: Session, job: Job, contract: Contract | None, request:
         changed_deployer_addresses=(deployer,) if registry_row is not None and deployer else (),
     )
     if delta != gate.FactsDelta():
-        gate.evaluate(session, delta)
+        gate.evaluate(session, delta, deployer_enumerator=session_deployer_enumerator(session))
         session.commit()
 
 
@@ -588,6 +497,7 @@ def run_chain_enable_sweep(session: Session) -> None:
     eval_result = gate.evaluate(
         session,
         gate.FactsDelta(new_member_contract_ids=all_promoted, new_edge_addresses=tuple(sorted(resolved))),
+        deployer_enumerator=session_deployer_enumerator(session),
     )
     session.commit()
 
