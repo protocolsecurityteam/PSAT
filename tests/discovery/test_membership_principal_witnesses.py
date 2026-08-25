@@ -737,3 +737,44 @@ def test_settling_is_idempotent_under_the_principal_arms(db_session, protocol):
     assert second.promoted_contract_ids == ()
     assert second.demoted_contract_ids == ()
     assert all(session_row.protocol_id == protocol.id for session_row in (timelock, ward, spawn))
+
+
+def test_losing_the_anchoring_witness_without_demotion_still_cascades(db_session, protocol):
+    """The drift shape reconcile caught on the dev-DB re-earn: a member keeps
+    membership on a W3-D2 witness while the W3-D1 witness that made it ANCHOR
+    is revoked. Everything resting on its anchoring — factory lineage,
+    principal-keyed W3 — must fall with it (invariant 8)."""
+    anchor = _anchored_member(db_session, protocol, ADDR(0x8000))
+    owner_eoa = ADDR(0x8001)
+    _principal(db_session, anchor, owner_eoa, resolved_type="eoa")
+
+    # The factory enters on BOTH a D1 (anchoring) and a D2 (non-anchoring)
+    # witness, so losing the D1 leaves it a member that no longer anchors.
+    factory = _contract(db_session, ADDR(0x8002), nominated=protocol.id)
+    _caller_gate(db_session, factory, owner_eoa)
+    _caller_gate(db_session, anchor, factory.address)
+    _unclaimed_ward(db_session, factory)
+    child = _contract(db_session, ADDR(0x8003), nominated=protocol.id, factory=factory.address)
+    grandchild = _contract(db_session, ADDR(0x8004), nominated=protocol.id, factory=child.address)
+
+    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(factory.id, child.id, grandchild.id)))
+    db_session.flush()
+    assert factory.protocol_id == protocol.id
+    assert _rules(db_session, factory, protocol) >= {
+        (WITNESS_RULE_W3_CONTROL, "d1"),
+        (WITNESS_RULE_W3_CONTROL, "d2"),
+    }
+    assert child.protocol_id == protocol.id and grandchild.protocol_id == protocol.id
+
+    # Drop the principal that proved the D1 via; the D2 witness is untouched.
+    db_session.query(FunctionPrincipal).filter(FunctionPrincipal.address == owner_eoa.lower()).delete(
+        synchronize_session=False
+    )
+    db_session.flush()
+    gate.evaluate(db_session, gate.FactsDelta(new_edge_addresses=(anchor.address, owner_eoa)))
+    db_session.flush()
+
+    assert factory.protocol_id == protocol.id, "the D2 witness still holds — the factory stays a member"
+    assert (WITNESS_RULE_W3_CONTROL, "d1") not in _rules(db_session, factory, protocol)
+    assert child.protocol_id is None, "a D2-only member anchors no factory lineage"
+    assert grandchild.protocol_id is None, "and the cascade follows"

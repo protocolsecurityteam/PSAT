@@ -2406,6 +2406,23 @@ def _cascade_deployer_demotions(session: Session, result: DemotionResult) -> Dem
         addr = (contract.address or "").lower() if contract is not None else ""
         if addr:
             seed.add(addr)
+    # A member that kept membership but lost the witness that made it ANCHOR
+    # is a changed via-fact too, so every revocation seeds — not only the
+    # demotions (same reason as ``_revocation_quiescence``'s frontier).
+    if result.revoked_witness_ids:
+        seed |= {
+            address.lower()
+            for (address,) in session.execute(
+                select(Contract.address)
+                .join(ContractMembershipWitness, ContractMembershipWitness.contract_id == Contract.id)
+                .where(
+                    ContractMembershipWitness.id.in_(sorted(result.revoked_witness_ids)),
+                    Contract.address.is_not(None),
+                )
+                .distinct()
+            )
+            if address
+        }
     if not seed:
         return result
     revoked, demoted = _revocation_quiescence(session, seed)
@@ -2546,10 +2563,15 @@ def _revocation_quiescence(session: Session, seed_vias: Sequence[str] | set[str]
             revoked.extend(extra)
             if was_demoted:
                 demoted.append(contract_id)
-                contract = session.get(Contract, contract_id)
-                addr = (contract.address or "").lower() if contract is not None else ""
-                if addr:
-                    frontier.add(addr)
+            # The frontier follows every revocation, not only the demotions.
+            # A member that KEEPS membership can still lose the witness that
+            # made it anchor (``_member_anchors_ladder``), and the F2 facts
+            # resting on that anchoring — factory lineage, principal-keyed W3 —
+            # are keyed on this address alone (invariant 8).
+            contract = session.get(Contract, contract_id)
+            addr = (contract.address or "").lower() if contract is not None else ""
+            if addr:
+                frontier.add(addr)
     return revoked, demoted
 
 
