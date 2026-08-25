@@ -96,9 +96,12 @@ def audit(session: Session, *, protocol_ids: list[int] | None = None) -> list[Dr
     return drifts
 
 
-def apply_fixes(session: Session, drifts: list[Drift]) -> None:
+def apply_fixes(session: Session, drifts: list[Drift]) -> int:
     """Fix each drift through the gate's own primitives; demotions cascade to
-    quiescence so dependents of a fixed row settle in the same pass."""
+    quiescence so dependents of a fixed row settle in the same pass. Returns
+    the number of rows actually fixed (stale drifts and refused promotes
+    don't count)."""
+    fixed_count = 0
     demoted_addresses: set[str] = set()
     for drift in drifts:
         contract = session.get(Contract, drift.contract_id)
@@ -131,12 +134,14 @@ def apply_fixes(session: Session, drifts: list[Drift]) -> None:
             # drift went stale within this pass and the next audit re-judges.
             fixed = gate.promote(session, contract=contract, protocol_id=drift.protocol_id)
         if fixed:
+            fixed_count += 1
             logger.info(
                 "membership drift fixed",
                 extra={"kind": drift.kind, "contract_id": drift.contract_id, "protocol_id": drift.protocol_id},
             )
     if demoted_addresses:
         _revocation_quiescence(session, demoted_addresses)
+    return fixed_count
 
 
 def format_drifts(drifts: list[Drift]) -> str:
@@ -179,8 +184,7 @@ def main(argv: list[str] | None = None) -> int:
         for _pass in range(_APPLY_PASS_CAP):
             if not drifts:
                 break
-            apply_fixes(session, drifts)
-            fixed_total += len(drifts)
+            fixed_total += apply_fixes(session, drifts)
             drifts = audit(session, protocol_ids=args.protocol_id)
         session.commit()
         print(f"\napplied: {fixed_total} drifted row(s) fixed.")

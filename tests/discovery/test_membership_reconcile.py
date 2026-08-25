@@ -171,3 +171,50 @@ def test_parked_candidate_is_not_drift(db_session):
     pruned = _contract(db_session, ADDR(10), nominated_protocol_id=protocol.id)
     _code_fact(db_session, pruned.address, absent=True)
     assert audit(db_session) == []
+
+
+# ---------------------------------------------------------------------------
+# CLI exit codes (report drift = 1; apply residual = 1; clean = 0)
+# ---------------------------------------------------------------------------
+
+
+def _bind_cli_session(monkeypatch):
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session
+
+    import scripts.reconcile_membership as reconcile_module
+    from tests.conftest import DATABASE_URL
+
+    engine = create_engine(DATABASE_URL)
+    monkeypatch.setattr(reconcile_module, "SessionLocal", lambda: Session(engine))
+    return reconcile_module
+
+
+def test_cli_exit_codes_report_and_apply(db_session, monkeypatch):
+    reconcile_module = _bind_cli_session(monkeypatch)
+    protocol = _protocol(db_session)
+    row = _contract(db_session, ADDR(11), nominated_protocol_id=protocol.id)
+    _code_fact(db_session, row.address)
+    row.protocol_id = protocol.id  # out-of-band stamp, no witnesses
+    db_session.commit()
+
+    assert reconcile_module.main([]) == 1  # report mode: drift is nonzero exit
+    assert reconcile_module.main(["--apply"]) == 0  # fixed and logged
+    assert reconcile_module.main([]) == 0  # clean after the fix
+    db_session.expire_all()
+    fixed = db_session.get(Contract, row.id)
+    assert fixed is not None and fixed.protocol_id is None and fixed.nominated_protocol_id == protocol.id
+
+
+def test_cli_exit_1_when_drift_remains_after_apply_passes(db_session, monkeypatch):
+    reconcile_module = _bind_cli_session(monkeypatch)
+    protocol = _protocol(db_session)
+    row = _contract(db_session, ADDR(12), nominated_protocol_id=protocol.id)
+    _code_fact(db_session, row.address)
+    row.protocol_id = protocol.id
+    db_session.commit()
+
+    # A fix pass that fixes nothing leaves residual drift — the loop must
+    # surface it as a failure, never a green exit.
+    monkeypatch.setattr(reconcile_module, "apply_fixes", lambda session, drifts: 0)
+    assert reconcile_module.main(["--apply"]) == 1
