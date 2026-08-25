@@ -4,8 +4,11 @@ import { useIsAdmin } from "../api/useIsAdmin.js";
 import { listAddressLabels, buildLabelMaps, resolveLabelName } from "../api/addressLabels.js";
 import AddressLabelInline from "./AddressLabelInline.jsx";
 import {
+  candidateReasonText,
   computeCurrentImplAddrs,
   isPureHistorical,
+  prunedReasonText,
+  splitMembership,
 } from "./addressFilter.js";
 import { proxyDisplayName } from "../shared/displayName.js";
 import { coalesceChain, entityKey } from "../surface/entityKey.js";
@@ -62,6 +65,7 @@ export default function AddressesModal({ companyName, onClose }) {
   const [compareInput, setCompareInput] = useState("");
   const [busyAddr, setBusyAddr] = useState(null); // address currently being deleted/analyzed
   const [showHistorical, setShowHistorical] = useState(false);
+  const [showPruned, setShowPruned] = useState(false);
 
   const refresh = useCallback(() => {
     let cancelled = false;
@@ -128,16 +132,23 @@ export default function AddressesModal({ companyName, onClose }) {
     [data],
   );
 
+  // Three-state partition from the payload's membership_state (never derived
+  // client-side): members in the main table, candidates in their own section,
+  // pruned collapsed behind a count.
+  const { members, candidates, pruned } = useMemo(
+    () => splitMembership(data?.all_addresses || []),
+    [data],
+  );
+
   const { activeRows, historicalCount } = useMemo(() => {
-    const all = data?.all_addresses || [];
     const active = [];
     let hist = 0;
-    for (const r of all) {
+    for (const r of members) {
       if (isPureHistorical(r, currentImplAddrs)) hist += 1;
       else active.push(r);
     }
     return { activeRows: active, historicalCount: hist };
-  }, [data, currentImplAddrs]);
+  }, [members, currentImplAddrs]);
 
   const parsedCompare = useMemo(() => parseAddressList(compareInput), [compareInput]);
 
@@ -158,8 +169,9 @@ export default function AddressesModal({ companyName, onClose }) {
 
     // Compare mode always uses the full inventory — users paste lists that
     // may legitimately include historical impls and need to see them flagged
-    // as matched/missing. Outside compare mode, default to active-only.
-    const all = showHistorical ? (data?.all_addresses || []) : activeRows;
+    // as matched/missing. Outside compare mode the main table shows members,
+    // defaulting to active-only (historical impls behind the toggle).
+    const all = showHistorical ? members : activeRows;
     const q = filter.trim().toLowerCase();
     const filtered = q
       ? all.filter((r) => {
@@ -193,7 +205,20 @@ export default function AddressesModal({ companyName, onClose }) {
       sorted.sort((a, b) => (a.address || "").localeCompare(b.address || ""));
     }
     return sorted;
-  }, [data, filter, labels, sortBy, compareOpen, parsedCompare, compareWinner, showHistorical, activeRows]);
+  }, [filter, labels, sortBy, compareOpen, parsedCompare, compareWinner, showHistorical, members, activeRows]);
+
+  // Candidates honor the same text filter as the main table.
+  const candidateRows = useMemo(() => {
+    const q = filter.trim().toLowerCase();
+    const list = q
+      ? candidates.filter((r) => {
+          const addr = (r.address || "").toLowerCase();
+          const name = (r.name || "").toLowerCase();
+          return addr.includes(q) || name.includes(q);
+        })
+      : candidates;
+    return [...list].sort((a, b) => (a.name || "zzz").localeCompare(b.name || "zzz"));
+  }, [candidates, filter]);
 
   const compareSummary = useMemo(() => {
     if (!compareOpen) return null;
@@ -430,7 +455,7 @@ export default function AddressesModal({ companyName, onClose }) {
         <div className="ps-addresses-modal-body">
           {error && <p className="ps-audit-modal-empty">Failed to load: {error}</p>}
           {!error && !data && <p className="ps-audit-modal-empty">Loading addresses…</p>}
-          {data && rows.length === 0 && !compareOpen && (
+          {data && rows.length === 0 && candidateRows.length === 0 && !compareOpen && (
             <p className="ps-audit-modal-empty">No addresses match “{filter}”.</p>
           )}
           {data && compareOpen && parsedCompare.length === 0 && (
@@ -533,6 +558,73 @@ export default function AddressesModal({ companyName, onClose }) {
                 })}
               </tbody>
             </table>
+          )}
+          {data && !compareOpen && candidateRows.length > 0 && (
+            <div className="ps-addresses-modal-candidates">
+              <p className="eyebrow" style={{ margin: "16px 0 6px" }}>
+                Candidates — awaiting verification ({candidateRows.length})
+              </p>
+              <table className="ps-addresses-modal-table">
+                <thead>
+                  <tr>
+                    <th>Name / Label</th>
+                    <th>Address</th>
+                    <th>Why not verified</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {candidateRows.map((r) => (
+                    <tr key={`${r.chain || "?"}-${r.address}`}>
+                      <td className="ps-addresses-modal-name">
+                        {prettyAddressName(r) || <span style={{ opacity: 0.5 }}>(unnamed)</span>}
+                      </td>
+                      <td className="ps-addresses-modal-addr mono">{r.address}</td>
+                      <td>
+                        <span className="ps-addresses-modal-chip pending">candidate</span>{" "}
+                        <span style={{ color: "#94a3b8", fontSize: 11 }}>{candidateReasonText(r)}</span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {data && !compareOpen && pruned.length > 0 && (
+            <div className="ps-addresses-modal-pruned">
+              <button
+                type="button"
+                className="ps-addresses-modal-historical-toggle"
+                onClick={() => setShowPruned((v) => !v)}
+                title="Nominated addresses proven to hold no code at the probed block."
+              >
+                {showPruned ? `Hide ${pruned.length} pruned` : `Show ${pruned.length} pruned`}
+              </button>
+              {showPruned && (
+                <table className="ps-addresses-modal-table">
+                  <thead>
+                    <tr>
+                      <th>Name / Label</th>
+                      <th>Address</th>
+                      <th>Why pruned</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {pruned.map((r) => (
+                      <tr key={`${r.chain || "?"}-${r.address}`}>
+                        <td className="ps-addresses-modal-name">
+                          {prettyAddressName(r) || <span style={{ opacity: 0.5 }}>(unnamed)</span>}
+                        </td>
+                        <td className="ps-addresses-modal-addr mono">{r.address}</td>
+                        <td>
+                          <span className="ps-addresses-modal-chip err">pruned</span>{" "}
+                          <span style={{ color: "#94a3b8", fontSize: 11 }}>{prunedReasonText(r)}</span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
           )}
         </div>
       </div>

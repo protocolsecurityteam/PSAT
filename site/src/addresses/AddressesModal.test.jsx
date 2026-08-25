@@ -31,6 +31,103 @@ describe("AddressesModal", () => {
     expectNoCrash();
   });
 
+  it("renders members, candidates with their reason, and pruned behind a count", async () => {
+    const MEMBER = "0x1111111111111111111111111111111111111111";
+    const CANDIDATE = "0x2222222222222222222222222222222222222222";
+    const PRUNED = "0x3333333333333333333333333333333333333333";
+    setFetchHandler(
+      (url) => /^\/api\/company\/[^/]+\/addresses$/.test(url.pathname),
+      () => ({
+        all_addresses: [
+          {
+            address: MEMBER,
+            chain: "ethereum",
+            name: "Vault",
+            is_proxy: false,
+            analyzed: true,
+            membership_state: "member",
+            membership_witnesses: [{ rule: "w6_llama_seed", via_address: null }],
+            membership_reason: null,
+          },
+          {
+            address: CANDIDATE,
+            chain: "ethereum",
+            name: "MaybeVault",
+            is_proxy: false,
+            analyzed: false,
+            membership_state: "candidate",
+            membership_witnesses: [],
+            membership_reason: { kind: "no_probe_attempt" },
+          },
+          {
+            address: PRUNED,
+            chain: "ethereum",
+            name: "Phantom",
+            is_proxy: false,
+            analyzed: false,
+            membership_state: "pruned",
+            membership_witnesses: [],
+            membership_reason: { kind: "code_absent", code_probe_block: 999 },
+          },
+        ],
+      }),
+    );
+
+    render(<AddressesModal companyName="etherfi" onClose={() => {}} />);
+    await waitFor(() => {
+      expect(screen.queryByText(/Loading…/)).not.toBeInTheDocument();
+    });
+
+    // Member in the main table.
+    expect(screen.getByText("Vault")).toBeInTheDocument();
+    // Candidate section with its token-templated reason.
+    expect(screen.getByText(/Candidates — awaiting verification \(1\)/)).toBeInTheDocument();
+    expect(screen.getByText("MaybeVault")).toBeInTheDocument();
+    expect(screen.getByText("no probe attempt yet")).toBeInTheDocument();
+    // Pruned collapsed behind a count; expands on click with the block fact.
+    expect(screen.queryByText("Phantom")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Show 1 pruned" }));
+    expect(screen.getByText("Phantom")).toBeInTheDocument();
+    expect(screen.getByText("no code at block 999")).toBeInTheDocument();
+    expectNoCrash();
+  });
+
+  it("shows a probed candidate's out-of-perimeter reads", async () => {
+    const CANDIDATE = "0x4444444444444444444444444444444444444444";
+    const OWNER = "0x5555555555555555555555555555555555555555";
+    setFetchHandler(
+      (url) => /^\/api\/company\/[^/]+\/addresses$/.test(url.pathname),
+      () => ({
+        all_addresses: [
+          {
+            address: CANDIDATE,
+            chain: "ethereum",
+            name: "ParkedVault",
+            is_proxy: false,
+            analyzed: false,
+            membership_state: "candidate",
+            membership_witnesses: [],
+            membership_reason: {
+              kind: "probe_unresolved",
+              probe_block: 1234,
+              resolved_reads: { owner: OWNER },
+              unresolved_reads: ["authority"],
+            },
+          },
+        ],
+      }),
+    );
+
+    render(<AddressesModal companyName="etherfi" onClose={() => {}} />);
+    await waitFor(() => {
+      expect(screen.queryByText(/Loading…/)).not.toBeInTheDocument();
+    });
+    expect(
+      screen.getByText("probed at block 1234 — owner 0x5555...5555 not in perimeter; authority resolved nowhere"),
+    ).toBeInTheDocument();
+    expectNoCrash();
+  });
+
   it("compare mode: bare address matches on any chain, ethereum row wins the collapse (invariant 13)", async () => {
     const ADDR = "0x2222222222222222222222222222222222222222"; // deployed on ethereum + base
     const BASE_ONLY = "0x3333333333333333333333333333333333333333"; // base only
