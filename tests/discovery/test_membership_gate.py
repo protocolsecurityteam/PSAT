@@ -635,6 +635,183 @@ def test_classify_deployer_nominated_creation_never_maps(db_session):
     assert verdict.trust_class == "B"
 
 
+def test_classify_deployer_member_factory_child_maps(db_session):
+    """Member-factory mapping rule (deliberate §3.3 deviation): a creation
+    minted by this protocol's own anchoring MEMBER factory counts as mapped in
+    the exclusivity test — mapping only, no admission and no witness."""
+    protocol = _protocol(db_session)
+    eoa = ADDR(0x550)
+    members = _seed_class_b_members(db_session, protocol, eoa)
+    factory = _contract(db_session, ADDR(0x551), protocol_id=protocol.id)
+    anchor = _contract(db_session, ADDR(0x552), protocol_id=protocol.id)
+    _seed_w2_witness(db_session, factory, anchor, protocol.id)
+    child = ADDR(0x553)  # no contracts row at all
+    history = [m.address for m in members] + [child]
+
+    verdict = gate.classify_deployer(
+        db_session,
+        protocol_id=protocol.id,
+        address=eoa,
+        creation_history=history,
+        history_complete=True,
+        creation_factories={child: factory.address},
+    )
+    assert verdict.trust_class == "B"
+    assert verdict.evidence["member_factory_mapped"] == {"count": 1, "factories": [factory.address]}
+
+
+def test_classify_deployer_non_member_factory_child_does_not_map(db_session):
+    protocol = _protocol(db_session)
+    eoa = ADDR(0x558)
+    members = _seed_class_b_members(db_session, protocol, eoa)
+    child = ADDR(0x559)
+    history = [m.address for m in members] + [child]
+
+    # The factory has no contracts row at all — foreign machinery.
+    verdict = gate.classify_deployer(
+        db_session,
+        protocol_id=protocol.id,
+        address=eoa,
+        creation_history=history,
+        history_complete=True,
+        creation_factories={child: ADDR(0x55A)},
+    )
+    assert verdict.trust_class is None
+    assert verdict.evidence["reason"] == "foreign_or_unknown_creations"
+    assert child in verdict.evidence["unmapped_addresses"]
+
+
+def test_classify_deployer_foreign_protocol_member_factory_does_not_map(db_session):
+    # A factory that is a MEMBER — of another protocol. Its children are that
+    # protocol's family, never this one's.
+    protocol = _protocol(db_session)
+    other = _protocol(db_session)
+    eoa = ADDR(0x560)
+    members = _seed_class_b_members(db_session, protocol, eoa)
+    factory = _contract(db_session, ADDR(0x561), protocol_id=other.id)
+    factory_anchor = _contract(db_session, ADDR(0x562), protocol_id=other.id)
+    _seed_w2_witness(db_session, factory, factory_anchor, other.id)
+    child = ADDR(0x563)
+    history = [m.address for m in members] + [child]
+
+    verdict = gate.classify_deployer(
+        db_session,
+        protocol_id=protocol.id,
+        address=eoa,
+        creation_history=history,
+        history_complete=True,
+        creation_factories={child: factory.address},
+    )
+    assert verdict.trust_class is None
+    assert verdict.evidence["reason"] == "foreign_or_unknown_creations"
+
+
+def test_classify_deployer_d2_only_member_factory_does_not_map(db_session):
+    # F2 carried into the factory rule: a D2-only member factory is
+    # non-transitive and must not convert its children into mapped creations.
+    protocol = _protocol(db_session)
+    eoa = ADDR(0x568)
+    members = _seed_class_b_members(db_session, protocol, eoa)
+    factory = _contract(db_session, ADDR(0x569), protocol_id=protocol.id)
+    _seed_d2_witness(db_session, factory, protocol.id, ADDR(0x56A))
+    child = ADDR(0x56B)
+    history = [m.address for m in members] + [child]
+
+    verdict = gate.classify_deployer(
+        db_session,
+        protocol_id=protocol.id,
+        address=eoa,
+        creation_history=history,
+        history_complete=True,
+        creation_factories={child: factory.address},
+    )
+    assert verdict.trust_class is None
+    assert verdict.evidence["reason"] == "foreign_or_unknown_creations"
+
+
+def test_exclusivity_tolerates_member_factory_children(db_session):
+    """Operator-exclusivity arm of the member-factory rule: a controlled row
+    whose STORED creation attribution names this protocol's anchoring member
+    factory is a protocol-family observation. NULL attribution stays a
+    refusal — not-determined licenses nothing."""
+    from db.models import ContractCreationWitness
+    from services.discovery.membership_gate import _controller_is_exclusive
+
+    protocol = _protocol(db_session)
+    operator = ADDR(0x570)
+    member = _contract(db_session, ADDR(0x571), protocol_id=protocol.id)
+    member_anchor = _contract(db_session, ADDR(0x572), protocol_id=protocol.id)
+    _seed_w2_witness(db_session, member, member_anchor, protocol.id)
+    controlled = _contract(db_session, ADDR(0x573))
+    for row in (member, controlled):
+        db_session.add(
+            ControllerValue(
+                contract_id=row.id, controller_id="owner", value=operator, authority_provenance="caller_gate"
+            )
+        )
+    db_session.flush()
+
+    # No creation attribution recorded → the observation stays foreign.
+    assert not _controller_is_exclusive(
+        db_session, protocol_id=protocol.id, controller_address=operator, exclude_contract_ids=set()
+    )
+
+    factory = _contract(db_session, ADDR(0x574), protocol_id=protocol.id)
+    factory_anchor = _contract(db_session, ADDR(0x575), protocol_id=protocol.id)
+    _seed_w2_witness(db_session, factory, factory_anchor, protocol.id)
+    db_session.add(
+        ContractCreationWitness(
+            chain_id=1,
+            address=controlled.address,
+            creation_tx_hash="0x" + "78" * 32,
+            creation_block=90,
+            creation_factory=factory.address,
+        )
+    )
+    db_session.flush()
+    assert _controller_is_exclusive(
+        db_session, protocol_id=protocol.id, controller_address=operator, exclude_contract_ids=set()
+    )
+
+
+def test_nominate_enumerated_creations_writes_candidates_only(db_session):
+    """2b producer: unknown creations become nominated candidates with the
+    ``deployer_enumeration`` source tag — never members, never witnesses; an
+    existing row at the same (address, chain) is left untouched."""
+    from services.discovery.deployer_enumeration import DeployerCreation
+
+    protocol = _protocol(db_session)
+    eoa = ADDR(0x580)
+    existing = _contract(db_session, ADDR(0x581), nominated_protocol_id=protocol.id, deployer=eoa)
+    new_ids = gate.nominate_enumerated_creations(
+        db_session,
+        protocol_id=protocol.id,
+        deployer=eoa,
+        creations=[
+            DeployerCreation(address=existing.address, chain_id=1),
+            DeployerCreation(address=ADDR(0x582), chain_id=1, factory=ADDR(0x583)),
+        ],
+    )
+    assert len(new_ids) == 1
+    row = db_session.get(Contract, new_ids[0])
+    assert row.address == ADDR(0x582)
+    assert row.chain == "ethereum"
+    assert row.deployer == eoa
+    assert row.protocol_id is None
+    assert row.nominated_protocol_id == protocol.id
+    assert row.discovery_sources == ["deployer_enumeration"]
+    assert gate.active_witnesses(db_session, contract_id=row.id, protocol_id=protocol.id) == []
+
+    # The nominated-but-unevidenced row still refuses Class B (F1 pin).
+    members = _seed_class_b_members(db_session, protocol, eoa)
+    history = [m.address for m in members] + [row.address]
+    verdict = gate.classify_deployer(
+        db_session, protocol_id=protocol.id, address=eoa, creation_history=history, history_complete=True
+    )
+    assert verdict.trust_class is None
+    assert verdict.evidence["reason"] == "foreign_or_unknown_creations"
+
+
 def test_exclusivity_tolerates_only_evidenced_candidates(db_session):
     """F1, operator-exclusivity path: a controlled row that is merely
     nominated refuses exclusivity; the same row with a non-lineage witness

@@ -60,8 +60,14 @@ class _Wire:
 
 
 class TestTheEmptyAnswerIsNotAFailure:
-    def test_exactly_the_empty_triple_comes_back_as_data(self, monkeypatch):
-        payload = {"status": "0", "message": "No token found", "result": []}
+    @pytest.mark.parametrize(
+        "message",
+        ["No token found", "No transactions found"],
+    )
+    def test_exactly_the_empty_triple_comes_back_as_data(self, monkeypatch, message):
+        # Both empty-list answers: an address holding no tokens, and an
+        # address/tx with no transactions (the deployer-enumeration shapes).
+        payload = {"status": "0", "message": message, "result": []}
         monkeypatch.setattr(etherscan.requests, "get", lambda *a, **kw: _Response(payload))
         monkeypatch.setattr(etherscan, "_get_api_key", lambda: "k")
         assert etherscan.get("account", "addresstokenbalance", chain_id=1, empty_result_ok=True) == payload
@@ -71,7 +77,7 @@ class TestTheEmptyAnswerIsNotAFailure:
         [
             {"status": "0", "message": "NOTOK", "result": "Max rate limit reached"},
             {"status": "0", "message": "No token found", "result": "No token found"},
-            {"status": "0", "message": "No transactions found", "result": []},
+            {"status": "0", "message": "No transactions found", "result": "No transactions found"},
             {"status": "0", "message": "No token found", "result": [{"TokenAddress": "0x1"}]},
         ],
     )

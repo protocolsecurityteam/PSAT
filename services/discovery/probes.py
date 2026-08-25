@@ -114,14 +114,14 @@ def fetch_creations(
     addresses: Sequence[str],
     *,
     chain_id: int,
-) -> dict[str, tuple[str | None, int | None, str | None]]:
+) -> dict[str, tuple[str | None, int | None, str | None, str | None]]:
     """Etherscan ``getcontractcreation`` for *addresses* (chunked 5/call),
-    persisting ``creation_tx_hash``/``creation_block`` into
-    ``contract_creation_witnesses``. Returns ``{address: (tx, block, creator)}``
-    for the addresses the indexer answered; a missing key means no answer,
-    never "no creation"."""
+    persisting ``creation_tx_hash``/``creation_block``/``creation_factory``
+    into ``contract_creation_witnesses``. Returns
+    ``{address: (tx, block, creator, factory)}`` for the addresses the indexer
+    answered; a missing key means no answer, never "no creation"."""
     wanted = sorted({a.lower() for a in addresses})
-    out: dict[str, tuple[str | None, int | None, str | None]] = {}
+    out: dict[str, tuple[str | None, int | None, str | None, str | None]] = {}
     for start in range(0, len(wanted), _CREATION_BATCH):
         batch = wanted[start : start + _CREATION_BATCH]
         try:
@@ -156,18 +156,22 @@ def fetch_creations(
             if not isinstance(addr, str) or not isinstance(tx, str):
                 continue
             creator = item.get("contractCreator")
+            factory = item.get("contractFactory")
             out[addr.lower()] = (
                 tx.lower(),
                 _coerce_block(item.get("blockNumber")),
                 creator.lower() if isinstance(creator, str) else None,
+                factory.lower() if isinstance(factory, str) and factory else None,
             )
-    for addr, (tx, block, _creator) in out.items():
+    for addr, (tx, block, _creator, factory) in out.items():
         row = session.get(ContractCreationWitness, (chain_id, addr))
         if row is None:
             row = ContractCreationWitness(chain_id=chain_id, address=addr)
             session.add(row)
         row.creation_tx_hash = tx
         row.creation_block = block
+        if factory is not None:
+            row.creation_factory = factory
     if out:
         session.flush()
     return out
@@ -260,7 +264,7 @@ def run_probe(session: Session, contract: Contract) -> ProbeResult:
         )
         creations = {}
     if address in creations:
-        creation_tx, creation_block, deployer = creations[address]
+        creation_tx, creation_block, deployer, _factory = creations[address]
         if deployer and not contract.deployer:
             contract.deployer = deployer
 

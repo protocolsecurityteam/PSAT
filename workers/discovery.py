@@ -46,7 +46,11 @@ from services.clients.rpc import chain_id_for_chain_name
 from services.discovery import membership_gate as gate
 from services.discovery.audit_reports import merge_audit_reports, search_audit_reports
 from services.discovery.deployer import _batch_get_creators
-from services.discovery.deployer_enumeration import enumerate_with_coverage, session_deployer_enumerator
+from services.discovery.deployer_enumeration import (
+    creation_factories,
+    enumerate_with_coverage,
+    session_deployer_enumerator,
+)
 from services.discovery.fetch import fetch, is_vyper_result, parse_remappings, parse_sources, source_content_hash
 from services.discovery.inventory import merge_inventory, search_protocol_inventory
 from services.discovery.perimeter import (
@@ -221,6 +225,7 @@ def _register_protocol_deployer(
 
     verdict = gate.classify_deployer(session, protocol_id=protocol_id, address=addr)
     history: list[str] = []
+    factories: dict[str, str] = {}
     scope: list[int] = []
     coverage_gap: str | None = None
     if verdict.trust_class is None and verdict.evidence.get("reason") == "no_complete_enumeration":
@@ -231,13 +236,22 @@ def _register_protocol_deployer(
             )
         ).scalar_one()
         if existing is not None or sibling_count >= 2:
-            history, scope, complete, coverage_gap = enumerate_with_coverage(session, addr)
+            creations, scope, complete, coverage_gap = enumerate_with_coverage(session, addr)
+            history = sorted({c.address for c in creations})
+            factories = creation_factories(creations)
+            if complete:
+                new_ids = gate.nominate_enumerated_creations(
+                    session, protocol_id=protocol_id, deployer=addr, creations=creations
+                )
+                if reprobe_sink is not None:
+                    reprobe_sink.update(new_ids)
             verdict = gate.classify_deployer(
                 session,
                 protocol_id=protocol_id,
                 address=addr,
                 creation_history=history,
                 history_complete=complete,
+                creation_factories=factories,
             )
     if verdict.trust_class is None:
         reason = verdict.evidence.get("reason")
@@ -257,6 +271,8 @@ def _register_protocol_deployer(
         enumeration = dict(evidence.get("enumeration") or {})
         enumeration["chain_ids"] = scope
         enumeration["addresses"] = history
+        if factories:
+            enumeration["factories"] = factories
         evidence["enumeration"] = enumeration
     classification = gate.DeployerClassification(trust_class=verdict.trust_class, evidence=evidence)
     return gate.register_deployer(session, protocol_id=protocol_id, address=addr, classification=classification)

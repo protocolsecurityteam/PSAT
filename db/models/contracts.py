@@ -481,6 +481,10 @@ class ContractCreationWitness(Base):
     # never "the address has no creation tx".
     creation_tx_hash: Mapped[str | None] = mapped_column(String(66), nullable=True)
     creation_block: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # ``getcontractcreation``'s ``contractFactory``: the contract whose CREATE/
+    # CREATE2 frame minted this address. NULL = no factory attribution recorded
+    # — never "created directly by an EOA".
+    creation_factory: Mapped[str | None] = mapped_column(String(42), nullable=True)
     # The height at which ``eth_getCode`` was read, and what it said. NULL/NULL
     # = not probed; the pair is written together so "probed and code was there"
     # is distinguishable from "never probed".

@@ -129,12 +129,23 @@ def _seed_w2(session, contract: Contract, anchor: Contract, protocol_id: int) ->
     )
 
 
-def _stub_txlist(monkeypatch, txs_by_chain: dict[int, list | Exception]) -> list[tuple]:
+def _stub_txlist(
+    monkeypatch,
+    txs_by_chain: dict[int, list | Exception],
+    internal_by_txhash: dict[str, list | Exception] | None = None,
+) -> list[tuple]:
     calls: list[tuple] = []
+    internal = internal_by_txhash or {}
 
     def fake_get(module, action, chain_id, empty_result_ok=False, **params):
         calls.append((module, action, chain_id, params))
-        assert (module, action) == ("account", "txlist")
+        assert module == "account"
+        if action == "txlistinternal":
+            entry = internal.get(params["txhash"], [])
+            if isinstance(entry, Exception):
+                raise entry
+            return {"result": entry}
+        assert action == "txlist"
         entry = txs_by_chain.get(chain_id, [])
         if isinstance(entry, Exception):
             raise entry
@@ -146,6 +157,18 @@ def _stub_txlist(monkeypatch, txs_by_chain: dict[int, list | Exception]) -> list
 
 def _creation_tx(target: str) -> dict:
     return {"to": "", "contractAddress": target, "hash": _TX}
+
+
+def _call_tx(sender: str, *, tx_hash: str, to: str = "0x" + "aa" * 20, is_error: str = "0") -> dict:
+    return {"from": sender, "to": to, "contractAddress": "", "hash": tx_hash, "isError": is_error}
+
+
+def _create_frame(target: str, factory: str, *, kind: str = "create2", is_error: str = "0") -> dict:
+    return {"type": kind, "from": factory, "to": "", "contractAddress": target, "isError": is_error}
+
+
+def _created_addresses(creations) -> list[str]:
+    return sorted({c.address for c in creations})
 
 
 # ---------------------------------------------------------------------------
@@ -160,9 +183,121 @@ def test_enumeration_collects_direct_creations(monkeypatch):
         {1: [_creation_tx(ADDR(0x201)), {"to": ADDR(0x999), "contractAddress": ""}, _creation_tx(ADDR(0x202))]},
     )
     created, scope, complete = enumerate_deployer_creations(ADDR(0x200))
-    assert created == sorted([ADDR(0x201), ADDR(0x202)])
+    assert _created_addresses(created) == sorted([ADDR(0x201), ADDR(0x202)])
+    assert all(c.factory is None and c.chain_id == 1 for c in created)
     assert scope == [1]
     assert complete is True
+
+
+def test_enumeration_unions_internal_creations_with_factory_attribution(monkeypatch):
+    # Etherscan attributes factory-mediated creations to the tx ORIGIN, so the
+    # EOA's own sent calls are resolved per-txhash and their CREATE frames
+    # union with the direct creations — factory recorded per child.
+    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
+    eoa = ADDR(0x260)
+    tx_hash = "0x" + "45" * 32
+    _stub_txlist(
+        monkeypatch,
+        {1: [_creation_tx(ADDR(0x261)), _call_tx(eoa, tx_hash=tx_hash, to=ADDR(0x262))]},
+        internal_by_txhash={tx_hash: [_create_frame(ADDR(0x263), ADDR(0x262))]},
+    )
+    created, scope, complete = enumerate_deployer_creations(eoa)
+    assert _created_addresses(created) == sorted([ADDR(0x261), ADDR(0x263)])
+    assert {c.address: c.factory for c in created} == {ADDR(0x261): None, ADDR(0x263): ADDR(0x262)}
+    assert scope == [1]
+    assert complete is True
+
+
+def test_enumeration_internal_only_creation_is_complete(monkeypatch):
+    # A purely factory-mediated deployer now has an enumerable history.
+    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
+    eoa = ADDR(0x264)
+    tx_hash = "0x" + "46" * 32
+    _stub_txlist(
+        monkeypatch,
+        {1: [_call_tx(eoa, tx_hash=tx_hash)]},
+        internal_by_txhash={tx_hash: [_create_frame(ADDR(0x265), ADDR(0x266))]},
+    )
+    created, scope, complete = enumerate_deployer_creations(eoa)
+    assert _created_addresses(created) == [ADDR(0x265)]
+    assert scope == [1]
+    assert complete is True
+
+
+def test_enumeration_skips_received_failed_and_frameless_txs(monkeypatch):
+    # Received txs, reverted txs, failed CREATE frames and call frames are
+    # never creations of this EOA; only its own successful calls are resolved.
+    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
+    eoa = ADDR(0x267)
+    resolved = "0x" + "47" * 32
+    _stub_txlist(
+        monkeypatch,
+        {
+            1: [
+                _call_tx(ADDR(0x999), tx_hash="0x" + "48" * 32),  # received — not resolved
+                _call_tx(eoa, tx_hash="0x" + "49" * 32, is_error="1"),  # reverted — not resolved
+                _call_tx(eoa, tx_hash=resolved),
+            ]
+        },
+        internal_by_txhash={
+            resolved: [
+                {"type": "call", "from": ADDR(0x262), "to": ADDR(0x263), "contractAddress": "", "isError": "0"},
+                _create_frame(ADDR(0x268), ADDR(0x262), is_error="1"),
+            ]
+        },
+    )
+    created, scope, complete = enumerate_deployer_creations(eoa)
+    assert created == []
+    assert complete is False  # empty enumeration can never license exclusivity
+
+
+def test_enumeration_internal_failure_is_incomplete(monkeypatch):
+    # EITHER endpoint failing for a chain ⇒ that chain out of scope,
+    # incomplete — a half-enumerated chain must never claim completeness.
+    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
+    eoa = ADDR(0x269)
+    tx_hash = "0x" + "4a" * 32
+    _stub_txlist(
+        monkeypatch,
+        {1: [_creation_tx(ADDR(0x26A)), _call_tx(eoa, tx_hash=tx_hash)]},
+        internal_by_txhash={tx_hash: RuntimeError("etherscan down")},
+    )
+    created, scope, complete = enumerate_deployer_creations(eoa)
+    assert created == []
+    assert scope == []
+    assert complete is False
+
+
+def test_enumeration_internal_budget_exceeded_is_incomplete(monkeypatch):
+    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
+    eoa = ADDR(0x26B)
+    window = [
+        _call_tx(eoa, tx_hash="0x" + f"{n:064x}") for n in range(deployer_enumeration.INTERNAL_RESOLUTION_TX_BUDGET + 1)
+    ]
+    calls = _stub_txlist(monkeypatch, {1: window})
+    created, scope, complete = enumerate_deployer_creations(eoa)
+    assert created == []
+    assert scope == []
+    assert complete is False
+    # The budget refusal is decided BEFORE any internal call is spent.
+    assert [c for c in calls if c[1] == "txlistinternal"] == []
+
+
+def test_enumeration_combined_cap_is_incomplete(monkeypatch):
+    # The cap applies to the COMBINED direct ∪ internal creation set.
+    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
+    eoa = ADDR(0x26C)
+    tx_hash = "0x" + "4b" * 32
+    frames = [_create_frame(ADDR(0x100000 + n), ADDR(0x262)) for n in range(DEPLOYER_ENUMERATION_CAP - 1)]
+    _stub_txlist(
+        monkeypatch,
+        {1: [_creation_tx(ADDR(0x26D)), _call_tx(eoa, tx_hash=tx_hash)]},
+        internal_by_txhash={tx_hash: frames},
+    )
+    created, scope, complete = enumerate_deployer_creations(eoa)
+    assert created == []
+    assert scope == []
+    assert complete is False
 
 
 def test_enumeration_cap_exceeded_is_incomplete(monkeypatch):
@@ -187,13 +322,24 @@ def test_enumeration_empty_or_failed_is_incomplete(monkeypatch):
     assert enumerate_deployer_creations(ADDR(0x210)) == ([], [], False)
 
 
+def test_enumeration_zero_tx_chain_stays_in_scope(monkeypatch):
+    # An enabled chain the EOA never acted on is a COMPLETE (empty) answer,
+    # not a failure — it must not bar Class B for the chains it did act on.
+    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1,8453")
+    _stub_txlist(monkeypatch, {1: [_creation_tx(ADDR(0x220))], 8453: []})
+    created, scope, complete = enumerate_deployer_creations(ADDR(0x221))
+    assert _created_addresses(created) == [ADDR(0x220)]
+    assert scope == [1, 8453]
+    assert complete is True
+
+
 def test_enumeration_any_enabled_chain_failing_is_incomplete(monkeypatch):
     # EOAs are chain-agnostic: completeness requires every enabled chain's
     # window to come back clean, and the failed chain stays out of scope.
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1,8453")
     _stub_txlist(monkeypatch, {1: [_creation_tx(ADDR(0x220))], 8453: RuntimeError("boom")})
     created, scope, complete = enumerate_deployer_creations(ADDR(0x221))
-    assert created == [ADDR(0x220)]
+    assert _created_addresses(created) == [ADDR(0x220)]
     assert scope == [1]
     assert complete is False
 
@@ -277,6 +423,108 @@ def test_ladder_wire_foreign_creation_is_class_c(db_session, monkeypatch):
     _stub_txlist(monkeypatch, {1: [_creation_tx(m.address) for m in members] + [_creation_tx(ADDR(0x999))]})
 
     assert _register_protocol_deployer(db_session, protocol_id=protocol.id, deployer=eoa) is None
+
+
+def test_ladder_wire_nominates_unknown_creations_and_still_refuses_b(db_session, monkeypatch):
+    """2b + F1 pin: a complete enumeration's unknown creation is NOMINATED
+    (free recall, queued for probes) — and that bare nomination must NOT count
+    as mapped, so Class B still refuses on the very row it just nominated."""
+    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
+    protocol = _protocol(db_session)
+    eoa = ADDR(0x2C0)
+    members = _seed_class_b_shape(db_session, protocol, eoa)
+    tx_hash = "0x" + "51" * 32
+    unknown = ADDR(0x2C1)
+    _stub_txlist(
+        monkeypatch,
+        {1: [_creation_tx(m.address) for m in members] + [_call_tx(eoa, tx_hash=tx_hash, to=ADDR(0x2C2))]},
+        internal_by_txhash={tx_hash: [_create_frame(unknown, ADDR(0x2C2))]},
+    )
+    sink: set[int] = set()
+
+    assert _register_protocol_deployer(db_session, protocol_id=protocol.id, deployer=eoa, reprobe_sink=sink) is None
+    assert db_session.execute(select(ProtocolDeployer).where(ProtocolDeployer.address == eoa)).first() is None
+
+    row = db_session.execute(select(Contract).where(Contract.address == unknown)).scalar_one()
+    assert row.protocol_id is None
+    assert row.nominated_protocol_id == protocol.id
+    assert row.deployer == eoa
+    assert row.chain == "ethereum"
+    assert row.discovery_sources == [gate.ENUMERATION_SOURCE_TAG]
+    assert row.id in sink
+
+    # Idempotent: a re-run neither duplicates the row nor re-nominates.
+    sink.clear()
+    assert _register_protocol_deployer(db_session, protocol_id=protocol.id, deployer=eoa, reprobe_sink=sink) is None
+    assert db_session.execute(select(Contract).where(Contract.address == unknown)).scalar_one() is row
+    assert row.id not in sink
+
+
+def test_ladder_wire_member_factory_child_mints_b_with_factory_evidence(db_session, monkeypatch):
+    """2a: a creation minted by the protocol's own anchoring MEMBER factory
+    counts as mapped (deliberate §3.3 deviation) — Class B mints and the
+    evidence records the factory attribution."""
+    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
+    protocol = _protocol(db_session)
+    eoa = ADDR(0x2C4)
+    members = _seed_class_b_shape(db_session, protocol, eoa)
+    factory = _contract(db_session, ADDR(0x2C5), protocol_id=protocol.id)
+    factory_anchor = _contract(db_session, ADDR(0x2C6), protocol_id=protocol.id)
+    _seed_w2(db_session, factory, factory_anchor, protocol.id)
+    tx_hash = "0x" + "52" * 32
+    child = ADDR(0x2C7)
+    _stub_txlist(
+        monkeypatch,
+        {1: [_creation_tx(m.address) for m in members] + [_call_tx(eoa, tx_hash=tx_hash, to=factory.address)]},
+        internal_by_txhash={tx_hash: [_create_frame(child, factory.address)]},
+    )
+    sink: set[int] = set()
+
+    row = _register_protocol_deployer(db_session, protocol_id=protocol.id, deployer=eoa, reprobe_sink=sink)
+
+    assert row is not None and row.trust_class == "B"
+    assert row.evidence["member_factory_mapped"] == {"count": 1, "factories": [factory.address]}
+    assert row.evidence["enumeration"]["factories"] == {child: factory.address}
+    assert child in row.evidence["enumeration"]["addresses"]
+    # Mapping only: the child is nominated as a candidate, never admitted.
+    child_row = db_session.execute(select(Contract).where(Contract.address == child)).scalar_one()
+    assert child_row.protocol_id is None
+    assert child_row.nominated_protocol_id == protocol.id
+    assert child_row.id in sink
+
+
+def test_fixpoint_enumeration_nominates_and_queues_probes(db_session, monkeypatch):
+    """The gate-side wire: a complete enumeration inside the fixpoint's ladder
+    stratum nominates unknown creations through the enumerator's ``creations``
+    channel and queues them as reprobe candidates."""
+    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
+    protocol = _protocol(db_session)
+    eoa = ADDR(0x2C8)
+    members = _seed_class_b_shape(db_session, protocol, eoa)
+    candidate = _contract(db_session, ADDR(0x2C9), nominated_protocol_id=protocol.id, deployer=eoa)
+    tx_hash = "0x" + "53" * 32
+    unknown = ADDR(0x2CA)
+    _stub_txlist(
+        monkeypatch,
+        {
+            1: [_creation_tx(m.address) for m in members]
+            + [_creation_tx(candidate.address), _call_tx(eoa, tx_hash=tx_hash, to=ADDR(0x2CB))]
+        },
+        internal_by_txhash={tx_hash: [_create_frame(unknown, ADDR(0x2CB))]},
+    )
+
+    result = gate.evaluate(
+        db_session,
+        gate.FactsDelta(recheck_contract_ids=(candidate.id,)),
+        deployer_enumerator=session_deployer_enumerator(db_session),
+    )
+
+    row = db_session.execute(select(Contract).where(Contract.address == unknown)).scalar_one()
+    assert row.nominated_protocol_id == protocol.id
+    assert row.discovery_sources == [gate.ENUMERATION_SOURCE_TAG]
+    assert row.id in result.reprobe_contract_ids
+    # The unknown creation held no evidence, so Class B stayed refused.
+    assert db_session.execute(select(ProtocolDeployer).where(ProtocolDeployer.address == eoa)).first() is None
 
 
 def test_ladder_wire_class_a_skips_enumeration(db_session, monkeypatch):

@@ -45,12 +45,13 @@ from db.models import (
     UpgradeEvent,
 )
 from services.clients.rpc import chain_id_for_chain_name
-from utils.chains import canonical_chain
+from utils.chains import UnknownChainError, canonical_chain, chain_by_id
 from utils.logging import record_degraded
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
 
+    from services.discovery.deployer_enumeration import DeployerCreation
     from services.discovery.probes import ProbeResult
 
 logger = logging.getLogger(__name__)
@@ -619,6 +620,38 @@ def _member_anchors_ladder(session: Session, *, contract_id: int, protocol_id: i
     return False
 
 
+def _anchoring_member_factory(session: Session, *, protocol_id: int, factory: str) -> bool:
+    """Whether *factory* is this protocol's own MEMBER holding a non-D2
+    admitting witness (F2). The member-factory mapping rule (deliberate §3.3
+    deviation, owner ruling): a creation minted by the protocol's own member
+    factory is a protocol-family creation — it counts as MAPPED in the Class-B
+    exclusivity test and is tolerated by the shared-operator kill. Mapping
+    only: it admits nothing and mints no witness."""
+    for member in session.execute(
+        select(Contract)
+        .where(Contract.protocol_id == protocol_id, func.lower(Contract.address) == factory)
+        .order_by(Contract.id)
+    ).scalars():
+        if _member_anchors_ladder(session, contract_id=member.id, protocol_id=protocol_id):
+            return True
+    return False
+
+
+def _member_factory_created(session: Session, *, protocol_id: int, contract: Contract) -> bool:
+    """The stored-attribution arm of the member-factory rule: the row's own
+    creation witness names a factory that is an anchoring member of this
+    protocol. NULL attribution is not-determined and licenses nothing."""
+    chain_id = chain_id_for_chain_name(contract.chain)
+    addr = (contract.address or "").lower()
+    if chain_id is None or not addr:
+        return False
+    witness = session.get(ContractCreationWitness, (chain_id, addr))
+    factory = (witness.creation_factory or "").lower() if witness is not None else ""
+    if not factory:
+        return False
+    return _anchoring_member_factory(session, protocol_id=protocol_id, factory=factory)
+
+
 # ---------------------------------------------------------------------------
 # Witness-fact verification (spec §3.2 witness invalidation; invariant 6).
 # Admission and cascade both re-check the EDGE, never mere witness presence —
@@ -788,6 +821,10 @@ def _controller_is_exclusive(
             and row.nominated_protocol_id == protocol_id
             and _has_nonlineage_witness(session, contract_id=row.id, protocol_id=protocol_id)
         ):
+            continue
+        # Member-factory rule (§3.3 deviation): a child of the protocol's own
+        # member factory is a protocol-family observation, not a foreign one.
+        if _member_factory_created(session, protocol_id=protocol_id, contract=row):
             continue
         return False
     return member_seen
@@ -1092,6 +1129,7 @@ def classify_deployer(
     address: str,
     creation_history: Sequence[str] | None = None,
     history_complete: bool = False,
+    creation_factories: Mapping[str, str] | None = None,
 ) -> DeployerClassification:
     """§3.3 trust-ladder verdict for one EOA. Reads only; ``register_deployer``
     writes the registry row for an A/B verdict.
@@ -1099,6 +1137,12 @@ def classify_deployer(
     ``creation_history`` is the EOA's Etherscan-enumerated FULL creation list;
     ``history_complete=False`` (cap exceeded, not enumerated) can never reach
     Class B — DB-local exclusivity is absence of counterevidence, not proof.
+
+    ``creation_factories`` (created address → factory address, from the
+    enumeration's internal CREATE frames) feeds the member-factory mapping
+    rule — a DELIBERATE §3.3 deviation (owner ruling): a creation minted by
+    this protocol's own anchoring MEMBER factory counts as mapped in the
+    exclusivity test. Mapping only — it admits nothing and mints no witness.
     """
     _require_positive_int(protocol_id, "protocol_id")
     addr = _require_address(address, "address")
@@ -1199,6 +1243,19 @@ def classify_deployer(
             )
         }
     unmapped = sorted(created - known)
+    factory_mapped: dict[str, str] = {}
+    if unmapped and creation_factories:
+        anchoring: dict[str, bool] = {}
+        for creation in unmapped:
+            factory = creation_factories.get(creation)
+            if not isinstance(factory, str) or not factory:
+                continue
+            factory = factory.lower()
+            if factory not in anchoring:
+                anchoring[factory] = _anchoring_member_factory(session, protocol_id=protocol_id, factory=factory)
+            if anchoring[factory]:
+                factory_mapped[creation] = factory
+        unmapped = [creation for creation in unmapped if creation not in factory_mapped]
     if unmapped:
         return DeployerClassification(
             trust_class=None,
@@ -1209,14 +1266,19 @@ def classify_deployer(
                 "checked_at": checked_at,
             },
         )
-    return DeployerClassification(
-        trust_class=DEPLOYER_TRUST_CLASS_B,
-        evidence={
-            "corroborating_member_ids": sorted(corroborating),
-            "enumeration": {"count": len(created), "complete": True},
-            "checked_at": checked_at,
-        },
-    )
+    evidence: dict[str, Any] = {
+        "corroborating_member_ids": sorted(corroborating),
+        "enumeration": {"count": len(created), "complete": True},
+        "checked_at": checked_at,
+    }
+    if factory_mapped:
+        # The deciding attribution for the member-factory-mapped creations
+        # rides in the evidence: which factories, and how many children each.
+        evidence["member_factory_mapped"] = {
+            "count": len(factory_mapped),
+            "factories": sorted(set(factory_mapped.values())),
+        }
+    return DeployerClassification(trust_class=DEPLOYER_TRUST_CLASS_B, evidence=evidence)
 
 
 def register_deployer(
@@ -1253,6 +1315,75 @@ def register_deployer(
     assert row is not None  # the upsert just returned this id
     session.refresh(row)
     return row
+
+
+#: ``discovery_sources`` tag for rows a complete Class-B enumeration surfaced.
+ENUMERATION_SOURCE_TAG = "deployer_enumeration"
+
+#: Bound on rows one enumeration may nominate. The tail is NOT lost recall
+#: silently: the overflow is recorded as degraded, and the next complete
+#: enumeration of the same EOA re-surfaces it (nomination is idempotent).
+ENUMERATION_NOMINATION_CAP = 1_000
+
+
+def nominate_enumerated_creations(
+    session: Session,
+    *,
+    protocol_id: int,
+    deployer: str,
+    creations: "Sequence[DeployerCreation]",
+) -> list[int]:
+    """Enumeration-driven nomination: a COMPLETE enumeration's creations with
+    no contracts row become candidates of *protocol_id* (free recall — the
+    probe/evidence path still gates everything; F1 keeps a bare nomination out
+    of the Class-B mapping test, so this can never manufacture exclusivity).
+    Returns the new candidate ids; the caller queues their probes."""
+    _require_positive_int(protocol_id, "protocol_id")
+    addr = _require_address(deployer, "deployer")
+    missing: list[tuple[str, str]] = []
+    for creation in sorted(creations, key=lambda c: (c.chain_id, c.address)):
+        target = (creation.address or "").lower()
+        if not _ADDRESS_RE.match(target) or target == addr:
+            continue
+        try:
+            chain_name = chain_by_id(creation.chain_id).name
+        except UnknownChainError:
+            continue
+        existing = session.execute(
+            select(Contract.id)
+            .where(
+                func.lower(Contract.address) == target,
+                func.lower(func.coalesce(Contract.chain, "ethereum")) == _chain_key(chain_name),
+            )
+            .limit(1)
+        ).first()
+        if existing is None:
+            missing.append((target, chain_name))
+    if len(missing) > ENUMERATION_NOMINATION_CAP:
+        overflow = len(missing) - ENUMERATION_NOMINATION_CAP
+        record_degraded(
+            phase="deployer_enumeration_nomination",
+            exc=RuntimeError(f"{overflow} enumerated creations past the nomination cap"),
+            context={"deployer": addr, "protocol_id": protocol_id, "cap": ENUMERATION_NOMINATION_CAP},
+        )
+        logger.warning(
+            "enumeration nomination cap exceeded",
+            extra={"deployer": addr, "protocol_id": protocol_id, "missing": len(missing)},
+        )
+        missing = missing[:ENUMERATION_NOMINATION_CAP]
+    new_ids: list[int] = []
+    for target, chain_name in missing:
+        row = Contract(address=target, chain=chain_name, deployer=addr)
+        session.add(row)
+        session.flush()
+        nominate(session, contract=row, protocol_id=protocol_id, source_tag=ENUMERATION_SOURCE_TAG)
+        new_ids.append(row.id)
+    if new_ids:
+        logger.info(
+            "enumerated creations nominated",
+            extra={"deployer": addr, "protocol_id": protocol_id, "contract_ids": new_ids[:50], "count": len(new_ids)},
+        )
+    return new_ids
 
 
 @dataclass(frozen=True)
@@ -1474,6 +1605,11 @@ class PromotionResult:
 #: ``enumerator(eoa) -> (created_addresses, history_complete)``. Optional —
 #: without one the fixpoint can register Class A but never mint Class B
 #: (positive exclusivity evidence cannot be derived from the DB alone).
+#: An enumerator MAY expose attribute channels the fixpoint reads via getattr:
+#: ``coverage_gaps`` (deployer → gap, F3 counterevidence) and ``creations``
+#: (deployer → full ``DeployerCreation`` records — the factory attributions
+#: for the member-factory mapping rule and the chain identities for
+#: enumeration-driven nomination).
 DeployerEnumerator = Callable[[str], "tuple[Sequence[str], bool]"]
 
 
@@ -1728,7 +1864,7 @@ def _stratified_fixpoint(
         )
         named_registry_addresses = set()
         loss_check_protocol_ids = set()
-        recl_changed, recl_pending, recl_demotion = _reclassify_deployers(
+        recl_changed, recl_pending, recl_nominated, recl_demotion = _reclassify_deployers(
             session,
             pending,
             deployer_enumerator,
@@ -1738,6 +1874,10 @@ def _stratified_fixpoint(
         if recl_changed:
             changed = True
         pending.update(recl_pending)
+        # Enumeration-driven nominations are candidates blocked on a probe
+        # fact (no W1, no probe attempt) — queued out, never settled blind.
+        pending.update(recl_nominated)
+        reprobe.update(recl_nominated)
         demoted.update(recl_demotion.demoted_contract_ids)
         promoted.difference_update(recl_demotion.demoted_contract_ids)
         reprobe.update(recl_demotion.reprobe_contract_ids)
@@ -1838,16 +1978,18 @@ def _reclassify_deployers(
     enum_cache: dict[str, tuple[Sequence[str], bool]],
     *,
     extra_pairs: set[tuple[int, str]] | None = None,
-) -> tuple[bool, set[int], DemotionResult]:
+) -> tuple[bool, set[int], set[int], DemotionResult]:
     """Stratum (ii): re-run the §3.3 ladder for every (protocol, deployer)
     pair the pending candidates name, plus ``extra_pairs`` (standing registry
     rows pulled in by a named deployer or a shrunken member set). Registers
     fresh A/B verdicts; revokes an existing row only on POSITIVE
     counterevidence (collision, perimeter fact lost, corroboration lost) — an
-    absent enumeration never revokes."""
+    absent enumeration never revokes. The third element is the ids a complete
+    enumeration NOMINATED (``nominate_enumerated_creations``) — candidates
+    blocked on a probe fact until the caller probes them."""
     extra = set(extra_pairs or ())
     if not pending and not extra:
-        return False, set(), DemotionResult()
+        return False, set(), set(), DemotionResult()
     candidate_pairs: set[tuple[int, str]] = set()
     if pending:
         candidate_pairs = {
@@ -1865,6 +2007,7 @@ def _reclassify_deployers(
     pairs = sorted(extra | candidate_pairs)
     changed = False
     new_pending: set[int] = set()
+    nominated: set[int] = set()
     revoked: set[int] = set()
     demotion_demoted: set[int] = set()
     demotion_reprobe: set[int] = set()
@@ -1894,12 +2037,20 @@ def _reclassify_deployers(
                     enum_cache[deployer] = ((), False)
             history, complete = enum_cache[deployer]
             if complete:
+                records: Sequence[Any] = ((getattr(deployer_enumerator, "creations", None) or {}).get(deployer)) or ()
+                new_ids = nominate_enumerated_creations(
+                    session, protocol_id=protocol_id, deployer=deployer, creations=records
+                )
+                if new_ids:
+                    changed = True
+                    nominated.update(new_ids)
                 verdict = classify_deployer(
                     session,
                     protocol_id=protocol_id,
                     address=deployer,
                     creation_history=history,
                     history_complete=True,
+                    creation_factories={c.address: c.factory for c in records if getattr(c, "factory", None)},
                 )
         if verdict.trust_class is None and verdict.evidence.get("reason") == "cross_protocol_collision":
             # Invariant 7: a collision is Class C for EVERY party, never a
@@ -1967,6 +2118,7 @@ def _reclassify_deployers(
     return (
         changed,
         new_pending,
+        nominated,
         DemotionResult(
             revoked_witness_ids=tuple(sorted(revoked)),
             demoted_contract_ids=tuple(sorted(demotion_demoted)),

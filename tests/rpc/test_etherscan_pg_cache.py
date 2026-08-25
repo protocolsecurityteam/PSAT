@@ -222,6 +222,16 @@ def test_pg_cache_whitelisted_actions_pass_through(monkeypatch):
     assert etherscan._pg_cache_eligible("contract", "getcontractcreation") is True
 
 
+def test_pg_cache_txlistinternal_by_txhash_only(monkeypatch):
+    """A mined tx's internal frames are immutable → the per-TXHASH form is
+    PG-cacheable; the by-ADDRESS form is living history and must never be
+    served stale."""
+    assert etherscan._pg_cache_eligible("account", "txlistinternal", {"txhash": "0x" + "11" * 32}) is True
+    assert etherscan._pg_cache_eligible("account", "txlistinternal", {"address": "0xa"}) is False
+    assert etherscan._pg_cache_eligible("account", "txlistinternal") is False
+    assert etherscan._pg_cache_eligible("account", "txlist", {"address": "0xa"}) is False
+
+
 # ---------------------------------------------------------------------------
 # Codex iter-5 P2: skip caching empty-source / unverified responses
 # ---------------------------------------------------------------------------
