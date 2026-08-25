@@ -52,6 +52,7 @@ from typing import Any
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
+from db.jsonb import jsonb_has_payload
 from db.models import (
     ADMITTING_WITNESS_RULES,
     WITNESS_RULE_W5_HUMAN,
@@ -172,7 +173,7 @@ def _admin_inventory_job_exists(session: Session, contract: Contract, protocol_i
             select(Job.id)
             .where(
                 func.lower(Job.address) == address,
-                Job.request.isnot(None),
+                jsonb_has_payload(Job.request),
                 Job.request.contains({"discovery_sources": ["inventory"]}),
                 or_(Job.protocol_id == protocol_id, Job.request.contains({"protocol_id": protocol_id})),
             )
