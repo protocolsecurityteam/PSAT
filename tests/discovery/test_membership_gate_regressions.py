@@ -55,7 +55,7 @@ def seed_protocol(db_session):
     """Fresh protocol whose contracts get cleaned up by db_session teardown."""
     from db.models import Protocol
 
-    p = Protocol(name=f"src-conf-{uuid.uuid4().hex[:10]}")
+    p = Protocol(name=f"gate-reg-{uuid.uuid4().hex[:10]}")
     db_session.add(p)
     db_session.commit()
     return p.id
@@ -925,7 +925,7 @@ class TestStructuralOrphanMigration:
         from db.models import Contract, Protocol
 
         # Second protocol so we can simulate a cross-protocol structural edge.
-        second_proto = Protocol(name=f"src-conf-second-{uuid.uuid4().hex[:8]}")
+        second_proto = Protocol(name=f"gate-reg-second-{uuid.uuid4().hex[:8]}")
         db_session.add(second_proto)
         db_session.commit()
 

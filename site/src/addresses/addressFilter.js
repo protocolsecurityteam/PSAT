@@ -84,7 +84,9 @@ export function candidateReasonText(row) {
   }
   if (kind === "probe_error") return "probe attempt failed";
   if (kind === "no_probe_attempt") return "no probe attempt yet";
-  return "not yet verified";
+  // An unknown kind surfaces its token verbatim — never a vague default
+  // (invariant 5: the missing piece is always named).
+  return typeof kind === "string" && kind ? kind : "";
 }
 
 export function prunedReasonText(row) {

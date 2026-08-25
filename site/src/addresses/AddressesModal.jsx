@@ -7,6 +7,7 @@ import {
   candidateReasonText,
   computeCurrentImplAddrs,
   isPureHistorical,
+  membershipState,
   prunedReasonText,
   splitMembership,
 } from "./addressFilter.js";
@@ -161,7 +162,10 @@ export default function AddressesModal({ companyName, onClose }) {
       const missing = [];
       for (const a of parsedCompare) {
         const hit = compareWinner.get(a);
-        if (hit) matched.push({ ...hit, _compareStatus: "matched" });
+        // A pruned row is tracked (so it is not "missing" and never gets
+        // re-queued by "Analyze all missing") but proven code-absent — it
+        // must not wear the green matched chip.
+        if (hit) matched.push({ ...hit, _compareStatus: membershipState(hit) === "pruned" ? "pruned" : "matched" });
         else missing.push({ address: a, _compareStatus: "missing", name: "", is_proxy: false, analyzed: false });
       }
       return [...matched, ...missing];
@@ -455,7 +459,7 @@ export default function AddressesModal({ companyName, onClose }) {
         <div className="ps-addresses-modal-body">
           {error && <p className="ps-audit-modal-empty">Failed to load: {error}</p>}
           {!error && !data && <p className="ps-audit-modal-empty">Loading addresses…</p>}
-          {data && rows.length === 0 && candidateRows.length === 0 && !compareOpen && (
+          {data && rows.length === 0 && candidateRows.length === 0 && pruned.length === 0 && !compareOpen && (
             <p className="ps-audit-modal-empty">No addresses match “{filter}”.</p>
           )}
           {data && compareOpen && parsedCompare.length === 0 && (
@@ -520,6 +524,10 @@ export default function AddressesModal({ companyName, onClose }) {
                         {compareOpen ? (
                           isMissing ? (
                             <span className="ps-addresses-modal-chip err">missing</span>
+                          ) : r._compareStatus === "pruned" ? (
+                            <span className="ps-addresses-modal-chip" title={prunedReasonText(r)}>
+                              pruned
+                            </span>
                           ) : (
                             <span className="ps-addresses-modal-chip ok">matched</span>
                           )

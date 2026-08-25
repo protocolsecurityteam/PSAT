@@ -136,6 +136,11 @@ describe("addressFilter", () => {
       const r = row({ membership_state: "candidate", membership_reason: { kind: "probe_error" } });
       expect(candidateReasonText(r)).toBe("probe attempt failed");
     });
+
+    it("surfaces an unknown reason kind verbatim, never a vague default", () => {
+      const r = row({ membership_state: "candidate", membership_reason: { kind: "future_reason_kind" } });
+      expect(candidateReasonText(r)).toBe("future_reason_kind");
+    });
   });
 
   describe("prunedReasonText", () => {
