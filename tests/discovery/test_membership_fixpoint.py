@@ -905,3 +905,90 @@ def test_secondary_impl_edge_matches_case_insensitively(db_session):
     )
     assert w2.evidence["edge_kind"] == "secondary_implementation"
     assert w2.via_address == member.address
+
+
+# ---------------------------------------------------------------------------
+# Review round 2 (NEW-1): a demotion that voids a Class-A anchor revokes the
+# standing registry row in the SAME evaluate run (invariant 8's trigger),
+# without any candidate naming the EOA.
+# ---------------------------------------------------------------------------
+
+
+def test_demotion_voiding_class_a_anchor_revokes_registry_same_run(db_session):
+    protocol = _protocol(db_session, "anchorloss")
+    deployer = _addr(0xD10)
+    seed = _member(db_session, protocol, _addr(0xD11), implementation=_addr(0xD12))
+    # Anchor member: sole support is the W2 edge from the seed; it carries the
+    # Class A perimeter fact (a resolved controller value naming the EOA).
+    anchor = _contract(db_session, _addr(0xD12), protocol_id=protocol.id, nominated_protocol_id=protocol.id)
+    _code_fact(db_session, anchor.address)
+    gate.write_witness(
+        db_session,
+        contract_id=anchor.id,
+        protocol_id=protocol.id,
+        rule="w1_code",
+        evidence=gate.w1_evidence(chain_id=1, code_probe_block=50),
+    )
+    gate.write_witness(
+        db_session,
+        contract_id=anchor.id,
+        protocol_id=protocol.id,
+        rule="w2_structural",
+        evidence=gate.w2_evidence(
+            edge_kind="implementation",
+            member_contract_id=seed.id,
+            member_address=seed.address,
+            resolved_pointer=anchor.address,
+        ),
+        via_address=seed.address,
+    )
+    db_session.add(ControllerValue(contract_id=anchor.id, controller_id="owner", value=deployer))
+    registry = ProtocolDeployer(
+        protocol_id=protocol.id,
+        address=deployer,
+        trust_class="A",
+        evidence={"perimeter_fact": {"kind": "controller_value", "contract_id": None}, "checked_at": "2026-01-01"},
+    )
+    db_session.add(registry)
+    # W4 member resting only on the registry row's lineage.
+    w4_member = _contract(
+        db_session, _addr(0xD13), protocol_id=protocol.id, nominated_protocol_id=protocol.id, deployer=deployer
+    )
+    _code_fact(db_session, w4_member.address, tx=_TX)
+    gate.write_witness(
+        db_session,
+        contract_id=w4_member.id,
+        protocol_id=protocol.id,
+        rule="w1_code",
+        evidence=gate.w1_evidence(chain_id=1, code_probe_block=50),
+    )
+    db_session.flush()
+    gate.write_witness(
+        db_session,
+        contract_id=w4_member.id,
+        protocol_id=protocol.id,
+        rule="w4_deployer",
+        evidence=gate.w4_evidence(
+            deployer_address=deployer,
+            deployer_registry_id=registry.id,
+            creation_tx_hash=_TX,
+            creation_block=10,
+        ),
+        via_address=deployer,
+    )
+    # The seed loses its status out-of-band (honestly: witnesses revoked too).
+    for witness in gate.active_witnesses(db_session, contract_id=seed.id, protocol_id=protocol.id):
+        gate.revoke_witness(db_session, witness, reason="test_seed_loss")
+    gate.demote_member(db_session, contract=seed, reason="test_seed_loss")
+    db_session.flush()
+
+    result = gate.evaluate(db_session, gate.FactsDelta(new_edge_addresses=(seed.address,)))
+    db_session.commit()
+
+    # Stratum (i) demotes the anchor (via-fact gone); the SAME run's stratum
+    # (ii) loss check then revokes the Class-A row and demotes the W4 member.
+    assert anchor.protocol_id is None and w4_member.protocol_id is None
+    assert {anchor.id, w4_member.id} <= set(result.demoted_contract_ids)
+    db_session.refresh(registry)
+    assert registry.revoked_at is not None and registry.revocation_reason == "perimeter_fact_lost"
+    assert _active_rules(db_session, w4_member) <= {"w1_code"}

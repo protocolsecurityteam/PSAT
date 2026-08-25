@@ -1476,7 +1476,11 @@ def evaluate(
     a mid-migration world where no stamps exist proves nothing lost. Genuine
     POSITIVE counterevidence (``cross_protocol_collision``,
     ``foreign_or_unknown_creations``) still revokes. A normal pass over the
-    settled world must follow so a loss that persists revokes for real."""
+    settled world must follow so a loss that persists revokes for real.
+
+    ``changed_deployer_addresses`` also forces the §3.3 ladder re-check of any
+    STANDING registry row for those EOAs — a registry row is re-examined when
+    its deployer is named, not only when a candidate happens to name it."""
     targeted = _target_candidates(session, facts_delta)
     dirty_vias = {a.lower() for a in facts_delta.changed_deployer_addresses if a}
     dirty_vias |= _standing_vias_named_by_edges(session, facts_delta.new_edge_addresses)
@@ -1484,6 +1488,7 @@ def evaluate(
         session,
         targeted,
         dirty_via_addresses=sorted(dirty_vias),
+        changed_deployer_addresses=facts_delta.changed_deployer_addresses,
         deployer_enumerator=deployer_enumerator,
         defer_registry_loss_revocation=defer_registry_loss_revocation,
     )
@@ -1540,6 +1545,7 @@ def _stratified_fixpoint(
     candidate_ids: set[int],
     *,
     dirty_via_addresses: Sequence[str] = (),
+    changed_deployer_addresses: Sequence[str] = (),
     deployer_enumerator: DeployerEnumerator | None = None,
     defer_registry_loss_revocation: bool = False,
 ) -> PromotionResult:
@@ -1550,10 +1556,18 @@ def _stratified_fixpoint(
     stored evidence, independent of event arrival order (confluence).
     Terminates: admissions consume strictly new witnesses and revocations
     only shrink the witness set (a collision-revoked registry row is never
-    re-registered within a run)."""
+    re-registered within a run).
+
+    Stratum (ii) examines (protocol, deployer) pairs from pending candidates
+    PLUS every standing registry row named by ``changed_deployer_addresses``
+    PLUS every standing registry row of a protocol whose member set just
+    shrank (a demotion can void a Class-A anchor or Class-B corroboration —
+    invariant 8's trigger, enforced same-run, never left for a later event)."""
     targeted = set(candidate_ids)
     pending: set[int] = set(targeted)
     dirty_vias: set[str] = {a.lower() for a in dirty_via_addresses if a}
+    named_registry_addresses: set[str] = {a.lower() for a in changed_deployer_addresses if a}
+    loss_check_protocol_ids: set[int] = set()
     promoted: set[int] = set()
     demoted: set[int] = set()
     reprobe: set[int] = set()
@@ -1571,12 +1585,19 @@ def _stratified_fixpoint(
             promoted.difference_update(demoted_ids)
             reprobe.update(demoted_ids)
             pending.update(demoted_ids)
+            loss_check_protocol_ids.update(_protocols_of_demoted(session, demoted_ids))
 
+        extra_pairs = _standing_registry_pairs(
+            session, addresses=named_registry_addresses, protocol_ids=loss_check_protocol_ids
+        )
+        named_registry_addresses = set()
+        loss_check_protocol_ids = set()
         recl_changed, recl_pending, recl_demotion = _reclassify_deployers(
             session,
             pending,
             deployer_enumerator,
             enum_cache,
+            extra_pairs=extra_pairs,
             defer_loss_revocation=defer_registry_loss_revocation,
         )
         if recl_changed:
@@ -1586,6 +1607,9 @@ def _stratified_fixpoint(
         promoted.difference_update(recl_demotion.demoted_contract_ids)
         reprobe.update(recl_demotion.reprobe_contract_ids)
         pending.update(recl_demotion.demoted_contract_ids)
+        # A stratum-(ii) demotion shrinks a member set too — its protocol's
+        # standing rows get the same loss check next round.
+        loss_check_protocol_ids.update(_protocols_of_demoted(session, recl_demotion.demoted_contract_ids))
 
         round_promoted: set[int] = set()
         for contract_id in sorted(pending):
@@ -1635,25 +1659,66 @@ def _stratified_fixpoint(
     )
 
 
+def _protocols_of_demoted(session: Session, contract_ids: Sequence[int] | set[int]) -> set[int]:
+    """Former protocols of just-demoted members — ``demote_member`` preserves
+    them in ``nominated_protocol_id`` (invariant 4)."""
+    ids = sorted(set(contract_ids))
+    if not ids:
+        return set()
+    return {
+        int(protocol_id)
+        for (protocol_id,) in session.execute(
+            select(Contract.nominated_protocol_id)
+            .where(Contract.id.in_(ids), Contract.nominated_protocol_id.is_not(None))
+            .distinct()
+        )
+    }
+
+
+def _standing_registry_pairs(session: Session, *, addresses: set[str], protocol_ids: set[int]) -> set[tuple[int, str]]:
+    """Unrevoked registry rows named by EOA or owned by a protocol whose
+    member set changed — the extra stratum-(ii) checks beyond candidate-named
+    pairs."""
+    conditions = []
+    if addresses:
+        conditions.append(ProtocolDeployer.address.in_(sorted(addresses)))
+    if protocol_ids:
+        conditions.append(ProtocolDeployer.protocol_id.in_(sorted(protocol_ids)))
+    if not conditions:
+        return set()
+    return {
+        (int(protocol_id), address.lower())
+        for protocol_id, address in session.execute(
+            select(ProtocolDeployer.protocol_id, ProtocolDeployer.address).where(
+                or_(*conditions), ProtocolDeployer.revoked_at.is_(None)
+            )
+        )
+    }
+
+
 def _reclassify_deployers(
     session: Session,
     pending: set[int],
     deployer_enumerator: DeployerEnumerator | None,
     enum_cache: dict[str, tuple[Sequence[str], bool]],
     *,
+    extra_pairs: set[tuple[int, str]] | None = None,
     defer_loss_revocation: bool = False,
 ) -> tuple[bool, set[int], DemotionResult]:
     """Stratum (ii): re-run the §3.3 ladder for every (protocol, deployer)
-    pair the pending candidates name. Registers fresh A/B verdicts; revokes an
-    existing row only on POSITIVE counterevidence (collision, perimeter fact
-    lost, corroboration lost) — an absent enumeration never revokes.
-    ``defer_loss_revocation`` additionally holds back the two evidence-LOSS
-    reasons (see ``evaluate``); collision and fresh foreign creations still
-    revoke."""
-    if not pending:
+    pair the pending candidates name, plus ``extra_pairs`` (standing registry
+    rows pulled in by a named deployer or a shrunken member set). Registers
+    fresh A/B verdicts; revokes an existing row only on POSITIVE
+    counterevidence (collision, perimeter fact lost, corroboration lost) — an
+    absent enumeration never revokes. ``defer_loss_revocation`` additionally
+    holds back the two evidence-LOSS reasons (see ``evaluate``); collision and
+    fresh foreign creations still revoke."""
+    extra = set(extra_pairs or ())
+    if not pending and not extra:
         return False, set(), DemotionResult()
-    pairs = sorted(
-        {
+    candidate_pairs: set[tuple[int, str]] = set()
+    if pending:
+        candidate_pairs = {
             (int(protocol_id), deployer.lower())
             for protocol_id, deployer in session.execute(
                 select(Contract.nominated_protocol_id, Contract.deployer).where(
@@ -1665,7 +1730,7 @@ def _reclassify_deployers(
             )
             if deployer and _ADDRESS_RE.match(deployer)
         }
-    )
+    pairs = sorted(extra | candidate_pairs)
     changed = False
     new_pending: set[int] = set()
     revoked: set[int] = set()
