@@ -9,7 +9,6 @@ set and creates the top-N analysis child jobs once the siblings settle.
 
 from __future__ import annotations
 
-import inspect
 import logging
 import uuid
 from typing import Any, cast
@@ -174,20 +173,6 @@ ENABLED_CHAINS_SEEN_KEY = "enabled_chains_seen"
 #: truncation, never a complete creation history → ``history_complete=False``
 #: → Class C (spec §3.3).
 DEPLOYER_ENUMERATION_CAP = 10_000
-
-
-def _job_assertion(job: Job) -> dict[str, str] | None:
-    """The W5 human assertion the admin job request carries (actor +
-    timestamp, invariant 14), or None when the job carries no assertion."""
-    request = job.request if isinstance(job.request, dict) else {}
-    raw = request.get("human_assertion")
-    if not isinstance(raw, dict):
-        return None
-    actor = raw.get("actor")
-    asserted_at = raw.get("asserted_at")
-    if not isinstance(actor, str) or not actor.strip() or not isinstance(asserted_at, str) or not asserted_at:
-        return None
-    return {"actor": actor.strip(), "asserted_at": asserted_at}
 
 
 def _enumerate_deployer_creations(deployer: str) -> tuple[list[str], list[int], bool]:
@@ -463,20 +448,18 @@ def _gate_intake(session: Session, job: Job, contract: Contract | None, request:
     if not protocol_id or contract is None:
         return
 
-    assertion = _job_assertion(job)
-    nominate_kwargs: dict[str, Any] = {}
-    # TODO(gate-w5): collapse the signature probe to a plain keyword once the
-    # ``human_assertion`` parameter lands on ``nominate``.
-    if assertion is not None and "human_assertion" in inspect.signature(gate.nominate).parameters:
-        nominate_kwargs["human_assertion"] = assertion
+    human_assertion = gate.human_assertion_from_request(job.request)
 
     tags = [t for t in (request.get("discovery_sources") or []) if isinstance(t, str) and t]
     if not tags:
         discovered_by = request.get("discovered_by")
         tags = [discovered_by] if isinstance(discovered_by, str) and discovered_by else [""]
     for tag in tags:
-        # gate consumes W5 at nomination
-        gate.nominate(session, contract=contract, protocol_id=protocol_id, source_tag=tag, **nominate_kwargs)
+        # The gate consumes the W5 assertion at nomination (invariant 14);
+        # the witness upsert is idempotent across tags.
+        gate.nominate(
+            session, contract=contract, protocol_id=protocol_id, source_tag=tag, human_assertion=human_assertion
+        )
 
     _structural_intake(session, job, contract, request)
 

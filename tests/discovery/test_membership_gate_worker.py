@@ -39,7 +39,6 @@ from workers.discovery import (
     ENABLED_CHAINS_SEEN_KEY,
     _enumerate_deployer_creations,
     _gate_intake,
-    _job_assertion,
     _register_protocol_deployer,
     run_chain_enable_sweep,
     run_probe_pass,
@@ -106,6 +105,10 @@ def _seed_w1(session, contract: Contract, protocol_id: int, *, chain_id: int = 1
 
 
 def _seed_w2(session, contract: Contract, anchor: Contract, protocol_id: int) -> None:
+    # The witness row is a claim; promote re-verifies the via-fact against the
+    # stored resolution, so the anchor's pointer must actually carry the edge.
+    anchor.implementation = contract.address
+    session.flush()
     gate.write_witness(
         session,
         contract_id=contract.id,
@@ -383,20 +386,47 @@ def test_ladder_wire_snapshot_reuse_skips_reenumeration(db_session, monkeypatch)
 
 
 # ---------------------------------------------------------------------------
-# W5 assertion helper
+# W5 assertion: admin submission end to end
 # ---------------------------------------------------------------------------
 
 
-def test_job_assertion_shapes():
-    def job_with(request):
-        return Job(id=uuid.uuid4(), request=request, status=JobStatus.queued, stage=JobStage.discovery)
+def test_w5_end_to_end_admin_submission_to_membership(api_client, db_session, monkeypatch):
+    """Admin address+company submission → job.request carries the attributed
+    assertion → fetch intake writes the W5 witness (candidate until W1) → the
+    event-1 probe supplies W1 and the row promotes to member."""
+    from db.models import WITNESS_RULE_W5_HUMAN
 
-    good = job_with({"human_assertion": {"actor": " admin@psat ", "asserted_at": "2026-08-24T00:00:00+00:00"}})
-    assert _job_assertion(good) == {"actor": "admin@psat", "asserted_at": "2026-08-24T00:00:00+00:00"}
-    assert _job_assertion(job_with({})) is None
-    assert _job_assertion(job_with({"human_assertion": "admin"})) is None
-    assert _job_assertion(job_with({"human_assertion": {"actor": " ", "asserted_at": "x"}})) is None
-    assert _job_assertion(job_with({"human_assertion": {"actor": "admin"}})) is None
+    protocol = _protocol(db_session)
+    db_session.commit()
+    address = ADDR(0x2F9)
+    resp = api_client.post("/api/analyze", json={"address": address, "name": "t", "company": protocol.name})
+    assert resp.status_code == 200, resp.text
+    job = db_session.query(Job).filter_by(id=resp.json()["job_id"]).one()
+    payload = (job.request or {}).get(gate.HUMAN_ASSERTION_REQUEST_KEY)
+    assert isinstance(payload, dict) and payload["actor"]
+    assert job.protocol_id == protocol.id
+
+    contract = _contract(db_session, address)
+    request = job.request if isinstance(job.request, dict) else {}
+
+    # No eRPC route: intake records the W5 witness, but W1 is missing —
+    # candidate, never a member (invariant 3).
+    monkeypatch.delenv("ERPC_BASE_URL", raising=False)
+    _gate_intake(db_session, job, contract, request)
+    w5 = (
+        db_session.query(ContractMembershipWitness)
+        .filter_by(contract_id=contract.id, rule=WITNESS_RULE_W5_HUMAN)
+        .one()
+    )
+    assert w5.evidence["actor"] == payload["actor"]
+    assert contract.protocol_id is None
+    assert contract.nominated_protocol_id == protocol.id
+
+    # The chain becomes routable: the probe supplies W1 and W5 admits.
+    monkeypatch.setenv("ERPC_BASE_URL", "http://erpc.test")
+    _stub_probe_wire(monkeypatch)
+    _gate_intake(db_session, job, contract, request)
+    assert contract.protocol_id == protocol.id
 
 
 # ---------------------------------------------------------------------------
