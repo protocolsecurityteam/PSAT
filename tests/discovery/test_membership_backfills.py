@@ -56,11 +56,25 @@ def test_plan_targets_null_deployer_only_and_unresolvable_reported(db_session):
     _contract(db_session, ADDR(1), deployer=ADDR(0xD0))
     _contract(db_session, ADDR(2))
     _contract(db_session, ADDR(3), chain="not-a-chain")
-    targets, unresolvable = backfill_deployers.plan_targets(db_session)
+    targets, skipped = backfill_deployers.plan_targets(db_session)
     assert [t.address for t in targets] == [ADDR(2)]
     assert targets[0].chain_id == 1
     # canonical_chain folds hyphens to spaces before the id lookup fails.
-    assert unresolvable == {"not a chain": 1}
+    assert skipped == {"chain_unresolvable:not a chain": 1}
+
+
+def test_plan_targets_excludes_code_absent_rows(db_session):
+    # A probe proved no code at (address, chain): nothing deployable exists
+    # there, so a creation fetch is spend with no witness value.
+    pruned = _contract(db_session, ADDR(0x50))
+    db_session.add(
+        ContractCreationWitness(chain_id=1, address=pruned.address, code_probe_block=9, code_absent_at_probe=True)
+    )
+    live = _contract(db_session, ADDR(0x51))
+    db_session.flush()
+    targets, skipped = backfill_deployers.plan_targets(db_session)
+    assert [t.address for t in targets] == [live.address]
+    assert skipped == {"code_absent": 1}
 
 
 def test_run_backfill_chunks_five_per_call_and_fills(db_session, monkeypatch):
@@ -198,3 +212,71 @@ def test_scripts_importable_without_side_effects():
     # main() guards: importing must not execute a CLI.
     for module in (backfill_deployers, backfill_code_probes):
         assert callable(module.main)
+
+
+# ---------------------------------------------------------------------------
+# CLI exit codes (wire-dead vs honest steady state)
+# ---------------------------------------------------------------------------
+
+
+def _bind_cli_session(monkeypatch, module):
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session
+
+    from tests.conftest import DATABASE_URL
+
+    engine = create_engine(DATABASE_URL)
+    monkeypatch.setattr(module, "SessionLocal", lambda: Session(engine))
+
+
+def test_deployer_backfill_exit_1_when_wire_dead(db_session, monkeypatch):
+    _contract(db_session, ADDR(0x60))
+    db_session.commit()
+    _bind_cli_session(monkeypatch, backfill_deployers)
+
+    def dead_get(module, action, chain_id=None, **params):
+        raise RuntimeError("Etherscan error: NOTOK - Max rate limit reached")
+
+    monkeypatch.setattr(probes.etherscan, "get", dead_get)
+    assert backfill_deployers.main(["--apply"]) == 1
+
+
+def test_deployer_backfill_exit_0_on_honest_no_data_steady_state(db_session, monkeypatch):
+    _contract(db_session, ADDR(0x61))
+    db_session.commit()
+    _bind_cli_session(monkeypatch, backfill_deployers)
+
+    def no_data_get(module, action, chain_id=None, **params):
+        # Etherscan's status-0 ANSWER for a batch with no creation info — a
+        # healthy wire saying "nothing here", not a failure.
+        raise RuntimeError("Etherscan error: No data found - ")
+
+    monkeypatch.setattr(probes.etherscan, "get", no_data_get)
+    assert backfill_deployers.main(["--apply"]) == 0
+
+
+def test_deployer_backfill_exit_0_dry_run(db_session, monkeypatch):
+    _contract(db_session, ADDR(0x62))
+    db_session.commit()
+    _bind_cli_session(monkeypatch, backfill_deployers)
+    assert backfill_deployers.main([]) == 0
+
+
+def test_code_probe_backfill_exit_1_when_every_probe_errors(db_session, monkeypatch, erpc_env):
+    _contract(db_session, ADDR(0x63))
+    db_session.commit()
+    _bind_cli_session(monkeypatch, backfill_code_probes)
+
+    def dead_rpc(rpc_url, method, params, *args, **kwargs):
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(probes, "rpc_request", dead_rpc)
+    assert backfill_code_probes.main(["--apply"]) == 1
+
+
+def test_code_probe_backfill_exit_0_after_successful_probes(db_session, monkeypatch, erpc_env):
+    _contract(db_session, ADDR(0x64))
+    db_session.commit()
+    _bind_cli_session(monkeypatch, backfill_code_probes)
+    _stub_probe_wire(monkeypatch)
+    assert backfill_code_probes.main(["--apply"]) == 0

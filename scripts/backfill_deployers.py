@@ -25,12 +25,14 @@ import argparse
 import json
 import logging
 import sys
+from contextlib import contextmanager
 from dataclasses import dataclass
+from typing import Iterator
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from db.models import Contract, SessionLocal
+from db.models import Contract, ContractCreationWitness, SessionLocal
 from services.clients import etherscan
 from services.clients.rpc import chain_id_for_chain_name
 from services.discovery.probes import fetch_creations
@@ -59,15 +61,25 @@ def _chain_key(chain: str | None) -> str:
 def plan_targets(
     session: Session, *, chain: str | None = None, limit: int | None = None
 ) -> tuple[list[Target], dict[str, int]]:
-    """(fetchable rows, per-chain-name count of rows whose chain id is not
-    resolvable). Reads only."""
+    """(fetchable rows, skip counts). Reads only. Skip keys:
+    ``chain_unresolvable:<name>`` (no chain id to query) and ``code_absent``
+    (a probe proved no code at (address, chain) — there is no creation to
+    fetch that could matter; the row is pruned-shaped, not backfillable)."""
+    code_absent: set[tuple[int, str]] = {
+        (row_chain_id, row_address)
+        for row_chain_id, row_address in session.execute(
+            select(ContractCreationWitness.chain_id, ContractCreationWitness.address).where(
+                ContractCreationWitness.code_absent_at_probe.is_(True)
+            )
+        )
+    }
     stmt = (
         select(Contract.id, Contract.address, Contract.chain)
         .where(Contract.deployer.is_(None))
         .order_by(Contract.chain, Contract.address, Contract.id)
     )
     targets: list[Target] = []
-    unresolvable: dict[str, int] = {}
+    skipped: dict[str, int] = {}
     for contract_id, address, raw_chain in session.execute(stmt):
         chain_key = _chain_key(raw_chain)
         if chain is not None and chain_key != _chain_key(chain):
@@ -76,12 +88,16 @@ def plan_targets(
             continue
         chain_id = chain_id_for_chain_name(chain_key)
         if chain_id is None:
-            unresolvable[chain_key] = unresolvable.get(chain_key, 0) + 1
+            key = f"chain_unresolvable:{chain_key}"
+            skipped[key] = skipped.get(key, 0) + 1
+            continue
+        if (chain_id, address.lower()) in code_absent:
+            skipped["code_absent"] = skipped.get("code_absent", 0) + 1
             continue
         targets.append(Target(contract_id=contract_id, address=address.lower(), chain=chain_key, chain_id=chain_id))
         if limit is not None and len(targets) >= limit:
             break
-    return targets, unresolvable
+    return targets, skipped
 
 
 def run_backfill(session: Session, targets: list[Target], *, commit: bool = True, chunk: int = CHUNK) -> dict[str, int]:
@@ -121,16 +137,57 @@ def run_backfill(session: Session, targets: list[Target], *, commit: bool = True
     return counts
 
 
-def format_targets(targets: list[Target], unresolvable: dict[str, int]) -> str:
+def format_targets(targets: list[Target], skipped: dict[str, int]) -> str:
     lines = [f"{len(targets)} row(s) with NULL deployer on resolvable chains"]
     per_chain: dict[str, int] = {}
     for target in targets:
         per_chain[target.chain] = per_chain.get(target.chain, 0) + 1
     for chain in sorted(per_chain):
         lines.append(f"  {chain:<12} {per_chain[chain]}")
-    for chain in sorted(unresolvable):
-        lines.append(f"  {chain:<12} {unresolvable[chain]} row(s) SKIPPED: chain id not resolvable")
+    for reason in sorted(skipped):
+        lines.append(f"  SKIPPED {reason}: {skipped[reason]} row(s)")
     return "\n".join(lines)
+
+
+@dataclass
+class EtherscanWireStats:
+    """Distinguishes a dead wire (auth/quota — every call raising) from a
+    healthy wire honestly answering nothing (unanswerable rows, the steady
+    state after a full run)."""
+
+    calls: int = 0
+    failures: int = 0
+    no_data: int = 0
+
+    @property
+    def wire_failures(self) -> int:
+        return self.failures - self.no_data
+
+
+@contextmanager
+def _count_etherscan_outcomes() -> Iterator[EtherscanWireStats]:
+    """Wrap ``etherscan.get`` for the run: ``fetch_creations`` swallows its
+    exceptions, so call outcomes are counted here or nowhere. "No data found"
+    (Etherscan's status-0 answer for a batch with no creation info) counts as
+    an answer, never a wire failure."""
+    stats = EtherscanWireStats()
+    real_get = etherscan.get
+
+    def counting_get(*args, **kwargs):
+        stats.calls += 1
+        try:
+            return real_get(*args, **kwargs)
+        except Exception as exc:
+            stats.failures += 1
+            if "no data found" in str(exc).lower():
+                stats.no_data += 1
+            raise
+
+    etherscan.get = counting_get
+    try:
+        yield stats
+    finally:
+        etherscan.get = real_get
 
 
 def apply_rate_limit_override(calls_per_sec: int) -> None:
@@ -159,17 +216,22 @@ def main(argv: list[str] | None = None) -> int:
         apply_rate_limit_override(args.rate_limit)
 
     with SessionLocal() as session:
-        targets, unresolvable = plan_targets(session, chain=args.chain, limit=args.limit)
-        print(format_targets(targets, unresolvable))
+        targets, skipped = plan_targets(session, chain=args.chain, limit=args.limit)
+        print(format_targets(targets, skipped))
         if not args.apply:
             print(f"\ndry run: {len(targets)} row(s) would be fetched. Re-run with --apply to write.")
             return 0
-        counts = run_backfill(session, targets)
-        print("\napplied: " + json.dumps(counts, sort_keys=True))
-        if targets and counts["filled"] == 0:
-            # A whole run answering nothing is the silent-starvation shape
-            # (expired key, exhausted quota) — fail loud, not green.
-            print("no rows filled — check ETHERSCAN_API_KEY / quota", file=sys.stderr)
+        with _count_etherscan_outcomes() as stats:
+            counts = run_backfill(session, targets)
+        print("\napplied: " + json.dumps({**counts, "wire_failures": stats.wire_failures}, sort_keys=True))
+        if targets and counts["filled"] == 0 and counts["no_creator"] == 0 and stats.wire_failures > 0:
+            # Nothing landed AND calls were dying: the silent-starvation shape
+            # (expired key, exhausted quota) — fail loud, not green. A healthy
+            # wire honestly answering nothing (only unanswerable rows remain)
+            # exits 0 with its "unanswered" count.
+            print(
+                "no creation data landed and Etherscan calls failed — check ETHERSCAN_API_KEY / quota", file=sys.stderr
+            )
             return 1
     return 0
 
