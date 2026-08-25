@@ -54,7 +54,15 @@ from typing import TYPE_CHECKING, Any, Collection, Mapping, TypedDict
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from db.models import Contract, ContractCreationWitness, ContractDependency, ContractProbeAttempt, Job, JobStage
+from db.models import (
+    Contract,
+    ContractCreationWitness,
+    ContractDependency,
+    ContractMembershipWitness,
+    ContractProbeAttempt,
+    Job,
+    JobStage,
+)
 from db.queue import _mainnet_coalesced_chain, create_job, find_existing_job_for_address
 from services.clients.rpc import chain_id_for_chain_name
 from utils.chains import canonical_chain, chain_enabled
@@ -341,6 +349,29 @@ def needs_probe(session: Session, contract: Contract) -> bool:
         return False
     witness = session.get(ContractCreationWitness, (chain_id, address))
     return witness is not None and witness.code_absent_at_probe is True
+
+
+def probe_predates_revocation(session: Session, contract: Contract) -> bool:
+    """A demoted member keeps its completed ``probed`` attempt, so
+    ``needs_probe`` skips it. A witness revocation NEWER than that attempt
+    makes the stored probe stale evidence for re-admission (invariant 8), so
+    the probe pass re-targets the row through the normal event flow — the
+    pickup path for demotions from request/queue contexts (e.g. the
+    protocol-merge deployer cascade) where no inline probe may run."""
+    from services.discovery.probes import UNRESOLVABLE_CHAIN_ID
+
+    chain_id = chain_id_for_chain_name(contract.chain)
+    key_chain = UNRESOLVABLE_CHAIN_ID if chain_id is None else chain_id
+    attempt = session.get(ContractProbeAttempt, (contract.id, key_chain))
+    if attempt is None or attempt.probed_at is None:
+        return False
+    newest = session.execute(
+        select(func.max(ContractMembershipWitness.revoked_at)).where(
+            ContractMembershipWitness.contract_id == contract.id,
+            ContractMembershipWitness.revoked_at.is_not(None),
+        )
+    ).scalar_one()
+    return newest is not None and attempt.probed_at < newest
 
 
 def record_code_witness(session: Session, *, contract: Contract, protocol_id: int, probe_result: "ProbeResult") -> bool:

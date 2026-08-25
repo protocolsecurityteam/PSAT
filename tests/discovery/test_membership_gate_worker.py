@@ -29,9 +29,8 @@ from db.models import (
     ProtocolDeployer,
 )
 from services.clients.rpc import EthCallResult
-from services.discovery import deployer_enumeration
+from services.discovery import deployer_enumeration, probes
 from services.discovery import membership_gate as gate
-from services.discovery import probes
 from services.discovery.deployer_enumeration import (
     DEPLOYER_ENUMERATION_CAP,
     enumerate_deployer_creations,
@@ -489,9 +488,7 @@ def test_w5_end_to_end_admin_submission_to_membership(api_client, db_session, mo
     monkeypatch.delenv("ERPC_BASE_URL", raising=False)
     _gate_intake(db_session, job, contract, request)
     w5 = (
-        db_session.query(ContractMembershipWitness)
-        .filter_by(contract_id=contract.id, rule=WITNESS_RULE_W5_HUMAN)
-        .one()
+        db_session.query(ContractMembershipWitness).filter_by(contract_id=contract.id, rule=WITNESS_RULE_W5_HUMAN).one()
     )
     assert w5.evidence["actor"] == payload["actor"]
     assert contract.protocol_id is None
@@ -716,6 +713,86 @@ def test_probe_pass_reprobes_error_attempts(db_session, monkeypatch, erpc_env):
     assert seen["probed"] == [stuck.address]
     w1 = db_session.query(ContractMembershipWitness).filter_by(contract_id=stuck.id, rule=WITNESS_RULE_W1_CODE).one()
     assert w1.evidence["code_probe_block"] == 120
+
+
+def test_probe_pass_retargets_demoted_member_after_revocation(db_session, monkeypatch, erpc_env):
+    """Request/queue-context demotions run no inline probe; the next probe
+    pass re-targets the row because its completed attempt predates the newest
+    witness revocation (invariant 8 via the normal event flow)."""
+    from datetime import datetime, timezone
+
+    protocol = _protocol(db_session)
+    anchor = _contract(db_session, ADDR(0x320), protocol_id=protocol.id)
+    member = _contract(db_session, ADDR(0x321), protocol_id=protocol.id, nominated_protocol_id=protocol.id)
+    _seed_w2(db_session, member, anchor, protocol.id)
+    db_session.add(
+        ContractProbeAttempt(
+            contract_id=member.id,
+            chain_id=1,
+            block_number=90,
+            results={"status": "probed"},
+            probed_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+    )
+    db_session.flush()
+    witness = db_session.query(ContractMembershipWitness).filter_by(contract_id=member.id).one()
+    gate.revoke_witness(db_session, witness, reason="protocol_merge_revoked_deployer")
+    member.protocol_id = None
+    db_session.commit()
+
+    seen = _stub_probe_wire(monkeypatch)
+    run_probe_pass(db_session, protocol.id)
+
+    assert member.address in seen["probed"]
+
+
+def test_gate_intake_reprobes_members_demoted_by_counterevidence(db_session, monkeypatch, erpc_env):
+    """The intake's counterevidence revocation feeds the demoted lineage-only
+    member straight back into the probe machinery (bounded, same pass)."""
+    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
+    protocol = _protocol(db_session)
+    eoa = ADDR(0x340)
+    members = _seed_class_b_shape(db_session, protocol, eoa)
+    calls = _stub_txlist(monkeypatch, {1: [_creation_tx(m.address) for m in members]})
+    lineage_only = _contract(db_session, ADDR(0x341), protocol_id=protocol.id, deployer=eoa)
+    known = [*members, lineage_only]
+    _stub_txlist(monkeypatch, {1: [_creation_tx(c.address) for c in known]})
+    registry = _register_protocol_deployer(db_session, protocol_id=protocol.id, deployer=eoa)
+    assert registry is not None and registry.trust_class == "B"
+    gate.write_witness(
+        db_session,
+        contract_id=lineage_only.id,
+        protocol_id=protocol.id,
+        rule=WITNESS_RULE_W4_DEPLOYER,
+        evidence=gate.w4_evidence(
+            deployer_address=eoa, deployer_registry_id=registry.id, creation_tx_hash=_TX, creation_block=7
+        ),
+        via_address=eoa,
+    )
+    newcomer = _contract(db_session, ADDR(0x342), nominated_protocol_id=protocol.id, deployer=eoa)
+    db_session.commit()
+
+    # One transport stub for both consumers (probes + enumeration share the
+    # etherscan module): the re-enumeration now surfaces a foreign creation.
+    seen = _stub_probe_wire(monkeypatch)
+    foreign_window = [_creation_tx(c.address) for c in (*known, newcomer)] + [_creation_tx(ADDR(0x998))]
+
+    def fake_etherscan(module, action, chain_id, empty_result_ok=False, **params):
+        if action == "txlist":
+            return {"result": foreign_window}
+        return {"result": []}
+
+    monkeypatch.setattr(probes.etherscan, "get", fake_etherscan)
+    del calls
+
+    job = _job(db_session, protocol_id=protocol.id, address=newcomer.address)
+    _gate_intake(db_session, job, newcomer, {})
+
+    db_session.refresh(registry)
+    assert registry.revoked_at is not None
+    assert lineage_only.protocol_id is None
+    # The demoted member was re-probed in the same pass, not parked silently.
+    assert lineage_only.address in seen["probed"]
 
 
 def test_probe_pass_reprobes_renominated_pruned_rows(db_session, monkeypatch, erpc_env):

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from typing import Any, cast
+from typing import Collection, Sequence, cast
 
 from sqlalchemy import func, null, select
 from sqlalchemy.orm import Session
@@ -49,7 +49,12 @@ from services.discovery.deployer import _batch_get_creators
 from services.discovery.deployer_enumeration import enumerate_with_coverage, session_deployer_enumerator
 from services.discovery.fetch import fetch, is_vyper_result, parse_remappings, parse_sources, source_content_hash
 from services.discovery.inventory import merge_inventory, search_protocol_inventory
-from services.discovery.perimeter import needs_probe, produce_structural_witness, record_code_witness
+from services.discovery.perimeter import (
+    needs_probe,
+    probe_predates_revocation,
+    produce_structural_witness,
+    record_code_witness,
+)
 from services.discovery.probes import fetch_creations
 from services.discovery.protocol_resolver import pick_family_slug, resolve_protocol
 from utils.chains import (
@@ -186,7 +191,12 @@ def _snapshot_covers(row: ProtocolDeployer, contract_address: str) -> bool:
 
 
 def _register_protocol_deployer(
-    session: Session, *, protocol_id: int, deployer: str, contract_address: str | None = None
+    session: Session,
+    *,
+    protocol_id: int,
+    deployer: str,
+    contract_address: str | None = None,
+    reprobe_sink: set[int] | None = None,
 ) -> ProtocolDeployer | None:
     """§3.3 ladder wire: classify the EOA; register A/B; Class C registers
     nothing. An unrevoked Class B row whose recorded enumeration snapshot
@@ -229,7 +239,9 @@ def _register_protocol_deployer(
     if verdict.trust_class is None:
         reason = verdict.evidence.get("reason")
         if existing is not None and reason in _DEPLOYER_COUNTEREVIDENCE_REASONS:
-            gate.demote(session, deployer_row=existing, reason=str(reason))
+            demotion = gate.demote(session, deployer_row=existing, reason=str(reason))
+            if reprobe_sink is not None:
+                reprobe_sink.update(demotion.reprobe_contract_ids)
         return None
 
     evidence = dict(verdict.evidence)
@@ -284,6 +296,63 @@ def _write_deployer_witness(session: Session, *, contract: Contract, registry_ro
     return True
 
 
+#: Bound on one reprobe pass. The tail is never lost state: reprobe ids are
+#: re-derived from stored evidence at every evaluate, and the probe pass's
+#: revocation-staleness targeting re-finds demoted members at the next event.
+_REPROBE_PASS_CAP = 25
+
+
+def _consume_reprobes(
+    session: Session,
+    contract_ids: Sequence[int],
+    *,
+    context: str,
+    exclude: Collection[int] = (),
+) -> None:
+    """Invariant-8 consumer for the gate's ``reprobe_contract_ids``: probe the
+    re-queued candidates (bounded), then evaluate once with the fresh probe
+    facts. One round only — a still-blocked candidate settles at a later
+    event. Degrades; never raises into the caller."""
+    ids = [cid for cid in dict.fromkeys(contract_ids) if cid not in set(exclude)][:_REPROBE_PASS_CAP]
+    if not ids:
+        return
+    probed: list[int] = []
+    resolved: set[str] = set()
+    try:
+        for contract_id in ids:
+            contract = session.get(Contract, contract_id)
+            if contract is None or contract.protocol_id is not None:
+                continue
+            protocol_id = contract.nominated_protocol_id
+            if protocol_id is None:
+                continue
+            result = gate.probe(session, contract)
+            probed.append(contract_id)
+            record_code_witness(session, contract=contract, protocol_id=protocol_id, probe_result=result)
+            resolved.update(result.resolved_addresses)
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        record_degraded(
+            phase="membership_reprobe",
+            exc=exc,
+            context={"context": context, "contract_ids": ids},
+        )
+        logger.warning(
+            "membership reprobe pass failed",
+            extra={"context": context, "exc_type": type(exc).__name__, "error": str(exc)[:300]},
+        )
+        return
+    if not probed:
+        return
+    gate.evaluate_committed(
+        session,
+        gate.FactsDelta(new_edge_addresses=tuple(sorted(resolved)), recheck_contract_ids=tuple(probed)),
+        context=f"reprobe:{context}",
+        deployer_enumerator=session_deployer_enumerator(session),
+    )
+
+
 def run_probe_pass(session: Session, protocol_id: int) -> gate.PromotionResult:
     """§3.4 event 1: settle the protocol's fresh candidates near-line. Bounded
     to the current protocol's candidates; commits before evaluating."""
@@ -298,7 +367,10 @@ def run_probe_pass(session: Session, protocol_id: int) -> gate.PromotionResult:
     probed: list[Contract] = []
     resolved: set[str] = set()
     for contract in candidates:
-        if not needs_probe(session, contract):
+        # Revocation staleness re-targets demoted members whose completed
+        # attempt ``needs_probe`` would skip (invariant 8 pickup for
+        # request/queue-context demotions, e.g. the protocol-merge cascade).
+        if not needs_probe(session, contract) and not probe_predates_revocation(session, contract):
             continue
         result = gate.probe(session, contract)
         probed.append(contract)
@@ -315,10 +387,17 @@ def run_probe_pass(session: Session, protocol_id: int) -> gate.PromotionResult:
     )
     cascade = gate.evaluate(session, delta, deployer_enumerator=session_deployer_enumerator(session))
     session.commit()
+    _consume_reprobes(
+        session,
+        cascade.reprobe_contract_ids,
+        context=f"probe_pass:{protocol_id}",
+        exclude={contract.id for contract in probed},
+    )
     return gate.PromotionResult(
         targeted_contract_ids=cascade.targeted_contract_ids,
         promoted_contract_ids=tuple(promoted) + cascade.promoted_contract_ids,
         demoted_contract_ids=cascade.demoted_contract_ids,
+        reprobe_contract_ids=cascade.reprobe_contract_ids,
     )
 
 
@@ -373,6 +452,7 @@ def _gate_intake(session: Session, job: Job, contract: Contract | None, request:
     _structural_intake(session, job, contract, request)
 
     registry_row: ProtocolDeployer | None = None
+    reprobe_sink: set[int] = set()
     deployer = (contract.deployer or "").lower() or None
     if deployer:
         registry_row = _register_protocol_deployer(
@@ -380,6 +460,7 @@ def _gate_intake(session: Session, job: Job, contract: Contract | None, request:
             protocol_id=protocol_id,
             deployer=deployer,
             contract_address=(contract.address or "").lower() or None,
+            reprobe_sink=reprobe_sink,
         )
         if registry_row is not None:
             _write_deployer_witness(session, contract=contract, registry_row=registry_row)
@@ -391,13 +472,18 @@ def _gate_intake(session: Session, job: Job, contract: Contract | None, request:
     promoted = gate.promote(session, contract=contract, protocol_id=protocol_id)
     session.commit()
 
+    # A demote-only registration (registry_row None, sink non-empty) is still
+    # a deployer fact change the cascade must see.
+    deployer_changed = deployer is not None and (registry_row is not None or bool(reprobe_sink))
     delta = gate.FactsDelta(
         new_member_contract_ids=(contract.id,) if promoted else (),
-        changed_deployer_addresses=(deployer,) if registry_row is not None and deployer else (),
+        changed_deployer_addresses=(deployer,) if deployer_changed and deployer else (),
     )
     if delta != gate.FactsDelta():
-        gate.evaluate(session, delta, deployer_enumerator=session_deployer_enumerator(session))
+        cascade = gate.evaluate(session, delta, deployer_enumerator=session_deployer_enumerator(session))
         session.commit()
+        reprobe_sink.update(cascade.reprobe_contract_ids)
+    _consume_reprobes(session, sorted(reprobe_sink), context=f"gate_intake:{job.id}", exclude={contract.id})
 
 
 def _sweep_candidates(session: Session, chain_id: int) -> list[Contract]:
@@ -481,12 +567,14 @@ def run_chain_enable_sweep(session: Session) -> None:
     logger.info("chain-enable sweep starting", extra={"new_chain_ids": new_ids})
     promoted_by_protocol: dict[int, list[int]] = {}
     resolved: set[str] = set()
+    swept_ids: set[int] = set()
     for chain_id in new_ids:
         for contract in _sweep_candidates(session, chain_id):
             protocol_id = contract.nominated_protocol_id
             if protocol_id is None:
                 continue
             result = gate.probe(session, contract)
+            swept_ids.add(contract.id)
             record_code_witness(session, contract=contract, protocol_id=protocol_id, probe_result=result)
             resolved.update(result.resolved_addresses)
             if gate.promote(session, contract=contract, protocol_id=protocol_id):
@@ -500,6 +588,7 @@ def run_chain_enable_sweep(session: Session) -> None:
         deployer_enumerator=session_deployer_enumerator(session),
     )
     session.commit()
+    _consume_reprobes(session, eval_result.reprobe_contract_ids, context="chain_enable_sweep", exclude=swept_ids)
 
     gained = set(promoted_by_protocol)
     for contract_id in eval_result.promoted_contract_ids:
