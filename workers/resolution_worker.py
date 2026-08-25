@@ -517,6 +517,17 @@ class ResolutionWorker(BaseWorker):
             return 0
         written = persist_role_holder_planes(session, rows)
         session.commit()
+        # §3.4 event 2: the rewritten plane is a controller-fact delta the gate
+        # must see — role holders are anchor-chain links, so a grant/revoke
+        # here can make or break a standing W3-D1 witness.
+        from services.discovery.membership_gate import evaluate_role_plane_change
+
+        evaluate_role_plane_change(
+            session,
+            registry_address=registry_address,
+            rows=rows,
+            context=f"role_holder_plane:{registry_address}",
+        )
         self._record_role_plane_outcome(job, registry_address, OUTCOME_ROWS_WRITTEN, written)
         return written
 
