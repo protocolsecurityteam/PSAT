@@ -89,6 +89,28 @@ W3_SOURCES = frozenset({"controller_values", "proxy_admin_slot", "probe", "funct
 #: misresolution. NULL/unknown is not_determined and proves nothing either.
 W3_PRINCIPAL_CONTROLLER_TYPES = frozenset({"timelock", "safe", "contract"})
 
+#: Standard ERC-20/721/1155 transfer and approval entry points. The caller set
+#: of one of these is the TOKEN'S operator-approval set — an open mapping any
+#: holder can add to — so a principal read off it names a permitted spender,
+#: never an authority over the protocol (invariant 6, the §2 overreach shape:
+#: Seaport and the NFT marketplace TransferManagers land here). A closed set of
+#: standard selectors, not a name match.
+W3_TOKEN_ENTRY_POINT_SELECTORS = frozenset(
+    {
+        "0xa9059cbb",  # ERC-20 transfer
+        "0x23b872dd",  # ERC-20/721 transferFrom
+        "0x095ea7b3",  # ERC-20/721 approve
+        "0x39509351",  # ERC-20 increaseAllowance
+        "0xa457c2d7",  # ERC-20 decreaseAllowance
+        "0xd505accf",  # ERC-20 permit
+        "0x42842e0e",  # ERC-721 safeTransferFrom(address,address,uint256)
+        "0xb88d4fde",  # ERC-721 safeTransferFrom(address,address,uint256,bytes)
+        "0xa22cb465",  # ERC-721/1155 setApprovalForAll
+        "0xf242432a",  # ERC-1155 safeTransferFrom
+        "0x2eb2c2d6",  # ERC-1155 safeBatchTransferFrom
+    }
+)
+
 #: The §3.3 perimeter observations a principal-keyed W3 witness may record.
 #: ``safe_owner`` (signer-set containment) is recordable but never proves D1
 #: transitivity — the same line ``_perimeter_anchor`` already draws.
@@ -1014,11 +1036,14 @@ def _member_principal_rows(
     ``safe_owners=False`` reads the principal row whose ADDRESS is *address*;
     ``safe_owners=True`` reads Safe principals whose stored signer set CONTAINS
     it. Only same-chain members are read: a principal fact is an observation on
-    a deployment, and a deployment is (address, chain).
+    a deployment, and a deployment is (address, chain). Standard token
+    transfer/approval entry points (:data:`W3_TOKEN_ENTRY_POINT_SELECTORS`) are
+    excluded — their caller set is the token's approval mapping, not control.
     """
     member_scope = [
         Contract.protocol_id == protocol_id,
         func.lower(func.coalesce(Contract.chain, "ethereum")) == chain_key,
+        func.coalesce(func.lower(EffectiveFunction.selector), "").not_in(sorted(W3_TOKEN_ENTRY_POINT_SELECTORS)),
     ]
     if exclude_contract_id is not None:
         member_scope.append(Contract.id != exclude_contract_id)

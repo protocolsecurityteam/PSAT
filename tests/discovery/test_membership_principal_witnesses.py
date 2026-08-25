@@ -119,8 +119,8 @@ def _d2_only_member(db_session, protocol, address, *, controls):
     return row
 
 
-def _principal(db_session, host, address, *, resolved_type=None, details=None, name="admin"):
-    fn = EffectiveFunction(contract_id=host.id, function_name=f"{name}-{uuid.uuid4().hex[:6]}")
+def _principal(db_session, host, address, *, resolved_type=None, details=None, name="admin", selector=None):
+    fn = EffectiveFunction(contract_id=host.id, function_name=f"{name}-{uuid.uuid4().hex[:6]}", selector=selector)
     db_session.add(fn)
     db_session.flush()
     row = FunctionPrincipal(function_id=fn.id, address=address.lower(), resolved_type=resolved_type, details=details)
@@ -778,3 +778,34 @@ def test_losing_the_anchoring_witness_without_demotion_still_cascades(db_session
     assert (WITNESS_RULE_W3_CONTROL, "d1") not in _rules(db_session, factory, protocol)
     assert child.protocol_id is None, "a D2-only member anchors no factory lineage"
     assert grandchild.protocol_id is None, "and the cascade follows"
+
+
+@pytest.mark.parametrize("selector", sorted(gate.W3_TOKEN_ENTRY_POINT_SELECTORS))
+def test_token_entry_point_callers_never_admit(db_session, protocol, selector):
+    """The §2 overreach shape as the dev DB carries it: Seaport and the NFT
+    marketplace TransferManagers are resolved principals of a member NFT's
+    ``safeBatchTransferFrom``. That caller set is the token's approval mapping,
+    which any holder can add to — a permitted spender, never an authority."""
+    member = _anchored_member(db_session, protocol, ADDR(0x9000))
+    marketplace = _contract(db_session, ADDR(0x9001 + int(selector, 16) % 256), nominated=protocol.id)
+    _principal(db_session, member, marketplace.address, resolved_type="contract", selector=selector)
+    # The same address as an EOA-typed principal must not license its wards either.
+    ward = _contract(db_session, ADDR(0x9200 + int(selector, 16) % 256), nominated=protocol.id)
+    operator = ADDR(0x9300 + int(selector, 16) % 256)
+    _principal(db_session, member, operator, resolved_type="eoa", selector=selector)
+    _caller_gate(db_session, ward, operator)
+
+    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(marketplace.id, ward.id)))
+    db_session.flush()
+    assert marketplace.protocol_id is None, selector
+    assert ward.protocol_id is None, selector
+
+
+def test_a_non_token_function_principal_still_admits(db_session, protocol):
+    """Control for the refusal above: the selector, not the principal, decides."""
+    member = _anchored_member(db_session, protocol, ADDR(0x9400))
+    pauser = _contract(db_session, ADDR(0x9401), nominated=protocol.id)
+    _principal(db_session, member, pauser.address, resolved_type="contract", selector="0x8456cb59")
+    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(pauser.id,)))
+    db_session.flush()
+    assert pauser.protocol_id == protocol.id
