@@ -418,10 +418,12 @@ def run_probe_pass(session: Session, protocol_id: int) -> gate.PromotionResult:
         recheck_contract_ids=tuple(sorted({c.id for c in seeded if c.protocol_id is None})),
     )
     cascade = gate.evaluate(session, delta, deployer_enumerator=session_deployer_enumerator(session))
+    session.commit()
+    # After the gate's commit: create_job commits, so enqueuing first would
+    # land the cascade durably ahead of its own commit point.
     enqueue_selection_for_promotions(
         session, tuple(promoted) + cascade.promoted_contract_ids, reason="membership_promotion"
     )
-    session.commit()
     _consume_reprobes(
         session,
         cascade.reprobe_contract_ids,
@@ -520,12 +522,12 @@ def _gate_intake(session: Session, job: Job, contract: Contract | None, request:
     )
     if delta != gate.FactsDelta():
         cascade = gate.evaluate(session, delta, deployer_enumerator=session_deployer_enumerator(session))
+        session.commit()
         enqueue_selection_for_promotions(
             session,
             ((contract.id,) if promoted else ()) + cascade.promoted_contract_ids,
             reason="membership_promotion",
         )
-        session.commit()
         reprobe_sink.update(cascade.reprobe_contract_ids)
     _consume_reprobes(session, sorted(reprobe_sink), context=f"gate_intake:{job.id}", exclude={contract.id})
 
