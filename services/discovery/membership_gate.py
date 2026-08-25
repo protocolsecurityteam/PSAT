@@ -990,6 +990,20 @@ def promote(session: Session, *, contract: Contract, protocol_id: int) -> bool:
         )
         return False
     contract.protocol_id = protocol_id
+    if contract.nominated_protocol_id != protocol_id:
+        # Proof supersedes provenance: the earned membership realigns the
+        # nomination slot so the demotion restore stays coherent. The first
+        # nominator's identity survives in ``discovery_sources`` and here.
+        if contract.nominated_protocol_id is not None:
+            logger.info(
+                "promotion supersedes foreign nomination slot",
+                extra={
+                    "contract_id": contract.id,
+                    "protocol_id": protocol_id,
+                    "prior_nominated_protocol_id": contract.nominated_protocol_id,
+                },
+            )
+        contract.nominated_protocol_id = protocol_id
     _mark_membership_dirty(session, protocol_id)
     logger.info(
         "contract promoted to member",
@@ -1891,14 +1905,18 @@ def _stratified_fixpoint(
             contract = session.get(Contract, contract_id)
             if contract is None or contract.protocol_id is not None:
                 continue
-            protocol_id = contract.nominated_protocol_id
-            if protocol_id is None:
+            if contract.nominated_protocol_id is None:
+                # Unclaimed rows are outside the gate's event flow (§3.1) —
+                # nomination is still the entry ticket; only ADMISSION is
+                # evidence-keyed across protocols.
                 continue
-            outcome = _attempt_admission(session, contract, protocol_id)
-            if outcome == "promoted":
-                round_promoted.add(contract_id)
-            elif outcome == "needs_probe":
-                reprobe.add(contract_id)
+            for protocol_id in _admission_protocols(session, contract):
+                outcome = _attempt_admission(session, contract, protocol_id)
+                if outcome == "promoted":
+                    round_promoted.add(contract_id)
+                    break
+                if outcome == "needs_probe":
+                    reprobe.add(contract_id)
         if round_promoted:
             changed = True
             promoted.update(round_promoted)
@@ -2125,6 +2143,118 @@ def _reclassify_deployers(
             reprobe_contract_ids=tuple(sorted(demotion_reprobe)),
         ),
     )
+
+
+def _admission_protocols(session: Session, contract: Contract) -> list[int]:
+    """Protocols the fixpoint may evaluate *contract* against, in
+    deterministic order: the nominated slot's protocol first (the slot stays
+    first-nominator-wins recall provenance and keeps first-attempt priority),
+    then every OTHER protocol whose OWN-SIDE facts name the candidate — a
+    member row's stored pointer/controller/upgrade history, an unrevoked
+    registry row for the candidate's deployer, or a recorded witness row —
+    in ascending protocol id. The first valid admission wins — a contract
+    holds ONE ``protocol_id``; a losing protocol's already-recorded
+    witnesses stay recorded-but-non-admitting.
+
+    Listing a protocol here licenses nothing: each attempt derives and
+    re-verifies from THAT protocol's own edges/registry only
+    (``_derive_admitting_facts``/``promote`` are protocol-scoped), so P's
+    facts can never admit to Q."""
+    protocols: set[int] = set()
+    addr = (contract.address or "").lower()
+    if addr:
+        chain_key = _chain_key(contract.chain)
+        member_scope = (
+            Contract.protocol_id.is_not(None),
+            Contract.id != contract.id,
+            func.lower(func.coalesce(Contract.chain, "ethereum")) == chain_key,
+        )
+        # Members whose stored facts name the candidate: pointer edges (W2),
+        # historical impls (W2), caller-gating controller values and probe
+        # reads (W3-D2).
+        protocols.update(
+            session.execute(
+                select(Contract.protocol_id)
+                .where(
+                    *member_scope,
+                    (func.lower(Contract.implementation) == addr)
+                    | (func.lower(Contract.beacon) == addr)
+                    | (func.lower(Contract.admin) == addr)
+                    | _secondary_pointer_named([addr]),
+                )
+                .distinct()
+            ).scalars()
+        )
+        protocols.update(
+            session.execute(
+                select(Contract.protocol_id)
+                .join(UpgradeEvent, UpgradeEvent.contract_id == Contract.id)
+                .where(*member_scope, func.lower(UpgradeEvent.new_impl) == addr)
+                .distinct()
+            ).scalars()
+        )
+        protocols.update(
+            session.execute(
+                select(Contract.protocol_id)
+                .join(ControllerValue, ControllerValue.contract_id == Contract.id)
+                .where(
+                    *member_scope,
+                    func.lower(ControllerValue.value) == addr,
+                    ControllerValue.authority_provenance == W3_CONTROLLER_PROVENANCE,
+                )
+                .distinct()
+            ).scalars()
+        )
+        protocols.update(
+            session.execute(
+                select(Contract.protocol_id)
+                .join(ContractProbeAttempt, ContractProbeAttempt.contract_id == Contract.id)
+                .where(
+                    *member_scope,
+                    ContractProbeAttempt.results.op("->")("resolved_addresses").op("?|")(cast([addr], ARRAY(Text()))),
+                )
+                .distinct()
+            ).scalars()
+        )
+        # Deliberately NOT discovered here: protocols reached only through the
+        # candidate's OWN stored pointers/controllers (the W2 proxy shape and
+        # W3-D1). A candidate delegating to a foreign protocol's shared
+        # singleton impl, or sharing an operator with it, is code-reuse or
+        # shared-ops — not that protocol's claim on the row — and admitting on
+        # it would vacuum every Safe-style proxy into the singleton owner's
+        # protocol. Those shapes still admit for the NOMINATED protocol
+        # (attempted first, full derivation), where the nomination supplies
+        # the corroborating recall.
+    # W4 — unrevoked registry rows for the candidate's deployer.
+    deployer = (contract.deployer or "").lower()
+    if deployer and _ADDRESS_RE.match(deployer):
+        protocols.update(
+            session.execute(
+                select(ProtocolDeployer.protocol_id)
+                .where(ProtocolDeployer.address == deployer, ProtocolDeployer.revoked_at.is_(None))
+                .distinct()
+            ).scalars()
+        )
+    # Recorded witness rows — a W5 assertion for a foreign protocol, or a
+    # prior attempt's rows; promote re-verifies every via-fact regardless.
+    protocols.update(
+        session.execute(
+            select(ContractMembershipWitness.protocol_id)
+            .where(
+                ContractMembershipWitness.contract_id == contract.id,
+                ContractMembershipWitness.revoked_at.is_(None),
+            )
+            .distinct()
+        ).scalars()
+    )
+    others = {int(p) for p in protocols if p is not None}
+    ordered: list[int] = []
+    nominated = contract.nominated_protocol_id
+    if nominated is not None:
+        ordered.append(nominated)
+        others.discard(nominated)
+    ordered.extend(sorted(others))
+    return ordered
 
 
 def _attempt_admission(session: Session, contract: Contract, protocol_id: int) -> str | None:
