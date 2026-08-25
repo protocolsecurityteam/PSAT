@@ -573,6 +573,22 @@ class ContractMembershipWitness(Base):
             unique=True,
             postgresql_where=text("via_address IS NULL"),
         ),
+        # The revocation frontier probes the via ALONE, which the composite
+        # uniques above cannot serve (via_address is their fourth column), and
+        # only over live rows — a revoked witness is history, never a target.
+        Index(
+            "ix_contract_membership_witnesses_active_via",
+            "via_address",
+            postgresql_where=text("revoked_at IS NULL AND via_address IS NOT NULL"),
+        ),
+        # Serves the ``evidence @> …`` containment that finds a W3-D1 witness
+        # by an address inside its published anchor chain.
+        Index(
+            "ix_contract_membership_witnesses_evidence",
+            "evidence",
+            postgresql_using="gin",
+            postgresql_ops={"evidence": "jsonb_path_ops"},
+        ),
     )
 
 
