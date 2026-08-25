@@ -43,6 +43,12 @@ def stub_etherscan(monkeypatch):
     monkeypatch.setattr(etherscan_mod, "get_contract_info", lambda address, **_kw: (f"Impl-{address[2:6]}", {}))
 
 
+@pytest.fixture(autouse=True)
+def _stub_membership_probe(monkeypatch):
+    """Stub-the-wire: the backfill's near-line §3.5 probe never leaves the machine."""
+    monkeypatch.setattr("services.discovery.membership_gate.probe", lambda session, contract: None)
+
+
 # ---------------------------------------------------------------------------
 # project_to_events — proxy-row lookup
 # ---------------------------------------------------------------------------
