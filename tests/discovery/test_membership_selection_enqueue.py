@@ -10,7 +10,11 @@ on stored facts alone.
 
 from __future__ import annotations
 
-from db.models import Job, JobStage, JobStatus
+from datetime import datetime, timezone
+
+from sqlalchemy import func
+
+from db.models import Contract, ContractCreationWitness, Job, JobStage, JobStatus
 from services.discovery import membership_gate as gate
 from tests.conftest import ADDR, requires_postgres
 from tests.discovery.test_membership_anchor_chain import (
@@ -19,6 +23,7 @@ from tests.discovery.test_membership_anchor_chain import (
     _anchored_member,
     _caller_gate,
     _contract,
+    _d1_witness,
     _d2_member,
     _role_plane,
     protocol,
@@ -109,3 +114,65 @@ def test_non_worker_evaluate_never_enqueues(db_session, protocol):
     db_session.commit()
     assert result.promoted_contract_ids == (ward.id,)
     assert _selection_jobs(db_session, protocol) == []
+
+
+def test_supersession_transient_is_not_reported_as_a_promotion(db_session, protocol):
+    """A member whose published proof is superseded is revoked and re-admitted
+    on the true current proof inside one run. Its membership never changed, so
+    it is not net-new: it must stay out of ``promoted_contract_ids`` and
+    enqueue no selection pass."""
+    anchor = _anchored_member(db_session, protocol, ADDR(0x5501))
+    timelock = _d2_member(db_session, protocol, ADDR(0x5502), controls=anchor)
+    safe = _anchored_holder(db_session, protocol, ADDR(0x5503))
+    _role_plane(db_session, timelock.address, PROPOSER_ROLE, [safe])
+    ward = _contract(db_session, ADDR(0x5505), nominated=protocol.id)
+    _caller_gate(db_session, ward, timelock.address)
+    db_session.commit()
+
+    # The unclaimed ward ``_d2_member`` leaves behind refuses exclusivity, so
+    # the ward admits on the anchor chain and stays there.
+    first = gate.evaluate_committed(db_session, gate.FactsDelta(recheck_contract_ids=(ward.id,)), context="test")
+    assert first is not None
+    assert first.promoted_contract_ids == (ward.id,)
+    assert _d1_witness(db_session, ward, protocol).evidence["anchor_chain"]["anchor_address"] == safe
+    assert len(_selection_jobs(db_session, protocol)) == 1
+    for job in _selection_jobs(db_session, protocol):
+        job.status = JobStatus.completed
+    db_session.commit()
+
+    # That last ward joins the protocol out of band (an admin assertion the
+    # gate did not have to derive), so the controller becomes exclusive and
+    # the recorded chain stops being the current proof.
+    stray = db_session.query(Contract).filter(func.lower(Contract.address) == ADDR(0x5502 + 0x800000)).one()
+    stray.nominated_protocol_id = protocol.id
+    stray.protocol_id = protocol.id
+    db_session.add(
+        ContractCreationWitness(chain_id=1, address=stray.address, code_probe_block=1000, code_absent_at_probe=False)
+    )
+    db_session.flush()
+    gate.write_witness(
+        db_session,
+        contract_id=stray.id,
+        protocol_id=protocol.id,
+        rule="w5_human",
+        evidence=gate.w5_evidence(actor="admin", asserted_at=datetime(2026, 8, 25, tzinfo=timezone.utc)),
+    )
+    db_session.commit()
+    proof = gate._via_transitivity(
+        db_session, protocol_id=protocol.id, via_address=timelock.address, chain_key="ethereum"
+    )
+    assert proof is not None
+    assert proof.arm == "d2_exclusive"
+
+    second = gate.evaluate_committed(
+        db_session, gate.FactsDelta(new_edge_addresses=(timelock.address,)), context="test"
+    )
+    assert second is not None
+
+    assert ward.protocol_id == protocol.id, "membership is unchanged across the supersession"
+    assert "anchor_chain" not in (_d1_witness(db_session, ward, protocol).evidence or {}), (
+        "the published proof is now the stronger arm"
+    )
+    assert second.promoted_contract_ids == (), "a transient re-admission is not a net-new member"
+    assert second.demoted_contract_ids == ()
+    assert len(_selection_jobs(db_session, protocol)) == 1, "no net-new members means no second pass"

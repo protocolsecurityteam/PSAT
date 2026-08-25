@@ -2518,12 +2518,11 @@ def _stratified_fixpoint(
     two facts. Within one protocol every re-checked predicate is monotone in
     that protocol's member set, and a round either promotes (member set grows)
     or revokes (it shrinks), so a row cannot oscillate without some other
-    protocol's set changing. Across protocols a contested row resolves into
-    exactly one ``protocol_id`` per run — the losers' witnesses stay recorded
-    but non-admitting — so the cross-protocol frontier is consumed, not
-    regenerated. A collision-revoked registry row is never re-registered
-    within a run. ``_FIXPOINT_ROUND_CAP`` is the loud-failure guard, not the
-    bound.
+    protocol's set changing. Across protocols a contested row's LOSING claims
+    are consumed, not regenerated — a refused claim's witnesses stay recorded
+    but non-admitting — so the cross-protocol frontier drains. A
+    collision-revoked registry row is never re-registered within a run.
+    ``_FIXPOINT_ROUND_CAP`` is the loud-failure guard, not the bound.
 
     Stratum (ii) examines (protocol, deployer) pairs from pending candidates
     PLUS every standing registry row named by ``changed_deployer_addresses``
@@ -2538,6 +2537,12 @@ def _stratified_fixpoint(
     promoted: set[int] = set()
     demoted: set[int] = set()
     reprobe: set[int] = set()
+    #: Rows this run found ALREADY stamped. The admission stratum skips a row
+    #: whose ``protocol_id`` is set, so an entry-member can only reach
+    #: ``promoted`` by being demoted first — every demotion the fixpoint did
+    #: not itself cause therefore names one. Subtracted from the published
+    #: promotions so a supersession transient is not reported as net-new.
+    members_at_entry: set[int] = set()
     enum_cache: dict[str, tuple[Sequence[str], bool]] = {}
 
     for _round in range(_FIXPOINT_ROUND_CAP):
@@ -2549,6 +2554,7 @@ def _stratified_fixpoint(
             if revoked_ids or demoted_ids:
                 changed = True
             demoted.update(demoted_ids)
+            members_at_entry.update(set(demoted_ids) - promoted)
             promoted.difference_update(demoted_ids)
             reprobe.update(demoted_ids)
             pending.update(demoted_ids)
@@ -2574,6 +2580,7 @@ def _stratified_fixpoint(
         pending.update(recl_nominated)
         reprobe.update(recl_nominated)
         demoted.update(recl_demotion.demoted_contract_ids)
+        members_at_entry.update(set(recl_demotion.demoted_contract_ids) - promoted)
         promoted.difference_update(recl_demotion.demoted_contract_ids)
         reprobe.update(recl_demotion.reprobe_contract_ids)
         pending.update(recl_demotion.demoted_contract_ids)
@@ -2645,7 +2652,7 @@ def _stratified_fixpoint(
     reprobe.difference_update(promoted)
     return PromotionResult(
         targeted_contract_ids=tuple(sorted(targeted)),
-        promoted_contract_ids=tuple(sorted(promoted)),
+        promoted_contract_ids=tuple(sorted(promoted - members_at_entry)),
         demoted_contract_ids=tuple(sorted(demoted - promoted)),
         reprobe_contract_ids=tuple(sorted(reprobe)),
     )
