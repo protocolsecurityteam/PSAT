@@ -743,3 +743,134 @@ class TestAnalyzeLimitFilling:
             f"Expected at least 3 child jobs (filling past skipped entries), "
             f"got {len(child_jobs)}. Skipped entries consumed the analyze_limit."
         )
+
+
+# ---------------------------------------------------------------------------
+# Nomination settle: selection runs the §3.4 event-1 probe pass before ranking
+# ---------------------------------------------------------------------------
+
+
+def _stub_probe_wire(monkeypatch, *, code: str = "0x6001") -> dict:
+    """Transport-boundary stubs for the gate's probe pass (never the wire)."""
+    from services.clients.rpc import EthCallResult
+    from services.discovery import probes
+    from utils.evm import OWNER_SELECTOR
+
+    seen: dict = {"probed": []}
+
+    def fake_rpc_request(rpc_url, method, params, *args, **kwargs):
+        if method == "eth_blockNumber":
+            return hex(120)
+        if method == "eth_getCode":
+            seen["probed"].append(params[0])
+            return code
+        raise AssertionError(f"unexpected rpc method {method}")
+
+    def fake_eth_call_batch(rpc_url, calls, block_tag="latest", **kwargs):
+        results = []
+        for call in calls:
+            assert call["data"] in (OWNER_SELECTOR, probes.AUTHORITY_SELECTOR)
+            results.append(EthCallResult(False, "0x", None, "execution reverted"))
+        return results
+
+    def fake_rpc_batch_request(rpc_url, calls, *args, **kwargs):
+        return ["0x" + "0" * 64 for _ in calls]
+
+    def fake_etherscan_get(module, action, chain_id=None, **params):
+        return {"result": []}
+
+    monkeypatch.setattr(probes, "rpc_request", fake_rpc_request)
+    monkeypatch.setattr(probes, "eth_call_batch", fake_eth_call_batch)
+    monkeypatch.setattr(probes, "rpc_batch_request", fake_rpc_batch_request)
+    monkeypatch.setattr(probes.etherscan, "get", fake_etherscan_get)
+    return seen
+
+
+@requires_postgres
+def test_selection_settles_pending_nominations_before_ranking(db_session, worker, seed_protocol, monkeypatch):
+    """A cold cascade's crawl nominations land AFTER discovery's inline probe
+    pass; selection must settle them before ranking, or a fully-nominated
+    protocol ranks zero candidates (preview run 2026-08-25: first cascade
+    ended "no eligible candidates" while 585 nominations sat unprobed)."""
+    from db.models import (
+        WITNESS_RULE_W1_CODE,
+        WITNESS_RULE_W2_STRUCTURAL,
+        Contract,
+        ContractMembershipWitness,
+        Job,
+        JobStage,
+        JobStatus,
+    )
+    from services.discovery import membership_gate as gate
+
+    monkeypatch.setenv("ERPC_BASE_URL", "http://erpc.test")
+    protocol_id, company, addr = seed_protocol
+    anchor_addr = addr()
+    candidate_addr = addr()
+
+    # Anchor: an already-analyzed member (job_id set → not a ranking candidate).
+    anchor_job = Job(company=company, address=anchor_addr, stage=JobStage.done, status=JobStatus.completed, request={})
+    db_session.add(anchor_job)
+    db_session.commit()
+    anchor = Contract(
+        protocol_id=protocol_id,
+        address=anchor_addr,
+        chain="ethereum",
+        discovery_sources=["ai_inventory"],
+        confidence=0.9,
+        job_id=anchor_job.id,
+    )
+    # Candidate: nominated by a crawl writer, never probed, not yet a member.
+    candidate = Contract(
+        nominated_protocol_id=protocol_id,
+        address=candidate_addr,
+        chain="ethereum",
+        discovery_sources=["ai_inventory"],
+        confidence=0.9,
+    )
+    db_session.add_all([anchor, candidate])
+    db_session.commit()
+
+    # W2 edge whose via-fact holds (anchor's stored pointer names the
+    # candidate); the probe pass supplies the missing W1.
+    anchor.implementation = candidate.address
+    db_session.flush()
+    gate.write_witness(
+        db_session,
+        contract_id=candidate.id,
+        protocol_id=protocol_id,
+        rule=WITNESS_RULE_W2_STRUCTURAL,
+        evidence=gate.w2_evidence(
+            edge_kind="implementation",
+            member_contract_id=anchor.id,
+            member_address=anchor.address,
+            resolved_pointer=candidate.address,
+        ),
+        via_address=anchor.address,
+    )
+    db_session.commit()
+
+    seen = _stub_probe_wire(monkeypatch)
+    job = _add_selection_job(db_session, protocol_id=protocol_id, company=company, analyze_limit=2)
+
+    with pytest.raises(JobHandledDirectly):
+        worker.process(db_session, job)
+
+    assert seen["probed"] == [candidate.address]
+    db_session.refresh(candidate)
+    assert candidate.protocol_id == protocol_id
+    w1 = (
+        db_session.query(ContractMembershipWitness).filter_by(contract_id=candidate.id, rule=WITNESS_RULE_W1_CODE).one()
+    )
+    assert w1.revoked_at is None
+
+    from db.models import Job as JobModel
+
+    children = (
+        db_session.execute(select(JobModel).where(JobModel.request["parent_job_id"].as_string() == str(job.id)))
+        .scalars()
+        .all()
+    )
+    assert {child.address for child in children} == {candidate.address}
+    db_session.refresh(job)
+    assert "queued 1" in (job.detail or "")

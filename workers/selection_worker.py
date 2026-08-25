@@ -38,8 +38,9 @@ from services.discovery.ranking import (
     rank_contract_rows,
 )
 from utils.chains import chain_enabled
-from utils.logging import log_timed_phase, record_stage_metric
+from utils.logging import log_timed_phase, record_degraded, record_stage_metric
 from workers.base import BaseWorker, JobHandledDirectly
+from workers.discovery import run_probe_pass
 
 logger = logging.getLogger("workers.selection_worker")
 
@@ -166,6 +167,29 @@ class SelectionWorker(BaseWorker):
             "Selection started",
             extra={"protocol_id": job.protocol_id, "analyze_limit": analyze_limit},
         )
+
+        # §3.4 event-1 sweep for the crawl writers: DApp/DefiLlama nominations
+        # land AFTER the discovery stage's inline probe pass, and this claim
+        # opens as soon as those siblings settle — without settling here, the
+        # cascade's own crawl candidates are still unpromoted and the member
+        # query below sees none of them (on a cold protocol: "no eligible
+        # candidates" with a full nomination backlog). Selection is serialized
+        # after every nomination writer, so this pass cannot race a sibling's
+        # writes. Degrades: ranking proceeds on whatever membership the stored
+        # evidence supports.
+        try:
+            with log_timed_phase(logger, "membership_probe_pass") as probe_ph:
+                probe_result = run_probe_pass(session, job.protocol_id)
+                probe_ph["targeted"] = len(probe_result.targeted_contract_ids)
+                probe_ph["promoted"] = len(probe_result.promoted_contract_ids)
+        except Exception as exc:
+            session.rollback()
+            record_degraded(
+                phase="membership_probe_pass",
+                exc=exc,
+                context={"protocol_id": job.protocol_id, "site": "selection"},
+                include_traceback=True,
+            )
 
         # Every unanalysed row for the protocol, INCLUDING the ones the two
         # pre-rank filters remove. The superseded-impl anchors used to be
