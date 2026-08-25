@@ -1181,7 +1181,10 @@ def _link_root(
     caller), or None when the link roots nowhere.
 
     ``require_member_terminal`` binds a set-valued link (:data:`W3_SET_VALUED_LINK_KINDS`)
-    to an anchor of kind ``member``, including through the recursion."""
+    to an anchor of kind ``member``. It binds the ELEMENT as well as the
+    terminal: the element must itself be an independently anchored member, so
+    the recursive branch demands exactly what the direct branch does and a set
+    element cannot enter the walk on a D2-only entry."""
     for member in _member_rows_at(session, protocol_id=protocol_id, address=address, chain_key=chain_key):
         rule = _independent_anchor_rule(session, contract_id=member.id, protocol_id=protocol_id, blocked=in_progress)
         if rule is not None:
@@ -1195,7 +1198,9 @@ def _link_root(
                 "anchor_kind": "perimeter_principal",
                 "anchor_rule": anchor,
             }
-    if depth + 1 >= _ANCHOR_CHAIN_MAX_DEPTH:
+    if require_member_terminal or depth + 1 >= _ANCHOR_CHAIN_MAX_DEPTH:
+        # A set element that reached here is a D2-only member (the direct
+        # branch above already refused it), which is not an anchor.
         return None
     for member in _member_rows_at(session, protocol_id=protocol_id, address=address, chain_key=chain_key):
         nested = _anchor_chain_for(
@@ -1206,11 +1211,8 @@ def _link_root(
             in_progress=in_progress | {address},
             depth=depth + 1,
         )
-        if nested is None:
-            continue
-        if require_member_terminal and nested.get("anchor_kind") != "member":
-            continue
-        return nested
+        if nested is not None:
+            return nested
     return None
 
 
@@ -2060,6 +2062,40 @@ def _cascade_deployer_demotions(session: Session, result: DemotionResult) -> Dem
     )
 
 
+def _controllers_of(session: Session, contract_ids: Sequence[int] | set[int]) -> set[str]:
+    """The addresses observed controlling these rows — caller-gating resolved
+    controller values plus proxy-admin pointers.
+
+    A controller's exclusivity is a claim about the rows it controls, so when
+    one of those rows changes hands the claim must be re-verified. The
+    ``d2_exclusive`` arm records no anchor chain and keys its dependent
+    witnesses on the controller, so this is the only edge that reaches them."""
+    ids = sorted(set(contract_ids))
+    if not ids:
+        return set()
+    out = {
+        value.lower()
+        for value in session.execute(
+            select(ControllerValue.value)
+            .where(
+                ControllerValue.contract_id.in_(ids),
+                ControllerValue.authority_provenance == W3_CONTROLLER_PROVENANCE,
+                ControllerValue.value.is_not(None),
+            )
+            .distinct()
+        ).scalars()
+        if value
+    }
+    out |= {
+        admin.lower()
+        for admin in session.execute(
+            select(Contract.admin).where(Contract.id.in_(ids), Contract.admin.is_not(None)).distinct()
+        ).scalars()
+        if admin
+    }
+    return {a for a in out if _ADDRESS_RE.match(a)}
+
+
 def _vias_citing_anchor_link(session: Session, addresses: Sequence[str] | set[str]) -> set[str]:
     """The vias of standing W3-D1 witnesses whose recorded ``anchor_chain``
     names one of *addresses* — as a walked link or as the terminal anchor.
@@ -2286,16 +2322,14 @@ def _target_candidates(session: Session, facts_delta: FactsDelta) -> set[int]:
     reach_addrs = edge_addrs | member_addrs
     if reach_addrs:
         reach_list = sorted(reach_addrs)
+        # The candidate's OWN ``secondary_implementations`` is deliberately not
+        # probed here: no admitting rule reads it in that direction, so the
+        # per-address LIKE it would cost buys no targeting.
         pointer_named = (
             func.lower(Contract.implementation).in_(reach_list)
             | func.lower(Contract.beacon).in_(reach_list)
             | func.lower(Contract.admin).in_(reach_list)
         )
-        # ``secondary_implementations`` has no index a value lookup can use, so
-        # its per-address LIKE stays on the bounded member set; a fresh-edge
-        # delta can name hundreds of addresses.
-        if member_addrs:
-            pointer_named = pointer_named | _secondary_pointer_named(sorted(member_addrs))
         targeted.update(session.execute(select(Contract.id).where(*candidate, pointer_named)).scalars())
         targeted.update(
             session.execute(
@@ -2478,9 +2512,18 @@ def _stratified_fixpoint(
     (ii) deployer registry reclassification, (iii) admissions — iterating in
     stable sorted order, so the settled state is a deterministic function of
     stored evidence, independent of event arrival order (confluence).
-    Terminates: admissions consume strictly new witnesses and revocations
-    only shrink the witness set (a collision-revoked registry row is never
-    re-registered within a run).
+
+    Termination does NOT rest on the witness set only shrinking — a
+    re-admission re-arms a revoked row through ``write_witness``. It rests on
+    two facts. Within one protocol every re-checked predicate is monotone in
+    that protocol's member set, and a round either promotes (member set grows)
+    or revokes (it shrinks), so a row cannot oscillate without some other
+    protocol's set changing. Across protocols a contested row resolves into
+    exactly one ``protocol_id`` per run — the losers' witnesses stay recorded
+    but non-admitting — so the cross-protocol frontier is consumed, not
+    regenerated. A collision-revoked registry row is never re-registered
+    within a run. ``_FIXPOINT_ROUND_CAP`` is the loud-failure guard, not the
+    bound.
 
     Stratum (ii) examines (protocol, deployer) pairs from pending candidates
     PLUS every standing registry row named by ``changed_deployer_addresses``
@@ -2578,6 +2621,11 @@ def _stratified_fixpoint(
             # addresses and with the vias whose published anchor chain cites
             # one, so the next round re-verifies them (invariant 8).
             dirty_vias |= _standing_vias_named_by_edges(session, sorted(promoted_addrs))
+            # The d2_exclusive arm publishes no chain and keys its witnesses on
+            # the CONTROLLER, so a promoted row reaches those witnesses only
+            # through its own controllers — exactly the ones whose observed
+            # control set this promotion just widened past the protocol.
+            dirty_vias |= _controllers_of(session, round_promoted)
             pending.update(
                 _target_candidates(
                     session,
