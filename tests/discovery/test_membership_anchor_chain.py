@@ -268,6 +268,26 @@ def test_role_holder_link_needs_a_proven_role_identity(db_session, protocol):
     assert ward.protocol_id is None
 
 
+def test_default_admin_role_anchors_on_the_zero_hash_alone(db_session, protocol):
+    """DEFAULT_ADMIN_ROLE is the zero word — the one role identity provable
+    without a name, so an unnamed plane row still contributes its holders."""
+    anchor = _anchored_member(db_session, protocol, ADDR(0xC21))
+    registry = _d2_member(db_session, protocol, ADDR(0xC22), controls=anchor)
+    admin = ADDR(0xC23)
+    _role_plane(db_session, registry.address, DEFAULT_ADMIN_ROLE, [admin], role_name="DEFAULT_ADMIN_ROLE")
+    _caller_gate(db_session, anchor, admin, controller_id="governor")
+
+    ward = _contract(db_session, ADDR(0xC24), nominated=protocol.id)
+    _caller_gate(db_session, ward, registry.address)
+    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(ward.id,)))
+    db_session.flush()
+
+    assert ward.protocol_id == protocol.id
+    chain = _d1_witness(db_session, ward, protocol).evidence["anchor_chain"]
+    assert chain["links"][0]["kind"] == "role_holder"
+    assert chain["links"][0]["detail"] == DEFAULT_ADMIN_ROLE
+
+
 def test_withheld_holder_set_contributes_no_link(db_session, protocol):
     anchor = _anchored_member(db_session, protocol, ADDR(0xC11))
     timelock = _d2_member(db_session, protocol, ADDR(0xC12), controls=anchor)
