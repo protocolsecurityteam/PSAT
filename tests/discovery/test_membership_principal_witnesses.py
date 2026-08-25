@@ -671,3 +671,20 @@ def test_principal_arms_settle_identically_across_arrival_orders(db_session):
     assert principals_first == candidates_first
     assert all(is_member for is_member, _ in principals_first.values())
     assert (WITNESS_RULE_W4_FACTORY, None) in dict(principals_first)[5][1]
+
+
+def test_closest_miss_names_a_non_anchoring_factory(db_session, protocol):
+    """Invariant 5: a row parked behind the factory rule says so by name."""
+    from scripts.membership_reporting import closest_miss
+
+    outsider = _contract(db_session, ADDR(0x6600), nominated=protocol.id)
+    child = _contract(db_session, ADDR(0x6601), nominated=protocol.id, factory=outsider.address)
+    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(child.id,)))
+    db_session.flush()
+    assert child.protocol_id is None
+    miss = closest_miss(db_session, contract=child, protocol_id=protocol.id)
+    assert miss == {
+        "nearest_rule": "w4_factory",
+        "missing": "factory_not_anchoring_member",
+        "factory": outsider.address,
+    }

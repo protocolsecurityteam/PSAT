@@ -121,6 +121,14 @@ def closest_miss(session: Session, contract: Contract, protocol_id: int) -> dict
             "deployer": deployer,
         }
 
+    factory = (code_row.creation_factory or "").lower() if code_row is not None else ""
+    if factory and ADDRESS_RE.match(factory):
+        return {
+            "nearest_rule": "w4_factory",
+            "missing": "factory_not_anchoring_member",
+            "factory": factory,
+        }
+
     attempt = session.get(ContractProbeAttempt, (contract.id, chain_id))
     if attempt is not None and isinstance(attempt.results, dict):
         status = attempt.results.get("status")
