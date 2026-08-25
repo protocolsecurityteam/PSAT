@@ -420,7 +420,9 @@ def run_probe_pass(session: Session, protocol_id: int) -> gate.PromotionResult:
     cascade = gate.evaluate(session, delta, deployer_enumerator=session_deployer_enumerator(session))
     session.commit()
     # After the gate's commit: create_job commits, so enqueuing first would
-    # land the cascade durably ahead of its own commit point.
+    # land the cascade durably ahead of its own commit point. Residual: a crash
+    # in between delays the pass to the next event, never loses it — selection
+    # ranks the full unanalyzed set, so a later pass covers these members.
     enqueue_selection_for_promotions(
         session, tuple(promoted) + cascade.promoted_contract_ids, reason="membership_promotion"
     )
@@ -523,6 +525,9 @@ def _gate_intake(session: Session, job: Job, contract: Contract | None, request:
     if delta != gate.FactsDelta():
         cascade = gate.evaluate(session, delta, deployer_enumerator=session_deployer_enumerator(session))
         session.commit()
+        # Enqueue after the commit (create_job commits). Residual: a crash in
+        # between delays the pass to the next event, never loses it — selection
+        # ranks the full unanalyzed set.
         enqueue_selection_for_promotions(
             session,
             ((contract.id,) if promoted else ()) + cascade.promoted_contract_ids,
