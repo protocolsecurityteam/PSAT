@@ -48,9 +48,9 @@ Cross-protocol collisions — an orphan whose evidence resolves to
 multiple distinct protocols — are skipped + logged for manual review.
 Same convention as ``3a8f4d1c9b07``.
 
-``HIGH_CONFIDENCE_SOURCES`` is inlined as a literal rather than
-imported because migrations are deploy-time snapshots; if the
-constant is refactored later, this migration's intent is preserved.
+The HIGH source list is inlined as a literal because migrations are
+deploy-time snapshots; the values are a frozen legacy copy of the
+retired source-confidence tiers (superseded by the membership gate).
 """
 
 from __future__ import annotations
@@ -87,8 +87,8 @@ logger = logging.getLogger("alembic.runtime.migration")
 # ``dominant_protocol`` is the protocol with the most matching
 # evidence rows — used only when there is no cross-protocol ambiguity.
 #
-# HIGH set snapshot — keep in sync with
-# ``services/discovery/source_confidence.HIGH_CONFIDENCE_SOURCES``.
+# HIGH set snapshot — frozen legacy copy of the retired source-confidence
+# tiers; values deliberately not shared with live code.
 _SELECT_REMAINING_ORPHANS = sa.text(
     """
     WITH high_sourced_deployer AS (

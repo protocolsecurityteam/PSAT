@@ -68,10 +68,10 @@ def test_resolve_company_jobs_protocol_path(db_session):
     """Modern data: Protocol row exists, jobs carry ``protocol_id``, AND
     the analyzed subject has a Contract row whose ``protocol_id`` matches.
 
-    The Contract row is the authoritative ownership signal (gated by
-    services/discovery/source_confidence on every write); ``Job.protocol_id``
-    alone is insufficient because dependency-expansion jobs inherit
-    protocol_id from their parent without proving ownership.
+    The Contract row is the authoritative membership signal (``protocol_id``
+    is written only by the membership gate against recorded witnesses);
+    ``Job.protocol_id`` alone is insufficient because dependency-expansion
+    jobs inherit protocol_id from their parent without proving membership.
     """
     p = _add_protocol(db_session, f"alpha-{uuid.uuid4().hex[:8]}")
     addr_a1 = _addr("a1")

@@ -8,8 +8,9 @@ PR #87 introduced a discovery-confidence gate that left some
 legitimately protocol-owned contracts as orphans — specifically the
 proxy shells and beacons that ether.fi's resolution cascade pulled in
 for confirmed impls. This migration re-evaluates every orphan against
-the now-extended ``asserts_ownership`` logic: if any HIGH-owned
-contract has a structural dep edge (relationship_type IN
+the then-current structural-ownership rules (a frozen legacy copy of
+the retired source-confidence model): if any HIGH-owned contract has a
+structural dep edge (relationship_type IN
 'implementation','proxy','beacon') to the orphan, adopt it.
 
 Cross-protocol collisions — an orphan referenced by HIGH-owned
@@ -65,11 +66,9 @@ _SELECT_STRUCTURAL_ORPHANS = sa.text(
     -- protocol_id via a LOW source (``upgrade_history`` backfill,
     -- ``structural_adoption``) — using those as adoption evidence would
     -- silently extend the one-hop limit the runtime gate enforces.
-    -- Keep the migration consistent with ``asserts_ownership`` so the
-    -- catch-up pass can't undo the cascade discipline. The HIGH set
-    -- mirrors ``services/discovery/source_confidence.HIGH_CONFIDENCE_SOURCES``;
-    -- migrations are deploy-time snapshots so the constant is duplicated
-    -- here rather than imported.
+    -- The HIGH set below is a frozen legacy copy of the retired
+    -- source-confidence tiers (superseded by the membership gate);
+    -- migrations are deploy-time snapshots so the values live here.
     SELECT
         orphan.id              AS orphan_id,
         array_agg(DISTINCT parent.protocol_id) AS parent_protocols

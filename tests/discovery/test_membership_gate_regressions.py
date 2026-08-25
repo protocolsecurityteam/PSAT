@@ -1,6 +1,7 @@
-"""Regression tests for the discovery source-confidence gate.
+"""Regression pins for the membership gate's historic leak shapes, plus the
+frozen legacy orphan-adoption migrations.
 
-Two leak paths motivated this gate, and both are exercised here:
+Two leak paths motivated gating membership, and both are exercised here:
 
   1. ``dapp_crawl`` scrapes every ``0x...`` on a DApp page — including
      widely-held tokens (WETH, stETH) and shared infrastructure
@@ -15,21 +16,17 @@ Two leak paths motivated this gate, and both are exercised here:
      the leak — one EigenPodManager proxy → 7 EigenPodManager impls all
      tagged etherfi.
 
-The fix funnels ownership through ``services.discovery.source_confidence``:
-only HIGH_CONFIDENCE sources may stamp ``Contract.protocol_id``. Both
-the central ``bulk_upsert`` writer and the historical-impl backfill
-consult ``asserts_ownership`` before assigning ownership.
+Under the membership gate (DISCOVERY_MEMBERSHIP_GATE_SPEC.md) no source
+tag stamps ``protocol_id`` at all: every discovery write is a nomination,
+and promotion requires a recorded witness. These tests:
 
-These tests:
-  * unit-cover the helper (boundary cases),
-  * verify the writer gate at the persistence boundary,
-  * verify the backfill gate against a real Postgres so the
-    cross-protocol / orphan paths are exercised end-to-end,
-  * include an end-to-end shape test that mirrors the EigenLayer leak.
-
-A pre-fix build fails the writer tests (rows get ``protocol_id`` set
-from low-confidence sources) and the backfill tests (orphan impls get
-adopted into the protocol).
+  * verify the writer path nominates without stamping,
+  * verify the historical-impl backfill promotes only on a verified
+    member-proxy edge (W2) plus a persisted code fact (W1),
+  * pin the EigenLayer leak shape end-to-end,
+  * pin the applied legacy adoption migrations (``3a8f4d1c9b07``,
+    ``4d72e9b1f035``), whose inlined source lists are frozen deploy-time
+    snapshots of the retired source-confidence tiers.
 """
 
 from __future__ import annotations
@@ -39,107 +36,7 @@ from pathlib import Path
 
 import pytest
 
-from services.discovery.source_confidence import (
-    HIGH_CONFIDENCE_SOURCES,
-    LOW_CONFIDENCE_SOURCES,
-    STRUCTURAL_OWNERSHIP_RELATIONSHIPS,
-    asserts_ownership,
-)
 from tests.conftest import requires_postgres
-
-# ---------------------------------------------------------------------------
-# 1. The helper itself
-# ---------------------------------------------------------------------------
-
-
-class TestAssertsOwnership:
-    """Boundary cases for the helper that the gate consults. Cheap unit
-    tests — if these regress, every downstream gate test will get noisier
-    failures than they need to."""
-
-    def test_empty_or_none_does_not_assert(self):
-        assert asserts_ownership(None) is False
-        assert asserts_ownership([]) is False
-
-    def test_single_high_confidence_source_asserts(self):
-        assert asserts_ownership(["deployer_expansion"]) is True
-        assert asserts_ownership(["defillama"]) is True
-        assert asserts_ownership(["ai_inventory"]) is True
-
-    def test_single_low_confidence_source_does_not_assert(self):
-        assert asserts_ownership(["dapp_crawl"]) is False
-        assert asserts_ownership(["upgrade_history"]) is False
-
-    def test_mixed_promotes_to_assertion(self):
-        # The whole point of unioning sources — corroboration from any
-        # high-confidence source promotes the row out of orphan status.
-        assert asserts_ownership(["dapp_crawl", "deployer_expansion"]) is True
-
-    def test_unknown_source_does_not_assert(self):
-        # Safety default: an unknown source is treated as low-confidence
-        # so newly-added sources can't accidentally start stamping
-        # ``protocol_id`` before they're vetted.
-        assert asserts_ownership(["some_brand_new_source"]) is False
-
-    def test_tier_sets_are_disjoint(self):
-        # Defensive: if a source ends up in both tiers, the helper's
-        # behavior is ambiguous and the gate's contract starts leaking.
-        assert HIGH_CONFIDENCE_SOURCES.isdisjoint(LOW_CONFIDENCE_SOURCES)
-
-
-class TestStructuralOwnership:
-    """The second evidence branch: a same-protocol structural relationship
-    to a confirmed parent grants ownership without a HIGH source on the
-    child. This is the fix for the resolution-cascade false negatives —
-    UUPSProxy / OssifiableProxy / UpgradeableBeacon shells of confirmed
-    impls were ending up orphan because cascade-spawn jobs don't pass a
-    HIGH discovery source.
-    """
-
-    def test_structural_alone_grants_ownership(self):
-        # No HIGH source — pure structural propagation from a confirmed
-        # parent via an ``implementation`` edge.
-        for rel in ("implementation", "proxy", "beacon"):
-            assert asserts_ownership(None, parent_owns=True, parent_relationship=rel) is True
-
-    def test_structural_without_parent_owns_is_blocked(self):
-        # If the parent itself isn't HIGH-owned, the structural edge
-        # doesn't transitively grant ownership — propagation stops at
-        # one hop, otherwise dapp_crawl noise would cascade.
-        assert asserts_ownership(None, parent_owns=False, parent_relationship="implementation") is False
-
-    def test_non_structural_relationship_does_not_grant(self):
-        # Regular CALL edges (parent calls WETH), library edges
-        # (correctly tagged but the bucket mixes internal helpers with
-        # shared infra), and unknown relationships must NOT propagate
-        # ownership. See source_confidence.py docstring for the library
-        # rationale.
-        for rel in ("regular", "library", None, "controller", "principal"):
-            assert asserts_ownership(None, parent_owns=True, parent_relationship=rel) is False
-
-    def test_library_is_excluded(self):
-        # Pin the deliberate omission. The classifier correctly
-        # identifies library-pattern targets, but the bucket mixes
-        # protocol-internal helpers (BucketLimiter) with shared
-        # infrastructure (Circle's SignatureChecker). Without a
-        # signal that splits the two, adopting either way is wrong
-        # for the other — see source_confidence.py docstring.
-        assert "library" not in STRUCTURAL_OWNERSHIP_RELATIONSHIPS
-
-    def test_either_branch_grants_ownership(self):
-        # Both axes are valid evidence — direct OR structural — and
-        # supplying both still returns True (no XOR).
-        assert asserts_ownership(["deployer_expansion"], parent_owns=True, parent_relationship="implementation") is True
-
-    def test_low_confidence_source_plus_structural_branch_grants(self):
-        # The structural branch independently grants ownership even when
-        # the child's own discovery_sources is LOW-only. This is the
-        # exact false-negative case from PR review: an impl was found
-        # via dapp_crawl, its analysis spawned a proxy-shell child whose
-        # discovery_sources stayed LOW, and the structural relationship
-        # is the only thing that lets the gate adopt it.
-        assert asserts_ownership(["dapp_crawl"], parent_owns=True, parent_relationship="implementation") is True
-
 
 # ---------------------------------------------------------------------------
 # 2. Writer-side gate — db/queue.py

@@ -231,11 +231,11 @@ def test_process_runs_against_real_queue_and_fake_dapp(
     assert protocol_row.official_domain == "127.0.0.1"
 
     # Contracts table populated with all discovered addresses, tagged
-    # dapp_crawl. ``protocol_id`` stays NULL until a high-confidence
-    # source corroborates — dapp_crawl is low-confidence (it scrapes
-    # every 0x... on a page, including third-party tokens and
-    # infrastructure), so it can't assert protocol ownership on its
-    # own. See services/discovery/source_confidence.py.
+    # dapp_crawl. ``protocol_id`` stays NULL: every discovery write is a
+    # nomination, and only the membership gate promotes on a recorded
+    # witness (services/discovery/membership_gate.py). A dapp_crawl
+    # scrape sees every 0x... on a page, including third-party tokens
+    # and infrastructure — none of which may become members here.
     contracts = (
         db_session.execute(select(Contract).where(Contract.address.in_([ADDR_A, ADDR_B, ADDR_C]))).scalars().all()
     )
@@ -245,7 +245,7 @@ def test_process_runs_against_real_queue_and_fake_dapp(
     assert all(c.protocol_id is None for c in contracts), (
         "dapp_crawl-only entries should land as orphans (protocol_id=NULL); "
         "stamping protocol_id from a low-confidence source is the leak the "
-        "ownership gate closes — see test_discovery_source_confidence.py"
+        "membership gate closes — see test_membership_gate_regressions.py"
     )
 
 
