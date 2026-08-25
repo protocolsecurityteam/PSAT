@@ -11,9 +11,10 @@ scans:
   is in the dirty frontier — the partial unique indexes on
   (contract, protocol, rule, via_address) cannot serve a via-only predicate,
   because ``via_address`` is their fourth column.
-* ``_vias_citing_anchor_link`` matches an address inside a W3-D1 witness's
-  published ``evidence->'anchor_chain'`` — a link address or the terminal
-  anchor — which needs a jsonb path index to avoid reading every row.
+* ``_vias_citing_evidence_address`` matches an address inside a W3 witness's
+  published proof — an ``anchor_chain`` link or terminal anchor, or the member
+  hosting a ``principal_fact`` — which needs a jsonb path index to avoid
+  reading every row.
 
 The via index is partial on the active rows: a revoked witness is history and is
 never a revocation target, so it does not belong in the index the frontier

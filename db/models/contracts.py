@@ -506,6 +506,11 @@ WITNESS_RULE_W1_CODE = "w1_code"
 WITNESS_RULE_W2_STRUCTURAL = "w2_structural"
 WITNESS_RULE_W3_CONTROL = "w3_control"
 WITNESS_RULE_W4_DEPLOYER = "w4_deployer"
+# W4 family, second arm (owner ruling): lineage from the protocol's own
+# ANCHORING MEMBER factory, per the recorded ``creation_factory`` attribution.
+# Its via-fact is a member, not a registry EOA, so it carries its own
+# revocation story — the factory's demotion revokes it.
+WITNESS_RULE_W4_FACTORY = "w4_factory"
 WITNESS_RULE_W5_HUMAN = "w5_human"
 WITNESS_RULE_W6_LLAMA_SEED = "w6_llama_seed"
 WITNESS_RULES = frozenset(
@@ -514,6 +519,7 @@ WITNESS_RULES = frozenset(
         WITNESS_RULE_W2_STRUCTURAL,
         WITNESS_RULE_W3_CONTROL,
         WITNESS_RULE_W4_DEPLOYER,
+        WITNESS_RULE_W4_FACTORY,
         WITNESS_RULE_W5_HUMAN,
         WITNESS_RULE_W6_LLAMA_SEED,
     }
@@ -547,7 +553,8 @@ class ContractMembershipWitness(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "rule IN ('w1_code', 'w2_structural', 'w3_control', 'w4_deployer', 'w5_human', 'w6_llama_seed')",
+            "rule IN ('w1_code', 'w2_structural', 'w3_control', 'w4_deployer', 'w4_factory', "
+            "'w5_human', 'w6_llama_seed')",
             name="ck_contract_membership_witnesses_rule",
         ),
         Index("ix_contract_membership_witnesses_contract_id", "contract_id"),

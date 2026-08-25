@@ -699,10 +699,10 @@ def test_anchoring_member_demotion_revokes_the_dependent_chain(db_session, proto
 def test_anchor_link_address_reaches_the_revocation_frontier(db_session, protocol):
     """The recorded chain's link — not the witness's own via — is what changed."""
     _anchor, timelock, safe, ward, _proxy, _independent = _timelock_shape(db_session, protocol, 0x2300)
-    assert gate._vias_citing_anchor_link(db_session, [safe]) == {timelock.address}
+    assert gate._vias_citing_evidence_address(db_session, [safe]) == {timelock.address}
     chain = _d1_witness(db_session, ward, protocol).evidence["anchor_chain"]
-    assert gate._vias_citing_anchor_link(db_session, [chain["anchor_address"]]) == {timelock.address}
-    assert gate._vias_citing_anchor_link(db_session, [ADDR(0x23FF)]) == set()
+    assert gate._vias_citing_evidence_address(db_session, [chain["anchor_address"]]) == {timelock.address}
+    assert gate._vias_citing_evidence_address(db_session, [ADDR(0x23FF)]) == set()
 
 
 def test_foreign_promotion_of_a_published_anchor_revokes_in_the_same_run(db_session, protocol):

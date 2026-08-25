@@ -30,6 +30,7 @@ from db.models import (
     WITNESS_RULE_W2_STRUCTURAL,
     WITNESS_RULE_W3_CONTROL,
     WITNESS_RULE_W4_DEPLOYER,
+    WITNESS_RULE_W4_FACTORY,
     WITNESS_RULE_W5_HUMAN,
     WITNESS_RULE_W6_LLAMA_SEED,
     WITNESS_RULES,
@@ -77,9 +78,22 @@ W2_EDGE_KINDS = frozenset(
 W3_DIRECTION_D1 = "d1"
 W3_DIRECTION_D2 = "d2"
 # Where a W3 edge may come from (spec §3.2): resolved controller values, a
-# resolved proxy-admin slot, or a §3.5 probe read. Never "appears in a
-# member's control graph".
-W3_SOURCES = frozenset({"controller_values", "proxy_admin_slot", "probe"})
+# resolved proxy-admin slot, a §3.5 probe read, or a resolved FunctionPrincipal
+# of a member's effective function. Never "appears in a member's control graph".
+W3_SOURCES = frozenset({"controller_values", "proxy_admin_slot", "probe", "function_principal"})
+
+#: ``FunctionPrincipal.resolved_type`` values that name a CONTROLLER for the
+#: D2-principal arm. ``eoa`` is excluded: an EOA is not deployed code, so a
+#: CONTRACT candidate whose address carries an eoa-typed principal row is a
+#: resolution artifact, and resting membership on it would rest it on a
+#: misresolution. NULL/unknown is not_determined and proves nothing either.
+W3_PRINCIPAL_CONTROLLER_TYPES = frozenset({"timelock", "safe", "contract"})
+
+#: The §3.3 perimeter observations the D1-principal arm reads — resolved
+#: principals of a member's effective functions, plus Safe signer-set
+#: containment. Deliberately narrower than ``_perimeter_fact_candidates``,
+#: which also reads bare controller values.
+W3_PRINCIPAL_FACT_KINDS = frozenset({"function_principal", "safe_owner"})
 
 #: Non-lineage witness rules — evidence a row BELONGS beyond deployer lineage.
 #: A bare nomination or a W4-only row is NOT evidence of belonging: §3.3's
@@ -127,6 +141,7 @@ _ANCHOR_CHAIN_MAX_DEPTH = 8
 
 _ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 _ROLE_HASH_RE = re.compile(r"^0x[0-9a-fA-F]{64}$")
+_TX_HASH_RE = re.compile(r"^0x[0-9a-fA-F]{64}$")
 
 #: The ONE ``detail`` each singleton link kind may carry — the W3 source it
 #: was read from. Set-valued kinds carry an identity instead (role hash /
@@ -266,6 +281,43 @@ def _anchor_chain_evidence(anchor_chain: Any) -> dict[str, Any]:
     return rebuilt
 
 
+def _principal_fact_evidence(fact: Any) -> dict[str, Any]:
+    """Canonicalize the resolved-principal observation a principal-keyed W3
+    witness rests on: which member hosts it, on which effective function, and
+    what the principal resolved to. Rebuilt field-for-field (nullable fields
+    always present) so the round-trip is exact and two runs over the same facts
+    emit identical evidence."""
+    if not isinstance(fact, Mapping):
+        raise ValueError("principal_fact must be a mapping")
+    kind = fact.get("kind")
+    if kind not in W3_PRINCIPAL_FACT_KINDS:
+        raise ValueError(f"principal_fact kind must be one of {sorted(W3_PRINCIPAL_FACT_KINDS)}, got {kind!r}")
+    resolved_type = fact.get("resolved_type")
+    if resolved_type is not None and (not isinstance(resolved_type, str) or not resolved_type.strip()):
+        raise ValueError(f"principal_fact resolved_type must be a non-empty string or None, got {resolved_type!r}")
+    safe_address = fact.get("safe_address")
+    if kind == "safe_owner":
+        safe_address = _require_address(safe_address, "principal_fact safe_address")
+    elif safe_address is not None:
+        raise ValueError("principal_fact safe_address is safe_owner evidence only")
+    rebuilt = {
+        "kind": kind,
+        "function_principal_id": _require_positive_int(
+            fact.get("function_principal_id"), "principal_fact function_principal_id"
+        ),
+        "function_id": _require_positive_int(fact.get("function_id"), "principal_fact function_id"),
+        "member_contract_id": _require_positive_int(
+            fact.get("member_contract_id"), "principal_fact member_contract_id"
+        ),
+        "member_address": _require_address(fact.get("member_address"), "principal_fact member_address"),
+        "resolved_type": resolved_type,
+        "safe_address": safe_address,
+    }
+    if set(fact) != set(rebuilt):
+        raise ValueError("principal_fact has unexpected fields")
+    return rebuilt
+
+
 def w3_evidence(
     *,
     direction: str,
@@ -273,6 +325,7 @@ def w3_evidence(
     via_address: str,
     via_transitive: bool | None = None,
     anchor_chain: Mapping[str, Any] | None = None,
+    principal_fact: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """W3 control edge. D1 (candidate's resolved controller is a TRANSITIVE
     perimeter entity) requires ``via_transitive=True`` — proven, not defaulted.
@@ -281,25 +334,47 @@ def w3_evidence(
 
     ``anchor_chain`` is present exactly when transitivity was proven by the
     anchored-authority-chain arm (spec §3.2 extension, ``_via_transitivity``);
-    it records WHICH chain fact proved it. Its absence means the via was
-    transitive on its own witnesses."""
+    it records WHICH chain fact proved it. ``principal_fact`` is present
+    exactly when it was proven by the §3.3 perimeter-principal arm, or — on a
+    D2 witness — when the control edge itself is a resolved FunctionPrincipal
+    of the member. The two proofs are mutually exclusive; absence of both on a
+    D1 witness means the via was transitive on its own witnesses."""
     if direction not in (W3_DIRECTION_D1, W3_DIRECTION_D2):
         raise ValueError(f"direction must be 'd1' or 'd2', got {direction!r}")
     if source not in W3_SOURCES:
         raise ValueError(f"source must be one of {sorted(W3_SOURCES)}, got {source!r}")
+    if anchor_chain is not None and principal_fact is not None:
+        raise ValueError("anchor_chain and principal_fact are alternative proofs; at most one may be recorded")
     via = _require_address(via_address, "via_address")
     if direction == W3_DIRECTION_D1:
+        if source == "function_principal":
+            raise ValueError("function_principal is a d2 source; a d1 witness names how the CANDIDATE was read")
         if via_transitive is not True:
             raise ValueError("d1 requires via_transitive=True — a proven transitive perimeter entity")
         evidence: dict[str, Any] = {"direction": direction, "source": source, "via": via, "via_transitive": True}
         if anchor_chain is not None:
             evidence["anchor_chain"] = _anchor_chain_evidence(anchor_chain)
+        if principal_fact is not None:
+            evidence["principal_fact"] = _principal_fact_evidence(principal_fact)
         return evidence
     if via_transitive is not None:
         raise ValueError("d2 does not take via_transitive; its perimeter entry is non-transitive by rule")
     if anchor_chain is not None:
         raise ValueError("anchor_chain is d1 evidence only")
-    return {"direction": direction, "source": source, "via": via, "perimeter_entry_transitive": False}
+    if (source == "function_principal") != (principal_fact is not None):
+        raise ValueError("a function_principal d2 witness records its principal_fact, and only it")
+    evidence = {"direction": direction, "source": source, "via": via, "perimeter_entry_transitive": False}
+    if principal_fact is not None:
+        fact = _principal_fact_evidence(principal_fact)
+        if fact["kind"] != "function_principal":
+            raise ValueError("a d2 principal_fact names the candidate's own principal row")
+        if fact["resolved_type"] not in W3_PRINCIPAL_CONTROLLER_TYPES:
+            raise ValueError(
+                f"d2 principal_fact resolved_type must be one of {sorted(W3_PRINCIPAL_CONTROLLER_TYPES)}, "
+                f"got {fact['resolved_type']!r}"
+            )
+        evidence["principal_fact"] = fact
+    return evidence
 
 
 def w4_evidence(
@@ -317,6 +392,29 @@ def w4_evidence(
         "deployer_registry_id": _require_positive_int(deployer_registry_id, "deployer_registry_id"),
         "creation_tx_hash": creation_tx_hash.lower(),
         "creation_block": None if creation_block is None else _require_block(creation_block, "creation_block"),
+    }
+
+
+def w4_factory_evidence(
+    *,
+    factory_address: str,
+    factory_member_contract_id: int,
+    chain_id: int,
+    creation_tx_hash: str | None,
+) -> dict[str, Any]:
+    """W4 factory lineage: the recorded ``creation_factory`` attribution plus
+    the member factory it names. ``creation_tx_hash`` may be NULL — the factory
+    attribution and the creating tx are independent columns of the creation
+    witness, and the attribution alone is what this rule rests on."""
+    if creation_tx_hash is not None and (
+        not isinstance(creation_tx_hash, str) or not re.match(r"^0x[0-9a-fA-F]{64}$", creation_tx_hash)
+    ):
+        raise ValueError(f"creation_tx_hash must be a 32-byte hex hash or None, got {creation_tx_hash!r}")
+    return {
+        "factory_address": _require_address(factory_address, "factory_address"),
+        "factory_member_contract_id": _require_positive_int(factory_member_contract_id, "factory_member_contract_id"),
+        "chain_id": _require_positive_int(chain_id, "chain_id"),
+        "creation_tx_hash": None if creation_tx_hash is None else creation_tx_hash.lower(),
     }
 
 
@@ -372,9 +470,15 @@ def _rebuild_evidence(rule: str, evidence: dict[str, Any]) -> dict[str, Any]:
             kwargs["via_transitive"] = evidence.get("via_transitive")
             if "anchor_chain" in evidence:
                 kwargs["anchor_chain"] = evidence.get("anchor_chain")
+        if "principal_fact" in evidence:
+            kwargs["principal_fact"] = evidence.get("principal_fact")
         return w3_evidence(**kwargs)
     if rule == WITNESS_RULE_W4_DEPLOYER:
         return w4_evidence(**picked("deployer_address", "deployer_registry_id", "creation_tx_hash", "creation_block"))
+    if rule == WITNESS_RULE_W4_FACTORY:
+        return w4_factory_evidence(
+            **picked("factory_address", "factory_member_contract_id", "chain_id", "creation_tx_hash")
+        )
     if rule == WITNESS_RULE_W5_HUMAN:
         raw = evidence.get("asserted_at")
         if not isinstance(raw, str):
@@ -726,6 +830,20 @@ def _member_anchors_ladder(session: Session, *, contract_id: int, protocol_id: i
     return False
 
 
+def _anchoring_member_factory_id(session: Session, *, protocol_id: int, factory: str) -> int | None:
+    """The id of this protocol's MEMBER row at *factory* holding a non-D2
+    admitting witness (F2), or None. Lowest member id wins, so the published
+    via is a function of the evidence set, not of row order (invariant 9)."""
+    for member in session.execute(
+        select(Contract)
+        .where(Contract.protocol_id == protocol_id, func.lower(Contract.address) == factory)
+        .order_by(Contract.id)
+    ).scalars():
+        if _member_anchors_ladder(session, contract_id=member.id, protocol_id=protocol_id):
+            return member.id
+    return None
+
+
 def _anchoring_member_factory(session: Session, *, protocol_id: int, factory: str) -> bool:
     """Whether *factory* is this protocol's own MEMBER holding a non-D2
     admitting witness (F2). The member-factory mapping rule (deliberate §3.3
@@ -733,29 +851,50 @@ def _anchoring_member_factory(session: Session, *, protocol_id: int, factory: st
     factory is a protocol-family creation — it counts as MAPPED in the Class-B
     exclusivity test and is tolerated by the shared-operator kill. Mapping
     only: it admits nothing and mints no witness."""
-    for member in session.execute(
-        select(Contract)
-        .where(Contract.protocol_id == protocol_id, func.lower(Contract.address) == factory)
-        .order_by(Contract.id)
-    ).scalars():
-        if _member_anchors_ladder(session, contract_id=member.id, protocol_id=protocol_id):
-            return True
-    return False
+    return _anchoring_member_factory_id(session, protocol_id=protocol_id, factory=factory) is not None
 
 
-def _member_factory_created(session: Session, *, protocol_id: int, contract: Contract) -> bool:
+@dataclass(frozen=True)
+class MemberFactoryLineage:
+    """The stored creation attribution behind a W4-factory witness."""
+
+    factory: str
+    member_contract_id: int
+    chain_id: int
+    creation_tx_hash: str | None
+
+
+def _member_factory_lineage(
+    session: Session, *, protocol_id: int, contract: Contract, factory: str | None = None
+) -> MemberFactoryLineage | None:
     """The stored-attribution arm of the member-factory rule: the row's own
     creation witness names a factory that is an anchoring member of this
-    protocol. NULL attribution is not-determined and licenses nothing."""
+    protocol. NULL attribution is not-determined and licenses nothing.
+    ``factory``, when given, additionally pins WHICH factory must be named —
+    the re-verification path for an already-published witness."""
     chain_id = chain_id_for_chain_name(contract.chain)
     addr = (contract.address or "").lower()
     if chain_id is None or not addr:
-        return False
+        return None
     witness = session.get(ContractCreationWitness, (chain_id, addr))
-    factory = (witness.creation_factory or "").lower() if witness is not None else ""
-    if not factory:
-        return False
-    return _anchoring_member_factory(session, protocol_id=protocol_id, factory=factory)
+    named = (witness.creation_factory or "").lower() if witness is not None else ""
+    if not named or (factory is not None and named != factory):
+        return None
+    member_id = _anchoring_member_factory_id(session, protocol_id=protocol_id, factory=named)
+    if member_id is None:
+        return None
+    assert witness is not None  # ``named`` is non-empty only when the row exists
+    tx = witness.creation_tx_hash
+    return MemberFactoryLineage(
+        factory=named,
+        member_contract_id=member_id,
+        chain_id=chain_id,
+        creation_tx_hash=tx.lower() if isinstance(tx, str) and _TX_HASH_RE.match(tx) else None,
+    )
+
+
+def _member_factory_created(session: Session, *, protocol_id: int, contract: Contract) -> bool:
+    return _member_factory_lineage(session, protocol_id=protocol_id, contract=contract) is not None
 
 
 # ---------------------------------------------------------------------------
@@ -850,13 +989,155 @@ def _w2_edge_holds(session: Session, *, contract: Contract, member: Contract, ed
     return False
 
 
+def _member_principal_rows(
+    session: Session,
+    *,
+    protocol_id: int,
+    address: str,
+    chain_key: str,
+    exclude_contract_id: int | None,
+    safe_owners: bool,
+):
+    """Resolved-principal observations of *address* on this protocol's members,
+    in deterministic order (principal row id), as
+    ``(function_principal_id, function_id, resolved_type, safe_address, member)``.
+
+    ``safe_owners=False`` reads the principal row whose ADDRESS is *address*;
+    ``safe_owners=True`` reads Safe principals whose stored signer set CONTAINS
+    it. Only same-chain members are read: a principal fact is an observation on
+    a deployment, and a deployment is (address, chain).
+    """
+    member_scope = [
+        Contract.protocol_id == protocol_id,
+        func.lower(func.coalesce(Contract.chain, "ethereum")) == chain_key,
+    ]
+    if exclude_contract_id is not None:
+        member_scope.append(Contract.id != exclude_contract_id)
+    if not safe_owners:
+        for fp_id, function_id, resolved_type, member in session.execute(
+            select(FunctionPrincipal.id, FunctionPrincipal.function_id, FunctionPrincipal.resolved_type, Contract)
+            .join(EffectiveFunction, FunctionPrincipal.function_id == EffectiveFunction.id)
+            .join(Contract, EffectiveFunction.contract_id == Contract.id)
+            .where(*member_scope, func.lower(FunctionPrincipal.address) == address)
+            .order_by(FunctionPrincipal.id)
+        ):
+            yield fp_id, function_id, resolved_type, None, member
+        return
+    # Owner matching happens in Python so stored casing can never hide a
+    # signer; the SQL ``ilike`` is a case-insensitive SUPERSET prefilter only.
+    for fp_id, function_id, safe_address, details, member in session.execute(
+        select(
+            FunctionPrincipal.id,
+            FunctionPrincipal.function_id,
+            FunctionPrincipal.address,
+            FunctionPrincipal.details,
+            Contract,
+        )
+        .join(EffectiveFunction, FunctionPrincipal.function_id == EffectiveFunction.id)
+        .join(Contract, EffectiveFunction.contract_id == Contract.id)
+        .where(
+            *member_scope,
+            FunctionPrincipal.resolved_type == "safe",
+            jsonb_has_payload(FunctionPrincipal.details),
+            FunctionPrincipal.details.op("->")("owners").cast(Text).ilike(f"%{address}%"),
+        )
+        .order_by(FunctionPrincipal.id)
+    ):
+        owners = details.get("owners") if isinstance(details, dict) else None
+        if not isinstance(owners, list):
+            continue
+        if any(isinstance(owner, str) and owner.lower() == address for owner in owners):
+            yield fp_id, function_id, "safe", (safe_address or "").lower(), member
+
+
+def _principal_perimeter_fact(
+    session: Session,
+    *,
+    protocol_id: int,
+    address: str,
+    chain_key: str,
+    exclude_contract_id: int | None = None,
+) -> dict[str, Any] | None:
+    """§3.3 perimeter reading for the D1-principal arm: *address* is a resolved
+    principal of a member's effective function, or a signer of a member's
+    resolved Safe principal. The hosting member must itself hold a non-D2
+    admitting witness (F2) — a principal observed only on a D2-only entry
+    licenses nothing, since the D2 entry itself is non-transitive.
+
+    Direct principal rows are read before signer containment, and within each
+    the smallest principal row wins, so the published fact is a function of the
+    evidence set rather than of row arrival order (invariant 9)."""
+    for safe_owners in (False, True):
+        for fp_id, function_id, resolved_type, safe_address, member in _member_principal_rows(
+            session,
+            protocol_id=protocol_id,
+            address=address,
+            chain_key=chain_key,
+            exclude_contract_id=exclude_contract_id,
+            safe_owners=safe_owners,
+        ):
+            if not _member_anchors_ladder(session, contract_id=member.id, protocol_id=protocol_id):
+                continue
+            return _principal_fact_evidence(
+                {
+                    "kind": "safe_owner" if safe_owners else "function_principal",
+                    "function_principal_id": fp_id,
+                    "function_id": function_id,
+                    "member_contract_id": member.id,
+                    "member_address": (member.address or "").lower(),
+                    "resolved_type": resolved_type,
+                    "safe_address": safe_address if safe_owners else None,
+                }
+            )
+    return None
+
+
+def _d2_principal_facts(
+    session: Session, *, protocol_id: int, address: str, chain_key: str, exclude_contract_id: int | None
+) -> list[tuple[Contract, dict[str, Any]]]:
+    """One D2-principal fact per anchoring member on which *address* is a
+    resolved controller-typed principal (:data:`W3_PRINCIPAL_CONTROLLER_TYPES`).
+    The smallest principal row per member wins; members are returned in id
+    order."""
+    facts: dict[int, tuple[Contract, dict[str, Any]]] = {}
+    for fp_id, function_id, resolved_type, _safe, member in _member_principal_rows(
+        session,
+        protocol_id=protocol_id,
+        address=address,
+        chain_key=chain_key,
+        exclude_contract_id=exclude_contract_id,
+        safe_owners=False,
+    ):
+        if resolved_type not in W3_PRINCIPAL_CONTROLLER_TYPES or member.id in facts:
+            continue
+        if not _member_anchors_ladder(session, contract_id=member.id, protocol_id=protocol_id):
+            continue
+        facts[member.id] = (
+            member,
+            _principal_fact_evidence(
+                {
+                    "kind": "function_principal",
+                    "function_principal_id": fp_id,
+                    "function_id": function_id,
+                    "member_contract_id": member.id,
+                    "member_address": (member.address or "").lower(),
+                    "resolved_type": resolved_type,
+                    "safe_address": None,
+                }
+            ),
+        )
+    return [facts[member_id] for member_id in sorted(facts)]
+
+
 @dataclass(frozen=True)
 class TransitivityProof:
     """Which §3.2 arm proved a W3-D1 via transitive. ``anchor_chain`` is set
-    only for the anchored-authority-chain arm."""
+    only for the anchored-authority-chain arm; ``principal_fact`` only for the
+    §3.3 perimeter-principal arm."""
 
     arm: str
     anchor_chain: dict[str, Any] | None = None
+    principal_fact: dict[str, Any] | None = None
 
 
 def _via_is_transitive(
@@ -894,11 +1175,20 @@ def _via_transitivity(
     every contract it is observed to control belongs to this protocol — or
     (spec §3.2 EXTENSION, see ``_anchor_chain_for``) a D2-only member
     controller whose OWN resolved controllers root in the protocol's
-    independently anchored perimeter.
+    independently anchored perimeter — or (owner ruling, salvage wave) a
+    resolved PERIMETER PRINCIPAL of an anchoring member, the same §3.3 Class-A
+    inference already accepted for deployer EOAs.
+
+    Arms are tried strongest-first and the principal arm last, so a via that
+    gains a stronger proof publishes the stronger one and re-derivation is
+    stable across rounds (invariant 9).
+
     The candidate under evaluation never counts toward its own license."""
     if via_address in in_progress:
         return None
+    saw_member = False
     for member in _member_rows_at(session, protocol_id=protocol_id, address=via_address, chain_key=chain_key):
+        saw_member = True
         rows = active_witnesses(session, contract_id=member.id, protocol_id=protocol_id)
         has_d2 = False
         for row in rows:
@@ -929,7 +1219,36 @@ def _via_transitivity(
         )
         if chain is not None:
             return TransitivityProof("anchor_chain", chain)
-    return None
+    if saw_member:
+        # A via that is itself a member has its transitivity decided by its own
+        # witnesses (§3.2) and by the arms above — full stop. The
+        # perimeter-principal arm is the §3.3 Class-A reading for addresses
+        # OUTSIDE the member set; letting it also speak for a member would
+        # dissolve D2 non-transitivity, since a D2 controller of a member is
+        # normally recorded as that member's principal too.
+        return None
+    fact = _principal_perimeter_fact(
+        session,
+        protocol_id=protocol_id,
+        address=via_address,
+        chain_key=chain_key,
+        exclude_contract_id=exclude_contract_id,
+    )
+    if fact is None:
+        return None
+    # §3.2's shared-operator warning applied as POSITIVE counterevidence rather
+    # than as a positive-exclusivity requirement (which absence of foreign rows
+    # could never supply): a perimeter principal observed controlling a row
+    # that provably belongs elsewhere licenses nothing here.
+    if _address_proven_foreign(session, protocol_id=protocol_id, address=via_address):
+        logger.info(
+            "perimeter-principal transitivity refused: via is proven foreign",
+            extra={"protocol_id": protocol_id, "via": via_address},
+        )
+        return None
+    if _controls_a_foreign_row(session, protocol_id=protocol_id, controller_address=via_address):
+        return None
+    return TransitivityProof("perimeter_principal", principal_fact=fact)
 
 
 @dataclass(frozen=True)
@@ -1356,6 +1675,13 @@ def _witness_fact_holds(
             ).first()
             is not None
         )
+    if rule == WITNESS_RULE_W4_FACTORY:
+        # Re-derived, never trusted: the stored attribution must still name
+        # this factory AND the factory must still be an anchoring member —
+        # its demotion is what revokes this witness (invariant 8).
+        if not via:
+            return False
+        return _member_factory_lineage(session, protocol_id=protocol_id, contract=contract, factory=via) is not None
     chain_key = _chain_key(contract.chain)
     if rule == WITNESS_RULE_W2_STRUCTURAL:
         member = session.get(Contract, evidence.get("member_contract_id"))
@@ -1371,6 +1697,20 @@ def _witness_fact_holds(
         source = evidence.get("source")
         addr = (contract.address or "").lower()
         if direction == W3_DIRECTION_D2:
+            if source == "function_principal":
+                # F2 is re-checked here, not only at derivation: a hosting
+                # member demoted to a D2-only entry stops anchoring, and the
+                # principal fact it hosts must fall with it (invariant 8).
+                return any(
+                    member.address and member.address.lower() == via
+                    for member, _fact in _d2_principal_facts(
+                        session,
+                        protocol_id=protocol_id,
+                        address=addr,
+                        chain_key=chain_key,
+                        exclude_contract_id=contract.id,
+                    )
+                )
             for member in _member_rows_at(session, protocol_id=protocol_id, address=via, chain_key=chain_key):
                 if member.id == contract.id:
                     continue
@@ -1392,14 +1732,28 @@ def _witness_fact_holds(
             if proof is None:
                 return False
             recorded = evidence.get("anchor_chain")
-            # A witness that PUBLISHED an anchor chain must still be able to
-            # cite it: a re-proof at a different anchor is a different fact and
-            # gets re-derived with its own evidence (invariant 8).
-            if isinstance(recorded, dict) and proof.arm == "anchor_chain":
-                assert proof.anchor_chain is not None
-                if proof.anchor_chain.get("anchor_address") != recorded.get("anchor_address"):
+            recorded_principal = evidence.get("principal_fact")
+            # A witness that PUBLISHED a proof must still be able to cite it: a
+            # re-proof by a different arm, at a different anchor, or off a
+            # different hosting member is a different fact and gets re-derived
+            # with its own evidence (invariant 8).
+            if proof.arm == "anchor_chain":
+                if recorded_principal is not None:
                     return False
-            elif isinstance(recorded, dict) and proof.arm != "anchor_chain":
+                assert proof.anchor_chain is not None
+                if isinstance(recorded, dict) and proof.anchor_chain.get("anchor_address") != recorded.get(
+                    "anchor_address"
+                ):
+                    return False
+            elif proof.arm == "perimeter_principal":
+                if recorded is not None:
+                    return False
+                assert proof.principal_fact is not None
+                if isinstance(recorded_principal, dict) and proof.principal_fact.get(
+                    "member_contract_id"
+                ) != recorded_principal.get("member_contract_id"):
+                    return False
+            elif recorded is not None or recorded_principal is not None:
                 return False
             if source == "controller_values":
                 return _has_controller_value(session, contract_id=contract.id, value=via)
@@ -2096,15 +2450,16 @@ def _controllers_of(session: Session, contract_ids: Sequence[int] | set[int]) ->
     return {a for a in out if _ADDRESS_RE.match(a)}
 
 
-def _vias_citing_anchor_link(session: Session, addresses: Sequence[str] | set[str]) -> set[str]:
-    """The vias of standing W3-D1 witnesses whose recorded ``anchor_chain``
-    names one of *addresses* — as a walked link or as the terminal anchor.
+def _vias_citing_evidence_address(session: Session, addresses: Sequence[str] | set[str]) -> set[str]:
+    """The vias of standing W3 witnesses whose recorded PROOF names one of
+    *addresses* — an anchor-chain link or terminal anchor, or the member
+    hosting a perimeter-principal fact.
 
-    Invariant 8's trigger for the anchored-chain arm: such a witness's via is
-    the CONTROLLER, so a broken link would otherwise never reach the revocation
-    frontier.
+    Invariant 8's trigger for both proof arms: such a witness's via is the
+    CONTROLLER, not the address whose facts changed, so a broken proof would
+    otherwise never reach the revocation frontier.
 
-    Both arms are written as containment against the ``evidence`` COLUMN, not
+    Every arm is written as containment against the ``evidence`` COLUMN, not
     against a ``->`` path expression: only the column form is served by the
     GIN index (``ix_contract_membership_witnesses_evidence``). JSONB
     containment recurses through objects and matches an array when some element
@@ -2119,6 +2474,9 @@ def _vias_citing_anchor_link(session: Session, addresses: Sequence[str] | set[st
         )
         conditions.append(
             ContractMembershipWitness.evidence.op("@>")(cast({"anchor_chain": {"links": [{"address": addr}]}}, JSONB))
+        )
+        conditions.append(
+            ContractMembershipWitness.evidence.op("@>")(cast({"principal_fact": {"member_address": addr}}, JSONB))
         )
     return {
         (via or "").lower()
@@ -2146,7 +2504,7 @@ def _revocation_quiescence(session: Session, seed_vias: Sequence[str] | set[str]
     demoted: list[int] = []
     frontier = {a.lower() for a in seed_vias if a}
     while frontier:
-        batch = sorted(frontier | _vias_citing_anchor_link(session, frontier))
+        batch = sorted(frontier | _vias_citing_evidence_address(session, frontier))
         frontier = set()
         witnesses = list(
             session.execute(
@@ -2155,7 +2513,12 @@ def _revocation_quiescence(session: Session, seed_vias: Sequence[str] | set[str]
                     ContractMembershipWitness.via_address.in_(batch),
                     ContractMembershipWitness.revoked_at.is_(None),
                     ContractMembershipWitness.rule.in_(
-                        [WITNESS_RULE_W2_STRUCTURAL, WITNESS_RULE_W3_CONTROL, WITNESS_RULE_W4_DEPLOYER]
+                        [
+                            WITNESS_RULE_W2_STRUCTURAL,
+                            WITNESS_RULE_W3_CONTROL,
+                            WITNESS_RULE_W4_DEPLOYER,
+                            WITNESS_RULE_W4_FACTORY,
+                        ]
                     ),
                 )
                 .order_by(ContractMembershipWitness.contract_id, ContractMembershipWitness.id)
@@ -2273,8 +2636,32 @@ def _standing_vias_named_by_edges(session: Session, edge_addresses: Sequence[str
     }
     # An address that is not a via itself can still be a LINK in a standing
     # D1 anchor chain; the witness resting on it is keyed by its controller.
-    touched |= _vias_citing_anchor_link(session, addrs)
+    touched |= _vias_citing_evidence_address(session, addrs)
     return {t for t in touched if t}
+
+
+def principal_addresses(session: Session, contract_ids: Sequence[int] | set[int]) -> set[str]:
+    """Addresses the stored ``FunctionPrincipal`` rows of these contracts name
+    — the principals themselves plus the signer sets of resolved Safe
+    principals. The fuel and the revocation trigger for both principal-keyed
+    W3 arms; a withheld (NULL) signer set is not_determined and names nothing."""
+    ids = sorted(set(contract_ids))
+    if not ids:
+        return set()
+    out: set[str] = set()
+    for address, details in session.execute(
+        select(FunctionPrincipal.address, FunctionPrincipal.details)
+        .join(EffectiveFunction, FunctionPrincipal.function_id == EffectiveFunction.id)
+        .where(EffectiveFunction.contract_id.in_(ids))
+    ):
+        if isinstance(address, str) and _ADDRESS_RE.match(address):
+            out.add(address.lower())
+        owners = details.get("owners") if isinstance(details, dict) else None
+        if isinstance(owners, list):
+            for owner in owners:
+                if isinstance(owner, str) and _ADDRESS_RE.match(owner):
+                    out.add(owner.lower())
+    return out
 
 
 def _target_candidates(session: Session, facts_delta: FactsDelta) -> set[int]:
@@ -2294,8 +2681,27 @@ def _target_candidates(session: Session, facts_delta: FactsDelta) -> set[int]:
             for pointer in (row.implementation, row.beacon, row.admin, *(row.secondary_implementations or [])):
                 if pointer:
                     pointer_addrs.add(pointer.lower())
+    # A fresh member's own principals are fresh perimeter facts: they admit the
+    # principal itself (D2) and anything that principal controls (D1).
+    # Targeting both directions here is what makes the settled state
+    # independent of whether the promotion or the principal write arrived first.
+    principal_addrs = principal_addresses(session, facts_delta.new_member_contract_ids)
 
-    by_address = edge_addrs | pointer_addrs
+    # Children the fresh members are recorded as having minted: a factory that
+    # just became a member is new W4-factory lineage for everything it created.
+    factory_children: set[str] = set()
+    if member_addrs:
+        factory_children = {
+            address.lower()
+            for (address,) in session.execute(
+                select(ContractCreationWitness.address).where(
+                    func.lower(ContractCreationWitness.creation_factory).in_(sorted(member_addrs))
+                )
+            )
+            if address
+        }
+
+    by_address = edge_addrs | pointer_addrs | principal_addrs | factory_children
     if by_address:
         targeted.update(
             session.execute(
@@ -2319,7 +2725,7 @@ def _target_candidates(session: Session, facts_delta: FactsDelta) -> set[int]:
     # well as fresh members: an edge that names a STANDING member (a role
     # holder written under a member registry) changes that member's
     # transitivity, and only its wards' own controller rows point back at it.
-    reach_addrs = edge_addrs | member_addrs
+    reach_addrs = edge_addrs | member_addrs | principal_addrs
     if reach_addrs:
         reach_list = sorted(reach_addrs)
         # The candidate's OWN ``secondary_implementations`` is deliberately not
@@ -2349,7 +2755,7 @@ def _target_candidates(session: Session, facts_delta: FactsDelta) -> set[int]:
     # Candidates whose PROBED reads resolved to an address that just became a
     # member or a fresh edge value (the probe persisted the resolved set for
     # exactly this lookup).
-    perimeter_delta = sorted(edge_addrs | member_addrs)
+    perimeter_delta = sorted(reach_addrs)
     if perimeter_delta:
         targeted.update(
             session.execute(
@@ -2490,6 +2896,36 @@ def evaluate_role_plane_change(
     return evaluate_committed(
         session,
         FactsDelta(new_edge_addresses=tuple(sorted(addresses)), recheck_contract_ids=registry_rows),
+        context=context,
+    )
+
+
+def evaluate_principal_change(
+    session: Session,
+    *,
+    contract_id: int,
+    addresses: Sequence[str] | set[str],
+    context: str,
+) -> PromotionResult | None:
+    """§3.4 event 2 for a ``FunctionPrincipal`` rewrite — the fuel and the
+    revocation trigger for both principal-keyed W3 arms (invariant 8).
+
+    *addresses* must be the UNION of the principal addresses before and after
+    the rewrite: a principal the re-analysis DROPPED names no fact afterwards,
+    so only the pre-image can reach the witnesses resting on it. The rewritten
+    contract's own address is named too — it is the via of every D2-principal
+    witness it hosts, and the ``principal_fact.member_address`` of every
+    D1-principal witness it proved."""
+    contract = session.get(Contract, contract_id)
+    own = (contract.address or "").lower() if contract is not None else ""
+    named = {a.lower() for a in addresses if isinstance(a, str) and _ADDRESS_RE.match(a)}
+    if own:
+        named.add(own)
+    if not named:
+        return None
+    return evaluate_committed(
+        session,
+        FactsDelta(new_edge_addresses=tuple(sorted(named)), recheck_contract_ids=(contract_id,)),
         context=context,
     )
 
@@ -3012,9 +3448,6 @@ def _attempt_admission(session: Session, contract: Contract, protocol_id: int) -
     return "needs_probe" if w4_blocked_on_creation else None
 
 
-_TX_HASH_RE = re.compile(r"^0x[0-9a-fA-F]{64}$")
-
-
 def _derive_admitting_facts(
     session: Session, contract: Contract, protocol_id: int
 ) -> tuple[list[tuple[str, dict[str, Any], str]], bool]:
@@ -3144,6 +3577,23 @@ def _derive_admitting_facts(
                 (member.address or "").lower(),
             )
 
+    # W3 D2 — the candidate is a resolved controller-typed principal of a
+    # member's effective functions. The hosting member must anchor (F2): a
+    # principal fact hosted only on D2-only entries admits nothing.
+    for member, principal_fact in _d2_principal_facts(
+        session, protocol_id=protocol_id, address=addr, chain_key=chain_key, exclude_contract_id=contract.id
+    ):
+        add(
+            WITNESS_RULE_W3_CONTROL,
+            w3_evidence(
+                direction=W3_DIRECTION_D2,
+                source="function_principal",
+                via_address=member.address,
+                principal_fact=principal_fact,
+            ),
+            (member.address or "").lower(),
+        )
+
     # W3 D1 — the candidate's resolved controller is a TRANSITIVE perimeter
     # entity (the gate proves transitivity here; a caller cannot assert it).
     own_controllers: list[tuple[str, str]] = []
@@ -3179,9 +3629,26 @@ def _derive_admitting_facts(
                     via_address=via,
                     via_transitive=True,
                     anchor_chain=proof.anchor_chain,
+                    principal_fact=proof.principal_fact,
                 ),
                 via,
             )
+
+    # W4 factory — the recorded creation attribution names an anchoring member
+    # factory of this protocol (owner ruling). Its via-fact is that member, so
+    # the factory's demotion revokes it.
+    lineage = _member_factory_lineage(session, protocol_id=protocol_id, contract=contract)
+    if lineage is not None:
+        add(
+            WITNESS_RULE_W4_FACTORY,
+            w4_factory_evidence(
+                factory_address=lineage.factory,
+                factory_member_contract_id=lineage.member_contract_id,
+                chain_id=lineage.chain_id,
+                creation_tx_hash=lineage.creation_tx_hash,
+            ),
+            lineage.factory,
+        )
 
     # W4 — deployer lineage through the registry.
     w4_blocked = False
