@@ -89,11 +89,20 @@ W3_SOURCES = frozenset({"controller_values", "proxy_admin_slot", "probe", "funct
 #: misresolution. NULL/unknown is not_determined and proves nothing either.
 W3_PRINCIPAL_CONTROLLER_TYPES = frozenset({"timelock", "safe", "contract"})
 
-#: The §3.3 perimeter observations the D1-principal arm reads — resolved
-#: principals of a member's effective functions, plus Safe signer-set
-#: containment. Deliberately narrower than ``_perimeter_fact_candidates``,
-#: which also reads bare controller values.
+#: The §3.3 perimeter observations a principal-keyed W3 witness may record.
+#: ``safe_owner`` (signer-set containment) is recordable but never proves D1
+#: transitivity — the same line ``_perimeter_anchor`` already draws.
 W3_PRINCIPAL_FACT_KINDS = frozenset({"function_principal", "safe_owner"})
+
+#: The ONE resolved type that proves D1 transitivity through a perimeter
+#: principal (§3.3 Class A: "the EOA is a resolved principal inside the
+#: protocol's proven control graph"). Restricting the arm to EOAs is what keeps
+#: it MONOTONE in the member set: an EOA is not deployed code, so it can never
+#: itself become a member and the arm's verdict cannot be withdrawn by a later
+#: promotion. Every richer type is a contract, whose transitivity §3.2 decides
+#: from its OWN witnesses — a shared operator's affiliation with one member
+#: must never license every ward it also controls.
+W3_PERIMETER_PRINCIPAL_TYPE = "eoa"
 
 #: Non-lineage witness rules — evidence a row BELONGS beyond deployer lineage.
 #: A bare nomination or a W4-only row is NOT evidence of belonging: §3.3's
@@ -1058,37 +1067,37 @@ def _principal_perimeter_fact(
     chain_key: str,
     exclude_contract_id: int | None = None,
 ) -> dict[str, Any] | None:
-    """§3.3 perimeter reading for the D1-principal arm: *address* is a resolved
-    principal of a member's effective function, or a signer of a member's
-    resolved Safe principal. The hosting member must itself hold a non-D2
-    admitting witness (F2) — a principal observed only on a D2-only entry
-    licenses nothing, since the D2 entry itself is non-transitive.
+    """§3.3 Class-A perimeter reading for the D1-principal arm: *address* is a
+    resolved EOA principal (:data:`W3_PERIMETER_PRINCIPAL_TYPE`) of a member's
+    effective function. The hosting member must itself hold a non-D2 admitting
+    witness (F2) — a principal observed only on a D2-only entry licenses
+    nothing, since the D2 entry itself is non-transitive.
 
-    Direct principal rows are read before signer containment, and within each
-    the smallest principal row wins, so the published fact is a function of the
+    Smallest principal row wins, so the published fact is a function of the
     evidence set rather than of row arrival order (invariant 9)."""
-    for safe_owners in (False, True):
-        for fp_id, function_id, resolved_type, safe_address, member in _member_principal_rows(
-            session,
-            protocol_id=protocol_id,
-            address=address,
-            chain_key=chain_key,
-            exclude_contract_id=exclude_contract_id,
-            safe_owners=safe_owners,
-        ):
-            if not _member_anchors_ladder(session, contract_id=member.id, protocol_id=protocol_id):
-                continue
-            return _principal_fact_evidence(
-                {
-                    "kind": "safe_owner" if safe_owners else "function_principal",
-                    "function_principal_id": fp_id,
-                    "function_id": function_id,
-                    "member_contract_id": member.id,
-                    "member_address": (member.address or "").lower(),
-                    "resolved_type": resolved_type,
-                    "safe_address": safe_address if safe_owners else None,
-                }
-            )
+    for fp_id, function_id, resolved_type, _safe_address, member in _member_principal_rows(
+        session,
+        protocol_id=protocol_id,
+        address=address,
+        chain_key=chain_key,
+        exclude_contract_id=exclude_contract_id,
+        safe_owners=False,
+    ):
+        if resolved_type != W3_PERIMETER_PRINCIPAL_TYPE:
+            continue
+        if not _member_anchors_ladder(session, contract_id=member.id, protocol_id=protocol_id):
+            continue
+        return _principal_fact_evidence(
+            {
+                "kind": "function_principal",
+                "function_principal_id": fp_id,
+                "function_id": function_id,
+                "member_contract_id": member.id,
+                "member_address": (member.address or "").lower(),
+                "resolved_type": resolved_type,
+                "safe_address": None,
+            }
+        )
     return None
 
 
@@ -1176,19 +1185,19 @@ def _via_transitivity(
     (spec §3.2 EXTENSION, see ``_anchor_chain_for``) a D2-only member
     controller whose OWN resolved controllers root in the protocol's
     independently anchored perimeter — or (owner ruling, salvage wave) a
-    resolved PERIMETER PRINCIPAL of an anchoring member, the same §3.3 Class-A
-    inference already accepted for deployer EOAs.
+    resolved perimeter-principal EOA of an anchoring member, the same §3.3
+    Class-A inference already accepted for deployer EOAs.
 
     Arms are tried strongest-first and the principal arm last, so a via that
     gains a stronger proof publishes the stronger one and re-derivation is
-    stable across rounds (invariant 9).
+    stable across rounds (invariant 9). Every arm is MONOTONE in the member set
+    — growing it can add transitivity, never withdraw it — which is what keeps
+    the fixpoint from oscillating a candidate between promoted and demoted.
 
     The candidate under evaluation never counts toward its own license."""
     if via_address in in_progress:
         return None
-    saw_member = False
     for member in _member_rows_at(session, protocol_id=protocol_id, address=via_address, chain_key=chain_key):
-        saw_member = True
         rows = active_witnesses(session, contract_id=member.id, protocol_id=protocol_id)
         has_d2 = False
         for row in rows:
@@ -1219,14 +1228,6 @@ def _via_transitivity(
         )
         if chain is not None:
             return TransitivityProof("anchor_chain", chain)
-    if saw_member:
-        # A via that is itself a member has its transitivity decided by its own
-        # witnesses (§3.2) and by the arms above — full stop. The
-        # perimeter-principal arm is the §3.3 Class-A reading for addresses
-        # OUTSIDE the member set; letting it also speak for a member would
-        # dissolve D2 non-transitivity, since a D2 controller of a member is
-        # normally recorded as that member's principal too.
-        return None
     fact = _principal_perimeter_fact(
         session,
         protocol_id=protocol_id,

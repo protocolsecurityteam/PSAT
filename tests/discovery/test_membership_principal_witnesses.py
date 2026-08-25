@@ -325,7 +325,10 @@ def test_owner_that_is_a_member_principal_admits_and_cascades(db_session, protoc
     assert ward.protocol_id == protocol.id
 
 
-def test_safe_signer_containment_proves_the_d1_via(db_session, protocol):
+def test_safe_signer_containment_does_not_prove_the_d1_via(db_session, protocol):
+    """A signer set is affiliation, not control of the signer's own wards —
+    the same line ``_perimeter_anchor`` draws when it refuses ``safe_owner``
+    facts. The §3.3 ladder still reads them; D1 does not."""
     member = _anchored_member(db_session, protocol, ADDR(0x2100))
     signer = ADDR(0x2101)
     safe = ADDR(0x2102)
@@ -336,16 +339,37 @@ def test_safe_signer_containment_proves_the_d1_via(db_session, protocol):
     gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(subject.id,)))
     db_session.flush()
 
-    assert subject.protocol_id == protocol.id
-    fact = _witness(db_session, subject, protocol, WITNESS_RULE_W3_CONTROL, "d1").evidence["principal_fact"]
-    assert fact["kind"] == "safe_owner"
-    assert fact["safe_address"] == safe.lower()
+    assert subject.protocol_id is None
+    # The ladder's own reading is unchanged: the signer is still a §3.3
+    # perimeter fact for deployer classification.
+    assert gate._perimeter_fact(db_session, protocol_id=protocol.id, address=signer) is not None
 
 
-def test_a_via_that_is_itself_a_member_is_decided_by_its_own_witnesses(db_session, protocol):
-    """D2 non-transitivity survives the new arm: a D2-only member controller is
-    normally recorded as its member's principal too, so letting the
-    perimeter-principal arm speak for a MEMBER would dissolve §3.2."""
+@pytest.mark.parametrize("resolved_type", ["safe", "timelock", "contract"])
+def test_only_an_eoa_principal_proves_d1_transitivity(db_session, protocol, resolved_type):
+    """Monotonicity is the reason: a contract-typed via can itself become a
+    member later, and §3.2 decides a member's transitivity from its OWN
+    witnesses. Letting the principal arm also speak for it would let a
+    promotion WITHDRAW transitivity and oscillate the fixpoint — and would
+    license every ward a shared operator happens to control."""
+    member = _anchored_member(db_session, protocol, ADDR(0x2400))
+    operator = ADDR(0x2401)
+    _principal(db_session, member, operator, resolved_type=resolved_type)
+    ward = _contract(db_session, ADDR(0x2402), nominated=protocol.id)
+    _caller_gate(db_session, ward, operator)
+
+    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(ward.id,)))
+    db_session.flush()
+    assert ward.protocol_id is None
+    assert (
+        gate._via_transitivity(db_session, protocol_id=protocol.id, via_address=operator, chain_key="ethereum") is None
+    )
+
+
+def test_d2_only_member_recorded_as_a_principal_still_licenses_nothing(db_session, protocol):
+    """D2 non-transitivity survives the new arm. A D2-only member controller is
+    normally recorded as its member's principal too, so the principal arm must
+    not be a second door into transitivity for it."""
     anchor = _anchored_member(db_session, protocol, ADDR(0x2300))
     ops_safe = _d2_only_member(db_session, protocol, ADDR(0x2301), controls=anchor)
     _principal(db_session, anchor, ops_safe.address, resolved_type="safe", details={"owners": [ADDR(0x2302)]})
@@ -370,7 +394,7 @@ def test_d1_via_controlling_a_foreign_row_is_refused(db_session, protocol):
     db_session.flush()
     member = _anchored_member(db_session, protocol, ADDR(0x2200))
     operator = ADDR(0x2201)
-    _principal(db_session, member, operator, resolved_type="safe")
+    _principal(db_session, member, operator, resolved_type="eoa")
     foreign = _contract(db_session, ADDR(0x2202), protocol_id=other.id, nominated=other.id)
     _caller_gate(db_session, foreign, operator)
 
@@ -688,3 +712,28 @@ def test_closest_miss_names_a_non_anchoring_factory(db_session, protocol):
         "missing": "factory_not_anchoring_member",
         "factory": outsider.address,
     }
+
+
+def test_settling_is_idempotent_under_the_principal_arms(db_session, protocol):
+    """A second evaluation over unchanged evidence must promote and demote
+    nothing. A non-monotone transitivity arm shows up here first: it makes a
+    row oscillate between promoted and demoted instead of settling."""
+    anchor = _anchored_member(db_session, protocol, ADDR(0x7300))
+    timelock = _contract(db_session, ADDR(0x7301), nominated=protocol.id)
+    _principal(db_session, anchor, timelock.address, resolved_type="timelock")
+    owner_eoa = ADDR(0x7302)
+    _principal(db_session, anchor, owner_eoa, resolved_type="eoa")
+    ward = _contract(db_session, ADDR(0x7303), nominated=protocol.id)
+    _caller_gate(db_session, ward, owner_eoa)
+    spawn = _contract(db_session, ADDR(0x7304), nominated=protocol.id, factory=ward.address)
+
+    ids = (timelock.id, ward.id, spawn.id)
+    first = gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=ids))
+    db_session.flush()
+    assert set(first.promoted_contract_ids) == set(ids)
+
+    second = gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=ids))
+    db_session.flush()
+    assert second.promoted_contract_ids == ()
+    assert second.demoted_contract_ids == ()
+    assert all(session_row.protocol_id == protocol.id for session_row in (timelock, ward, spawn))
