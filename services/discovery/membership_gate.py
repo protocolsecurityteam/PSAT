@@ -2309,9 +2309,17 @@ def evaluate_committed(
 ) -> PromotionResult | None:
     """Event-2 hook wrapper: ``evaluate`` + commit, best-effort. A failure
     rolls back and returns None — membership settles at a later event or via
-    reconcile; a pipeline stage never fails on the gate."""
+    reconcile; a pipeline stage never fails on the gate.
+
+    Net-new members also enqueue a selection pass for their protocol: this
+    wrapper is the WORKER entry point, so the CLI/migration paths (which call
+    ``evaluate`` and commit themselves) enqueue nothing."""
     try:
         result = evaluate(session, facts_delta, deployer_enumerator=deployer_enumerator)
+        if result.promoted_contract_ids:
+            from services.discovery.selection_enqueue import enqueue_selection_for_promotions
+
+            enqueue_selection_for_promotions(session, result.promoted_contract_ids, reason="membership_promotion")
         session.commit()
     except Exception as exc:
         session.rollback()

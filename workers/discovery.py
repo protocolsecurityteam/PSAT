@@ -22,7 +22,6 @@ from db.models import (
     ContractCreationWitness,
     Job,
     JobStage,
-    JobStatus,
     OpsKv,
     Protocol,
     ProtocolDeployer,
@@ -61,6 +60,7 @@ from services.discovery.perimeter import (
 )
 from services.discovery.probes import fetch_creations
 from services.discovery.protocol_resolver import pick_family_slug, resolve_protocol
+from services.discovery.selection_enqueue import enqueue_selection_for_promotions, enqueue_selection_pass
 from utils.chains import (
     UnknownChainError,
     canonical_chain,
@@ -418,6 +418,9 @@ def run_probe_pass(session: Session, protocol_id: int) -> gate.PromotionResult:
         recheck_contract_ids=tuple(sorted({c.id for c in seeded if c.protocol_id is None})),
     )
     cascade = gate.evaluate(session, delta, deployer_enumerator=session_deployer_enumerator(session))
+    enqueue_selection_for_promotions(
+        session, tuple(promoted) + cascade.promoted_contract_ids, reason="membership_promotion"
+    )
     session.commit()
     _consume_reprobes(
         session,
@@ -517,6 +520,11 @@ def _gate_intake(session: Session, job: Job, contract: Contract | None, request:
     )
     if delta != gate.FactsDelta():
         cascade = gate.evaluate(session, delta, deployer_enumerator=session_deployer_enumerator(session))
+        enqueue_selection_for_promotions(
+            session,
+            ((contract.id,) if promoted else ()) + cascade.promoted_contract_ids,
+            reason="membership_promotion",
+        )
         session.commit()
         reprobe_sink.update(cascade.reprobe_contract_ids)
     _consume_reprobes(session, sorted(reprobe_sink), context=f"gate_intake:{job.id}", exclude={contract.id})
@@ -549,25 +557,9 @@ def _sweep_candidates(session: Session, chain_id: int) -> list[Contract]:
 
 
 def _enqueue_selection_pass(session: Session, protocol_id: int) -> None:
-    """One selection pass per protocol; a queued/processing pass already covers
-    the new members (the selection worker ranks the full unanalyzed set)."""
-    pending = session.execute(
-        select(Job.id)
-        .where(
-            Job.stage == JobStage.selection,
-            Job.status.in_([JobStatus.queued, JobStatus.processing]),
-            Job.protocol_id == protocol_id,
-        )
-        .limit(1)
-    ).first()
-    if pending is not None:
-        return
-    create_job(
-        session,
-        {"protocol_id": protocol_id, "name": f"chain_enable_selection_{protocol_id}"},
-        initial_stage=JobStage.selection,
-    )
-    logger.info("chain-enable sweep enqueued selection pass", extra={"protocol_id": protocol_id})
+    """Chain-enable sweep's own enqueue (§3.4 event 4). Shares the dedupe with
+    the promotion-triggered path so a sweep and a promotion never double-fire."""
+    enqueue_selection_pass(session, protocol_id, reason="chain_enable")
 
 
 def run_chain_enable_sweep(session: Session) -> None:
