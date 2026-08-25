@@ -61,6 +61,7 @@ from db.models import (
     ContractMembershipWitness,
     Job,
     Protocol,
+    ProtocolDeployer,
     SessionLocal,
 )
 from scripts.membership_reporting import active_witness_rules, closest_miss, format_row_line
@@ -101,16 +102,27 @@ class BudgetedEnumerator:
     """The shared worker-context enumerator, capped. Past the budget every
     verdict is (nothing, incomplete) — which can never license Class B — and
     the refused EOA is RECORDED so the report can name the budget, not the
-    chain, as the missing piece (item: budget honesty)."""
+    chain, as the missing piece (item: budget honesty). Results are memoized,
+    so one EOA costs one budget charge across both evaluate passes.
+
+    ``budget`` must be ≥ 1: a zero budget means "no enumerator" and is
+    expressed by passing ``enumerator=None`` (the CLI's ``0`` does exactly
+    that), never by an enumerator that refuses everything."""
 
     def __init__(self, session: Session, budget: int) -> None:
+        if budget < 1:
+            raise ValueError("budget must be >= 1; enumeration is disabled by passing enumerator=None")
         self._inner = session_deployer_enumerator(session)
+        self._cache: dict[str, tuple[list[str], bool]] = {}
         self.budget = budget
         self.used = 0
         self.exhausted: set[str] = set()
 
     def __call__(self, deployer: str) -> tuple[list[str], bool]:
         addr = deployer.lower()
+        cached = self._cache.get(addr)
+        if cached is not None:
+            return cached
         if self.used >= self.budget:
             self.exhausted.add(addr)
             logger.warning(
@@ -120,7 +132,9 @@ class BudgetedEnumerator:
             return [], False
         self.used += 1
         history, complete = self._inner(addr)
-        return list(history), complete
+        result = (list(history), complete)
+        self._cache[addr] = result
+        return result
 
 
 def _target_rows(session: Session, protocol_ids: list[int] | None) -> list[Contract]:
@@ -305,10 +319,26 @@ def run_reearn(
         defer_registry_loss_revocation=True,
     )
     # Pass 2: the normal gate over the settled world — a loss that persists
-    # here is real and revokes for real.
+    # here is real and revokes for real. Every standing registry EOA of the
+    # touched protocols is named, so the settled-world ladder check runs even
+    # when no candidate happens to name the EOA.
+    touched_protocols = sorted(
+        {c.protocol_id for c in rows if c.protocol_id is not None}
+        | {c.nominated_protocol_id for c in rows if c.nominated_protocol_id is not None}
+    )
+    standing_registry_eoas = tuple(
+        sorted(
+            address.lower()
+            for (address,) in session.execute(
+                select(ProtocolDeployer.address)
+                .where(ProtocolDeployer.protocol_id.in_(touched_protocols), ProtocolDeployer.revoked_at.is_(None))
+                .distinct()
+            )
+        )
+    )
     gate.evaluate(
         session,
-        gate.FactsDelta(recheck_contract_ids=candidate_ids),
+        gate.FactsDelta(recheck_contract_ids=candidate_ids, changed_deployer_addresses=standing_registry_eoas),
         deployer_enumerator=enumerator,
     )
 

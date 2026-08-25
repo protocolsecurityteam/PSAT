@@ -349,20 +349,52 @@ def _registry_state(session, registry_id: int) -> tuple:
 
 
 def test_rerun_without_enumerator_keeps_w4_members_and_registry(db_session):
-    # Reviewer repro: the cleared-stamp world must not mint loss verdicts —
-    # a re-run with no enumerator demotes nothing and touches no registry row.
+    # The cleared-stamp world must not mint loss verdicts — a re-run with no
+    # enumerator demotes nothing and touches no registry row. The Class A
+    # anchor is GENUINE in the settled world (a re-earning member carries the
+    # perimeter controller value), so pass 2's settled-world ladder check
+    # confirms the row rather than revoking it.
     protocol = _protocol(db_session)
     deployer = ADDR(0xE1)
+    anchor = _inventory_contract(db_session, protocol, ADDR(0x26), protocol_id=protocol.id)
+    _code_fact(db_session, anchor.address)
+    db_session.add(ControllerValue(contract_id=anchor.id, controller_id="owner", value=deployer))
     registry, member = _w4_member_fixture(db_session, protocol, deployer, ADDR(16))
     before = _registry_state(db_session, registry.id)
 
     report = run_reearn(db_session, protocol_ids=[protocol.id], enumerator=None)
 
-    assert member.protocol_id == protocol.id
+    assert member.protocol_id == protocol.id and anchor.protocol_id == protocol.id
     assert report.counts["demote"] == 0
     assert _registry_state(db_session, registry.id) == before
     w4 = [w for w in _witness_rows(db_session, member.id) if w.rule == WITNESS_RULE_W4_DEPLOYER]
     assert w4 and all(w.revoked_at is None for w in w4)
+
+
+def test_pass_two_revokes_deferred_row_with_no_candidate_naming_eoa(db_session):
+    # Reviewer repro (NEW-1): the Class A row is anchored on a no-seed member
+    # A; W4 member M re-earns through the deferred row in pass 1; NO candidate
+    # names the EOA. Pass 2 names every standing registry EOA of the touched
+    # protocols itself, so the settled-world loss still revokes and M demotes
+    # — and reconcile sees zero drift on the result.
+    protocol = _protocol(db_session)
+    deployer = ADDR(0xE6)
+    anchor = _contract(db_session, ADDR(0x27), protocol_id=protocol.id)  # no seed: will not re-earn
+    _code_fact(db_session, anchor.address)
+    db_session.add(ControllerValue(contract_id=anchor.id, controller_id="owner", value=deployer))
+    registry, member = _w4_member_fixture(db_session, protocol, deployer, ADDR(0x28))
+
+    report = run_reearn(db_session, protocol_ids=[protocol.id], enumerator=None)
+
+    registry_row = db_session.get(ProtocolDeployer, registry.id)
+    assert registry_row is not None and registry_row.revoked_at is not None
+    assert registry_row.revocation_reason == "perimeter_fact_lost"
+    assert anchor.protocol_id is None and member.protocol_id is None
+    demoted_ids = {c.contract_id for c in report.changes if c.kind == "demote"}
+    assert {anchor.id, member.id} <= demoted_ids
+    w4 = [w for w in _witness_rows(db_session, member.id) if w.rule == WITNESS_RULE_W4_DEPLOYER]
+    assert w4 and all(w.revoked_at is not None for w in w4)
+    assert reconcile_audit(db_session) == []
 
 
 def test_genuine_registry_loss_revokes_in_pass_two(db_session):
@@ -426,26 +458,51 @@ def test_apply_idempotent_with_registry_fixture(db_session):
 # ---------------------------------------------------------------------------
 
 
-def test_budget_exhaustion_recorded_and_named_in_closest_miss(db_session):
+def test_budget_zero_is_impossible_use_none_instead(db_session):
+    import pytest
+
+    with pytest.raises(ValueError):
+        BudgetedEnumerator(db_session, 0)
+
+
+def test_budget_exhaustion_recorded_named_and_memoized(db_session):
+    # Two EOAs each needing an enumeration, budget for one: the first (sorted)
+    # EOA is charged once ACROSS BOTH PASSES (memoized), the second is refused
+    # and recorded; rows demoted for the refusal carry the budget token.
     protocol = _protocol(db_session)
-    deployer = ADDR(0xE4)
-    for n in (22, 23):  # two W5-corroborated members deployed by the EOA
+    first_eoa = ADDR(0xE4)  # sorts before second_eoa
+    second_eoa = ADDR(0xE7)
+    for n, eoa in ((22, first_eoa), (23, first_eoa), (0x2A, second_eoa), (0x2B, second_eoa)):
         row = _inventory_contract(
-            db_session, protocol, ADDR(n), protocol_id=protocol.id, nominated_protocol_id=protocol.id, deployer=deployer
+            db_session, protocol, ADDR(n), protocol_id=protocol.id, nominated_protocol_id=protocol.id, deployer=eoa
         )
         _code_fact(db_session, row.address)
-    doomed = _contract(db_session, ADDR(24), protocol_id=protocol.id, deployer=deployer)
-    _code_fact(db_session, doomed.address, tx=_TX)
+    doomed_first = _contract(db_session, ADDR(24), protocol_id=protocol.id, deployer=first_eoa)
+    _code_fact(db_session, doomed_first.address, tx=_TX)
+    doomed_second = _contract(db_session, ADDR(0x2C), protocol_id=protocol.id, deployer=second_eoa)
+    _code_fact(db_session, doomed_second.address, tx=_TX)
 
-    enumerator = BudgetedEnumerator(db_session, 0)
+    enumerator = BudgetedEnumerator(db_session, 1)
+    inner_calls: list[str] = []
+
+    def fake_inner(addr: str) -> tuple[list[str], bool]:
+        inner_calls.append(addr)
+        return [], False  # incomplete: never licenses Class B, never hits the wire
+
+    enumerator._inner = fake_inner
     report = run_reearn(db_session, protocol_ids=[protocol.id], enumerator=enumerator)
 
-    assert enumerator.exhausted == {deployer}
+    # NEW-2: one charge for the first EOA despite two evaluate passes.
+    assert inner_calls == [first_eoa]
+    assert enumerator.used == 1
+    assert enumerator.exhausted == {second_eoa}
     assert report.counts["enumeration_budget_exhausted_eoas"] == 1
-    demotes = [c for c in report.changes if c.kind == "demote" and c.contract_id == doomed.id]
-    assert demotes and demotes[0].detail["missing"] == "enumeration_budget_exhausted"
+    first_demote = next(c for c in report.changes if c.kind == "demote" and c.contract_id == doomed_first.id)
+    assert first_demote.detail["missing"] == "no_complete_enumeration"
+    second_demote = next(c for c in report.changes if c.kind == "demote" and c.contract_id == doomed_second.id)
+    assert second_demote.detail["missing"] == "enumeration_budget_exhausted"
     # The shared closest-miss helper names the budget too.
-    miss = closest_miss(db_session, doomed, protocol.id, budget_exhausted_deployers=enumerator.exhausted)
+    miss = closest_miss(db_session, doomed_second, protocol.id, budget_exhausted_deployers=enumerator.exhausted)
     assert miss["missing"] == "enumeration_budget_exhausted"
 
 
