@@ -40,6 +40,7 @@ from db.models import (
     ControllerValue,
     EffectiveFunction,
     FunctionPrincipal,
+    Protocol,
     ProtocolDeployer,
     UpgradeEvent,
 )
@@ -59,6 +60,9 @@ MembershipState = Literal["member", "candidate", "pruned", "unclaimed"]
 #: One reason string for both dirty queues: a promotion/demotion changed the
 #: member set that enrollment and the score fold read (spec §5.2).
 MEMBERSHIP_DIRTY_REASON = "membership_change"
+
+#: The DefiLlama worker's ``discovery_sources`` tag — the W6 provenance key.
+DEFILLAMA_SOURCE_TAG = "defillama"
 
 # W2 edge kinds — each names a verified structural link against STORED
 # resolution, never a bare ``relationship_type`` (spec §3.2, invariant 6).
@@ -421,6 +425,55 @@ def nominate(
             evidence=w5_evidence(actor=human_assertion.actor, asserted_at=human_assertion.asserted_at),
         )
         promote(session, contract=contract, protocol_id=protocol_id)
+
+
+def seed_llama_witness(session: Session, *, contract: Contract) -> bool:
+    """W6 seed for the contract's claimed protocol (spec §3.2): the
+    ``defillama`` source tag plus a code-present probe on the row's own chain.
+    The ONE producer of W6 rows — the live probe/intake paths and the re-earn
+    migration both mint through here. A row already carrying a W6 row, active
+    OR revoked, is left alone: re-observing the same listing is not new
+    evidence, so a revoked seed (§3.2 revocation story) is never re-armed."""
+    protocol_id = contract.protocol_id if contract.protocol_id is not None else contract.nominated_protocol_id
+    if protocol_id is None or DEFILLAMA_SOURCE_TAG not in (contract.discovery_sources or []):
+        return False
+    chain_id = chain_id_for_chain_name(contract.chain)
+    if chain_id is None or not contract.address:
+        return False
+    code_row = session.get(ContractCreationWitness, (chain_id, contract.address.lower()))
+    if code_row is None or code_row.code_probe_block is None or code_row.code_absent_at_probe:
+        return False
+    if contract.id is None:
+        session.flush()
+    existing = session.execute(
+        select(ContractMembershipWitness.id)
+        .where(
+            ContractMembershipWitness.contract_id == contract.id,
+            ContractMembershipWitness.protocol_id == protocol_id,
+            ContractMembershipWitness.rule == WITNESS_RULE_W6_LLAMA_SEED,
+        )
+        .limit(1)
+    ).first()
+    if existing is not None:
+        return False
+    protocol = session.get(Protocol, protocol_id)
+    if protocol is None:
+        return False
+    # Adapter provenance: the DefiLlama family slug when resolved, else the
+    # protocol name the adapter scan matched on.
+    adapter_slug = protocol.canonical_slug or protocol.name
+    write_witness(
+        session,
+        contract_id=contract.id,
+        protocol_id=protocol_id,
+        rule=WITNESS_RULE_W6_LLAMA_SEED,
+        evidence=w6_evidence(
+            adapter_slug=adapter_slug,
+            chain_id=chain_id,
+            code_probe_block=code_row.code_probe_block,
+        ),
+    )
+    return True
 
 
 # ---------------------------------------------------------------------------

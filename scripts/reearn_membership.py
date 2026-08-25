@@ -55,17 +55,13 @@ from sqlalchemy.orm import Session
 from db.models import (
     ADMITTING_WITNESS_RULES,
     WITNESS_RULE_W5_HUMAN,
-    WITNESS_RULE_W6_LLAMA_SEED,
     Contract,
-    ContractCreationWitness,
     ContractMembershipWitness,
     Job,
-    Protocol,
     ProtocolDeployer,
     SessionLocal,
 )
 from scripts.membership_reporting import active_witness_rules, closest_miss, format_row_line
-from services.clients.rpc import chain_id_for_chain_name
 from services.discovery import membership_gate as gate
 from services.discovery.deployer_enumeration import session_deployer_enumerator
 from services.discovery.membership_gate import _witness_fact_holds
@@ -216,44 +212,11 @@ def convert_inventory_to_w5(
 
 
 def seed_w6(session: Session, rows: list[Contract]) -> list[int]:
-    """§5.3.3(b): W6 seeds for defillama-sourced rows that pass W1. The W6
-    evidence shape itself requires the code-probe facts (invariant 3), so a
-    row without a code-present probe cannot be seeded."""
-    seeded: list[int] = []
-    protocols: dict[int, Protocol | None] = {}
-    for contract in rows:
-        protocol_id = _claimed_protocol(contract)
-        if protocol_id is None or "defillama" not in (contract.discovery_sources or []):
-            continue
-        chain_id = chain_id_for_chain_name(contract.chain)
-        if chain_id is None or not contract.address:
-            continue
-        code_row = session.get(ContractCreationWitness, (chain_id, contract.address.lower()))
-        if code_row is None or code_row.code_probe_block is None or code_row.code_absent_at_probe:
-            continue
-        if _has_witness(session, contract_id=contract.id, protocol_id=protocol_id, rule=WITNESS_RULE_W6_LLAMA_SEED):
-            continue
-        if protocol_id not in protocols:
-            protocols[protocol_id] = session.get(Protocol, protocol_id)
-        protocol = protocols[protocol_id]
-        if protocol is None:
-            continue
-        # Adapter provenance: the DefiLlama family slug when resolved, else
-        # the protocol name the adapter scan matched on.
-        adapter_slug = protocol.canonical_slug or protocol.name
-        gate.write_witness(
-            session,
-            contract_id=contract.id,
-            protocol_id=protocol_id,
-            rule=WITNESS_RULE_W6_LLAMA_SEED,
-            evidence=gate.w6_evidence(
-                adapter_slug=adapter_slug,
-                chain_id=chain_id,
-                code_probe_block=code_row.code_probe_block,
-            ),
-        )
-        seeded.append(contract.id)
-    return seeded
+    """§5.3.3(b): W6 seeds for defillama-sourced rows that pass W1, minted
+    through the gate's single W6 producer (``gate.seed_llama_witness``). The
+    W6 evidence shape itself requires the code-probe facts (invariant 3), so
+    a row without a code-present probe cannot be seeded."""
+    return [contract.id for contract in rows if gate.seed_llama_witness(session, contract=contract)]
 
 
 #: (protocol_id, nominated_protocol_id, state, address, chain) per claimed row.

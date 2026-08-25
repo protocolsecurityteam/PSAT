@@ -26,6 +26,7 @@ from db.queue import (
     store_artifact,
 )
 from services.crawlers.defillama.scan import scan_protocol
+from services.discovery.membership_gate import DEFILLAMA_SOURCE_TAG
 from services.discovery.protocol_resolver import pick_family_slug, resolve_protocol
 from utils.chains import UnknownChainError, chain_by_id
 from utils.logging import log_timed_phase, record_stage_metric
@@ -139,7 +140,7 @@ class DefiLlamaWorker(BaseWorker):
                 {
                     "address": normalized,
                     "chain": chain,
-                    "new_sources": ["defillama"],
+                    "new_sources": [DEFILLAMA_SOURCE_TAG],
                 }
             )
         bulk_upsert_discovered_contracts(

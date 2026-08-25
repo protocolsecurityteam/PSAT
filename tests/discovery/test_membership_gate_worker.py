@@ -17,6 +17,7 @@ from db.models import (
     WITNESS_RULE_W1_CODE,
     WITNESS_RULE_W2_STRUCTURAL,
     WITNESS_RULE_W4_DEPLOYER,
+    WITNESS_RULE_W6_LLAMA_SEED,
     Contract,
     ContractCreationWitness,
     ContractMembershipWitness,
@@ -68,6 +69,7 @@ def _contract(
     nominated_protocol_id: int | None = None,
     deployer: str | None = None,
     implementation: str | None = None,
+    discovery_sources: list[str] | None = None,
 ) -> Contract:
     row = Contract(
         address=address.lower(),
@@ -76,6 +78,7 @@ def _contract(
         nominated_protocol_id=nominated_protocol_id,
         deployer=deployer,
         implementation=implementation,
+        discovery_sources=discovery_sources,
     )
     session.add(row)
     session.flush()
@@ -813,6 +816,101 @@ def test_probe_pass_reprobes_renominated_pruned_rows(db_session, monkeypatch, er
     witness = db_session.get(ContractCreationWitness, (1, pruned.address))
     assert witness is not None and witness.code_absent_at_probe is False
     assert gate.resolve_membership_state(db_session, pruned) == "candidate"
+
+
+# ---------------------------------------------------------------------------
+# W6 live producer (spec §3.2 W6): defillama tag + W1 mint the seed witness
+# ---------------------------------------------------------------------------
+
+
+def _w6_rows(session, contract_id: int):
+    return (
+        session.query(ContractMembershipWitness)
+        .filter_by(contract_id=contract_id, rule=WITNESS_RULE_W6_LLAMA_SEED)
+        .all()
+    )
+
+
+def test_probe_pass_seeds_w6_and_promotes_defillama_nomination(db_session, monkeypatch, erpc_env):
+    protocol = _protocol(db_session)
+    candidate = _contract(db_session, ADDR(0x2F0), nominated_protocol_id=protocol.id, discovery_sources=["defillama"])
+    db_session.flush()
+    _stub_probe_wire(monkeypatch)
+
+    result = run_probe_pass(db_session, protocol.id)
+
+    (w6,) = _w6_rows(db_session, candidate.id)
+    assert w6.revoked_at is None
+    assert w6.evidence == {"adapter_slug": protocol.name, "chain_id": 1, "code_probe_block": 120}
+    assert candidate.protocol_id == protocol.id
+    assert candidate.id in result.promoted_contract_ids
+
+
+def test_probe_pass_no_w6_without_defillama_tag(db_session, monkeypatch, erpc_env):
+    protocol = _protocol(db_session)
+    candidate = _contract(
+        db_session, ADDR(0x2F1), nominated_protocol_id=protocol.id, discovery_sources=["exa_deep_research"]
+    )
+    db_session.flush()
+    _stub_probe_wire(monkeypatch)
+
+    run_probe_pass(db_session, protocol.id)
+
+    assert _w6_rows(db_session, candidate.id) == []
+    # W1 alone admits nothing.
+    assert candidate.protocol_id is None
+
+
+def test_probe_pass_no_w6_when_defillama_nomination_fails_w1(db_session, monkeypatch, erpc_env):
+    protocol = _protocol(db_session)
+    candidate = _contract(db_session, ADDR(0x2F2), nominated_protocol_id=protocol.id, discovery_sources=["defillama"])
+    db_session.flush()
+    _stub_probe_wire(monkeypatch, code="0x")
+
+    run_probe_pass(db_session, protocol.id)
+
+    assert _w6_rows(db_session, candidate.id) == []
+    assert candidate.protocol_id is None
+    assert gate.resolve_membership_state(db_session, candidate) == "pruned"
+
+
+def test_gate_intake_seeds_w6_for_already_probed_defillama_row(db_session, monkeypatch, erpc_env):
+    # A row probed before the defillama tag arrived: intake must still seed
+    # W6 from the persisted code fact, not only from a fresh probe.
+    protocol = _protocol(db_session)
+    candidate = _contract(db_session, ADDR(0x2F3), nominated_protocol_id=protocol.id, discovery_sources=["defillama"])
+    db_session.add(
+        ContractProbeAttempt(contract_id=candidate.id, chain_id=1, block_number=90, results={"status": "probed"})
+    )
+    db_session.add(
+        ContractCreationWitness(chain_id=1, address=candidate.address, code_probe_block=90, code_absent_at_probe=False)
+    )
+    db_session.flush()
+    _stub_probe_wire(monkeypatch)
+
+    job = _job(db_session, protocol_id=protocol.id, address=candidate.address)
+    _gate_intake(db_session, job, candidate, {"discovery_sources": ["defillama"]})
+
+    (w6,) = _w6_rows(db_session, candidate.id)
+    assert w6.evidence["code_probe_block"] == 90
+    assert candidate.protocol_id == protocol.id
+
+
+def test_seed_llama_witness_never_rearms_revoked_seed(db_session):
+    protocol = _protocol(db_session)
+    candidate = _contract(db_session, ADDR(0x2F4), nominated_protocol_id=protocol.id, discovery_sources=["defillama"])
+    db_session.add(
+        ContractCreationWitness(chain_id=1, address=candidate.address, code_probe_block=90, code_absent_at_probe=False)
+    )
+    db_session.flush()
+    assert gate.seed_llama_witness(db_session, contract=candidate) is True
+    (w6,) = _w6_rows(db_session, candidate.id)
+    gate.revoke_witness(db_session, w6, reason="listing_hijack")
+    db_session.flush()
+
+    assert gate.seed_llama_witness(db_session, contract=candidate) is False
+    (w6_after,) = _w6_rows(db_session, candidate.id)
+    assert w6_after.revoked_at is not None
 
 
 # ---------------------------------------------------------------------------

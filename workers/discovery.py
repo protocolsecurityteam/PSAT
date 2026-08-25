@@ -329,6 +329,7 @@ def _consume_reprobes(
             result = gate.probe(session, contract)
             probed.append(contract_id)
             record_code_witness(session, contract=contract, protocol_id=protocol_id, probe_result=result)
+            gate.seed_llama_witness(session, contract=contract)
             resolved.update(result.resolved_addresses)
         session.commit()
     except Exception as exc:
@@ -365,25 +366,32 @@ def run_probe_pass(session: Session, protocol_id: int) -> gate.PromotionResult:
         ).scalars()
     )
     probed: list[Contract] = []
+    seeded: list[Contract] = []
     resolved: set[str] = set()
     for contract in candidates:
         # Revocation staleness re-targets demoted members whose completed
         # attempt ``needs_probe`` would skip (invariant 8 pickup for
         # request/queue-context demotions, e.g. the protocol-merge cascade).
-        if not needs_probe(session, contract) and not probe_predates_revocation(session, contract):
-            continue
-        result = gate.probe(session, contract)
-        probed.append(contract)
-        record_code_witness(session, contract=contract, protocol_id=protocol_id, probe_result=result)
-        resolved.update(result.resolved_addresses)
+        if needs_probe(session, contract) or probe_predates_revocation(session, contract):
+            result = gate.probe(session, contract)
+            probed.append(contract)
+            record_code_witness(session, contract=contract, protocol_id=protocol_id, probe_result=result)
+            resolved.update(result.resolved_addresses)
+        # W6 rides on the persisted code fact, so an already-probed candidate
+        # a fresh defillama nomination just tagged is seeded here too.
+        if gate.seed_llama_witness(session, contract=contract):
+            seeded.append(contract)
     promoted: list[int] = []
     for contract in probed:
         if gate.promote(session, contract=contract, protocol_id=protocol_id):
             promoted.append(contract.id)
     session.commit()
+    # Seeded-but-unprobed rows carry no W1 witness row yet; the fixpoint's
+    # admission binds W1 from the persisted code probe on recheck.
     delta = gate.FactsDelta(
         new_member_contract_ids=tuple(promoted),
         new_edge_addresses=tuple(sorted(resolved)),
+        recheck_contract_ids=tuple(sorted({c.id for c in seeded if c.protocol_id is None})),
     )
     cascade = gate.evaluate(session, delta, deployer_enumerator=session_deployer_enumerator(session))
     session.commit()
@@ -468,16 +476,20 @@ def _gate_intake(session: Session, job: Job, contract: Contract | None, request:
     if needs_probe(session, contract):
         result = gate.probe(session, contract)
         record_code_witness(session, contract=contract, protocol_id=protocol_id, probe_result=result)
+    seeded = gate.seed_llama_witness(session, contract=contract)
 
     promoted = gate.promote(session, contract=contract, protocol_id=protocol_id)
     session.commit()
 
     # A demote-only registration (registry_row None, sink non-empty) is still
-    # a deployer fact change the cascade must see.
+    # a deployer fact change the cascade must see. A W6 seeded onto an
+    # already-probed row has no W1 witness row yet; the fixpoint's admission
+    # binds W1 from the persisted code probe on recheck.
     deployer_changed = deployer is not None and (registry_row is not None or bool(reprobe_sink))
     delta = gate.FactsDelta(
         new_member_contract_ids=(contract.id,) if promoted else (),
         changed_deployer_addresses=(deployer,) if deployer_changed and deployer else (),
+        recheck_contract_ids=(contract.id,) if seeded and not promoted else (),
     )
     if delta != gate.FactsDelta():
         cascade = gate.evaluate(session, delta, deployer_enumerator=session_deployer_enumerator(session))
