@@ -1611,19 +1611,10 @@ def evaluate(
     facts_delta: FactsDelta,
     *,
     deployer_enumerator: DeployerEnumerator | None = None,
-    defer_registry_loss_revocation: bool = False,
 ) -> PromotionResult:
     """Targeted gate check for one fact delta (spec §3.4 events 2–3):
     indexed candidate lookup, then the stratified fixpoint. Mutates the
     session without committing — the caller commits.
-
-    ``defer_registry_loss_revocation`` (re-earn pass 1 only): suppresses the
-    EVIDENCE-LOSS registry revocations (``perimeter_fact_lost`` /
-    ``corroboration_lost``) that a transiently-cleared member set fabricates —
-    a mid-migration world where no stamps exist proves nothing lost. Genuine
-    POSITIVE counterevidence (``cross_protocol_collision``,
-    ``foreign_or_unknown_creations``) still revokes. A normal pass over the
-    settled world must follow so a loss that persists revokes for real.
 
     ``changed_deployer_addresses`` also forces the §3.3 ladder re-check of any
     STANDING registry row for those EOAs — a registry row is re-examined when
@@ -1637,7 +1628,6 @@ def evaluate(
         dirty_via_addresses=sorted(dirty_vias),
         changed_deployer_addresses=facts_delta.changed_deployer_addresses,
         deployer_enumerator=deployer_enumerator,
-        defer_registry_loss_revocation=defer_registry_loss_revocation,
     )
     return PromotionResult(
         targeted_contract_ids=tuple(sorted(targeted)),
@@ -1694,7 +1684,6 @@ def _stratified_fixpoint(
     dirty_via_addresses: Sequence[str] = (),
     changed_deployer_addresses: Sequence[str] = (),
     deployer_enumerator: DeployerEnumerator | None = None,
-    defer_registry_loss_revocation: bool = False,
 ) -> PromotionResult:
     """Stratified fixpoint (spec §3.4 event 3, invariants 8+9). Each round
     runs fixed strata — (i) revocations/invalidations to quiescence,
@@ -1745,7 +1734,6 @@ def _stratified_fixpoint(
             deployer_enumerator,
             enum_cache,
             extra_pairs=extra_pairs,
-            defer_loss_revocation=defer_registry_loss_revocation,
         )
         if recl_changed:
             changed = True
@@ -1850,16 +1838,13 @@ def _reclassify_deployers(
     enum_cache: dict[str, tuple[Sequence[str], bool]],
     *,
     extra_pairs: set[tuple[int, str]] | None = None,
-    defer_loss_revocation: bool = False,
 ) -> tuple[bool, set[int], DemotionResult]:
     """Stratum (ii): re-run the §3.3 ladder for every (protocol, deployer)
     pair the pending candidates name, plus ``extra_pairs`` (standing registry
     rows pulled in by a named deployer or a shrunken member set). Registers
     fresh A/B verdicts; revokes an existing row only on POSITIVE
     counterevidence (collision, perimeter fact lost, corroboration lost) — an
-    absent enumeration never revokes. ``defer_loss_revocation`` additionally
-    holds back the two evidence-LOSS reasons (see ``evaluate``); collision and
-    fresh foreign creations still revoke."""
+    absent enumeration never revokes."""
     extra = set(extra_pairs or ())
     if not pending and not extra:
         return False, set(), DemotionResult()
@@ -1973,8 +1958,6 @@ def _reclassify_deployers(
                 and len(_nonlineage_corroborating_member_ids(session, protocol_id=protocol_id, address=deployer)) < 2
             ):
                 reason = "corroboration_lost"
-            if defer_loss_revocation and reason in ("perimeter_fact_lost", "corroboration_lost"):
-                reason = None
             if reason is not None:
                 result = demote(session, deployer_row=existing, reason=reason)
                 changed = True

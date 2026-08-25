@@ -1,5 +1,5 @@
-"""Shared verdict/report helpers for the membership operator CLIs
-(DISCOVERY_MEMBERSHIP_GATE_SPEC.md §5.3.3, §5.4).
+"""Verdict/report helpers for the membership reconcile CLI
+(DISCOVERY_MEMBERSHIP_GATE_SPEC.md §5.4).
 
 Everything here re-uses the gate's own verification internals — the verdict a
 CLI reports is the verdict ``membership_gate`` would reach, never a fork of it
@@ -51,18 +51,10 @@ def active_witness_rules(session: Session, *, contract_id: int, protocol_id: int
     )
 
 
-def closest_miss(
-    session: Session,
-    contract: Contract,
-    protocol_id: int,
-    *,
-    budget_exhausted_deployers: set[str] | frozenset[str] | None = None,
-) -> dict[str, Any]:
+def closest_miss(session: Session, contract: Contract, protocol_id: int) -> dict[str, Any]:
     """Which witness rule came nearest and what named piece of evidence is
     missing (invariant 5's skip+log posture). Token fields only, never
-    composed prose. ``budget_exhausted_deployers``: EOAs whose enumeration was
-    refused by a run budget — their ``no_complete_enumeration`` verdict is the
-    budget's doing, and the token must say so, not blame the chain."""
+    composed prose."""
     address = (contract.address or "").lower()
     chain_id = chain_id_for_chain_name(contract.chain)
     if chain_id is None:
@@ -123,12 +115,9 @@ def closest_miss(
         verdict = gate.classify_deployer(session, protocol_id=protocol_id, address=deployer)
         if verdict.trust_class is not None:
             return {"nearest_rule": "w4_deployer", "missing": "creation_witness", "deployer": deployer}
-        reason = str(verdict.evidence.get("reason"))
-        if reason == "no_complete_enumeration" and deployer in (budget_exhausted_deployers or ()):
-            reason = "enumeration_budget_exhausted"
         return {
             "nearest_rule": "w4_deployer",
-            "missing": reason,
+            "missing": str(verdict.evidence.get("reason")),
             "deployer": deployer,
         }
 

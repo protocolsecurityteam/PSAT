@@ -15,7 +15,9 @@ from db.models import (
     Contract,
     ContractCreationWitness,
     ContractMembershipWitness,
+    ControllerValue,
     Protocol,
+    ProtocolDeployer,
 )
 from scripts.reconcile_membership import (
     DRIFT_CANDIDATE_WITH_EVIDENCE,
@@ -27,6 +29,8 @@ from services.discovery import membership_gate as gate
 from tests.conftest import ADDR, requires_postgres
 
 pytestmark = [requires_postgres]
+
+_TX = "0x" + "ab" * 32
 
 
 def _protocol(session) -> Protocol:
@@ -43,9 +47,16 @@ def _contract(session, address: str, **fields) -> Contract:
     return row
 
 
-def _code_fact(session, address: str, *, absent: bool = False) -> None:
+def _code_fact(session, address: str, *, absent: bool = False, tx: str | None = None) -> None:
     session.add(
-        ContractCreationWitness(chain_id=1, address=address.lower(), code_probe_block=50, code_absent_at_probe=absent)
+        ContractCreationWitness(
+            chain_id=1,
+            address=address.lower(),
+            code_probe_block=50,
+            code_absent_at_probe=absent,
+            creation_tx_hash=tx,
+            creation_block=10 if tx else None,
+        )
     )
     session.flush()
 
@@ -81,6 +92,59 @@ def _freshly_gated(session):
 
 def test_zero_drift_on_freshly_gated_db(db_session):
     _freshly_gated(db_session)
+    assert audit(db_session) == []
+
+
+def test_full_ladder_gated_db_reconciles_zero_drift(db_session):
+    """Invariant-13 handshake: a DB whose every membership fact was earned
+    through the gate's own primitives — W5 anchor, W2 impl, a Class-A registry
+    row earned by the ladder plus its W4 member, a revoked-and-demoted row,
+    and a parked candidate — reconciles with zero drift."""
+    protocol = _protocol(db_session)
+    deployer = ADDR(0xE5)
+
+    anchor = _contract(db_session, ADDR(20), nominated_protocol_id=protocol.id, implementation=ADDR(21))
+    _code_fact(db_session, anchor.address)
+    db_session.add(
+        ControllerValue(
+            contract_id=anchor.id, controller_id="owner", value=deployer, authority_provenance="caller_gate"
+        )
+    )
+    gate.write_witness(
+        db_session,
+        contract_id=anchor.id,
+        protocol_id=protocol.id,
+        rule="w5_human",
+        evidence=gate.w5_evidence(actor="test", asserted_at=datetime.now()),
+    )
+    impl = _contract(db_session, ADDR(21), nominated_protocol_id=protocol.id)
+    _code_fact(db_session, impl.address)
+    result = gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(anchor.id, impl.id)))
+    assert {anchor.id, impl.id} <= set(result.promoted_contract_ids)
+
+    # The ladder itself earns the Class-A row (perimeter fact = the anchor's
+    # controller value), then W4 admits the deployer's creation.
+    w4_member = _contract(db_session, ADDR(22), nominated_protocol_id=protocol.id, deployer=deployer)
+    _code_fact(db_session, w4_member.address, tx=_TX)
+    result = gate.evaluate(
+        db_session,
+        gate.FactsDelta(recheck_contract_ids=(w4_member.id,), changed_deployer_addresses=(deployer,)),
+    )
+    assert w4_member.id in result.promoted_contract_ids
+    registry = db_session.execute(select(ProtocolDeployer).where(ProtocolDeployer.address == deployer)).scalar_one()
+    assert registry.trust_class == "A" and registry.revoked_at is None
+
+    demoted = _gate_member(db_session, protocol, ADDR(23))
+    for witness in gate.active_witnesses(db_session, contract_id=demoted.id, protocol_id=protocol.id):
+        gate.revoke_witness(db_session, witness, reason="test_revocation")
+    gate.demote_member(db_session, contract=demoted, reason="test_demotion")
+
+    parked = _contract(db_session, ADDR(24), nominated_protocol_id=protocol.id)
+    _code_fact(db_session, parked.address)
+
+    assert anchor.protocol_id == protocol.id and impl.protocol_id == protocol.id
+    assert w4_member.protocol_id == protocol.id
+    assert demoted.protocol_id is None and parked.protocol_id is None
     assert audit(db_session) == []
 
 
