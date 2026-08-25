@@ -106,6 +106,11 @@ W3_ANCHOR_LINK_KINDS = frozenset({"owner_or_authority", "proxy_admin", "probe_re
 #: witness, or at a §3.3 perimeter principal of such a member.
 W3_ANCHOR_KINDS = frozenset({"member", "perimeter_principal"})
 
+#: Link kinds that name a SET of keys rather than one authority. A set-valued
+#: link may terminate only at an independently anchored MEMBER: membership of
+#: such a set is affiliation, and affiliation is not control.
+W3_SET_VALUED_LINK_KINDS = frozenset({"role_holder", "safe_signer"})
+
 #: OZ ``AccessControl``'s DEFAULT_ADMIN_ROLE is the zero word — the one role
 #: identity provable from the hash alone.
 _DEFAULT_ADMIN_ROLE_HASH = "0x" + "0" * 64
@@ -121,6 +126,16 @@ _PROVEN_ROLE_NAME_BASES = frozenset({"keccak_preimage", "accesscontrol_default_a
 _ANCHOR_CHAIN_MAX_DEPTH = 8
 
 _ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
+_ROLE_HASH_RE = re.compile(r"^0x[0-9a-fA-F]{64}$")
+
+#: The ONE ``detail`` each singleton link kind may carry — the W3 source it
+#: was read from. Set-valued kinds carry an identity instead (role hash /
+#: Safe address), checked by shape.
+_LINK_DETAIL_BY_KIND = {
+    "owner_or_authority": "controller_values",
+    "proxy_admin": "proxy_admin_slot",
+    "probe_read": "probe",
+}
 
 # Class B enumeration evidence is capped so a registry row stays readable;
 # the exclusivity verdict itself is over the FULL enumeration.
@@ -213,8 +228,18 @@ def _anchor_chain_evidence(anchor_chain: Any) -> dict[str, Any]:
         if kind not in W3_ANCHOR_LINK_KINDS:
             raise ValueError(f"anchor_chain link kind must be one of {sorted(W3_ANCHOR_LINK_KINDS)}, got {kind!r}")
         detail = raw.get("detail")
-        if detail is not None and not isinstance(detail, str):
-            raise ValueError("anchor_chain link detail must be a string or absent")
+        # The detail is a closed set per kind, never free text: it is the W3
+        # source or the identity the link was read under.
+        if kind in _LINK_DETAIL_BY_KIND:
+            if detail != _LINK_DETAIL_BY_KIND[kind]:
+                raise ValueError(f"anchor_chain {kind} detail must be {_LINK_DETAIL_BY_KIND[kind]!r}, got {detail!r}")
+        elif kind == "role_holder":
+            if not isinstance(detail, str) or not _ROLE_HASH_RE.match(detail) or detail != detail.lower():
+                raise ValueError(f"anchor_chain role_holder detail must be a lowercase role hash, got {detail!r}")
+        elif kind == "safe_signer":
+            detail = _require_address(detail, "anchor_chain safe_signer detail")
+        else:
+            raise ValueError(f"no detail rule for anchor_chain link kind {kind!r}")
         link = {
             "from": _require_address(raw.get("from"), "anchor_chain link from"),
             "address": _require_address(raw.get("address"), "anchor_chain link address"),
@@ -976,8 +1001,9 @@ def _own_controller_links(session: Session, *, protocol_id: int, controller: Con
 
     if own:
         # The Safe under evaluation is the LINK: its signer set is its own
-        # controller set. Scoped to this protocol's own rows so a foreign
-        # analysis of the same Safe never supplies the signers.
+        # controller set. Read off this protocol's MEMBERS only — a demoted
+        # row's stale analysis is not this protocol's observation — and the
+        # NEWEST such row wins, so a re-analysis supersedes what it replaced.
         row = session.execute(
             select(FunctionPrincipal.details)
             .join(EffectiveFunction, FunctionPrincipal.function_id == EffectiveFunction.id)
@@ -986,9 +1012,9 @@ def _own_controller_links(session: Session, *, protocol_id: int, controller: Con
                 func.lower(FunctionPrincipal.address) == own,
                 FunctionPrincipal.resolved_type == "safe",
                 jsonb_has_payload(FunctionPrincipal.details),
-                or_(Contract.protocol_id == protocol_id, Contract.nominated_protocol_id == protocol_id),
+                Contract.protocol_id == protocol_id,
             )
-            .order_by(FunctionPrincipal.id)
+            .order_by(FunctionPrincipal.id.desc())
             .limit(1)
         ).first()
         details = row[0] if row is not None else None
@@ -1031,33 +1057,53 @@ def _address_proven_foreign(session: Session, *, protocol_id: int, address: str)
 
 
 def _controls_a_foreign_row(session: Session, *, protocol_id: int, controller_address: str) -> bool:
-    """Ward-side counterevidence for the anchor-chain arm: does this controller
-    control a row that PROVABLY belongs elsewhere — another protocol's member,
-    or a row another protocol nominated? The full ``_controller_is_exclusive``
-    test is deliberately not reused: it refuses on unevidenced same-protocol
-    candidates, which is exactly the state the anchor chain exists to settle.
-    What must still refuse is a controller observed reaching outside."""
-    for row in session.execute(
-        select(Contract)
+    """Ward-side counterevidence for the anchor-chain arm: is this controller
+    observed controlling a row that PROVABLY belongs elsewhere — another
+    protocol's member, or a row another protocol nominated? The observation set
+    is the same three W3 sources ``_controller_is_exclusive`` reads:
+    caller-gating controller values, proxy-admin pointers, §3.5 probe reads."""
+    foreign = or_(
+        Contract.protocol_id.is_not(None) & (Contract.protocol_id != protocol_id),
+        Contract.protocol_id.is_(None)
+        & Contract.nominated_protocol_id.is_not(None)
+        & (Contract.nominated_protocol_id != protocol_id),
+    )
+    row = session.execute(
+        select(Contract.id)
         .join(ControllerValue, ControllerValue.contract_id == Contract.id)
         .where(
             func.lower(ControllerValue.value) == controller_address,
             ControllerValue.authority_provenance == W3_CONTROLLER_PROVENANCE,
-            or_(
-                Contract.protocol_id.is_not(None) & (Contract.protocol_id != protocol_id),
-                Contract.protocol_id.is_(None)
-                & Contract.nominated_protocol_id.is_not(None)
-                & (Contract.nominated_protocol_id != protocol_id),
-            ),
+            foreign,
         )
         .limit(1)
-    ).scalars():
-        logger.info(
-            "anchor chain refused: controller reaches a foreign row",
-            extra={"protocol_id": protocol_id, "controller": controller_address, "foreign_ward": row.id},
-        )
-        return True
-    return False
+    ).first()
+    if row is None:
+        row = session.execute(
+            select(Contract.id).where(func.lower(Contract.admin) == controller_address, foreign).limit(1)
+        ).first()
+    if row is None:
+        for candidate in session.execute(
+            select(Contract)
+            .join(ContractProbeAttempt, ContractProbeAttempt.contract_id == Contract.id)
+            .where(
+                ContractProbeAttempt.results.op("->")("resolved_addresses").op("?|")(
+                    cast([controller_address], ARRAY(Text()))
+                ),
+                foreign,
+            )
+            .order_by(Contract.id)
+        ).scalars():
+            if controller_address in _probe_controller_values(session, candidate):
+                row = (candidate.id,)
+                break
+    if row is None:
+        return False
+    logger.info(
+        "anchor chain refused: controller reaches a foreign row",
+        extra={"protocol_id": protocol_id, "controller": controller_address, "foreign_ward": row[0]},
+    )
+    return True
 
 
 def _independent_anchor_rule(
@@ -1073,24 +1119,31 @@ def _independent_anchor_rule(
     never anchors (§3.2 non-transitivity); W5/W6 rest on no via-fact at all and
     anchor outright; W2/W3-D1 anchor only when their via names a member that is
     itself independently anchored, so a chain cannot bootstrap itself through a
-    hop resting on the address under evaluation."""
+    hop resting on the address under evaluation.
+
+    Of several anchoring witnesses the SMALLEST rule name wins, not the oldest
+    row: the published rule is then a function of the evidence set, not of the
+    order the rows were written (invariant 9)."""
     contract = session.get(Contract, contract_id)
     if contract is None:
         return None
     chain_key = _chain_key(contract.chain)
+    anchoring: set[str] = set()
     for row in sorted(active_witnesses(session, contract_id=contract_id, protocol_id=protocol_id), key=lambda r: r.id):
-        if row.rule not in ADMITTING_WITNESS_RULES:
+        if row.rule not in ADMITTING_WITNESS_RULES or row.rule in anchoring:
             continue
         evidence = row.evidence if isinstance(row.evidence, dict) else {}
         if row.rule == WITNESS_RULE_W3_CONTROL and evidence.get("direction") != W3_DIRECTION_D1:
             continue
         via = (row.via_address or "").lower()
         if not via:
-            return row.rule
+            anchoring.add(row.rule)
+            continue
         if via in blocked:
             continue
         if row.rule == WITNESS_RULE_W4_DEPLOYER:
-            return row.rule
+            anchoring.add(row.rule)
+            continue
         if depth >= _ANCHOR_CHAIN_MAX_DEPTH:
             continue
         for member in _member_rows_at(session, protocol_id=protocol_id, address=via, chain_key=chain_key):
@@ -1106,8 +1159,9 @@ def _independent_anchor_rule(
                 )
                 is not None
             ):
-                return row.rule
-    return None
+                anchoring.add(row.rule)
+                break
+    return min(anchoring) if anchoring else None
 
 
 def _link_root(
@@ -1118,19 +1172,29 @@ def _link_root(
     chain_key: str,
     in_progress: frozenset[str],
     depth: int,
+    require_member_terminal: bool,
 ) -> dict[str, Any] | None:
     """Where a controller link terminates: an independently anchored member at
     *address*, a §3.3 perimeter principal of such a member, or — recursively —
     a D2-only member controller that itself anchors through its own
     controllers. Returns the chain suffix (links already walked stay with the
-    caller), or None when the link roots nowhere."""
+    caller), or None when the link roots nowhere.
+
+    ``require_member_terminal`` binds a set-valued link (:data:`W3_SET_VALUED_LINK_KINDS`)
+    to an anchor of kind ``member``, including through the recursion."""
     for member in _member_rows_at(session, protocol_id=protocol_id, address=address, chain_key=chain_key):
         rule = _independent_anchor_rule(session, contract_id=member.id, protocol_id=protocol_id, blocked=in_progress)
         if rule is not None:
             return {"links": [], "anchor_address": address, "anchor_kind": "member", "anchor_rule": rule}
-    anchor = _perimeter_anchor(session, protocol_id=protocol_id, address=address, blocked=in_progress)
-    if anchor is not None:
-        return {"links": [], "anchor_address": address, "anchor_kind": "perimeter_principal", "anchor_rule": anchor}
+    if not require_member_terminal:
+        anchor = _perimeter_anchor(session, protocol_id=protocol_id, address=address, blocked=in_progress)
+        if anchor is not None:
+            return {
+                "links": [],
+                "anchor_address": address,
+                "anchor_kind": "perimeter_principal",
+                "anchor_rule": anchor,
+            }
     if depth + 1 >= _ANCHOR_CHAIN_MAX_DEPTH:
         return None
     for member in _member_rows_at(session, protocol_id=protocol_id, address=address, chain_key=chain_key):
@@ -1142,8 +1206,11 @@ def _link_root(
             in_progress=in_progress | {address},
             depth=depth + 1,
         )
-        if nested is not None:
-            return nested
+        if nested is None:
+            continue
+        if require_member_terminal and nested.get("anchor_kind") != "member":
+            continue
+        return nested
     return None
 
 
@@ -1159,17 +1226,11 @@ def _anchor_chain_for(
     """Spec §3.2 EXTENSION (deliberate; the owner folds it into the spec text).
 
     A D2-only member controller is TRANSITIVE when its own resolved
-    controllers root in this protocol's independently anchored perimeter.
-
-    Set semantics, chosen deliberately: a controller SET (role holders, Safe
-    signers) or a mixed controller set anchors when **≥1 member of the set
-    roots in the perimeter AND no member of the set is proven foreign**. The
-    all-must-root reading was rejected against the observed shapes — a real
-    timelock's canceller/executor sets routinely contain keys the analysis
-    resolved nowhere, and not_determined may never be read as refusal. The
-    ≥1 reading still refuses the shared-operator shape, which is the invariant
-    this rule must not break: signers visible ONLY through the Safe itself root
-    nowhere, so the set contributes no anchor at all.
+    controllers root in this protocol's independently anchored perimeter:
+    ≥1 link roots, no link is proven foreign, and the controller is observed
+    controlling no foreign row. A SET-valued link
+    (:data:`W3_SET_VALUED_LINK_KINDS`) roots only at an anchor of kind
+    ``member``.
 
     Returns the anchor-chain evidence, or None."""
     if depth >= _ANCHOR_CHAIN_MAX_DEPTH:
@@ -1195,6 +1256,7 @@ def _anchor_chain_for(
             chain_key=chain_key,
             in_progress=in_progress,
             depth=depth,
+            require_member_terminal=link.kind in W3_SET_VALUED_LINK_KINDS,
         )
         if root is None:
             continue
@@ -1513,17 +1575,13 @@ def _perimeter_fact(session: Session, *, protocol_id: int, address: str) -> dict
 
 
 def _perimeter_anchor(session: Session, *, protocol_id: int, address: str, blocked: frozenset[str]) -> str | None:
-    """The anchor-chain arm's reading of the same observations: the anchoring
-    member must be anchored INDEPENDENTLY of *blocked* (``_member_anchors_ladder``
-    is the shallow F2 check the deployer ladder wants; a chain walk may not
-    launder its own in-progress addresses through it). Returns the anchoring
-    member's admitting rule, or None.
-
-    A ``safe_owner`` fact minted BY an in-progress Safe is skipped: that fact
-    says only "this signer signs for the controller we are evaluating", which
-    is the shared-operator shape the D2 non-transitivity exists to refuse."""
+    """The anchor-chain arm's reading of the same observations, narrower than
+    the §3.3 ladder's on two counts: the anchoring member must be anchored
+    INDEPENDENTLY of *blocked*, and a ``safe_owner`` fact never anchors — only
+    the ladder, which names signer-set entries explicitly, reads those.
+    Returns the anchoring member's admitting rule, or None."""
     for fact, member_id in _perimeter_fact_candidates(session, protocol_id=protocol_id, address=address):
-        if fact.get("kind") == "safe_owner" and fact.get("safe_address") in blocked:
+        if fact.get("kind") == "safe_owner":
             continue
         rule = _independent_anchor_rule(session, contract_id=member_id, protocol_id=protocol_id, blocked=blocked)
         if rule is not None:
@@ -2008,16 +2066,24 @@ def _vias_citing_anchor_link(session: Session, addresses: Sequence[str] | set[st
 
     Invariant 8's trigger for the anchored-chain arm: such a witness's via is
     the CONTROLLER, so a broken link would otherwise never reach the revocation
-    frontier. A JSONB containment scan over the active D1 rows is deliberate:
-    that row set is small, and the alternative (re-verifying every D1 witness
-    on every frontier) is not targeted."""
+    frontier.
+
+    Both arms are written as containment against the ``evidence`` COLUMN, not
+    against a ``->`` path expression: only the column form is served by the
+    GIN index (``ix_contract_membership_witnesses_evidence``). JSONB
+    containment recurses through objects and matches an array when some element
+    contains the probe, so the nested shapes below are exact."""
     addrs = sorted({a.lower() for a in addresses if a})
     if not addrs:
         return set()
-    chain = ContractMembershipWitness.evidence.op("->")("anchor_chain")
-    conditions = [chain.op("->>")("anchor_address").in_(addrs)]
+    conditions = []
     for addr in addrs:
-        conditions.append(chain.op("->")("links").op("@>")(cast([{"address": addr}], JSONB)))
+        conditions.append(
+            ContractMembershipWitness.evidence.op("@>")(cast({"anchor_chain": {"anchor_address": addr}}, JSONB))
+        )
+        conditions.append(
+            ContractMembershipWitness.evidence.op("@>")(cast({"anchor_chain": {"links": [{"address": addr}]}}, JSONB))
+        )
     return {
         (via or "").lower()
         for via in session.execute(
@@ -2026,7 +2092,6 @@ def _vias_citing_anchor_link(session: Session, addresses: Sequence[str] | set[st
                 ContractMembershipWitness.rule == WITNESS_RULE_W3_CONTROL,
                 ContractMembershipWitness.revoked_at.is_(None),
                 ContractMembershipWitness.via_address.is_not(None),
-                jsonb_has_payload(chain),
                 or_(*conditions),
             )
             .distinct()
@@ -2221,17 +2286,17 @@ def _target_candidates(session: Session, facts_delta: FactsDelta) -> set[int]:
     reach_addrs = edge_addrs | member_addrs
     if reach_addrs:
         reach_list = sorted(reach_addrs)
-        targeted.update(
-            session.execute(
-                select(Contract.id).where(
-                    *candidate,
-                    func.lower(Contract.implementation).in_(reach_list)
-                    | func.lower(Contract.beacon).in_(reach_list)
-                    | func.lower(Contract.admin).in_(reach_list)
-                    | _secondary_pointer_named(reach_list),
-                )
-            ).scalars()
+        pointer_named = (
+            func.lower(Contract.implementation).in_(reach_list)
+            | func.lower(Contract.beacon).in_(reach_list)
+            | func.lower(Contract.admin).in_(reach_list)
         )
+        # ``secondary_implementations`` has no index a value lookup can use, so
+        # its per-address LIKE stays on the bounded member set; a fresh-edge
+        # delta can name hundreds of addresses.
+        if member_addrs:
+            pointer_named = pointer_named | _secondary_pointer_named(sorted(member_addrs))
+        targeted.update(session.execute(select(Contract.id).where(*candidate, pointer_named)).scalars())
         targeted.update(
             session.execute(
                 select(Contract.id)
@@ -2281,10 +2346,25 @@ def evaluate(
 
     ``changed_deployer_addresses`` also forces the §3.3 ladder re-check of any
     STANDING registry row for those EOAs — a registry row is re-examined when
-    its deployer is named, not only when a candidate happens to name it."""
+    its deployer is named, not only when a candidate happens to name it.
+
+    ``new_member_contract_ids`` seeds the revocation stratum as well as the
+    recall lookup: a member another protocol just claimed is counterevidence
+    against every standing proof resting on that address, and a caller may
+    name one without naming any edge (invariant 8)."""
     targeted = _target_candidates(session, facts_delta)
     dirty_vias = {a.lower() for a in facts_delta.changed_deployer_addresses if a}
-    dirty_vias |= _standing_vias_named_by_edges(session, facts_delta.new_edge_addresses)
+    named_addresses = list(facts_delta.new_edge_addresses)
+    if facts_delta.new_member_contract_ids:
+        named_addresses.extend(
+            address.lower()
+            for (address,) in session.execute(
+                select(Contract.address).where(
+                    Contract.id.in_(sorted(set(facts_delta.new_member_contract_ids))), Contract.address.is_not(None)
+                )
+            )
+        )
+    dirty_vias |= _standing_vias_named_by_edges(session, named_addresses)
     settled = _stratified_fixpoint(
         session,
         targeted,
@@ -2313,13 +2393,11 @@ def evaluate_committed(
 
     Net-new members also enqueue a selection pass for their protocol: this
     wrapper is the WORKER entry point, so the CLI/migration paths (which call
-    ``evaluate`` and commit themselves) enqueue nothing."""
+    ``evaluate`` and commit themselves) enqueue nothing. The enqueue runs
+    AFTER the gate's own commit — ``create_job`` commits, so running it inside
+    the try would land the cascade durably and void the rollback below."""
     try:
         result = evaluate(session, facts_delta, deployer_enumerator=deployer_enumerator)
-        if result.promoted_contract_ids:
-            from services.discovery.selection_enqueue import enqueue_selection_for_promotions
-
-            enqueue_selection_for_promotions(session, result.promoted_contract_ids, reason="membership_promotion")
         session.commit()
     except Exception as exc:
         session.rollback()
@@ -2329,6 +2407,10 @@ def evaluate_committed(
             extra={"context": context, "exc_type": type(exc).__name__, "error": str(exc)[:300]},
         )
         return None
+    if result.promoted_contract_ids:
+        from services.discovery.selection_enqueue import enqueue_selection_for_promotions
+
+        enqueue_selection_for_promotions(session, result.promoted_contract_ids, reason="membership_promotion")
     if result.promoted_contract_ids or result.demoted_contract_ids or result.reprobe_contract_ids:
         logger.info(
             "membership gate settled",
@@ -2478,11 +2560,24 @@ def _stratified_fixpoint(
             promoted.update(round_promoted)
             pending.difference_update(round_promoted)
             deployer_addrs: set[str] = set()
+            promoted_addrs: set[str] = set()
             for contract_id in sorted(round_promoted):
                 contract = session.get(Contract, contract_id)
-                dep = (contract.deployer or "").lower() if contract is not None else ""
+                if contract is None:
+                    continue
+                dep = (contract.deployer or "").lower()
                 if dep:
                     deployer_addrs.add(dep)
+                addr = (contract.address or "").lower()
+                if addr:
+                    promoted_addrs.add(addr)
+            # A promotion is new counterevidence for STANDING witnesses too,
+            # not only fresh recall: an address this protocol just claimed is
+            # proven foreign to every other protocol resting a transitivity
+            # proof on it. Re-seed the revocation stratum with the promoted
+            # addresses and with the vias whose published anchor chain cites
+            # one, so the next round re-verifies them (invariant 8).
+            dirty_vias |= _standing_vias_named_by_edges(session, sorted(promoted_addrs))
             pending.update(
                 _target_candidates(
                     session,

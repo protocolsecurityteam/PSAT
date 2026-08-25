@@ -15,11 +15,11 @@ from services.discovery import membership_gate as gate
 from tests.conftest import ADDR, requires_postgres
 from tests.discovery.test_membership_anchor_chain import (
     PROPOSER_ROLE,
+    _anchored_holder,
     _anchored_member,
     _caller_gate,
     _contract,
     _d2_member,
-    _principal,
     _role_plane,
     protocol,
 )
@@ -36,9 +36,8 @@ def _selection_jobs(db_session, protocol):
 def test_promotion_enqueues_exactly_one_selection_pass(db_session, protocol):
     anchor = _anchored_member(db_session, protocol, ADDR(0x5001))
     timelock = _d2_member(db_session, protocol, ADDR(0x5002), controls=anchor)
-    safe = ADDR(0x5003)
+    safe = _anchored_holder(db_session, protocol, ADDR(0x5003))
     _role_plane(db_session, timelock.address, PROPOSER_ROLE, [safe])
-    _principal(db_session, anchor, safe, resolved_type="safe", details={"owners": [ADDR(0x5004)]})
     ward_a = _contract(db_session, ADDR(0x5005), nominated=protocol.id)
     ward_b = _contract(db_session, ADDR(0x5006), nominated=protocol.id)
     _caller_gate(db_session, ward_a, timelock.address)
@@ -65,9 +64,8 @@ def test_no_promotion_enqueues_nothing(db_session, protocol):
 def test_reevaluation_with_no_new_members_enqueues_nothing(db_session, protocol):
     anchor = _anchored_member(db_session, protocol, ADDR(0x5201))
     timelock = _d2_member(db_session, protocol, ADDR(0x5202), controls=anchor)
-    safe = ADDR(0x5203)
+    safe = _anchored_holder(db_session, protocol, ADDR(0x5203))
     _role_plane(db_session, timelock.address, PROPOSER_ROLE, [safe])
-    _principal(db_session, anchor, safe, resolved_type="safe", details={"owners": [ADDR(0x5204)]})
     ward = _contract(db_session, ADDR(0x5205), nominated=protocol.id)
     _caller_gate(db_session, ward, timelock.address)
     db_session.commit()
@@ -86,9 +84,8 @@ def test_existing_queued_pass_is_not_duplicated(db_session, protocol):
 
     anchor = _anchored_member(db_session, protocol, ADDR(0x5301))
     timelock = _d2_member(db_session, protocol, ADDR(0x5302), controls=anchor)
-    safe = ADDR(0x5303)
+    safe = _anchored_holder(db_session, protocol, ADDR(0x5303))
     _role_plane(db_session, timelock.address, PROPOSER_ROLE, [safe])
-    _principal(db_session, anchor, safe, resolved_type="safe", details={"owners": [ADDR(0x5304)]})
     ward = _contract(db_session, ADDR(0x5305), nominated=protocol.id)
     _caller_gate(db_session, ward, timelock.address)
     create_job(db_session, {"protocol_id": protocol.id, "name": "already-queued"}, initial_stage=JobStage.selection)
@@ -103,9 +100,8 @@ def test_non_worker_evaluate_never_enqueues(db_session, protocol):
     """The reconcile/re-earn CLIs call ``evaluate`` and commit themselves."""
     anchor = _anchored_member(db_session, protocol, ADDR(0x5401))
     timelock = _d2_member(db_session, protocol, ADDR(0x5402), controls=anchor)
-    safe = ADDR(0x5403)
+    safe = _anchored_holder(db_session, protocol, ADDR(0x5403))
     _role_plane(db_session, timelock.address, PROPOSER_ROLE, [safe])
-    _principal(db_session, anchor, safe, resolved_type="safe", details={"owners": [ADDR(0x5404)]})
     ward = _contract(db_session, ADDR(0x5405), nominated=protocol.id)
     _caller_gate(db_session, ward, timelock.address)
 
