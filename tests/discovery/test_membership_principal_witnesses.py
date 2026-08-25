@@ -119,11 +119,32 @@ def _d2_only_member(db_session, protocol, address, *, controls):
     return row
 
 
-def _principal(db_session, host, address, *, resolved_type=None, details=None, name="admin", selector=None):
+AUTHORITY_PATH = ["enumerable_role_store"]
+#: The resolver derived this caller set by enumerating a param-keyed mapping —
+#: membership of a mapping the contract's own writers populate, not authority.
+MAPPING_PATH = ["param_keyed_mapping_enumeration"]
+
+
+def _principal(
+    db_session,
+    host,
+    address,
+    *,
+    resolved_type=None,
+    details=None,
+    name="admin",
+    selector=None,
+    resolver_path=AUTHORITY_PATH,
+):
     fn = EffectiveFunction(contract_id=host.id, function_name=f"{name}-{uuid.uuid4().hex[:6]}", selector=selector)
     db_session.add(fn)
     db_session.flush()
-    row = FunctionPrincipal(function_id=fn.id, address=address.lower(), resolved_type=resolved_type, details=details)
+    merged = dict(details or {})
+    if resolver_path is not None:
+        merged["resolver_path"] = list(resolver_path)
+    row = FunctionPrincipal(
+        function_id=fn.id, address=address.lower(), resolved_type=resolved_type, details=merged or None
+    )
     db_session.add(row)
     db_session.flush()
     return row
@@ -780,32 +801,57 @@ def test_losing_the_anchoring_witness_without_demotion_still_cascades(db_session
     assert grandchild.protocol_id is None, "and the cascade follows"
 
 
-@pytest.mark.parametrize("selector", sorted(gate.W3_TOKEN_ENTRY_POINT_SELECTORS))
-def test_token_entry_point_callers_never_admit(db_session, protocol, selector):
+@pytest.mark.parametrize(
+    "resolver_path", [None, [], MAPPING_PATH, ["enumerable_role_store", "param_keyed_mapping_enumeration"]]
+)
+def test_a_principal_with_no_authority_derivation_never_admits(db_session, protocol, resolver_path):
     """The §2 overreach shape as the dev DB carries it: Seaport and the NFT
     marketplace TransferManagers are resolved principals of a member NFT's
-    ``safeBatchTransferFrom``. That caller set is the token's approval mapping,
-    which any holder can add to — a permitted spender, never an authority."""
+    transfer entry point, derived by enumerating the token's approval mapping
+    or with no derivation recorded at all. Membership of a caller set is a
+    permission its writer granted, never control (invariant 6)."""
     member = _anchored_member(db_session, protocol, ADDR(0x9000))
-    marketplace = _contract(db_session, ADDR(0x9001 + int(selector, 16) % 256), nominated=protocol.id)
-    _principal(db_session, member, marketplace.address, resolved_type="contract", selector=selector)
-    # The same address as an EOA-typed principal must not license its wards either.
-    ward = _contract(db_session, ADDR(0x9200 + int(selector, 16) % 256), nominated=protocol.id)
-    operator = ADDR(0x9300 + int(selector, 16) % 256)
-    _principal(db_session, member, operator, resolved_type="eoa", selector=selector)
+    marketplace = _contract(db_session, ADDR(0x9001), nominated=protocol.id)
+    _principal(db_session, member, marketplace.address, resolved_type="contract", resolver_path=resolver_path)
+    # The same shape must not license a ward through the D1 arm either.
+    operator = ADDR(0x9002)
+    ward = _contract(db_session, ADDR(0x9003), nominated=protocol.id)
+    _principal(db_session, member, operator, resolved_type="eoa", resolver_path=resolver_path)
     _caller_gate(db_session, ward, operator)
 
     gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(marketplace.id, ward.id)))
     db_session.flush()
-    assert marketplace.protocol_id is None, selector
-    assert ward.protocol_id is None, selector
+    assert marketplace.protocol_id is None
+    assert ward.protocol_id is None
 
 
-def test_a_non_token_function_principal_still_admits(db_session, protocol):
-    """Control for the refusal above: the selector, not the principal, decides."""
+@pytest.mark.parametrize("resolver_path", sorted(gate.W3_PRINCIPAL_AUTHORITY_RESOLVERS))
+def test_every_authority_derivation_admits(db_session, protocol, resolver_path):
+    """Control for the refusal above: the recorded derivation, not the function
+    or the principal, is what decides."""
     member = _anchored_member(db_session, protocol, ADDR(0x9400))
-    pauser = _contract(db_session, ADDR(0x9401), nominated=protocol.id)
-    _principal(db_session, member, pauser.address, resolved_type="contract", selector="0x8456cb59")
+    pauser = _contract(db_session, ADDR(0x9401 + sorted(gate.W3_PRINCIPAL_AUTHORITY_RESOLVERS).index(resolver_path)))
+    pauser.nominated_protocol_id = protocol.id
+    db_session.flush()
+    _principal(db_session, member, pauser.address, resolved_type="contract", resolver_path=[resolver_path])
     gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(pauser.id,)))
     db_session.flush()
     assert pauser.protocol_id == protocol.id
+
+
+def test_authority_derivation_admits_even_on_a_token_entry_point(db_session, protocol):
+    """The rule is about the DERIVATION, not the function: a proven role holder
+    that is also permitted on a transfer entry point is still a role holder."""
+    member = _anchored_member(db_session, protocol, ADDR(0x9500))
+    role_holder = _contract(db_session, ADDR(0x9501), nominated=protocol.id)
+    _principal(
+        db_session,
+        member,
+        role_holder.address,
+        resolved_type="timelock",
+        selector="0x2eb2c2d6",
+        resolver_path=AUTHORITY_PATH,
+    )
+    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(role_holder.id,)))
+    db_session.flush()
+    assert role_holder.protocol_id == protocol.id

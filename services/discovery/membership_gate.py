@@ -89,25 +89,29 @@ W3_SOURCES = frozenset({"controller_values", "proxy_admin_slot", "probe", "funct
 #: misresolution. NULL/unknown is not_determined and proves nothing either.
 W3_PRINCIPAL_CONTROLLER_TYPES = frozenset({"timelock", "safe", "contract"})
 
-#: Standard ERC-20/721/1155 transfer and approval entry points. The caller set
-#: of one of these is the TOKEN'S operator-approval set — an open mapping any
-#: holder can add to — so a principal read off it names a permitted spender,
-#: never an authority over the protocol (invariant 6, the §2 overreach shape:
-#: Seaport and the NFT marketplace TransferManagers land here). A closed set of
-#: standard selectors, not a name match.
-W3_TOKEN_ENTRY_POINT_SELECTORS = frozenset(
+#: ``FunctionPrincipal.details['resolver_path']`` steps that resolve an
+#: AUTHORITY — a role store, a roles-authority contract, an owner/authority
+#: getter, an authority storage slot, or a materialized external authority
+#: check. A principal edge admits only when the principal's OWN recorded
+#: derivation is one of these end to end.
+#:
+#: Everything else is membership of a caller SET, which is not control:
+#: ``param_keyed_mapping_enumeration`` enumerates a mapping the contract's own
+#: writers populate (an ERC-1155 ``isApprovedForAll`` operator set resolves
+#: exactly here), and an absent/null path means the resolver derived no
+#: authority at all — not_determined, which may never stand in for a witness.
+#: This is the invariant-6 line for principal edges: it is what refuses the §2
+#: overreach shape the dev DB carries, where Seaport and the NFT marketplace
+#: TransferManagers are resolved principals of a member NFT's transfer entry
+#: point with no authority derivation behind them.
+W3_PRINCIPAL_AUTHORITY_RESOLVERS = frozenset(
     {
-        "0xa9059cbb",  # ERC-20 transfer
-        "0x23b872dd",  # ERC-20/721 transferFrom
-        "0x095ea7b3",  # ERC-20/721 approve
-        "0x39509351",  # ERC-20 increaseAllowance
-        "0xa457c2d7",  # ERC-20 decreaseAllowance
-        "0xd505accf",  # ERC-20 permit
-        "0x42842e0e",  # ERC-721 safeTransferFrom(address,address,uint256)
-        "0xb88d4fde",  # ERC-721 safeTransferFrom(address,address,uint256,bytes)
-        "0xa22cb465",  # ERC-721/1155 setApprovalForAll
-        "0xf242432a",  # ERC-1155 safeTransferFrom
-        "0x2eb2c2d6",  # ERC-1155 safeBatchTransferFrom
+        "enumerable_role_store",
+        "solmate_roles_authority",
+        "live_getter_resolution",
+        "authority_getter_basis",
+        "live_slot_resolution",
+        "external_check_materialized",
     }
 )
 
@@ -1020,6 +1024,20 @@ def _w2_edge_holds(session: Session, *, contract: Contract, member: Contract, ed
     return False
 
 
+def _authority_derived_principal():
+    """SQL predicate: the principal row's recorded ``resolver_path`` is a
+    non-empty list of AUTHORITY resolutions, end to end. ``<@`` is JSONB array
+    containment — every step must be an authority resolver, so a path that
+    mixes in a mapping enumeration does not qualify. A missing path, a JSON
+    ``null`` path, and an empty list are all not_determined and never qualify."""
+    path = FunctionPrincipal.details.op("->")("resolver_path")
+    return (
+        (func.jsonb_typeof(path) == "array")
+        & (func.jsonb_array_length(path) > 0)
+        & path.op("<@")(cast(sorted(W3_PRINCIPAL_AUTHORITY_RESOLVERS), JSONB))
+    )
+
+
 def _member_principal_rows(
     session: Session,
     *,
@@ -1036,14 +1054,15 @@ def _member_principal_rows(
     ``safe_owners=False`` reads the principal row whose ADDRESS is *address*;
     ``safe_owners=True`` reads Safe principals whose stored signer set CONTAINS
     it. Only same-chain members are read: a principal fact is an observation on
-    a deployment, and a deployment is (address, chain). Standard token
-    transfer/approval entry points (:data:`W3_TOKEN_ENTRY_POINT_SELECTORS`) are
-    excluded — their caller set is the token's approval mapping, not control.
+    a deployment, and a deployment is (address, chain). Only AUTHORITY-derived
+    principals are read (:data:`W3_PRINCIPAL_AUTHORITY_RESOLVERS`) — a row the
+    resolver produced by enumerating a caller mapping, or with no recorded
+    derivation, proves membership of a caller set and not control.
     """
     member_scope = [
         Contract.protocol_id == protocol_id,
         func.lower(func.coalesce(Contract.chain, "ethereum")) == chain_key,
-        func.coalesce(func.lower(EffectiveFunction.selector), "").not_in(sorted(W3_TOKEN_ENTRY_POINT_SELECTORS)),
+        _authority_derived_principal(),
     ]
     if exclude_contract_id is not None:
         member_scope.append(Contract.id != exclude_contract_id)
