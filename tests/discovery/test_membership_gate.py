@@ -449,9 +449,21 @@ def test_demote_member_preserves_nomination_and_history(db_session):
 # ---------------------------------------------------------------------------
 
 
+def _seed_w5_witness(db_session, member: Contract, protocol_id: int) -> None:
+    # F2: only a member holding a non-D2 admitting witness anchors the ladder.
+    gate.write_witness(
+        db_session,
+        contract_id=member.id,
+        protocol_id=protocol_id,
+        rule="w5_human",
+        evidence=gate.w5_evidence(actor="admin", asserted_at=datetime(2026, 8, 24, tzinfo=timezone.utc)),
+    )
+
+
 def test_classify_deployer_class_a_perimeter_principal(db_session):
     protocol = _protocol(db_session)
     member = _contract(db_session, ADDR(50), protocol_id=protocol.id)
+    _seed_w5_witness(db_session, member, protocol.id)
     eoa = ADDR(51)
     db_session.add(
         ControllerValue(contract_id=member.id, controller_id="owner", value=eoa, authority_provenance="caller_gate")
@@ -467,6 +479,7 @@ def test_classify_deployer_class_a_safe_signer(db_session):
 
     protocol = _protocol(db_session)
     member = _contract(db_session, ADDR(52), protocol_id=protocol.id)
+    _seed_w5_witness(db_session, member, protocol.id)
     eoa = ADDR(53)
     fn = EffectiveFunction(contract_id=member.id, function_name="upgradeTo")
     db_session.add(fn)
@@ -551,6 +564,153 @@ def test_classify_deployer_foreign_creation_is_class_c(db_session):
     assert verdict.trust_class is None
     assert verdict.evidence["reason"] == "foreign_or_unknown_creations"
     assert ADDR(65) in verdict.evidence["unmapped_addresses"]
+
+
+def _seed_code_and_creation(db_session, address: str, *, chain_id: int = 1) -> None:
+    from db.models import ContractCreationWitness
+
+    db_session.add(
+        ContractCreationWitness(
+            chain_id=chain_id,
+            address=address.lower(),
+            code_probe_block=100,
+            code_absent_at_probe=False,
+            creation_tx_hash="0x" + "77" * 32,
+            creation_block=90,
+        )
+    )
+    db_session.flush()
+
+
+def _seed_w2_witness(db_session, contract: Contract, anchor: Contract, protocol_id: int) -> None:
+    anchor.implementation = contract.address
+    db_session.flush()
+    gate.write_witness(
+        db_session,
+        contract_id=contract.id,
+        protocol_id=protocol_id,
+        rule=WITNESS_RULE_W2_STRUCTURAL,
+        evidence=gate.w2_evidence(
+            edge_kind="implementation",
+            member_contract_id=anchor.id,
+            member_address=anchor.address,
+            resolved_pointer=contract.address,
+        ),
+        via_address=anchor.address,
+    )
+
+
+def test_classify_deployer_nominated_creation_never_maps(db_session):
+    """F1: a bare nomination is not membership evidence — a shared deployer's
+    foreign creation that is merely nominated must NOT map into the Class-B
+    exclusivity set, and the foreign creation must never ride in on W4."""
+    protocol = _protocol(db_session)
+    eoa = ADDR(0x510)
+    members = _seed_class_b_members(db_session, protocol, eoa)
+    foreign = _contract(db_session, ADDR(0x511), nominated_protocol_id=protocol.id, deployer=eoa)
+    _seed_code_and_creation(db_session, foreign.address)
+    history = [m.address for m in members] + [foreign.address]
+
+    verdict = gate.classify_deployer(
+        db_session, protocol_id=protocol.id, address=eoa, creation_history=history, history_complete=True
+    )
+    assert verdict.trust_class is None
+    assert verdict.evidence["reason"] == "foreign_or_unknown_creations"
+    assert foreign.address in verdict.evidence["unmapped_addresses"]
+
+    result = gate.evaluate(
+        db_session,
+        gate.FactsDelta(recheck_contract_ids=(foreign.id,)),
+        deployer_enumerator=lambda addr: (history, True),
+    )
+    assert foreign.id not in result.promoted_contract_ids
+    assert foreign.protocol_id is None
+
+    # The same creation holding a real W2 witness maps in — Class B allowed.
+    anchor = _contract(db_session, ADDR(0x512), protocol_id=protocol.id)
+    _seed_w2_witness(db_session, foreign, anchor, protocol.id)
+    verdict = gate.classify_deployer(
+        db_session, protocol_id=protocol.id, address=eoa, creation_history=history, history_complete=True
+    )
+    assert verdict.trust_class == "B"
+
+
+def test_exclusivity_tolerates_only_evidenced_candidates(db_session):
+    """F1, operator-exclusivity path: a controlled row that is merely
+    nominated refuses exclusivity; the same row with a non-lineage witness
+    tolerates it."""
+    from services.discovery.membership_gate import _controller_is_exclusive
+
+    protocol = _protocol(db_session)
+    operator = ADDR(0x520)
+    member = _contract(db_session, ADDR(0x521), protocol_id=protocol.id)
+    controlled = _contract(db_session, ADDR(0x522), nominated_protocol_id=protocol.id)
+    for row in (member, controlled):
+        db_session.add(
+            ControllerValue(
+                contract_id=row.id, controller_id="owner", value=operator, authority_provenance="caller_gate"
+            )
+        )
+    db_session.flush()
+
+    assert not _controller_is_exclusive(
+        db_session, protocol_id=protocol.id, controller_address=operator, exclude_contract_ids=set()
+    )
+
+    anchor = _contract(db_session, ADDR(0x523), protocol_id=protocol.id)
+    _seed_w2_witness(db_session, controlled, anchor, protocol.id)
+    assert _controller_is_exclusive(
+        db_session, protocol_id=protocol.id, controller_address=operator, exclude_contract_ids=set()
+    )
+
+
+def _seed_d2_witness(db_session, member: Contract, protocol_id: int, via: str) -> None:
+    gate.write_witness(
+        db_session,
+        contract_id=member.id,
+        protocol_id=protocol_id,
+        rule="w3_control",
+        evidence=gate.w3_evidence(direction="d2", source="controller_values", via_address=via),
+        via_address=via,
+    )
+
+
+def test_classify_deployer_d2_only_member_never_anchors_class_a(db_session):
+    """F2: D2 entries are non-transitive — a principal observed on a D2-only
+    member (the EndpointV2 worst case) must not mint a Class-A anchor."""
+    protocol = _protocol(db_session)
+    member = _contract(db_session, ADDR(0x530), protocol_id=protocol.id)
+    _seed_d2_witness(db_session, member, protocol.id, ADDR(0x531))
+    eoa = ADDR(0x532)
+    db_session.add(
+        ControllerValue(contract_id=member.id, controller_id="owner", value=eoa, authority_provenance="caller_gate")
+    )
+    db_session.flush()
+
+    verdict = gate.classify_deployer(db_session, protocol_id=protocol.id, address=eoa)
+    assert verdict.trust_class != "A"
+
+    # With an independent non-D2 witness the same member anchors Class A.
+    anchor = _contract(db_session, ADDR(0x533), protocol_id=protocol.id)
+    _seed_w2_witness(db_session, member, anchor, protocol.id)
+    verdict = gate.classify_deployer(db_session, protocol_id=protocol.id, address=eoa)
+    assert verdict.trust_class == "A"
+
+
+def test_d2_only_member_does_not_corroborate_class_b(db_session):
+    from services.discovery.membership_gate import _nonlineage_corroborating_member_ids
+
+    protocol = _protocol(db_session)
+    eoa = ADDR(0x540)
+    m1 = _contract(db_session, ADDR(0x541), protocol_id=protocol.id, deployer=eoa)
+    m2 = _contract(db_session, ADDR(0x542), protocol_id=protocol.id, deployer=eoa)
+    for m in (m1, m2):
+        _seed_d2_witness(db_session, m, protocol.id, ADDR(0x543))
+    assert _nonlineage_corroborating_member_ids(db_session, protocol_id=protocol.id, address=eoa) == []
+
+    anchor = _contract(db_session, ADDR(0x544), protocol_id=protocol.id)
+    _seed_w2_witness(db_session, m1, anchor, protocol.id)
+    assert _nonlineage_corroborating_member_ids(db_session, protocol_id=protocol.id, address=eoa) == [m1.id]
 
 
 def test_classify_deployer_lineage_only_corroboration_is_class_c(db_session):

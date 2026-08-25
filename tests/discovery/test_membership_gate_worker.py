@@ -203,6 +203,29 @@ def test_enumeration_any_enabled_chain_failing_is_incomplete(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+def _seed_stale_w2(session, contract: Contract, former_anchor: Contract, protocol_id: int) -> None:
+    """An unrevoked W2 row whose edge no longer holds (the anchor's pointer
+    was since rewritten). F1 membership evidence for the Class-B mapping test;
+    promotion still requires a witness that VERIFIES — the W4 under test."""
+    former_anchor.implementation = contract.address
+    session.flush()
+    gate.write_witness(
+        session,
+        contract_id=contract.id,
+        protocol_id=protocol_id,
+        rule=WITNESS_RULE_W2_STRUCTURAL,
+        evidence=gate.w2_evidence(
+            edge_kind="implementation",
+            member_contract_id=former_anchor.id,
+            member_address=former_anchor.address,
+            resolved_pointer=contract.address,
+        ),
+        via_address=former_anchor.address,
+    )
+    former_anchor.implementation = None
+    session.flush()
+
+
 def _seed_class_b_shape(db_session, protocol, eoa: str) -> list[Contract]:
     members = []
     for n in (0x230, 0x231):
@@ -261,6 +284,9 @@ def test_ladder_wire_class_a_skips_enumeration(db_session, monkeypatch):
 
     protocol = _protocol(db_session)
     member = _contract(db_session, ADDR(0x270), protocol_id=protocol.id)
+    # F2: only a member with a non-D2 admitting witness anchors Class A.
+    anchor = _contract(db_session, ADDR(0x272), protocol_id=protocol.id)
+    _seed_w2(db_session, member, anchor, protocol.id)
     eoa = ADDR(0x271)
     db_session.add(
         ControllerValue(contract_id=member.id, controller_id="owner", value=eoa, authority_provenance="caller_gate")
@@ -365,6 +391,66 @@ def test_ladder_wire_counterevidence_revokes_stale_b_row(db_session, monkeypatch
     assert all(m.protocol_id == protocol.id for m in members)
 
 
+def test_ladder_wire_coverage_gap_revokes_standing_b_row(db_session, monkeypatch):
+    # F3: a coverage gap (known creation missing from a COMPLETE enumeration)
+    # is positive counterevidence against a standing B row — unlike budget/cap
+    # incompleteness, which never revokes.
+    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
+    protocol = _protocol(db_session)
+    eoa = ADDR(0x2E4)
+    members = _seed_class_b_shape(db_session, protocol, eoa)
+    _stub_txlist(monkeypatch, {1: [_creation_tx(m.address) for m in members]})
+    registry = _register_protocol_deployer(db_session, protocol_id=protocol.id, deployer=eoa)
+    assert registry is not None and registry.trust_class == "B"
+    db_session.commit()
+
+    # A later creation attributed to the EOA (getcontractcreation) that its
+    # txlist does NOT contain: the standing license provably missed one.
+    _contract(db_session, ADDR(0x2E5), nominated_protocol_id=protocol.id, deployer=eoa)
+    db_session.flush()
+    row = _register_protocol_deployer(db_session, protocol_id=protocol.id, deployer=eoa, contract_address=ADDR(0x2E5))
+
+    assert row is None
+    db_session.refresh(registry)
+    assert registry.revoked_at is not None
+    assert registry.revocation_reason == "enumeration_coverage_gap"
+
+
+def test_fixpoint_coverage_gap_revokes_standing_b_row(db_session):
+    # F3, gate path: the enumerator adapter surfaces the gap; the fixpoint's
+    # stratum-(ii) reclassification revokes the standing row.
+    protocol = _protocol(db_session)
+    eoa = ADDR(0x2E6)
+    _seed_class_b_shape(db_session, protocol, eoa)
+    registry = gate.register_deployer(
+        db_session,
+        protocol_id=protocol.id,
+        address=eoa,
+        classification=gate.DeployerClassification(
+            trust_class="B",
+            evidence={"corroborating_member_ids": [], "enumeration": {"count": 2, "complete": True}},
+        ),
+    )
+    db_session.commit()
+
+    class Enumerator:
+        coverage_gaps = {eoa: f"known_creation_missing_from_enumeration:{ADDR(0x2E7)}"}
+
+        def __call__(self, addr: str):
+            return (), False
+
+    enumerator = Enumerator()
+    gate.evaluate(
+        db_session,
+        gate.FactsDelta(changed_deployer_addresses=(eoa,)),
+        deployer_enumerator=enumerator,
+    )
+    db_session.commit()
+    db_session.refresh(registry)
+    assert registry.revoked_at is not None
+    assert registry.revocation_reason == "enumeration_coverage_gap"
+
+
 def test_ladder_wire_snapshot_reuse_skips_reenumeration(db_session, monkeypatch):
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     protocol = _protocol(db_session)
@@ -382,8 +468,10 @@ def test_ladder_wire_snapshot_reuse_skips_reenumeration(db_session, monkeypatch)
     assert len(calls) == 1
 
     # Address outside the snapshot: full re-enumeration (fix-2's revocation
-    # opportunity), snapshot refreshed to cover the newcomer.
+    # opportunity), snapshot refreshed to cover the newcomer. F1: the
+    # newcomer maps through membership evidence, never its bare nomination.
     newcomer = _contract(db_session, ADDR(0x2C7), nominated_protocol_id=protocol.id, deployer=eoa)
+    _seed_w2(db_session, newcomer, _contract(db_session, ADDR(0x2C8), protocol_id=protocol.id), protocol.id)
     _stub_txlist(monkeypatch, {1: [_creation_tx(m.address) for m in members] + [_creation_tx(newcomer.address)]})
     refreshed = _register_protocol_deployer(
         db_session, protocol_id=protocol.id, deployer=eoa, contract_address=newcomer.address
@@ -415,6 +503,9 @@ def test_fixpoint_mints_class_b_through_worker_adapter(db_session, monkeypatch):
             code_absent_at_probe=False,
         )
     )
+    # F1: the sibling maps into the exclusivity set only through membership
+    # evidence; its stale W2 maps it while W4 remains the admitting witness.
+    _seed_stale_w2(db_session, sibling, _contract(db_session, ADDR(0x313), protocol_id=protocol.id), protocol.id)
     db_session.flush()
     _stub_txlist(monkeypatch, {1: [_creation_tx(c.address) for c in (*members, sibling)]})
 
@@ -442,6 +533,8 @@ def test_class_b_verdict_parity_between_ladder_wire_and_fixpoint(db_session, mon
     eoa = ADDR(0x316)
     members = _seed_class_b_shape(db_session, protocol, eoa)
     stray = _contract(db_session, ADDR(0x317), nominated_protocol_id=protocol.id, deployer=eoa)
+    # F1: the stray maps only through membership evidence.
+    _seed_w2(db_session, stray, _contract(db_session, ADDR(0x318), protocol_id=protocol.id), protocol.id)
     # The enumerated window misses the stray known creation → coverage gap.
     _stub_txlist(monkeypatch, {1: [_creation_tx(m.address) for m in members]})
 
@@ -602,6 +695,9 @@ def test_gate_intake_registers_deployer_and_writes_w4(db_session, monkeypatch):
         ContractCreationWitness(chain_id=1, address=newcomer.address, creation_tx_hash=_TX, creation_block=50)
     )
     _seed_w1(db_session, newcomer, protocol.id)
+    # F1: the newcomer maps into the exclusivity set through its stale W2;
+    # the W4 under test is what verifies and admits.
+    _seed_stale_w2(db_session, newcomer, _contract(db_session, ADDR(0x2B2), protocol_id=protocol.id), protocol.id)
     db_session.flush()
     _stub_txlist(monkeypatch, {1: [_creation_tx(m.address) for m in members] + [_creation_tx(newcomer.address)]})
 

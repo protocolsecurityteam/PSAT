@@ -178,7 +178,9 @@ ENABLED_CHAINS_SEEN_KEY = "enabled_chains_seen"
 
 #: Class C verdict reasons that are COUNTEREVIDENCE against an existing A/B
 #: registry row (not mere absence of proof) — they revoke it (invariant 8).
-_DEPLOYER_COUNTEREVIDENCE_REASONS = frozenset({"cross_protocol_collision", "foreign_or_unknown_creations"})
+_DEPLOYER_COUNTEREVIDENCE_REASONS = frozenset(
+    {"cross_protocol_collision", "foreign_or_unknown_creations", "enumeration_coverage_gap"}
+)
 
 
 def _snapshot_covers(row: ProtocolDeployer, contract_address: str) -> bool:
@@ -220,6 +222,7 @@ def _register_protocol_deployer(
     verdict = gate.classify_deployer(session, protocol_id=protocol_id, address=addr)
     history: list[str] = []
     scope: list[int] = []
+    coverage_gap: str | None = None
     if verdict.trust_class is None and verdict.evidence.get("reason") == "no_complete_enumeration":
         sibling_count = session.execute(
             select(func.count(Contract.id)).where(
@@ -228,7 +231,7 @@ def _register_protocol_deployer(
             )
         ).scalar_one()
         if existing is not None or sibling_count >= 2:
-            history, scope, complete = enumerate_with_coverage(session, addr)
+            history, scope, complete, coverage_gap = enumerate_with_coverage(session, addr)
             verdict = gate.classify_deployer(
                 session,
                 protocol_id=protocol_id,
@@ -238,6 +241,11 @@ def _register_protocol_deployer(
             )
     if verdict.trust_class is None:
         reason = verdict.evidence.get("reason")
+        # F3: a coverage gap on a standing Class-B row is positive
+        # counterevidence — budget/cap incompleteness is not.
+        if reason == "no_complete_enumeration" and coverage_gap is not None and existing is not None:
+            if existing.trust_class == "B":
+                reason = "enumeration_coverage_gap"
         if existing is not None and reason in _DEPLOYER_COUNTEREVIDENCE_REASONS:
             demotion = gate.demote(session, deployer_row=existing, reason=str(reason))
             if reprobe_sink is not None:

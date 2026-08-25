@@ -110,11 +110,18 @@ def enumeration_coverage_gap(
     return None
 
 
-def enumerate_with_coverage(session: Session, deployer: str) -> tuple[list[str], list[int], bool]:
+def enumerate_with_coverage(session: Session, deployer: str) -> tuple[list[str], list[int], bool, str | None]:
     """Enumeration with the coverage refusal folded into ``history_complete``
-    — the one place a Class-B-licensing enumeration verdict is minted."""
+    — the one place a Class-B-licensing enumeration verdict is minted.
+
+    The fourth element distinguishes the two incompleteness shapes (F3): a
+    COVERAGE GAP (the raw windows were complete, yet a known creation is
+    missing or off-scope — positive counterevidence against a standing Class-B
+    license) versus budget/cap/wire incompleteness (absence of evidence,
+    which never revokes)."""
     addr = deployer.lower()
     history, scope, complete = enumerate_deployer_creations(addr)
+    gap: str | None = None
     if complete:
         gap = enumeration_coverage_gap(session, deployer=addr, created=set(history), scope_chain_ids=set(scope))
         if gap is not None:
@@ -123,16 +130,26 @@ def enumerate_with_coverage(session: Session, deployer: str) -> tuple[list[str],
                 extra={"deployer": addr, "gap": gap},
             )
             complete = False
-    return history, scope, complete
+    return history, scope, complete, gap
 
 
 def session_deployer_enumerator(session: Session) -> DeployerEnumerator:
     """Gate-facing adapter (``membership_gate.DeployerEnumerator``): the scope
     stays internal to the coverage check; the gate consumes only what §3.3
-    needs — the creation set and whether it licenses exclusivity."""
+    needs — the creation set and whether it licenses exclusivity. Coverage
+    gaps are recorded on the adapter's ``coverage_gaps`` (the same
+    attribute-channel pattern as the re-earn budget's ``exhausted``) so the
+    fixpoint can treat them as positive counterevidence (F3)."""
+    return _SessionEnumerator(session)
 
-    def _enumerate(deployer: str) -> tuple[Sequence[str], bool]:
-        history, _scope, complete = enumerate_with_coverage(session, deployer)
+
+class _SessionEnumerator:
+    def __init__(self, session: Session) -> None:
+        self._session = session
+        self.coverage_gaps: dict[str, str] = {}
+
+    def __call__(self, deployer: str) -> tuple[Sequence[str], bool]:
+        history, _scope, complete, gap = enumerate_with_coverage(self._session, deployer)
+        if gap is not None:
+            self.coverage_gaps[deployer.lower()] = gap
         return history, complete
-
-    return _enumerate

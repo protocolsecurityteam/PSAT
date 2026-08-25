@@ -106,6 +106,25 @@ def test_fixpoint_multi_round_chain_w2_then_class_b_then_w4(db_session):
     sibling = _contract(db_session, _addr(0x1A2), nominated_protocol_id=protocol.id, deployer=deployer)
     _code_fact(db_session, impl.address, tx=_TX)
     _code_fact(db_session, sibling.address, tx=_TX)
+    # F1: a bare nomination never maps into the exclusivity set. The sibling
+    # maps through an unrevoked W2 whose edge no longer holds (former anchor
+    # rewritten) — W4 stays the witness that verifies and admits it.
+    former_anchor = _member(db_session, protocol, _addr(0x1A3), implementation=sibling.address)
+    gate.write_witness(
+        db_session,
+        contract_id=sibling.id,
+        protocol_id=protocol.id,
+        rule="w2_structural",
+        evidence=gate.w2_evidence(
+            edge_kind="implementation",
+            member_contract_id=former_anchor.id,
+            member_address=former_anchor.address,
+            resolved_pointer=sibling.address,
+        ),
+        via_address=former_anchor.address,
+    )
+    former_anchor.implementation = None
+    db_session.flush()
 
     enumerated = [member.address, impl.address, sibling.address]
     calls: list[str] = []
@@ -126,7 +145,8 @@ def test_fixpoint_multi_round_chain_w2_then_class_b_then_w4(db_session):
     assert impl.protocol_id == protocol.id
     assert sibling.protocol_id == protocol.id
     assert _active_rules(db_session, impl) == {"w1_code", "w2_structural"}
-    assert _active_rules(db_session, sibling) == {"w1_code", "w4_deployer"}
+    # The stale W2 row stays active-but-unverified; W4 is what admitted.
+    assert _active_rules(db_session, sibling) == {"w1_code", "w2_structural", "w4_deployer"}
     registry = db_session.query(ProtocolDeployer).filter_by(protocol_id=protocol.id, address=deployer).one()
     assert registry.trust_class == "B" and registry.revoked_at is None
     # The enumeration is fetched once, then cached across rounds.
@@ -520,6 +540,48 @@ def test_resolution_hook_promotes_controller_of_member(db_session):
     # Delta targeting: the unrelated candidate is untouched.
     assert unrelated.protocol_id is None
     assert _active_rules(db_session, unrelated) == set()
+
+
+def test_resolution_hook_removed_controller_revokes_class_a_row(db_session):
+    """F5: a re-resolution that drops the controller value a Class-A registry
+    row is anchored on must revoke the row in the SAME evaluate — the removed
+    address rides the hook's delta as a changed deployer."""
+    from workers.resolution_worker import _membership_gate_controller_hook
+
+    protocol = _protocol(db_session, "reshook-rm")
+    member = _member(db_session, protocol, _addr(0x830))
+    eoa = _addr(0x831)
+    replacement = _addr(0x832)
+    cv = ControllerValue(contract_id=member.id, controller_id="owner", value=eoa, authority_provenance="caller_gate")
+    db_session.add(cv)
+    db_session.flush()
+    registry = gate.register_deployer(
+        db_session,
+        protocol_id=protocol.id,
+        address=eoa,
+        classification=gate.classify_deployer(db_session, protocol_id=protocol.id, address=eoa),
+    )
+    assert registry.trust_class == "A"
+    db_session.commit()
+
+    # Re-resolution: the stage rewrites the snapshot, replacing the EOA.
+    db_session.delete(cv)
+    db_session.add(
+        ControllerValue(
+            contract_id=member.id, controller_id="owner", value=replacement, authority_provenance="caller_gate"
+        )
+    )
+    db_session.flush()
+    _membership_gate_controller_hook(
+        db_session,
+        member,
+        {"owner": {"value": replacement, "resolved_type": "eoa"}},
+        removed_values={eoa},
+    )
+
+    db_session.refresh(registry)
+    assert registry.revoked_at is not None
+    assert registry.revocation_reason == "perimeter_fact_lost"
 
 
 def test_static_hook_edge_addresses_admit_member_proxys_impl(db_session):

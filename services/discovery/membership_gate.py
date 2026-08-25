@@ -79,6 +79,15 @@ W3_DIRECTION_D2 = "d2"
 # member's control graph".
 W3_SOURCES = frozenset({"controller_values", "proxy_admin_slot", "probe"})
 
+#: Non-lineage witness rules — evidence a row BELONGS beyond deployer lineage.
+#: A bare nomination or a W4-only row is NOT evidence of belonging: §3.3's
+#: literal "member/candidate set" wording is deliberately narrowed here
+#: (owner ruling) to uphold §0 — an LLM-sourced nomination must never convert
+#: a shared deployer's foreign creation into exclusivity corroboration.
+NONLINEAGE_WITNESS_RULES = frozenset(
+    {WITNESS_RULE_W2_STRUCTURAL, WITNESS_RULE_W3_CONTROL, WITNESS_RULE_W5_HUMAN, WITNESS_RULE_W6_LLAMA_SEED}
+)
+
 #: The one ``ControllerValue.authority_provenance`` that is a control edge
 #: (invariant 6): the value gates callers. ``call_target`` is an integration
 #: operand (nativeWrapper, endpoint, stETH — the WETH9/EndpointV2/Lido
@@ -576,6 +585,40 @@ def active_witnesses(session: Session, *, contract_id: int, protocol_id: int) ->
     )
 
 
+def _has_nonlineage_witness(session: Session, *, contract_id: int, protocol_id: int) -> bool:
+    """Does the row hold ≥1 unrevoked non-lineage witness for *protocol_id*?
+    The F1 membership-evidence test for candidate rows: nomination alone (or
+    W4 alone) proves nothing about belonging."""
+    return (
+        session.execute(
+            select(ContractMembershipWitness.id)
+            .where(
+                ContractMembershipWitness.contract_id == contract_id,
+                ContractMembershipWitness.protocol_id == protocol_id,
+                ContractMembershipWitness.revoked_at.is_(None),
+                ContractMembershipWitness.rule.in_(sorted(NONLINEAGE_WITNESS_RULES)),
+            )
+            .limit(1)
+        ).first()
+        is not None
+    )
+
+
+def _member_anchors_ladder(session: Session, *, contract_id: int, protocol_id: int) -> bool:
+    """§3.2 D2 non-transitivity mirrored into the ladder (F2, same discipline
+    as ``_via_is_transitive``): a member whose ONLY admitting witness is W3-D2
+    must not anchor perimeter or corroboration facts — its principals would
+    license what the D2 entry itself may not."""
+    for row in active_witnesses(session, contract_id=contract_id, protocol_id=protocol_id):
+        if row.rule not in ADMITTING_WITNESS_RULES:
+            continue
+        if row.rule != WITNESS_RULE_W3_CONTROL:
+            return True
+        if isinstance(row.evidence, dict) and row.evidence.get("direction") == W3_DIRECTION_D1:
+            return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Witness-fact verification (spec §3.2 witness invalidation; invariant 6).
 # Admission and cascade both re-check the EDGE, never mere witness presence —
@@ -738,7 +781,13 @@ def _controller_is_exclusive(
         if row.protocol_id == protocol_id:
             member_seen = True
             continue
-        if row.protocol_id is None and row.nominated_protocol_id == protocol_id:
+        # F1: a candidate tolerates the exclusivity check only with real
+        # membership evidence — a bare nomination proves nothing.
+        if (
+            row.protocol_id is None
+            and row.nominated_protocol_id == protocol_id
+            and _has_nonlineage_witness(session, contract_id=row.id, protocol_id=protocol_id)
+        ):
             continue
         return False
     return member_seen
@@ -961,51 +1010,60 @@ def _member_ids_subquery(protocol_id: int):
 def _perimeter_fact(session: Session, *, protocol_id: int, address: str) -> dict[str, Any] | None:
     """A resolved principal fact placing *address* inside the protocol's proven
     control graph: a resolved controller value on a member, a function
-    principal of a member, or a resolved Safe signer-set entry."""
+    principal of a member, or a resolved Safe signer-set entry. The anchoring
+    member must itself hold a non-D2 admitting witness (F2) — a principal
+    observed on a D2-only entry never mints a ladder anchor."""
     members = _member_ids_subquery(protocol_id)
-    cv = session.execute(
+    for member_id, controller_id in session.execute(
         select(ControllerValue.contract_id, ControllerValue.controller_id)
         .where(
             ControllerValue.contract_id.in_(members),
             func.lower(ControllerValue.value) == address,
             ControllerValue.authority_provenance == W3_CONTROLLER_PROVENANCE,
         )
-        .limit(1)
-    ).first()
-    if cv is not None:
-        return {"kind": "controller_value", "contract_id": cv[0], "controller_id": cv[1]}
-    fp = session.execute(
-        select(FunctionPrincipal.id, FunctionPrincipal.function_id)
+        .order_by(ControllerValue.contract_id, ControllerValue.id)
+    ):
+        if _member_anchors_ladder(session, contract_id=member_id, protocol_id=protocol_id):
+            return {"kind": "controller_value", "contract_id": member_id, "controller_id": controller_id}
+    for fp_id, function_id, member_id in session.execute(
+        select(FunctionPrincipal.id, FunctionPrincipal.function_id, EffectiveFunction.contract_id)
         .join(EffectiveFunction, FunctionPrincipal.function_id == EffectiveFunction.id)
         .where(EffectiveFunction.contract_id.in_(members), func.lower(FunctionPrincipal.address) == address)
-        .limit(1)
-    ).first()
-    if fp is not None:
-        return {"kind": "function_principal", "function_principal_id": fp[0], "function_id": fp[1]}
+        .order_by(FunctionPrincipal.id)
+    ):
+        if _member_anchors_ladder(session, contract_id=member_id, protocol_id=protocol_id):
+            return {"kind": "function_principal", "function_principal_id": fp_id, "function_id": function_id}
     # Owner matching happens in Python so stored casing can never hide a
     # signer: the persisted owner strings are lowercased on read.
     safe_rows = session.execute(
-        select(FunctionPrincipal.id, FunctionPrincipal.address, FunctionPrincipal.details)
+        select(
+            FunctionPrincipal.id, FunctionPrincipal.address, FunctionPrincipal.details, EffectiveFunction.contract_id
+        )
         .join(EffectiveFunction, FunctionPrincipal.function_id == EffectiveFunction.id)
         .where(
             EffectiveFunction.contract_id.in_(members),
             FunctionPrincipal.resolved_type == "safe",
             jsonb_has_payload(FunctionPrincipal.details),
         )
+        .order_by(FunctionPrincipal.id)
     ).all()
-    for fp_id, safe_address, details in safe_rows:
+    for fp_id, safe_address, details, member_id in safe_rows:
         owners = details.get("owners") if isinstance(details, dict) else None
         if not isinstance(owners, list):
             continue
-        if any(isinstance(owner, str) and owner.lower() == address for owner in owners):
+        if any(isinstance(owner, str) and owner.lower() == address for owner in owners) and _member_anchors_ladder(
+            session, contract_id=member_id, protocol_id=protocol_id
+        ):
             return {"kind": "safe_owner", "function_principal_id": fp_id, "safe_address": (safe_address or "").lower()}
     return None
 
 
 def _nonlineage_corroborating_member_ids(session: Session, *, protocol_id: int, address: str) -> list[int]:
     """Members deployed by *address* whose membership rests on a NON-lineage
-    witness (§3.3 Class B condition 1)."""
-    return sorted(
+    witness (§3.3 Class B condition 1). The member must also hold a non-D2
+    admitting witness (F2) — a D2-only entry is non-transitive and must not
+    corroborate exclusivity."""
+    candidates = {
         row[0]
         for row in session.execute(
             select(ContractMembershipWitness.contract_id)
@@ -1021,6 +1079,9 @@ def _nonlineage_corroborating_member_ids(session: Session, *, protocol_id: int, 
             )
             .distinct()
         )
+    }
+    return sorted(
+        cid for cid in candidates if _member_anchors_ladder(session, contract_id=cid, protocol_id=protocol_id)
     )
 
 
@@ -1116,12 +1177,24 @@ def classify_deployer(
     created = {_require_address(a, "creation_history entry") for a in creation_history}
     known: set[str] = set()
     if created:
+        # F1: a creation "maps in" only as a member or as a candidate holding
+        # ≥1 unrevoked non-lineage witness — never on a bare nomination.
+        evidenced_candidates = (
+            select(ContractMembershipWitness.contract_id)
+            .where(
+                ContractMembershipWitness.protocol_id == protocol_id,
+                ContractMembershipWitness.revoked_at.is_(None),
+                ContractMembershipWitness.rule.in_(sorted(NONLINEAGE_WITNESS_RULES)),
+            )
+            .scalar_subquery()
+        )
         known = {
             row[0].lower()
             for row in session.execute(
                 select(Contract.address).where(
                     func.lower(Contract.address).in_(sorted(created)),
-                    (Contract.protocol_id == protocol_id) | (Contract.nominated_protocol_id == protocol_id),
+                    (Contract.protocol_id == protocol_id)
+                    | ((Contract.nominated_protocol_id == protocol_id) & Contract.id.in_(evidenced_candidates)),
                 )
             )
         }
@@ -1875,6 +1948,7 @@ def _reclassify_deployers(
                     ).scalars()
                 )
         elif existing is not None:
+            coverage_gaps: Mapping[str, str] = getattr(deployer_enumerator, "coverage_gaps", None) or {}
             reason: str | None = None
             if (
                 existing.trust_class == DEPLOYER_TRUST_CLASS_A
@@ -1888,6 +1962,12 @@ def _reclassify_deployers(
                 # member/candidate set — the §3.3 later-foreign-observation
                 # revocation; the run can mint no new W4 on this EOA after it.
                 reason = "foreign_or_unknown_creations"
+            elif existing.trust_class == DEPLOYER_TRUST_CLASS_B and deployer in coverage_gaps:
+                # F3: coverage gap — the raw enumeration was complete yet a
+                # KNOWN creation is missing or off-scope. Positive
+                # counterevidence against the standing license, unlike
+                # budget/cap incompleteness (which never revokes).
+                reason = "enumeration_coverage_gap"
             elif (
                 existing.trust_class == DEPLOYER_TRUST_CLASS_B
                 and len(_nonlineage_corroborating_member_ids(session, protocol_id=protocol_id, address=deployer)) < 2

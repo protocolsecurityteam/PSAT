@@ -139,10 +139,21 @@ _HEX_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 _ZERO_ADDRESS = "0x" + "0" * 40
 
 
-def _membership_gate_controller_hook(session: Session, contract_row: Contract, controller_values: dict) -> None:
+def _membership_gate_controller_hook(
+    session: Session,
+    contract_row: Contract,
+    controller_values: dict,
+    *,
+    removed_values: set[str] | frozenset[str] = frozenset(),
+) -> None:
     """Membership-gate event-2 hook for the resolution stage's ControllerValue
     commit (spec §3.4 event 2b). Targeted delta, best-effort — a gate failure
-    never fails the stage."""
+    never fails the stage.
+
+    ``removed_values`` (F5): controller addresses the rewrite dropped. A
+    Class-A registry row anchored on a removed value must be re-checked in the
+    SAME evaluate — the removed addresses ride as changed deployers (stratum-ii
+    ladder re-check) and as edge names (revocation-stratum vias)."""
     from services.discovery.membership_gate import FactsDelta, evaluate_committed
 
     values: set[str] = set()
@@ -150,9 +161,14 @@ def _membership_gate_controller_hook(session: Session, contract_row: Contract, c
         value = cv.get("value") if isinstance(cv, dict) else None
         if isinstance(value, str) and _HEX_ADDRESS_RE.match(value) and value.lower() != _ZERO_ADDRESS:
             values.add(value.lower())
+    removed = {v for v in removed_values if v not in values}
     evaluate_committed(
         session,
-        FactsDelta(new_edge_addresses=tuple(sorted(values)), recheck_contract_ids=(contract_row.id,)),
+        FactsDelta(
+            new_edge_addresses=tuple(sorted(values | removed)),
+            changed_deployer_addresses=tuple(sorted(removed)),
+            recheck_contract_ids=(contract_row.id,),
+        ),
         context=f"resolution_controller_values:{contract_row.id}",
     )
 
@@ -246,6 +262,18 @@ class ResolutionWorker(BaseWorker):
         # Write to controller_values table
         contract_row = session.execute(select(Contract).where(Contract.job_id == job.id).limit(1)).scalar_one_or_none()
         if contract_row:
+            # F5: the values the rewrite is about to drop — registry rows
+            # anchored on them must be re-checked by the same gate pass.
+            pre_rewrite_values = {
+                v.lower()
+                for (v,) in session.execute(
+                    select(ControllerValue.value).where(
+                        ControllerValue.contract_id == contract_row.id,
+                        deployment_scope(ControllerValue.deployment_address, deployment_address),
+                    )
+                )
+                if isinstance(v, str) and _HEX_ADDRESS_RE.match(v) and v.lower() != _ZERO_ADDRESS
+            }
             session.query(ControllerValue).filter(
                 ControllerValue.contract_id == contract_row.id,
                 deployment_scope(ControllerValue.deployment_address, deployment_address),
@@ -271,7 +299,9 @@ class ResolutionWorker(BaseWorker):
             # gate's W3 fuel — resolved controller addresses as a fact delta,
             # plus the subject itself (its own controllers may now resolve to
             # perimeter entities). The static stage never sees these.
-            _membership_gate_controller_hook(session, contract_row, snapshot.get("controller_values", {}))
+            _membership_gate_controller_hook(
+                session, contract_row, snapshot.get("controller_values", {}), removed_values=pre_rewrite_values
+            )
 
         logger.info(
             "Resolution stage control snapshot complete for job %s address=%s name=%s",

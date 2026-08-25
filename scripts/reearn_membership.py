@@ -110,6 +110,9 @@ class BudgetedEnumerator:
         if budget < 1:
             raise ValueError("budget must be >= 1; enumeration is disabled by passing enumerator=None")
         self._inner = session_deployer_enumerator(session)
+        #: Shared reference: the inner adapter records coverage gaps (F3) and
+        #: the gate reads them off whichever enumerator it was handed.
+        self.coverage_gaps: dict[str, str] = getattr(self._inner, "coverage_gaps", {})
         self._cache: dict[str, tuple[list[str], bool]] = {}
         self.budget = budget
         self.used = 0
