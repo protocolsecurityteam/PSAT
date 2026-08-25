@@ -404,6 +404,166 @@ class TestEigenLayerLeakShape:
 
 
 # ---------------------------------------------------------------------------
+# 6b. Call-target / NULL-provenance overreach — the WETH9/EndpointV2 leak
+# ---------------------------------------------------------------------------
+
+
+@requires_postgres
+class TestCallTargetOverreachShape:
+    """The dev-DB shape behind the WETH9 / EndpointV2 / DepositContract / Lido
+    admissions: members carry ``call_target`` ControllerValue rows naming the
+    externals they integrate with. A W3 edge exists only for
+    ``authority_provenance == 'caller_gate'``; ``call_target`` is an operand
+    and NULL is not-determined — neither admits (invariant 6)."""
+
+    @staticmethod
+    def _seed(db_session, seed_protocol, tag):
+        from db.models import Contract, ContractCreationWitness
+
+        member = Contract(address=_addr(0xF000 + tag), chain="ethereum", protocol_id=seed_protocol)
+        candidate = Contract(address=_addr(0xF100 + tag), chain="ethereum", nominated_protocol_id=seed_protocol)
+        db_session.add_all([member, candidate])
+        db_session.flush()
+        db_session.add(
+            ContractCreationWitness(
+                chain_id=1, address=candidate.address, code_probe_block=90, code_absent_at_probe=False
+            )
+        )
+        db_session.flush()
+        return member, candidate
+
+    @staticmethod
+    def _evaluate(db_session, candidate):
+        from services.discovery import membership_gate as gate
+
+        gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(candidate.id,)))
+        db_session.commit()
+
+    def test_call_target_controller_value_never_admits(self, db_session, seed_protocol):
+        from db.models import ContractMembershipWitness, ControllerValue
+
+        member, weth9 = self._seed(db_session, seed_protocol, 0)
+        db_session.add(
+            ControllerValue(
+                contract_id=member.id,
+                controller_id="nativeWrapper",
+                value=weth9.address,
+                authority_provenance="call_target",
+            )
+        )
+        self._evaluate(db_session, weth9)
+
+        assert weth9.protocol_id is None
+        assert (
+            db_session.query(ContractMembershipWitness).filter_by(contract_id=weth9.id, rule="w3_control").count() == 0
+        )
+
+    def test_null_provenance_controller_value_never_admits(self, db_session, seed_protocol):
+        from db.models import ContractMembershipWitness, ControllerValue
+
+        member, foreign = self._seed(db_session, seed_protocol, 1)
+        db_session.add(ControllerValue(contract_id=member.id, controller_id="endpoint", value=foreign.address))
+        self._evaluate(db_session, foreign)
+
+        assert foreign.protocol_id is None
+        assert (
+            db_session.query(ContractMembershipWitness).filter_by(contract_id=foreign.id, rule="w3_control").count()
+            == 0
+        )
+
+    def test_caller_gate_controller_value_still_admits(self, db_session, seed_protocol):
+        from db.models import ControllerValue
+
+        member, controller = self._seed(db_session, seed_protocol, 2)
+        db_session.add(
+            ControllerValue(
+                contract_id=member.id,
+                controller_id="owner",
+                value=controller.address,
+                authority_provenance="caller_gate",
+            )
+        )
+        self._evaluate(db_session, controller)
+
+        assert controller.protocol_id == seed_protocol
+
+    def test_w2_cascade_dies_with_the_refused_w3_root(self, db_session, seed_protocol):
+        """The Lido shape: the stETH proxy entered via a call_target CV, then
+        its implementation rode in on W2. Refusing the W3 root must starve the
+        W2 edge — neither row may become a member."""
+        from db.models import Contract, ContractCreationWitness, ControllerValue
+
+        member, foreign_proxy = self._seed(db_session, seed_protocol, 3)
+        impl = Contract(address=_addr(0xF200), chain="ethereum", nominated_protocol_id=seed_protocol)
+        db_session.add(impl)
+        db_session.flush()
+        foreign_proxy.implementation = impl.address
+        db_session.add(
+            ContractCreationWitness(chain_id=1, address=impl.address, code_probe_block=90, code_absent_at_probe=False)
+        )
+        db_session.add(
+            ControllerValue(
+                contract_id=member.id,
+                controller_id="stETH",
+                value=foreign_proxy.address,
+                authority_provenance="call_target",
+            )
+        )
+        db_session.flush()
+
+        from services.discovery import membership_gate as gate
+
+        gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(foreign_proxy.id, impl.id)))
+        db_session.commit()
+
+        assert foreign_proxy.protocol_id is None
+        assert impl.protocol_id is None
+
+    def test_exclusivity_observed_set_counts_caller_gate_only(self, db_session, seed_protocol):
+        """Owner ruling: a call_target operand is not an observation of
+        control, so it neither licenses exclusivity nor refuses it — the
+        exclusivity verdict is computed over caller_gate rows alone."""
+        from db.models import Contract, ControllerValue, Protocol
+        from services.discovery.membership_gate import _controller_is_exclusive
+
+        member, _ = self._seed(db_session, seed_protocol, 4)
+        operator = _addr(0xF300)
+        db_session.add(
+            ControllerValue(
+                contract_id=member.id, controller_id="owner", value=operator, authority_provenance="caller_gate"
+            )
+        )
+        other = Protocol(name=f"ct-excl-{uuid.uuid4().hex[:10]}")
+        db_session.add(other)
+        db_session.flush()
+        foreign = Contract(address=_addr(0xF301), chain="ethereum", protocol_id=other.id)
+        db_session.add(foreign)
+        db_session.flush()
+        # A call_target row naming the operator on a FOREIGN contract is not
+        # an observation of control and must not decide the verdict either way.
+        db_session.add(
+            ControllerValue(
+                contract_id=foreign.id, controller_id="router", value=operator, authority_provenance="call_target"
+            )
+        )
+        db_session.flush()
+
+        assert _controller_is_exclusive(
+            db_session, protocol_id=seed_protocol, controller_address=operator, exclude_contract_ids=set()
+        )
+
+        # The same observation with caller_gate provenance IS control — and
+        # being foreign, it kills exclusivity (the two-hop shape).
+        db_session.query(ControllerValue).filter_by(contract_id=foreign.id).update(
+            {"authority_provenance": "caller_gate"}
+        )
+        db_session.flush()
+        assert not _controller_is_exclusive(
+            db_session, protocol_id=seed_protocol, controller_address=operator, exclude_contract_ids=set()
+        )
+
+
+# ---------------------------------------------------------------------------
 # 7. Structural-orphan adoption migration (3a8f4d1c9b07)
 # ---------------------------------------------------------------------------
 

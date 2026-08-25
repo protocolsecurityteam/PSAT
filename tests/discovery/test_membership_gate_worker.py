@@ -262,7 +262,9 @@ def test_ladder_wire_class_a_skips_enumeration(db_session, monkeypatch):
     protocol = _protocol(db_session)
     member = _contract(db_session, ADDR(0x270), protocol_id=protocol.id)
     eoa = ADDR(0x271)
-    db_session.add(ControllerValue(contract_id=member.id, controller_id="owner", value=eoa))
+    db_session.add(
+        ControllerValue(contract_id=member.id, controller_id="owner", value=eoa, authority_provenance="caller_gate")
+    )
     db_session.flush()
     calls = _stub_txlist(monkeypatch, {})
 

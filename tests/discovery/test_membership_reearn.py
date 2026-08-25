@@ -358,7 +358,11 @@ def test_rerun_without_enumerator_keeps_w4_members_and_registry(db_session):
     deployer = ADDR(0xE1)
     anchor = _inventory_contract(db_session, protocol, ADDR(0x26), protocol_id=protocol.id)
     _code_fact(db_session, anchor.address)
-    db_session.add(ControllerValue(contract_id=anchor.id, controller_id="owner", value=deployer))
+    db_session.add(
+        ControllerValue(
+            contract_id=anchor.id, controller_id="owner", value=deployer, authority_provenance="caller_gate"
+        )
+    )
     registry, member = _w4_member_fixture(db_session, protocol, deployer, ADDR(16))
     before = _registry_state(db_session, registry.id)
 
@@ -381,7 +385,11 @@ def test_pass_two_revokes_deferred_row_with_no_candidate_naming_eoa(db_session):
     deployer = ADDR(0xE6)
     anchor = _contract(db_session, ADDR(0x27), protocol_id=protocol.id)  # no seed: will not re-earn
     _code_fact(db_session, anchor.address)
-    db_session.add(ControllerValue(contract_id=anchor.id, controller_id="owner", value=deployer))
+    db_session.add(
+        ControllerValue(
+            contract_id=anchor.id, controller_id="owner", value=deployer, authority_provenance="caller_gate"
+        )
+    )
     registry, member = _w4_member_fixture(db_session, protocol, deployer, ADDR(0x28))
 
     report = run_reearn(db_session, protocol_ids=[protocol.id], enumerator=None)
@@ -425,7 +433,11 @@ def test_apply_idempotent_with_registry_fixture(db_session):
     deployer = ADDR(0xE3)
     anchor = _inventory_contract(db_session, protocol, ADDR(19), protocol_id=protocol.id)
     _code_fact(db_session, anchor.address)
-    db_session.add(ControllerValue(contract_id=anchor.id, controller_id="owner", value=deployer))
+    db_session.add(
+        ControllerValue(
+            contract_id=anchor.id, controller_id="owner", value=deployer, authority_provenance="caller_gate"
+        )
+    )
     registry = _registry_row(db_session, protocol, deployer, trust_class="A")
     w4_member = _contract(
         db_session, ADDR(20), protocol_id=protocol.id, nominated_protocol_id=protocol.id, deployer=deployer
@@ -574,7 +586,11 @@ def test_reearn_apply_then_reconcile_zero_drift(db_session):
     deployer = ADDR(0xE5)
     anchor = _inventory_contract(db_session, protocol, ADDR(33), protocol_id=protocol.id, implementation=ADDR(34))
     _code_fact(db_session, anchor.address)
-    db_session.add(ControllerValue(contract_id=anchor.id, controller_id="owner", value=deployer))
+    db_session.add(
+        ControllerValue(
+            contract_id=anchor.id, controller_id="owner", value=deployer, authority_provenance="caller_gate"
+        )
+    )
     impl = _contract(db_session, ADDR(34), nominated_protocol_id=protocol.id)
     _code_fact(db_session, impl.address)
     _registry_row(db_session, protocol, deployer, trust_class="A")

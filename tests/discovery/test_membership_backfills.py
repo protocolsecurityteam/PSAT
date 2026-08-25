@@ -175,7 +175,35 @@ def test_plan_skips_rows_with_code_fact(db_session):
     db_session.flush()
     targets, skipped = backfill_code_probes.plan_targets(db_session)
     assert targets == [missing.id]
-    assert skipped == {"has_code_fact": 1, "parked_not_routable": 0}
+    assert skipped == {"has_code_fact": 1, "parked_not_routable": 0, "stale_absent_retargeted": 0}
+
+
+def test_plan_retargets_stale_absent_fact_without_attempt_row(db_session):
+    # A code-absent fact with NO probe attempt predates the gate (every
+    # gate-era probe persists one): evidence-at-a-block, not a current
+    # verdict — the row is re-probed instead of standing as pruned.
+    stale = _contract(db_session, ADDR(0x44))
+    db_session.add(
+        ContractCreationWitness(chain_id=1, address=stale.address, code_probe_block=9, code_absent_at_probe=True)
+    )
+    db_session.flush()
+    targets, skipped = backfill_code_probes.plan_targets(db_session)
+    assert targets == [stale.id]
+    assert skipped["stale_absent_retargeted"] == 1
+
+
+def test_plan_keeps_gate_era_absent_fact_with_attempt_row(db_session):
+    fresh = _contract(db_session, ADDR(0x45))
+    db_session.add(
+        ContractCreationWitness(chain_id=1, address=fresh.address, code_probe_block=90, code_absent_at_probe=True)
+    )
+    db_session.add(
+        ContractProbeAttempt(contract_id=fresh.id, chain_id=1, block_number=90, results={"status": "probed"})
+    )
+    db_session.flush()
+    targets, skipped = backfill_code_probes.plan_targets(db_session)
+    assert targets == []
+    assert skipped == {"has_code_fact": 1, "parked_not_routable": 0, "stale_absent_retargeted": 0}
 
 
 def test_run_probes_persists_code_fact_and_rerun_skips(db_session, monkeypatch, erpc_env):
@@ -280,3 +308,17 @@ def test_code_probe_backfill_exit_0_after_successful_probes(db_session, monkeypa
     _bind_cli_session(monkeypatch, backfill_code_probes)
     _stub_probe_wire(monkeypatch)
     assert backfill_code_probes.main(["--apply"]) == 0
+
+
+def test_plan_retargets_stale_absent_after_errored_reprobe(db_session):
+    # An rpc_error attempt is an attempt, never a verdict — the stale absent
+    # fact keeps re-targeting until a fresh probe lands.
+    stale = _contract(db_session, ADDR(0x46))
+    db_session.add(
+        ContractCreationWitness(chain_id=1, address=stale.address, code_probe_block=9, code_absent_at_probe=True)
+    )
+    db_session.add(ContractProbeAttempt(contract_id=stale.id, chain_id=1, results={"status": "rpc_error"}))
+    db_session.flush()
+    targets, skipped = backfill_code_probes.plan_targets(db_session)
+    assert targets == [stale.id]
+    assert skipped["stale_absent_retargeted"] == 1

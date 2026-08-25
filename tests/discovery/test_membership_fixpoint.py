@@ -390,14 +390,24 @@ def test_shared_operator_two_hop_kill(db_session):
     safe = _contract(db_session, _addr(0x720), nominated_protocol_id=protocol.id)
     _code_fact(db_session, safe.address)
     member_x = _member(db_session, protocol, _addr(0x721))
-    db_session.add(ControllerValue(contract_id=member_x.id, controller_id="owner", value=safe.address))
+    db_session.add(
+        ControllerValue(
+            contract_id=member_x.id, controller_id="owner", value=safe.address, authority_provenance="caller_gate"
+        )
+    )
     # Foreign vault the SAME operator controls — the two-hop shape's tell.
     foreign_w = _contract(db_session, _addr(0x722), protocol_id=foreign_protocol.id)
-    db_session.add(ControllerValue(contract_id=foreign_w.id, controller_id="owner", value=safe.address))
+    db_session.add(
+        ControllerValue(
+            contract_id=foreign_w.id, controller_id="owner", value=safe.address, authority_provenance="caller_gate"
+        )
+    )
     # Candidate Y of P whose resolved owner is the shared operator.
     y = _contract(db_session, _addr(0x723), nominated_protocol_id=protocol.id)
     _code_fact(db_session, y.address)
-    db_session.add(ControllerValue(contract_id=y.id, controller_id="owner", value=safe.address))
+    db_session.add(
+        ControllerValue(contract_id=y.id, controller_id="owner", value=safe.address, authority_provenance="caller_gate")
+    )
     db_session.flush()
 
     result = gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(safe.id, y.id)))
@@ -419,10 +429,16 @@ def test_exclusive_d2_controller_is_transitive(db_session):
     safe = _contract(db_session, _addr(0x730), nominated_protocol_id=protocol.id)
     _code_fact(db_session, safe.address)
     member_x = _member(db_session, protocol, _addr(0x731))
-    db_session.add(ControllerValue(contract_id=member_x.id, controller_id="owner", value=safe.address))
+    db_session.add(
+        ControllerValue(
+            contract_id=member_x.id, controller_id="owner", value=safe.address, authority_provenance="caller_gate"
+        )
+    )
     y = _contract(db_session, _addr(0x732), nominated_protocol_id=protocol.id)
     _code_fact(db_session, y.address)
-    db_session.add(ControllerValue(contract_id=y.id, controller_id="owner", value=safe.address))
+    db_session.add(
+        ControllerValue(contract_id=y.id, controller_id="owner", value=safe.address, authority_provenance="caller_gate")
+    )
     db_session.flush()
 
     gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(safe.id, y.id)))
@@ -446,11 +462,15 @@ def test_demoting_the_via_revokes_dependent_d1(db_session):
     safe = _contract(db_session, _addr(0x740), nominated_protocol_id=protocol.id)
     _code_fact(db_session, safe.address)
     member_x = _member(db_session, protocol, _addr(0x741))
-    x_cv = ControllerValue(contract_id=member_x.id, controller_id="owner", value=safe.address)
+    x_cv = ControllerValue(
+        contract_id=member_x.id, controller_id="owner", value=safe.address, authority_provenance="caller_gate"
+    )
     db_session.add(x_cv)
     y = _contract(db_session, _addr(0x742), nominated_protocol_id=protocol.id)
     _code_fact(db_session, y.address)
-    db_session.add(ControllerValue(contract_id=y.id, controller_id="owner", value=safe.address))
+    db_session.add(
+        ControllerValue(contract_id=y.id, controller_id="owner", value=safe.address, authority_provenance="caller_gate")
+    )
     db_session.flush()
     gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(safe.id, y.id)))
     db_session.commit()
@@ -482,7 +502,11 @@ def test_resolution_hook_promotes_controller_of_member(db_session):
     unrelated = _contract(db_session, _addr(0x802), nominated_protocol_id=protocol.id)
     _code_fact(db_session, unrelated.address)
     # The stage's commit wrote this CV row; the hook receives the snapshot.
-    db_session.add(ControllerValue(contract_id=member.id, controller_id="owner", value=controller.address))
+    db_session.add(
+        ControllerValue(
+            contract_id=member.id, controller_id="owner", value=controller.address, authority_provenance="caller_gate"
+        )
+    )
     db_session.flush()
 
     _membership_gate_controller_hook(
@@ -659,8 +683,12 @@ def _d1_chain_universe(db_session, base: int) -> tuple[Protocol, dict[str, Contr
     y = _contract(db_session, _addr(base + 2), nominated_protocol_id=protocol.id)
     _code_fact(db_session, s.address)
     _code_fact(db_session, y.address)
-    db_session.add(ControllerValue(contract_id=m0.id, controller_id="owner", value=s.address))
-    db_session.add(ControllerValue(contract_id=y.id, controller_id="owner", value=s.address))
+    db_session.add(
+        ControllerValue(contract_id=m0.id, controller_id="owner", value=s.address, authority_provenance="caller_gate")
+    )
+    db_session.add(
+        ControllerValue(contract_id=y.id, controller_id="owner", value=s.address, authority_provenance="caller_gate")
+    )
     db_session.flush()
     return protocol, {"m0": m0, "s": s, "y": y}
 
@@ -796,10 +824,16 @@ def test_foreign_cv_write_revokes_dependent_d1(db_session):
     safe = _contract(db_session, _addr(0xC20), nominated_protocol_id=protocol.id)
     _code_fact(db_session, safe.address)
     member_x = _member(db_session, protocol, _addr(0xC21))
-    db_session.add(ControllerValue(contract_id=member_x.id, controller_id="owner", value=safe.address))
+    db_session.add(
+        ControllerValue(
+            contract_id=member_x.id, controller_id="owner", value=safe.address, authority_provenance="caller_gate"
+        )
+    )
     y = _contract(db_session, _addr(0xC22), nominated_protocol_id=protocol.id)
     _code_fact(db_session, y.address)
-    db_session.add(ControllerValue(contract_id=y.id, controller_id="owner", value=safe.address))
+    db_session.add(
+        ControllerValue(contract_id=y.id, controller_id="owner", value=safe.address, authority_provenance="caller_gate")
+    )
     db_session.flush()
     gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(safe.id, y.id)))
     db_session.commit()
@@ -808,7 +842,11 @@ def test_foreign_cv_write_revokes_dependent_d1(db_session):
     # The foreign observation arrives exactly as a hook would deliver it: a
     # fresh CV row on another protocol's member naming S as its controller.
     foreign_w = _contract(db_session, _addr(0xC23), protocol_id=foreign_protocol.id)
-    db_session.add(ControllerValue(contract_id=foreign_w.id, controller_id="owner", value=safe.address))
+    db_session.add(
+        ControllerValue(
+            contract_id=foreign_w.id, controller_id="owner", value=safe.address, authority_provenance="caller_gate"
+        )
+    )
     db_session.flush()
     result = gate.evaluate(
         db_session,
@@ -942,7 +980,11 @@ def test_demotion_voiding_class_a_anchor_revokes_registry_same_run(db_session):
         ),
         via_address=seed.address,
     )
-    db_session.add(ControllerValue(contract_id=anchor.id, controller_id="owner", value=deployer))
+    db_session.add(
+        ControllerValue(
+            contract_id=anchor.id, controller_id="owner", value=deployer, authority_provenance="caller_gate"
+        )
+    )
     registry = ProtocolDeployer(
         protocol_id=protocol.id,
         address=deployer,

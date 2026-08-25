@@ -453,7 +453,9 @@ def test_classify_deployer_class_a_perimeter_principal(db_session):
     protocol = _protocol(db_session)
     member = _contract(db_session, ADDR(50), protocol_id=protocol.id)
     eoa = ADDR(51)
-    db_session.add(ControllerValue(contract_id=member.id, controller_id="owner", value=eoa))
+    db_session.add(
+        ControllerValue(contract_id=member.id, controller_id="owner", value=eoa, authority_provenance="caller_gate")
+    )
     db_session.flush()
     verdict = gate.classify_deployer(db_session, protocol_id=protocol.id, address=eoa)
     assert verdict.trust_class == "A"

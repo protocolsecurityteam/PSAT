@@ -51,25 +51,39 @@ def plan_targets(
     limit: int | None = None,
     retry_parked: bool = False,
 ) -> tuple[list[int], dict[str, int]]:
-    """(contract ids to probe, skip counts by reason). Reads only."""
-    probed: set[tuple[int, str]] = {
-        (chain_id, address)
-        for chain_id, address in session.execute(
-            select(ContractCreationWitness.chain_id, ContractCreationWitness.address).where(
-                ContractCreationWitness.code_probe_block.is_not(None)
-            )
+    """(contract ids to probe, count breakdown). Reads only.
+
+    A code-absent fact is evidence-at-a-block (spec §3.4), so a pre-gate
+    absent verdict must not stand as current: rows whose fact says absent but
+    that have NO probe attempt for (contract, chain) — every gate-era probe
+    persists one — are re-targeted (``stale_absent_retargeted``). A fresh
+    gate-era verdict (attempt row present) is skipped as before.
+    """
+    probed: dict[tuple[int, str], bool] = {
+        (chain_id, address): bool(code_absent)
+        for chain_id, address, code_absent in session.execute(
+            select(
+                ContractCreationWitness.chain_id,
+                ContractCreationWitness.address,
+                ContractCreationWitness.code_absent_at_probe,
+            ).where(ContractCreationWitness.code_probe_block.is_not(None))
         )
     }
     parked: set[tuple[int, int]] = set()
-    if not retry_parked:
-        for contract_id, attempt_chain_id, results in session.execute(
-            select(ContractProbeAttempt.contract_id, ContractProbeAttempt.chain_id, ContractProbeAttempt.results)
-        ):
-            if isinstance(results, dict) and results.get("status") == STATUS_NOT_ROUTABLE:
-                parked.add((contract_id, attempt_chain_id))
+    attempted: set[tuple[int, int]] = set()
+    for contract_id, attempt_chain_id, results in session.execute(
+        select(ContractProbeAttempt.contract_id, ContractProbeAttempt.chain_id, ContractProbeAttempt.results)
+    ):
+        status = results.get("status") if isinstance(results, dict) else None
+        # An rpc_error attempt is an attempt, never a verdict: it must not
+        # let a stale absent fact stand as attempted.
+        if status != "rpc_error":
+            attempted.add((contract_id, attempt_chain_id))
+        if not retry_parked and status == STATUS_NOT_ROUTABLE:
+            parked.add((contract_id, attempt_chain_id))
 
     targets: list[int] = []
-    skipped = {"has_code_fact": 0, "parked_not_routable": 0}
+    skipped = {"has_code_fact": 0, "parked_not_routable": 0, "stale_absent_retargeted": 0}
     stmt = select(Contract.id, Contract.address, Contract.chain).order_by(Contract.chain, Contract.address, Contract.id)
     for contract_id, address, raw_chain in session.execute(stmt):
         chain_key = _chain_key(raw_chain)
@@ -78,13 +92,20 @@ def plan_targets(
         if not address:
             continue
         chain_id = chain_id_for_chain_name(chain_key)
+        stale_absent = False
         if chain_id is not None and (chain_id, address.lower()) in probed:
-            skipped["has_code_fact"] += 1
-            continue
+            code_absent = probed[(chain_id, address.lower())]
+            if code_absent and (contract_id, chain_id) not in attempted:
+                stale_absent = True
+            else:
+                skipped["has_code_fact"] += 1
+                continue
         attempt_key = UNRESOLVABLE_CHAIN_ID if chain_id is None else chain_id
         if (contract_id, attempt_key) in parked:
             skipped["parked_not_routable"] += 1
             continue
+        if stale_absent:
+            skipped["stale_absent_retargeted"] += 1
         targets.append(contract_id)
         if limit is not None and len(targets) >= limit:
             break
@@ -134,7 +155,11 @@ def main(argv: list[str] | None = None) -> int:
 
     with SessionLocal() as session:
         targets, skipped = plan_targets(session, chain=args.chain, limit=args.limit, retry_parked=args.retry_parked)
-        print(f"{len(targets)} row(s) lack a code fact; skipped: " + json.dumps(skipped, sort_keys=True))
+        print(
+            f"{len(targets)} row(s) to probe "
+            f"({skipped['stale_absent_retargeted']} stale absent re-targeted); "
+            "skipped: " + json.dumps(skipped, sort_keys=True)
+        )
         if not args.apply:
             print(f"\ndry run: {len(targets)} row(s) would be probed. Re-run with --apply to write.")
             return 0

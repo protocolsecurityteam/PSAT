@@ -79,6 +79,15 @@ W3_DIRECTION_D2 = "d2"
 # member's control graph".
 W3_SOURCES = frozenset({"controller_values", "proxy_admin_slot", "probe"})
 
+#: The one ``ControllerValue.authority_provenance`` that is a control edge
+#: (invariant 6): the value gates callers. ``call_target`` is an integration
+#: operand (nativeWrapper, endpoint, stETH — the WETH9/EndpointV2/Lido
+#: overreach shape), and NULL provenance is not-determined — neither may
+#: stand in for a W3 witness, a perimeter fact, or an exclusivity
+#: observation. Probe reads (§3.5 owner/authority/admin slots) are
+#: caller-gating by construction and carry no provenance column.
+W3_CONTROLLER_PROVENANCE = "caller_gate"
+
 _ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 
 # Class B enumeration evidence is capped so a registry row stays readable;
@@ -621,7 +630,11 @@ def _has_controller_value(session: Session, *, contract_id: int, value: str) -> 
     return (
         session.execute(
             select(ControllerValue.id)
-            .where(ControllerValue.contract_id == contract_id, func.lower(ControllerValue.value) == value)
+            .where(
+                ControllerValue.contract_id == contract_id,
+                func.lower(ControllerValue.value) == value,
+                ControllerValue.authority_provenance == W3_CONTROLLER_PROVENANCE,
+            )
             .limit(1)
         ).first()
         is not None
@@ -697,15 +710,19 @@ def _controller_is_exclusive(
     exclude_contract_ids: set[int],
 ) -> bool:
     """Shared-operator kill (spec §3.2): every contract the controller is
-    observed to control (resolved controller values + proxy-admin pointers)
-    maps into this protocol's member/candidate set, with ≥1 proven member.
-    Any foreign or unclaimed observation refuses — revocable, mirroring
-    Class B."""
+    observed to control (caller-gating resolved controller values +
+    proxy-admin pointers) maps into this protocol's member/candidate set, with
+    ≥1 proven member. Any foreign or unclaimed observation refuses —
+    revocable, mirroring Class B. A ``call_target``/NULL-provenance row is not
+    an observation of control, so it neither licenses nor refuses here."""
     controlled: dict[int, Contract] = {}
     for row in session.execute(
         select(Contract)
         .join(ControllerValue, ControllerValue.contract_id == Contract.id)
-        .where(func.lower(ControllerValue.value) == controller_address)
+        .where(
+            func.lower(ControllerValue.value) == controller_address,
+            ControllerValue.authority_provenance == W3_CONTROLLER_PROVENANCE,
+        )
         .distinct()
     ).scalars():
         controlled[row.id] = row
@@ -948,7 +965,11 @@ def _perimeter_fact(session: Session, *, protocol_id: int, address: str) -> dict
     members = _member_ids_subquery(protocol_id)
     cv = session.execute(
         select(ControllerValue.contract_id, ControllerValue.controller_id)
-        .where(ControllerValue.contract_id.in_(members), func.lower(ControllerValue.value) == address)
+        .where(
+            ControllerValue.contract_id.in_(members),
+            func.lower(ControllerValue.value) == address,
+            ControllerValue.authority_provenance == W3_CONTROLLER_PROVENANCE,
+        )
         .limit(1)
     ).first()
     if cv is not None:
@@ -2036,11 +2057,15 @@ def _derive_admitting_facts(
             (member.address or "").lower(),
         )
 
-    # W3 D2 — the candidate is a resolved controller of a member.
+    # W3 D2 — the candidate is a caller-gating resolved controller of a member.
     for member in session.execute(
         select(Contract)
         .join(ControllerValue, ControllerValue.contract_id == Contract.id)
-        .where(*member_scope, func.lower(ControllerValue.value) == addr)
+        .where(
+            *member_scope,
+            func.lower(ControllerValue.value) == addr,
+            ControllerValue.authority_provenance == W3_CONTROLLER_PROVENANCE,
+        )
         .distinct()
         .order_by(Contract.id)
     ).scalars():
@@ -2070,7 +2095,12 @@ def _derive_admitting_facts(
     # entity (the gate proves transitivity here; a caller cannot assert it).
     own_controllers: list[tuple[str, str]] = []
     for (value,) in session.execute(
-        select(ControllerValue.value).where(ControllerValue.contract_id == contract.id).distinct()
+        select(ControllerValue.value)
+        .where(
+            ControllerValue.contract_id == contract.id,
+            ControllerValue.authority_provenance == W3_CONTROLLER_PROVENANCE,
+        )
+        .distinct()
     ):
         if value:
             own_controllers.append(("controller_values", value.lower()))
