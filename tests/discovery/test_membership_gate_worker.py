@@ -1242,6 +1242,33 @@ def test_gate_intake_seeds_w6_for_already_probed_defillama_row(db_session, monke
     assert candidate.protocol_id == protocol.id
 
 
+def test_listing_seed_mints_w6_only_with_a_code_present_probe(db_session):
+    """The listing ``address`` nomination rides the SAME W6 shape as an adapter
+    hit: the tag alone mints nothing, and a code-absent probe mints nothing."""
+    protocol = _protocol(db_session)
+    unprobed = _contract(db_session, ADDR(0x2F6), nominated_protocol_id=protocol.id, discovery_sources=["defillama"])
+    db_session.flush()
+    assert gate.seed_llama_witness(db_session, contract=unprobed) is False
+    assert _w6_rows(db_session, unprobed.id) == []
+
+    empty = _contract(db_session, ADDR(0x2F7), nominated_protocol_id=protocol.id, discovery_sources=["defillama"])
+    db_session.add(
+        ContractCreationWitness(chain_id=1, address=empty.address, code_probe_block=91, code_absent_at_probe=True)
+    )
+    db_session.flush()
+    assert gate.seed_llama_witness(db_session, contract=empty) is False
+    assert _w6_rows(db_session, empty.id) == []
+
+    token = _contract(db_session, ADDR(0x2F8), nominated_protocol_id=protocol.id, discovery_sources=["defillama"])
+    db_session.add(
+        ContractCreationWitness(chain_id=1, address=token.address, code_probe_block=92, code_absent_at_probe=False)
+    )
+    db_session.flush()
+    assert gate.seed_llama_witness(db_session, contract=token) is True
+    (w6,) = _w6_rows(db_session, token.id)
+    assert w6.evidence["code_probe_block"] == 92
+
+
 def test_seed_llama_witness_never_rearms_revoked_seed(db_session):
     protocol = _protocol(db_session)
     candidate = _contract(db_session, ADDR(0x2F4), nominated_protocol_id=protocol.id, discovery_sources=["defillama"])
