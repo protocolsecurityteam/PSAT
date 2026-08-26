@@ -444,6 +444,79 @@ def test_same_contract_implementation_inherits_and_rides_the_revocation(db_sessi
     assert impl.protocol_id is None
 
 
+def test_exclusivity_requires_a_proven_member(db_session):
+    """§9 invariant 3 on the shared-operator kill: a heuristic-only member is
+    not_determined there — it neither supplies the mandatory proven member nor
+    refuses the verdict as foreign."""
+    protocol = _protocol(db_session)
+    deployer = _addr(0xD20)
+    operator = _addr(0xD21)
+    _anchor(db_session, protocol, _addr(0x2200), deployer=deployer)
+    _anchor(db_session, protocol, _addr(0x2201), deployer=deployer)
+    sibling = _candidate(db_session, protocol, _addr(0x2202), deployer=deployer)
+    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(sibling.id,)))
+    db_session.commit()
+    assert sibling.protocol_id == protocol.id
+    assert gate.member_for_evidence(db_session, contract_id=sibling.id, protocol_id=protocol.id) is False
+
+    db_session.add(
+        ControllerValue(
+            contract_id=sibling.id, controller_id="owner", value=operator, authority_provenance="caller_gate"
+        )
+    )
+    db_session.flush()
+    assert not gate._controller_is_exclusive(
+        db_session,
+        protocol_id=protocol.id,
+        controller_address=operator,
+        chain_key="ethereum",
+        exclude_contract_ids=set(),
+    )
+
+    proven = _anchor(db_session, protocol, _addr(0x2203), deployer=_addr(0xBEE1))
+    db_session.add(
+        ControllerValue(
+            contract_id=proven.id, controller_id="owner", value=operator, authority_provenance="caller_gate"
+        )
+    )
+    db_session.flush()
+    # One proven member licenses; the heuristic member is tolerated as family.
+    assert gate._controller_is_exclusive(
+        db_session,
+        protocol_id=protocol.id,
+        controller_address=operator,
+        chain_key="ethereum",
+        exclude_contract_ids=set(),
+    )
+
+
+def test_proxy_over_heuristic_only_impl_member_derives_no_w2(db_session):
+    """§6 is one-directional: an H-member proxy carries its implementation,
+    but a heuristic-only IMPL member is invisible to the reverse proxy edge —
+    no W2 for the proxy, flagged or not, and a re-evaluation over unchanged
+    facts mints and revokes nothing."""
+    protocol = _protocol(db_session)
+    deployer = _addr(0xD22)
+    _anchor(db_session, protocol, _addr(0x2300), deployer=deployer)
+    _anchor(db_session, protocol, _addr(0x2301), deployer=deployer)
+    impl = _candidate(db_session, protocol, _addr(0x2302), deployer=deployer)
+    proxy = _candidate(db_session, protocol, _addr(0x2303), deployer=_addr(0xBEE2), implementation=impl.address)
+
+    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(impl.id, proxy.id)))
+    db_session.commit()
+
+    assert impl.protocol_id == protocol.id
+    assert gate.member_for_evidence(db_session, contract_id=impl.id, protocol_id=protocol.id) is False
+    assert proxy.protocol_id is None
+    assert _rules(db_session, proxy) == set()
+
+    before = {(row.id, row.revoked_at) for row in db_session.execute(select(ContractMembershipWitness)).scalars()}
+    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(impl.id, proxy.id)))
+    db_session.commit()
+    after = {(row.id, row.revoked_at) for row in db_session.execute(select(ContractMembershipWitness)).scalars()}
+    assert after == before
+
+
 def test_heuristic_via_is_same_contract_only(db_session):
     with pytest.raises(ValueError, match="same-contract"):
         gate.w2_evidence(

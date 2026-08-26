@@ -789,7 +789,11 @@ def test_exclusivity_tolerates_member_factory_children(db_session):
 
     # No creation attribution recorded → the observation stays foreign.
     assert not _controller_is_exclusive(
-        db_session, protocol_id=protocol.id, controller_address=operator, exclude_contract_ids=set()
+        db_session,
+        protocol_id=protocol.id,
+        controller_address=operator,
+        chain_key="ethereum",
+        exclude_contract_ids=set(),
     )
 
     factory = _contract(db_session, ADDR(0x574), protocol_id=protocol.id)
@@ -806,7 +810,11 @@ def test_exclusivity_tolerates_member_factory_children(db_session):
     )
     db_session.flush()
     assert _controller_is_exclusive(
-        db_session, protocol_id=protocol.id, controller_address=operator, exclude_contract_ids=set()
+        db_session,
+        protocol_id=protocol.id,
+        controller_address=operator,
+        chain_key="ethereum",
+        exclude_contract_ids=set(),
     )
 
 
@@ -862,13 +870,55 @@ def test_exclusivity_tolerates_only_evidenced_candidates(db_session):
     db_session.flush()
 
     assert not _controller_is_exclusive(
-        db_session, protocol_id=protocol.id, controller_address=operator, exclude_contract_ids=set()
+        db_session,
+        protocol_id=protocol.id,
+        controller_address=operator,
+        chain_key="ethereum",
+        exclude_contract_ids=set(),
     )
 
     anchor = _contract(db_session, ADDR(0x523), protocol_id=protocol.id)
     _seed_w2_witness(db_session, controlled, anchor, protocol.id)
     assert _controller_is_exclusive(
-        db_session, protocol_id=protocol.id, controller_address=operator, exclude_contract_ids=set()
+        db_session,
+        protocol_id=protocol.id,
+        controller_address=operator,
+        chain_key="ethereum",
+        exclude_contract_ids=set(),
+    )
+
+
+def test_exclusivity_scopes_controlled_set_to_the_controllers_chain(db_session):
+    """Control is observed on a deployment, and a deployment is (address,
+    chain): a same-address row on another chain belonging elsewhere is an
+    observation on THAT chain and must not refuse exclusivity on this one."""
+    from services.discovery.membership_gate import _controller_is_exclusive
+
+    protocol = _protocol(db_session)
+    other = _protocol(db_session)
+    operator = ADDR(0x590)
+    member = _contract(db_session, ADDR(0x591), protocol_id=protocol.id)
+    anchor = _contract(db_session, ADDR(0x592), protocol_id=protocol.id)
+    _seed_w2_witness(db_session, member, anchor, protocol.id)
+    db_session.add(
+        ControllerValue(
+            contract_id=member.id, controller_id="owner", value=operator, authority_provenance="caller_gate"
+        )
+    )
+    foreign_twin = _contract(db_session, ADDR(0x591), chain="base", protocol_id=other.id)
+    foreign_twin.admin = operator
+    db_session.flush()
+
+    assert _controller_is_exclusive(
+        db_session,
+        protocol_id=protocol.id,
+        controller_address=operator,
+        chain_key="ethereum",
+        exclude_contract_ids=set(),
+    )
+    # On base the only controlled row is the foreign twin — nothing licenses.
+    assert not _controller_is_exclusive(
+        db_session, protocol_id=protocol.id, controller_address=operator, chain_key="base", exclude_contract_ids=set()
     )
 
 

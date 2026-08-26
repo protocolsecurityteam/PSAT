@@ -554,7 +554,11 @@ class TestCallTargetOverreachShape:
         db_session.flush()
 
         assert _controller_is_exclusive(
-            db_session, protocol_id=seed_protocol, controller_address=operator, exclude_contract_ids=set()
+            db_session,
+            protocol_id=seed_protocol,
+            controller_address=operator,
+            chain_key="ethereum",
+            exclude_contract_ids=set(),
         )
 
         # The same observation with caller_gate provenance IS control — and
@@ -564,7 +568,11 @@ class TestCallTargetOverreachShape:
         )
         db_session.flush()
         assert not _controller_is_exclusive(
-            db_session, protocol_id=seed_protocol, controller_address=operator, exclude_contract_ids=set()
+            db_session,
+            protocol_id=seed_protocol,
+            controller_address=operator,
+            chain_key="ethereum",
+            exclude_contract_ids=set(),
         )
 
 

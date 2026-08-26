@@ -1408,6 +1408,7 @@ def _via_transitivity(
             session,
             protocol_id=protocol_id,
             controller_address=via_address,
+            chain_key=chain_key,
             exclude_contract_ids={member.id} | ({exclude_contract_id} if exclude_contract_id is not None else set()),
         ):
             return TransitivityProof("d2_exclusive")
@@ -1792,14 +1793,21 @@ def _controller_is_exclusive(
     *,
     protocol_id: int,
     controller_address: str,
+    chain_key: str,
     exclude_contract_ids: set[int],
 ) -> bool:
     """Shared-operator kill (spec §3.2): every contract the controller is
     observed to control (caller-gating resolved controller values +
     proxy-admin pointers) maps into this protocol's member/candidate set, with
-    ≥1 proven member. Any foreign or unclaimed observation refuses —
+    ≥1 member proven under ``member_for_evidence`` — a heuristic-only member
+    is not_determined: tolerated as protocol-family, never the mandatory
+    proof (DEPLOYER_HEURISTIC_SPEC.md §9 invariant 3). Control is observed on
+    a deployment, and a deployment is (address, chain), so the controlled set
+    is scoped to the controller's chain (same NULL≡'ethereum' convention as
+    ``_member_rows_at``). Any foreign or unclaimed observation refuses —
     revocable, mirroring Class B. A ``call_target``/NULL-provenance row is not
     an observation of control, so it neither licenses nor refuses here."""
+    chain_scope = func.lower(func.coalesce(Contract.chain, "ethereum")) == chain_key
     controlled: dict[int, Contract] = {}
     for row in session.execute(
         select(Contract)
@@ -1807,11 +1815,14 @@ def _controller_is_exclusive(
         .where(
             func.lower(ControllerValue.value) == controller_address,
             ControllerValue.authority_provenance == W3_CONTROLLER_PROVENANCE,
+            chain_scope,
         )
         .distinct()
     ).scalars():
         controlled[row.id] = row
-    for row in session.execute(select(Contract).where(func.lower(Contract.admin) == controller_address)).scalars():
+    for row in session.execute(
+        select(Contract).where(func.lower(Contract.admin) == controller_address, chain_scope)
+    ).scalars():
         controlled[row.id] = row
     member_seen = False
     for cid in sorted(controlled):
@@ -1821,7 +1832,8 @@ def _controller_is_exclusive(
         if (row.address or "").lower() == controller_address:
             continue
         if row.protocol_id == protocol_id:
-            member_seen = True
+            if member_for_evidence(session, contract_id=row.id, protocol_id=protocol_id):
+                member_seen = True
             continue
         # F1: a candidate tolerates the exclusivity check only with real
         # membership evidence — a bare nomination proves nothing.
