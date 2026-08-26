@@ -502,6 +502,38 @@ def test_classify_deployer_class_a_safe_signer(db_session):
     assert other.trust_class is None
 
 
+def test_classify_deployer_principal_fact_requires_authority_derivation(db_session):
+    from db.models import EffectiveFunction, FunctionPrincipal
+
+    protocol = _protocol(db_session)
+    member = _contract(db_session, ADDR(55), protocol_id=protocol.id)
+    _seed_w5_witness(db_session, member, protocol.id)
+    eoa = ADDR(56)
+    fn = EffectiveFunction(contract_id=member.id, function_name="safeTransferFrom")
+    db_session.add(fn)
+    db_session.flush()
+    principal = FunctionPrincipal(
+        function_id=fn.id,
+        address=eoa,
+        resolved_type="eoa",
+        details={"resolver_path": ["param_keyed_mapping_enumeration"]},
+    )
+    db_session.add(principal)
+    db_session.flush()
+    # Membership of an enumerated caller set is not control: no perimeter
+    # fact, no Class-A verdict, no registry row for the EOA.
+    assert gate._perimeter_fact(db_session, protocol_id=protocol.id, address=eoa) is None
+    verdict = gate.classify_deployer(db_session, protocol_id=protocol.id, address=eoa)
+    assert verdict.trust_class is None
+
+    # The identical shape with an authority derivation still mints Class A.
+    principal.details = {"resolver_path": ["live_getter_resolution"]}
+    db_session.flush()
+    verdict = gate.classify_deployer(db_session, protocol_id=protocol.id, address=eoa)
+    assert verdict.trust_class == "A"
+    assert verdict.evidence["perimeter_fact"]["kind"] == "function_principal"
+
+
 def _seed_class_b_members(db_session, protocol, eoa: str) -> list[Contract]:
     members = []
     for n in (60, 61):

@@ -2156,10 +2156,17 @@ def _perimeter_fact_candidates(session: Session, *, protocol_id: int, address: s
         .order_by(ControllerValue.contract_id, ControllerValue.id)
     ):
         yield {"kind": "controller_value", "contract_id": member_id, "controller_id": controller_id}, member_id
+    # A principal produced by enumerating a caller mapping proves membership
+    # of a caller set, not control — only an authority-derived principal is a
+    # perimeter observation (invariant 6, :data:`W3_PRINCIPAL_AUTHORITY_RESOLVERS`).
     for fp_id, function_id, member_id in session.execute(
         select(FunctionPrincipal.id, FunctionPrincipal.function_id, EffectiveFunction.contract_id)
         .join(EffectiveFunction, FunctionPrincipal.function_id == EffectiveFunction.id)
-        .where(EffectiveFunction.contract_id.in_(members), func.lower(FunctionPrincipal.address) == address)
+        .where(
+            EffectiveFunction.contract_id.in_(members),
+            func.lower(FunctionPrincipal.address) == address,
+            _authority_derived_principal(),
+        )
         .order_by(FunctionPrincipal.id)
     ):
         yield {"kind": "function_principal", "function_principal_id": fp_id, "function_id": function_id}, member_id
