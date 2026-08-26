@@ -147,12 +147,7 @@ def audit_heuristic_registry(session: Session, *, protocol_ids: list[int] | None
             affinity = gate.compute_deployer_affinity(session, protocol_id=row.protocol_id, address=row.address)
             challenges = gate.sync_deployer_challenges(session, deployer_row=row)
             recorded = row.evidence if isinstance(row.evidence, dict) else {}
-            derived = {
-                "anchor_count": affinity.anchor_count,
-                "foreign_anchor_count": affinity.foreign_anchor_count,
-                "affinity": affinity.affinity,
-                "challenge_count": challenges,
-            }
+            derived = gate.heuristic_live_numbers(affinity, challenges=challenges)
             if any(recorded.get(key) != value for key, value in derived.items()):
                 drifts.append(
                     Drift(
@@ -162,7 +157,9 @@ def audit_heuristic_registry(session: Session, *, protocol_ids: list[int] | None
                         chain=None,
                         protocol_id=row.protocol_id,
                         detail={
-                            "state": gate.heuristic_registry_state(session, deployer_row=row),
+                            "state": gate.heuristic_registry_state(
+                                session, deployer_row=row, affinity=affinity, challenges=challenges
+                            ),
                             **{f"derived_{key}": value for key, value in derived.items()},
                             **{f"recorded_{key}": recorded.get(key) for key in derived},
                         },

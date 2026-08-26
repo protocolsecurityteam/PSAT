@@ -1252,6 +1252,22 @@ def _member_principal_rows(
             yield fp_id, function_id, "safe", (safe_address or "").lower(), member
 
 
+def _function_principal_fact(
+    fp_id: int, function_id: int, member: Contract, resolved_type: str | None
+) -> dict[str, Any]:
+    return _principal_fact_evidence(
+        {
+            "kind": "function_principal",
+            "function_principal_id": fp_id,
+            "function_id": function_id,
+            "member_contract_id": member.id,
+            "member_address": (member.address or "").lower(),
+            "resolved_type": resolved_type,
+            "safe_address": None,
+        }
+    )
+
+
 def _principal_perimeter_fact(
     session: Session,
     *,
@@ -1280,17 +1296,7 @@ def _principal_perimeter_fact(
             continue
         if not _member_anchors_ladder(session, contract_id=member.id, protocol_id=protocol_id):
             continue
-        return _principal_fact_evidence(
-            {
-                "kind": "function_principal",
-                "function_principal_id": fp_id,
-                "function_id": function_id,
-                "member_contract_id": member.id,
-                "member_address": (member.address or "").lower(),
-                "resolved_type": resolved_type,
-                "safe_address": None,
-            }
-        )
+        return _function_principal_fact(fp_id, function_id, member, resolved_type)
     return None
 
 
@@ -1314,20 +1320,7 @@ def _d2_principal_facts(
             continue
         if not _member_anchors_ladder(session, contract_id=member.id, protocol_id=protocol_id):
             continue
-        facts[member.id] = (
-            member,
-            _principal_fact_evidence(
-                {
-                    "kind": "function_principal",
-                    "function_principal_id": fp_id,
-                    "function_id": function_id,
-                    "member_contract_id": member.id,
-                    "member_address": (member.address or "").lower(),
-                    "resolved_type": resolved_type,
-                    "safe_address": None,
-                }
-            ),
-        )
+        facts[member.id] = (member, _function_principal_fact(fp_id, function_id, member, resolved_type))
     return [facts[member_id] for member_id in sorted(facts)]
 
 
@@ -2618,15 +2611,24 @@ def heuristic_registry_state(
     return W4H_STATE_ACTIVE
 
 
+def heuristic_live_numbers(affinity: DeployerAffinity, *, challenges: int) -> dict[str, Any]:
+    """The recomputable numbers an H row's evidence records — the drift
+    contract shared by the stratum's rewrite-on-drift check and reconcile's
+    stale-registry audit."""
+    return {
+        "anchor_count": affinity.anchor_count,
+        "foreign_anchor_count": affinity.foreign_anchor_count,
+        "affinity": affinity.affinity,
+        "challenge_count": challenges,
+    }
+
+
 def heuristic_evidence(affinity: DeployerAffinity, *, challenges: int) -> dict[str, Any]:
     """§8.1 H-row evidence: the inputs AND the computation, recorded so a
     reviewer reads the numbers the grant was made on, not just the verdict."""
     return {
         "anchors": [dict(anchor) for anchor in affinity.anchors],
-        "anchor_count": affinity.anchor_count,
-        "foreign_anchor_count": affinity.foreign_anchor_count,
-        "affinity": affinity.affinity,
-        "challenge_count": challenges,
+        **heuristic_live_numbers(affinity, challenges=challenges),
         "thresholds": {
             "min_anchors": W4H_MIN_ANCHORS,
             "min_affinity": W4H_MIN_AFFINITY,
@@ -3388,6 +3390,19 @@ def _stratified_fixpoint(
     members_at_entry: set[int] = set()
     enum_cache: dict[str, tuple[Sequence[str], bool]] = {}
 
+    def fold_demotions(demoted_ids: Sequence[int] | set[int]) -> None:
+        """Every stratum's demotion bookkeeping. ``members_at_entry`` must be
+        read off ``promoted`` BEFORE it shrinks. A demotion shrinks a member
+        set too — its protocol's standing rows get the loss check next round."""
+        demoted.update(demoted_ids)
+        members_at_entry.update(set(demoted_ids) - promoted)
+        promoted.difference_update(demoted_ids)
+        reprobe.update(demoted_ids)
+        pending.update(demoted_ids)
+        lost_protocol_ids = _protocols_of_demoted(session, demoted_ids)
+        loss_check_protocol_ids.update(lost_protocol_ids)
+        member_change_protocol_ids.update(lost_protocol_ids)
+
     for _round in range(_FIXPOINT_ROUND_CAP):
         changed = False
 
@@ -3396,14 +3411,7 @@ def _stratified_fixpoint(
             dirty_vias = set()
             if revoked_ids or demoted_ids:
                 changed = True
-            demoted.update(demoted_ids)
-            members_at_entry.update(set(demoted_ids) - promoted)
-            promoted.difference_update(demoted_ids)
-            reprobe.update(demoted_ids)
-            pending.update(demoted_ids)
-            lost_protocol_ids = _protocols_of_demoted(session, demoted_ids)
-            loss_check_protocol_ids.update(lost_protocol_ids)
-            member_change_protocol_ids.update(lost_protocol_ids)
+            fold_demotions(demoted_ids)
 
         extra_pairs = _standing_registry_pairs(
             session, addresses=named_registry_addresses, protocol_ids=loss_check_protocol_ids
@@ -3420,16 +3428,8 @@ def _stratified_fixpoint(
         if recl_changed:
             changed = True
         pending.update(recl_pending)
-        demoted.update(recl_demotion.demoted_contract_ids)
-        members_at_entry.update(set(recl_demotion.demoted_contract_ids) - promoted)
-        promoted.difference_update(recl_demotion.demoted_contract_ids)
+        fold_demotions(recl_demotion.demoted_contract_ids)
         reprobe.update(recl_demotion.reprobe_contract_ids)
-        pending.update(recl_demotion.demoted_contract_ids)
-        # A stratum-(ii) demotion shrinks a member set too — its protocol's
-        # standing rows get the same loss check next round.
-        recl_lost_protocol_ids = _protocols_of_demoted(session, recl_demotion.demoted_contract_ids)
-        loss_check_protocol_ids.update(recl_lost_protocol_ids)
-        member_change_protocol_ids.update(recl_lost_protocol_ids)
 
         round_promoted: set[int] = set()
         for contract_id in sorted(pending):
@@ -3501,10 +3501,7 @@ def _stratified_fixpoint(
     )
     promoted.update(w4h_promoted)
     pending.difference_update(w4h_promoted)
-    demoted.update(w4h_demoted)
-    members_at_entry.update(w4h_demoted - promoted)
-    promoted.difference_update(w4h_demoted)
-    reprobe.update(w4h_demoted)
+    fold_demotions(w4h_demoted)
 
     reprobe.update(demoted - promoted)
     reprobe.difference_update(promoted)
@@ -4034,12 +4031,7 @@ def _w4h_stratum(
         # Rewrite the recorded numbers only on drift — an unchanged evaluation
         # must leave the evidence (``computed_at`` included) untouched.
         recorded = row.evidence if isinstance(row.evidence, dict) else {}
-        derived = {
-            "anchor_count": affinity.anchor_count,
-            "foreign_anchor_count": affinity.foreign_anchor_count,
-            "affinity": affinity.affinity,
-            "challenge_count": challenges,
-        }
+        derived = heuristic_live_numbers(affinity, challenges=challenges)
         if any(recorded.get(key) != value for key, value in derived.items()):
             row.evidence = heuristic_evidence(affinity, challenges=challenges)
         if state == W4H_STATE_REVOKED:
