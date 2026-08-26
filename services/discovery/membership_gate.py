@@ -3894,6 +3894,53 @@ def _attempt_w4h_admission(
     return promote(session, contract=contract, protocol_id=registry.protocol_id)
 
 
+def _w4h_late_inheritance_seed(session: Session, candidate_ids: set[int]) -> set[int]:
+    """§6 late arrival: an implementation discovered AFTER the run that
+    admitted its proxy is unreachable if inheritance seeds only from that
+    run's promotions — the proof strata refuse the heuristic via, so nothing
+    ever closes it. Return every STANDING heuristic-only member whose
+    same-contract pointer (implementation / secondary implementations —
+    the only edge kinds the pass follows) resolves to a pending candidate.
+    Keyed on this run's candidates, never a full member sweep."""
+    addresses: dict[str, set[int]] = {}
+    if candidate_ids:
+        for address, nominated in session.execute(
+            select(Contract.address, Contract.nominated_protocol_id).where(
+                Contract.id.in_(sorted(candidate_ids)),
+                Contract.protocol_id.is_(None),
+                Contract.nominated_protocol_id.is_not(None),
+            )
+        ):
+            addr = (address or "").lower()
+            if _ADDRESS_RE.match(addr):
+                addresses.setdefault(addr, set()).add(int(nominated))
+    if not addresses:
+        return set()
+    matched = sorted(addresses)
+    seed: set[int] = set()
+    for member in session.execute(
+        select(Contract)
+        .where(
+            Contract.protocol_id.is_not(None),
+            func.lower(Contract.implementation).in_(matched) | _secondary_pointer_named(matched),
+        )
+        .order_by(Contract.id)
+    ).scalars():
+        assert member.protocol_id is not None  # the WHERE clause guarantees a stamp
+        pointed = {
+            pointer.lower()
+            for pointer in (member.implementation, *(member.secondary_implementations or []))
+            if isinstance(pointer, str) and _ADDRESS_RE.match(pointer)
+        }
+        if not any(member.protocol_id in addresses.get(pointer, ()) for pointer in pointed):
+            continue
+        # A proven member's pointer edge is the proof strata's W2 already.
+        if member_for_evidence(session, contract_id=member.id, protocol_id=member.protocol_id):
+            continue
+        seed.add(member.id)
+    return seed
+
+
 def _w4h_inheritance_pass(session: Session, heuristic_member_ids: set[int]) -> set[int]:
     """§6 exception: an H-member proxy carries its implementation / secondary
     implementations through W2, with the heuristic status propagated. Bounded
@@ -4026,7 +4073,7 @@ def _w4h_stratum(
         for contract in candidates:
             if _attempt_w4h_admission(session, contract, registry=row, affinity=affinity):
                 promoted.add(contract.id)
-    promoted |= _w4h_inheritance_pass(session, promoted)
+    promoted |= _w4h_inheritance_pass(session, promoted | _w4h_late_inheritance_seed(session, candidate_ids))
     return promoted, demoted - promoted
 
 

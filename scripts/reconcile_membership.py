@@ -173,6 +173,25 @@ def audit_heuristic_registry(session: Session, *, protocol_ids: list[int] | None
     return drifts
 
 
+def late_inheritance_would_admit(session: Session, *, protocol_ids: list[int] | None = None) -> list[int]:
+    """Named observation (report mode only, never drift): pending candidates
+    the gate's §6 late-arrival inheritance sweep would admit on its next
+    evaluate. Computed by the gate's own seed + pass inside a rolled-back
+    savepoint — no parallel definition of the rule."""
+    stmt = select(Contract.id).where(Contract.protocol_id.is_(None), Contract.nominated_protocol_id.is_not(None))
+    if protocol_ids:
+        stmt = stmt.where(Contract.nominated_protocol_id.in_(protocol_ids))
+    pending = {int(cid) for cid in session.execute(stmt).scalars()}
+    seed = gate._w4h_late_inheritance_seed(session, pending)
+    if not seed:
+        return []
+    savepoint = session.begin_nested()
+    try:
+        return sorted(gate._w4h_inheritance_pass(session, seed))
+    finally:
+        savepoint.rollback()
+
+
 def apply_fixes(session: Session, drifts: list[Drift]) -> int:
     """Fix each drift through the gate's own primitives; demotions cascade to
     quiescence so dependents of a fixed row settle in the same pass. Returns
@@ -258,6 +277,9 @@ def main(argv: list[str] | None = None) -> int:
         drifts.extend(audit_heuristic_registry(session, protocol_ids=args.protocol_id))
         print(format_drifts(drifts))
         if not args.apply:
+            would = late_inheritance_would_admit(session, protocol_ids=args.protocol_id)
+            line = f"w4h_late_inheritance_would_admit: {len(would)}"
+            print(f"{line} contract_ids={would}" if would else line)
             if drifts:
                 print(f"\n{len(drifts)} drifted row(s) — drift on a freshly gated DB is a bug report.")
                 return 1
