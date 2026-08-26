@@ -252,21 +252,33 @@ def evaluate(
     targeted = _target_candidates(session, facts_delta)
     dirty_vias = {a.lower() for a in facts_delta.changed_deployer_addresses if a}
     named_addresses = list(facts_delta.new_edge_addresses)
+    entry_member_deployers: set[str] = set()
     if facts_delta.new_member_contract_ids:
+        entry_ids = sorted(set(facts_delta.new_member_contract_ids))
         named_addresses.extend(
             address.lower()
             for (address,) in session.execute(
-                select(Contract.address).where(
-                    Contract.id.in_(sorted(set(facts_delta.new_member_contract_ids))), Contract.address.is_not(None)
-                )
+                select(Contract.address).where(Contract.id.in_(entry_ids), Contract.address.is_not(None))
             )
         )
+        # An entry-delta member is a fresh FOREIGN anchor against every
+        # standing H row keyed by its deployer under another protocol; the
+        # delta names no deployer, so the W4-H scope must — a should-be-revoked
+        # row is re-judged this run, not on some later touch.
+        entry_member_deployers = {
+            deployer.lower()
+            for (deployer,) in session.execute(
+                select(Contract.deployer).where(Contract.id.in_(entry_ids), Contract.deployer.is_not(None))
+            )
+            if deployer and _ADDRESS_RE.match(deployer)
+        }
     dirty_vias |= _standing_vias_named_by_edges(session, named_addresses)
     settled = _stratified_fixpoint(
         session,
         targeted,
         dirty_via_addresses=sorted(dirty_vias),
         changed_deployer_addresses=facts_delta.changed_deployer_addresses,
+        w4h_extra_addresses=sorted(entry_member_deployers),
         deployer_enumerator=deployer_enumerator,
     )
     return PromotionResult(
@@ -398,6 +410,7 @@ def _stratified_fixpoint(
     *,
     dirty_via_addresses: Sequence[str] = (),
     changed_deployer_addresses: Sequence[str] = (),
+    w4h_extra_addresses: Sequence[str] = (),
     deployer_enumerator: DeployerEnumerator | None = None,
 ) -> PromotionResult:
     """Stratified fixpoint (spec §3.4 event 3, invariants 8+9). Each round
@@ -428,8 +441,10 @@ def _stratified_fixpoint(
     named_registry_addresses: set[str] = {a.lower() for a in changed_deployer_addresses if a}
     loss_check_protocol_ids: set[int] = set()
     #: Run-level accumulators scoping the trailing W4-H stratum: the EOAs the
-    #: triggering delta named, and every protocol whose member set moved.
-    w4h_named_addresses: set[str] = set(named_registry_addresses)
+    #: triggering delta named (changed deployers plus the caller's extras —
+    #: entry-delta members' deployers), every round-promoted contract's
+    #: deployer (added below), and every protocol whose member set moved.
+    w4h_named_addresses: set[str] = set(named_registry_addresses) | {a.lower() for a in w4h_extra_addresses if a}
     member_change_protocol_ids: set[int] = set()
     promoted: set[int] = set()
     demoted: set[int] = set()
@@ -518,6 +533,10 @@ def _stratified_fixpoint(
                 addr = (contract.address or "").lower()
                 if addr:
                     promoted_addrs.add(addr)
+            # A round promotion is a fresh FOREIGN anchor for any standing H
+            # row keyed by the same EOA under another protocol — its deployer
+            # joins the W4-H scope so that row is re-judged this run.
+            w4h_named_addresses |= deployer_addrs
             # A promotion is new counterevidence for STANDING witnesses too,
             # not only fresh recall: an address this protocol just claimed is
             # proven foreign to every other protocol resting a transitivity

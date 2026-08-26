@@ -211,10 +211,13 @@ def heuristic_registry_state(
 
 
 def heuristic_live_numbers(affinity: DeployerAffinity, *, challenges: int) -> dict[str, Any]:
-    """The recomputable numbers an H row's evidence records — the drift
+    """The recomputable values an H row's evidence records — the drift
     contract shared by the stratum's rewrite-on-drift check and reconcile's
-    stale-registry audit."""
+    stale-registry audit. ``anchors`` is order-normalized at derivation
+    (sorted by contract id), so an anchor swap that preserves every count is
+    still drift: §8.1 promises a reviewer the actual inputs, not just totals."""
     return {
+        "anchors": [dict(anchor) for anchor in affinity.anchors],
         "anchor_count": affinity.anchor_count,
         "foreign_anchor_count": affinity.foreign_anchor_count,
         "affinity": affinity.affinity,
@@ -226,7 +229,6 @@ def heuristic_evidence(affinity: DeployerAffinity, *, challenges: int) -> dict[s
     """§8.1 H-row evidence: the inputs AND the computation, recorded so a
     reviewer reads the numbers the grant was made on, not just the verdict."""
     return {
-        "anchors": [dict(anchor) for anchor in affinity.anchors],
         **heuristic_live_numbers(affinity, challenges=challenges),
         "thresholds": {
             "min_anchors": W4H_MIN_ANCHORS,
@@ -277,10 +279,12 @@ def _w4h_pairs(
     """(protocol, EOA) pairs the heuristic stratum examines: every pending
     candidate's nominated protocol + deployer, plus the standing H rows this
     run could have moved — those of a protocol the candidates name or whose
-    member set changed, and those named by EOA in the triggering delta (the
-    same scoping ``_standing_registry_pairs`` applies to stratum (ii)). An
-    untouched H row's numbers are recomputed on its next touch, or by
-    reconcile's audit."""
+    member set changed, and those named by EOA in the run's accumulated scope
+    (the triggering delta's deployers, entry-delta members' deployers, and
+    round-promoted contracts' deployers — every path that can grow a standing
+    row's foreign-anchor count; the same scoping ``_standing_registry_pairs``
+    applies to stratum (ii)). An untouched H row's numbers are recomputed on
+    its next touch, or by reconcile's audit."""
     pairs: set[tuple[int, str]] = set()
     if candidate_ids:
         pairs |= {
@@ -455,9 +459,26 @@ def _w4h_stratum(
     promoted: set[int] = set()
     demoted: set[int] = set()
     admitting: dict[tuple[int, str], tuple[ProtocolDeployer, DeployerAffinity]] = {}
-    for protocol_id, address in _w4h_pairs(
-        session, candidate_ids, changed_protocol_ids=changed_protocol_ids, named_addresses=named_addresses
-    ):
+    late_seed = _w4h_late_inheritance_seed(session, candidate_ids)
+    pairs = set(
+        _w4h_pairs(session, candidate_ids, changed_protocol_ids=changed_protocol_ids, named_addresses=named_addresses)
+    )
+    # Ordering invariant (revocations before inheritance), kept explicit: a
+    # late seed's via member can rest on an H row nothing in this run's delta
+    # names — dead by live affinity yet still recorded active. Examining the
+    # vias' (protocol, deployer) pairs here means a stale row's auto-revoke
+    # fires (demoting the via) before the inheritance pass below can read it.
+    if late_seed:
+        pairs |= {
+            (int(protocol_id), deployer.lower())
+            for protocol_id, deployer in session.execute(
+                select(Contract.protocol_id, Contract.deployer).where(
+                    Contract.id.in_(sorted(late_seed)), Contract.deployer.is_not(None)
+                )
+            )
+            if protocol_id is not None and deployer and _ADDRESS_RE.match(deployer)
+        }
+    for protocol_id, address in sorted(pairs):
         affinity = compute_deployer_affinity(session, protocol_id=protocol_id, address=address)
         row = _heuristic_registry_row(session, protocol_id=protocol_id, address=address)
         if row is None:
@@ -532,5 +553,7 @@ def _w4h_stratum(
         for contract in candidates:
             if _attempt_w4h_admission(session, contract, registry=row, affinity=affinity):
                 promoted.add(contract.id)
-    promoted |= _w4h_inheritance_pass(session, promoted | _w4h_late_inheritance_seed(session, candidate_ids))
+    # A via the loop above demoted drops out inside the pass (its stamp is
+    # gone), so a revoked row's members carry no late inheritance.
+    promoted |= _w4h_inheritance_pass(session, promoted | late_seed)
     return promoted, demoted - promoted

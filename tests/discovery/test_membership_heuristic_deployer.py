@@ -360,6 +360,69 @@ def test_auto_revoke_below_the_hysteresis_floor(db_session):
     assert _rules(db_session, sibling) == {"w1_code"}
 
 
+def test_same_run_promotion_recomputes_a_foreign_standing_h_row(db_session):
+    """A proof-round promotion is a fresh FOREIGN anchor against a standing H
+    row keyed by the same EOA under ANOTHER protocol: the promoted contract's
+    deployer joins the W4-H scope, so the third foreign anchor arriving
+    through the promotion auto-revokes (P1, X) in the SAME evaluate."""
+    protocol = _protocol(db_session)
+    other = _protocol(db_session, "lombard")
+    deployer = _addr(0xD30)
+    _anchor(db_session, protocol, _addr(0x2700), deployer=deployer)
+    _anchor(db_session, protocol, _addr(0x2701), deployer=deployer)
+    sibling = _candidate(db_session, protocol, _addr(0x2702), deployer=deployer)
+    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(sibling.id,)))
+    db_session.commit()
+    assert sibling.protocol_id == protocol.id
+
+    # Two standing foreign anchors: 2/4 = 0.5 — AT the floor, not below it.
+    third_address = _addr(0x2712)
+    _anchor(db_session, other, _addr(0x2710), deployer=deployer, implementation=third_address)
+    _anchor(db_session, other, _addr(0x2711), deployer=deployer)
+    # The third arrives as a pending candidate of the OTHER protocol; its W2
+    # promotion in the proof rounds pushes affinity to 2/5 = 0.4.
+    third = _candidate(db_session, other, third_address, deployer=deployer)
+
+    result = gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(third.id,)))
+    db_session.commit()
+
+    assert third.protocol_id == other.id
+    row = _h_row(db_session, protocol, deployer)
+    assert row is not None and row.revoked_at is not None
+    assert row.revocation_reason == "affinity_below_auto_revoke_floor"
+    assert sibling.protocol_id is None
+    assert sibling.id in result.demoted_contract_ids
+
+
+def test_entry_delta_member_recomputes_a_foreign_standing_h_row(db_session):
+    """``run_probe_pass`` promotes near-line and hands the members to
+    ``evaluate`` as the entry delta — those members' deployers must reach the
+    W4-H scope, or a should-be-revoked H row of another protocol stands."""
+    protocol = _protocol(db_session)
+    other = _protocol(db_session, "lombard")
+    deployer = _addr(0xD31)
+    _anchor(db_session, protocol, _addr(0x2800), deployer=deployer)
+    _anchor(db_session, protocol, _addr(0x2801), deployer=deployer)
+    sibling = _candidate(db_session, protocol, _addr(0x2802), deployer=deployer)
+    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(sibling.id,)))
+    db_session.commit()
+    assert sibling.protocol_id == protocol.id
+
+    _anchor(db_session, other, _addr(0x2810), deployer=deployer)
+    _anchor(db_session, other, _addr(0x2811), deployer=deployer)
+    # The third foreign anchor was stamped BEFORE this evaluate (the probe-pass
+    # shape) — the delta names the member, never its deployer.
+    third = _anchor(db_session, other, _addr(0x2812), deployer=deployer)
+
+    result = gate.evaluate(db_session, gate.FactsDelta(new_member_contract_ids=(third.id,)))
+    db_session.commit()
+
+    row = _h_row(db_session, protocol, deployer)
+    assert row is not None and row.revoked_at is not None
+    assert sibling.protocol_id is None
+    assert sibling.id in result.demoted_contract_ids
+
+
 def test_suspended_when_anchors_erode(db_session):
     """Basis erosion is not counterevidence: the row suspends (no new
     admissions), standing members keep."""
@@ -515,6 +578,42 @@ def test_late_inherited_w2_falls_with_the_proxys_heuristic_standing(db_session):
     assert proxy.protocol_id is None
     assert impl.protocol_id is None
     assert "w2_structural" not in _rules(db_session, impl)
+
+
+def test_late_inheritance_refused_off_a_stale_h_row(db_session):
+    """Revocations before inheritance: a late impl candidate WITHOUT deployer
+    attribution names no (protocol, deployer) pair, so only the seed's via
+    members can pull the stale H row into the stratum — the row (live affinity
+    below the auto-revoke floor) is revoked, the via proxy demoted, and the
+    impl NOT admitted off the dead row."""
+    protocol = _protocol(db_session)
+    other = _protocol(db_session, "lombard")
+    deployer = _addr(0xD32)
+    _anchor(db_session, protocol, _addr(0x2900), deployer=deployer)
+    _anchor(db_session, protocol, _addr(0x2901), deployer=deployer)
+    impl_address = _addr(0x2911)
+    proxy = _candidate(db_session, protocol, _addr(0x2910), deployer=deployer, implementation=impl_address)
+    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(proxy.id,)))
+    db_session.commit()
+    assert proxy.protocol_id == protocol.id
+
+    # The row goes stale out-of-band: three foreign anchors written with no
+    # evaluate naming the deployer — live affinity 2/5 = 0.4, recorded active.
+    for n in range(3):
+        _anchor(db_session, other, _addr(0x2920 + n), deployer=deployer)
+
+    impl = _contract(db_session, impl_address, nominated_protocol_id=protocol.id)
+    _code_fact(db_session, impl.address)
+    result = gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(impl.id,)))
+    db_session.commit()
+
+    row = _h_row(db_session, protocol, deployer)
+    assert row is not None and row.revoked_at is not None
+    assert row.revocation_reason == "affinity_below_auto_revoke_floor"
+    assert proxy.protocol_id is None
+    assert proxy.id in result.demoted_contract_ids
+    assert impl.protocol_id is None
+    assert _rules(db_session, impl) == set()
 
 
 def test_heuristic_member_without_pointer_seeds_no_late_inheritance(db_session):
@@ -707,6 +806,47 @@ def test_reevaluation_over_unchanged_facts_leaves_evidence_untouched(db_session)
     db_session.commit()
     db_session.refresh(row)
     assert row.evidence == first
+
+
+def test_anchor_swap_preserving_counts_refreshes_evidence(db_session):
+    """§8.1: the evidence names the actual inputs. An anchor swap that leaves
+    all four live numbers unchanged still rewrites ``anchors`` (and
+    ``computed_at``); a further no-change evaluate leaves it byte-identical."""
+    protocol = _protocol(db_session)
+    deployer = _addr(0xD33)
+    swapped = _anchor(db_session, protocol, _addr(0x2A00), deployer=deployer)
+    _anchor(db_session, protocol, _addr(0x2A01), deployer=deployer)
+    # A creation-less candidate keeps the (protocol, EOA) pair examined on
+    # every run without ever settling.
+    blocked = _contract(db_session, _addr(0x2A03), nominated_protocol_id=protocol.id, deployer=deployer)
+    _code_fact(db_session, blocked.address, tx=None)
+    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(blocked.id,)))
+    db_session.commit()
+    row = _h_row(db_session, protocol, deployer)
+    assert row is not None
+    first = dict(row.evidence)
+    assert swapped.id in [anchor["contract_id"] for anchor in first["anchors"]]
+
+    # Swap: one anchor out, a replacement in — every count is preserved.
+    replacement = _anchor(db_session, protocol, _addr(0x2A02), deployer=deployer)
+    for witness in gate.active_witnesses(db_session, contract_id=swapped.id, protocol_id=protocol.id):
+        gate.revoke_witness(db_session, witness, reason="anchor_swap")
+    db_session.flush()
+
+    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(blocked.id,)))
+    db_session.commit()
+    db_session.refresh(row)
+    for key in ("anchor_count", "foreign_anchor_count", "affinity", "challenge_count"):
+        assert row.evidence[key] == first[key]
+    anchor_ids = [anchor["contract_id"] for anchor in row.evidence["anchors"]]
+    assert replacement.id in anchor_ids and swapped.id not in anchor_ids
+    assert row.evidence["computed_at"] != first["computed_at"]
+
+    second = dict(row.evidence)
+    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(blocked.id,)))
+    db_session.commit()
+    db_session.refresh(row)
+    assert row.evidence == second
 
 
 def test_heuristic_promotion_never_preempts_a_proof(db_session):
