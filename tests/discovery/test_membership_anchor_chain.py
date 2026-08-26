@@ -21,6 +21,7 @@ from db.models import (
     Contract,
     ContractCreationWitness,
     ContractMembershipWitness,
+    ContractProbeAttempt,
     ControllerValue,
     EffectiveFunction,
     FunctionPrincipal,
@@ -91,7 +92,35 @@ def _anchored_holder(db_session, protocol, address):
     return _anchored_member(db_session, protocol, address).address
 
 
+def _probe_read(db_session, subject, value):
+    """Persist the §3.5 probe read of a governance getter, merged into the
+    subject's single attempt row under the first free slot of the three reads
+    the gate consults. This is the derivation a W3-D2 witness rests on
+    (``W3_D2_SOURCES``) — a bare caller gate is not one."""
+    row = db_session.get(ContractProbeAttempt, (subject.id, 1))
+    reads = dict(row.results.get("reads", {})) if row is not None and isinstance(row.results, dict) else {}
+    slot = next(
+        (
+            name
+            for name in ("owner", "authority", "admin")
+            if name not in reads or reads[name]["value"] == value.lower()
+        ),
+        "owner",
+    )
+    reads[slot] = {"value": value.lower()}
+    resolved = sorted({read["value"] for read in reads.values()})
+    results = {"status": "probed", "code_present": True, "reads": reads, "resolved_addresses": resolved}
+    if row is None:
+        db_session.add(ContractProbeAttempt(contract_id=subject.id, chain_id=1, block_number=1000, results=results))
+    else:
+        row.results = results
+    db_session.flush()
+
+
 def _caller_gate(db_session, subject, value, controller_id="owner"):
+    """The subject's resolved owner/authority, recorded on both derivations the
+    gate reads: the static caller-gate row (which feeds the anchor-chain and
+    exclusivity walks) and the probe read (which is what admits under D2)."""
     db_session.add(
         ControllerValue(
             contract_id=subject.id,
@@ -101,6 +130,7 @@ def _caller_gate(db_session, subject, value, controller_id="owner"):
         )
     )
     db_session.flush()
+    _probe_read(db_session, subject, value)
 
 
 def _principal(db_session, host, address, *, resolved_type=None, details=None, function_name="admin"):

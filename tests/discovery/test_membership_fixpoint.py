@@ -18,6 +18,7 @@ from db.models import (
     ContractCreationWitness,
     ContractDependency,
     ContractMembershipWitness,
+    ContractProbeAttempt,
     ControllerValue,
     Protocol,
     ProtocolDeployer,
@@ -80,6 +81,41 @@ def _member(session, protocol: Protocol, address: str, **fields) -> Contract:
         rule="w5_human",
         evidence=gate.w5_evidence(actor="admin_api_key", asserted_at=datetime(2026, 8, 24, tzinfo=timezone.utc)),
     )
+    return row
+
+
+def _probe_read(session, subject: Contract, value: str) -> None:
+    """The §3.5 probe read of a governance getter — the derivation a W3-D2
+    witness rests on (``W3_D2_SOURCES``); a bare caller gate is not one."""
+    row = session.get(ContractProbeAttempt, (subject.id, 1))
+    reads = dict(row.results.get("reads", {})) if row is not None and isinstance(row.results, dict) else {}
+    slot = next(
+        (
+            name
+            for name in ("owner", "authority", "admin")
+            if name not in reads or reads[name]["value"] == value.lower()
+        ),
+        "owner",
+    )
+    reads[slot] = {"value": value.lower()}
+    resolved = sorted({read["value"] for read in reads.values()})
+    results = {"status": "probed", "code_present": True, "reads": reads, "resolved_addresses": resolved}
+    if row is None:
+        session.add(ContractProbeAttempt(contract_id=subject.id, chain_id=1, block_number=50, results=results))
+    else:
+        row.results = results
+    session.flush()
+
+
+def _owner_edge(session, subject: Contract, value: str) -> ControllerValue:
+    """The subject's resolved owner on both derivations the gate reads: the
+    static caller-gate row and the probe read that admits under D2."""
+    row = ControllerValue(
+        contract_id=subject.id, controller_id="owner", value=value.lower(), authority_provenance="caller_gate"
+    )
+    session.add(row)
+    session.flush()
+    _probe_read(session, subject, value)
     return row
 
 
@@ -167,9 +203,16 @@ def test_fixpoint_without_enumerator_never_mints_class_b(db_session):
     result = gate.evaluate(db_session, gate.FactsDelta(new_member_contract_ids=(member.id,)))
     db_session.commit()
 
-    assert set(result.promoted_contract_ids) == {impl.id}
-    assert sibling.protocol_id is None
-    assert db_session.query(ProtocolDeployer).filter_by(address=deployer).count() == 0
+    assert impl.id in result.promoted_contract_ids
+    # Without an enumerator the EOA can reach no PROOF class; anything it
+    # licenses is the labeled heuristic rule (DEPLOYER_HEURISTIC_SPEC.md §1).
+    assert (
+        db_session.query(ProtocolDeployer)
+        .filter(ProtocolDeployer.address == deployer, ProtocolDeployer.trust_class.in_(["A", "B"]))
+        .count()
+        == 0
+    )
+    assert "w4_deployer" not in _active_rules(db_session, sibling)
 
 
 # ---------------------------------------------------------------------------
@@ -410,25 +453,14 @@ def test_shared_operator_two_hop_kill(db_session):
     safe = _contract(db_session, _addr(0x720), nominated_protocol_id=protocol.id)
     _code_fact(db_session, safe.address)
     member_x = _member(db_session, protocol, _addr(0x721))
-    db_session.add(
-        ControllerValue(
-            contract_id=member_x.id, controller_id="owner", value=safe.address, authority_provenance="caller_gate"
-        )
-    )
+    _owner_edge(db_session, member_x, safe.address)
     # Foreign vault the SAME operator controls — the two-hop shape's tell.
     foreign_w = _contract(db_session, _addr(0x722), protocol_id=foreign_protocol.id)
-    db_session.add(
-        ControllerValue(
-            contract_id=foreign_w.id, controller_id="owner", value=safe.address, authority_provenance="caller_gate"
-        )
-    )
+    _owner_edge(db_session, foreign_w, safe.address)
     # Candidate Y of P whose resolved owner is the shared operator.
     y = _contract(db_session, _addr(0x723), nominated_protocol_id=protocol.id)
     _code_fact(db_session, y.address)
-    db_session.add(
-        ControllerValue(contract_id=y.id, controller_id="owner", value=safe.address, authority_provenance="caller_gate")
-    )
-    db_session.flush()
+    _owner_edge(db_session, y, safe.address)
 
     result = gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(safe.id, y.id)))
     db_session.commit()
@@ -449,17 +481,10 @@ def test_exclusive_d2_controller_is_transitive(db_session):
     safe = _contract(db_session, _addr(0x730), nominated_protocol_id=protocol.id)
     _code_fact(db_session, safe.address)
     member_x = _member(db_session, protocol, _addr(0x731))
-    db_session.add(
-        ControllerValue(
-            contract_id=member_x.id, controller_id="owner", value=safe.address, authority_provenance="caller_gate"
-        )
-    )
+    _owner_edge(db_session, member_x, safe.address)
     y = _contract(db_session, _addr(0x732), nominated_protocol_id=protocol.id)
     _code_fact(db_session, y.address)
-    db_session.add(
-        ControllerValue(contract_id=y.id, controller_id="owner", value=safe.address, authority_provenance="caller_gate")
-    )
-    db_session.flush()
+    _owner_edge(db_session, y, safe.address)
 
     gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(safe.id, y.id)))
     db_session.commit()
@@ -482,22 +507,18 @@ def test_demoting_the_via_revokes_dependent_d1(db_session):
     safe = _contract(db_session, _addr(0x740), nominated_protocol_id=protocol.id)
     _code_fact(db_session, safe.address)
     member_x = _member(db_session, protocol, _addr(0x741))
-    x_cv = ControllerValue(
-        contract_id=member_x.id, controller_id="owner", value=safe.address, authority_provenance="caller_gate"
-    )
-    db_session.add(x_cv)
+    x_cv = _owner_edge(db_session, member_x, safe.address)
     y = _contract(db_session, _addr(0x742), nominated_protocol_id=protocol.id)
     _code_fact(db_session, y.address)
-    db_session.add(
-        ControllerValue(contract_id=y.id, controller_id="owner", value=safe.address, authority_provenance="caller_gate")
-    )
-    db_session.flush()
+    _owner_edge(db_session, y, safe.address)
     gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(safe.id, y.id)))
     db_session.commit()
     assert safe.protocol_id == protocol.id and y.protocol_id == protocol.id
 
-    # The control edge that admitted S disappears (owner rotated away).
+    # The control edge that admitted S disappears (owner rotated away) — on
+    # both derivations the gate reads.
     db_session.delete(x_cv)
+    db_session.get(ContractProbeAttempt, (member_x.id, 1)).results = {"status": "probed", "reads": {}}
     db_session.flush()
     revoked, demoted = gate._revocation_quiescence(db_session, {member_x.address})
     db_session.commit()
@@ -522,12 +543,7 @@ def test_resolution_hook_promotes_controller_of_member(db_session):
     unrelated = _contract(db_session, _addr(0x802), nominated_protocol_id=protocol.id)
     _code_fact(db_session, unrelated.address)
     # The stage's commit wrote this CV row; the hook receives the snapshot.
-    db_session.add(
-        ControllerValue(
-            contract_id=member.id, controller_id="owner", value=controller.address, authority_provenance="caller_gate"
-        )
-    )
-    db_session.flush()
+    _owner_edge(db_session, member, controller.address)
 
     _membership_gate_controller_hook(
         db_session,
@@ -745,13 +761,8 @@ def _d1_chain_universe(db_session, base: int) -> tuple[Protocol, dict[str, Contr
     y = _contract(db_session, _addr(base + 2), nominated_protocol_id=protocol.id)
     _code_fact(db_session, s.address)
     _code_fact(db_session, y.address)
-    db_session.add(
-        ControllerValue(contract_id=m0.id, controller_id="owner", value=s.address, authority_provenance="caller_gate")
-    )
-    db_session.add(
-        ControllerValue(contract_id=y.id, controller_id="owner", value=s.address, authority_provenance="caller_gate")
-    )
-    db_session.flush()
+    _owner_edge(db_session, m0, s.address)
+    _owner_edge(db_session, y, s.address)
     return protocol, {"m0": m0, "s": s, "y": y}
 
 
@@ -886,17 +897,10 @@ def test_foreign_cv_write_revokes_dependent_d1(db_session):
     safe = _contract(db_session, _addr(0xC20), nominated_protocol_id=protocol.id)
     _code_fact(db_session, safe.address)
     member_x = _member(db_session, protocol, _addr(0xC21))
-    db_session.add(
-        ControllerValue(
-            contract_id=member_x.id, controller_id="owner", value=safe.address, authority_provenance="caller_gate"
-        )
-    )
+    _owner_edge(db_session, member_x, safe.address)
     y = _contract(db_session, _addr(0xC22), nominated_protocol_id=protocol.id)
     _code_fact(db_session, y.address)
-    db_session.add(
-        ControllerValue(contract_id=y.id, controller_id="owner", value=safe.address, authority_provenance="caller_gate")
-    )
-    db_session.flush()
+    _owner_edge(db_session, y, safe.address)
     gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(safe.id, y.id)))
     db_session.commit()
     assert safe.protocol_id == protocol.id and y.protocol_id == protocol.id
@@ -904,12 +908,7 @@ def test_foreign_cv_write_revokes_dependent_d1(db_session):
     # The foreign observation arrives exactly as a hook would deliver it: a
     # fresh CV row on another protocol's member naming S as its controller.
     foreign_w = _contract(db_session, _addr(0xC23), protocol_id=foreign_protocol.id)
-    db_session.add(
-        ControllerValue(
-            contract_id=foreign_w.id, controller_id="owner", value=safe.address, authority_provenance="caller_gate"
-        )
-    )
-    db_session.flush()
+    _owner_edge(db_session, foreign_w, safe.address)
     result = gate.evaluate(
         db_session,
         gate.FactsDelta(new_edge_addresses=(safe.address,), recheck_contract_ids=(foreign_w.id,)),

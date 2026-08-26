@@ -618,13 +618,17 @@ def test_classify_deployer_nominated_creation_never_maps(db_session):
     assert verdict.evidence["reason"] == "foreign_or_unknown_creations"
     assert foreign.address in verdict.evidence["unmapped_addresses"]
 
-    result = gate.evaluate(
+    gate.evaluate(
         db_session,
         gate.FactsDelta(recheck_contract_ids=(foreign.id,)),
         deployer_enumerator=lambda addr: (history, True),
     )
-    assert foreign.id not in result.promoted_contract_ids
-    assert foreign.protocol_id is None
+    # No proof-class row exists, so the row can hold no W4 witness. What it may
+    # hold is the labeled heuristic one (DEPLOYER_HEURISTIC_SPEC.md §1) — the
+    # distinction the rule string exists to keep.
+    rules = {w.rule for w in gate.active_witnesses(db_session, contract_id=foreign.id, protocol_id=protocol.id)}
+    assert WITNESS_RULE_W4_DEPLOYER not in rules
+    assert rules <= {"w1_code", "w4h_deployer_affinity"}
 
     # The same creation holding a real W2 witness maps in — Class B allowed.
     anchor = _contract(db_session, ADDR(0x512), protocol_id=protocol.id)
@@ -847,7 +851,7 @@ def _seed_d2_witness(db_session, member: Contract, protocol_id: int, via: str) -
         contract_id=member.id,
         protocol_id=protocol_id,
         rule="w3_control",
-        evidence=gate.w3_evidence(direction="d2", source="controller_values", via_address=via),
+        evidence=gate.w3_evidence(direction="d2", source="probe", via_address=via),
         via_address=via,
     )
 

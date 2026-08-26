@@ -411,10 +411,11 @@ class TestEigenLayerLeakShape:
 @requires_postgres
 class TestCallTargetOverreachShape:
     """The dev-DB shape behind the WETH9 / EndpointV2 / DepositContract / Lido
-    admissions: members carry ``call_target`` ControllerValue rows naming the
-    externals they integrate with. A W3 edge exists only for
-    ``authority_provenance == 'caller_gate'``; ``call_target`` is an operand
-    and NULL is not-determined — neither admits (invariant 6)."""
+    admissions: members carry ControllerValue rows naming the externals they
+    integrate with. ``call_target`` is an operand, NULL is not-determined, and
+    ``caller_gate`` is a proven gate on an entry point but not a governance
+    derivation — none of the three admits a D2 controller (invariant 6,
+    ``W3_D2_SOURCES``; see test_membership_caller_gate_admission.py)."""
 
     @staticmethod
     def _seed(db_session, seed_protocol, tag):
@@ -471,8 +472,8 @@ class TestCallTargetOverreachShape:
             == 0
         )
 
-    def test_caller_gate_controller_value_still_admits(self, db_session, seed_protocol):
-        from db.models import ControllerValue
+    def test_caller_gate_controller_value_never_admits_either(self, db_session, seed_protocol):
+        from db.models import ContractMembershipWitness, ControllerValue
 
         member, controller = self._seed(db_session, seed_protocol, 2)
         db_session.add(
@@ -485,7 +486,11 @@ class TestCallTargetOverreachShape:
         )
         self._evaluate(db_session, controller)
 
-        assert controller.protocol_id == seed_protocol
+        assert controller.protocol_id is None
+        assert (
+            db_session.query(ContractMembershipWitness).filter_by(contract_id=controller.id, rule="w3_control").count()
+            == 0
+        )
 
     def test_w2_cascade_dies_with_the_refused_w3_root(self, db_session, seed_protocol):
         """The Lido shape: the stETH proxy entered via a call_target CV, then

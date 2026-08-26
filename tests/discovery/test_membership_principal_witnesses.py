@@ -23,6 +23,7 @@ from db.models import (
     WITNESS_RULE_W4_FACTORY,
     Contract,
     ContractCreationWitness,
+    ContractProbeAttempt,
     ControllerValue,
     EffectiveFunction,
     FunctionPrincipal,
@@ -82,7 +83,33 @@ def _anchored_member(db_session, protocol, address, *, factory=None):
     return row
 
 
+def _probe_read(db_session, subject, value):
+    """The §3.5 probe read of a governance getter — the derivation a W3-D2
+    witness rests on (``W3_D2_SOURCES``); a bare caller gate is not one."""
+    row = db_session.get(ContractProbeAttempt, (subject.id, 1))
+    reads = dict(row.results.get("reads", {})) if row is not None and isinstance(row.results, dict) else {}
+    slot = next(
+        (
+            name
+            for name in ("owner", "authority", "admin")
+            if name not in reads or reads[name]["value"] == value.lower()
+        ),
+        "owner",
+    )
+    reads[slot] = {"value": value.lower()}
+    resolved = sorted({read["value"] for read in reads.values()})
+    results = {"status": "probed", "code_present": True, "reads": reads, "resolved_addresses": resolved}
+    if row is None:
+        db_session.add(ContractProbeAttempt(contract_id=subject.id, chain_id=1, block_number=1000, results=results))
+    else:
+        row.results = results
+    db_session.flush()
+
+
 def _caller_gate(db_session, subject, value, controller_id="owner"):
+    """The subject's resolved owner/authority on both derivations the gate
+    reads: the static caller-gate row and the probe read that admits under D2."""
+    _probe_read(db_session, subject, value)
     db_session.add(
         ControllerValue(
             contract_id=subject.id,
@@ -209,7 +236,7 @@ def test_function_principal_source_requires_its_fact_and_vice_versa():
     with pytest.raises(ValueError, match="principal_fact"):
         gate.w3_evidence(direction="d2", source="function_principal", via_address=ADDR(0x11))
     with pytest.raises(ValueError, match="principal_fact"):
-        gate.w3_evidence(direction="d2", source="controller_values", via_address=ADDR(0x11), principal_fact=_fact())
+        gate.w3_evidence(direction="d2", source="probe", via_address=ADDR(0x11), principal_fact=_fact())
 
 
 def test_d1_principal_evidence_round_trips():

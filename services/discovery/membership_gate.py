@@ -82,6 +82,22 @@ W3_DIRECTION_D2 = "d2"
 # of a member's effective function. Never "appears in a member's control graph".
 W3_SOURCES = frozenset({"controller_values", "proxy_admin_slot", "probe", "function_principal"})
 
+#: The sources a D2 witness — which admits the CONTROLLER itself — may rest on.
+#: ``controller_values`` is excluded: those rows record a bare caller gate
+#: (:data:`W3_CONTROLLER_PROVENANCE`), which is a proven fact about who may call
+#: an entry point and NOT a governance derivation. LayerZero's
+#: ``if (msg.sender != endpoint) revert`` on the delivery entry point is
+#: indistinguishable at the predicate level from ``msg.sender != _owner``, so
+#: the shape admits an integration counterparty (EndpointV2, and through its
+#: owner slot OneSig) exactly as readily as an authority. The governance
+#: derivations keep admitting: a probed ``owner()``/``authority()``/``admin()``
+#: read, a resolved proxy-admin slot, and an authority-derived
+#: ``FunctionPrincipal`` (:data:`W3_PRINCIPAL_AUTHORITY_RESOLVERS`) each resolve
+#: an authority rather than a caller set. The caller-gate rows stay recorded and
+#: keep feeding monitoring, scoring and the D1/anchor-chain reads of a
+#: candidate's OWN controllers — they simply admit nobody.
+W3_D2_SOURCES = frozenset({"proxy_admin_slot", "probe", "function_principal"})
+
 #: ``FunctionPrincipal.resolved_type`` values that name a CONTROLLER for the
 #: D2-principal arm. ``eoa`` is excluded: an EOA is not deployed code, so a
 #: CONTRACT candidate whose address carries an eoa-typed principal row is a
@@ -396,6 +412,8 @@ def w3_evidence(
         raise ValueError("d2 does not take via_transitive; its perimeter entry is non-transitive by rule")
     if anchor_chain is not None:
         raise ValueError("anchor_chain is d1 evidence only")
+    if source not in W3_D2_SOURCES:
+        raise ValueError(f"d2 source must be one of {sorted(W3_D2_SOURCES)}, got {source!r}")
     if (source == "function_principal") != (principal_fact is not None):
         raise ValueError("a function_principal d2 witness records its principal_fact, and only it")
     evidence = {"direction": direction, "source": source, "via": via, "perimeter_entry_transitive": False}
@@ -1756,11 +1774,11 @@ def _witness_fact_holds(
                         exclude_contract_id=contract.id,
                     )
                 )
+            if source not in W3_D2_SOURCES:
+                return False
             for member in _member_rows_at(session, protocol_id=protocol_id, address=via, chain_key=chain_key):
                 if member.id == contract.id:
                     continue
-                if source == "controller_values" and _has_controller_value(session, contract_id=member.id, value=addr):
-                    return True
                 if source == "proxy_admin_slot" and (member.admin or "").lower() == addr:
                     return True
                 if source == "probe" and addr in _probe_controller_values(session, member):
@@ -2496,7 +2514,6 @@ def _controllers_of(session: Session, contract_ids: Sequence[int] | set[int]) ->
             .where(
                 ControllerValue.contract_id.in_(ids),
                 ControllerValue.authority_provenance == W3_CONTROLLER_PROVENANCE,
-                ControllerValue.value.is_not(None),
             )
             .distinct()
         ).scalars()
@@ -3381,8 +3398,7 @@ def _admission_protocols(session: Session, contract: Contract) -> list[int]:
             func.lower(func.coalesce(Contract.chain, "ethereum")) == chain_key,
         )
         # Members whose stored facts name the candidate: pointer edges (W2),
-        # historical impls (W2), caller-gating controller values and probe
-        # reads (W3-D2).
+        # historical impls (W2), probe reads (W3-D2).
         protocols.update(
             session.execute(
                 select(Contract.protocol_id)
@@ -3401,18 +3417,6 @@ def _admission_protocols(session: Session, contract: Contract) -> list[int]:
                 select(Contract.protocol_id)
                 .join(UpgradeEvent, UpgradeEvent.contract_id == Contract.id)
                 .where(*member_scope, func.lower(UpgradeEvent.new_impl) == addr)
-                .distinct()
-            ).scalars()
-        )
-        protocols.update(
-            session.execute(
-                select(Contract.protocol_id)
-                .join(ControllerValue, ControllerValue.contract_id == Contract.id)
-                .where(
-                    *member_scope,
-                    func.lower(ControllerValue.value) == addr,
-                    ControllerValue.authority_provenance == W3_CONTROLLER_PROVENANCE,
-                )
                 .distinct()
             ).scalars()
         )
@@ -3610,23 +3614,8 @@ def _derive_admitting_facts(
             (member.address or "").lower(),
         )
 
-    # W3 D2 — the candidate is a caller-gating resolved controller of a member.
-    for member in session.execute(
-        select(Contract)
-        .join(ControllerValue, ControllerValue.contract_id == Contract.id)
-        .where(
-            *member_scope,
-            func.lower(ControllerValue.value) == addr,
-            ControllerValue.authority_provenance == W3_CONTROLLER_PROVENANCE,
-        )
-        .distinct()
-        .order_by(Contract.id)
-    ).scalars():
-        add(
-            WITNESS_RULE_W3_CONTROL,
-            w3_evidence(direction=W3_DIRECTION_D2, source="controller_values", via_address=member.address),
-            (member.address or "").lower(),
-        )
+    # W3 D2 — the candidate is a resolved controller of a member, read from a
+    # governance derivation only (:data:`W3_D2_SOURCES`).
     for member in session.execute(
         select(Contract)
         .join(ContractProbeAttempt, ContractProbeAttempt.contract_id == Contract.id)
