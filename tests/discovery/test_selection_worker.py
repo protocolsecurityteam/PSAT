@@ -571,6 +571,36 @@ def test_claim_fires_when_sibling_completes(db_session, worker, seed_protocol):
     assert claimed.id == job.id
 
 
+@requires_postgres
+def test_ready_claim_stamps_lease(db_session, worker, seed_protocol):
+    """A claimed selection job must carry a lease — without it the stale-job
+    sweep can requeue live work and a sibling double-runs it."""
+    protocol_id, company, _addr = seed_protocol
+    _add_selection_job(db_session, protocol_id=protocol_id, company=company, analyze_limit=3)
+
+    claimed = worker._claim_ready_job(db_session)
+    assert claimed is not None
+    assert claimed.lease_id is not None
+    assert claimed.lease_expires_at is not None
+
+
+@requires_postgres
+def test_stuck_claim_stamps_lease(db_session, worker, seed_protocol):
+    from db.models import JobStage, JobStatus
+
+    protocol_id, company, _addr = seed_protocol
+    stuck_time = datetime.now(timezone.utc) - timedelta(hours=2)
+    job = _add_selection_job(
+        db_session, protocol_id=protocol_id, company=company, analyze_limit=3, updated_at=stuck_time
+    )
+    _add_sibling_job(db_session, stage=JobStage.dapp_crawl, status=JobStatus.processing, root_job_id=str(job.id))
+
+    claimed = worker._claim_stuck_job(db_session)
+    assert claimed is not None
+    assert claimed.lease_id is not None
+    assert claimed.lease_expires_at is not None
+
+
 # ---------------------------------------------------------------------------
 # 8. Stuck-sibling escape hatch: claim fires past the timeout regardless
 # ---------------------------------------------------------------------------

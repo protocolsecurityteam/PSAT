@@ -10,8 +10,9 @@ set and creates the top-N analysis child jobs once the siblings settle.
 from __future__ import annotations
 
 import logging
+import os
 import uuid
-from typing import Collection, Sequence, cast
+from typing import Callable, Collection, Sequence, cast
 
 from sqlalchemy import func, null, select
 from sqlalchemy.orm import Session
@@ -378,33 +379,61 @@ def _consume_reprobes(
     )
 
 
-def run_probe_pass(session: Session, protocol_id: int) -> gate.PromotionResult:
+def run_probe_pass(
+    session: Session,
+    protocol_id: int,
+    *,
+    heartbeat: Callable[[], None] | None = None,
+) -> gate.PromotionResult:
     """§3.4 event 1: settle the protocol's fresh candidates near-line. Bounded
-    to the current protocol's candidates; commits before evaluating."""
+    to the current protocol's candidates AND to ``PSAT_PROBE_PASS_MAX`` wire
+    probes per pass (lowest ids first); commits before evaluating. The pass is
+    idempotent — ``needs_probe`` re-selects the deferred tail on the next pass,
+    and the deferral is recorded, never silent. *heartbeat*, when given, is
+    called after each wire probe so a long pass stays visibly leased."""
+    probe_budget = int(os.getenv("PSAT_PROBE_PASS_MAX", "200"))
     candidates = list(
         session.execute(
-            select(Contract).where(
+            select(Contract)
+            .where(
                 Contract.protocol_id.is_(None),
                 Contract.nominated_protocol_id == protocol_id,
             )
+            .order_by(Contract.id)
         ).scalars()
     )
     probed: list[Contract] = []
     seeded: list[Contract] = []
     resolved: set[str] = set()
+    deferred = 0
     for contract in candidates:
         # Revocation staleness re-targets demoted members whose completed
         # attempt ``needs_probe`` would skip (invariant 8 pickup for
         # request/queue-context demotions, e.g. the protocol-merge cascade).
         if needs_probe(session, contract) or probe_predates_revocation(session, contract):
+            if len(probed) >= probe_budget:
+                deferred += 1
+                continue
             result = gate.probe(session, contract)
             probed.append(contract)
             record_code_witness(session, contract=contract, protocol_id=protocol_id, probe_result=result)
             resolved.update(result.resolved_addresses)
+            if heartbeat is not None:
+                heartbeat()
         # W6 rides on the persisted code fact, so an already-probed candidate
         # a fresh defillama nomination just tagged is seeded here too.
         if gate.seed_llama_witness(session, contract=contract):
             seeded.append(contract)
+    if deferred:
+        record_degraded(
+            phase="membership_probe_pass_budget",
+            exc=RuntimeError(f"{deferred} unprobed candidates deferred past the probe-pass budget"),
+            context={"protocol_id": protocol_id, "budget": probe_budget, "deferred": deferred},
+        )
+        logger.warning(
+            "probe pass budget exhausted — tail deferred to the next pass",
+            extra={"protocol_id": protocol_id, "budget": probe_budget, "deferred": deferred},
+        )
     promoted: list[int] = []
     for contract in probed:
         if gate.promote(session, contract=contract, protocol_id=protocol_id):

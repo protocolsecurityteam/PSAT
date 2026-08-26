@@ -1073,6 +1073,40 @@ def test_probe_pass_reprobes_error_attempts(db_session, monkeypatch, erpc_env):
     assert w1.evidence["code_probe_block"] == 120
 
 
+def test_probe_pass_budget_defers_tail_with_named_record(db_session, monkeypatch, erpc_env):
+    """The per-pass probe budget caps wire spend; the tail is a NAMED deferral
+    (degraded record), never a silent drop, and the next pass re-covers it."""
+    from utils.logging import degraded_errors_var
+
+    monkeypatch.setenv("PSAT_PROBE_PASS_MAX", "2")
+    protocol = _protocol(db_session)
+    c1 = _contract(db_session, ADDR(0x2E4), nominated_protocol_id=protocol.id)
+    c2 = _contract(db_session, ADDR(0x2E5), nominated_protocol_id=protocol.id)
+    c3 = _contract(db_session, ADDR(0x2E6), nominated_protocol_id=protocol.id)
+    db_session.flush()
+    seen = _stub_probe_wire(monkeypatch)
+    beats = {"n": 0}
+
+    errors: list = []
+    token = degraded_errors_var.set(errors)
+    try:
+        run_probe_pass(db_session, protocol.id, heartbeat=lambda: beats.__setitem__("n", beats["n"] + 1))
+    finally:
+        degraded_errors_var.reset(token)
+
+    # Lowest-id slice only, one heartbeat per wire probe.
+    assert seen["probed"] == [c1.address, c2.address]
+    assert beats["n"] == 2
+    budget_errors = [e for e in errors if e.phase == "membership_probe_pass_budget"]
+    assert len(budget_errors) == 1
+    assert budget_errors[0].context == {"protocol_id": protocol.id, "budget": 2, "deferred": 1}
+
+    # Idempotent re-cover: the next pass probes exactly the deferred tail.
+    seen2 = _stub_probe_wire(monkeypatch)
+    run_probe_pass(db_session, protocol.id)
+    assert seen2["probed"] == [c3.address]
+
+
 def test_probe_pass_retargets_demoted_member_after_revocation(db_session, monkeypatch, erpc_env):
     """Request/queue-context demotions run no inline probe; the next probe
     pass re-targets the row because its completed attempt predates the newest

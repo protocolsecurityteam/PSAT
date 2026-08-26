@@ -18,12 +18,15 @@ from __future__ import annotations
 
 import logging
 import os
+import uuid
 
 from sqlalchemy import select, text
+from sqlalchemy import update as sa_update
 from sqlalchemy.orm import Session
 
 from db.models import Contract, Job, JobStage, JobStatus
 from db.queue import (
+    DEFAULT_JOB_LEASE_TTL_S,
     complete_job,
     count_analysis_children,
     create_job,
@@ -89,6 +92,22 @@ class SelectionWorker(BaseWorker):
         """Primary readiness-gated claim OR stuck-sibling fallback."""
         return self._claim_ready_job(session) or self._claim_stuck_job(session)
 
+    def _finalize_claim(self, session: Session, job: Job) -> Job:
+        """Stamp status/worker plus a fresh lease, mirroring ``db.queue.claim_job``:
+        without the lease, the stale-job sweep can requeue a live selection job and
+        a sibling double-runs it."""
+        job.status = JobStatus.processing
+        job.worker_id = self.worker_id
+        job.lease_id = uuid.uuid4()
+        session.execute(
+            sa_update(Job)
+            .where(Job.id == job.id)
+            .values(lease_expires_at=text(f"NOW() + INTERVAL '{int(DEFAULT_JOB_LEASE_TTL_S)} seconds'"))
+        )
+        session.commit()
+        session.refresh(job)
+        return job
+
     def _claim_ready_job(self, session: Session) -> Job | None:
         """Claim a selection job whose DApp/DefiLlama siblings have settled (matched by ``request->>'root_job_id'``)."""
         claim_id = session.execute(
@@ -114,11 +133,7 @@ class SelectionWorker(BaseWorker):
         job = session.get(Job, claim_id)
         if job is None:
             return None
-        job.status = JobStatus.processing
-        job.worker_id = self.worker_id
-        session.commit()
-        session.refresh(job)
-        return job
+        return self._finalize_claim(session, job)
 
     def _claim_stuck_job(self, session: Session) -> Job | None:
         """Bypass readiness and claim a job that's been queued too long."""
@@ -145,11 +160,7 @@ class SelectionWorker(BaseWorker):
             "Claiming stuck selection job past timeout — DApp/DefiLlama sibling(s) did not settle",
             extra={"stuck_timeout_s": _STUCK_SELECTION_TIMEOUT},
         )
-        job.status = JobStatus.processing
-        job.worker_id = self.worker_id
-        session.commit()
-        session.refresh(job)
-        return job
+        return self._finalize_claim(session, job)
 
     # -- Process ----------------------------------------------------------
 
@@ -179,7 +190,7 @@ class SelectionWorker(BaseWorker):
         # evidence supports.
         try:
             with log_timed_phase(logger, "membership_probe_pass") as probe_ph:
-                probe_result = run_probe_pass(session, job.protocol_id)
+                probe_result = run_probe_pass(session, job.protocol_id, heartbeat=lambda: self._heartbeat(session, job))
                 probe_ph["targeted"] = len(probe_result.targeted_contract_ids)
                 probe_ph["promoted"] = len(probe_result.promoted_contract_ids)
         except Exception as exc:

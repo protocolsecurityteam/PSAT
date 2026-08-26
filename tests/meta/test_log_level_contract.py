@@ -76,7 +76,7 @@ ALLOW_LIST: dict[str, dict[int, str]] = {
     "workers/discovery.py": {
         # Boot-time chain-enable sweep in main(): no job is claimed yet, so no
         # accumulator is bound and record_degraded would be a no-op.
-        1219: "Boot-time sweep failure; runs before any job context exists.",
+        1248: "Boot-time sweep failure; runs before any job context exists.",
     },
     "workers/policy_worker.py": {
         # Reanalysis-completion notifier: the reanalysis itself completed
