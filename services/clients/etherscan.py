@@ -316,8 +316,11 @@ def get(module: str, action: str, chain_id: int, empty_result_ok: bool = False, 
     relaxation of the error contract: the triple is a distinct answer the
     endpoint gives, and raising on it made "this address holds no tokens"
     indistinguishable from a transport failure at the one call site that can
-    tell them apart. The answer is deliberately NOT cached — an empty list is a
-    statement about one moment, and a cached negative would outlive it.
+    tell them apart. The empty answer is NOT cached unless the
+    (module, action, params) triple is itself immutable and PG-cache-eligible
+    (e.g. per-txhash ``txlistinternal``, where a mined tx's lack of internal
+    frames is permanent); for dynamic queries an empty list is a statement
+    about one moment, and a cached negative would outlive it.
     """
     inmem = _CACHE_ENABLED and _inmem_cache_eligible(module, action)
     source_cached = _CACHE_ENABLED and _source_cache_eligible(module, action)
@@ -378,6 +381,10 @@ def get(module: str, action: str, chain_id: int, empty_result_ok: bool = False, 
             return data
 
         if empty_result_ok and _is_empty_result(data):
+            # Whitelist-gated: only (module, action, params) triples that are
+            # themselves immutable (per-txhash internal frames) persist; a
+            # by-address empty stays a statement about one moment.
+            _pg_cache_put(module, action, chain_id, params, data)
             return data
 
         result_str = str(data.get("result", ""))

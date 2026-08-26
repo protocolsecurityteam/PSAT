@@ -233,6 +233,84 @@ def test_pg_cache_txlistinternal_by_txhash_only(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Empty-result caching: immutable per-txhash empties persist; dynamic empties
+# stay uncached
+# ---------------------------------------------------------------------------
+
+
+class _FakePgStore:
+    """Dict-backed stand-in for the PG layer that keeps the REAL eligibility
+    gate (``_pg_cache_eligible``) — only the DB round-trip is faked."""
+
+    def __init__(self):
+        self.store: dict[str, dict] = {}
+
+    def get(self, module, action, chain_id, params):
+        if not etherscan._PG_CACHE_ENABLED or not etherscan._pg_cache_eligible(module, action, params):
+            return None
+        return self.store.get(etherscan._params_hash(module, action, chain_id, dict(params)))
+
+    def put(self, module, action, chain_id, params, response):
+        if not etherscan._PG_CACHE_ENABLED or not etherscan._pg_cache_eligible(module, action, params):
+            return
+        self.store[etherscan._params_hash(module, action, chain_id, dict(params))] = response
+
+
+def _wire_empty(payload: dict, monkeypatch, pg: _FakePgStore):
+    monkeypatch.setattr(etherscan, "_PG_CACHE_ENABLED", True)
+    monkeypatch.setattr(etherscan, "_CACHE_ENABLED", True)
+    monkeypatch.setattr(etherscan, "_pg_cache_get", pg.get)
+    monkeypatch.setattr(etherscan, "_pg_cache_put", pg.put)
+    monkeypatch.setattr(etherscan, "_get_api_key", lambda: "fake")
+    monkeypatch.setattr(etherscan, "_wait_rate_limit", lambda: None)
+    fake_resp = _stable_etherscan_response_mock(payload)
+    wire = MagicMock(get=MagicMock(return_value=fake_resp))
+    monkeypatch.setattr(etherscan, "requests", wire)
+    return wire
+
+
+def test_empty_txhash_txlistinternal_cached_in_pg(monkeypatch):
+    """A mined tx with no internal frames is a permanent fact → the empty
+    per-txhash ``txlistinternal`` answer persists and the second call is
+    served from the PG cache (exactly one wire call)."""
+    empty = {"status": "0", "message": "No transactions found", "result": []}
+    pg = _FakePgStore()
+    wire = _wire_empty(empty, monkeypatch, pg)
+
+    first = etherscan.get("account", "txlistinternal", 1, empty_result_ok=True, txhash="0x" + "11" * 32)
+    second = etherscan.get("account", "txlistinternal", 1, empty_result_ok=True, txhash="0x" + "11" * 32)
+    assert first == empty
+    assert second == empty
+    assert wire.get.call_count == 1, "second empty per-txhash call must be served from the PG cache"
+
+
+def test_empty_by_address_txlist_not_cached(monkeypatch):
+    """An empty by-address ``txlist`` is living history — never cached; both
+    calls hit the wire."""
+    empty = {"status": "0", "message": "No transactions found", "result": []}
+    pg = _FakePgStore()
+    wire = _wire_empty(empty, monkeypatch, pg)
+
+    etherscan.get("account", "txlist", 1, empty_result_ok=True, address="0xabc")
+    etherscan.get("account", "txlist", 1, empty_result_ok=True, address="0xabc")
+    assert wire.get.call_count == 2
+    assert pg.store == {}, "by-address empty must never persist"
+
+
+def test_empty_addresstokenbalance_not_cached(monkeypatch):
+    """An empty token-balance answer is a statement about one moment — never
+    cached; both calls hit the wire."""
+    empty = {"status": "0", "message": "No token found", "result": []}
+    pg = _FakePgStore()
+    wire = _wire_empty(empty, monkeypatch, pg)
+
+    etherscan.get("account", "addresstokenbalance", 1, empty_result_ok=True, address="0xabc")
+    etherscan.get("account", "addresstokenbalance", 1, empty_result_ok=True, address="0xabc")
+    assert wire.get.call_count == 2
+    assert pg.store == {}, "dynamic empty must never persist"
+
+
+# ---------------------------------------------------------------------------
 # Codex iter-5 P2: skip caching empty-source / unverified responses
 # ---------------------------------------------------------------------------
 
