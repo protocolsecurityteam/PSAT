@@ -45,9 +45,33 @@ DEPLOYER_ENUMERATION_CAP = 10_000
 #: spend resolving internal creations. Exceeding it leaves the chain's history
 #: unresolvable within budget → the chain stays out of scope and
 #: ``history_complete=False`` — a half-enumerated chain must never claim
-#: completeness. (Responses are immutable and PG-cached, so a re-enumeration
-#: of the same EOA re-pays only the ``txlist`` window.)
+#: completeness. (Non-empty responses — and mature empties — are PG-cached, so
+#: a re-enumeration of the same EOA re-pays little beyond the ``txlist``
+#: window.)
 INTERNAL_RESOLUTION_TX_BUDGET = 1_000
+
+#: Minimum ``confirmations`` (head − block, straight off the ``txlist``
+#: record) before an EMPTY per-txhash internal-trace answer may be frozen in
+#: the PG cache: Etherscan's trace indexing lags the head, so a fresh tx's
+#: "no internal frames" can be a transient false-empty that would permanently
+#: delete a CREATE frame from the EOA's history — ~an hour of mainnet blocks
+#: sits comfortably past the observed lag. Non-empty answers are immutable
+#: once present and cache unconditionally.
+INTERNAL_TRACE_CACHE_MIN_CONFIRMATIONS = 300
+
+
+def _tx_mature(tx: dict) -> bool:
+    """Whether an empty internal-trace answer for *tx* would be a permanent
+    fact rather than indexing lag. Only a positive ``confirmations`` reading
+    past the floor licenses the cache write — a missing or unparseable field
+    is not_determined, never mature."""
+    raw = tx.get("confirmations")
+    if not isinstance(raw, (str, int)):
+        return False
+    try:
+        return int(raw) >= INTERNAL_TRACE_CACHE_MIN_CONFIRMATIONS
+    except ValueError:
+        return False
 
 
 @dataclass(frozen=True)
@@ -61,18 +85,22 @@ class DeployerCreation:
     factory: str | None = None
 
 
-def _internal_creations(addr: str, chain_id: int, tx_hashes: Sequence[str]) -> list[DeployerCreation] | None:
-    """CREATE/CREATE2 frames inside the EOA's own sent txs, or ``None`` when
-    any lookup fails — the chain's history is then unresolvable and must not
-    claim completeness."""
+def _internal_creations(
+    addr: str, chain_id: int, sent_calls: Sequence[tuple[str, bool]]
+) -> list[DeployerCreation] | None:
+    """CREATE/CREATE2 frames inside the EOA's own sent txs (``(tx_hash,
+    mature)`` pairs), or ``None`` when any lookup fails — the chain's history
+    is then unresolvable and must not claim completeness. An empty answer is
+    frozen in the PG cache only for a mature tx (``cache_empty``)."""
     found: list[DeployerCreation] = []
-    for tx_hash in tx_hashes:
+    for tx_hash, mature in sent_calls:
         try:
             data = etherscan.get(
                 "account",
                 "txlistinternal",
                 chain_id=chain_id,
                 empty_result_ok=True,
+                cache_empty=mature,
                 txhash=tx_hash,
             )
         except Exception as exc:
@@ -155,7 +183,7 @@ def enumerate_deployer_creations(deployer: str) -> tuple[list[DeployerCreation],
             complete = False
             continue
         chain_created: list[DeployerCreation] = []
-        sent_call_hashes: list[str] = []
+        sent_calls: list[tuple[str, bool]] = []
         for tx in result:
             if not isinstance(tx, dict):
                 continue
@@ -174,15 +202,15 @@ def enumerate_deployer_creations(deployer: str) -> tuple[list[DeployerCreation],
                 and isinstance(tx_hash, str)
                 and tx_hash
             ):
-                sent_call_hashes.append(tx_hash)
-        if len(sent_call_hashes) > INTERNAL_RESOLUTION_TX_BUDGET:
+                sent_calls.append((tx_hash, _tx_mature(tx)))
+        if len(sent_calls) > INTERNAL_RESOLUTION_TX_BUDGET:
             logger.warning(
                 "deployer internal-resolution budget exceeded",
-                extra={"deployer": addr, "chain_id": chain_id, "sent_calls": len(sent_call_hashes)},
+                extra={"deployer": addr, "chain_id": chain_id, "sent_calls": len(sent_calls)},
             )
             complete = False
             continue
-        internal = _internal_creations(addr, chain_id, sent_call_hashes)
+        internal = _internal_creations(addr, chain_id, sent_calls)
         if internal is None:
             complete = False
             continue

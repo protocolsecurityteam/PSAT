@@ -304,7 +304,9 @@ def _is_empty_result(data: dict) -> bool:
     )
 
 
-def get(module: str, action: str, chain_id: int, empty_result_ok: bool = False, **params) -> dict:
+def get(
+    module: str, action: str, chain_id: int, empty_result_ok: bool = False, cache_empty: bool = False, **params
+) -> dict:
     """Etherscan API call with rate-limit retry; reads through in-memory then Postgres cache before the wire.
 
     *chain_id* is required: the v2 endpoint is chain-scoped via the
@@ -316,11 +318,14 @@ def get(module: str, action: str, chain_id: int, empty_result_ok: bool = False, 
     relaxation of the error contract: the triple is a distinct answer the
     endpoint gives, and raising on it made "this address holds no tokens"
     indistinguishable from a transport failure at the one call site that can
-    tell them apart. The empty answer is NOT cached unless the
-    (module, action, params) triple is itself immutable and PG-cache-eligible
-    (e.g. per-txhash ``txlistinternal``, where a mined tx's lack of internal
-    frames is permanent); for dynamic queries an empty list is a statement
-    about one moment, and a cached negative would outlive it.
+    tell them apart. The empty answer is persisted only when the
+    (module, action, params) triple is PG-cache-eligible AND the caller passes
+    ``cache_empty=True`` — its attestation that the answer can no longer
+    change. Even an immutable-shaped triple (per-txhash ``txlistinternal``)
+    can be a transient false-empty while Etherscan's trace indexing lags a
+    fresh tx, so only the caller — who knows the tx's age — may freeze it;
+    for dynamic queries an empty list is a statement about one moment, and a
+    cached negative would outlive it. Non-empty answers cache unconditionally.
     """
     inmem = _CACHE_ENABLED and _inmem_cache_eligible(module, action)
     source_cached = _CACHE_ENABLED and _source_cache_eligible(module, action)
@@ -381,10 +386,12 @@ def get(module: str, action: str, chain_id: int, empty_result_ok: bool = False, 
             return data
 
         if empty_result_ok and _is_empty_result(data):
-            # Whitelist-gated: only (module, action, params) triples that are
-            # themselves immutable (per-txhash internal frames) persist; a
-            # by-address empty stays a statement about one moment.
-            _pg_cache_put(module, action, chain_id, params, data)
+            # Whitelist-gated AND caller-attested: only an immutable triple
+            # (per-txhash internal frames) whose caller vouched the tx is past
+            # Etherscan's trace-indexing lag persists — a lag-empty frozen for
+            # a fresh tx would permanently delete its CREATE frames.
+            if cache_empty:
+                _pg_cache_put(module, action, chain_id, params, data)
             return data
 
         result_str = str(data.get("result", ""))

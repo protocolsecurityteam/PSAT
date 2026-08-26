@@ -159,8 +159,13 @@ def _creation_tx(target: str) -> dict:
     return {"to": "", "contractAddress": target, "hash": _TX}
 
 
-def _call_tx(sender: str, *, tx_hash: str, to: str = "0x" + "aa" * 20, is_error: str = "0") -> dict:
-    return {"from": sender, "to": to, "contractAddress": "", "hash": tx_hash, "isError": is_error}
+def _call_tx(
+    sender: str, *, tx_hash: str, to: str = "0x" + "aa" * 20, is_error: str = "0", confirmations: str | None = None
+) -> dict:
+    tx = {"from": sender, "to": to, "contractAddress": "", "hash": tx_hash, "isError": is_error}
+    if confirmations is not None:
+        tx["confirmations"] = confirmations
+    return tx
 
 
 def _create_frame(target: str, factory: str, *, kind: str = "create2", is_error: str = "0") -> dict:
@@ -266,6 +271,38 @@ def test_enumeration_internal_failure_is_incomplete(monkeypatch):
     assert created == []
     assert scope == []
     assert complete is False
+
+
+def test_internal_empty_caching_gated_on_tx_maturity(monkeypatch):
+    """A lag-empty must not be frozen: the enumeration attests ``cache_empty``
+    per tx from the txlist record's own ``confirmations`` — only a reading at
+    or past the maturity floor licenses persisting an empty trace answer; a
+    fresh or unreadable field is not_determined, never mature."""
+    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
+    eoa = ADDR(0x26E)
+    fresh_hash = "0x" + "4c" * 32
+    mature_hash = "0x" + "4d" * 32
+    unknown_hash = "0x" + "4e" * 32
+    calls = _stub_txlist(
+        monkeypatch,
+        {
+            1: [
+                _creation_tx(ADDR(0x26F)),
+                _call_tx(eoa, tx_hash=fresh_hash, confirmations="3"),
+                _call_tx(
+                    eoa,
+                    tx_hash=mature_hash,
+                    confirmations=str(deployer_enumeration.INTERNAL_TRACE_CACHE_MIN_CONFIRMATIONS),
+                ),
+                _call_tx(eoa, tx_hash=unknown_hash),
+            ]
+        },
+    )
+    _, scope, complete = enumerate_deployer_creations(eoa)
+    assert scope == [1]
+    assert complete is True
+    by_hash = {c[3]["txhash"]: c[3]["cache_empty"] for c in calls if c[1] == "txlistinternal"}
+    assert by_hash == {fresh_hash: False, mature_hash: True, unknown_hash: False}
 
 
 def test_enumeration_internal_budget_exceeded_is_incomplete(monkeypatch):
