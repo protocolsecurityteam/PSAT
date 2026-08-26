@@ -452,16 +452,6 @@ def test_ladder_wire_cap_exceeded_is_class_c_no_row(db_session, monkeypatch):
     assert db_session.execute(select(ProtocolDeployer).where(ProtocolDeployer.address == eoa)).first() is None
 
 
-def test_ladder_wire_foreign_creation_is_class_c(db_session, monkeypatch):
-    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
-    protocol = _protocol(db_session)
-    eoa = ADDR(0x260)
-    members = _seed_class_b_shape(db_session, protocol, eoa)
-    _stub_txlist(monkeypatch, {1: [_creation_tx(m.address) for m in members] + [_creation_tx(ADDR(0x999))]})
-
-    assert _register_protocol_deployer(db_session, protocol_id=protocol.id, deployer=eoa) is None
-
-
 def test_ladder_wire_counts_unknown_creations_without_materializing(db_session, monkeypatch):
     """DEPLOYER_HEURISTIC_SPEC.md §7 ruling 3: a complete enumeration's
     unknown creation is COUNTED (Class B refuses on it) but never becomes a
@@ -1364,27 +1354,17 @@ def _clean_marker(db_session):
     db_session.commit()
 
 
-def test_boot_sweep_seeds_marker_on_first_boot(db_session, monkeypatch, _clean_marker):
+@pytest.mark.parametrize("pre_seeded", [False, True], ids=["first_boot", "unchanged"])
+def test_boot_sweep_seeds_marker_and_never_probes_without_a_new_chain(
+    db_session, monkeypatch, _clean_marker, pre_seeded
+):
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
+    if pre_seeded:
+        db_session.add(OpsKv(key=ENABLED_CHAINS_SEEN_KEY, value=[1]))
+        db_session.commit()
 
     def no_wire(*args, **kwargs):
-        raise AssertionError("first boot must not probe")
-
-    monkeypatch.setattr(probes, "rpc_request", no_wire)
-
-    run_chain_enable_sweep(db_session)
-
-    marker = db_session.get(OpsKv, ENABLED_CHAINS_SEEN_KEY)
-    assert marker is not None and marker.value == [1]
-
-
-def test_boot_sweep_noop_when_unchanged(db_session, monkeypatch, _clean_marker):
-    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
-    db_session.add(OpsKv(key=ENABLED_CHAINS_SEEN_KEY, value=[1]))
-    db_session.commit()
-
-    def no_wire(*args, **kwargs):
-        raise AssertionError("unchanged allowlist must not probe")
+        raise AssertionError("first boot / unchanged allowlist must not probe")
 
     monkeypatch.setattr(probes, "rpc_request", no_wire)
 

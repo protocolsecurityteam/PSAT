@@ -16,6 +16,8 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
+import pytest
+
 from db.models import Contract, ContractCreationWitness, ContractMembershipWitness, Protocol
 from services.discovery import membership_gate as gate
 from tests.conftest import requires_postgres
@@ -89,17 +91,27 @@ def _active_witness_protocols(session, contract: Contract) -> set[int]:
 # ---------------------------------------------------------------------------
 
 
-def test_a_nominated_candidate_admits_to_b_on_b_w2_edge(db_session):
-    """A candidate slot-claimed by protocol A earns B-membership when B's
-    member's stored impl pointer names it (genuine W2 for B). The slot aligns
-    to B on promotion; A's nomination stays visible as provenance."""
+@pytest.mark.parametrize(
+    "candidate_n,member_n,source_tag,edge_field,deployer_n",
+    [(0xC1, 0xC2, "inventory", "implementation", None), (0xC5, 0xC6, "registry_probe", "beacon", 0xD5)],
+    ids=["inventory_impl_edge", "deployer_keyed_beacon_edge"],
+)
+def test_a_nominated_candidate_admits_to_b_on_b_edge(
+    db_session, candidate_n, member_n, source_tag, edge_field, deployer_n
+):
+    """A candidate slot-claimed by protocol A — inventory- or deployer-keyed —
+    earns B-membership when B's member's stored structural pointer names it
+    (genuine W2 for B). The slot aligns to B on promotion; A's nomination stays
+    visible as provenance; and no A-witness is minted from B's facts (a
+    wrong-protocol derivation is impossible)."""
     protocol_a = _protocol(db_session, "slot-a")
     protocol_b = _protocol(db_session, "evidence-b")
-    candidate = _contract(db_session, _addr(0xC1))
-    gate.nominate(db_session, contract=candidate, protocol_id=protocol_a.id, source_tag="inventory")
+    fields = {"deployer": _addr(deployer_n)} if deployer_n is not None else {}
+    candidate = _contract(db_session, _addr(candidate_n), **fields)
+    gate.nominate(db_session, contract=candidate, protocol_id=protocol_a.id, source_tag=source_tag)
     assert candidate.nominated_protocol_id == protocol_a.id
-    _code_fact(db_session, candidate.address)
-    b_member = _member(db_session, protocol_b, _addr(0xC2), implementation=candidate.address)
+    _code_fact(db_session, candidate.address, tx=_TX if deployer_n is not None else None)
+    b_member = _member(db_session, protocol_b, _addr(member_n), **{edge_field: candidate.address})
     db_session.commit()
 
     result = gate.evaluate(db_session, gate.FactsDelta(new_member_contract_ids=(b_member.id,)))
@@ -109,57 +121,17 @@ def test_a_nominated_candidate_admits_to_b_on_b_w2_edge(db_session):
     assert candidate.id in result.promoted_contract_ids
     assert candidate.protocol_id == protocol_b.id
     assert candidate.nominated_protocol_id == protocol_b.id  # proof supersedes provenance
-    assert "inventory" in (candidate.discovery_sources or [])  # A's provenance survives
+    assert source_tag in (candidate.discovery_sources or [])  # A's provenance survives
     assert protocol_b.id in _active_witness_protocols(db_session, candidate)
-
-
-def test_slot_squatting_by_deployer_keyed_nomination_cannot_block(db_session):
-    """A deployer-keyed nomination slot-claims the row for A first; B's
-    evidence still admits to B."""
-    protocol_a = _protocol(db_session, "squatter-a")
-    protocol_b = _protocol(db_session, "victim-b")
-    candidate = _contract(db_session, _addr(0xC5), deployer=_addr(0xD5))
-    gate.nominate(db_session, contract=candidate, protocol_id=protocol_a.id, source_tag="registry_probe")
-    _code_fact(db_session, candidate.address, tx=_TX)
-    b_member = _member(db_session, protocol_b, _addr(0xC6), beacon=candidate.address)
-    db_session.commit()
-
-    result = gate.evaluate(db_session, gate.FactsDelta(new_member_contract_ids=(b_member.id,)))
-    db_session.commit()
-    db_session.refresh(candidate)
-
-    assert candidate.id in result.promoted_contract_ids
-    assert candidate.protocol_id == protocol_b.id
-    assert candidate.nominated_protocol_id == protocol_b.id
-    assert "registry_probe" in (candidate.discovery_sources or [])
+    a_rows = (
+        db_session.query(ContractMembershipWitness).filter_by(contract_id=candidate.id, protocol_id=protocol_a.id).all()
+    )
+    assert a_rows == []
 
 
 # ---------------------------------------------------------------------------
 # No new overreach
 # ---------------------------------------------------------------------------
-
-
-def test_b_evidence_never_admits_to_a(db_session):
-    """Wrong-protocol derivation is impossible: B's member edge admits the
-    candidate to B only — never to the slot-claiming A."""
-    protocol_a = _protocol(db_session, "no-overreach-a")
-    protocol_b = _protocol(db_session, "no-overreach-b")
-    candidate = _contract(db_session, _addr(0xC8))
-    gate.nominate(db_session, contract=candidate, protocol_id=protocol_a.id, source_tag="inventory")
-    _code_fact(db_session, candidate.address)
-    b_member = _member(db_session, protocol_b, _addr(0xC9), implementation=candidate.address)
-    db_session.commit()
-
-    gate.evaluate(db_session, gate.FactsDelta(new_member_contract_ids=(b_member.id,)))
-    db_session.commit()
-    db_session.refresh(candidate)
-
-    assert candidate.protocol_id == protocol_b.id
-    # No A-witness was minted from B's facts.
-    a_rows = (
-        db_session.query(ContractMembershipWitness).filter_by(contract_id=candidate.id, protocol_id=protocol_a.id).all()
-    )
-    assert a_rows == []
 
 
 def test_candidate_own_pointer_to_foreign_member_does_not_cross(db_session):

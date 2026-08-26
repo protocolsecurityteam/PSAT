@@ -66,8 +66,9 @@ class TestBulkUpsertOwnershipGate:
     """Membership-gate model (DISCOVERY_MEMBERSHIP_GATE_SPEC.md): NO source
     tag stamps ``protocol_id`` at the persistence boundary — every write is a
     nomination (``nominated_protocol_id``) and promotion is the gate's job.
-    The path-1 leak stays closed a fortiori; the old HIGH tier no longer
-    stamps either."""
+    The full writer matrix (tag tiers, re-nominations, the single-row helper)
+    is pinned in test_discovery_nomination_writers.py; kept here is the named
+    path-1 leak shape."""
 
     def test_dapp_crawl_only_entry_stays_orphan(self, db_session, seed_protocol):
         """Pre-fix: this row landed with ``protocol_id=etherfi`` — that's
@@ -99,113 +100,6 @@ class TestBulkUpsertOwnershipGate:
         assert row.nominated_protocol_id == seed_protocol
         assert "dapp_crawl" in (row.discovery_sources or [])
         assert row.discovery_url == "https://example.com/cash"
-
-    def test_high_confidence_source_no_longer_stamps(self, db_session, seed_protocol):
-        """The retired HIGH tier: a deployer_expansion tag now yields a
-        nomination, never a member — invariant 1."""
-        from db.models import Contract
-        from db.queue import bulk_upsert_discovered_contracts
-
-        addr = _addr(0xDE01)
-        bulk_upsert_discovered_contracts(
-            db_session,
-            protocol_id=seed_protocol,
-            entries=[{"address": addr, "chain": "ethereum", "new_sources": ["deployer_expansion"]}],
-        )
-        db_session.commit()
-        row = db_session.query(Contract).filter_by(address=addr, chain="ethereum").one()
-        assert row.protocol_id is None
-        assert row.nominated_protocol_id == seed_protocol
-
-    def test_mixed_sources_nominate_without_stamping(self, db_session, seed_protocol):
-        """A formerly-HIGH tag in a mixed source list changes nothing:
-        one nomination, all tags kept as provenance."""
-        from db.models import Contract
-        from db.queue import bulk_upsert_discovered_contracts
-
-        addr = _addr(0xDE02)
-        bulk_upsert_discovered_contracts(
-            db_session,
-            protocol_id=seed_protocol,
-            entries=[
-                {
-                    "address": addr,
-                    "chain": "ethereum",
-                    "new_sources": ["dapp_crawl", "ai_inventory"],
-                }
-            ],
-        )
-        db_session.commit()
-        row = db_session.query(Contract).filter_by(address=addr, chain="ethereum").one()
-        assert row.protocol_id is None
-        assert row.nominated_protocol_id == seed_protocol
-        assert set(row.discovery_sources or []) >= {"dapp_crawl", "ai_inventory"}
-
-    def test_later_source_corroborates_but_never_promotes(self, db_session, seed_protocol):
-        """The real-world cycle: dapp_crawl first, deployer_expansion later.
-        Corroboration accumulates in ``discovery_sources``; promotion stays
-        with the gate."""
-        from db.models import Contract
-        from db.queue import bulk_upsert_discovered_contracts
-
-        addr = _addr(0xDE03)
-        bulk_upsert_discovered_contracts(
-            db_session,
-            protocol_id=seed_protocol,
-            entries=[{"address": addr, "chain": "ethereum", "new_sources": ["dapp_crawl"]}],
-        )
-        db_session.commit()
-        assert db_session.query(Contract).filter_by(address=addr).one().protocol_id is None
-        bulk_upsert_discovered_contracts(
-            db_session,
-            protocol_id=seed_protocol,
-            entries=[{"address": addr, "chain": "ethereum", "new_sources": ["deployer_expansion"]}],
-        )
-        db_session.commit()
-        row = db_session.query(Contract).filter_by(address=addr).one()
-        assert row.protocol_id is None
-        assert row.nominated_protocol_id == seed_protocol
-        # Both sources retained — discovery history is union, not overwrite.
-        assert set(row.discovery_sources or []) >= {"dapp_crawl", "deployer_expansion"}
-
-    def test_low_confidence_update_does_not_adopt_existing_orphan(self, db_session, seed_protocol):
-        """An orphan row gains a nomination, never a stamp."""
-        from db.models import Contract
-        from db.queue import bulk_upsert_discovered_contracts
-
-        addr = _addr(0xDE04)
-        # Seed an orphan directly so we know the row pre-exists.
-        db_session.add(Contract(address=addr, chain="ethereum", protocol_id=None, discovery_sources=["dapp_crawl"]))
-        db_session.commit()
-        bulk_upsert_discovered_contracts(
-            db_session,
-            protocol_id=seed_protocol,
-            entries=[{"address": addr, "chain": "ethereum", "new_sources": ["dapp_crawl"]}],
-        )
-        db_session.commit()
-        row = db_session.query(Contract).filter_by(address=addr).one()
-        assert row.protocol_id is None
-        assert row.nominated_protocol_id == seed_protocol
-
-    def test_singular_upsert_helper_is_also_gated(self, db_session, seed_protocol):
-        """``upsert_discovered_contract`` (single-row variant) goes through
-        the same path; gate this one too so single-shot writers don't
-        bypass it."""
-        from db.models import Contract
-        from db.queue import upsert_discovered_contract
-
-        addr = _addr(0xDE05)
-        upsert_discovered_contract(
-            db_session,
-            address=addr,
-            chain="ethereum",
-            protocol_id=seed_protocol,
-            new_sources=["dapp_crawl"],
-        )
-        db_session.commit()
-        row = db_session.query(Contract).filter_by(address=addr).one()
-        assert row.protocol_id is None
-        assert row.nominated_protocol_id == seed_protocol
 
 
 # ---------------------------------------------------------------------------
@@ -412,10 +306,10 @@ class TestEigenLayerLeakShape:
 class TestCallTargetOverreachShape:
     """The dev-DB shape behind the WETH9 / EndpointV2 / DepositContract / Lido
     admissions: members carry ControllerValue rows naming the externals they
-    integrate with. ``call_target`` is an operand, NULL is not-determined, and
-    ``caller_gate`` is a proven gate on an entry point but not a governance
-    derivation — none of the three admits a D2 controller (invariant 6,
-    ``W3_D2_SOURCES``; see test_membership_caller_gate_admission.py)."""
+    integrate with. ``call_target`` is an operand and NULL is not-determined —
+    neither admits a D2 controller (invariant 6, ``W3_D2_SOURCES``). The third
+    refused provenance, ``caller_gate``, is pinned with the full EndpointV2
+    shape in test_membership_caller_gate_admission.py."""
 
     @staticmethod
     def _seed(db_session, seed_protocol, tag):
@@ -469,26 +363,6 @@ class TestCallTargetOverreachShape:
         assert foreign.protocol_id is None
         assert (
             db_session.query(ContractMembershipWitness).filter_by(contract_id=foreign.id, rule="w3_control").count()
-            == 0
-        )
-
-    def test_caller_gate_controller_value_never_admits_either(self, db_session, seed_protocol):
-        from db.models import ContractMembershipWitness, ControllerValue
-
-        member, controller = self._seed(db_session, seed_protocol, 2)
-        db_session.add(
-            ControllerValue(
-                contract_id=member.id,
-                controller_id="owner",
-                value=controller.address,
-                authority_provenance="caller_gate",
-            )
-        )
-        self._evaluate(db_session, controller)
-
-        assert controller.protocol_id is None
-        assert (
-            db_session.query(ContractMembershipWitness).filter_by(contract_id=controller.id, rule="w3_control").count()
             == 0
         )
 

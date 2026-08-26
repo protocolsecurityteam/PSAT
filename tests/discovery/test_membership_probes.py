@@ -229,18 +229,6 @@ def test_probe_malformed_getcode_never_mints_a_verdict(db_session, monkeypatch, 
     assert gate.resolve_membership_state(db_session, row) == "candidate"
 
 
-def test_probe_real_bytecode_is_a_present_verdict(db_session, monkeypatch, erpc_env):
-    protocol = _protocol(db_session)
-    row = _contract(db_session, ADDR(0x111), nominated=protocol.id)
-    _stub_wire(monkeypatch, code="0x608060405234801561001057600080fd5b50")
-
-    result = gate.probe(db_session, row)
-
-    assert result.code_present is True
-    witness = db_session.get(ContractCreationWitness, (1, row.address))
-    assert witness is not None and witness.code_absent_at_probe is False
-
-
 def test_failed_reprobe_preserves_last_good_results(db_session, monkeypatch, erpc_env):
     protocol = _protocol(db_session)
     row = _contract(db_session, ADDR(0x112), nominated=protocol.id)

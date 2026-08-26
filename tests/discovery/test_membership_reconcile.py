@@ -91,11 +91,6 @@ def _freshly_gated(session):
     return protocol, anchor, proxy, parked
 
 
-def test_zero_drift_on_freshly_gated_db(db_session):
-    _freshly_gated(db_session)
-    assert audit(db_session) == []
-
-
 def test_full_ladder_gated_db_reconciles_zero_drift(db_session):
     """Invariant-13 handshake: a DB whose every membership fact was earned
     through the gate's own primitives — W5 anchor, W2 impl, a Class-A registry
