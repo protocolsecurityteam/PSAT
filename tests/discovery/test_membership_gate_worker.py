@@ -523,8 +523,17 @@ def test_fixpoint_enumeration_nominates_and_queues_probes(db_session, monkeypatc
     assert row.nominated_protocol_id == protocol.id
     assert row.discovery_sources == [gate.ENUMERATION_SOURCE_TAG]
     assert row.id in result.reprobe_contract_ids
-    # The unknown creation held no evidence, so Class B stayed refused.
-    assert db_session.execute(select(ProtocolDeployer).where(ProtocolDeployer.address == eoa)).first() is None
+    # The unknown creation held no evidence, so Class B stayed refused. The
+    # EOA may still hold the labeled heuristic row (DEPLOYER_HEURISTIC_SPEC.md
+    # §1) — what it may not hold is a PROOF class.
+    assert (
+        db_session.execute(
+            select(ProtocolDeployer).where(
+                ProtocolDeployer.address == eoa, ProtocolDeployer.trust_class.in_(["A", "B"])
+            )
+        ).first()
+        is None
+    )
 
 
 def test_ladder_wire_class_a_skips_enumeration(db_session, monkeypatch):

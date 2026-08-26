@@ -25,12 +25,14 @@ from db.models import (
     ADMITTING_WITNESS_RULES,
     DEPLOYER_TRUST_CLASS_A,
     DEPLOYER_TRUST_CLASS_B,
-    DEPLOYER_TRUST_CLASSES,
+    DEPLOYER_TRUST_CLASS_H,
+    PROOF_DEPLOYER_TRUST_CLASSES,
     WITNESS_RULE_W1_CODE,
     WITNESS_RULE_W2_STRUCTURAL,
     WITNESS_RULE_W3_CONTROL,
     WITNESS_RULE_W4_DEPLOYER,
     WITNESS_RULE_W4_FACTORY,
+    WITNESS_RULE_W4H_DEPLOYER_AFFINITY,
     WITNESS_RULE_W5_HUMAN,
     WITNESS_RULE_W6_LLAMA_SEED,
     WITNESS_RULES,
@@ -39,6 +41,7 @@ from db.models import (
     ContractMembershipWitness,
     ContractProbeAttempt,
     ControllerValue,
+    DeployerAffinityChallenge,
     EffectiveFunction,
     FunctionPrincipal,
     Protocol,
@@ -155,6 +158,28 @@ NONLINEAGE_WITNESS_RULES = frozenset(
     {WITNESS_RULE_W2_STRUCTURAL, WITNESS_RULE_W3_CONTROL, WITNESS_RULE_W5_HUMAN, WITNESS_RULE_W6_LLAMA_SEED}
 )
 
+#: Rules whose via-fact is a ``protocol_deployers`` row, so revoking that row
+#: revokes them (DEPLOYER_HEURISTIC_SPEC.md §5; gate invariant 8).
+LINEAGE_REGISTRY_WITNESS_RULES = frozenset({WITNESS_RULE_W4_DEPLOYER, WITNESS_RULE_W4H_DEPLOYER_AFFINITY})
+
+#: HEURISTIC witness rules (DEPLOYER_HEURISTIC_SPEC.md §6): admitted on
+#: measured affinity, not on proof. A heuristic witness is invisible to every
+#: evidence rule — including W4-H's own anchor counting — so a false admission
+#: has zero transitive amplification. It is NOT in
+#: :data:`NONLINEAGE_WITNESS_RULES`: w4h is lineage.
+HEURISTIC_WITNESS_RULES = frozenset({WITNESS_RULE_W4H_DEPLOYER_AFFINITY})
+
+#: W2 evidence flag for the ONE §6 exception: this structural edge was derived
+#: from a HEURISTIC member. The derived witness is heuristic itself — the
+#: status propagates, never launders.
+W2_HEURISTIC_VIA_KEY = "heuristic_via"
+
+#: The §6 same-contract structural edges: a proxy and its implementation are one
+#: logical contract, so an H-member proxy carries them. Different-entity edges
+#: (proxy admin, the beacon contract itself, factory children, every control
+#: edge) never inherit.
+W2_SAME_CONTRACT_EDGE_KINDS = frozenset({"implementation", "secondary_implementation"})
+
 #: The one ``ControllerValue.authority_provenance`` that is a control edge
 #: (invariant 6): the value gates callers. ``call_target`` is an integration
 #: operand (nativeWrapper, endpoint, stETH — the WETH9/EndpointV2/Lido
@@ -163,6 +188,23 @@ NONLINEAGE_WITNESS_RULES = frozenset(
 #: observation. Probe reads (§3.5 owner/authority/admin slots) are
 #: caller-gating by construction and carry no provenance column.
 W3_CONTROLLER_PROVENANCE = "caller_gate"
+
+#: W4-H qualification thresholds (DEPLOYER_HEURISTIC_SPEC.md §1/§5). Recorded
+#: in every H row's evidence, so a granted row carries the rule it was granted
+#: under rather than only the verdict.
+W4H_MIN_ANCHORS = 2
+W4H_MIN_AFFINITY = 0.9
+#: Hysteresis floor: admission needs ≥ 0.9, a standing grant survives to 0.5.
+W4H_AUTO_REVOKE_AFFINITY = 0.5
+W4H_CHALLENGE_QUORUM = 3
+W4H_EVIDENCE_VERSION = 1
+
+#: Derived H-registry states (§5) — never stored flags. ``revoked_at`` is the
+#: one stored transition; everything else is recomputed from the evidence.
+W4H_STATE_ACTIVE = "active"
+W4H_STATE_FROZEN = "frozen"
+W4H_STATE_SUSPENDED = "suspended"
+W4H_STATE_REVOKED = "revoked"
 
 #: Anchor-chain link kinds (spec §3.2 extension, see ``_own_controller_links``).
 W3_ANCHOR_LINK_KINDS = frozenset({"owner_or_authority", "proxy_admin", "probe_read", "role_holder", "safe_signer"})
@@ -251,19 +293,29 @@ def w2_evidence(
     member_address: str,
     resolved_pointer: str,
     upgrade_tx_hash: str | None = None,
+    heuristic_via: bool = False,
 ) -> dict[str, Any]:
     """W2 structural edge, verified against stored resolution (the pointer the
     member's own row carries), never a bare ``relationship_type``.
     ``upgrade_tx_hash`` belongs to ``historical_implementation`` only — the
-    upgrade tx the stored ``UpgradeEvent`` row observed (may be unrecorded)."""
+    upgrade tx the stored ``UpgradeEvent`` row observed (may be unrecorded).
+
+    ``heuristic_via=True`` records the DEPLOYER_HEURISTIC_SPEC.md §6 exception:
+    the member this edge rests on is itself a heuristic member, and the derived
+    witness inherits that status (§6 invariant 1 — a heuristic membership is
+    never presented as proven)."""
     if edge_kind not in W2_EDGE_KINDS:
         raise ValueError(f"edge_kind must be one of {sorted(W2_EDGE_KINDS)}, got {edge_kind!r}")
+    if heuristic_via and edge_kind not in W2_SAME_CONTRACT_EDGE_KINDS:
+        raise ValueError(f"heuristic inheritance is same-contract only, got edge_kind {edge_kind!r}")
     evidence: dict[str, Any] = {
         "edge_kind": edge_kind,
         "member_contract_id": _require_positive_int(member_contract_id, "member_contract_id"),
         "member_address": _require_address(member_address, "member_address"),
         "resolved_pointer": _require_address(resolved_pointer, "resolved_pointer"),
     }
+    if heuristic_via:
+        evidence[W2_HEURISTIC_VIA_KEY] = True
     if edge_kind == "historical_implementation":
         if upgrade_tx_hash is not None:
             if not isinstance(upgrade_tx_hash, str) or not re.match(r"^0x[0-9a-fA-F]{64}$", upgrade_tx_hash):
@@ -471,6 +523,33 @@ def w4_factory_evidence(
     }
 
 
+def w4h_evidence(
+    *,
+    deployer_address: str,
+    deployer_registry_id: int,
+    creation_tx_hash: str,
+    creation_block: int | None,
+    affinity_at_grant: float,
+    anchors_at_grant: int,
+) -> dict[str, Any]:
+    """W4-H heuristic deployer lineage (DEPLOYER_HEURISTIC_SPEC.md §8.2). The
+    grant-time affinity and anchor count are HISTORICAL RECORD — what the
+    computation said when the witness was minted — not a re-verified claim; the
+    live numbers live on the registry row."""
+    if not isinstance(creation_tx_hash, str) or not re.match(r"^0x[0-9a-fA-F]{64}$", creation_tx_hash):
+        raise ValueError(f"creation_tx_hash must be a 32-byte hex hash, got {creation_tx_hash!r}")
+    if not isinstance(affinity_at_grant, float) or not (0.0 <= affinity_at_grant <= 1.0):
+        raise ValueError(f"affinity_at_grant must be a float in [0, 1], got {affinity_at_grant!r}")
+    return {
+        "deployer_address": _require_address(deployer_address, "deployer_address"),
+        "deployer_registry_id": _require_positive_int(deployer_registry_id, "deployer_registry_id"),
+        "creation_tx_hash": creation_tx_hash.lower(),
+        "creation_block": None if creation_block is None else _require_block(creation_block, "creation_block"),
+        "affinity_at_grant": affinity_at_grant,
+        "anchors_at_grant": _require_positive_int(anchors_at_grant, "anchors_at_grant"),
+    }
+
+
 def w5_evidence(*, actor: str, asserted_at: datetime) -> dict[str, Any]:
     """W5 human assertion: explicit and attributed (invariant 14)."""
     if not isinstance(actor, str) or not actor.strip():
@@ -515,6 +594,8 @@ def _rebuild_evidence(rule: str, evidence: dict[str, Any]) -> dict[str, Any]:
         kwargs = picked("edge_kind", "member_contract_id", "member_address", "resolved_pointer")
         if evidence.get("edge_kind") == "historical_implementation":
             kwargs["upgrade_tx_hash"] = evidence.get("upgrade_tx_hash")
+        if W2_HEURISTIC_VIA_KEY in evidence:
+            kwargs["heuristic_via"] = evidence.get(W2_HEURISTIC_VIA_KEY)
         return w2_evidence(**kwargs)
     if rule == WITNESS_RULE_W3_CONTROL:
         kwargs = picked("direction", "source")
@@ -531,6 +612,17 @@ def _rebuild_evidence(rule: str, evidence: dict[str, Any]) -> dict[str, Any]:
     if rule == WITNESS_RULE_W4_FACTORY:
         return w4_factory_evidence(
             **picked("factory_address", "factory_member_contract_id", "chain_id", "creation_tx_hash")
+        )
+    if rule == WITNESS_RULE_W4H_DEPLOYER_AFFINITY:
+        return w4h_evidence(
+            **picked(
+                "deployer_address",
+                "deployer_registry_id",
+                "creation_tx_hash",
+                "creation_block",
+                "affinity_at_grant",
+                "anchors_at_grant",
+            )
         )
     if rule == WITNESS_RULE_W5_HUMAN:
         raw = evidence.get("asserted_at")
@@ -868,13 +960,47 @@ def _has_nonlineage_witness(session: Session, *, contract_id: int, protocol_id: 
     )
 
 
+def witness_is_heuristic(witness: ContractMembershipWitness) -> bool:
+    """Is this row a HEURISTIC witness (DEPLOYER_HEURISTIC_SPEC.md §6)? Either
+    a heuristic rule outright, or the §6 same-contract structural edge derived
+    from a heuristic member, which carries the status rather than laundering
+    it."""
+    if witness.rule in HEURISTIC_WITNESS_RULES:
+        return True
+    return (
+        witness.rule == WITNESS_RULE_W2_STRUCTURAL
+        and isinstance(witness.evidence, dict)
+        and witness.evidence.get(W2_HEURISTIC_VIA_KEY) is True
+    )
+
+
+def member_for_evidence(session: Session, *, contract_id: int, protocol_id: int) -> bool:
+    """DEPLOYER_HEURISTIC_SPEC.md §6: may this member stand as the via-fact of
+    another evidence rule? False EXACTLY when its admission is heuristic —
+    every active admitting witness it holds is a heuristic one. Heuristic
+    members stay full members operationally (``protocol_id`` is unchanged for
+    selection, monitoring, scoring, overview); the boundary is evidentiary, so
+    a heuristic admission has zero transitive amplification.
+
+    The predicate judges the witness set, not membership: a row with no
+    admitting witness at all is not a HEURISTIC admission, and whether it may
+    be a member is ``promote``'s question, asked with its own evidence."""
+    admitting = [
+        row
+        for row in active_witnesses(session, contract_id=contract_id, protocol_id=protocol_id)
+        if row.rule in ADMITTING_WITNESS_RULES
+    ]
+    return not admitting or any(not witness_is_heuristic(row) for row in admitting)
+
+
 def _member_anchors_ladder(session: Session, *, contract_id: int, protocol_id: int) -> bool:
     """§3.2 D2 non-transitivity mirrored into the ladder (F2, same discipline
     as ``_via_is_transitive``): a member whose ONLY admitting witness is W3-D2
     must not anchor perimeter or corroboration facts — its principals would
-    license what the D2 entry itself may not."""
+    license what the D2 entry itself may not. Heuristic witnesses never anchor
+    either (DEPLOYER_HEURISTIC_SPEC.md §6)."""
     for row in active_witnesses(session, contract_id=contract_id, protocol_id=protocol_id):
-        if row.rule not in ADMITTING_WITNESS_RULES:
+        if row.rule not in ADMITTING_WITNESS_RULES or witness_is_heuristic(row):
             continue
         if row.rule != WITNESS_RULE_W3_CONTROL:
             return True
@@ -964,17 +1090,19 @@ def _chain_key(chain: str | None) -> str:
 
 
 def _member_rows_at(session: Session, *, protocol_id: int, address: str, chain_key: str) -> list[Contract]:
-    return list(
-        session.execute(
-            select(Contract)
-            .where(
-                Contract.protocol_id == protocol_id,
-                func.lower(Contract.address) == address,
-                func.lower(func.coalesce(Contract.chain, "ethereum")) == chain_key,
-            )
-            .order_by(Contract.id)
-        ).scalars()
-    )
+    """This protocol's EVIDENCE members at (address, chain): heuristic-only
+    members are excluded (DEPLOYER_HEURISTIC_SPEC.md §6) — every caller here
+    reads a member as the via-fact of another rule."""
+    rows = session.execute(
+        select(Contract)
+        .where(
+            Contract.protocol_id == protocol_id,
+            func.lower(Contract.address) == address,
+            func.lower(func.coalesce(Contract.chain, "ethereum")) == chain_key,
+        )
+        .order_by(Contract.id)
+    ).scalars()
+    return [row for row in rows if member_for_evidence(session, contract_id=row.id, protocol_id=protocol_id)]
 
 
 _PROBE_CONTROLLER_READS = ("owner", "authority", "admin")
@@ -1263,7 +1391,7 @@ def _via_transitivity(
         rows = active_witnesses(session, contract_id=member.id, protocol_id=protocol_id)
         has_d2 = False
         for row in rows:
-            if row.rule not in ADMITTING_WITNESS_RULES:
+            if row.rule not in ADMITTING_WITNESS_RULES or witness_is_heuristic(row):
                 continue
             if row.rule != WITNESS_RULE_W3_CONTROL:
                 return TransitivityProof("independent_witness")
@@ -1386,8 +1514,8 @@ def _own_controller_links(session: Session, *, protocol_id: int, controller: Con
         # controller set. Read off this protocol's MEMBERS only — a demoted
         # row's stale analysis is not this protocol's observation — and the
         # NEWEST such row wins, so a re-analysis supersedes what it replaced.
-        row = session.execute(
-            select(FunctionPrincipal.details)
+        for details, member_id in session.execute(
+            select(FunctionPrincipal.details, Contract.id)
             .join(EffectiveFunction, FunctionPrincipal.function_id == EffectiveFunction.id)
             .join(Contract, EffectiveFunction.contract_id == Contract.id)
             .where(
@@ -1397,13 +1525,14 @@ def _own_controller_links(session: Session, *, protocol_id: int, controller: Con
                 Contract.protocol_id == protocol_id,
             )
             .order_by(FunctionPrincipal.id.desc())
-            .limit(1)
-        ).first()
-        details = row[0] if row is not None else None
-        owners = details.get("owners") if isinstance(details, dict) else None
-        if isinstance(owners, list):
-            for owner in owners:
-                add("safe_signer", owner, own)
+        ):
+            if not member_for_evidence(session, contract_id=member_id, protocol_id=protocol_id):
+                continue
+            owners = details.get("owners") if isinstance(details, dict) else None
+            if isinstance(owners, list):
+                for owner in owners:
+                    add("safe_signer", owner, own)
+            break
 
     return sorted(links.values(), key=lambda link: (link.kind, link.address, link.detail or ""))
 
@@ -1512,7 +1641,7 @@ def _independent_anchor_rule(
     chain_key = _chain_key(contract.chain)
     anchoring: set[str] = set()
     for row in sorted(active_witnesses(session, contract_id=contract_id, protocol_id=protocol_id), key=lambda r: r.id):
-        if row.rule not in ADMITTING_WITNESS_RULES or row.rule in anchoring:
+        if row.rule not in ADMITTING_WITNESS_RULES or row.rule in anchoring or witness_is_heuristic(row):
             continue
         evidence = row.evidence if isinstance(row.evidence, dict) else {}
         if row.rule == WITNESS_RULE_W3_CONTROL and evidence.get("direction") != W3_DIRECTION_D1:
@@ -1726,18 +1855,14 @@ def _witness_fact_holds(
     if rule == WITNESS_RULE_W4_DEPLOYER:
         if not via or (contract.deployer or "").lower() != via:
             return False
-        return (
-            session.execute(
-                select(ProtocolDeployer.id)
-                .where(
-                    ProtocolDeployer.protocol_id == protocol_id,
-                    ProtocolDeployer.address == via,
-                    ProtocolDeployer.revoked_at.is_(None),
-                )
-                .limit(1)
-            ).first()
-            is not None
-        )
+        return _proof_registry_row(session, protocol_id=protocol_id, address=via) is not None
+    if rule == WITNESS_RULE_W4H_DEPLOYER_AFFINITY:
+        # A standing heuristic witness holds while its H registry row is
+        # UNREVOKED (DEPLOYER_HEURISTIC_SPEC.md §5): a frozen or suspended row
+        # stops new admissions and flags, it does not de-stamp what stands.
+        if not via or (contract.deployer or "").lower() != via:
+            return False
+        return _heuristic_registry_row(session, protocol_id=protocol_id, address=via) is not None
     if rule == WITNESS_RULE_W4_FACTORY:
         # Re-derived, never trusted: the stored attribution must still name
         # this factory AND the factory must still be an anchoring member —
@@ -1749,6 +1874,14 @@ def _witness_fact_holds(
     if rule == WITNESS_RULE_W2_STRUCTURAL:
         member = session.get(Contract, evidence.get("member_contract_id"))
         if member is None or member.protocol_id != protocol_id or _chain_key(member.chain) != chain_key:
+            return False
+        if evidence.get(W2_HEURISTIC_VIA_KEY) is True:
+            # §6 exception: the via is a heuristic member, so the edge is
+            # re-verified without the evidence-membership test — but only for a
+            # same-contract edge kind, which ``w2_evidence`` already pins.
+            if evidence.get("edge_kind") not in W2_SAME_CONTRACT_EDGE_KINDS:
+                return False
+        elif not member_for_evidence(session, contract_id=member.id, protocol_id=protocol_id):
             return False
         return _w2_edge_holds(
             session, contract=contract, member=member, edge_kind=evidence.get("edge_kind"), evidence=evidence
@@ -2252,9 +2385,11 @@ def register_deployer(
     address: str,
     classification: DeployerClassification,
 ) -> ProtocolDeployer:
-    """Upsert the registry row for a Class A/B verdict. A Class C verdict may
-    never produce a row (invariant 7) — raise instead of writing."""
-    if classification.trust_class not in DEPLOYER_TRUST_CLASSES:
+    """Upsert the registry row for a proof-class (A/B) verdict. A Class C
+    verdict may never produce a row (invariant 7) — raise instead of writing.
+    Trust class H is not a ladder verdict and is granted by
+    ``grant_heuristic_deployer`` instead."""
+    if classification.trust_class not in PROOF_DEPLOYER_TRUST_CLASSES:
         raise ValueError("Class C is the absence of a registry row; nothing to register")
     addr = _require_address(address, "address")
     stmt = pg_insert(ProtocolDeployer).values(
@@ -2278,6 +2413,223 @@ def register_deployer(
     row = session.get(ProtocolDeployer, row_id)
     assert row is not None  # the upsert just returned this id
     session.refresh(row)
+    return row
+
+
+# ---------------------------------------------------------------------------
+# W4-H — heuristic deployer affinity (DEPLOYER_HEURISTIC_SPEC.md §1, §5, §6)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DeployerAffinity:
+    """The §1 affinity computation for one (protocol, EOA), recomputed from
+    stored witness rows only — no network, no enumeration (§7 ruling 3).
+
+    ``affinity`` is None when the denominator is empty: no anchor either way is
+    not_determined, never 0.0."""
+
+    anchors: tuple[dict[str, Any], ...]
+    anchor_count: int
+    foreign_anchor_count: int
+    affinity: float | None
+
+    def qualifies(self) -> bool:
+        return self.anchor_count >= W4H_MIN_ANCHORS and self.affinity is not None and self.affinity >= W4H_MIN_AFFINITY
+
+
+def _nonheuristic_nonlineage_witnesses(session: Session, *, address: str):
+    """Every ACTIVE non-lineage, non-heuristic witness on a contract the
+    persisted creation attribution assigns to *address*, as
+    ``(contract, witness)``. This is the ONE observation the affinity metric
+    reads: unknown creations never enter the denominator (§1, invariant 4)."""
+    for contract, witness in session.execute(
+        select(Contract, ContractMembershipWitness)
+        .join(ContractMembershipWitness, ContractMembershipWitness.contract_id == Contract.id)
+        .where(
+            func.lower(Contract.deployer) == address,
+            ContractMembershipWitness.revoked_at.is_(None),
+            ContractMembershipWitness.rule.in_(sorted(NONLINEAGE_WITNESS_RULES)),
+        )
+        .order_by(Contract.id, ContractMembershipWitness.id)
+    ):
+        if witness_is_heuristic(witness):
+            continue
+        yield contract, witness
+
+
+def compute_deployer_affinity(session: Session, *, protocol_id: int, address: str) -> DeployerAffinity:
+    """§1 affinity for (P, E). Deterministic from stored evidence."""
+    addr = _require_address(address, "address")
+    own: dict[int, tuple[Contract, set[str]]] = {}
+    foreign: set[tuple[int, int]] = set()
+    for contract, witness in _nonheuristic_nonlineage_witnesses(session, address=addr):
+        if witness.protocol_id == protocol_id:
+            own.setdefault(contract.id, (contract, set()))[1].add(witness.rule)
+        else:
+            foreign.add((witness.protocol_id, contract.id))
+    anchors = tuple(
+        {
+            "contract_id": contract_id,
+            "rules": sorted(rules),
+            "chain_id": chain_id_for_chain_name(contract.chain),
+        }
+        for contract_id, (contract, rules) in sorted(own.items())
+    )
+    denominator = len(anchors) + len(foreign)
+    return DeployerAffinity(
+        anchors=anchors,
+        anchor_count=len(anchors),
+        foreign_anchor_count=len(foreign),
+        affinity=None if denominator == 0 else round(len(anchors) / denominator, 6),
+    )
+
+
+def _heuristic_registry_row(session: Session, *, protocol_id: int, address: str) -> ProtocolDeployer | None:
+    """The unrevoked trust-class-H row for (P, E), or None."""
+    return session.execute(
+        select(ProtocolDeployer).where(
+            ProtocolDeployer.protocol_id == protocol_id,
+            ProtocolDeployer.address == address,
+            ProtocolDeployer.trust_class == DEPLOYER_TRUST_CLASS_H,
+            ProtocolDeployer.revoked_at.is_(None),
+        )
+    ).scalar_one_or_none()
+
+
+def _proof_registry_row(session: Session, *, protocol_id: int, address: str) -> ProtocolDeployer | None:
+    """The unrevoked Class-A/B row for (P, E), or None. Its existence is what
+    keeps H unminted — the proof classes take precedence (§1)."""
+    return session.execute(
+        select(ProtocolDeployer).where(
+            ProtocolDeployer.protocol_id == protocol_id,
+            ProtocolDeployer.address == address,
+            ProtocolDeployer.trust_class.in_(sorted(PROOF_DEPLOYER_TRUST_CLASSES)),
+            ProtocolDeployer.revoked_at.is_(None),
+        )
+    ).scalar_one_or_none()
+
+
+def sync_deployer_challenges(session: Session, *, deployer_row: ProtocolDeployer) -> int:
+    """§5: one challenge row per observed FOREIGN anchor, derived from a real
+    witness row for another protocol — never from suspicion. A challenge whose
+    foreign witness was revoked is revoked with it. Returns the number of
+    distinct contested contracts still standing."""
+    observed: dict[int, int] = {}
+    for contract, witness in _nonheuristic_nonlineage_witnesses(session, address=deployer_row.address):
+        if witness.protocol_id != deployer_row.protocol_id:
+            observed.setdefault(witness.id, contract.id)
+    existing = list(
+        session.execute(
+            select(DeployerAffinityChallenge).where(DeployerAffinityChallenge.protocol_deployer_id == deployer_row.id)
+        ).scalars()
+    )
+    known = {row.foreign_witness_id for row in existing if row.revoked_at is None}
+    for row in existing:
+        if row.revoked_at is None and row.foreign_witness_id not in observed:
+            row.revoked_at = _utcnow()
+            row.revocation_reason = "foreign_witness_revoked"
+            known.discard(row.foreign_witness_id)
+    for witness_id, contract_id in sorted(observed.items()):
+        if witness_id in known:
+            continue
+        witness = session.get(ContractMembershipWitness, witness_id)
+        if witness is None:
+            continue
+        session.execute(
+            pg_insert(DeployerAffinityChallenge)
+            .values(
+                protocol_deployer_id=deployer_row.id,
+                contract_id=contract_id,
+                foreign_protocol_id=witness.protocol_id,
+                foreign_witness_id=witness_id,
+                observed_at=func.now(),
+            )
+            .on_conflict_do_update(
+                constraint="uq_deployer_affinity_challenge_observation",
+                set_={"revoked_at": None, "revocation_reason": None},
+            )
+        )
+    session.flush()
+    return len(
+        {
+            contract_id
+            for (contract_id,) in session.execute(
+                select(DeployerAffinityChallenge.contract_id).where(
+                    DeployerAffinityChallenge.protocol_deployer_id == deployer_row.id,
+                    DeployerAffinityChallenge.revoked_at.is_(None),
+                )
+            )
+        }
+    )
+
+
+def heuristic_registry_state(session: Session, *, deployer_row: ProtocolDeployer) -> str:
+    """§5, derived from evidence — never a stored flag. ``revoked_at`` is the
+    one stored transition (human confirmation, or the automatic auto-revoke a
+    prior pass recorded); everything else is recomputed here."""
+    if deployer_row.revoked_at is not None:
+        return W4H_STATE_REVOKED
+    affinity = compute_deployer_affinity(session, protocol_id=deployer_row.protocol_id, address=deployer_row.address)
+    challenges = sync_deployer_challenges(session, deployer_row=deployer_row)
+    if affinity.affinity is not None and affinity.affinity < W4H_AUTO_REVOKE_AFFINITY:
+        return W4H_STATE_REVOKED
+    if challenges >= W4H_CHALLENGE_QUORUM or (affinity.affinity is not None and affinity.affinity < W4H_MIN_AFFINITY):
+        return W4H_STATE_FROZEN
+    if affinity.anchor_count < W4H_MIN_ANCHORS:
+        return W4H_STATE_SUSPENDED
+    return W4H_STATE_ACTIVE
+
+
+def heuristic_evidence(affinity: DeployerAffinity, *, challenges: int) -> dict[str, Any]:
+    """§8.1 H-row evidence: the inputs AND the computation, recorded so a
+    reviewer reads the numbers the grant was made on, not just the verdict."""
+    return {
+        "anchors": [dict(anchor) for anchor in affinity.anchors],
+        "anchor_count": affinity.anchor_count,
+        "foreign_anchor_count": affinity.foreign_anchor_count,
+        "affinity": affinity.affinity,
+        "challenge_count": challenges,
+        "thresholds": {
+            "min_anchors": W4H_MIN_ANCHORS,
+            "min_affinity": W4H_MIN_AFFINITY,
+            "challenge_quorum": W4H_CHALLENGE_QUORUM,
+        },
+        "computed_at": _utcnow().isoformat(),
+        "version": W4H_EVIDENCE_VERSION,
+    }
+
+
+def grant_heuristic_deployer(
+    session: Session, *, protocol_id: int, address: str, affinity: DeployerAffinity, challenges: int
+) -> ProtocolDeployer | None:
+    """Mint or refresh the trust-class-H row for (P, E). Returns None when the
+    §1 qualification does not hold, when the quorum is met, or when a proof
+    class already covers the EOA — H is granted, never inferred from silence."""
+    addr = _require_address(address, "address")
+    if not affinity.qualifies() or challenges >= W4H_CHALLENGE_QUORUM:
+        return None
+    evidence = heuristic_evidence(affinity, challenges=challenges)
+    existing = session.execute(
+        select(ProtocolDeployer).where(ProtocolDeployer.protocol_id == protocol_id, ProtocolDeployer.address == addr)
+    ).scalar_one_or_none()
+    if existing is not None:
+        # A revoked row is a recorded transition, human or automatic; only an
+        # explicit restore lifts it. A standing proof class outranks H (§1).
+        if existing.revoked_at is not None or existing.trust_class in PROOF_DEPLOYER_TRUST_CLASSES:
+            return None
+        existing.trust_class = DEPLOYER_TRUST_CLASS_H
+        existing.evidence = evidence
+        session.flush()
+        return existing
+    row = ProtocolDeployer(
+        protocol_id=protocol_id,
+        address=addr,
+        trust_class=DEPLOYER_TRUST_CLASS_H,
+        evidence=evidence,
+    )
+    session.add(row)
+    session.flush()
     return row
 
 
@@ -2416,7 +2768,7 @@ def _revoke_deployer_registry_row(
             select(ContractMembershipWitness)
             .where(
                 ContractMembershipWitness.protocol_id == deployer_row.protocol_id,
-                ContractMembershipWitness.rule == WITNESS_RULE_W4_DEPLOYER,
+                ContractMembershipWitness.rule.in_(sorted(LINEAGE_REGISTRY_WITNESS_RULES)),
                 ContractMembershipWitness.via_address == deployer_row.address,
                 ContractMembershipWitness.revoked_at.is_(None),
             )
@@ -3168,6 +3520,13 @@ def _stratified_fixpoint(
     else:
         raise RuntimeError("membership fixpoint exceeded the round cap — stored evidence did not settle")
 
+    w4h_promoted, w4h_demoted = _w4h_stratum(session, pending)
+    promoted.update(w4h_promoted)
+    pending.difference_update(w4h_promoted)
+    demoted.update(w4h_demoted)
+    members_at_entry.update(w4h_demoted - promoted)
+    reprobe.update(w4h_demoted)
+
     reprobe.update(demoted - promoted)
     reprobe.difference_update(promoted)
     return PromotionResult(
@@ -3298,12 +3657,19 @@ def _reclassify_deployers(
                 )
         if verdict.trust_class is None and verdict.evidence.get("reason") == "cross_protocol_collision":
             # Invariant 7: a collision is Class C for EVERY party, never a
-            # vote — every protocol's standing registry row for this EOA
-            # falls in the same pass, each with its full demote cascade.
+            # vote — every protocol's standing PROOF row for this EOA falls in
+            # the same pass, each with its full demote cascade. Trust class H
+            # is exempt by design (DEPLOYER_HEURISTIC_SPEC.md §4/§5, ruling 2):
+            # a foreign observation there is one challenge row, and the quorum
+            # freezes the EOA for every holder without de-stamping anyone.
             standing = list(
                 session.execute(
                     select(ProtocolDeployer)
-                    .where(ProtocolDeployer.address == deployer, ProtocolDeployer.revoked_at.is_(None))
+                    .where(
+                        ProtocolDeployer.address == deployer,
+                        ProtocolDeployer.trust_class.in_(sorted(PROOF_DEPLOYER_TRUST_CLASSES)),
+                        ProtocolDeployer.revoked_at.is_(None),
+                    )
                     .order_by(ProtocolDeployer.protocol_id)
                 ).scalars()
             )
@@ -3472,7 +3838,188 @@ def _admission_protocols(session: Session, contract: Contract) -> list[int]:
     return ordered
 
 
-def _attempt_admission(session: Session, contract: Contract, protocol_id: int) -> str | None:
+def _w4h_pairs(session: Session, candidate_ids: set[int]) -> list[tuple[int, str]]:
+    """(protocol, EOA) pairs the heuristic stratum examines: every pending
+    candidate's nominated protocol + deployer, plus every standing H row (its
+    numbers are recomputed each run, so drift is a bug report — §9 inv 10)."""
+    pairs: set[tuple[int, str]] = set()
+    if candidate_ids:
+        pairs |= {
+            (int(protocol_id), deployer.lower())
+            for protocol_id, deployer in session.execute(
+                select(Contract.nominated_protocol_id, Contract.deployer).where(
+                    Contract.id.in_(sorted(candidate_ids)),
+                    Contract.protocol_id.is_(None),
+                    Contract.nominated_protocol_id.is_not(None),
+                    Contract.deployer.is_not(None),
+                )
+            )
+            if deployer and _ADDRESS_RE.match(deployer)
+        }
+    pairs |= {
+        (int(protocol_id), address.lower())
+        for protocol_id, address in session.execute(
+            select(ProtocolDeployer.protocol_id, ProtocolDeployer.address).where(
+                ProtocolDeployer.trust_class == DEPLOYER_TRUST_CLASS_H, ProtocolDeployer.revoked_at.is_(None)
+            )
+        )
+    }
+    return sorted(pairs)
+
+
+def _attempt_w4h_admission(
+    session: Session, contract: Contract, *, registry: ProtocolDeployer, affinity: DeployerAffinity
+) -> bool:
+    """§1 admission for one contract: W1 code-present at (address, chain), the
+    persisted creation witness attributes it to the EOA, and the H row's
+    qualification was re-verified by the caller at this write (invariant 2)."""
+    addr = (contract.address or "").lower()
+    chain_id = chain_id_for_chain_name(contract.chain)
+    if not addr or chain_id is None:
+        return False
+    if (contract.deployer or "").lower() != registry.address:
+        return False
+    code_row = session.get(ContractCreationWitness, (chain_id, addr))
+    if code_row is None or code_row.code_absent_at_probe is not False or code_row.code_probe_block is None:
+        return False
+    if not code_row.creation_tx_hash:
+        return False
+    assert affinity.affinity is not None  # ``qualifies`` is the caller's gate
+    write_witness(
+        session,
+        contract_id=contract.id,
+        protocol_id=registry.protocol_id,
+        rule=WITNESS_RULE_W1_CODE,
+        evidence=w1_evidence(chain_id=chain_id, code_probe_block=code_row.code_probe_block),
+    )
+    write_witness(
+        session,
+        contract_id=contract.id,
+        protocol_id=registry.protocol_id,
+        rule=WITNESS_RULE_W4H_DEPLOYER_AFFINITY,
+        evidence=w4h_evidence(
+            deployer_address=registry.address,
+            deployer_registry_id=registry.id,
+            creation_tx_hash=code_row.creation_tx_hash,
+            creation_block=code_row.creation_block,
+            affinity_at_grant=affinity.affinity,
+            anchors_at_grant=affinity.anchor_count,
+        ),
+        via_address=registry.address,
+    )
+    return promote(session, contract=contract, protocol_id=registry.protocol_id)
+
+
+def _w4h_inheritance_pass(session: Session, heuristic_member_ids: set[int]) -> set[int]:
+    """§6 exception: an H-member proxy carries its implementation / secondary
+    implementations through W2, with the heuristic status propagated. Bounded
+    by the member set it is handed — the derived witnesses are heuristic too,
+    so they anchor nothing and cannot widen the frontier past same-contract
+    edges."""
+    promoted: set[int] = set()
+    frontier = set(heuristic_member_ids)
+    for _round in range(_ANCHOR_CHAIN_MAX_DEPTH):
+        pointers: dict[str, int] = {}
+        for member_id in sorted(frontier):
+            member = session.get(Contract, member_id)
+            if member is None or member.protocol_id is None:
+                continue
+            for pointer in (member.implementation, *(member.secondary_implementations or [])):
+                if isinstance(pointer, str) and _ADDRESS_RE.match(pointer):
+                    pointers.setdefault(pointer.lower(), member.protocol_id)
+        if not pointers:
+            break
+        frontier = set()
+        for contract in session.execute(
+            select(Contract)
+            .where(
+                Contract.protocol_id.is_(None),
+                Contract.nominated_protocol_id.is_not(None),
+                func.lower(Contract.address).in_(sorted(pointers)),
+            )
+            .order_by(Contract.id)
+        ).scalars():
+            protocol_id = contract.nominated_protocol_id
+            if protocol_id is None or pointers.get((contract.address or "").lower()) != protocol_id:
+                continue
+            if _attempt_admission(session, contract, protocol_id, heuristic_inheritance=True) == "promoted":
+                promoted.add(contract.id)
+                frontier.add(contract.id)
+        if not frontier:
+            break
+    return promoted
+
+
+def _w4h_stratum(session: Session, candidate_ids: set[int]) -> tuple[set[int], set[int]]:
+    """The LAST fixpoint stratum (DEPLOYER_HEURISTIC_SPEC.md §9 invariant 8):
+    heuristic promotion runs after proof-rule quiescence and feeds nothing
+    back, so the cascade stays terminating and confluent and a heuristic can
+    never pre-empt a proof. Returns (promoted, demoted)."""
+    promoted: set[int] = set()
+    demoted: set[int] = set()
+    admitting: dict[tuple[int, str], tuple[ProtocolDeployer, DeployerAffinity]] = {}
+    for protocol_id, address in _w4h_pairs(session, candidate_ids):
+        affinity = compute_deployer_affinity(session, protocol_id=protocol_id, address=address)
+        row = _heuristic_registry_row(session, protocol_id=protocol_id, address=address)
+        if row is None:
+            challenges = 0
+            probe_row = session.execute(
+                select(ProtocolDeployer).where(
+                    ProtocolDeployer.protocol_id == protocol_id, ProtocolDeployer.address == address
+                )
+            ).scalar_one_or_none()
+            if probe_row is not None:
+                challenges = sync_deployer_challenges(session, deployer_row=probe_row)
+            row = grant_heuristic_deployer(
+                session, protocol_id=protocol_id, address=address, affinity=affinity, challenges=challenges
+            )
+            if row is None:
+                continue
+            logger.info(
+                "heuristic deployer granted",
+                extra={
+                    "protocol_id": protocol_id,
+                    "address": address,
+                    "anchor_count": affinity.anchor_count,
+                    "foreign_anchor_count": affinity.foreign_anchor_count,
+                    "affinity": affinity.affinity,
+                },
+            )
+            admitting[(protocol_id, address)] = (row, affinity)
+            continue
+        state = heuristic_registry_state(session, deployer_row=row)
+        challenges = sync_deployer_challenges(session, deployer_row=row)
+        row.evidence = heuristic_evidence(affinity, challenges=challenges)
+        if state == W4H_STATE_REVOKED:
+            result = demote(session, deployer_row=row, reason="affinity_below_auto_revoke_floor")
+            demoted.update(result.demoted_contract_ids)
+            continue
+        if state == W4H_STATE_ACTIVE:
+            admitting[(protocol_id, address)] = (row, affinity)
+        else:
+            logger.info(
+                "heuristic deployer not admitting",
+                extra={"protocol_id": protocol_id, "address": address, "state": state},
+            )
+    for (protocol_id, address), (row, affinity) in sorted(admitting.items()):
+        for contract in session.execute(
+            select(Contract)
+            .where(
+                Contract.protocol_id.is_(None),
+                Contract.nominated_protocol_id == protocol_id,
+                func.lower(Contract.deployer) == address,
+            )
+            .order_by(Contract.id)
+        ).scalars():
+            if _attempt_w4h_admission(session, contract, registry=row, affinity=affinity):
+                promoted.add(contract.id)
+    promoted |= _w4h_inheritance_pass(session, promoted)
+    return promoted, demoted - promoted
+
+
+def _attempt_admission(
+    session: Session, contract: Contract, protocol_id: int, *, heuristic_inheritance: bool = False
+) -> str | None:
     """Stratum (iii) for one candidate: derive admitting witnesses from stored
     facts (each verified at derivation AND again in ``promote``), bind W1 from
     the persisted code probe, promote. Returns ``"promoted"``,
@@ -3486,7 +4033,9 @@ def _attempt_admission(session: Session, contract: Contract, protocol_id: int) -
     code_absent = code_row.code_absent_at_probe if code_row is not None else None
     if code_absent is True:
         return None
-    derived, w4_blocked_on_creation = _derive_admitting_facts(session, contract, protocol_id)
+    derived, w4_blocked_on_creation = _derive_admitting_facts(
+        session, contract, protocol_id, heuristic_inheritance=heuristic_inheritance
+    )
     has_admitting = bool(derived) or any(
         row.rule in ADMITTING_WITNESS_RULES
         for row in active_witnesses(session, contract_id=contract.id, protocol_id=protocol_id)
@@ -3520,12 +4069,17 @@ def _attempt_admission(session: Session, contract: Contract, protocol_id: int) -
 
 
 def _derive_admitting_facts(
-    session: Session, contract: Contract, protocol_id: int
+    session: Session, contract: Contract, protocol_id: int, *, heuristic_inheritance: bool = False
 ) -> tuple[list[tuple[str, dict[str, Any], str]], bool]:
     """W2/W3/W4 facts provable from stored resolution for one candidate,
     in deterministic order. Only control/lineage edges are consulted —
     control-graph presence and dependency rows never appear here
-    (invariant 6). Returns ``(facts, w4_blocked_on_creation_witness)``."""
+    (invariant 6). Returns ``(facts, w4_blocked_on_creation_witness)``.
+
+    ``heuristic_inheritance=True`` additionally reads the §6 same-contract
+    exception (DEPLOYER_HEURISTIC_SPEC.md): a HEURISTIC member proxy carries
+    its implementation / secondary implementations, and the derived W2 records
+    the heuristic via-fact. Off by default — the proof strata never see it."""
     addr = (contract.address or "").lower()
     chain_key = _chain_key(contract.chain)
     derived: list[tuple[str, dict[str, Any], str]] = []
@@ -3558,7 +4112,10 @@ def _derive_admitting_facts(
         ).scalars()
     )
     for member in pointer_members:
+        proven_member = member_for_evidence(session, contract_id=member.id, protocol_id=protocol_id)
         for edge_kind in ("implementation", "beacon", "proxy_admin", "secondary_implementation"):
+            if not proven_member and not (heuristic_inheritance and edge_kind in W2_SAME_CONTRACT_EDGE_KINDS):
+                continue
             if _w2_edge_holds(session, contract=contract, member=member, edge_kind=edge_kind, evidence={}):
                 add(
                     WITNESS_RULE_W2_STRUCTURAL,
@@ -3567,6 +4124,7 @@ def _derive_admitting_facts(
                         member_contract_id=member.id,
                         member_address=member.address,
                         resolved_pointer=addr,
+                        heuristic_via=not proven_member,
                     ),
                     (member.address or "").lower(),
                 )
@@ -3601,6 +4159,8 @@ def _derive_admitting_facts(
         if member.id in seen_event_members:
             continue
         seen_event_members.add(member.id)
+        if not member_for_evidence(session, contract_id=member.id, protocol_id=protocol_id):
+            continue
         tx = event.tx_hash if isinstance(event.tx_hash, str) and _TX_HASH_RE.match(event.tx_hash) else None
         add(
             WITNESS_RULE_W2_STRUCTURAL,
@@ -3626,6 +4186,8 @@ def _derive_admitting_facts(
         .distinct()
         .order_by(Contract.id)
     ).scalars():
+        if not member_for_evidence(session, contract_id=member.id, protocol_id=protocol_id):
+            continue
         if addr in _probe_controller_values(session, member):
             add(
                 WITNESS_RULE_W3_CONTROL,
@@ -3710,13 +4272,9 @@ def _derive_admitting_facts(
     w4_blocked = False
     deployer = (contract.deployer or "").lower()
     if deployer and _ADDRESS_RE.match(deployer):
-        registry = session.execute(
-            select(ProtocolDeployer).where(
-                ProtocolDeployer.protocol_id == protocol_id,
-                ProtocolDeployer.address == deployer,
-                ProtocolDeployer.revoked_at.is_(None),
-            )
-        ).scalar_one_or_none()
+        # PROOF classes only: an H row licenses ``w4h_deployer_affinity`` in
+        # the last stratum and never the proof rule (§1 precedence).
+        registry = _proof_registry_row(session, protocol_id=protocol_id, address=deployer)
         if registry is not None:
             chain_id = chain_id_for_chain_name(contract.chain)
             creation = session.get(ContractCreationWitness, (chain_id, addr)) if chain_id is not None else None
