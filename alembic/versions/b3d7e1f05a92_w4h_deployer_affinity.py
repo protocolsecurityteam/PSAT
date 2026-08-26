@@ -79,6 +79,23 @@ def downgrade() -> None:
     op.drop_index("ix_deployer_affinity_challenges_deployer", table_name="deployer_affinity_challenges")
     op.drop_table("deployer_affinity_challenges")
 
+    # The vocabulary narrows only after nothing rests on it: heuristic-derived
+    # W2 rows and memberships whose only admission was heuristic are unwound
+    # first, so no surviving row can present heuristic evidence as proven.
+    op.execute(f"DELETE FROM {_RULE_TABLE} WHERE rule = 'w2_structural' AND evidence->>'heuristic_via' = 'true'")
+    op.execute(
+        "UPDATE contracts c SET protocol_id = NULL "
+        "WHERE c.protocol_id IS NOT NULL "
+        "  AND NOT EXISTS ("
+        f"    SELECT 1 FROM {_RULE_TABLE} w"
+        "     WHERE w.contract_id = c.id"
+        "       AND w.protocol_id = c.protocol_id"
+        "       AND w.revoked_at IS NULL"
+        "       AND w.rule IN ('w2_structural', 'w3_control', 'w4_deployer', "
+        "'w4_factory', 'w5_human', 'w6_llama_seed')"
+        ")"
+    )
+
     # Rows are revoked, never deleted (gate invariant 4), so the vocabulary can
     # only narrow once the heuristic layer's rows are gone.
     op.execute(f"DELETE FROM {_RULE_TABLE} WHERE rule = 'w4h_deployer_affinity'")
