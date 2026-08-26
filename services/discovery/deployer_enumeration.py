@@ -257,7 +257,7 @@ def session_deployer_enumerator(session: Session) -> DeployerEnumerator:
     records (chain + factory attribution) on ``creations`` (the same
     attribute-channel pattern as the re-earn budget's ``exhausted``) so the
     fixpoint can treat gaps as positive counterevidence (F3) and feed the
-    member-factory mapping + enumeration-driven nomination."""
+    member-factory mapping."""
     return _SessionEnumerator(session)
 
 

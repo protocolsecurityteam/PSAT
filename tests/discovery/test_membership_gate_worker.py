@@ -425,10 +425,10 @@ def test_ladder_wire_foreign_creation_is_class_c(db_session, monkeypatch):
     assert _register_protocol_deployer(db_session, protocol_id=protocol.id, deployer=eoa) is None
 
 
-def test_ladder_wire_nominates_unknown_creations_and_still_refuses_b(db_session, monkeypatch):
-    """2b + F1 pin: a complete enumeration's unknown creation is NOMINATED
-    (free recall, queued for probes) — and that bare nomination must NOT count
-    as mapped, so Class B still refuses on the very row it just nominated."""
+def test_ladder_wire_counts_unknown_creations_without_materializing(db_session, monkeypatch):
+    """DEPLOYER_HEURISTIC_SPEC.md §7 ruling 3: a complete enumeration's
+    unknown creation is COUNTED (Class B refuses on it) but never becomes a
+    contracts row."""
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     protocol = _protocol(db_session)
     eoa = ADDR(0x2C0)
@@ -444,20 +444,8 @@ def test_ladder_wire_nominates_unknown_creations_and_still_refuses_b(db_session,
 
     assert _register_protocol_deployer(db_session, protocol_id=protocol.id, deployer=eoa, reprobe_sink=sink) is None
     assert db_session.execute(select(ProtocolDeployer).where(ProtocolDeployer.address == eoa)).first() is None
-
-    row = db_session.execute(select(Contract).where(Contract.address == unknown)).scalar_one()
-    assert row.protocol_id is None
-    assert row.nominated_protocol_id == protocol.id
-    assert row.deployer == eoa
-    assert row.chain == "ethereum"
-    assert row.discovery_sources == [gate.ENUMERATION_SOURCE_TAG]
-    assert row.id in sink
-
-    # Idempotent: a re-run neither duplicates the row nor re-nominates.
-    sink.clear()
-    assert _register_protocol_deployer(db_session, protocol_id=protocol.id, deployer=eoa, reprobe_sink=sink) is None
-    assert db_session.execute(select(Contract).where(Contract.address == unknown)).scalar_one() is row
-    assert row.id not in sink
+    assert db_session.execute(select(Contract).where(Contract.address == unknown)).first() is None
+    assert sink == set()
 
 
 def test_ladder_wire_member_factory_child_mints_b_with_factory_evidence(db_session, monkeypatch):
@@ -486,17 +474,16 @@ def test_ladder_wire_member_factory_child_mints_b_with_factory_evidence(db_sessi
     assert row.evidence["member_factory_mapped"] == {"count": 1, "factories": [factory.address]}
     assert row.evidence["enumeration"]["factories"] == {child: factory.address}
     assert child in row.evidence["enumeration"]["addresses"]
-    # Mapping only: the child is nominated as a candidate, never admitted.
-    child_row = db_session.execute(select(Contract).where(Contract.address == child)).scalar_one()
-    assert child_row.protocol_id is None
-    assert child_row.nominated_protocol_id == protocol.id
-    assert child_row.id in sink
+    # Mapping only (§7 ruling 3): the child is counted in the evidence, never
+    # materialized as a contracts row.
+    assert db_session.execute(select(Contract).where(Contract.address == child)).first() is None
+    assert sink == set()
 
 
-def test_fixpoint_enumeration_nominates_and_queues_probes(db_session, monkeypatch):
-    """The gate-side wire: a complete enumeration inside the fixpoint's ladder
-    stratum nominates unknown creations through the enumerator's ``creations``
-    channel and queues them as reprobe candidates."""
+def test_fixpoint_enumeration_counts_unknowns_without_materializing(db_session, monkeypatch):
+    """The gate-side wire, DEPLOYER_HEURISTIC_SPEC.md §7 ruling 3: a complete
+    enumeration inside the fixpoint's ladder stratum counts unknown creations
+    against Class B but never creates a contracts row for them."""
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     protocol = _protocol(db_session)
     eoa = ADDR(0x2C8)
@@ -513,16 +500,13 @@ def test_fixpoint_enumeration_nominates_and_queues_probes(db_session, monkeypatc
         internal_by_txhash={tx_hash: [_create_frame(unknown, ADDR(0x2CB))]},
     )
 
-    result = gate.evaluate(
+    gate.evaluate(
         db_session,
         gate.FactsDelta(recheck_contract_ids=(candidate.id,)),
         deployer_enumerator=session_deployer_enumerator(db_session),
     )
 
-    row = db_session.execute(select(Contract).where(Contract.address == unknown)).scalar_one()
-    assert row.nominated_protocol_id == protocol.id
-    assert row.discovery_sources == [gate.ENUMERATION_SOURCE_TAG]
-    assert row.id in result.reprobe_contract_ids
+    assert db_session.execute(select(Contract).where(Contract.address == unknown)).first() is None
     # The unknown creation held no evidence, so Class B stayed refused. The
     # EOA may still hold the labeled heuristic row (DEPLOYER_HEURISTIC_SPEC.md
     # §1) — what it may not hold is a PROOF class.

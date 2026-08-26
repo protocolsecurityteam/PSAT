@@ -50,13 +50,12 @@ from db.models import (
     UpgradeEvent,
 )
 from services.clients.rpc import chain_id_for_chain_name
-from utils.chains import UnknownChainError, canonical_chain, chain_by_id
+from utils.chains import canonical_chain
 from utils.logging import record_degraded
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
 
-    from services.discovery.deployer_enumeration import DeployerCreation
     from services.discovery.probes import ProbeResult
 
 logger = logging.getLogger(__name__)
@@ -198,6 +197,10 @@ W4H_MIN_AFFINITY = 0.9
 W4H_AUTO_REVOKE_AFFINITY = 0.5
 W4H_CHALLENGE_QUORUM = 3
 W4H_EVIDENCE_VERSION = 1
+#: Visibility line, not a cap (DEPLOYER_HEURISTIC_SPEC.md §7 ruling 3): an
+#: admission-candidate set past this bound warns loudly so a nomination flood
+#: is seen before it becomes the next junk-row incident.
+W4H_ADMISSION_CANDIDATE_SANITY_BOUND = 50
 
 #: Derived H-registry states (§5) — never stored flags. ``revoked_at`` is the
 #: one stored transition; everything else is recomputed from the evidence.
@@ -2655,75 +2658,6 @@ def grant_heuristic_deployer(
     return row
 
 
-#: ``discovery_sources`` tag for rows a complete Class-B enumeration surfaced.
-ENUMERATION_SOURCE_TAG = "deployer_enumeration"
-
-#: Bound on rows one enumeration may nominate. The tail is NOT lost recall
-#: silently: the overflow is recorded as degraded, and the next complete
-#: enumeration of the same EOA re-surfaces it (nomination is idempotent).
-ENUMERATION_NOMINATION_CAP = 1_000
-
-
-def nominate_enumerated_creations(
-    session: Session,
-    *,
-    protocol_id: int,
-    deployer: str,
-    creations: "Sequence[DeployerCreation]",
-) -> list[int]:
-    """Enumeration-driven nomination: a COMPLETE enumeration's creations with
-    no contracts row become candidates of *protocol_id* (free recall — the
-    probe/evidence path still gates everything; F1 keeps a bare nomination out
-    of the Class-B mapping test, so this can never manufacture exclusivity).
-    Returns the new candidate ids; the caller queues their probes."""
-    _require_positive_int(protocol_id, "protocol_id")
-    addr = _require_address(deployer, "deployer")
-    missing: list[tuple[str, str]] = []
-    for creation in sorted(creations, key=lambda c: (c.chain_id, c.address)):
-        target = (creation.address or "").lower()
-        if not _ADDRESS_RE.match(target) or target == addr:
-            continue
-        try:
-            chain_name = chain_by_id(creation.chain_id).name
-        except UnknownChainError:
-            continue
-        existing = session.execute(
-            select(Contract.id)
-            .where(
-                func.lower(Contract.address) == target,
-                func.lower(func.coalesce(Contract.chain, "ethereum")) == _chain_key(chain_name),
-            )
-            .limit(1)
-        ).first()
-        if existing is None:
-            missing.append((target, chain_name))
-    if len(missing) > ENUMERATION_NOMINATION_CAP:
-        overflow = len(missing) - ENUMERATION_NOMINATION_CAP
-        record_degraded(
-            phase="deployer_enumeration_nomination",
-            exc=RuntimeError(f"{overflow} enumerated creations past the nomination cap"),
-            context={"deployer": addr, "protocol_id": protocol_id, "cap": ENUMERATION_NOMINATION_CAP},
-        )
-        logger.warning(
-            "enumeration nomination cap exceeded",
-            extra={"deployer": addr, "protocol_id": protocol_id, "missing": len(missing)},
-        )
-        missing = missing[:ENUMERATION_NOMINATION_CAP]
-    new_ids: list[int] = []
-    for target, chain_name in missing:
-        row = Contract(address=target, chain=chain_name, deployer=addr)
-        session.add(row)
-        session.flush()
-        nominate(session, contract=row, protocol_id=protocol_id, source_tag=ENUMERATION_SOURCE_TAG)
-        new_ids.append(row.id)
-    if new_ids:
-        logger.info(
-            "enumerated creations nominated",
-            extra={"deployer": addr, "protocol_id": protocol_id, "contract_ids": new_ids[:50], "count": len(new_ids)},
-        )
-    return new_ids
-
-
 @dataclass(frozen=True)
 class DemotionResult:
     revoked_witness_ids: tuple[int, ...] = ()
@@ -3050,8 +2984,7 @@ class PromotionResult:
 #: An enumerator MAY expose attribute channels the fixpoint reads via getattr:
 #: ``coverage_gaps`` (deployer → gap, F3 counterevidence) and ``creations``
 #: (deployer → full ``DeployerCreation`` records — the factory attributions
-#: for the member-factory mapping rule and the chain identities for
-#: enumeration-driven nomination).
+#: for the member-factory mapping rule).
 DeployerEnumerator = Callable[[str], "tuple[Sequence[str], bool]"]
 
 
@@ -3465,7 +3398,7 @@ def _stratified_fixpoint(
         )
         named_registry_addresses = set()
         loss_check_protocol_ids = set()
-        recl_changed, recl_pending, recl_nominated, recl_demotion = _reclassify_deployers(
+        recl_changed, recl_pending, recl_demotion = _reclassify_deployers(
             session,
             pending,
             deployer_enumerator,
@@ -3475,10 +3408,6 @@ def _stratified_fixpoint(
         if recl_changed:
             changed = True
         pending.update(recl_pending)
-        # Enumeration-driven nominations are candidates blocked on a probe
-        # fact (no W1, no probe attempt) — queued out, never settled blind.
-        pending.update(recl_nominated)
-        reprobe.update(recl_nominated)
         demoted.update(recl_demotion.demoted_contract_ids)
         members_at_entry.update(set(recl_demotion.demoted_contract_ids) - promoted)
         promoted.difference_update(recl_demotion.demoted_contract_ids)
@@ -3619,18 +3548,16 @@ def _reclassify_deployers(
     enum_cache: dict[str, tuple[Sequence[str], bool]],
     *,
     extra_pairs: set[tuple[int, str]] | None = None,
-) -> tuple[bool, set[int], set[int], DemotionResult]:
+) -> tuple[bool, set[int], DemotionResult]:
     """Stratum (ii): re-run the §3.3 ladder for every (protocol, deployer)
     pair the pending candidates name, plus ``extra_pairs`` (standing registry
     rows pulled in by a named deployer or a shrunken member set). Registers
     fresh A/B verdicts; revokes an existing row only on POSITIVE
     counterevidence (collision, perimeter fact lost, corroboration lost) — an
-    absent enumeration never revokes. The third element is the ids a complete
-    enumeration NOMINATED (``nominate_enumerated_creations``) — candidates
-    blocked on a probe fact until the caller probes them."""
+    absent enumeration never revokes."""
     extra = set(extra_pairs or ())
     if not pending and not extra:
-        return False, set(), set(), DemotionResult()
+        return False, set(), DemotionResult()
     candidate_pairs: set[tuple[int, str]] = set()
     if pending:
         candidate_pairs = {
@@ -3648,7 +3575,6 @@ def _reclassify_deployers(
     pairs = sorted(extra | candidate_pairs)
     changed = False
     new_pending: set[int] = set()
-    nominated: set[int] = set()
     revoked: set[int] = set()
     demotion_demoted: set[int] = set()
     demotion_reprobe: set[int] = set()
@@ -3679,12 +3605,6 @@ def _reclassify_deployers(
             history, complete = enum_cache[deployer]
             if complete:
                 records: Sequence[Any] = ((getattr(deployer_enumerator, "creations", None) or {}).get(deployer)) or ()
-                new_ids = nominate_enumerated_creations(
-                    session, protocol_id=protocol_id, deployer=deployer, creations=records
-                )
-                if new_ids:
-                    changed = True
-                    nominated.update(new_ids)
                 verdict = classify_deployer(
                     session,
                     protocol_id=protocol_id,
@@ -3766,7 +3686,6 @@ def _reclassify_deployers(
     return (
         changed,
         new_pending,
-        nominated,
         DemotionResult(
             revoked_witness_ids=tuple(sorted(revoked)),
             demoted_contract_ids=tuple(sorted(demotion_demoted)),
@@ -4076,15 +3995,23 @@ def _w4h_stratum(
                 extra={"protocol_id": protocol_id, "address": address, "state": state},
             )
     for (protocol_id, address), (row, affinity) in sorted(admitting.items()):
-        for contract in session.execute(
-            select(Contract)
-            .where(
-                Contract.protocol_id.is_(None),
-                Contract.nominated_protocol_id == protocol_id,
-                func.lower(Contract.deployer) == address,
+        candidates = list(
+            session.execute(
+                select(Contract)
+                .where(
+                    Contract.protocol_id.is_(None),
+                    Contract.nominated_protocol_id == protocol_id,
+                    func.lower(Contract.deployer) == address,
+                )
+                .order_by(Contract.id)
+            ).scalars()
+        )
+        if len(candidates) > W4H_ADMISSION_CANDIDATE_SANITY_BOUND:
+            logger.warning(
+                "w4h admission candidates exceed sanity bound",
+                extra={"protocol_id": protocol_id, "deployer": address, "count": len(candidates)},
             )
-            .order_by(Contract.id)
-        ).scalars():
+        for contract in candidates:
             if _attempt_w4h_admission(session, contract, registry=row, affinity=affinity):
                 promoted.add(contract.id)
     promoted |= _w4h_inheritance_pass(session, promoted)

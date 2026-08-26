@@ -240,12 +240,6 @@ def _register_protocol_deployer(
             creations, scope, complete, coverage_gap = enumerate_with_coverage(session, addr)
             history = sorted({c.address for c in creations})
             factories = creation_factories(creations)
-            if complete:
-                new_ids = gate.nominate_enumerated_creations(
-                    session, protocol_id=protocol_id, deployer=addr, creations=creations
-                )
-                if reprobe_sink is not None:
-                    reprobe_sink.update(new_ids)
             verdict = gate.classify_deployer(
                 session,
                 protocol_id=protocol_id,

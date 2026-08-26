@@ -113,13 +113,13 @@ def test_a_nominated_candidate_admits_to_b_on_b_w2_edge(db_session):
     assert protocol_b.id in _active_witness_protocols(db_session, candidate)
 
 
-def test_slot_squatting_by_enumeration_nomination_cannot_block(db_session):
-    """2b shape: the enumeration-driven nomination path slot-claims the row for
-    A first; B's evidence still admits to B."""
+def test_slot_squatting_by_deployer_keyed_nomination_cannot_block(db_session):
+    """A deployer-keyed nomination slot-claims the row for A first; B's
+    evidence still admits to B."""
     protocol_a = _protocol(db_session, "squatter-a")
     protocol_b = _protocol(db_session, "victim-b")
     candidate = _contract(db_session, _addr(0xC5), deployer=_addr(0xD5))
-    gate.nominate(db_session, contract=candidate, protocol_id=protocol_a.id, source_tag=gate.ENUMERATION_SOURCE_TAG)
+    gate.nominate(db_session, contract=candidate, protocol_id=protocol_a.id, source_tag="registry_probe")
     _code_fact(db_session, candidate.address, tx=_TX)
     b_member = _member(db_session, protocol_b, _addr(0xC6), beacon=candidate.address)
     db_session.commit()
@@ -131,7 +131,7 @@ def test_slot_squatting_by_enumeration_nomination_cannot_block(db_session):
     assert candidate.id in result.promoted_contract_ids
     assert candidate.protocol_id == protocol_b.id
     assert candidate.nominated_protocol_id == protocol_b.id
-    assert gate.ENUMERATION_SOURCE_TAG in (candidate.discovery_sources or [])
+    assert "registry_probe" in (candidate.discovery_sources or [])
 
 
 # ---------------------------------------------------------------------------

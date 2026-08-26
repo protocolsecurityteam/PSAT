@@ -810,37 +810,32 @@ def test_exclusivity_tolerates_member_factory_children(db_session):
     )
 
 
-def test_nominate_enumerated_creations_writes_candidates_only(db_session):
-    """2b producer: unknown creations become nominated candidates with the
-    ``deployer_enumeration`` source tag — never members, never witnesses; an
-    existing row at the same (address, chain) is left untouched."""
+def test_enumeration_never_creates_contract_rows(db_session):
+    """Pinned regression, DEPLOYER_HEURISTIC_SPEC.md §7 ruling 3: a COMPLETE
+    enumeration's unknown creations are counted, never materialized."""
+    from sqlalchemy import func, select
+
     from services.discovery.deployer_enumeration import DeployerCreation
 
     protocol = _protocol(db_session)
     eoa = ADDR(0x580)
-    existing = _contract(db_session, ADDR(0x581), nominated_protocol_id=protocol.id, deployer=eoa)
-    new_ids = gate.nominate_enumerated_creations(
-        db_session,
-        protocol_id=protocol.id,
-        deployer=eoa,
-        creations=[
-            DeployerCreation(address=existing.address, chain_id=1),
-            DeployerCreation(address=ADDR(0x582), chain_id=1, factory=ADDR(0x583)),
-        ],
-    )
-    assert len(new_ids) == 1
-    row = db_session.get(Contract, new_ids[0])
-    assert row.address == ADDR(0x582)
-    assert row.chain == "ethereum"
-    assert row.deployer == eoa
-    assert row.protocol_id is None
-    assert row.nominated_protocol_id == protocol.id
-    assert row.discovery_sources == ["deployer_enumeration"]
-    assert gate.active_witnesses(db_session, contract_id=row.id, protocol_id=protocol.id) == []
-
-    # The nominated-but-unevidenced row still refuses Class B (F1 pin).
     members = _seed_class_b_members(db_session, protocol, eoa)
-    history = [m.address for m in members] + [row.address]
+    candidate = _contract(db_session, ADDR(0x581), nominated_protocol_id=protocol.id, deployer=eoa)
+    unknown = ADDR(0x582)
+    history = sorted(m.address for m in members) + [candidate.address, unknown]
+
+    class Enumerator:
+        creations = {eoa: (DeployerCreation(address=unknown, chain_id=1, factory=ADDR(0x583)),)}
+
+        def __call__(self, addr: str) -> tuple[list[str], bool]:
+            return history, True
+
+    rows_before = db_session.execute(select(func.count(Contract.id))).scalar_one()
+    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(candidate.id,)), deployer_enumerator=Enumerator())
+    assert db_session.execute(select(Contract).where(Contract.address == unknown)).first() is None
+    assert db_session.execute(select(func.count(Contract.id))).scalar_one() == rows_before
+
+    # The counted-but-unknown creation still refuses Class B (F1 pin).
     verdict = gate.classify_deployer(
         db_session, protocol_id=protocol.id, address=eoa, creation_history=history, history_complete=True
     )
