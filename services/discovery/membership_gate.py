@@ -3532,6 +3532,7 @@ def _stratified_fixpoint(
     pending.difference_update(w4h_promoted)
     demoted.update(w4h_demoted)
     members_at_entry.update(w4h_demoted - promoted)
+    promoted.difference_update(w4h_demoted)
     reprobe.update(w4h_demoted)
 
     reprobe.update(demoted - promoted)

@@ -1095,3 +1095,36 @@ def test_demotion_voiding_class_a_anchor_revokes_registry_same_run(db_session):
     db_session.refresh(registry)
     assert registry.revoked_at is not None and registry.revocation_reason == "perimeter_fact_lost"
     assert _active_rules(db_session, w4_member) <= {"w1_code"}
+
+
+def test_w4h_auto_revoke_subtracts_the_same_runs_promotion(db_session):
+    """A contract promoted in the proof rounds and then demoted by the W4-H
+    stratum's auto-revoke cascade is published as a demotion, never as a
+    promotion, and stays queued for re-probe."""
+    protocol = _protocol(db_session, "w4h-fold")
+    other = _protocol(db_session, "w4h-foreign")
+    deployer = _addr(0xD20)
+    for n in range(2):
+        _member(db_session, protocol, _addr(0x2600 + n), deployer=deployer)
+    sibling = _contract(db_session, _addr(0x2610), nominated_protocol_id=protocol.id, deployer=deployer)
+    _code_fact(db_session, sibling.address, tx=_TX)
+    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(sibling.id,)))
+    db_session.commit()
+    assert sibling.protocol_id == protocol.id
+    assert "w4h_deployer_affinity" in _active_rules(db_session, sibling)
+
+    # The sibling loses its stamp while its w4h witness stays active — the
+    # standing witness re-admits it in the next run's proof rounds.
+    gate.demote_member(db_session, contract=sibling, reason="test_stamp_loss")
+    # Three foreign anchors push affinity to 2/5 = 0.4, below the 0.5 floor.
+    for n in range(3):
+        _member(db_session, other, _addr(0x2620 + n), deployer=deployer)
+    db_session.flush()
+
+    result = gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(sibling.id,)))
+    db_session.commit()
+
+    assert sibling.protocol_id is None
+    assert sibling.id in result.demoted_contract_ids
+    assert sibling.id not in result.promoted_contract_ids
+    assert sibling.id in result.reprobe_contract_ids
