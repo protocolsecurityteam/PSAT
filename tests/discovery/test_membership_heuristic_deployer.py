@@ -455,6 +455,85 @@ def test_heuristic_via_is_same_contract_only(db_session):
         )
 
 
+def test_proof_class_row_never_accrues_challenges(db_session):
+    """Challenges are an H-class concept (§5): the W4-H stratum leaves a
+    standing Class-A row alone — no challenge sync, no grant attempt."""
+    protocol = _protocol(db_session)
+    other = _protocol(db_session, "other")
+    deployer = _addr(0xD10)
+    anchor = _anchor(db_session, protocol, _addr(0x2001), deployer=deployer)
+    # A real Class-A perimeter fact keeps the row standing through stratum (ii).
+    db_session.add(
+        ControllerValue(
+            contract_id=anchor.id,
+            controller_id="state_variable:owner",
+            value=deployer,
+            authority_provenance="caller_gate",
+        )
+    )
+    db_session.flush()
+    verdict = gate.classify_deployer(db_session, protocol_id=protocol.id, address=deployer)
+    assert verdict.trust_class == "A"
+    row = gate.register_deployer(db_session, protocol_id=protocol.id, address=deployer, classification=verdict)
+
+    # A foreign anchor the challenge sync would observe: a CANDIDATE of another
+    # protocol attributed to the EOA, holding a non-lineage witness — no member
+    # stamp, so it mints no cross-protocol collision either.
+    foreign = _contract(db_session, _addr(0x2002), nominated_protocol_id=other.id, deployer=deployer)
+    _code_fact(db_session, foreign.address)
+    gate.write_witness(
+        db_session,
+        contract_id=foreign.id,
+        protocol_id=other.id,
+        rule="w6_llama_seed",
+        evidence=gate.w6_evidence(adapter_slug="seed", chain_id=1, code_probe_block=50),
+    )
+    # A creation-less candidate keeps (protocol, EOA) in the W4-H stratum's
+    # scope without ever settling.
+    blocked = _contract(db_session, _addr(0x2003), nominated_protocol_id=protocol.id, deployer=deployer)
+    _code_fact(db_session, blocked.address, tx=None)
+
+    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(blocked.id,)))
+    db_session.commit()
+
+    db_session.refresh(row)
+    assert row.trust_class == "A" and row.revoked_at is None
+    assert _h_row(db_session, protocol, deployer) is None
+    challenges = (
+        db_session.execute(
+            select(DeployerAffinityChallenge).where(DeployerAffinityChallenge.protocol_deployer_id == row.id)
+        )
+        .scalars()
+        .all()
+    )
+    assert challenges == []
+
+
+def test_reevaluation_over_unchanged_facts_leaves_evidence_untouched(db_session):
+    """A second evaluate over an unchanged DB is a no-op on the H registry:
+    the recorded evidence — ``computed_at`` included — stays byte-identical."""
+    protocol = _protocol(db_session)
+    deployer = _addr(0xD11)
+    _anchor(db_session, protocol, _addr(0x2101), deployer=deployer)
+    _anchor(db_session, protocol, _addr(0x2102), deployer=deployer)
+    sibling = _candidate(db_session, protocol, _addr(0x2103), deployer=deployer)
+    # A creation-less candidate keeps the (protocol, EOA) pair examined on
+    # every run without ever settling.
+    blocked = _contract(db_session, _addr(0x2104), nominated_protocol_id=protocol.id, deployer=deployer)
+    _code_fact(db_session, blocked.address, tx=None)
+
+    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(sibling.id, blocked.id)))
+    db_session.commit()
+    row = _h_row(db_session, protocol, deployer)
+    assert row is not None and sibling.protocol_id == protocol.id
+    first = dict(row.evidence)
+
+    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(blocked.id,)))
+    db_session.commit()
+    db_session.refresh(row)
+    assert row.evidence == first
+
+
 def test_heuristic_promotion_never_preempts_a_proof(db_session):
     """§9 invariant 8: W4-H is the last stratum, so a row that can be proven is
     proven — the heuristic rule never supplies its witness."""

@@ -2571,14 +2571,29 @@ def sync_deployer_challenges(session: Session, *, deployer_row: ProtocolDeployer
     )
 
 
-def heuristic_registry_state(session: Session, *, deployer_row: ProtocolDeployer) -> str:
+def heuristic_registry_state(
+    session: Session,
+    *,
+    deployer_row: ProtocolDeployer,
+    affinity: DeployerAffinity | None = None,
+    challenges: int | None = None,
+) -> str:
     """§5, derived from evidence — never a stored flag. ``revoked_at`` is the
     one stored transition (human confirmation, or the automatic auto-revoke a
-    prior pass recorded); everything else is recomputed here."""
+    prior pass recorded); everything else is recomputed here.
+
+    Reads like a predicate but WRITES by default: when ``challenges`` is not
+    supplied it syncs the row's challenge table. Pass a precomputed
+    ``affinity``/``challenges`` pair (the W4-H stratum does) to make the call
+    a pure reader."""
     if deployer_row.revoked_at is not None:
         return W4H_STATE_REVOKED
-    affinity = compute_deployer_affinity(session, protocol_id=deployer_row.protocol_id, address=deployer_row.address)
-    challenges = sync_deployer_challenges(session, deployer_row=deployer_row)
+    if affinity is None:
+        affinity = compute_deployer_affinity(
+            session, protocol_id=deployer_row.protocol_id, address=deployer_row.address
+        )
+    if challenges is None:
+        challenges = sync_deployer_challenges(session, deployer_row=deployer_row)
     if affinity.affinity is not None and affinity.affinity < W4H_AUTO_REVOKE_AFFINITY:
         return W4H_STATE_REVOKED
     if challenges >= W4H_CHALLENGE_QUORUM or (affinity.affinity is not None and affinity.affinity < W4H_MIN_AFFINITY):
@@ -3413,6 +3428,10 @@ def _stratified_fixpoint(
     dirty_vias: set[str] = {a.lower() for a in dirty_via_addresses if a}
     named_registry_addresses: set[str] = {a.lower() for a in changed_deployer_addresses if a}
     loss_check_protocol_ids: set[int] = set()
+    #: Run-level accumulators scoping the trailing W4-H stratum: the EOAs the
+    #: triggering delta named, and every protocol whose member set moved.
+    w4h_named_addresses: set[str] = set(named_registry_addresses)
+    member_change_protocol_ids: set[int] = set()
     promoted: set[int] = set()
     demoted: set[int] = set()
     reprobe: set[int] = set()
@@ -3437,7 +3456,9 @@ def _stratified_fixpoint(
             promoted.difference_update(demoted_ids)
             reprobe.update(demoted_ids)
             pending.update(demoted_ids)
-            loss_check_protocol_ids.update(_protocols_of_demoted(session, demoted_ids))
+            lost_protocol_ids = _protocols_of_demoted(session, demoted_ids)
+            loss_check_protocol_ids.update(lost_protocol_ids)
+            member_change_protocol_ids.update(lost_protocol_ids)
 
         extra_pairs = _standing_registry_pairs(
             session, addresses=named_registry_addresses, protocol_ids=loss_check_protocol_ids
@@ -3465,7 +3486,9 @@ def _stratified_fixpoint(
         pending.update(recl_demotion.demoted_contract_ids)
         # A stratum-(ii) demotion shrinks a member set too — its protocol's
         # standing rows get the same loss check next round.
-        loss_check_protocol_ids.update(_protocols_of_demoted(session, recl_demotion.demoted_contract_ids))
+        recl_lost_protocol_ids = _protocols_of_demoted(session, recl_demotion.demoted_contract_ids)
+        loss_check_protocol_ids.update(recl_lost_protocol_ids)
+        member_change_protocol_ids.update(recl_lost_protocol_ids)
 
         round_promoted: set[int] = set()
         for contract_id in sorted(pending):
@@ -3494,6 +3517,8 @@ def _stratified_fixpoint(
                 contract = session.get(Contract, contract_id)
                 if contract is None:
                     continue
+                if contract.protocol_id is not None:
+                    member_change_protocol_ids.add(contract.protocol_id)
                 dep = (contract.deployer or "").lower()
                 if dep:
                     deployer_addrs.add(dep)
@@ -3527,7 +3552,12 @@ def _stratified_fixpoint(
     else:
         raise RuntimeError("membership fixpoint exceeded the round cap — stored evidence did not settle")
 
-    w4h_promoted, w4h_demoted = _w4h_stratum(session, pending)
+    w4h_promoted, w4h_demoted = _w4h_stratum(
+        session,
+        pending,
+        changed_protocol_ids=member_change_protocol_ids,
+        named_addresses=w4h_named_addresses,
+    )
     promoted.update(w4h_promoted)
     pending.difference_update(w4h_promoted)
     demoted.update(w4h_demoted)
@@ -3846,10 +3876,16 @@ def _admission_protocols(session: Session, contract: Contract) -> list[int]:
     return ordered
 
 
-def _w4h_pairs(session: Session, candidate_ids: set[int]) -> list[tuple[int, str]]:
+def _w4h_pairs(
+    session: Session, candidate_ids: set[int], *, changed_protocol_ids: set[int], named_addresses: set[str]
+) -> list[tuple[int, str]]:
     """(protocol, EOA) pairs the heuristic stratum examines: every pending
-    candidate's nominated protocol + deployer, plus every standing H row (its
-    numbers are recomputed each run, so drift is a bug report — §9 inv 10)."""
+    candidate's nominated protocol + deployer, plus the standing H rows this
+    run could have moved — those of a protocol the candidates name or whose
+    member set changed, and those named by EOA in the triggering delta (the
+    same scoping ``_standing_registry_pairs`` applies to stratum (ii)). An
+    untouched H row's numbers are recomputed on its next touch, or by
+    reconcile's audit."""
     pairs: set[tuple[int, str]] = set()
     if candidate_ids:
         pairs |= {
@@ -3864,14 +3900,23 @@ def _w4h_pairs(session: Session, candidate_ids: set[int]) -> list[tuple[int, str
             )
             if deployer and _ADDRESS_RE.match(deployer)
         }
-    pairs |= {
-        (int(protocol_id), address.lower())
-        for protocol_id, address in session.execute(
-            select(ProtocolDeployer.protocol_id, ProtocolDeployer.address).where(
-                ProtocolDeployer.trust_class == DEPLOYER_TRUST_CLASS_H, ProtocolDeployer.revoked_at.is_(None)
+    protocol_scope = {protocol_id for protocol_id, _ in pairs} | changed_protocol_ids
+    conditions = []
+    if protocol_scope:
+        conditions.append(ProtocolDeployer.protocol_id.in_(sorted(protocol_scope)))
+    if named_addresses:
+        conditions.append(ProtocolDeployer.address.in_(sorted(named_addresses)))
+    if conditions:
+        pairs |= {
+            (int(protocol_id), address.lower())
+            for protocol_id, address in session.execute(
+                select(ProtocolDeployer.protocol_id, ProtocolDeployer.address).where(
+                    ProtocolDeployer.trust_class == DEPLOYER_TRUST_CLASS_H,
+                    ProtocolDeployer.revoked_at.is_(None),
+                    or_(*conditions),
+                )
             )
-        )
-    }
+        }
     return sorted(pairs)
 
 
@@ -3958,7 +4003,9 @@ def _w4h_inheritance_pass(session: Session, heuristic_member_ids: set[int]) -> s
     return promoted
 
 
-def _w4h_stratum(session: Session, candidate_ids: set[int]) -> tuple[set[int], set[int]]:
+def _w4h_stratum(
+    session: Session, candidate_ids: set[int], *, changed_protocol_ids: set[int], named_addresses: set[str]
+) -> tuple[set[int], set[int]]:
     """The LAST fixpoint stratum (DEPLOYER_HEURISTIC_SPEC.md §9 invariant 8):
     heuristic promotion runs after proof-rule quiescence and feeds nothing
     back, so the cascade stays terminating and confluent and a heuristic can
@@ -3966,18 +4013,27 @@ def _w4h_stratum(session: Session, candidate_ids: set[int]) -> tuple[set[int], s
     promoted: set[int] = set()
     demoted: set[int] = set()
     admitting: dict[tuple[int, str], tuple[ProtocolDeployer, DeployerAffinity]] = {}
-    for protocol_id, address in _w4h_pairs(session, candidate_ids):
+    for protocol_id, address in _w4h_pairs(
+        session, candidate_ids, changed_protocol_ids=changed_protocol_ids, named_addresses=named_addresses
+    ):
         affinity = compute_deployer_affinity(session, protocol_id=protocol_id, address=address)
         row = _heuristic_registry_row(session, protocol_id=protocol_id, address=address)
         if row is None:
+            # Challenges are an H-class concept: a standing proof row neither
+            # syncs them nor competes with a grant (§1 precedence) — only a
+            # REVOKED H row keeps its challenge bookkeeping current here.
+            if _proof_registry_row(session, protocol_id=protocol_id, address=address) is not None:
+                continue
             challenges = 0
-            probe_row = session.execute(
+            revoked_h = session.execute(
                 select(ProtocolDeployer).where(
-                    ProtocolDeployer.protocol_id == protocol_id, ProtocolDeployer.address == address
+                    ProtocolDeployer.protocol_id == protocol_id,
+                    ProtocolDeployer.address == address,
+                    ProtocolDeployer.trust_class == DEPLOYER_TRUST_CLASS_H,
                 )
             ).scalar_one_or_none()
-            if probe_row is not None:
-                challenges = sync_deployer_challenges(session, deployer_row=probe_row)
+            if revoked_h is not None:
+                challenges = sync_deployer_challenges(session, deployer_row=revoked_h)
             row = grant_heuristic_deployer(
                 session, protocol_id=protocol_id, address=address, affinity=affinity, challenges=challenges
             )
@@ -3995,9 +4051,19 @@ def _w4h_stratum(session: Session, candidate_ids: set[int]) -> tuple[set[int], s
             )
             admitting[(protocol_id, address)] = (row, affinity)
             continue
-        state = heuristic_registry_state(session, deployer_row=row)
         challenges = sync_deployer_challenges(session, deployer_row=row)
-        row.evidence = heuristic_evidence(affinity, challenges=challenges)
+        state = heuristic_registry_state(session, deployer_row=row, affinity=affinity, challenges=challenges)
+        # Rewrite the recorded numbers only on drift — an unchanged evaluation
+        # must leave the evidence (``computed_at`` included) untouched.
+        recorded = row.evidence if isinstance(row.evidence, dict) else {}
+        derived = {
+            "anchor_count": affinity.anchor_count,
+            "foreign_anchor_count": affinity.foreign_anchor_count,
+            "affinity": affinity.affinity,
+            "challenge_count": challenges,
+        }
+        if any(recorded.get(key) != value for key, value in derived.items()):
+            row.evidence = heuristic_evidence(affinity, challenges=challenges)
         if state == W4H_STATE_REVOKED:
             result = demote(session, deployer_row=row, reason="affinity_below_auto_revoke_floor")
             demoted.update(result.demoted_contract_ids)
