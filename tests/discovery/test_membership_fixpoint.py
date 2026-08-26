@@ -622,7 +622,11 @@ def test_static_hook_edge_addresses_admit_member_proxys_impl(db_session):
 def test_evaluate_committed_swallows_failures(db_session, monkeypatch):
     """A gate failure inside a hook rolls back and returns None — the
     pipeline stage never fails on the gate."""
-    monkeypatch.setattr(gate, "_target_candidates", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    # ``evaluate`` calls ``_target_candidates`` inside the ``fixpoint``
+    # submodule, so the patch must land on the defining module.
+    monkeypatch.setattr(
+        gate.fixpoint, "_target_candidates", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
+    )
     result = gate.evaluate_committed(db_session, gate.FactsDelta(), context="test_failure")
     assert result is None
 
