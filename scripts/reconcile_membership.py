@@ -31,7 +31,15 @@ from typing import Any
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from db.models import ADMITTING_WITNESS_RULES, Contract, SessionLocal
+from db.models import (
+    ADMITTING_WITNESS_RULES,
+    DEPLOYER_TRUST_CLASS_H,
+    WITNESS_RULE_W4H_DEPLOYER_AFFINITY,
+    Contract,
+    ContractMembershipWitness,
+    ProtocolDeployer,
+    SessionLocal,
+)
 from scripts.membership_reporting import active_witness_rules, closest_miss, format_row_line, would_promote
 from services.discovery import membership_gate as gate
 from services.discovery.membership_gate import _revocation_quiescence, _witness_fact_holds
@@ -40,6 +48,8 @@ logger = logging.getLogger(__name__)
 
 DRIFT_MEMBER_NO_EVIDENCE = "member_without_supporting_evidence"
 DRIFT_CANDIDATE_WITH_EVIDENCE = "candidate_with_supporting_evidence"
+DRIFT_HEURISTIC_REGISTRY_STALE = "heuristic_registry_numbers_stale"
+DRIFT_HEURISTIC_WITNESS_ON_REVOKED_ROW = "heuristic_witness_on_revoked_registry_row"
 
 #: Fix passes are bounded; drift deep enough to need more is a bug, not load.
 _APPLY_PASS_CAP = 10
@@ -96,6 +106,73 @@ def audit(session: Session, *, protocol_ids: list[int] | None = None) -> list[Dr
     return drifts
 
 
+def audit_heuristic_registry(session: Session, *, protocol_ids: list[int] | None = None) -> list[Drift]:
+    """DEPLOYER_HEURISTIC_SPEC.md §8.5 / §9 invariant 10: recompute the whole
+    heuristic layer from stored witness rows — no network — and report every
+    disagreement with what an H row records, plus every ``w4h`` witness whose
+    registry row is revoked. Nonzero drift is a bug report.
+
+    The recomputation writes challenge rows, so it runs inside a savepoint that
+    is always rolled back: the audit stays read-only."""
+    drifts: list[Drift] = []
+    savepoint = session.begin_nested()
+    try:
+        stmt = select(ProtocolDeployer).where(ProtocolDeployer.trust_class == DEPLOYER_TRUST_CLASS_H)
+        if protocol_ids:
+            stmt = stmt.where(ProtocolDeployer.protocol_id.in_(protocol_ids))
+        for row in session.execute(stmt.order_by(ProtocolDeployer.id)).scalars():
+            witnesses = list(
+                session.execute(
+                    select(ContractMembershipWitness).where(
+                        ContractMembershipWitness.protocol_id == row.protocol_id,
+                        ContractMembershipWitness.rule == WITNESS_RULE_W4H_DEPLOYER_AFFINITY,
+                        ContractMembershipWitness.via_address == row.address,
+                        ContractMembershipWitness.revoked_at.is_(None),
+                    )
+                ).scalars()
+            )
+            if row.revoked_at is not None:
+                for witness in witnesses:
+                    drifts.append(
+                        Drift(
+                            kind=DRIFT_HEURISTIC_WITNESS_ON_REVOKED_ROW,
+                            contract_id=witness.contract_id,
+                            address=row.address,
+                            chain=None,
+                            protocol_id=row.protocol_id,
+                            detail={"deployer": row.address, "deployer_registry_id": row.id},
+                        )
+                    )
+                continue
+            affinity = gate.compute_deployer_affinity(session, protocol_id=row.protocol_id, address=row.address)
+            challenges = gate.sync_deployer_challenges(session, deployer_row=row)
+            recorded = row.evidence if isinstance(row.evidence, dict) else {}
+            derived = {
+                "anchor_count": affinity.anchor_count,
+                "foreign_anchor_count": affinity.foreign_anchor_count,
+                "affinity": affinity.affinity,
+                "challenge_count": challenges,
+            }
+            if any(recorded.get(key) != value for key, value in derived.items()):
+                drifts.append(
+                    Drift(
+                        kind=DRIFT_HEURISTIC_REGISTRY_STALE,
+                        contract_id=0,
+                        address=row.address,
+                        chain=None,
+                        protocol_id=row.protocol_id,
+                        detail={
+                            "state": gate.heuristic_registry_state(session, deployer_row=row),
+                            **{f"derived_{key}": value for key, value in derived.items()},
+                            **{f"recorded_{key}": recorded.get(key) for key in derived},
+                        },
+                    )
+                )
+    finally:
+        savepoint.rollback()
+    return drifts
+
+
 def apply_fixes(session: Session, drifts: list[Drift]) -> int:
     """Fix each drift through the gate's own primitives; demotions cascade to
     quiescence so dependents of a fixed row settle in the same pass. Returns
@@ -104,6 +181,10 @@ def apply_fixes(session: Session, drifts: list[Drift]) -> int:
     fixed_count = 0
     demoted_addresses: set[str] = set()
     for drift in drifts:
+        if drift.kind not in (DRIFT_MEMBER_NO_EVIDENCE, DRIFT_CANDIDATE_WITH_EVIDENCE):
+            # Heuristic-registry drift is a bug report about the recorded
+            # numbers, not a membership state a gate primitive can fix.
+            continue
         contract = session.get(Contract, drift.contract_id)
         if contract is None:
             continue
@@ -174,6 +255,7 @@ def main(argv: list[str] | None = None) -> int:
 
     with SessionLocal() as session:
         drifts = audit(session, protocol_ids=args.protocol_id)
+        drifts.extend(audit_heuristic_registry(session, protocol_ids=args.protocol_id))
         print(format_drifts(drifts))
         if not args.apply:
             if drifts:
@@ -186,6 +268,7 @@ def main(argv: list[str] | None = None) -> int:
                 break
             fixed_total += apply_fixes(session, drifts)
             drifts = audit(session, protocol_ids=args.protocol_id)
+            drifts.extend(audit_heuristic_registry(session, protocol_ids=args.protocol_id))
         session.commit()
         print(f"\napplied: {fixed_total} drifted row(s) fixed.")
         if drifts:

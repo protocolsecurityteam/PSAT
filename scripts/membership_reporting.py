@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from db.models import (
     ADMITTING_WITNESS_RULES,
@@ -49,6 +49,69 @@ def active_witness_rules(session: Session, *, contract_id: int, protocol_id: int
     return sorted(
         {row.rule for row in gate.active_witnesses(session, contract_id=contract_id, protocol_id=protocol_id)}
     )
+
+
+def _heuristic_edge_miss(session: Session, contract: Contract, protocol_id: int) -> dict[str, Any] | None:
+    """Near-miss class "impl/child of heuristic member": a member's stored
+    pointer names this candidate, but that member holds heuristic witnesses
+    only and the edge is not one of the DEPLOYER_HEURISTIC_SPEC.md §6
+    same-contract kinds that inherit."""
+    address = (contract.address or "").lower()
+    if not address:
+        return None
+    for member in session.execute(
+        select(Contract)
+        .where(
+            Contract.protocol_id == protocol_id,
+            Contract.id != contract.id,
+            (func.lower(Contract.implementation) == address)
+            | (func.lower(Contract.beacon) == address)
+            | (func.lower(Contract.admin) == address),
+        )
+        .order_by(Contract.id)
+    ).scalars():
+        if gate.member_for_evidence(session, contract_id=member.id, protocol_id=protocol_id):
+            continue
+        if (member.admin or "").lower() == address:
+            edge_kind = "proxy_admin"
+        elif (member.beacon or "").lower() == address:
+            edge_kind = "beacon"
+        else:
+            edge_kind = "implementation"
+        if edge_kind in gate.W2_SAME_CONTRACT_EDGE_KINDS:
+            continue
+        return {
+            "nearest_rule": "w2_structural",
+            "missing": "heuristic_member_edge_not_same_contract",
+            "edge_kind": edge_kind,
+            "heuristic_member_contract_id": member.id,
+        }
+    return None
+
+
+def _heuristic_deployer_miss(session: Session, *, protocol_id: int, deployer: str) -> dict[str, Any] | None:
+    """Near-miss classes "deployer one anchor short" and "affinity below the
+    floor" — the two W4-H qualification bars (DEPLOYER_HEURISTIC_SPEC.md §1),
+    reported with the measured numbers so a reviewer sees the gap."""
+    affinity = gate.compute_deployer_affinity(session, protocol_id=protocol_id, address=deployer)
+    if affinity.anchor_count == 0:
+        return None
+    detail: dict[str, Any] = {
+        "nearest_rule": "w4h_deployer_affinity",
+        "deployer": deployer,
+        "deployer_anchors": affinity.anchor_count,
+        "deployer_min_anchors": gate.W4H_MIN_ANCHORS,
+        "deployer_affinity": affinity.affinity,
+    }
+    if affinity.anchor_count < gate.W4H_MIN_ANCHORS:
+        detail["missing"] = "deployer_anchors_below_floor"
+        return detail
+    if affinity.affinity is not None and affinity.affinity < gate.W4H_MIN_AFFINITY:
+        detail["missing"] = "deployer_affinity_below_floor"
+        detail["deployer_min_affinity"] = gate.W4H_MIN_AFFINITY
+        detail["deployer_foreign_anchors"] = affinity.foreign_anchor_count
+        return detail
+    return None
 
 
 def closest_miss(session: Session, contract: Contract, protocol_id: int) -> dict[str, Any]:
@@ -110,11 +173,18 @@ def closest_miss(session: Session, contract: Contract, protocol_id: int) -> dict
                 "revoked_at": row.revoked_at.isoformat(),
             }
 
+    heuristic_edge = _heuristic_edge_miss(session, contract, protocol_id)
+    if heuristic_edge is not None:
+        return heuristic_edge
+
     deployer = (contract.deployer or "").lower()
     if deployer and ADDRESS_RE.match(deployer):
         verdict = gate.classify_deployer(session, protocol_id=protocol_id, address=deployer)
         if verdict.trust_class is not None:
             return {"nearest_rule": "w4_deployer", "missing": "creation_witness", "deployer": deployer}
+        heuristic = _heuristic_deployer_miss(session, protocol_id=protocol_id, deployer=deployer)
+        if heuristic is not None:
+            return heuristic
         return {
             "nearest_rule": "w4_deployer",
             "missing": str(verdict.evidence.get("reason")),
