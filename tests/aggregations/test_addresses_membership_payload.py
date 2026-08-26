@@ -93,7 +93,41 @@ def test_member_carries_state_and_admitting_witnesses(db_session, protocol):
     assert row["membership_reason"] is None
     # W1 is the precondition, not an admitting reason — only admitting rules
     # appear in the display witnesses.
-    assert row["membership_witnesses"] == [{"rule": "w2_structural", "via_address": via, "edge_kind": "implementation"}]
+    assert row["membership_witnesses"] == [
+        {"rule": "w2_structural", "via_address": via, "edge_kind": "implementation", "heuristic": False}
+    ]
+
+
+def test_witness_display_entry_flags_heuristic_rules():
+    """§9 invariant 1: no export presents a heuristic membership as proven —
+    the display entry carries the gate's own heuristic predicate."""
+    from services.aggregations.company_overview.payload import _witness_display_entry
+
+    w4h = ContractMembershipWitness(
+        contract_id=1,
+        protocol_id=1,
+        rule="w4h_deployer_affinity",
+        evidence={"deployer": _addr("d")},
+    )
+    assert _witness_display_entry(w4h)["heuristic"] is True
+
+    derived = ContractMembershipWitness(
+        contract_id=1,
+        protocol_id=1,
+        rule="w2_structural",
+        via_address=_addr("via"),
+        evidence={"edge_kind": "implementation", "heuristic_via": True},
+    )
+    assert _witness_display_entry(derived)["heuristic"] is True
+
+    proven = ContractMembershipWitness(
+        contract_id=1,
+        protocol_id=1,
+        rule="w2_structural",
+        via_address=_addr("via"),
+        evidence={"edge_kind": "implementation"},
+    )
+    assert _witness_display_entry(proven)["heuristic"] is False
 
 
 def test_member_revoked_witness_not_displayed(db_session, protocol):

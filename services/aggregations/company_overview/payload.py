@@ -24,7 +24,7 @@ from db.models import (
 from schemas.api_responses import CompanyOverviewResponse, ReachBlock, TvlSummary
 from schemas.control_tracking import MonitoredContractType
 from services.clients.rpc import chain_id_for_chain_name
-from services.discovery.membership_gate import membership_state
+from services.discovery.membership_gate import membership_state, witness_is_heuristic
 from services.discovery.probes import STATUS_NOT_ROUTABLE, STATUS_PROBED, UNRESOLVABLE_CHAIN_ID
 from services.scoring.reach import REACH_MODEL, load_protocol_reach, merge_reach
 
@@ -75,6 +75,9 @@ def _witness_display_entry(row: ContractMembershipWitness) -> dict[str, Any]:
     entry: dict[str, Any] = {"rule": row.rule, "via_address": row.via_address}
     if row.rule == WITNESS_RULE_W2_STRUCTURAL and isinstance(row.evidence, dict):
         entry["edge_kind"] = row.evidence.get("edge_kind")
+    # DEPLOYER_HEURISTIC_SPEC.md §9 invariant 1: no export presents a
+    # heuristic membership as proven.
+    entry["heuristic"] = witness_is_heuristic(row)
     return entry
 
 
