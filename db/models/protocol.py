@@ -219,7 +219,12 @@ class AuditContractCoverage(Base):
 # Class C is the ABSENCE of a row — never a row with a third value.
 DEPLOYER_TRUST_CLASS_A = "A"
 DEPLOYER_TRUST_CLASS_B = "B"
-DEPLOYER_TRUST_CLASSES = frozenset({DEPLOYER_TRUST_CLASS_A, DEPLOYER_TRUST_CLASS_B})
+# H — heuristic affinity (DEPLOYER_HEURISTIC_SPEC.md §1). Below the proof
+# classes: an H row may exist only while (protocol, address) holds no active
+# A/B row, and the lineage it licenses is recorded under its own witness rule.
+DEPLOYER_TRUST_CLASS_H = "H"
+PROOF_DEPLOYER_TRUST_CLASSES = frozenset({DEPLOYER_TRUST_CLASS_A, DEPLOYER_TRUST_CLASS_B})
+DEPLOYER_TRUST_CLASSES = PROOF_DEPLOYER_TRUST_CLASSES | {DEPLOYER_TRUST_CLASS_H}
 
 
 class ProtocolDeployer(Base):
@@ -243,7 +248,47 @@ class ProtocolDeployer(Base):
     revocation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     __table_args__ = (
-        CheckConstraint("trust_class IN ('A', 'B')", name="ck_protocol_deployers_trust_class"),
+        CheckConstraint("trust_class IN ('A', 'B', 'H')", name="ck_protocol_deployers_trust_class"),
         UniqueConstraint("protocol_id", "address", name="uq_protocol_deployers_protocol_address"),
         Index("ix_protocol_deployers_address", "address"),
+    )
+
+
+class DeployerAffinityChallenge(Base):
+    """One observed foreign anchor against a trust-class-H registry row
+    (DEPLOYER_HEURISTIC_SPEC.md §5).
+
+    A challenge is derived from a real witness row for another protocol, never
+    from suspicion: ``foreign_witness_id`` names it, and revoking that witness
+    revokes the challenge. The H row's state (active/frozen/suspended/revoked)
+    is DERIVED from these rows plus the affinity computation — never stored as
+    a flag.
+    """
+
+    __tablename__ = "deployer_affinity_challenges"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    protocol_deployer_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("protocol_deployers.id", ondelete="CASCADE"), nullable=False
+    )
+    contract_id: Mapped[int] = mapped_column(Integer, ForeignKey("contracts.id", ondelete="CASCADE"), nullable=False)
+    foreign_protocol_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("protocols.id", ondelete="CASCADE"), nullable=False
+    )
+    foreign_witness_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("contract_membership_witnesses.id", ondelete="CASCADE"), nullable=False
+    )
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revocation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "protocol_deployer_id",
+            "contract_id",
+            "foreign_witness_id",
+            name="uq_deployer_affinity_challenge_observation",
+        ),
+        Index("ix_deployer_affinity_challenges_deployer", "protocol_deployer_id"),
+        Index("ix_deployer_affinity_challenges_witness", "foreign_witness_id"),
     )

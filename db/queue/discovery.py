@@ -234,6 +234,7 @@ _PROTOCOL_FK_TABLES = (
     ("contracts", "nominated_protocol_id"),
     ("contract_membership_witnesses", "protocol_id"),
     ("protocol_deployers", "protocol_id"),
+    ("deployer_affinity_challenges", "foreign_protocol_id"),
     ("monitored_contracts", "protocol_id"),
     ("protocol_subscriptions", "protocol_id"),
     ("dapp_interactions", "protocol_id"),

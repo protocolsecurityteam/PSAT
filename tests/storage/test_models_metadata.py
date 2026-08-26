@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from db.models import Base
 
-EXPECTED_TABLE_COUNT = 58
+EXPECTED_TABLE_COUNT = 59
 
 EXPECTED_TABLES = [
     "address_labels",
@@ -34,6 +34,7 @@ EXPECTED_TABLES = [
     "controller_values",
     "daemon_leases",
     "dapp_interactions",
+    "deployer_affinity_challenges",
     "effect_behavior_cache",
     "effect_verdicts",
     "effective_functions",

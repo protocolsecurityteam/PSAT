@@ -513,6 +513,11 @@ WITNESS_RULE_W4_DEPLOYER = "w4_deployer"
 WITNESS_RULE_W4_FACTORY = "w4_factory"
 WITNESS_RULE_W5_HUMAN = "w5_human"
 WITNESS_RULE_W6_LLAMA_SEED = "w6_llama_seed"
+# W4-H (DEPLOYER_HEURISTIC_SPEC.md §1): lineage from a trust-class-H deployer,
+# admitted on measured affinity rather than on proof. The distinct rule string
+# is the honesty boundary — no display, export or API may present a heuristic
+# membership as proven (that spec's invariant 1).
+WITNESS_RULE_W4H_DEPLOYER_AFFINITY = "w4h_deployer_affinity"
 WITNESS_RULES = frozenset(
     {
         WITNESS_RULE_W1_CODE,
@@ -520,6 +525,7 @@ WITNESS_RULES = frozenset(
         WITNESS_RULE_W3_CONTROL,
         WITNESS_RULE_W4_DEPLOYER,
         WITNESS_RULE_W4_FACTORY,
+        WITNESS_RULE_W4H_DEPLOYER_AFFINITY,
         WITNESS_RULE_W5_HUMAN,
         WITNESS_RULE_W6_LLAMA_SEED,
     }
@@ -554,7 +560,7 @@ class ContractMembershipWitness(Base):
     __table_args__ = (
         CheckConstraint(
             "rule IN ('w1_code', 'w2_structural', 'w3_control', 'w4_deployer', 'w4_factory', "
-            "'w5_human', 'w6_llama_seed')",
+            "'w4h_deployer_affinity', 'w5_human', 'w6_llama_seed')",
             name="ck_contract_membership_witnesses_rule",
         ),
         Index("ix_contract_membership_witnesses_contract_id", "contract_id"),
