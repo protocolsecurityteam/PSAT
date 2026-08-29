@@ -30,6 +30,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from tests.support.balance_stubs import page, pinned_native_unavailable
+from tests.support.policy_builders import _minimal_contract_analysis
+from tests.support.resolution_worker_stubs import _minimal_tracking_plan
 
 # offline: the dependency phase probes eth_getCode and company mode resolves the
 # protocol via DefiLlama — stub both so the cross-module wiring runs with no wire.
@@ -705,17 +707,8 @@ def test_resolution_worker_rewrites_address_for_impl_jobs(monkeypatch):
     )
 
     # What static worker stored
-    tracking_plan = {
-        "schema_version": "0.1",
-        "contract_address": IMPL,
-        "contract_name": "VaultImpl",
-        "tracking_strategy": "event_first_with_polling_fallback",
-        "tracked_controllers": [],
-    }
-    contract_analysis = {
-        "subject": {"address": IMPL, "name": "VaultImpl"},
-        "semantic_control": {"semantic_functions": []},
-    }
+    tracking_plan = {**_minimal_tracking_plan(), "contract_address": IMPL, "contract_name": "VaultImpl"}
+    contract_analysis = _minimal_contract_analysis(address=IMPL, name="VaultImpl")
 
     artifacts = {
         "control_tracking_plan": tracking_plan,
@@ -1389,7 +1382,9 @@ def test_policy_worker_fails_cleanly_on_missing_artifacts(monkeypatch):
     # contract_analysis present but control_snapshot missing
     monkeypatch.setattr(
         "workers.policy_worker.get_artifact",
-        lambda _s, _j, name: {"subject": {"address": TARGET, "name": "T"}} if name == "contract_analysis" else None,
+        lambda _s, _j, name: (
+            _minimal_contract_analysis(address=TARGET, name="T") if name == "contract_analysis" else None
+        ),
     )
 
     with pytest.raises(RuntimeError, match="control_snapshot"):
@@ -1423,9 +1418,7 @@ def test_resolution_worker_fails_on_missing_artifacts(monkeypatch):
     # tracking plan present but contract_analysis missing
     monkeypatch.setattr(
         "workers.resolution_worker.get_artifact",
-        lambda _s, _j, name: (
-            {"schema_version": "0.1", "tracked_controllers": []} if name == "control_tracking_plan" else None
-        ),
+        lambda _s, _j, name: _minimal_tracking_plan() if name == "control_tracking_plan" else None,
     )
     with pytest.raises(RuntimeError, match="contract_analysis"):
         worker.process(session, job)

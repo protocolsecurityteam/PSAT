@@ -35,24 +35,93 @@ def _job(**overrides: Any) -> SimpleNamespace:
 
 def _minimal_tracking_plan() -> dict:
     return {
+        "schema_version": "1",
         "contract_address": TARGET_ADDRESS,
-        "controllers": [],
+        "contract_name": "TestContract",
+        "tracking_strategy": "event_first_with_polling_fallback",
+        "tracked_controllers": [],
     }
 
 
-def _minimal_contract_analysis() -> dict:
+def _minimal_contract_analysis(address: str = TARGET_ADDRESS, name: str = "TestContract") -> dict:
+    """A schema-complete ``ContractAnalysis`` carrying no findings."""
     return {
-        "subject": {"address": TARGET_ADDRESS},
-        "contract_name": "TestContract",
-        "functions": [],
+        "schema_version": "2",
+        "subject": {
+            "address": address,
+            "name": name,
+            "compiler_version": "unknown",
+            "source_verified": None,
+        },
+        "analysis_status": {"static_analysis_completed": True, "errors": []},
+        "summary": {
+            "control_model": "unknown",
+            "is_upgradeable": False,
+            "is_pausable": None,
+            "has_timelock": None,
+            "standards": None,
+            "is_factory": None,
+            "is_nft": None,
+        },
+        "contract_classification": {
+            "standards": [],
+            "is_erc20": False,
+            "is_erc721": False,
+            "is_erc1155": False,
+            "is_nft": False,
+            "is_factory": False,
+            "factory_functions": None,
+            "evidence": [],
+        },
+        "semantic_control": {
+            "pattern": "unknown",
+            "owner_variables": [],
+            "admin_variables": [],
+            "role_definitions": [],
+            "semantic_functions": [],
+            "current_holders": {"status": "unknown_static_only"},
+        },
+        "upgradeability": {
+            "is_upgradeable": False,
+            "is_upgradeable_proxy": False,
+            "pattern": "none",
+            "upgradeable_version": None,
+            "implementation_slots": [],
+            "admin_paths": [],
+            "evidence": [],
+        },
+        "pausability": {
+            "is_pausable": None,
+            "pause_functions": [],
+            "unpause_functions": [],
+            "gating_modifiers": [],
+            "pause_variables": [],
+            "authorized_roles": [],
+            "evidence": [],
+        },
+        "timelock": {
+            "has_timelock": None,
+            "pattern": "none",
+            "delay": None,
+            "delay_source": "not_read",
+            "delay_variables": [],
+            "queue_execute_functions": [],
+            "authorized_roles": [],
+            "evidence": [],
+        },
+        "audit_alignment": {"status": "not_checked", "bytecode_match": "unknown", "notes": []},
+        "tracking_hints": [],
+        "controller_tracking": [],
     }
 
 
 def _minimal_snapshot() -> dict:
     return {
+        "schema_version": "1",
         "contract_address": TARGET_ADDRESS,
-        "controller_values": {},
+        "contract_name": "TestContract",
         "block_number": 12345,
+        "controller_values": {},
     }
 
 

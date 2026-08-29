@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal
 
-from typing_extensions import NotRequired
+from typing_extensions import NotRequired, TypedDict
 
 ControlModel = Literal["ownable", "role_control", "auth", "governance", "custom", "unknown"]
 UpgradeabilityPattern = Literal["uups", "transparent", "beacon", "custom", "none", "unknown"]
@@ -49,12 +49,10 @@ SinkKind = Literal["state_write", "contract_creation", "external_call", "delegat
 ControllerReadStrategy = Literal["getter_call", "storage_slot", "mapping_lookup", "event_reconstruction", "unknown"]
 ControllerConfidence = Literal["exact", "high", "medium", "low", "unknown"]
 
-
 class Evidence(TypedDict, total=False):
     file: str
     line: int
     detail: str
-
 
 class Subject(TypedDict):
     address: str
@@ -68,13 +66,11 @@ class Subject(TypedDict):
     # ``/api/company/<slug>``.
     source_verified: bool | None
 
-
 class AnalysisStatus(TypedDict):
     # The IR-derived analysis (predicates, effects, claims, classification) is
     # the whole of the static stage; there is no detector pass behind this flag.
     static_analysis_completed: bool
     errors: list[str]
-
 
 class Summary(TypedDict):
     # Every evidence field here is nullable, and ``None`` means the detector
@@ -94,7 +90,6 @@ class Summary(TypedDict):
     is_factory: bool | None
     is_nft: bool | None
 
-
 class ContractClassification(TypedDict):
     # ``standards`` / ``is_erc*`` / ``is_nft`` are IR-derived (``contract.ercs()``
     # plus a signature+event match) and run on every parse, so ``[]`` / ``False``
@@ -110,12 +105,10 @@ class ContractClassification(TypedDict):
     factory_functions: list[str] | None
     evidence: list[Evidence]
 
-
 class RoleDefinition(TypedDict):
     role: str
     declared_in: str
     evidence: list[Evidence]
-
 
 class SemanticFunctionSummary(TypedDict):
     contract: str
@@ -131,10 +124,8 @@ class SemanticFunctionSummary(TypedDict):
     effect_labels: list[str]
     action_summary: str
 
-
 class CurrentHolders(TypedDict):
     status: CurrentHoldersStatus
-
 
 class SemanticControlAnalysis(TypedDict):
     pattern: ControlModel
@@ -147,7 +138,6 @@ class SemanticControlAnalysis(TypedDict):
     # list[dict] because TypedDict can't forward-ref a sibling module.
     mapping_writer_events: NotRequired[list[dict]]
 
-
 class UpgradeabilityAnalysis(TypedDict):
     is_upgradeable: bool
     is_upgradeable_proxy: bool
@@ -156,7 +146,6 @@ class UpgradeabilityAnalysis(TypedDict):
     implementation_slots: list[str]
     admin_paths: list[str]
     evidence: list[Evidence]
-
 
 class PausabilityAnalysis(TypedDict):
     # ``None`` = not determined (the claims plane, the only detector that
@@ -169,7 +158,6 @@ class PausabilityAnalysis(TypedDict):
     pause_variables: list[str]
     authorized_roles: list[str]
     evidence: list[Evidence]
-
 
 class TimelockAnalysis(TypedDict):
     # ``None`` = not determined (no IR to walk). Never ``False`` for "we did
@@ -188,24 +176,20 @@ class TimelockAnalysis(TypedDict):
     authorized_roles: list[str]
     evidence: list[Evidence]
 
-
 class AuditAlignment(TypedDict):
     status: str
     bytecode_match: str
     notes: list[str]
-
 
 class TrackingHint(TypedDict):
     kind: str
     label: str
     source: str
 
-
 class AssociatedEventInput(TypedDict):
     name: str
     type: str
     indexed: bool
-
 
 class EffectTags(TypedDict, total=False):
     """Structural side-effect summary for the union of functions that emit
@@ -226,13 +210,11 @@ class EffectTags(TypedDict, total=False):
     delegates: bool
     is_initializer: bool
 
-
 class AssociatedEventRequired(TypedDict):
     name: str
     signature: str
     topic0: str
     inputs: list[AssociatedEventInput]
-
 
 class AssociatedEvent(AssociatedEventRequired, total=False):
     effect_tags: EffectTags
@@ -255,18 +237,15 @@ class AssociatedEvent(AssociatedEventRequired, total=False):
     member_witness: dict[str, Any]
     writer_openness: str
 
-
 class ControllerTypeComponent(TypedDict):
     name: str
     type: str
     abi_type: str
     type_kind: str
 
-
 class ControllerReadSpecRequired(TypedDict):
     strategy: ControllerReadStrategy
     target: str
-
 
 class ControllerReadSpec(ControllerReadSpecRequired, total=False):
     kind: str
@@ -277,7 +256,6 @@ class ControllerReadSpec(ControllerReadSpecRequired, total=False):
     member_path: list[str]
     components: list[ControllerTypeComponent]
 
-
 class ControllerWriterFunction(TypedDict):
     contract: str
     function: str
@@ -285,7 +263,6 @@ class ControllerWriterFunction(TypedDict):
     writes: list[str]
     associated_events: list[AssociatedEvent]
     evidence: list[Evidence]
-
 
 class ControllerTrackingTarget(TypedDict):
     controller_id: str
@@ -302,7 +279,6 @@ class ControllerTrackingTarget(TypedDict):
     # Absent = not determined. See ``ControllerProvenance``.
     authority_provenance: NotRequired[ControllerProvenance]
 
-
 class SecondaryImplPointer(TypedDict):
     """A storage slot the primary impl's fallback/receive delegatecalls the value
     of — the split-proxy / admin-impl pattern (e.g. LRTSquared's ``adminImpl``).
@@ -315,7 +291,6 @@ class SecondaryImplPointer(TypedDict):
     name: str
     slot: int
     offset: int
-
 
 class ContractAnalysis(TypedDict):
     schema_version: str

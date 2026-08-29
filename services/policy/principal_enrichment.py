@@ -327,7 +327,7 @@ def _node_display_name(node: dict[str, Any] | None) -> str:
 
 
 def _collect_permissions(
-    effective_permissions: dict[str, Any],
+    effective_permissions: Mapping[str, Any],
 ) -> tuple[dict[str, list[PrincipalPermission]], dict[str, str]]:
     by_address: dict[str, list[PrincipalPermission]] = defaultdict(list)
     contract_name = effective_permissions["contract_name"]
@@ -427,21 +427,21 @@ def _collect_permissions(
     return by_address, {address: ",".join(sorted(labels)) for address, labels in permission_labels.items()}
 
 
-def _incoming_edges(graph: dict) -> dict[str, list[dict]]:
+def _incoming_edges(graph: Mapping[str, Any]) -> dict[str, list[dict]]:
     incoming: dict[str, list[dict]] = defaultdict(list)
     for edge in graph.get("edges", []):
         incoming[edge["to_id"]].append(edge)
     return incoming
 
 
-def _outgoing_edges(graph: dict) -> dict[str, list[dict]]:
+def _outgoing_edges(graph: Mapping[str, Any]) -> dict[str, list[dict]]:
     outgoing: dict[str, list[dict]] = defaultdict(list)
     for edge in graph.get("edges", []):
         outgoing[edge["from_id"]].append(edge)
     return outgoing
 
 
-def _node_by_id(graph: dict) -> dict[str, dict]:
+def _node_by_id(graph: Mapping[str, Any]) -> dict[str, dict]:
     return {node["id"]: node for node in graph.get("nodes", [])}
 
 
@@ -566,9 +566,9 @@ def _display_name(
 
 
 def build_principal_labels(
-    effective_permissions: dict,
+    effective_permissions: Mapping[str, Any],
     *,
-    resolved_control_graph: dict | None = None,
+    resolved_control_graph: Mapping[str, Any] | None = None,
     rpc_url: str | None = None,
     chain_id: int | None = None,
     classify_cache: dict[str, tuple[str, dict[str, object]]] | None = None,

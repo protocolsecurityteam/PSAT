@@ -42,6 +42,7 @@ from services.monitoring.restaking_enrollment import (
 )
 from services.resolution.role_holder_plane import ROLE_GRANTED_TOPIC0, ROLE_REVOKED_TOPIC0
 from workers.resolution_worker import ResolutionWorker
+from tests.support.resolution_worker_stubs import _minimal_contract_analysis, _minimal_tracking_plan
 
 # The measured EtherFiNodesManager PROXY. Its ``contracts`` row is keyed at the
 # implementation, which emits nothing — the enrollment target is this address.
@@ -329,8 +330,11 @@ class TestRoleHolderPlaneColdCursor:
 
 
 def _stub_stage(monkeypatch, **overrides: Any) -> None:
-    tracking_plan = {"contract_address": REGISTRY, "controllers": []}
-    contract_analysis = {"subject": {"address": REGISTRY}, "contract_name": "Registry", "functions": []}
+    tracking_plan = {**_minimal_tracking_plan(), "contract_address": REGISTRY, "contract_name": "Registry"}
+    contract_analysis = {
+        **_minimal_contract_analysis(),
+        "subject": {"address": REGISTRY, "name": "Registry", "compiler_version": "unknown", "source_verified": None},
+    }
     snapshot = {"contract_address": REGISTRY, "controller_values": {}, "block_number": BLOCK}
 
     monkeypatch.setattr(

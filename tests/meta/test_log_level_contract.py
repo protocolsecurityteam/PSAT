@@ -84,7 +84,7 @@ ALLOW_LIST: dict[str, dict[int, str]] = {
         # doesn't change the job's stage output. record_degraded would
         # mislead callers of /api/jobs/{id}/errors into thinking the
         # reanalysis was degraded.
-        1104: "Notifier side-effect; reanalysis already completed before this fired.",
+        1116: "Notifier side-effect; reanalysis already completed before this fired.",
     },
     "workers/effects_worker.py": {
         # Fork-close cleanup: the anvil subprocess close failing is a resource

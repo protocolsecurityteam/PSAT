@@ -36,6 +36,12 @@ from services.monitoring.reconciler import (
     sweep_enqueue_stale,
 )
 from tests.conftest import DATABASE_URL, requires_postgres
+from tests.support.policy_builders import (
+    _graph_with_nodes,
+    _minimal_contract_analysis,
+    _minimal_snapshot,
+    _tracking_plan,
+)
 
 pytestmark = requires_postgres
 
@@ -434,8 +440,9 @@ def test_policy_worker_marks_dirty(qsession, monkeypatch):
     proto = _make_protocol(qsession)
     # A completed sibling job makes maybe_enroll_protocol return True.
     qsession.add(Job(address="0x" + "a2" * 20, protocol_id=proto.id, status=JobStatus.completed, stage=JobStage.done))
+    job_address = "0x" + "b3" * 20
     job = Job(
-        address="0x" + "b3" * 20,
+        address=job_address,
         name="TestContract",
         protocol_id=proto.id,
         chain_id=1,
@@ -447,10 +454,10 @@ def test_policy_worker_marks_dirty(qsession, monkeypatch):
     qsession.commit()
 
     artifacts = {
-        "contract_analysis": {"contract_address": job.address, "contract_name": "TestContract", "functions": []},
-        "control_snapshot": {"contract_address": job.address, "controller_values": {}},
-        "resolved_control_graph": {"nodes": [], "edges": []},
-        "control_tracking_plan": {"schema_version": "0.1", "contract_address": job.address},
+        "contract_analysis": _minimal_contract_analysis(address=job_address),
+        "control_snapshot": _minimal_snapshot({}, address=job_address),
+        "resolved_control_graph": _graph_with_nodes([], address=job_address),
+        "control_tracking_plan": _tracking_plan(address=job_address),
     }
     monkeypatch.setattr("workers.policy_worker.get_artifact", lambda _s, _j, name: artifacts.get(name))
     monkeypatch.setattr("workers.policy_worker.store_artifact", lambda *a, **kw: None)

@@ -31,7 +31,7 @@ downstream
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import is_dataclass
 from typing import Any
 
@@ -235,7 +235,7 @@ def write_effective_function_rows(
     session: Session,
     *,
     contract_id: int,
-    function_records: list[dict[str, Any]],
+    function_records: Sequence[Mapping[str, Any]],
     capability_by_function: Mapping[str, CapabilityExpr | dict[str, Any]] | None,
     safe_address_lookup: dict[str, str] | None = None,
     resolve_principal_type: Callable[[str], tuple[str | None, dict[str, Any] | None]] | None = None,

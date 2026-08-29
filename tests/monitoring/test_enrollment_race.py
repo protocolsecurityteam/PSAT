@@ -33,6 +33,12 @@ from sqlalchemy.orm import Session
 
 from db.models import Contract, Job, JobStage, JobStatus, MonitoredContract, Protocol
 from tests.conftest import DATABASE_URL, requires_postgres
+from tests.support.policy_builders import (
+    _graph_with_nodes,
+    _minimal_contract_analysis,
+    _minimal_snapshot,
+    _tracking_plan,
+)
 
 pytestmark = requires_postgres
 
@@ -134,10 +140,10 @@ def _stub_policy_internals(monkeypatch, job_address):
     from workers.policy_worker import PolicyWorker
 
     artifacts = {
-        "contract_analysis": {"contract_address": job_address, "contract_name": "TestContract", "functions": []},
-        "control_snapshot": {"contract_address": job_address, "controller_values": {}},
-        "resolved_control_graph": {"nodes": [], "edges": []},
-        "control_tracking_plan": {"schema_version": "0.1", "contract_address": job_address},
+        "contract_analysis": _minimal_contract_analysis(address=job_address),
+        "control_snapshot": _minimal_snapshot({}, address=job_address),
+        "resolved_control_graph": _graph_with_nodes([], address=job_address),
+        "control_tracking_plan": _tracking_plan(address=job_address),
     }
     monkeypatch.setattr("workers.policy_worker.get_artifact", lambda _s, _j, name: artifacts.get(name))
     monkeypatch.setattr("workers.policy_worker.store_artifact", lambda *a, **kw: None)

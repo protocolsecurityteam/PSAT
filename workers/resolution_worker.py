@@ -6,9 +6,9 @@ import logging
 import os
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
-from typing import cast
+from typing import Any, cast
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -23,6 +23,7 @@ from db.models import (
 )
 from db.nested_artifacts import store_bundle as store_nested_artifacts
 from db.queue import create_job, get_artifact, store_artifact
+from db.queue.typed import ArtifactSchemaError, load_contract_analysis, load_control_tracking_plan
 from schemas.control_tracking import ControlSnapshot, ControlTrackingPlan
 from services.clients.rpc import require_rpc_url
 from services.discovery.perimeter import queue_discovered_contracts
@@ -121,8 +122,8 @@ def _chain_name_for_job(job: Job) -> str:
 
 
 def _build_root_artifacts(
-    contract_analysis: dict,
-    tracking_plan: dict,
+    contract_analysis: Mapping[str, Any],
+    tracking_plan: Mapping[str, Any],
     snapshot: ControlSnapshot,
     predicate_trees: dict | None = None,
 ) -> LoadedArtifacts:
@@ -187,14 +188,20 @@ class ResolutionWorker(BaseWorker):
         rpc_url = _rpc_url_for_job(job)
         chain_id = _chain_id_for_job(job)
 
-        # Read control_tracking_plan from DB
-        tracking_plan = get_artifact(session, job.id, "control_tracking_plan")
-        if not isinstance(tracking_plan, dict):
+        # Read the static stage's typed wire artifacts
+        try:
+            tracking_plan = load_control_tracking_plan(get_artifact, session, job.id)
+        except ArtifactSchemaError as exc:
+            raise RuntimeError(f"{exc.artifact_name} artifact not found") from exc
+        if tracking_plan is None:
             raise RuntimeError("control_tracking_plan artifact not found")
 
-        # Read contract_analysis from DB (needed for recursive resolution)
-        contract_analysis = get_artifact(session, job.id, "contract_analysis")
-        if not isinstance(contract_analysis, dict):
+        # contract_analysis is needed for recursive resolution
+        try:
+            contract_analysis = load_contract_analysis(get_artifact, session, job.id)
+        except ArtifactSchemaError as exc:
+            raise RuntimeError(f"{exc.artifact_name} artifact not found") from exc
+        if contract_analysis is None:
             raise RuntimeError("contract_analysis artifact not found")
         predicate_trees = get_artifact(session, job.id, "predicate_trees")
         if not isinstance(predicate_trees, dict):
@@ -220,7 +227,7 @@ class ResolutionWorker(BaseWorker):
             tracking_plan = {**tracking_plan, "contract_address": proxy_address}
             contract_analysis = {
                 **contract_analysis,
-                "subject": {**contract_analysis.get("subject", {}), "address": proxy_address},
+                "subject": {**contract_analysis["subject"], "address": proxy_address},
             }
             logger.info(
                 "Job %s: impl contract — reading state from proxy %s",

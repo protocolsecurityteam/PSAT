@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, cast
 
 from sqlalchemy import select
@@ -24,8 +24,14 @@ from db.models import (
 from db.nested_artifacts import ARTIFACT_KINDS, KEY_PREFIX, parse_key
 from db.nested_artifacts import store_bundle as store_nested_artifacts
 from db.queue import get_artifact, store_artifact
+from db.queue.typed import (
+    ArtifactSchemaError,
+    load_contract_analysis,
+    load_control_snapshot,
+    load_control_tracking_plan,
+)
 from schemas.control_tracking import ControlSnapshot
-from schemas.effective_permissions import PrincipalResolution
+from schemas.effective_permissions import EffectivePermissions, PrincipalResolution
 from services.clients.rpc import require_rpc_url
 from services.concurrency import parallel_map
 from services.discovery import membership_gate
@@ -262,8 +268,8 @@ def _persist_spawn_summary(
 
 
 def _root_artifacts(
-    contract_analysis: dict,
-    tracking_plan: dict,
+    contract_analysis: Mapping[str, Any],
+    tracking_plan: Mapping[str, Any],
     snapshot: ControlSnapshot,
 ) -> LoadedArtifacts:
     return {
@@ -461,7 +467,7 @@ def _safe_address_lookup_from_graph(
 
 
 def _semantic_controller_context_address(
-    snapshot: dict,
+    snapshot: Mapping[str, Any],
     nested_artifacts: dict[str, LoadedArtifacts],
 ) -> str | None:
     addresses: set[str] = set()
@@ -479,7 +485,7 @@ def _semantic_controller_context_address(
     return sorted(addresses)[0] if addresses else None
 
 
-def _selector_by_function_key(function_records: list[dict] | None) -> dict[str, str]:
+def _selector_by_function_key(function_records: Sequence[Mapping[str, Any]] | None) -> dict[str, str]:
     """``{function key -> selector}`` from the effective-permissions payload, so a
     consumer holding either signature can find the row that payload produced.
 
@@ -530,8 +536,11 @@ class PolicyWorker(BaseWorker):
         durations_ms: dict[str, int] = {}
 
         # Load required artifacts from DB
-        contract_analysis = get_artifact(session, job.id, "contract_analysis")
-        control_snapshot = get_artifact(session, job.id, "control_snapshot")
+        try:
+            contract_analysis = load_contract_analysis(get_artifact, session, job.id)
+            control_snapshot = load_control_snapshot(get_artifact, session, job.id)
+        except ArtifactSchemaError as exc:
+            raise RuntimeError(f"{exc.artifact_name} artifact not found") from exc
         resolved_control_graph = get_artifact(session, job.id, "resolved_control_graph")
         # ``predicate_trees`` and ``effects`` are the semantic inputs to
         # ``build_effective_permissions``.
@@ -555,7 +564,13 @@ class PolicyWorker(BaseWorker):
                 ", ".join(sorted(missing_semantic_inputs)),
                 extra={"missing_artifacts": sorted(missing_semantic_inputs)},
             )
-        tracking_plan = get_artifact(session, job.id, "control_tracking_plan")
+        try:
+            tracking_plan = load_control_tracking_plan(get_artifact, session, job.id)
+        except ArtifactSchemaError as exc:
+            # The plan was historically optional here (``{}`` fallback); a
+            # schema violation degrades + surfaces instead of failing the stage.
+            record_degraded(phase="control_tracking_plan_load", exc=exc, context={"job_id": str(job.id)})
+            tracking_plan = None
         # Optional: classify cache populated by the resolution stage. Lets the
         # refresh + labeling passes skip 6-10 RPCs per address.
         classify_cache_raw = get_artifact(session, job.id, "classified_addresses")
@@ -565,9 +580,9 @@ class PolicyWorker(BaseWorker):
                 if isinstance(val, list) and len(val) == 2:
                     classify_cache[addr] = (str(val[0]), dict(val[1]) if isinstance(val[1], dict) else {})
 
-        if not isinstance(contract_analysis, dict):
+        if contract_analysis is None:
             raise RuntimeError("contract_analysis artifact not found")
-        if not isinstance(control_snapshot, dict):
+        if control_snapshot is None:
             raise RuntimeError("control_snapshot artifact not found")
 
         nested_artifacts = _load_nested_artifacts(session, job.id, chain=chain_name)
@@ -621,19 +636,16 @@ class PolicyWorker(BaseWorker):
                 ph["function_count"] = len(capability_resolver_output or {})
 
         with log_timed_phase(logger, "effective_permissions", durations_ms=durations_ms) as ph:
-            ep_data: dict = cast(
-                dict,
-                build_effective_permissions(
-                    contract_analysis,
-                    target_snapshot=control_snapshot,
-                    authority_snapshot=authority_snapshot,
-                    principal_resolution=principal_resolution,
-                    predicate_trees=predicate_trees if isinstance(predicate_trees, dict) else None,
-                    capability_resolver_output=capability_resolver_output,
-                    effects=effects_artifact if isinstance(effects_artifact, dict) else None,
-                ),
+            ep_data: EffectivePermissions = build_effective_permissions(
+                contract_analysis,
+                target_snapshot=control_snapshot,
+                authority_snapshot=authority_snapshot,
+                principal_resolution=principal_resolution,
+                predicate_trees=predicate_trees if isinstance(predicate_trees, dict) else None,
+                capability_resolver_output=capability_resolver_output,
+                effects=effects_artifact if isinstance(effects_artifact, dict) else None,
             )
-            ph["function_count"] = len(ep_data.get("functions", [])) if isinstance(ep_data, dict) else 0
+            ph["function_count"] = len(ep_data["functions"])
 
         # Write to effective_functions and function_principals tables from
         # resolver-native semantic capability rows only.
@@ -760,12 +772,12 @@ class PolicyWorker(BaseWorker):
         # so semantic role/controller principals can be projected into the graph.
         # The refresh reuses the nested artifacts persisted during resolution.
         self.update_detail(session, job, "Refreshing resolved control graph")
-        if not isinstance(tracking_plan, dict):
+        if tracking_plan is None:
             tracking_plan = {}
         # Attach the target contract's updated effective_permissions to the
         # root bundle so role/controller principals can be projected when
         # re-traversing the graph.
-        root_bundle = _root_artifacts(contract_analysis, tracking_plan, cast(ControlSnapshot, control_snapshot))
+        root_bundle = _root_artifacts(contract_analysis, tracking_plan, control_snapshot)
         root_bundle["effective_permissions"] = ep_data
         with log_timed_phase(logger, "graph_refresh", durations_ms=durations_ms) as ph:
             refreshed_graph, refreshed_nested = resolve_control_graph(
@@ -1119,7 +1131,7 @@ class PolicyWorker(BaseWorker):
             },
         )
 
-    def _apply_cross_contract_claims(self, payload: dict, enriched: dict[str, list[Claim]]) -> None:
+    def _apply_cross_contract_claims(self, payload: Mapping[str, Any], enriched: dict[str, list[Claim]]) -> None:
         for fn in payload.get("functions", []):
             fn_sig = fn.get("function") or fn.get("abi_signature")
             additions = enriched.get(fn_sig) if fn_sig else None
@@ -1132,9 +1144,9 @@ class PolicyWorker(BaseWorker):
         self,
         session,
         job: Job,
-        contract_analysis: dict,
-        control_snapshot: dict,
-        function_records: list[dict] | None = None,
+        contract_analysis: Mapping[str, Any],
+        control_snapshot: Mapping[str, Any],
+        function_records: Sequence[Mapping[str, Any]] | None = None,
     ) -> dict[str, list[Claim]]:
         """Mint policy-derived claims from sibling facts.
 
@@ -1296,8 +1308,8 @@ class PolicyWorker(BaseWorker):
         self,
         session: Session,
         job: Job,
-        resolved_graph: dict,
-        snapshot: dict,
+        resolved_graph: Mapping[str, Any],
+        snapshot: Mapping[str, Any],
         nested_artifacts: dict[str, LoadedArtifacts],
     ) -> dict:
         """Locate nested controller context from resolution-stage DB bundles.

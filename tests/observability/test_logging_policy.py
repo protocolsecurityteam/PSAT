@@ -28,14 +28,19 @@ from typing import Any, cast
 
 import pytest
 
+from tests.support.policy_builders import (
+    TARGET_ADDRESS,
+    _graph_with_nodes,
+    _minimal_contract_analysis,
+    _minimal_snapshot,
+    _tracking_plan,
+)
 from utils.logging import (
     bind_trace_context,
     degraded_errors_var,
     stage_metrics_var,
 )
 from workers.policy_worker import PolicyWorker
-
-TARGET_ADDRESS = "0x1111111111111111111111111111111111111111"
 
 
 class _RecordCollector(logging.Handler):
@@ -78,22 +83,11 @@ def _drive_process_with_missing_contract_row(monkeypatch: pytest.MonkeyPatch) ->
     session.execute.return_value.scalar_one_or_none.return_value = None
     job = _job()
 
-    contract_analysis = {
-        "contract_address": TARGET_ADDRESS,
-        "contract_name": "TestContract",
-        "functions": [],
-    }
+    contract_analysis = _minimal_contract_analysis()
     # A non-empty controller_values + dict graph drives _resolve_authority.
-    control_snapshot = {
-        "contract_address": TARGET_ADDRESS,
-        "controller_values": {"some_key:admin": {"value": "0xbbb"}},
-    }
-    resolved_graph = {"nodes": [], "edges": []}
-    tracking_plan = {
-        "schema_version": "0.1",
-        "contract_address": TARGET_ADDRESS,
-        "contract_name": "TestContract",
-    }
+    control_snapshot = _minimal_snapshot({"some_key:admin": {"value": "0xbbb"}})
+    resolved_graph = _graph_with_nodes([])
+    tracking_plan = _tracking_plan()
 
     def fake_get_artifact(_session: Any, _job_id: Any, name: str) -> Any:
         return {

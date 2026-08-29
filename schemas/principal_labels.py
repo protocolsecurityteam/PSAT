@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Literal, TypedDict
+from typing import Literal
 
-from typing_extensions import NotRequired
+from typing_extensions import NotRequired, TypedDict
 
-from .control_tracking import ResolvedControllerType
+from .core import ArtifactEnvelope, Principal
 
 LabelConfidence = Literal["high", "medium", "low"]
 
@@ -19,20 +19,18 @@ class PrincipalPermission(TypedDict):
     controller: NotRequired[str]
 
 
-class PrincipalProfile(TypedDict):
-    address: str
-    resolved_type: ResolvedControllerType
+class PrincipalProfile(Principal):
+    """A core principal plus the labeling enrichment the policy stage adds.
+    ``display_name`` is REQUIRED here: a labeled principal always has a name
+    to show, which is why it stays off the bare core identity."""
+
     display_name: str
     labels: list[str]
     confidence: LabelConfidence
-    details: dict[str, object]
     graph_context: list[str]
     controller_context: list[str]
     permissions: list[PrincipalPermission]
 
 
-class PrincipalLabels(TypedDict):
-    schema_version: str
-    contract_address: str
-    contract_name: str
+class PrincipalLabels(ArtifactEnvelope):
     principals: list[PrincipalProfile]

@@ -11,9 +11,9 @@ import threading
 from collections import deque
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any, TypedDict, cast
+from typing import Any, cast
 
-from typing_extensions import NotRequired
+from typing_extensions import NotRequired, TypedDict
 
 from db.models import (
     EDGE_RELATION_CONTROLLER_VALUE,
@@ -120,13 +120,20 @@ def _bump_stage_metric(key: str, n: int = 1) -> None:
 
 
 class LoadedArtifacts(TypedDict):
-    """Per-contract artifact bundle emitted by ``resolve_control_graph`` and persisted by the worker as DB artifacts."""
+    """Per-contract artifact bundle emitted by ``resolve_control_graph`` and persisted by the worker as DB artifacts.
 
-    analysis: dict[str, Any]
-    tracking_plan: dict[str, Any]
-    snapshot: ControlSnapshot
+    Fields are ``Mapping`` (not the strict stage TypedDicts) because a bundle
+    has two provenances: the root's in-memory freshly-built documents, and
+    nested bundles hydrated from persisted JSONB rows (unverified shapes).
+    Every consumer reads via ``.get()`` anyway; the strict types live at the
+    producers (``build_control_tracking_plan`` / ``build_control_snapshot``).
+    """
+
+    analysis: Mapping[str, Any]
+    tracking_plan: Mapping[str, Any]
+    snapshot: Mapping[str, Any]
     predicate_trees: NotRequired[dict[str, Any] | None]
-    effective_permissions: NotRequired[dict[str, Any] | None]
+    effective_permissions: NotRequired[Mapping[str, Any] | None]
 
 
 class PendingContract(TypedDict):
@@ -179,7 +186,7 @@ def _contract_name_for_address(address: str, chain_id: int) -> str | None:
 
 
 def _build_effective_permissions(
-    analysis: dict[str, Any],
+    analysis: Mapping[str, Any],
     snapshot: ControlSnapshot,
 ) -> dict[str, Any] | None:
     """Compute the effective-permissions payload for nested resolution."""
@@ -519,11 +526,11 @@ def _materialize_contract_artifacts(
     if snapshot_address != effective_address:
         plan = {**plan, "contract_address": snapshot_address}
 
-    snapshot = build_control_snapshot(cast(Any, plan), rpc_url, chain_id=chain_id)
-    effective_permissions = _build_effective_permissions(cast(dict, analysis), snapshot)
+    snapshot = build_control_snapshot(cast(ControlTrackingPlan, plan), rpc_url, chain_id=chain_id)
+    effective_permissions = _build_effective_permissions(analysis, snapshot)
 
     return {
-        "analysis": cast(dict, analysis),
+        "analysis": analysis,
         "tracking_plan": plan,
         "snapshot": snapshot,
         "predicate_trees": predicate_trees,
@@ -751,7 +758,7 @@ def _safe_role_int(role: Any) -> int | None:
         return None
 
 
-def _role_principals_from_effective_permissions(effective_permissions: dict[str, Any]) -> list[RolePrincipal]:
+def _role_principals_from_effective_permissions(effective_permissions: Mapping[str, Any]) -> list[RolePrincipal]:
     principals: dict[str, RolePrincipalAccumulator] = {}
     for function in effective_permissions.get("functions", []):
         if not isinstance(function, dict):
@@ -769,7 +776,7 @@ def _role_principals_from_effective_permissions(effective_permissions: dict[str,
             if role is None:
                 logger.debug(
                     "recursive: skipping non-int role %r on %s",
-                    role_grant.get("role"),
+                    role,
                     function_signature,
                 )
                 continue
@@ -1486,12 +1493,12 @@ def resolve_control_graph(
                     edges=edges,
                     queue=queue,
                     queued=queued,
+                    depth=depth,
                     rpc_url=rpc_url,
                     from_node_id=controller_node_id,
                     source_controller_id=controller_id,
                     resolved_type=resolved_type,
                     details=details,
-                    depth=depth + 1,
                     max_depth=max_depth,
                     classify_fn=_cached_classify,
                     chain_id=chain_id,

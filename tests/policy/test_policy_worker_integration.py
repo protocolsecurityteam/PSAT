@@ -20,6 +20,7 @@ from tests.support.policy_builders import (
     _job,
     _minimal_contract_analysis,
     _minimal_snapshot,
+    _tracking_plan,
 )
 from workers.policy_worker import PolicyWorker
 
@@ -123,7 +124,7 @@ class TestProcessStoresAllArtifacts:
         contract_analysis = _minimal_contract_analysis()
         control_snapshot = _minimal_snapshot({"some_key:admin": {"value": "0xbbb"}})
         resolved_graph = _graph_with_nodes([])
-        tracking_plan = {"schema_version": "0.1", "contract_address": TARGET_ADDRESS, "contract_name": "TestContract"}
+        tracking_plan = _tracking_plan()
 
         def fake_get_artifact(_session: Any, _job_id: Any, name: str) -> Any:
             return {
@@ -180,7 +181,7 @@ class TestProcessSemanticInputs:
         contract_analysis = _minimal_contract_analysis()
         control_snapshot = _minimal_snapshot()
         resolved_graph = _graph_with_nodes([])
-        tracking_plan = {"schema_version": "0.1", "contract_address": TARGET_ADDRESS, "contract_name": "TestContract"}
+        tracking_plan = _tracking_plan()
 
         def fake_get_artifact(_session: Any, _job_id: Any, name: str) -> Any:
             return {
@@ -244,7 +245,7 @@ class TestGraphRefreshAfterEffectivePermissions:
         contract_analysis = _minimal_contract_analysis()
         control_snapshot = _minimal_snapshot()
         resolved_graph = _graph_with_nodes([])
-        tracking_plan = {"schema_version": "0.1", "contract_address": TARGET_ADDRESS, "contract_name": "TestContract"}
+        tracking_plan = _tracking_plan()
 
         def fake_get_artifact(_session: Any, _job_id: Any, name: str) -> Any:
             return {
@@ -298,7 +299,7 @@ class TestCrossContractEnrichmentArtifactSync:
         contract_analysis = _minimal_contract_analysis()
         control_snapshot = _minimal_snapshot({"state_variable:token": {"value": AUTH_ADDRESS}})
         resolved_graph = _graph_with_nodes([])
-        tracking_plan = {"schema_version": "0.1", "contract_address": TARGET_ADDRESS, "contract_name": "TestContract"}
+        tracking_plan = _tracking_plan()
 
         def fake_get_artifact(_session: Any, _job_id: Any, name: str) -> Any:
             return {
@@ -450,12 +451,7 @@ class TestProcessFanoutParity:
                 }
             ]
         )
-        tracking_plan = {
-            "schema_version": "0.1",
-            "contract_address": target,
-            "contract_name": "VaultBig",
-            "tracked_controllers": [],
-        }
+        tracking_plan = _tracking_plan(address=target, name="VaultBig")
 
         def fake_get_artifact(_session: Any, _job_id: Any, name: str) -> Any:
             return {
@@ -545,7 +541,7 @@ class TestGraphRefreshRewritesTables:
         contract_analysis = _minimal_contract_analysis()
         control_snapshot = _minimal_snapshot()
         resolved_graph = _graph_with_nodes([])
-        tracking_plan = {"schema_version": "0.1", "contract_address": TARGET_ADDRESS, "contract_name": "TestContract"}
+        tracking_plan = _tracking_plan()
         refreshed_graph = {
             "schema_version": "0.1",
             "root_contract_address": TARGET_ADDRESS,
