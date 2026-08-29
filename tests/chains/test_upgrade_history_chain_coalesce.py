@@ -43,6 +43,12 @@ def stub_etherscan(monkeypatch):
     monkeypatch.setattr(etherscan_mod, "get_contract_info", lambda address, **_kw: (f"Impl-{address[2:6]}", {}))
 
 
+@pytest.fixture(autouse=True)
+def _stub_membership_probe(monkeypatch):
+    """Stub-the-wire: the backfill's near-line §3.5 probe never leaves the machine."""
+    monkeypatch.setattr("services.discovery.membership_gate.probe", lambda session, contract: None)
+
+
 # ---------------------------------------------------------------------------
 # project_to_events — proxy-row lookup
 # ---------------------------------------------------------------------------
@@ -156,14 +162,15 @@ def test_backfill_adopts_legacy_null_impl_row_on_mainnet(db_session, proto_id, s
         protocol_id=proto_id,
         chain="ethereum",
         impl_addrs={impl_addr},
-        parent_proxy_sources=["inventory"],  # HIGH → ownership asserted
     )
 
     rows = db_session.query(Contract).filter(Contract.address == impl_addr).all()
-    assert len(rows) == 1  # adopted, not duplicated
+    assert len(rows) == 1  # nominated in place, not duplicated
     row = rows[0]
     assert row.chain is None  # no backfill of the legacy value
-    assert row.protocol_id == proto_id
+    # Membership is the gate's verdict (no member-proxy edge here): the
+    # coalesced dedup shows as an in-place NOMINATION, never a fresh row.
+    assert row.nominated_protocol_id == proto_id
     assert "upgrade_history" in (row.discovery_sources or [])
     assert row.contract_name == "ExistingImpl"  # existing name preserved
 
@@ -184,12 +191,12 @@ def test_backfill_base_does_not_adopt_legacy_null_mainnet_impl_row(db_session, p
         protocol_id=proto_id,
         chain="base",
         impl_addrs={impl_addr},
-        parent_proxy_sources=["inventory"],
     )
 
     rows = db_session.query(Contract).filter(Contract.address == impl_addr).all()
     assert {r.chain for r in rows} == {None, "base"}
-    # The mainnet (NULL) row was left an orphan; only the Base row is owned.
+    # The mainnet (NULL) row was left untouched; only the Base row carries
+    # the nomination.
     by_chain = {r.chain: r for r in rows}
-    assert by_chain[None].protocol_id is None
-    assert by_chain["base"].protocol_id == proto_id
+    assert by_chain[None].nominated_protocol_id is None
+    assert by_chain["base"].nominated_protocol_id == proto_id

@@ -73,13 +73,18 @@ PIPELINE_SERVICE_GLOBS: tuple[str, ...] = (
 # ``test_allow_list_entries_still_present`` below fails loudly when an entry
 # stops matching a real violation.
 ALLOW_LIST: dict[str, dict[int, str]] = {
+    "workers/discovery.py": {
+        # Boot-time chain-enable sweep in main(): no job is claimed yet, so no
+        # accumulator is bound and record_degraded would be a no-op.
+        1242: "Boot-time sweep failure; runs before any job context exists.",
+    },
     "workers/policy_worker.py": {
         # Reanalysis-completion notifier: the reanalysis itself completed
         # before the notifier ran, so its failure is a side-effect that
         # doesn't change the job's stage output. record_degraded would
         # mislead callers of /api/jobs/{id}/errors into thinking the
         # reanalysis was degraded.
-        1093: "Notifier side-effect; reanalysis already completed before this fired.",
+        1104: "Notifier side-effect; reanalysis already completed before this fired.",
     },
     "workers/effects_worker.py": {
         # Fork-close cleanup: the anvil subprocess close failing is a resource

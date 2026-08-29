@@ -96,14 +96,15 @@ def resolve_company_jobs(session: Session, name: str) -> tuple[Protocol | None, 
     Modern data: ``Protocol`` row exists, every job carries ``protocol_id``,
     AND its subject ``Contract`` row carries the same id. We filter on
     Contract.protocol_id (not Job.protocol_id) because the Contract row is
-    the authoritative ownership signal — gated by
-    services/discovery/source_confidence on every write. Jobs inherit
-    protocol_id from their parent at spawn time (selection / resolution /
-    static), which means a dependency-expansion job for WstETH spawned
-    while analyzing an etherfi contract carries Job.protocol_id=etherfi
-    even though the WstETH Contract row is correctly orphan. Filtering by
-    Contract.protocol_id keeps the surface page consistent with what the
-    discovery-source gate already enforces for ownership.
+    the authoritative membership signal — ``protocol_id`` is written only
+    by the membership gate (services/discovery/membership_gate) against
+    recorded witnesses. Jobs inherit protocol_id from their parent at
+    spawn time (selection / resolution / static), which means a
+    dependency-expansion job for WstETH spawned while analyzing an
+    etherfi contract carries Job.protocol_id=etherfi even though the
+    WstETH Contract row is correctly a non-member. Filtering by
+    Contract.protocol_id keeps the surface page consistent with the
+    gate's witnessed member set.
 
     Legacy fallback: no Protocol row but a Job has ``company == name``;
     we walk ``request.parent_job_id`` chains across all completed jobs to

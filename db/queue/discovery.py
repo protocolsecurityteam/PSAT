@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from db.models import Contract, Protocol
-from services.discovery.source_confidence import asserts_ownership
+from db.models import Contract, ContractMembershipWitness, Protocol, ProtocolDeployer
+from services.discovery.membership_gate import MEMBERSHIP_DIRTY_REASON, nominate
+from services.discovery.membership_gate import demote as gate_demote_deployer
 from utils.chains import canonical_chain, canonical_chain_list
 
 from ._chains import _mainnet_coalesced_chain
+
+logger = logging.getLogger(__name__)
 
 
 def bulk_upsert_discovered_contracts(
@@ -72,18 +76,14 @@ def bulk_upsert_discovered_contracts(
     for address, chain, entry in norm_entries:
         key = (address, _mainnet_coalesced_chain(chain))
         clean_sources = [s for s in (entry.get("new_sources") or []) if s]
-        # Only high-confidence sources may assert protocol ownership.
-        # Low-confidence sources (dapp_crawl scraping, upgrade_history
-        # traversal of unconfirmed proxies) populate discovery_sources
-        # but leave protocol_id NULL until a high-confidence source
-        # corroborates. See services/discovery/source_confidence.py.
-        owning_protocol_id = protocol_id if asserts_ownership(clean_sources) else None
+        # Invariant 1: no discovery source stamps protocol_id — every write
+        # is a nomination and the membership gate is the sole promoter.
+        source_tag = clean_sources[0] if clean_sources else ""
         existing = existing_by_key.get(key)
         if existing is None:
             row = Contract(
                 address=address,
                 chain=chain,
-                protocol_id=owning_protocol_id,
                 contract_name=entry.get("contract_name"),
                 confidence=entry.get("confidence"),
                 discovery_sources=list(clean_sources) or None,
@@ -91,6 +91,8 @@ def bulk_upsert_discovered_contracts(
                 discovery_url=entry.get("discovery_url"),
             )
             session.add(row)
+            if protocol_id is not None:
+                nominate(session, contract=row, protocol_id=protocol_id, source_tag=source_tag)
             existing_by_key[key] = row
             out.append(row)
             continue
@@ -101,8 +103,8 @@ def bulk_upsert_discovered_contracts(
                 merged.append(src)
         if merged:
             existing.discovery_sources = merged
-        if existing.protocol_id is None and owning_protocol_id is not None:
-            existing.protocol_id = owning_protocol_id
+        if protocol_id is not None:
+            nominate(session, contract=existing, protocol_id=protocol_id, source_tag=source_tag)
         if not existing.contract_name and entry.get("contract_name"):
             existing.contract_name = entry["contract_name"]
         if existing.confidence is None and entry.get("confidence") is not None:
@@ -140,7 +142,9 @@ def upsert_discovered_contract(
     When the row exists already:
         - ``discovery_sources`` is unioned (new entries appended, dedup
           preserves order so the first discoverer stays first).
-        - ``protocol_id`` is backfilled if null (orphan adoption).
+        - the nomination is recorded via the membership gate
+          (``nominated_protocol_id``); ``protocol_id`` is never written here
+          — promotion is the gate's job (invariant 1).
         - ``contract_name`` / ``confidence`` / ``chains`` /
           ``discovery_url`` are first-writer-wins: later writers only
           fill them if the stored value is missing, so a later
@@ -177,15 +181,13 @@ def upsert_discovered_contract(
     )
 
     clean_sources = [s for s in new_sources if s]
-    # See bulk_upsert_discovered_contracts — only high-confidence sources
-    # may assert protocol ownership.
-    owning_protocol_id = protocol_id if asserts_ownership(clean_sources) else None
+    # See bulk_upsert_discovered_contracts — writes nominate, never stamp.
+    source_tag = clean_sources[0] if clean_sources else ""
 
     if existing is None:
         row = Contract(
             address=normalized,
             chain=chain,
-            protocol_id=owning_protocol_id,
             contract_name=contract_name,
             confidence=confidence,
             discovery_sources=list(clean_sources) or None,
@@ -193,6 +195,8 @@ def upsert_discovered_contract(
             discovery_url=discovery_url,
         )
         session.add(row)
+        if protocol_id is not None:
+            nominate(session, contract=row, protocol_id=protocol_id, source_tag=source_tag)
         return row
 
     merged = list(existing.discovery_sources or [])
@@ -202,8 +206,8 @@ def upsert_discovered_contract(
     if merged:
         existing.discovery_sources = merged
 
-    if existing.protocol_id is None and owning_protocol_id is not None:
-        existing.protocol_id = owning_protocol_id
+    if protocol_id is not None:
+        nominate(session, contract=existing, protocol_id=protocol_id, source_tag=source_tag)
     if not existing.contract_name and contract_name:
         existing.contract_name = contract_name
     if existing.confidence is None and confidence is not None:
@@ -217,15 +221,20 @@ def upsert_discovered_contract(
 
 
 _PROTOCOL_FK_TABLES = (
-    # (table, column) for every FK referencing protocols.id. Listed
-    # explicitly so the merge step touches every dependent table without
-    # depending on a model registry walk. Includes both CASCADE and SET NULL
-    # FKs — the orphan row is being deleted, not nulled, so the destination
-    # protocol takes ownership of all children.
+    # (table, column) pairs the merge rewrites — an explicit list, not a
+    # model-registry walk, and NOT every protocols.id FK in the schema:
+    # tables absent here keep whatever their FK's delete action does when the
+    # src row is deleted. Includes both CASCADE and SET NULL FKs — the src
+    # row is deleted, not nulled, so the destination protocol takes ownership
+    # of the enumerated children.
     ("jobs", "protocol_id"),
     ("audit_reports", "protocol_id"),
     ("audit_contract_coverage", "protocol_id"),
     ("contracts", "protocol_id"),
+    ("contracts", "nominated_protocol_id"),
+    ("contract_membership_witnesses", "protocol_id"),
+    ("protocol_deployers", "protocol_id"),
+    ("deployer_affinity_challenges", "foreign_protocol_id"),
     ("monitored_contracts", "protocol_id"),
     ("protocol_subscriptions", "protocol_id"),
     ("dapp_interactions", "protocol_id"),
@@ -233,23 +242,161 @@ _PROTOCOL_FK_TABLES = (
 )
 
 
+def _merge_witness_rows(session: Session, *, src_id: int, dst_id: int) -> int:
+    """Rewrite src witness rows to dst. Where both protocols hold the same
+    (contract, rule, via_address) key, the destination row survives. A revoked
+    dst row is re-armed only by a src observation that POSTDATES the
+    revocation — an older observation cannot overturn negative evidence; a
+    fresh one re-earns later via ``write_witness``. Returns dropped-src-row
+    count."""
+    dropped = 0
+    src_rows = (
+        session.execute(select(ContractMembershipWitness).where(ContractMembershipWitness.protocol_id == src_id))
+        .scalars()
+        .all()
+    )
+    for src_row in src_rows:
+        via_match = (
+            ContractMembershipWitness.via_address.is_(None)
+            if src_row.via_address is None
+            else ContractMembershipWitness.via_address == src_row.via_address
+        )
+        dst_row = session.execute(
+            select(ContractMembershipWitness).where(
+                ContractMembershipWitness.protocol_id == dst_id,
+                ContractMembershipWitness.contract_id == src_row.contract_id,
+                ContractMembershipWitness.rule == src_row.rule,
+                via_match,
+            )
+        ).scalar_one_or_none()
+        if dst_row is None:
+            src_row.protocol_id = dst_id
+            continue
+        if dst_row.revoked_at is not None and src_row.revoked_at is None and src_row.observed_at > dst_row.revoked_at:
+            dst_row.revoked_at = None
+            dst_row.evidence = src_row.evidence
+            dst_row.observed_at = src_row.observed_at
+        session.delete(src_row)
+        dropped += 1
+    return dropped
+
+
+def _merge_deployer_rows(session: Session, *, src_id: int, dst_id: int) -> tuple[int, list[ProtocolDeployer]]:
+    """Rewrite src deployer-registry rows to dst. A same-address row under
+    both protocols survives as one row (invariant 7 collision resolved by the
+    merge itself: src and dst are the same protocol afterwards) — dst's row is
+    kept and revocation resolves conservatively: a revoked side keeps (or
+    makes) the survivor revoked, carrying the negative evidence. Returns the
+    dropped-src-row count and the surviving revoked rows whose invariant-8
+    demotion cascade the caller must run after the FK rewrite."""
+    dropped = 0
+    cascade: list[ProtocolDeployer] = []
+    src_rows = session.execute(select(ProtocolDeployer).where(ProtocolDeployer.protocol_id == src_id)).scalars().all()
+    for src_row in src_rows:
+        dst_row = session.execute(
+            select(ProtocolDeployer).where(
+                ProtocolDeployer.protocol_id == dst_id,
+                ProtocolDeployer.address == src_row.address,
+            )
+        ).scalar_one_or_none()
+        if dst_row is None:
+            src_row.protocol_id = dst_id
+            continue
+        src_revoked = src_row.revoked_at is not None
+        dst_revoked = dst_row.revoked_at is not None
+        discarded_evidence = src_row.evidence
+        if src_revoked and not dst_revoked:
+            # Negative evidence survives the merge: the surviving row adopts
+            # src's revocation, and dst's active evidence is the discard.
+            discarded_evidence = dst_row.evidence
+            dst_row.revoked_at = src_row.revoked_at
+            dst_row.revocation_reason = src_row.revocation_reason
+            dst_row.evidence = src_row.evidence
+            cascade.append(dst_row)
+        elif dst_revoked and not src_revoked:
+            cascade.append(dst_row)
+        logger.info(
+            "protocol merge dropped duplicate deployer row",
+            extra={
+                "address": src_row.address,
+                "src_protocol_id": src_id,
+                "dst_protocol_id": dst_id,
+                "src_revoked_at": src_row.revoked_at.isoformat() if src_row.revoked_at else None,
+                "dst_revoked_at": dst_row.revoked_at.isoformat() if dst_row.revoked_at else None,
+                "survivor_revocation_reason": dst_row.revocation_reason,
+                "discarded_evidence": discarded_evidence,
+            },
+        )
+        session.delete(src_row)
+        dropped += 1
+    return dropped, cascade
+
+
 def _merge_protocol_into(session: Session, src: Protocol, dst: Protocol) -> None:
     """Reassign every protocols.id FK from ``src`` to ``dst``, then delete src.
 
     Used when ``get_or_create_protocol`` discovers that a pre-resolver row
-    (NULL canonical_slug) is a duplicate of a freshly-resolved family. None
-    of the dependent tables have a UNIQUE(protocol_id, …) constraint, so the
-    bulk UPDATE never conflicts.
+    (NULL canonical_slug) is a duplicate of a freshly-resolved family. A gate
+    operation (invariant 1): contract membership, witness rows, and deployer
+    rows all move to dst in the same transaction, with the (protocol_id, …)
+    unique keys on ``contract_membership_witnesses`` / ``protocol_deployers``
+    resolved before the blind FK rewrite. A deployer collision whose survivor
+    is revoked runs the invariant-8 demotion cascade after the rewrite.
+    ``nominated_protocol_id`` is in ``_PROTOCOL_FK_TABLES`` and is rewritten
+    here — never left for the src delete's SET NULL. The remaining enumerated
+    tables carry no protocol-keyed uniqueness.
     """
-    if src.id == dst.id:
+    src_id, dst_id = src.id, dst.id
+    if src_id == dst_id:
         return
+    moved_members = session.execute(
+        select(func.count()).select_from(Contract).where(Contract.protocol_id == src_id)
+    ).scalar_one()
+    witness_dropped = _merge_witness_rows(session, src_id=src_id, dst_id=dst_id)
+    deployer_dropped, cascade_rows = _merge_deployer_rows(session, src_id=src_id, dst_id=dst_id)
+    session.flush()
     for table, col in _PROTOCOL_FK_TABLES:
         session.execute(
             text(f"UPDATE {table} SET {col} = :dst WHERE {col} = :src"),
-            {"src": src.id, "dst": dst.id},
+            {"src": src_id, "dst": dst_id},
+        )
+    # The raw rewrite bypasses the identity map; without this, an in-session
+    # Contract still reads its src-era ids (e.g. the member branch in
+    # ``nominate``) for the rest of the transaction.
+    session.expire_all()
+    for deployer_row in cascade_rows:
+        # Invariant 8 for the surviving revoked registry row: W4 witnesses
+        # resting on it are revoked and members left without an admitting
+        # witness are demoted, so reconcile reports zero drift post-merge.
+        result = gate_demote_deployer(session, deployer_row=deployer_row, reason="protocol_merge_revoked_deployer")
+        logger.info(
+            "protocol merge deployer demotion cascade",
+            extra={
+                "address": deployer_row.address,
+                "dst_protocol_id": dst_id,
+                "revoked_witness_ids": list(result.revoked_witness_ids),
+                "demoted_contract_ids": list(result.demoted_contract_ids),
+                "reprobe_contract_ids": list(result.reprobe_contract_ids),
+            },
         )
     session.delete(src)
     session.flush()
+    if moved_members:
+        from services.monitoring.enrollment import mark_enrollment_dirty
+        from services.scoring.dirty import SCORE_DIRTY_MEMBERSHIP, mark_protocol_score_dirty
+
+        mark_enrollment_dirty(session, dst_id, MEMBERSHIP_DIRTY_REASON)
+        mark_protocol_score_dirty(session, dst_id, SCORE_DIRTY_MEMBERSHIP)
+    logger.info(
+        "protocol merged (gate operation)",
+        extra={
+            "src_protocol_id": src_id,
+            "dst_protocol_id": dst_id,
+            "moved_member_contracts": moved_members,
+            "witness_duplicates_dropped": witness_dropped,
+            "deployer_duplicates_dropped": deployer_dropped,
+        },
+    )
 
 
 def get_or_create_protocol(

@@ -1,8 +1,9 @@
 """/api/analyze optional company linking: an address submission naming a
 company resolves to the EXISTING Protocol row (lookup-only) and stamps
-``protocol_id`` + the ``"inventory"`` ownership source on the job request, so
-the fetched contract adopts the protocol. Address-only submissions stay
-standalone; company-only submissions keep minting their protocol in discovery.
+``protocol_id`` + an attributed W5 human assertion on the job request
+(membership gate, invariant 14) — never a source tag. The gate consumes the
+assertion at nomination time. Address-only submissions stay standalone;
+company-only submissions keep minting their protocol in discovery.
 """
 
 from __future__ import annotations
@@ -29,7 +30,17 @@ def test_analyze_with_company_links_existing_protocol(api_client, db_session):
 
     job = db_session.query(Job).filter_by(id=resp.json()["job_id"]).one()
     assert job.protocol_id == proto.id
-    assert "inventory" in (job.request.get("discovery_sources") or [])
+    # W5 rides the request as an attributed assertion — never a source tag.
+    assertion = job.request.get("human_assertion")
+    assert isinstance(assertion, dict)
+    assert assertion["actor"] == "admin_api_key"
+    assert isinstance(assertion["asserted_at"], str) and assertion["asserted_at"]
+    assert "inventory" not in (job.request.get("discovery_sources") or [])
+
+    from services.discovery.membership_gate import human_assertion_from_request
+
+    parsed = human_assertion_from_request(job.request)
+    assert parsed is not None and parsed.actor == "admin_api_key"
 
 
 @requires_postgres

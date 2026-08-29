@@ -76,8 +76,13 @@ _PG_CACHE_WHITELIST: frozenset[tuple[str, str]] = frozenset(
 )
 
 
-def _pg_cache_eligible(module: str, action: str) -> bool:
-    return (module, action) in _PG_CACHE_WHITELIST
+def _pg_cache_eligible(module: str, action: str, params: Mapping | None = None) -> bool:
+    if (module, action) in _PG_CACHE_WHITELIST:
+        return True
+    # A mined tx's internal frames are immutable, so the per-TXHASH form of
+    # txlistinternal is PG-cacheable; the by-address form is living history
+    # and must never be served stale.
+    return (module, action) == ("account", "txlistinternal") and bool(params) and "txhash" in params
 
 
 # Narrower whitelist for the in-memory layer: only the small, immutable contract
@@ -200,7 +205,7 @@ def _params_hash(module: str, action: str, chain_id: int, params: dict) -> str:
 
 def _pg_cache_get(module: str, action: str, chain_id: int, params: dict) -> dict | None:
     """Postgres read-through; returns None on miss or DB unavailability so CLI usage without a DB still works."""
-    if not _PG_CACHE_ENABLED or not _pg_cache_eligible(module, action):
+    if not _PG_CACHE_ENABLED or not _pg_cache_eligible(module, action, params):
         return None
     try:
         from sqlalchemy import text
@@ -245,7 +250,7 @@ def _is_persistable(module: str, action: str, response: dict) -> bool:
 
 def _pg_cache_put(module: str, action: str, chain_id: int, params: dict, response: dict) -> None:
     """Best-effort upsert into etherscan_cache; whitelist-gated and empty-source responses are skipped."""
-    if not _PG_CACHE_ENABLED or not _pg_cache_eligible(module, action):
+    if not _PG_CACHE_ENABLED or not _pg_cache_eligible(module, action, params):
         return
     if not _is_persistable(module, action, response):
         logger.debug(
@@ -277,28 +282,31 @@ def _pg_cache_put(module: str, action: str, chain_id: int, params: dict, respons
         logger.debug("Etherscan PG cache write failed (%s) — keeping in-memory only", exc)
 
 
-# The ONE ``status=0`` shape that is an answer rather than a failure: the
-# ``addresstokenbalance`` endpoint's reply for an address whose token list is
-# empty. The conjunction is exact — status, message and an empty LIST result —
+# The ``status=0`` shapes that are answers rather than failures: an empty
+# token list (``addresstokenbalance``) and an empty transaction list
+# (``txlist``/``txlistinternal`` for an address or tx with no entries). The
+# conjunction is exact — status, a known message, and an empty LIST result —
 # and every other ``status=0`` shape (rate limits, invalid keys, upstream
 # errors, a message-bearing string result) stays a failure. It is opt-in per
 # call site (:func:`get`'s ``empty_result_ok``) so no other endpoint's error can
 # reach a caller as data.
-_EMPTY_TOKEN_LIST_MESSAGE = "No token found"
+_EMPTY_RESULT_MESSAGES = frozenset({"No token found", "No transactions found"})
 
 
 def _is_empty_result(data: dict) -> bool:
-    """Whether *data* is exactly the empty-token-list triple."""
+    """Whether *data* is exactly an empty-list answer triple."""
     result = data.get("result")
     return (
         str(data.get("status")).strip() == "0"
-        and str(data.get("message", "")).strip() == _EMPTY_TOKEN_LIST_MESSAGE
+        and str(data.get("message", "")).strip() in _EMPTY_RESULT_MESSAGES
         and isinstance(result, list)
         and not result
     )
 
 
-def get(module: str, action: str, chain_id: int, empty_result_ok: bool = False, **params) -> dict:
+def get(
+    module: str, action: str, chain_id: int, empty_result_ok: bool = False, cache_empty: bool = False, **params
+) -> dict:
     """Etherscan API call with rate-limit retry; reads through in-memory then Postgres cache before the wire.
 
     *chain_id* is required: the v2 endpoint is chain-scoped via the
@@ -310,8 +318,14 @@ def get(module: str, action: str, chain_id: int, empty_result_ok: bool = False, 
     relaxation of the error contract: the triple is a distinct answer the
     endpoint gives, and raising on it made "this address holds no tokens"
     indistinguishable from a transport failure at the one call site that can
-    tell them apart. The answer is deliberately NOT cached — an empty list is a
-    statement about one moment, and a cached negative would outlive it.
+    tell them apart. The empty answer is persisted only when the
+    (module, action, params) triple is PG-cache-eligible AND the caller passes
+    ``cache_empty=True`` — its attestation that the answer can no longer
+    change. Even an immutable-shaped triple (per-txhash ``txlistinternal``)
+    can be a transient false-empty while Etherscan's trace indexing lags a
+    fresh tx, so only the caller — who knows the tx's age — may freeze it;
+    for dynamic queries an empty list is a statement about one moment, and a
+    cached negative would outlive it. Non-empty answers cache unconditionally.
     """
     inmem = _CACHE_ENABLED and _inmem_cache_eligible(module, action)
     source_cached = _CACHE_ENABLED and _source_cache_eligible(module, action)
@@ -372,6 +386,12 @@ def get(module: str, action: str, chain_id: int, empty_result_ok: bool = False, 
             return data
 
         if empty_result_ok and _is_empty_result(data):
+            # Whitelist-gated AND caller-attested: only an immutable triple
+            # (per-txhash internal frames) whose caller vouched the tx is past
+            # Etherscan's trace-indexing lag persists — a lag-empty frozen for
+            # a fresh tx would permanently delete its CREATE frames.
+            if cache_empty:
+                _pg_cache_put(module, action, chain_id, params, data)
             return data
 
         result_str = str(data.get("result", ""))

@@ -28,6 +28,7 @@ from schemas.control_tracking import ControlSnapshot
 from schemas.effective_permissions import PrincipalResolution
 from services.clients.rpc import require_rpc_url
 from services.concurrency import parallel_map
+from services.discovery import membership_gate
 from services.discovery.perimeter import (
     PERIMETER_SPAWN_DEPTH_CAP,
     PERIMETER_SPAWN_LIMIT,
@@ -669,6 +670,10 @@ class PolicyWorker(BaseWorker):
             graph_nodes = resolved_control_graph.get("nodes") if isinstance(resolved_control_graph, dict) else None
             safe_lookup = _safe_address_lookup_from_graph(graph_nodes if isinstance(graph_nodes, list) else None)
 
+            # The pre-image is captured before the rewrite: a principal this
+            # run DROPS names no fact afterwards, and only the union of before
+            # and after reaches the membership witnesses resting on it.
+            principals_before = membership_gate.principal_addresses(session, [contract_row.id])
             with log_timed_phase(logger, "effective_function_rows", durations_ms=durations_ms) as ph:
                 fp_added = write_effective_function_rows(
                     session,
@@ -684,6 +689,12 @@ class PolicyWorker(BaseWorker):
                 session.commit()
                 ph["function_principals"] = fp_added
             record_stage_metric("function_principals", fp_added)
+            membership_gate.evaluate_principal_change(
+                session,
+                contract_id=contract_row.id,
+                addresses=principals_before | membership_gate.principal_addresses(session, [contract_row.id]),
+                context=f"policy_function_principals:{job.id}",
+            )
 
         store_artifact(session, job.id, "effective_permissions", data=ep_data)
         record_stage_metric("effective_functions", len(ep_data.get("functions", [])))

@@ -11,6 +11,9 @@ from services.discovery.protocol_resolver import (
     _make_result,
     _match_protocol,
     _normalize,
+    listing_addresses,
+    listing_nominations,
+    parse_listing_address,
     resolve_protocol,
 )
 
@@ -45,6 +48,15 @@ ETHERFI = {
     "parentProtocol": "parent#etherfi",
 }
 
+ETHERFI_LIQUID = {
+    "slug": "ether.fi-liquid",
+    "name": "Ether.fi Liquid",
+    "url": "https://ether.fi",
+    "chains": ["Ethereum"],
+    "tvl": 4_000,
+    "parentProtocol": "parent#etherfi",
+}
+
 LIDO = {
     "slug": "lido",
     "name": "Lido",
@@ -65,6 +77,11 @@ PROTOCOLS = [LIDO, AAVE, ETHERFI, AAVE_V2]
 def _reset_cache(monkeypatch):
     """Reset the module-level protocol cache before every test."""
     monkeypatch.setattr("services.discovery.protocol_resolver._protocols_cache", None)
+
+
+def _set_cache(monkeypatch, protocols):
+    """Seed the module cache so ``resolve_protocol`` never reaches the wire."""
+    monkeypatch.setattr("services.discovery.protocol_resolver._protocols_cache", list(protocols))
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +120,7 @@ class TestMakeResult:
             "url": "https://app.aave.com",
             "name": "Aave V3",
             "chains": ["Ethereum", "Polygon"],
+            "listing_addresses": [],
             "all_slugs": ["aave-v3", "aave-v2"],
             "all_names": ["Aave V3", "Aave V2"],
         }
@@ -349,3 +367,75 @@ class TestFetchProtocols:
 
         with pytest.raises(requests.HTTPError):
             _fetch_protocols()
+
+
+# ---------------------------------------------------------------------------
+# Listing `address` seed (DISCOVERY_MEMBERSHIP_GATE_SPEC.md §3.2 W6)
+# ---------------------------------------------------------------------------
+
+
+class TestListingAddress:
+    """The listing's own ``address`` field — the governance token DefiLlama
+    publishes on the protocol entry, which the adapter-source scan never sees."""
+
+    def test_bare_address_is_ethereum(self):
+        assert parse_listing_address("0xFE0C30065B384F05761f15d0CC899D4F9F9Cc0eB") == (
+            "0xfe0c30065b384f05761f15d0cc899d4f9f9cc0eb",
+            None,
+        )
+
+    def test_chain_prefixed_address_keeps_its_chain(self):
+        assert parse_listing_address("base:0x60359a0D0Bd9F2C6E3a8b1A9B4C5d6E7f8091A2b") == (
+            "0x60359a0d0bd9f2c6e3a8b1a9b4c5d6e7f8091a2b",
+            "base",
+        )
+
+    @pytest.mark.parametrize("raw", [None, "", "-", "   ", "null", 0x1234, ["0x" + "a" * 40]])
+    def test_non_address_values_are_skipped(self, raw):
+        assert parse_listing_address(raw) is None
+
+    @pytest.mark.parametrize(
+        "raw",
+        ["0xnothex", "0x" + "a" * 39, "0x" + "a" * 41, "base:", "base:notanaddress", ":0x" + "a" * 40],
+    )
+    def test_malformed_values_are_skipped(self, raw):
+        assert parse_listing_address(raw) is None
+
+    def test_family_addresses_are_deduped_and_ordered(self):
+        family = [
+            {"slug": "b", "address": "0x" + "b" * 40},
+            {"slug": "a", "address": "0x" + "A" * 40},
+            {"slug": "c", "address": "0x" + "a" * 40},
+            {"slug": "d", "address": "-"},
+            {"slug": "e", "address": None},
+        ]
+        assert listing_addresses(family) == [
+            {"address": "0x" + "a" * 40, "chain": None, "slug": "a"},
+            {"address": "0x" + "b" * 40, "chain": None, "slug": "b"},
+        ]
+
+    def test_resolve_protocol_publishes_the_family_listing_addresses(self, monkeypatch):
+        stake = dict(ETHERFI, address="0xFE0C30065B384F05761f15d0CC899D4F9F9Cc0eB")
+        liquid = dict(ETHERFI_LIQUID, address="0xfe0c30065b384f05761f15d0cc899d4f9f9cc0eb")
+        _set_cache(monkeypatch, [stake, liquid])
+        resolved = resolve_protocol("etherfi")
+        assert resolved["listing_addresses"] == [
+            {"address": "0xfe0c30065b384f05761f15d0cc899d4f9f9cc0eb", "chain": None, "slug": stake["slug"]}
+        ]
+        assert listing_nominations(resolved) == [
+            {"address": "0xfe0c30065b384f05761f15d0cc899d4f9f9cc0eb", "chain": "ethereum"}
+        ]
+
+    def test_no_match_publishes_no_listing_addresses(self, monkeypatch):
+        _set_cache(monkeypatch, [AAVE])
+        assert resolve_protocol("zzzz-nothing-like-this")["listing_addresses"] == []
+
+    def test_prefixed_chain_is_canonicalized_for_nomination(self):
+        resolved = {"listing_addresses": [{"address": "0x" + "c" * 40, "chain": "arbitrum one", "slug": "x"}]}
+        assert listing_nominations(resolved) == [{"address": "0x" + "c" * 40, "chain": "arbitrum"}]
+
+    def test_unrecognized_prefix_is_preserved_never_coerced(self):
+        """A chain nobody named must not become ethereum — the row stays a
+        candidate whose chain never resolves."""
+        resolved = {"listing_addresses": [{"address": "0x" + "d" * 40, "chain": "someL3", "slug": "x"}]}
+        assert listing_nominations(resolved) == [{"address": "0x" + "d" * 40, "chain": "somel3"}]

@@ -63,12 +63,12 @@ def test_resolve_proxy_queues_hidden_proxy_impl(monkeypatch):
     # set on the request — preserves the within-cascade dedup semantics for
     # top-level calls too.
     assert child["root_job_id"] == "job-1"
-    # ``discovery_relationship`` + ``parent_owns_high`` carry the
+    # ``discovery_relationship`` + ``parent_is_member`` carry the
     # structural-ownership signal to the child's discovery worker.
     assert child["discovery_relationship"] == "implementation"
     # False because session.execute returns None (no parent Contract row in this
     # mock setup), so the parent has no discovery_sources to evaluate.
-    assert child["parent_owns_high"] is False
+    assert child["parent_is_member"] is False
     # Derived default: the request carries no chain.
     assert child["chain"] == "ethereum"
 

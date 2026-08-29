@@ -379,6 +379,18 @@ def refresh_chain_role_holder_planes(
             written = persist_role_holder_planes(session, rows) if rows else 0
             _record_watermark(session, chain_id=chain_id, candidate=candidate, rows_written=written)
             session.commit()
+            if written:
+                # §3.4 event 2: role holders are membership-gate anchor-chain
+                # links, so a refreshed plane re-verifies the W3-D1 witnesses
+                # resting on this registry.
+                from services.discovery.membership_gate import evaluate_role_plane_change
+
+                evaluate_role_plane_change(
+                    session,
+                    registry_address=candidate.registry_address,
+                    rows=rows,
+                    context=f"role_holder_plane_cycle:{candidate.registry_address}",
+                )
         except Exception as exc:
             # No watermark, so the registry is still due next pass. One
             # registry's failure withholds nothing from the others.

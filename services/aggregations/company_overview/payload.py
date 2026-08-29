@@ -6,12 +6,26 @@ import logging
 import time
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select, tuple_
 from sqlalchemy.orm import Session
 
-from db.models import Contract, Job, JobStatus, Protocol, TvlSnapshot
+from db.models import (
+    ADMITTING_WITNESS_RULES,
+    WITNESS_RULE_W2_STRUCTURAL,
+    Contract,
+    ContractCreationWitness,
+    ContractMembershipWitness,
+    ContractProbeAttempt,
+    Job,
+    JobStatus,
+    Protocol,
+    TvlSnapshot,
+)
 from schemas.api_responses import CompanyOverviewResponse, ReachBlock, TvlSummary
 from schemas.control_tracking import MonitoredContractType
+from services.clients.rpc import chain_id_for_chain_name
+from services.discovery.membership_gate import membership_state, witness_is_heuristic
+from services.discovery.probes import STATUS_NOT_ROUTABLE, STATUS_PROBED, UNRESOLVABLE_CHAIN_ID
 from services.scoring.reach import REACH_MODEL, load_protocol_reach, merge_reach
 
 from .entity_keys import _coalesce_chain, _entity_key
@@ -29,11 +43,22 @@ from .principals import _MONITORED_TYPE_LOOKUP
 logger = logging.getLogger("services.aggregations.company_overview")
 
 
+def _protocol_inventory_filter(protocol_id: int):
+    """Members plus this protocol's candidates/pruned rows. A row whose
+    ``protocol_id`` belongs to another protocol is that protocol's member —
+    a foreign nomination never surfaces here; unclaimed rows (both ids NULL)
+    are outside the model entirely (spec §3.1)."""
+    return or_(
+        Contract.protocol_id == protocol_id,
+        and_(Contract.protocol_id.is_(None), Contract.nominated_protocol_id == protocol_id),
+    )
+
+
 def _all_addresses_count(session: Session, protocol_row: Protocol | None, jobs: list[Job]) -> int:
     if protocol_row:
         return int(
             session.execute(
-                select(func.count()).select_from(Contract).where(Contract.protocol_id == protocol_row.id)
+                select(func.count()).select_from(Contract).where(_protocol_inventory_filter(protocol_row.id))
             ).scalar_one()
         )
     fallback_job_ids = [j.id for j in jobs]
@@ -46,12 +71,128 @@ def _all_addresses_count(session: Session, protocol_row: Protocol | None, jobs: 
     )
 
 
+def _witness_display_entry(row: ContractMembershipWitness) -> dict[str, Any]:
+    entry: dict[str, Any] = {"rule": row.rule, "via_address": row.via_address}
+    if row.rule == WITNESS_RULE_W2_STRUCTURAL and isinstance(row.evidence, dict):
+        entry["edge_kind"] = row.evidence.get("edge_kind")
+    # DEPLOYER_HEURISTIC_SPEC.md §9 invariant 1: no export presents a
+    # heuristic membership as proven.
+    entry["heuristic"] = witness_is_heuristic(row)
+    return entry
+
+
+def _candidate_reason(attempt: ContractProbeAttempt | None) -> dict[str, Any]:
+    """Invariant 5: the parked state named from the persisted probe row —
+    never a silent default. ``no_probe_attempt`` is itself a named fact:
+    no row exists, so no probe has ever run for this (contract, chain)."""
+    if attempt is None:
+        return {"kind": "no_probe_attempt"}
+    results = attempt.results if isinstance(attempt.results, dict) else {}
+    status = results.get("status")
+    if status == STATUS_PROBED:
+        reads = results.get("reads")
+        resolved: dict[str, str] = {}
+        unresolved: list[str] = []
+        if isinstance(reads, dict):
+            for name in sorted(reads):
+                read = reads.get(name)
+                value = read.get("value") if isinstance(read, dict) else None
+                if isinstance(value, str) and value:
+                    resolved[name] = value
+                else:
+                    unresolved.append(name)
+        return {
+            "kind": "probe_unresolved",
+            "probe_block": attempt.block_number,
+            "resolved_reads": resolved,
+            "unresolved_reads": unresolved,
+        }
+    if status == STATUS_NOT_ROUTABLE:
+        return {"kind": "chain_not_routable", "chain": results.get("chain")}
+    return {"kind": "probe_error"}
+
+
+def _membership_fields(session: Session, rows: list[Contract]) -> dict[int, dict[str, Any]]:
+    """Per-row membership display fields (spec §5.2): state from the gate
+    helper, reasons only from persisted witness/probe rows. Batched — one
+    query per evidence table, never per row."""
+    chain_ids = {cr.id: chain_id_for_chain_name(cr.chain) for cr in rows}
+    code_pairs = sorted(
+        {(cid, cr.address.lower()) for cr in rows if cr.address and (cid := chain_ids.get(cr.id)) is not None}
+    )
+    code_facts: dict[tuple[int, str], ContractCreationWitness] = {}
+    if code_pairs:
+        for fact in session.execute(
+            select(ContractCreationWitness).where(
+                tuple_(ContractCreationWitness.chain_id, ContractCreationWitness.address).in_(code_pairs)
+            )
+        ).scalars():
+            code_facts[(fact.chain_id, fact.address)] = fact
+
+    states: dict[int, str] = {}
+    for cr in rows:
+        code_absent: bool | None = None
+        chain_id = chain_ids.get(cr.id)
+        if chain_id is not None and cr.address:
+            fact = code_facts.get((chain_id, cr.address.lower()))
+            if fact is not None:
+                code_absent = fact.code_absent_at_probe
+        states[cr.id] = membership_state(cr, code_absent_at_probe=code_absent)
+
+    member_protocol: dict[int, int] = {
+        cr.id: cr.protocol_id for cr in rows if states[cr.id] == "member" and cr.protocol_id is not None
+    }
+    witnesses_by_contract: dict[int, list[dict[str, Any]]] = {}
+    if member_protocol:
+        for w in session.execute(
+            select(ContractMembershipWitness)
+            .where(
+                ContractMembershipWitness.contract_id.in_(sorted(member_protocol)),
+                ContractMembershipWitness.revoked_at.is_(None),
+                ContractMembershipWitness.rule.in_(sorted(ADMITTING_WITNESS_RULES)),
+            )
+            .order_by(
+                ContractMembershipWitness.rule, ContractMembershipWitness.via_address, ContractMembershipWitness.id
+            )
+        ).scalars():
+            if w.protocol_id == member_protocol.get(w.contract_id):
+                witnesses_by_contract.setdefault(w.contract_id, []).append(_witness_display_entry(w))
+
+    candidate_ids = sorted(cid for cid, state in states.items() if state == "candidate")
+    attempts: dict[tuple[int, int], ContractProbeAttempt] = {}
+    if candidate_ids:
+        for attempt in session.execute(
+            select(ContractProbeAttempt).where(ContractProbeAttempt.contract_id.in_(candidate_ids))
+        ).scalars():
+            attempts[(attempt.contract_id, attempt.chain_id)] = attempt
+
+    out: dict[int, dict[str, Any]] = {}
+    for cr in rows:
+        state = states[cr.id]
+        reason: dict[str, Any] | None = None
+        if state == "candidate":
+            key_chain = chain_ids.get(cr.id)
+            reason = _candidate_reason(attempts.get((cr.id, UNRESOLVABLE_CHAIN_ID if key_chain is None else key_chain)))
+        elif state == "pruned":
+            chain_id = chain_ids.get(cr.id)
+            fact = code_facts.get((chain_id, cr.address.lower())) if chain_id is not None and cr.address else None
+            # ``pruned`` is only derivable FROM a code-absent probe row, so
+            # the fact is present by construction.
+            reason = {"kind": "code_absent", "code_probe_block": fact.code_probe_block if fact else None}
+        out[cr.id] = {
+            "membership_state": state,
+            "membership_witnesses": witnesses_by_contract.get(cr.id, []),
+            "membership_reason": reason,
+        }
+    return out
+
+
 def all_addresses_for_protocol(
     session: Session, protocol_row: Protocol | None, jobs: list[Job]
 ) -> list[dict[str, Any]]:
     if protocol_row:
         all_contract_rows = (
-            session.execute(select(Contract).where(Contract.protocol_id == protocol_row.id)).scalars().all()
+            session.execute(select(Contract).where(_protocol_inventory_filter(protocol_row.id))).scalars().all()
         )
     else:
         fallback_job_ids = [j.id for j in jobs]
@@ -78,12 +219,14 @@ def all_addresses_for_protocol(
             .scalars()
             .all()
         )
+    membership = _membership_fields(session, list(all_contract_rows))
 
     return sorted(
         [
             {
                 "address": cr.address,
                 "name": cr.contract_name,
+                **membership[cr.id],
                 "source_verified": cr.source_verified,
                 "is_proxy": cr.is_proxy,
                 "analyzed": cr.job_id is not None and cr.job_id in completed_job_ids,

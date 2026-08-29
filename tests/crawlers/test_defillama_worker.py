@@ -383,3 +383,53 @@ class TestProtocolCreation:
 
         assert trackers["protocol_calls"] == [("Aave", None)]
         assert job.company == "Aave"
+
+
+class TestListingAddressNomination:
+    """The listing's own ``address`` field is nominated alongside the adapter
+    scan's hits, under the same ``defillama`` tag and the same W6 seed path."""
+
+    def _run(self, monkeypatch: pytest.MonkeyPatch, *, listing: list[dict], scanned: list[str]) -> list[dict]:
+        worker = DefiLlamaWorker()
+        session = MagicMock()
+        job = _job()
+        _patch_worker_deps(monkeypatch)
+        monkeypatch.setattr(
+            "workers.defillama_worker.resolve_protocol",
+            lambda name: {
+                "slug": None,
+                "url": None,
+                "name": None,
+                "chains": [],
+                "listing_addresses": listing,
+                "all_slugs": [],
+                "all_names": [],
+            },
+        )
+        monkeypatch.setattr("workers.defillama_worker.scan_protocol", lambda **kwargs: _scan_result(addresses=scanned))
+        captured: list[dict] = []
+
+        def fake_bulk(session, *, protocol_id, entries, default_chain):
+            captured.extend(entries)
+
+        monkeypatch.setattr("workers.defillama_worker.bulk_upsert_discovered_contracts", fake_bulk)
+        with pytest.raises(JobHandledDirectly):
+            worker.process(session, cast(Any, job))
+        return captured
+
+    def test_bare_listing_address_is_nominated_on_ethereum(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        token = "0xfe0c30065b384f05761f15d0cc899d4f9f9cc0eb"
+        entries = self._run(
+            monkeypatch, listing=[{"address": token, "chain": None, "slug": "ether.fi-liquid"}], scanned=[ADDR_1]
+        )
+        assert {"address": token, "chain": "ethereum", "new_sources": ["defillama"]} in entries
+        assert {"address": ADDR_1, "chain": None, "new_sources": ["defillama"]} in entries
+
+    def test_prefixed_listing_address_keeps_its_chain(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        token = "0x60359a0d0bd9f2c6e3a8b1a9b4c5d6e7f8091a2b"
+        entries = self._run(monkeypatch, listing=[{"address": token, "chain": "base", "slug": "x"}], scanned=[])
+        assert entries == [{"address": token, "chain": "base", "new_sources": ["defillama"]}]
+
+    def test_no_listing_address_changes_nothing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        entries = self._run(monkeypatch, listing=[], scanned=[ADDR_1])
+        assert entries == [{"address": ADDR_1, "chain": None, "new_sources": ["defillama"]}]

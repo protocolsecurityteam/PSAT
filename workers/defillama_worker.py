@@ -26,7 +26,8 @@ from db.queue import (
     store_artifact,
 )
 from services.crawlers.defillama.scan import scan_protocol
-from services.discovery.protocol_resolver import pick_family_slug, resolve_protocol
+from services.discovery.membership_gate import DEFILLAMA_SOURCE_TAG
+from services.discovery.protocol_resolver import listing_nominations, pick_family_slug, resolve_protocol
 from utils.chains import UnknownChainError, chain_by_id
 from utils.logging import log_timed_phase, record_stage_metric
 from workers.base import BaseWorker, JobHandledDirectly
@@ -139,8 +140,26 @@ class DefiLlamaWorker(BaseWorker):
                 {
                     "address": normalized,
                     "chain": chain,
-                    "new_sources": ["defillama"],
+                    "new_sources": [DEFILLAMA_SOURCE_TAG],
                 }
+            )
+        # The listing's OWN ``address`` field, per family sibling — the adapter
+        # scan reads TVL token addresses out of adapter source and never sees
+        # it. Same provenance, same tag, same W6 seed path: the code probe
+        # still decides whether any of these become members.
+        listed = listing_nominations(resolved)
+        for entry in listed:
+            bulk_entries.append(
+                {
+                    "address": entry["address"],
+                    "chain": entry["chain"],
+                    "new_sources": [DEFILLAMA_SOURCE_TAG],
+                }
+            )
+        if listed:
+            logger.info(
+                "DefiLlama listing addresses nominated",
+                extra={"job_id": str(job.id), "count": len(listed), "addresses": [e["address"] for e in listed]},
             )
         bulk_upsert_discovered_contracts(
             session, protocol_id=protocol_id, entries=bulk_entries, default_chain=default_chain

@@ -43,6 +43,13 @@ pytestmark = [
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _stub_membership_probe(monkeypatch):
+    """Stub-the-wire: the backfill's near-line §3.5 probe never leaves the
+    machine — tests seed code facts directly via ``_seed_code_fact``."""
+    monkeypatch.setattr("services.discovery.membership_gate.probe", lambda session, contract: None)
+
+
 @pytest.fixture()
 def worker():
     """No-op fixture kept for source-compatibility with existing tests.
@@ -54,14 +61,8 @@ def worker():
     yield None
 
 
-def _backfill(session, *, protocol_id, chain, impl_addrs, parent_proxy_sources=None):
-    """Direct call into the backfill helper, kept short for test ergonomics.
-
-    ``parent_proxy_sources`` defaults to ``['inventory']`` (high-
-    confidence) so tests written before the ownership gate keep their
-    semantics. Tests of the gate itself pass a low-confidence value
-    like ``['dapp_crawl']`` explicitly.
-    """
+def _backfill(session, *, protocol_id, chain, impl_addrs, current_impl_address=None):
+    """Direct call into the backfill helper, kept short for test ergonomics."""
     from services.discovery.upgrade_history import backfill_historical_impl_contracts
 
     backfill_historical_impl_contracts(
@@ -69,16 +70,35 @@ def _backfill(session, *, protocol_id, chain, impl_addrs, parent_proxy_sources=N
         protocol_id=protocol_id,
         chain=chain,
         impl_addrs=impl_addrs,
-        parent_proxy_sources=parent_proxy_sources if parent_proxy_sources is not None else ["inventory"],
+        current_impl_address=current_impl_address,
     )
+
+
+def _seed_code_fact(session, addr, *, chain_id=1, block=90, absent=False):
+    """Persist the W1 code-probe fact the gate requires for every promotion
+    (invariant 3) — the offline stand-in for the §3.5 probe."""
+    from db.models import ContractCreationWitness
+
+    session.add(
+        ContractCreationWitness(
+            chain_id=chain_id,
+            address=addr.lower(),
+            code_probe_block=block,
+            code_absent_at_probe=absent,
+        )
+    )
+    session.commit()
 
 
 def _run_pipeline(session, *, contract, artifact_data, protocol_id=None):
     """Project an artifact into UpgradeEvent rows + backfill impl Contracts.
 
-    Mirrors what ``static_worker._resolve_upgrade_history`` does in production
-    after ``store_artifact`` — the same two service-level calls in the same
-    order, exercising the same code paths the live pipeline exercises.
+    Mirrors what ``static_worker._finalize_upgrade_history`` does in
+    production after ``store_artifact`` — the same two service-level calls in
+    the same order, exercising the same code paths the live pipeline
+    exercises. Membership of the impls is the gate's verdict: the backfill
+    nominates and evaluates; only impls with a member-proxy UpgradeEvent edge
+    AND a persisted code fact promote.
     """
     from services.discovery.upgrade_history import (
         backfill_historical_impl_contracts,
@@ -94,17 +114,11 @@ def _run_pipeline(session, *, contract, artifact_data, protocol_id=None):
     session.commit()
     pid = protocol_id if protocol_id is not None else contract.protocol_id
     if pid is not None and stats["impl_addrs"]:
-        # Default to high-confidence ['inventory'] when the subject
-        # proxy has no discovery_sources set. Most tests in this file
-        # predate the ownership gate and just want to exercise the
-        # backfill mechanics; the gate is tested separately.
-        sources = contract.discovery_sources or ["inventory"]
         backfill_historical_impl_contracts(
             session,
             protocol_id=pid,
             chain=contract.chain,
             impl_addrs=stats["impl_addrs"],
-            parent_proxy_sources=sources,
         )
     return stats
 
@@ -203,7 +217,10 @@ def _add_contract(session, **fields):
 # ---------------------------------------------------------------------------
 
 
-def test_backfill_creates_rows_with_upgrade_history_tag(db_session, seed_protocol, worker, stub_etherscan):
+def test_backfill_creates_rows_as_candidates_without_evidence(db_session, seed_protocol, worker, stub_etherscan):
+    """No member proxy names these impls in an UpgradeEvent and no code fact
+    exists, so the rows land as NOMINATED candidates — never members
+    (gate invariants 1+3)."""
     from db.models import Contract
 
     protocol_id, _ = seed_protocol
@@ -221,7 +238,8 @@ def test_backfill_creates_rows_with_upgrade_history_tag(db_session, seed_protoco
     rows = db_session.query(Contract).filter(Contract.address.in_(addrs)).all()
     assert len(rows) == 2
     for row in rows:
-        assert row.protocol_id == protocol_id
+        assert row.protocol_id is None
+        assert row.nominated_protocol_id == protocol_id
         assert "upgrade_history" in (row.discovery_sources or [])
         assert row.is_proxy is False
         assert row.job_id is None
@@ -232,13 +250,22 @@ def test_backfill_creates_rows_with_upgrade_history_tag(db_session, seed_protoco
 
 
 def test_backfill_adopts_orphan_row(db_session, seed_protocol, worker, stub_etherscan):
-    """Pre-existing Contract with protocol_id=None → gets adopted,
-    tagged, name preserved."""
-    from db.models import Contract
+    """Pre-existing Contract with protocol_id=None: with a member-proxy
+    UpgradeEvent edge and a code fact, the gate re-earns membership; name
+    preserved, no duplicate row."""
+    from db.models import Contract, ContractMembershipWitness, UpgradeEvent
 
     protocol_id, _ = seed_protocol
     addr = _addr(0xC3)
-    _add_contract(
+    proxy = _add_contract(
+        db_session,
+        protocol_id=protocol_id,
+        address=_addr(0xC30),
+        chain="ethereum",
+        contract_name="Proxy",
+        is_proxy=True,
+    )
+    orphan = _add_contract(
         db_session,
         protocol_id=None,
         address=addr,
@@ -246,6 +273,17 @@ def test_backfill_adopts_orphan_row(db_session, seed_protocol, worker, stub_ethe
         contract_name="ExistingName",
         is_proxy=False,
     )
+    db_session.add(
+        UpgradeEvent(
+            contract_id=proxy.id,
+            proxy_address=proxy.address,
+            new_impl=addr,
+            block_number=100,
+            tx_hash="0x" + "d" * 64,
+        )
+    )
+    db_session.commit()
+    _seed_code_fact(db_session, addr)
 
     _backfill(
         db_session,
@@ -261,6 +299,12 @@ def test_backfill_adopts_orphan_row(db_session, seed_protocol, worker, stub_ethe
     assert row.contract_name == "ExistingName"
     # No duplicate created.
     assert db_session.query(Contract).filter_by(address=addr).count() == 1
+    # Membership carries the W2 historical-impl witness with the upgrade tx.
+    witnesses = db_session.query(ContractMembershipWitness).filter_by(contract_id=orphan.id, revoked_at=None).all()
+    by_rule = {w.rule: w for w in witnesses}
+    assert set(by_rule) == {"w1_code", "w2_structural"}
+    assert by_rule["w2_structural"].evidence["edge_kind"] == "historical_implementation"
+    assert by_rule["w2_structural"].evidence["upgrade_tx_hash"] == "0x" + "d" * 64
 
 
 def test_backfill_does_not_stomp_foreign_protocol_row(db_session, seed_protocol, worker, stub_etherscan):
@@ -318,10 +362,10 @@ def test_backfill_is_idempotent(db_session, seed_protocol, worker, stub_ethersca
     addrs = {_addr(0xE5), _addr(0xF6)}
 
     _backfill(db_session, protocol_id=protocol_id, chain="ethereum", impl_addrs=addrs)
-    count_after_first = db_session.query(Contract).filter_by(protocol_id=protocol_id).count()
+    count_after_first = db_session.query(Contract).filter_by(nominated_protocol_id=protocol_id).count()
 
     _backfill(db_session, protocol_id=protocol_id, chain="ethereum", impl_addrs=addrs)
-    count_after_second = db_session.query(Contract).filter_by(protocol_id=protocol_id).count()
+    count_after_second = db_session.query(Contract).filter_by(nominated_protocol_id=protocol_id).count()
 
     assert count_after_first == count_after_second == 2
 
@@ -369,9 +413,10 @@ def test_backfill_treats_cross_chain_same_address_as_distinct(db_session, seed_p
         assert polygon_row.contract_name == "PolygonDeployment"
         assert "inventory" in (polygon_row.discovery_sources or [])
 
-        # Fresh ethereum row created for our protocol.
+        # Fresh ethereum row created, nominated for our protocol.
         ethereum_row = db_session.query(Contract).filter_by(address=addr, chain="ethereum").one()
-        assert ethereum_row.protocol_id == our_protocol_id
+        assert ethereum_row.nominated_protocol_id == our_protocol_id
+        assert ethereum_row.protocol_id is None
         assert ethereum_row.contract_name == "EthereumImpl"
         assert "upgrade_history" in (ethereum_row.discovery_sources or [])
     finally:
@@ -450,6 +495,9 @@ def test_run_upgrade_history_writes_events_and_backfills_impls(
     impl_b = _addr(0xB)
     stub_etherscan.names[impl_a] = "ImplA"
     stub_etherscan.names[impl_b] = "ImplB"
+    # W1 fuel: the gate promotes an impl only with a persisted code fact.
+    _seed_code_fact(db_session, impl_a)
+    _seed_code_fact(db_session, impl_b)
 
     artifact = {
         "proxies": {
@@ -855,8 +903,9 @@ def test_backfill_triggers_coverage_refresh_for_created_rows(db_session, seed_pr
 
     # 4. Backfill happens — late. Stub Etherscan to return the name the
     # audit scope is looking for, so the match is possible once the row
-    # exists.
+    # exists. Code fact seeded so the gate can promote (invariant 3).
     stub_etherscan.names[impl_addr] = "HistoricalImpl"
+    _seed_code_fact(db_session, impl_addr)
     _backfill(
         db_session,
         protocol_id=protocol_id,
@@ -946,6 +995,7 @@ def test_backfill_coverage_refresh_covers_adopted_rows_too(db_session, seed_prot
     db_session.commit()
     assert inserted == 0
 
+    _seed_code_fact(db_session, orphan_addr)
     _backfill(
         db_session,
         protocol_id=protocol_id,
@@ -1205,6 +1255,7 @@ def test_backfill_coverage_refresh_defers_source_equivalence(
     monkeypatch.setattr(se_mod, "verify_audit_covers_impl", _trip("verify_audit_covers_impl"))
     monkeypatch.setattr(se_mod, "fetch_etherscan_source_files", _trip("fetch_etherscan_source_files"))
 
+    _seed_code_fact(db_session, impl_addr)
     _backfill(
         db_session,
         protocol_id=protocol_id,

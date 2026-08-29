@@ -80,8 +80,9 @@ def test_defillama_then_dapp_crawl_same_mainnet_address_yields_one_row(db_sessio
     row = rows[0]
     assert row.chain == "ethereum"
     assert set(row.discovery_sources or []) == {"defillama", "dapp_crawl"}
-    # defillama is high-confidence → the row is owned; dapp_crawl enrichment keeps it.
-    assert row.protocol_id == proto_id
+    # Writers nominate, never stamp (membership-gate invariant 1).
+    assert row.protocol_id is None
+    assert row.nominated_protocol_id == proto_id
 
 
 @requires_postgres

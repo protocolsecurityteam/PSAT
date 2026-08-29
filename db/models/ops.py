@@ -407,3 +407,21 @@ class EffectsPlanMarker(Base):
     # ops-facing, so a marker can be audited against the cascade that produced it.
     candidates_planned: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     planned_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("NOW()"), nullable=False)
+
+
+class OpsKv(Base):
+    """Minimal persistent key/value row for operational markers.
+
+    Added for the membership gate's ``enabled_chains_seen`` marker (spec §3.4
+    event 4): workers on boot compare the enabled-chain allowlist against the
+    persisted value to detect a chain being enabled. Generic on purpose —
+    the next boot-time marker gets a key, not a table.
+    """
+
+    __tablename__ = "ops_kv"
+
+    key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    value: Mapped[Any] = mapped_column(JSONB, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )

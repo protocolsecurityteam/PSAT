@@ -1,6 +1,7 @@
-"""Regression tests for the discovery source-confidence gate.
+"""Regression pins for the membership gate's historic leak shapes, plus the
+frozen legacy orphan-adoption migrations.
 
-Two leak paths motivated this gate, and both are exercised here:
+Two leak paths motivated gating membership, and both are exercised here:
 
   1. ``dapp_crawl`` scrapes every ``0x...`` on a DApp page — including
      widely-held tokens (WETH, stETH) and shared infrastructure
@@ -15,21 +16,17 @@ Two leak paths motivated this gate, and both are exercised here:
      the leak — one EigenPodManager proxy → 7 EigenPodManager impls all
      tagged etherfi.
 
-The fix funnels ownership through ``services.discovery.source_confidence``:
-only HIGH_CONFIDENCE sources may stamp ``Contract.protocol_id``. Both
-the central ``bulk_upsert`` writer and the historical-impl backfill
-consult ``asserts_ownership`` before assigning ownership.
+Under the membership gate (DISCOVERY_MEMBERSHIP_GATE_SPEC.md) no source
+tag stamps ``protocol_id`` at all: every discovery write is a nomination,
+and promotion requires a recorded witness. These tests:
 
-These tests:
-  * unit-cover the helper (boundary cases),
-  * verify the writer gate at the persistence boundary,
-  * verify the backfill gate against a real Postgres so the
-    cross-protocol / orphan paths are exercised end-to-end,
-  * include an end-to-end shape test that mirrors the EigenLayer leak.
-
-A pre-fix build fails the writer tests (rows get ``protocol_id`` set
-from low-confidence sources) and the backfill tests (orphan impls get
-adopted into the protocol).
+  * verify the writer path nominates without stamping,
+  * verify the historical-impl backfill promotes only on a verified
+    member-proxy edge (W2) plus a persisted code fact (W1),
+  * pin the EigenLayer leak shape end-to-end,
+  * pin the applied legacy adoption migrations (``3a8f4d1c9b07``,
+    ``4d72e9b1f035``), whose inlined source lists are frozen deploy-time
+    snapshots of the retired source-confidence tiers.
 """
 
 from __future__ import annotations
@@ -39,107 +36,7 @@ from pathlib import Path
 
 import pytest
 
-from services.discovery.source_confidence import (
-    HIGH_CONFIDENCE_SOURCES,
-    LOW_CONFIDENCE_SOURCES,
-    STRUCTURAL_OWNERSHIP_RELATIONSHIPS,
-    asserts_ownership,
-)
 from tests.conftest import requires_postgres
-
-# ---------------------------------------------------------------------------
-# 1. The helper itself
-# ---------------------------------------------------------------------------
-
-
-class TestAssertsOwnership:
-    """Boundary cases for the helper that the gate consults. Cheap unit
-    tests — if these regress, every downstream gate test will get noisier
-    failures than they need to."""
-
-    def test_empty_or_none_does_not_assert(self):
-        assert asserts_ownership(None) is False
-        assert asserts_ownership([]) is False
-
-    def test_single_high_confidence_source_asserts(self):
-        assert asserts_ownership(["deployer_expansion"]) is True
-        assert asserts_ownership(["defillama"]) is True
-        assert asserts_ownership(["ai_inventory"]) is True
-
-    def test_single_low_confidence_source_does_not_assert(self):
-        assert asserts_ownership(["dapp_crawl"]) is False
-        assert asserts_ownership(["upgrade_history"]) is False
-
-    def test_mixed_promotes_to_assertion(self):
-        # The whole point of unioning sources — corroboration from any
-        # high-confidence source promotes the row out of orphan status.
-        assert asserts_ownership(["dapp_crawl", "deployer_expansion"]) is True
-
-    def test_unknown_source_does_not_assert(self):
-        # Safety default: an unknown source is treated as low-confidence
-        # so newly-added sources can't accidentally start stamping
-        # ``protocol_id`` before they're vetted.
-        assert asserts_ownership(["some_brand_new_source"]) is False
-
-    def test_tier_sets_are_disjoint(self):
-        # Defensive: if a source ends up in both tiers, the helper's
-        # behavior is ambiguous and the gate's contract starts leaking.
-        assert HIGH_CONFIDENCE_SOURCES.isdisjoint(LOW_CONFIDENCE_SOURCES)
-
-
-class TestStructuralOwnership:
-    """The second evidence branch: a same-protocol structural relationship
-    to a confirmed parent grants ownership without a HIGH source on the
-    child. This is the fix for the resolution-cascade false negatives —
-    UUPSProxy / OssifiableProxy / UpgradeableBeacon shells of confirmed
-    impls were ending up orphan because cascade-spawn jobs don't pass a
-    HIGH discovery source.
-    """
-
-    def test_structural_alone_grants_ownership(self):
-        # No HIGH source — pure structural propagation from a confirmed
-        # parent via an ``implementation`` edge.
-        for rel in ("implementation", "proxy", "beacon"):
-            assert asserts_ownership(None, parent_owns=True, parent_relationship=rel) is True
-
-    def test_structural_without_parent_owns_is_blocked(self):
-        # If the parent itself isn't HIGH-owned, the structural edge
-        # doesn't transitively grant ownership — propagation stops at
-        # one hop, otherwise dapp_crawl noise would cascade.
-        assert asserts_ownership(None, parent_owns=False, parent_relationship="implementation") is False
-
-    def test_non_structural_relationship_does_not_grant(self):
-        # Regular CALL edges (parent calls WETH), library edges
-        # (correctly tagged but the bucket mixes internal helpers with
-        # shared infra), and unknown relationships must NOT propagate
-        # ownership. See source_confidence.py docstring for the library
-        # rationale.
-        for rel in ("regular", "library", None, "controller", "principal"):
-            assert asserts_ownership(None, parent_owns=True, parent_relationship=rel) is False
-
-    def test_library_is_excluded(self):
-        # Pin the deliberate omission. The classifier correctly
-        # identifies library-pattern targets, but the bucket mixes
-        # protocol-internal helpers (BucketLimiter) with shared
-        # infrastructure (Circle's SignatureChecker). Without a
-        # signal that splits the two, adopting either way is wrong
-        # for the other — see source_confidence.py docstring.
-        assert "library" not in STRUCTURAL_OWNERSHIP_RELATIONSHIPS
-
-    def test_either_branch_grants_ownership(self):
-        # Both axes are valid evidence — direct OR structural — and
-        # supplying both still returns True (no XOR).
-        assert asserts_ownership(["deployer_expansion"], parent_owns=True, parent_relationship="implementation") is True
-
-    def test_low_confidence_source_plus_structural_branch_grants(self):
-        # The structural branch independently grants ownership even when
-        # the child's own discovery_sources is LOW-only. This is the
-        # exact false-negative case from PR review: an impl was found
-        # via dapp_crawl, its analysis spawned a proxy-shell child whose
-        # discovery_sources stayed LOW, and the structural relationship
-        # is the only thing that lets the gate adopt it.
-        assert asserts_ownership(["dapp_crawl"], parent_owns=True, parent_relationship="implementation") is True
-
 
 # ---------------------------------------------------------------------------
 # 2. Writer-side gate — db/queue.py
@@ -158,7 +55,7 @@ def seed_protocol(db_session):
     """Fresh protocol whose contracts get cleaned up by db_session teardown."""
     from db.models import Protocol
 
-    p = Protocol(name=f"src-conf-{uuid.uuid4().hex[:10]}")
+    p = Protocol(name=f"gate-reg-{uuid.uuid4().hex[:10]}")
     db_session.add(p)
     db_session.commit()
     return p.id
@@ -166,9 +63,12 @@ def seed_protocol(db_session):
 
 @requires_postgres
 class TestBulkUpsertOwnershipGate:
-    """Path-1 leak: dapp_crawl + similar low-confidence writers must
-    create Contract rows but leave ``protocol_id`` NULL until a high-
-    confidence source corroborates."""
+    """Membership-gate model (DISCOVERY_MEMBERSHIP_GATE_SPEC.md): NO source
+    tag stamps ``protocol_id`` at the persistence boundary — every write is a
+    nomination (``nominated_protocol_id``) and promotion is the gate's job.
+    The full writer matrix (tag tiers, re-nominations, the single-row helper)
+    is pinned in test_discovery_nomination_writers.py; kept here is the named
+    path-1 leak shape."""
 
     def test_dapp_crawl_only_entry_stays_orphan(self, db_session, seed_protocol):
         """Pre-fix: this row landed with ``protocol_id=etherfi`` — that's
@@ -196,114 +96,10 @@ class TestBulkUpsertOwnershipGate:
             "this is the dapp_crawl leak that pulled WETH/Lido into etherfi"
         )
         # Discovery trail is still preserved — the row exists, just not
-        # attributed to the protocol.
+        # attributed to the protocol; the nominator is recorded.
+        assert row.nominated_protocol_id == seed_protocol
         assert "dapp_crawl" in (row.discovery_sources or [])
         assert row.discovery_url == "https://example.com/cash"
-
-    def test_high_confidence_source_does_stamp(self, db_session, seed_protocol):
-        """Sanity counterpart: high-confidence sources still own the row.
-        Without this assertion the gate could be a stuck-open valve and
-        the other tests would still pass."""
-        from db.models import Contract
-        from db.queue import bulk_upsert_discovered_contracts
-
-        addr = _addr(0xDE01)
-        bulk_upsert_discovered_contracts(
-            db_session,
-            protocol_id=seed_protocol,
-            entries=[{"address": addr, "chain": "ethereum", "new_sources": ["deployer_expansion"]}],
-        )
-        db_session.commit()
-        row = db_session.query(Contract).filter_by(address=addr, chain="ethereum").one()
-        assert row.protocol_id == seed_protocol
-
-    def test_mixed_sources_promote_to_owned(self, db_session, seed_protocol):
-        """A single high-confidence tag in a mixed source list is enough
-        to assert ownership — corroboration is the whole point."""
-        from db.models import Contract
-        from db.queue import bulk_upsert_discovered_contracts
-
-        addr = _addr(0xDE02)
-        bulk_upsert_discovered_contracts(
-            db_session,
-            protocol_id=seed_protocol,
-            entries=[
-                {
-                    "address": addr,
-                    "chain": "ethereum",
-                    "new_sources": ["dapp_crawl", "ai_inventory"],
-                }
-            ],
-        )
-        db_session.commit()
-        row = db_session.query(Contract).filter_by(address=addr, chain="ethereum").one()
-        assert row.protocol_id == seed_protocol
-
-    def test_later_high_confidence_source_promotes_orphan(self, db_session, seed_protocol):
-        """Models the real-world cycle: dapp_crawl finds an address first
-        (no ownership), then a deployer_expansion run corroborates →
-        the existing row gets adopted into the protocol."""
-        from db.models import Contract
-        from db.queue import bulk_upsert_discovered_contracts
-
-        addr = _addr(0xDE03)
-        # First pass: dapp_crawl only → orphan.
-        bulk_upsert_discovered_contracts(
-            db_session,
-            protocol_id=seed_protocol,
-            entries=[{"address": addr, "chain": "ethereum", "new_sources": ["dapp_crawl"]}],
-        )
-        db_session.commit()
-        assert db_session.query(Contract).filter_by(address=addr).one().protocol_id is None
-        # Second pass: deployer_expansion → adopted.
-        bulk_upsert_discovered_contracts(
-            db_session,
-            protocol_id=seed_protocol,
-            entries=[{"address": addr, "chain": "ethereum", "new_sources": ["deployer_expansion"]}],
-        )
-        db_session.commit()
-        row = db_session.query(Contract).filter_by(address=addr).one()
-        assert row.protocol_id == seed_protocol
-        # Both sources retained — discovery history is union, not overwrite.
-        assert set(row.discovery_sources or []) >= {"dapp_crawl", "deployer_expansion"}
-
-    def test_low_confidence_update_does_not_adopt_existing_orphan(self, db_session, seed_protocol):
-        """An orphan row stays orphan when only a low-confidence source
-        shows up — otherwise the gate is just a slower leak."""
-        from db.models import Contract
-        from db.queue import bulk_upsert_discovered_contracts
-
-        addr = _addr(0xDE04)
-        # Seed an orphan directly so we know the row pre-exists.
-        db_session.add(Contract(address=addr, chain="ethereum", protocol_id=None, discovery_sources=["dapp_crawl"]))
-        db_session.commit()
-        bulk_upsert_discovered_contracts(
-            db_session,
-            protocol_id=seed_protocol,
-            entries=[{"address": addr, "chain": "ethereum", "new_sources": ["dapp_crawl"]}],
-        )
-        db_session.commit()
-        row = db_session.query(Contract).filter_by(address=addr).one()
-        assert row.protocol_id is None
-
-    def test_singular_upsert_helper_is_also_gated(self, db_session, seed_protocol):
-        """``upsert_discovered_contract`` (single-row variant) goes through
-        the same path; gate this one too so single-shot writers don't
-        bypass it."""
-        from db.models import Contract
-        from db.queue import upsert_discovered_contract
-
-        addr = _addr(0xDE05)
-        upsert_discovered_contract(
-            db_session,
-            address=addr,
-            chain="ethereum",
-            protocol_id=seed_protocol,
-            new_sources=["dapp_crawl"],
-        )
-        db_session.commit()
-        row = db_session.query(Contract).filter_by(address=addr).one()
-        assert row.protocol_id is None
 
 
 # ---------------------------------------------------------------------------
@@ -313,9 +109,10 @@ class TestBulkUpsertOwnershipGate:
 
 @pytest.fixture()
 def stub_etherscan(monkeypatch):
-    """Stub etherscan name lookup so the backfill works offline.
+    """Stub etherscan name lookup AND the backfill's near-line §3.5 probe so
+    the tests stay offline + hermetic (stub-the-wire rule).
 
-    Matches the helper in ``test_upgrade_history_backfill.py`` —
+    Matches the helpers in ``test_upgrade_history_backfill.py`` —
     duplicated here to keep this file self-contained and runnable in
     isolation.
     """
@@ -325,56 +122,71 @@ def stub_etherscan(monkeypatch):
         return (f"StubImpl-{address[2:6]}", {})
 
     monkeypatch.setattr(etherscan_mod, "get_contract_info", fake)
+    monkeypatch.setattr("services.discovery.membership_gate.probe", lambda session, contract: None)
 
 
 @requires_postgres
-class TestBackfillOwnershipGate:
-    """Path-2 leak: when a low-confidence parent proxy's upgrade history
-    is walked, the historical impls must not be stamped with the parent's
-    protocol_id. That's the multiplier behind the EigenPodManager × 7,
-    RewardsCoordinator × 6 chains in production."""
+class TestBackfillMembershipGate:
+    """Backfilled historical impls route through the membership gate: always
+    NOMINATED; MEMBER only via a member-proxy UpgradeEvent edge (W2
+    ``historical_implementation``) plus a persisted code fact (W1). The old
+    source-tag ownership gate this class used to pin is retired."""
 
-    def test_low_confidence_parent_produces_orphan_impls(self, db_session, seed_protocol, stub_etherscan):
-        """Mirrors the production leak: an EigenPodManager proxy got into
-        etherfi's inventory via dapp_crawl, then upgrade-history materialized
-        7 historical EigenPodManager impls all tagged etherfi. With the
-        gate, the impl rows still exist (so the coverage matcher has names
-        to resolve) but their ``protocol_id`` is NULL."""
+    @staticmethod
+    def _seed_code_fact(session, addr, block=90):
+        from db.models import ContractCreationWitness
+
+        session.add(
+            ContractCreationWitness(
+                chain_id=1, address=addr.lower(), code_probe_block=block, code_absent_at_probe=False
+            )
+        )
+        session.commit()
+
+    def test_backfill_without_member_edge_produces_candidates(self, db_session, seed_protocol, stub_etherscan):
+        """The EigenPodManager multiplier shape: impls with no proven
+        member-proxy edge stay candidates — a company-page query keyed on
+        ``protocol_id`` returns none of them."""
         from db.models import Contract
         from services.discovery.upgrade_history import backfill_historical_impl_contracts
 
         impl_addrs = {_addr(0xE100 + i) for i in range(3)}
         backfill_historical_impl_contracts(
-            db_session,
-            protocol_id=seed_protocol,
-            chain="ethereum",
-            impl_addrs=impl_addrs,
-            parent_proxy_sources=["dapp_crawl"],  # the leaky path
+            db_session, protocol_id=seed_protocol, chain="ethereum", impl_addrs=impl_addrs
         )
         db_session.commit()
 
         rows = db_session.query(Contract).filter(Contract.address.in_(impl_addrs)).all()
-        assert len(rows) == 3, "rows should still be created — only protocol_id is gated"
+        assert len(rows) == 3, "rows should still be created — only membership is gated"
         for r in rows:
-            assert r.protocol_id is None, (
-                f"impl {r.address} got protocol_id stamped from a low-confidence parent "
-                "— this is the EigenLayer multiplier leak"
-            )
+            assert r.protocol_id is None
+            assert r.nominated_protocol_id == seed_protocol
             assert "upgrade_history" in (r.discovery_sources or [])
 
-    def test_high_confidence_parent_stamps_impls(self, db_session, seed_protocol, stub_etherscan):
-        """Counterpart: a proxy genuinely owned by the protocol (e.g. via
-        deployer_expansion) still has its impls materialized AND owned."""
-        from db.models import Contract
+    def test_backfill_with_member_edge_and_code_fact_promotes(self, db_session, seed_protocol, stub_etherscan):
+        from db.models import Contract, ContractMembershipWitness, UpgradeEvent
         from services.discovery.upgrade_history import backfill_historical_impl_contracts
 
-        impl_addrs = {_addr(0xE200), _addr(0xE201)}
+        proxy = Contract(address=_addr(0xE200), chain="ethereum", protocol_id=seed_protocol, is_proxy=True)
+        db_session.add(proxy)
+        db_session.flush()
+        impl_addrs = {_addr(0xE201), _addr(0xE202)}
+        for i, addr in enumerate(sorted(impl_addrs)):
+            db_session.add(
+                UpgradeEvent(
+                    contract_id=proxy.id,
+                    proxy_address=proxy.address,
+                    new_impl=addr,
+                    block_number=100 + i,
+                    tx_hash="0x" + ("%064x" % (0xABC0 + i)),
+                )
+            )
+        db_session.commit()
+        for addr in impl_addrs:
+            self._seed_code_fact(db_session, addr)
+
         backfill_historical_impl_contracts(
-            db_session,
-            protocol_id=seed_protocol,
-            chain="ethereum",
-            impl_addrs=impl_addrs,
-            parent_proxy_sources=["deployer_expansion"],
+            db_session, protocol_id=seed_protocol, chain="ethereum", impl_addrs=impl_addrs
         )
         db_session.commit()
 
@@ -382,184 +194,30 @@ class TestBackfillOwnershipGate:
         assert len(rows) == 2
         for r in rows:
             assert r.protocol_id == seed_protocol
+            witness_rules = {
+                w.rule for w in db_session.query(ContractMembershipWitness).filter_by(contract_id=r.id, revoked_at=None)
+            }
+            assert witness_rules == {"w1_code", "w2_structural"}
 
-    def test_low_confidence_parent_does_not_adopt_existing_orphan(self, db_session, seed_protocol, stub_etherscan):
-        """Orphan impl already exists (e.g. from another protocol's
-        analysis). A low-confidence parent in OUR protocol must not pull
-        it in — that would be the adoption branch of the same leak."""
-        from db.models import Contract
-        from services.discovery.upgrade_history import backfill_historical_impl_contracts
-
-        addr = _addr(0xE300)
-        db_session.add(
-            Contract(address=addr, chain="ethereum", protocol_id=None, contract_name="ExistingOrphan", is_proxy=False)
-        )
-        db_session.commit()
-
-        backfill_historical_impl_contracts(
-            db_session,
-            protocol_id=seed_protocol,
-            chain="ethereum",
-            impl_addrs={addr},
-            parent_proxy_sources=["dapp_crawl"],
-        )
-        db_session.commit()
-
-        row = db_session.query(Contract).filter_by(address=addr).one()
-        assert row.protocol_id is None, (
-            "orphan was adopted by a low-confidence parent — the upgrade-history "
-            "adoption branch must respect the same ownership gate as the create branch"
-        )
-        # The tag still gets appended — discovery trail is preserved
-        # even when adoption is blocked.
-        assert "upgrade_history" in (row.discovery_sources or [])
-
-    def test_empty_parent_sources_treated_as_low_confidence(self, db_session, seed_protocol, stub_etherscan):
-        """A proxy with no discovery_sources at all is unconfirmed by
-        definition. Belt-and-braces — the helper already returns False
-        for None/[], this just pins the behavior at the backfill boundary."""
-        from db.models import Contract
-        from services.discovery.upgrade_history import backfill_historical_impl_contracts
-
-        addrs = {_addr(0xE400)}
-        backfill_historical_impl_contracts(
-            db_session,
-            protocol_id=seed_protocol,
-            chain="ethereum",
-            impl_addrs=addrs,
-            parent_proxy_sources=None,
-        )
-        db_session.commit()
-        row = db_session.query(Contract).filter_by(address=_addr(0xE400)).one()
-        assert row.protocol_id is None
-
-    def test_low_parent_with_high_current_impl_adopts(self, db_session, seed_protocol, stub_etherscan):
-        """LRTSquare runtime shape: the subject proxy is LOW-only (e.g.
-        ``structural_adoption`` after 3a8f4d1c9b07's branch 4 adopted
-        it) but its CURRENT impl is HIGH-sourced. Historical impls
-        must inherit the protocol via the impl anchor — same one-hop
-        discipline as 4d72e9b1f035 branch B, just enforced at write
-        time so future LRTSquare-like contracts don't have to wait
-        for the next catch-up migration."""
-        from db.models import Contract
-        from services.discovery.upgrade_history import backfill_historical_impl_contracts
-
-        current_impl_addr = _addr(0xE500)
-        # HIGH-sourced current impl — the authoritative anchor.
-        db_session.add(
-            Contract(
-                address=current_impl_addr,
-                chain="ethereum",
-                protocol_id=seed_protocol,
-                contract_name="HighCurrentImpl",
-                discovery_sources=["deployer_expansion"],
-            )
-        )
-        db_session.commit()
-
-        impl_addrs = {_addr(0xE501), _addr(0xE502)}
-        backfill_historical_impl_contracts(
-            db_session,
-            protocol_id=seed_protocol,
-            chain="ethereum",
-            impl_addrs=impl_addrs,
-            parent_proxy_sources=["structural_adoption"],  # LOW — actual prod tag
-            parent_proxy_current_impl_address=current_impl_addr,
-        )
-        db_session.commit()
-
-        rows = db_session.query(Contract).filter(Contract.address.in_(impl_addrs)).all()
-        assert len(rows) == 2
-        for r in rows:
-            assert r.protocol_id == seed_protocol, (
-                f"historical impl {r.address} did not inherit protocol from HIGH "
-                "current impl — runtime impl-anchor check is missing"
-            )
-            assert "upgrade_history" in (r.discovery_sources or [])
-
-    def test_low_parent_with_low_current_impl_stays_orphan(self, db_session, seed_protocol, stub_etherscan):
-        """EigenLayer-leak runtime shape: a LOW-only proxy whose current
-        impl is also LOW-only has no HIGH evidence anywhere in the
-        chain. Historical impls must NOT inherit — anchoring on the
-        impl's HIGH tag must keep this gate shut just like the proxy-
-        HIGH check does."""
-        from db.models import Contract
-        from services.discovery.upgrade_history import backfill_historical_impl_contracts
-
-        current_impl_addr = _addr(0xE600)
-        # LOW-only current impl — no HIGH source anywhere in the chain.
-        db_session.add(
-            Contract(
-                address=current_impl_addr,
-                chain="ethereum",
-                protocol_id=None,
-                contract_name="LowCurrentImpl",
-                discovery_sources=["dapp_crawl"],
-            )
-        )
-        db_session.commit()
-
-        impl_addrs = {_addr(0xE601), _addr(0xE602)}
-        backfill_historical_impl_contracts(
-            db_session,
-            protocol_id=seed_protocol,
-            chain="ethereum",
-            impl_addrs=impl_addrs,
-            parent_proxy_sources=["dapp_crawl"],
-            parent_proxy_current_impl_address=current_impl_addr,
-        )
-        db_session.commit()
-
-        for r in db_session.query(Contract).filter(Contract.address.in_(impl_addrs)).all():
-            assert r.protocol_id is None, (
-                f"historical impl {r.address} was adopted via a LOW-only chain — "
-                "EigenLayer-leak shape must stay closed at runtime too"
-            )
-
-    def test_low_parent_with_mismatched_impl_protocol_skips(self, db_session, seed_protocol, stub_etherscan):
-        """Mismatch guard at runtime: the proxy carries protocol_id A
-        (passed in via ``protocol_id``) but its current impl is HIGH-
-        sourced in a different protocol B. Historical impls must NOT
-        be adopted into A — otherwise a fork whose impl happens to
-        coincide with another protocol's HIGH contract would leak."""
+    def test_backfill_foreign_owned_row_left_alone(self, db_session, seed_protocol, stub_etherscan):
+        """A row already a MEMBER of a different protocol is never touched —
+        not renominated, not stamped."""
         from db.models import Contract, Protocol
         from services.discovery.upgrade_history import backfill_historical_impl_contracts
 
-        other = Protocol(name=f"backfill-mismatch-{uuid.uuid4().hex[:10]}")
+        other = Protocol(name=f"backfill-foreign-{uuid.uuid4().hex[:10]}")
         db_session.add(other)
         db_session.commit()
-
-        current_impl_addr = _addr(0xE700)
-        # HIGH impl belongs to a DIFFERENT protocol (B), not the one
-        # the backfill call is for (A = ``seed_protocol``).
-        db_session.add(
-            Contract(
-                address=current_impl_addr,
-                chain="ethereum",
-                protocol_id=other.id,
-                contract_name="ForeignHighImpl",
-                discovery_sources=["deployer_expansion"],
-            )
-        )
+        addr = _addr(0xE700)
+        db_session.add(Contract(address=addr, chain="ethereum", protocol_id=other.id, contract_name="ForeignImpl"))
         db_session.commit()
 
-        impl_addrs = {_addr(0xE701)}
-        backfill_historical_impl_contracts(
-            db_session,
-            protocol_id=seed_protocol,
-            chain="ethereum",
-            impl_addrs=impl_addrs,
-            parent_proxy_sources=["structural_adoption"],
-            parent_proxy_current_impl_address=current_impl_addr,
-        )
+        backfill_historical_impl_contracts(db_session, protocol_id=seed_protocol, chain="ethereum", impl_addrs={addr})
         db_session.commit()
 
-        row = db_session.query(Contract).filter_by(address=_addr(0xE701)).one()
-        assert row.protocol_id is None, (
-            "historical impl was adopted into protocol A even though the "
-            "current impl belongs to protocol B — the mismatch guard is "
-            "missing from the runtime impl-anchor check"
-        )
+        row = db_session.query(Contract).filter_by(address=addr).one()
+        assert row.protocol_id == other.id
+        assert row.nominated_protocol_id is None
 
 
 # ---------------------------------------------------------------------------
@@ -569,14 +227,13 @@ class TestBackfillOwnershipGate:
 
 @requires_postgres
 class TestEigenLayerLeakShape:
-    """Reproduces the real-world shape that triggered this fix: a foreign
-    proxy enters via dapp_crawl and its upgrade history adds N impls.
-    Before the fix, the protocol's inventory grew by 1+N foreign rows.
-    After the fix, the proxy lands orphan and so do the impls — zero
-    pollution in the protocol's company-page rollup."""
+    """The real-world shape that motivated the gate: a foreign proxy enters
+    via dapp_crawl and its upgrade history adds N impls. Even WITH stored
+    upgrade events and code facts, a proxy that is not itself a MEMBER
+    licenses nothing — zero pollution in the protocol's rollup."""
 
     def test_dapp_crawl_proxy_plus_upgrade_history_does_not_pollute(self, db_session, seed_protocol, stub_etherscan):
-        from db.models import Contract
+        from db.models import Contract, ContractCreationWitness, UpgradeEvent
         from db.queue import bulk_upsert_discovered_contracts
         from services.discovery.upgrade_history import backfill_historical_impl_contracts
 
@@ -598,22 +255,34 @@ class TestEigenLayerLeakShape:
         proxy = db_session.query(Contract).filter_by(address=proxy_addr).one()
         assert proxy.protocol_id is None, "writer gate failed at step 1"
 
-        # Step 2: the static worker analyzes the proxy and surfaces its
-        # historical impls. With ``parent_proxy_sources`` carrying only
-        # the low-confidence ``dapp_crawl`` tag, the impl backfill must
-        # produce orphan rows.
+        # Step 2: upgrade events + code facts exist for the impls — the
+        # strongest version of the shape. The via proxy is NOT a member, so
+        # the W2 edge does not verify and every impl stays a candidate.
         impl_addrs = {_addr(0xE001), _addr(0xE002), _addr(0xE003)}
+        for i, addr in enumerate(sorted(impl_addrs)):
+            db_session.add(
+                UpgradeEvent(
+                    contract_id=proxy.id,
+                    proxy_address=proxy.address,
+                    new_impl=addr,
+                    block_number=50 + i,
+                    tx_hash="0x" + ("%064x" % (0xDEAD0 + i)),
+                )
+            )
+            db_session.add(
+                ContractCreationWitness(chain_id=1, address=addr, code_probe_block=40, code_absent_at_probe=False)
+            )
+        db_session.commit()
         backfill_historical_impl_contracts(
             db_session,
             protocol_id=seed_protocol,
             chain="ethereum",
             impl_addrs=impl_addrs,
-            parent_proxy_sources=proxy.discovery_sources,
         )
         db_session.commit()
 
-        # The whole point of the fix: a company-page query keyed on
-        # ``protocol_id`` returns ZERO of these rows.
+        # The whole point: a company-page query keyed on ``protocol_id``
+        # returns ZERO of these rows.
         owned = db_session.query(Contract).filter_by(protocol_id=seed_protocol).all()
         leaked = [c for c in owned if c.address == proxy_addr or c.address in impl_addrs]
         assert leaked == [], (
@@ -629,297 +298,301 @@ class TestEigenLayerLeakShape:
 
 
 # ---------------------------------------------------------------------------
+# 6b. Call-target / NULL-provenance overreach — the WETH9/EndpointV2 leak
+# ---------------------------------------------------------------------------
+
+
+@requires_postgres
+class TestCallTargetOverreachShape:
+    """The dev-DB shape behind the WETH9 / EndpointV2 / DepositContract / Lido
+    admissions: members carry ControllerValue rows naming the externals they
+    integrate with. ``call_target`` is an operand and NULL is not-determined —
+    neither admits a D2 controller (invariant 6, ``W3_D2_SOURCES``). The third
+    refused provenance, ``caller_gate``, is pinned with the full EndpointV2
+    shape in test_membership_caller_gate_admission.py."""
+
+    @staticmethod
+    def _seed(db_session, seed_protocol, tag):
+        from db.models import Contract, ContractCreationWitness
+
+        member = Contract(address=_addr(0xF000 + tag), chain="ethereum", protocol_id=seed_protocol)
+        candidate = Contract(address=_addr(0xF100 + tag), chain="ethereum", nominated_protocol_id=seed_protocol)
+        db_session.add_all([member, candidate])
+        db_session.flush()
+        db_session.add(
+            ContractCreationWitness(
+                chain_id=1, address=candidate.address, code_probe_block=90, code_absent_at_probe=False
+            )
+        )
+        db_session.flush()
+        return member, candidate
+
+    @staticmethod
+    def _evaluate(db_session, candidate):
+        from services.discovery import membership_gate as gate
+
+        gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(candidate.id,)))
+        db_session.commit()
+
+    def test_call_target_controller_value_never_admits(self, db_session, seed_protocol):
+        from db.models import ContractMembershipWitness, ControllerValue
+
+        member, weth9 = self._seed(db_session, seed_protocol, 0)
+        db_session.add(
+            ControllerValue(
+                contract_id=member.id,
+                controller_id="nativeWrapper",
+                value=weth9.address,
+                authority_provenance="call_target",
+            )
+        )
+        self._evaluate(db_session, weth9)
+
+        assert weth9.protocol_id is None
+        assert (
+            db_session.query(ContractMembershipWitness).filter_by(contract_id=weth9.id, rule="w3_control").count() == 0
+        )
+
+    def test_null_provenance_controller_value_never_admits(self, db_session, seed_protocol):
+        from db.models import ContractMembershipWitness, ControllerValue
+
+        member, foreign = self._seed(db_session, seed_protocol, 1)
+        db_session.add(ControllerValue(contract_id=member.id, controller_id="endpoint", value=foreign.address))
+        self._evaluate(db_session, foreign)
+
+        assert foreign.protocol_id is None
+        assert (
+            db_session.query(ContractMembershipWitness).filter_by(contract_id=foreign.id, rule="w3_control").count()
+            == 0
+        )
+
+    def test_w2_cascade_dies_with_the_refused_w3_root(self, db_session, seed_protocol):
+        """The Lido shape: the stETH proxy entered via a call_target CV, then
+        its implementation rode in on W2. Refusing the W3 root must starve the
+        W2 edge — neither row may become a member."""
+        from db.models import Contract, ContractCreationWitness, ControllerValue
+
+        member, foreign_proxy = self._seed(db_session, seed_protocol, 3)
+        impl = Contract(address=_addr(0xF200), chain="ethereum", nominated_protocol_id=seed_protocol)
+        db_session.add(impl)
+        db_session.flush()
+        foreign_proxy.implementation = impl.address
+        db_session.add(
+            ContractCreationWitness(chain_id=1, address=impl.address, code_probe_block=90, code_absent_at_probe=False)
+        )
+        db_session.add(
+            ControllerValue(
+                contract_id=member.id,
+                controller_id="stETH",
+                value=foreign_proxy.address,
+                authority_provenance="call_target",
+            )
+        )
+        db_session.flush()
+
+        from services.discovery import membership_gate as gate
+
+        gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(foreign_proxy.id, impl.id)))
+        db_session.commit()
+
+        assert foreign_proxy.protocol_id is None
+        assert impl.protocol_id is None
+
+    def test_exclusivity_observed_set_counts_caller_gate_only(self, db_session, seed_protocol):
+        """Owner ruling: a call_target operand is not an observation of
+        control, so it neither licenses exclusivity nor refuses it — the
+        exclusivity verdict is computed over caller_gate rows alone."""
+        from db.models import Contract, ControllerValue, Protocol
+        from services.discovery.membership_gate import _controller_is_exclusive
+
+        member, _ = self._seed(db_session, seed_protocol, 4)
+        operator = _addr(0xF300)
+        db_session.add(
+            ControllerValue(
+                contract_id=member.id, controller_id="owner", value=operator, authority_provenance="caller_gate"
+            )
+        )
+        other = Protocol(name=f"ct-excl-{uuid.uuid4().hex[:10]}")
+        db_session.add(other)
+        db_session.flush()
+        foreign = Contract(address=_addr(0xF301), chain="ethereum", protocol_id=other.id)
+        db_session.add(foreign)
+        db_session.flush()
+        # A call_target row naming the operator on a FOREIGN contract is not
+        # an observation of control and must not decide the verdict either way.
+        db_session.add(
+            ControllerValue(
+                contract_id=foreign.id, controller_id="router", value=operator, authority_provenance="call_target"
+            )
+        )
+        db_session.flush()
+
+        assert _controller_is_exclusive(
+            db_session,
+            protocol_id=seed_protocol,
+            controller_address=operator,
+            chain_key="ethereum",
+            exclude_contract_ids=set(),
+        )
+
+        # The same observation with caller_gate provenance IS control — and
+        # being foreign, it kills exclusivity (the two-hop shape).
+        db_session.query(ControllerValue).filter_by(contract_id=foreign.id).update(
+            {"authority_provenance": "caller_gate"}
+        )
+        db_session.flush()
+        assert not _controller_is_exclusive(
+            db_session,
+            protocol_id=seed_protocol,
+            controller_address=operator,
+            chain_key="ethereum",
+            exclude_contract_ids=set(),
+        )
+
+
+# ---------------------------------------------------------------------------
 # 7. Structural-orphan adoption migration (3a8f4d1c9b07)
 # ---------------------------------------------------------------------------
 
 
 @requires_postgres
-class TestProxyOfHighImplRuntimeAdoption:
-    """Runtime counterpart to the migration's fourth branch. When
-    ``static_worker._resolve_proxy`` classifies a contract as a proxy
-    and sets its ``.implementation``, an orphan proxy whose impl is
-    HIGH-owned by some protocol P AND which is referenced by some
-    HIGH-owned-by-P contract gets adopted into P on the spot.
+class TestProxyMembershipOnClassification:
+    """Membership-gate event 2a at ``static_worker._resolve_proxy``: the
+    freshly stored proxy pointers are a fact delta; the gate promotes the
+    proxy only on a verified W2 proxy edge (its resolved impl IS a member of
+    its NOMINATED protocol) plus W1. This replaces the ad-hoc
+    proxy-of-HIGH-impl runtime adoption."""
 
-    The migration's same branch only fires once at deploy time on
-    populated data — useless for the live preview workflow where the
-    DB starts empty. The runtime check closes that gap so the live
-    pipeline actually fixes the false negative ``0x8f08`` shape
-    (a proxy whose impl is etherfi-owned but which isn't directly
-    on inventory)."""
+    @staticmethod
+    def _seed_proxy_job(db_session, proxy_addr, *, nominated_protocol_id=None):
+        from db.models import Contract, ContractCreationWitness, Job, JobStage, JobStatus
 
-    def test_orphan_proxy_with_high_impl_gets_adopted(self, db_session, seed_protocol, monkeypatch):
-        """End-to-end runtime path: proxy is orphan, impl is HIGH-owned,
-        proxy is referenced by another HIGH-owned protocol contract →
-        ``_resolve_proxy`` adopts the proxy and tags it
-        ``structural_adoption``."""
-        from db.models import Contract, ContractDependency, Job, JobStage, JobStatus
+        proxy_job = Job(
+            id=uuid.uuid4(),
+            stage=JobStage.static,
+            status=JobStatus.processing,
+            request={"rpc_url": "rpc"},
+        )
+        db_session.add(proxy_job)
+        db_session.flush()
+        db_session.add(
+            Contract(
+                address=proxy_addr,
+                chain="ethereum",
+                protocol_id=None,
+                nominated_protocol_id=nominated_protocol_id,
+                contract_name="Proxy",
+                job_id=proxy_job.id,
+            )
+        )
+        db_session.add(
+            ContractCreationWitness(chain_id=1, address=proxy_addr, code_probe_block=10, code_absent_at_probe=False)
+        )
+        db_session.commit()
+        return proxy_job
+
+    @staticmethod
+    def _stub_classifier(monkeypatch, impl_addr):
+        monkeypatch.setattr(
+            "services.discovery.classifier.classify_single",
+            lambda address, rpc_url, **_kw: {
+                "address": address,
+                "type": "proxy",
+                "proxy_type": "eip1967",
+                "implementation": impl_addr,
+            },
+        )
+        monkeypatch.setattr("workers.static_worker.store_artifact", lambda *a, **kw: None)
+        monkeypatch.setattr(
+            "workers.static_worker.create_job",
+            lambda *a, **kw: type("J", (), {"id": "child"})(),
+        )
+        monkeypatch.setattr("workers.static_worker.reconcile_impl_job_for_proxy", lambda *a, **kw: "skip")
+        monkeypatch.setattr("workers.static_worker._redirect_proxy_policy_dependencies", lambda *a, **kw: None)
+
+    def test_nominated_proxy_with_member_impl_promotes(self, db_session, seed_protocol, monkeypatch):
+        from types import SimpleNamespace
+
+        from db.models import Contract, ContractMembershipWitness
         from workers.static_worker import StaticWorker
 
         impl_addr = _addr(0xF000)
         proxy_addr = _addr(0xF001)
-        ref_addr = _addr(0xF002)
-
-        # HIGH-owned impl (e.g. ether.fi's LRTSquaredCore via deployer_expansion).
         db_session.add(
-            Contract(
-                address=impl_addr,
-                chain="ethereum",
-                protocol_id=seed_protocol,
-                contract_name="HighImpl",
-                discovery_sources=["deployer_expansion"],
-            )
-        )
-        # A second HIGH-owned contract that references the orphan proxy
-        # in its dep graph — the "protocol actually integrates with this
-        # proxy" signal that distinguishes a real protocol-internal
-        # proxy from an EIP-1167 minimal-proxy clone or ERC-6551 TBA.
-        ref_contract = Contract(
-            address=ref_addr,
-            chain="ethereum",
-            protocol_id=seed_protocol,
-            contract_name="RefContract",
-            discovery_sources=["ai_inventory"],
-        )
-        db_session.add(ref_contract)
-        db_session.flush()
-        db_session.add(
-            ContractDependency(
-                contract_id=ref_contract.id,
-                dependency_address=proxy_addr,
-                relationship_type="proxy",
-                source=["dynamic"],
-            )
-        )
-
-        # The orphan proxy + a Job representing its analysis. The Job FK
-        # has to point at a real row for the inner SELECT-then-update
-        # to land.
-        proxy_job = Job(
-            id=uuid.uuid4(),
-            stage=JobStage.static,
-            status=JobStatus.processing,
-            request={"rpc_url": "rpc"},
-        )
-        db_session.add(proxy_job)
-        db_session.flush()
-        db_session.add(
-            Contract(
-                address=proxy_addr,
-                chain="ethereum",
-                protocol_id=None,
-                contract_name="OrphanProxy",
-                discovery_sources=None,
-                job_id=proxy_job.id,
-            )
+            Contract(address=impl_addr, chain="ethereum", protocol_id=seed_protocol, contract_name="MemberImpl")
         )
         db_session.commit()
-
-        # Stub the classifier so ``_resolve_proxy`` returns the proxy
-        # verdict with the HIGH impl as its implementation.
-        monkeypatch.setattr(
-            "services.discovery.classifier.classify_single",
-            lambda address, rpc_url, **_kw: {
-                "address": address,
-                "type": "proxy",
-                "proxy_type": "eip1967",
-                "implementation": impl_addr,
-            },
-        )
-        # No-op the artifact + child-job side effects — we're testing
-        # the adoption behaviour, not the cascade.
-        monkeypatch.setattr(
-            "workers.static_worker.store_artifact",
-            lambda *a, **kw: None,
-        )
-        monkeypatch.setattr(
-            "workers.static_worker.create_job",
-            lambda *a, **kw: type("J", (), {"id": "child"})(),
-        )
-
-        from types import SimpleNamespace
-
-        # The worker needs ``job.request`` to be a dict and ``job.id`` to
-        # exist; everything else accessed in ``_resolve_proxy`` is mocked.
-        worker_job = SimpleNamespace(
-            id=proxy_job.id, address=proxy_addr, name="OrphanProxy", request={"rpc_url": "rpc", "chain_id": 1}
-        )
-        StaticWorker()._resolve_proxy(db_session, worker_job, proxy_addr, "OrphanProxy")
-        db_session.commit()
-
-        adopted = db_session.query(Contract).filter_by(address=proxy_addr).one()
-        assert adopted.protocol_id == seed_protocol, (
-            "orphan proxy whose impl is HIGH-owned and which a HIGH "
-            "protocol contract references should be adopted at runtime"
-        )
-        assert "structural_adoption" in (adopted.discovery_sources or [])
-
-    def test_orphan_proxy_with_high_impl_stays_orphan_when_unreferenced(self, db_session, seed_protocol, monkeypatch):
-        """Safety filter: an orphan proxy whose impl is HIGH-owned but
-        which no HIGH-owned-same-protocol contract references must NOT
-        be adopted. ERC-6551 TBA / fork shape. The runtime check must
-        respect the same safety filter the migration's fourth branch
-        uses, or it'd re-open a leak the migration carefully closes."""
-        from db.models import Contract, Job, JobStage, JobStatus
-        from workers.static_worker import StaticWorker
-
-        impl_addr = _addr(0xF100)
-        stranger_proxy = _addr(0xF101)
-
-        db_session.add(
-            Contract(
-                address=impl_addr,
-                chain="ethereum",
-                protocol_id=seed_protocol,
-                contract_name="HighImpl2",
-                discovery_sources=["deployer_expansion"],
-            )
-        )
-        proxy_job = Job(
-            id=uuid.uuid4(),
-            stage=JobStage.static,
-            status=JobStatus.processing,
-            request={"rpc_url": "rpc"},
-        )
-        db_session.add(proxy_job)
-        db_session.flush()
-        # Stranger proxy: HIGH impl, but no HIGH protocol contract
-        # references it in contract_dependencies.
-        db_session.add(
-            Contract(
-                address=stranger_proxy,
-                chain="ethereum",
-                protocol_id=None,
-                contract_name="StrangerFork",
-                discovery_sources=None,
-                job_id=proxy_job.id,
-            )
-        )
-        db_session.commit()
-
-        monkeypatch.setattr(
-            "services.discovery.classifier.classify_single",
-            lambda address, rpc_url, **_kw: {
-                "address": address,
-                "type": "proxy",
-                "proxy_type": "eip1967",
-                "implementation": impl_addr,
-            },
-        )
-        monkeypatch.setattr("workers.static_worker.store_artifact", lambda *a, **kw: None)
-        monkeypatch.setattr(
-            "workers.static_worker.create_job",
-            lambda *a, **kw: type("J", (), {"id": "child"})(),
-        )
-
-        from types import SimpleNamespace
+        proxy_job = self._seed_proxy_job(db_session, proxy_addr, nominated_protocol_id=seed_protocol)
+        self._stub_classifier(monkeypatch, impl_addr)
 
         worker_job = SimpleNamespace(
-            id=proxy_job.id, address=stranger_proxy, name="StrangerFork", request={"rpc_url": "rpc"}
+            id=proxy_job.id, address=proxy_addr, name="Proxy", request={"rpc_url": "rpc", "chain_id": 1}
         )
-        StaticWorker()._resolve_proxy(db_session, worker_job, stranger_proxy, "StrangerFork")
-        db_session.commit()
-
-        row = db_session.query(Contract).filter_by(address=stranger_proxy).one()
-        assert row.protocol_id is None, (
-            "stranger proxy was adopted just because its impl happens to be "
-            "HIGH-owned — the 'must be referenced by HIGH protocol' filter "
-            "is missing from the runtime check"
-        )
-
-    def test_runtime_skips_when_only_low_source_parent_references_orphan(self, db_session, seed_protocol, monkeypatch):
-        """Tightening regression: the proxy is referenced by a same-
-        protocol contract whose only source is LOW (``upgrade_history``,
-        ``structural_adoption``). ``protocol_id`` is set on that parent
-        (transitively, via upgrade_history backfill from a HIGH proxy),
-        but its discovery_sources don't satisfy the HIGH gate. The
-        adoption must NOT fire — otherwise the runtime check silently
-        admits transitive chains that the one-hop gate refuses."""
-        from db.models import Contract, ContractDependency, Job, JobStage, JobStatus
-        from workers.static_worker import StaticWorker
-
-        impl_addr = _addr(0xF200)
-        proxy_addr = _addr(0xF201)
-        low_ref_addr = _addr(0xF202)
-
-        db_session.add(
-            Contract(
-                address=impl_addr,
-                chain="ethereum",
-                protocol_id=seed_protocol,
-                contract_name="HighImpl3",
-                discovery_sources=["deployer_expansion"],
-            )
-        )
-        # Same-protocol parent — but its only source is LOW
-        # (``upgrade_history``). protocol_id is set because this row was
-        # backfilled from a HIGH proxy earlier; it must not act as
-        # adoption evidence on its own.
-        ref_contract = Contract(
-            address=low_ref_addr,
-            chain="ethereum",
-            protocol_id=seed_protocol,
-            contract_name="LowRefContract",
-            discovery_sources=["upgrade_history"],
-        )
-        db_session.add(ref_contract)
-        db_session.flush()
-        db_session.add(
-            ContractDependency(
-                contract_id=ref_contract.id,
-                dependency_address=proxy_addr,
-                relationship_type="proxy",
-                source=["dynamic"],
-            )
-        )
-        proxy_job = Job(
-            id=uuid.uuid4(),
-            stage=JobStage.static,
-            status=JobStatus.processing,
-            request={"rpc_url": "rpc"},
-        )
-        db_session.add(proxy_job)
-        db_session.flush()
-        db_session.add(
-            Contract(
-                address=proxy_addr,
-                chain="ethereum",
-                protocol_id=None,
-                contract_name="OrphanProxyLowParent",
-                discovery_sources=None,
-                job_id=proxy_job.id,
-            )
-        )
-        db_session.commit()
-
-        monkeypatch.setattr(
-            "services.discovery.classifier.classify_single",
-            lambda address, rpc_url, **_kw: {
-                "address": address,
-                "type": "proxy",
-                "proxy_type": "eip1967",
-                "implementation": impl_addr,
-            },
-        )
-        monkeypatch.setattr("workers.static_worker.store_artifact", lambda *a, **kw: None)
-        monkeypatch.setattr(
-            "workers.static_worker.create_job",
-            lambda *a, **kw: type("J", (), {"id": "child"})(),
-        )
-
-        from types import SimpleNamespace
-
-        worker_job = SimpleNamespace(
-            id=proxy_job.id, address=proxy_addr, name="OrphanProxyLowParent", request={"rpc_url": "rpc"}
-        )
-        StaticWorker()._resolve_proxy(db_session, worker_job, proxy_addr, "OrphanProxyLowParent")
+        StaticWorker()._resolve_proxy(db_session, worker_job, proxy_addr, "Proxy")
         db_session.commit()
 
         row = db_session.query(Contract).filter_by(address=proxy_addr).one()
-        assert row.protocol_id is None, (
-            "orphan was adopted on the strength of a LOW-only-source parent — "
-            "the runtime check is no longer enforcing the one-hop-from-HIGH rule"
+        assert row.protocol_id == seed_protocol
+        witness_rules = {
+            w.rule for w in db_session.query(ContractMembershipWitness).filter_by(contract_id=row.id, revoked_at=None)
+        }
+        assert witness_rules == {"w1_code", "w2_structural"}
+
+    def test_unnominated_proxy_never_promotes(self, db_session, seed_protocol, monkeypatch):
+        """No nomination → no membership, whatever the impl points at.
+        The stranger-fork / ERC-6551 TBA shape stays out."""
+        from types import SimpleNamespace
+
+        from db.models import Contract
+        from workers.static_worker import StaticWorker
+
+        impl_addr = _addr(0xF100)
+        proxy_addr = _addr(0xF101)
+        db_session.add(
+            Contract(address=impl_addr, chain="ethereum", protocol_id=seed_protocol, contract_name="MemberImpl2")
         )
+        db_session.commit()
+        proxy_job = self._seed_proxy_job(db_session, proxy_addr, nominated_protocol_id=None)
+        self._stub_classifier(monkeypatch, impl_addr)
+
+        worker_job = SimpleNamespace(
+            id=proxy_job.id, address=proxy_addr, name="StrangerFork", request={"rpc_url": "rpc", "chain_id": 1}
+        )
+        StaticWorker()._resolve_proxy(db_session, worker_job, proxy_addr, "StrangerFork")
+        db_session.commit()
+
+        row = db_session.query(Contract).filter_by(address=proxy_addr).one()
+        assert row.protocol_id is None
+
+    def test_proxy_nominated_elsewhere_stays_candidate(self, db_session, seed_protocol, monkeypatch):
+        """The impl is a member of protocol B; the proxy is nominated to A.
+        The W2 edge only verifies against the NOMINATED protocol, so nothing
+        promotes — no cross-protocol adoption through a shared impl."""
+        from types import SimpleNamespace
+
+        from db.models import Contract, Protocol
+        from workers.static_worker import StaticWorker
+
+        other = Protocol(name=f"proxy-foreign-{uuid.uuid4().hex[:10]}")
+        db_session.add(other)
+        db_session.commit()
+
+        impl_addr = _addr(0xF200)
+        proxy_addr = _addr(0xF201)
+        db_session.add(Contract(address=impl_addr, chain="ethereum", protocol_id=other.id, contract_name="ForeignImpl"))
+        db_session.commit()
+        proxy_job = self._seed_proxy_job(db_session, proxy_addr, nominated_protocol_id=seed_protocol)
+        self._stub_classifier(monkeypatch, impl_addr)
+
+        worker_job = SimpleNamespace(
+            id=proxy_job.id, address=proxy_addr, name="Proxy", request={"rpc_url": "rpc", "chain_id": 1}
+        )
+        StaticWorker()._resolve_proxy(db_session, worker_job, proxy_addr, "Proxy")
+        db_session.commit()
+
+        row = db_session.query(Contract).filter_by(address=proxy_addr).one()
+        assert row.protocol_id is None
+        assert row.nominated_protocol_id == seed_protocol
 
 
 @requires_postgres
@@ -1299,7 +972,7 @@ class TestStructuralOrphanMigration:
         from db.models import Contract, Protocol
 
         # Second protocol so we can simulate a cross-protocol structural edge.
-        second_proto = Protocol(name=f"src-conf-second-{uuid.uuid4().hex[:8]}")
+        second_proto = Protocol(name=f"gate-reg-second-{uuid.uuid4().hex[:8]}")
         db_session.add(second_proto)
         db_session.commit()
 
@@ -1368,9 +1041,10 @@ class TestStructuralOrphanMigration:
 class TestRemainingOrphanAdoption:
     """Both branches of ``4d72e9b1f035_adopt_remaining_orphan_classes``:
 
-    Branch A (deployer-cascade) — runtime helper lives in
-    ``workers.discovery._deployer_cascade_protocol_id``; migration
-    sweeps the same shape across the historical orphan set.
+    Branch A (deployer-cascade) — migration-only sweep of the historical
+    orphan set. The runtime helper it mirrored
+    (``workers.discovery._deployer_cascade_protocol_id``) is replaced by the
+    membership gate's deployer trust ladder (spec §3.3).
 
     Branch B (historical-impl behind HIGH-impl proxy) — migration-only.
     Anchors on the proxy's current implementation's HIGH source, not
@@ -1393,117 +1067,6 @@ class TestRemainingOrphanAdoption:
             )
         )
         db_session.commit()
-
-    # ----- runtime helper ----------------------------------------------------
-
-    def test_runtime_helper_returns_protocol_when_high_sibling_shares_deployer(self, db_session, seed_protocol):
-        from workers.discovery import _deployer_cascade_protocol_id
-
-        deployer = _addr(0xC001)
-        self._seed_high_sibling(
-            db_session,
-            protocol_id=seed_protocol,
-            deployer=deployer,
-            sibling_addr=_addr(0xC101),
-            sibling_sources=["ai_inventory"],  # HIGH
-        )
-
-        result = _deployer_cascade_protocol_id(db_session, deployer)
-        assert result == seed_protocol
-
-    def test_runtime_helper_returns_none_when_sibling_is_low_only(self, db_session, seed_protocol):
-        """LOW-only sibling must NOT trigger adoption — that's how WETH
-        with only ``dapp_crawl`` stays unattributed."""
-        from workers.discovery import _deployer_cascade_protocol_id
-
-        deployer = _addr(0xC002)
-        self._seed_high_sibling(
-            db_session,
-            protocol_id=seed_protocol,
-            deployer=deployer,
-            sibling_addr=_addr(0xC102),
-            sibling_sources=["dapp_crawl", "upgrade_history"],  # both LOW
-        )
-
-        assert _deployer_cascade_protocol_id(db_session, deployer) is None
-
-    def test_runtime_helper_returns_none_when_no_sibling_shares_deployer(self, db_session, seed_protocol):
-        from workers.discovery import _deployer_cascade_protocol_id
-
-        # Sibling exists for a DIFFERENT deployer.
-        self._seed_high_sibling(
-            db_session,
-            protocol_id=seed_protocol,
-            deployer=_addr(0xC003),
-            sibling_addr=_addr(0xC103),
-            sibling_sources=["deployer_expansion"],
-        )
-
-        result = _deployer_cascade_protocol_id(db_session, _addr(0xC004))
-        assert result is None
-
-    def test_runtime_helper_returns_none_when_deployer_is_none(self, db_session):
-        """Defensive — an orphan with no recorded deployer can't cascade."""
-        from workers.discovery import _deployer_cascade_protocol_id
-
-        assert _deployer_cascade_protocol_id(db_session, None) is None
-        assert _deployer_cascade_protocol_id(db_session, "") is None
-
-    def test_runtime_helper_picks_dominant_protocol_on_split(self, db_session, seed_protocol):
-        """If a deployer has HIGH-sourced contracts across two protocols
-        (rare but possible — shared dev team operating multiple protocols
-        from one EOA), pick the one with the most siblings."""
-        from db.models import Contract, Protocol
-        from workers.discovery import _deployer_cascade_protocol_id
-
-        other_proto = Protocol(name=f"dep-cascade-other-{uuid.uuid4().hex[:10]}")
-        db_session.add(other_proto)
-        db_session.commit()
-
-        deployer = _addr(0xC005)
-        # Three HIGH siblings on seed_protocol, one on other_proto.
-        for n, addr_n in enumerate((0xC105, 0xC106, 0xC107)):
-            db_session.add(
-                Contract(
-                    address=_addr(addr_n),
-                    chain="ethereum",
-                    deployer=deployer,
-                    protocol_id=seed_protocol,
-                    discovery_sources=["deployer_expansion"],
-                )
-            )
-        db_session.add(
-            Contract(
-                address=_addr(0xC108),
-                chain="ethereum",
-                deployer=deployer,
-                protocol_id=other_proto.id,
-                discovery_sources=["ai_inventory"],
-            )
-        )
-        db_session.commit()
-
-        # The HIGH-sibling count is 3 for seed_protocol vs 1 for other_proto.
-        assert _deployer_cascade_protocol_id(db_session, deployer) == seed_protocol
-
-    def test_runtime_helper_is_case_insensitive_on_deployer(self, db_session, seed_protocol):
-        """Contract.deployer addresses can land in either case; the lookup
-        must match regardless."""
-        from workers.discovery import _deployer_cascade_protocol_id
-
-        # Sibling row uses lowercase, query uses uppercase.
-        deployer_lc = _addr(0xC006)
-        self._seed_high_sibling(
-            db_session,
-            protocol_id=seed_protocol,
-            deployer=deployer_lc,
-            sibling_addr=_addr(0xC109),
-            sibling_sources=["deployer_expansion"],
-        )
-
-        # Same address, mixed case.
-        deployer_mixed = "0x" + deployer_lc[2:].upper()
-        assert _deployer_cascade_protocol_id(db_session, deployer_mixed) == seed_protocol
 
     # ----- migration --------------------------------------------------------
 

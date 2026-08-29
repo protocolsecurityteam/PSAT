@@ -494,10 +494,9 @@ def test_process_address_fanout_swallows_creators_exception(monkeypatch):
     assert contract.deployer is None
 
 
-def test_cache_hit_adopts_existing_row_from_request_sources(monkeypatch):
-    """The static-cache-hit early return must still run the ownership gate:
-    an explicit address+company submit carries the ``inventory`` source, and
-    that grant holds even when the address was already analyzed."""
+def test_cache_hit_routes_row_through_gate_intake(monkeypatch):
+    """The static-cache-hit early return must still enter the membership gate:
+    the cache hit reuses ANALYSIS, never protocol membership (invariant 1)."""
     from services.concurrency import RpcExecutor
 
     RpcExecutor.reset_for_tests()
@@ -510,17 +509,15 @@ def test_cache_hit_adopts_existing_row_from_request_sources(monkeypatch):
     )
     monkeypatch.setattr("workers.discovery.copy_static_cache", lambda session, src, dst: 42)
 
-    dirty_calls: list[tuple] = []
-    monkeypatch.setattr(
-        "services.monitoring.enrollment.mark_enrollment_dirty",
-        lambda session, pid, reason: dirty_calls.append((pid, reason)),
-    )
-
     cached_row = MagicMock()
     cached_row.protocol_id = None
-    cached_row.discovery_sources = None
-    cached_row.deployer = None
     cached_row.contract_name = "AtomicQueue"
+
+    intake_calls: list[tuple] = []
+    monkeypatch.setattr(
+        "workers.discovery._gate_intake",
+        lambda session, job, contract, request: intake_calls.append((job, contract, request)),
+    )
 
     worker = DiscoveryWorker()
     monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
@@ -530,14 +527,16 @@ def test_cache_hit_adopts_existing_row_from_request_sources(monkeypatch):
 
     worker._process_address(session, job)
 
-    assert cached_row.protocol_id == 1
-    assert "inventory" in (cached_row.discovery_sources or [])
-    assert dirty_calls == [(1, "discovery_adoption")]
+    assert len(intake_calls) == 1
+    intake_job, intake_row, intake_request = intake_calls[0]
+    assert intake_job is job
+    assert intake_row is cached_row
+    assert intake_request.get("discovery_sources") == ["inventory"]
 
 
-def test_fetch_path_adopts_existing_row_from_request_sources(monkeypatch):
-    """The fetch path's existing-row branch honors a HIGH source carried by
-    the request, not only sources already recorded on the row."""
+def test_fetch_path_routes_existing_row_through_gate_intake(monkeypatch):
+    """The fetch path's existing-row branch hands the row to the gate with the
+    request it arrived on — no direct protocol_id write anywhere in the path."""
     from services.concurrency import RpcExecutor
 
     RpcExecutor.reset_for_tests()
@@ -545,15 +544,16 @@ def test_fetch_path_adopts_existing_row_from_request_sources(monkeypatch):
     _patch_discovery(monkeypatch, result)
 
     monkeypatch.setattr("workers.discovery.find_completed_static_cache", lambda *a, **kw: None)
-    monkeypatch.setattr(
-        "services.monitoring.enrollment.mark_enrollment_dirty",
-        lambda session, pid, reason: True,
-    )
 
     existing_row = MagicMock()
     existing_row.protocol_id = None
-    existing_row.discovery_sources = None
     existing_row.deployer = None
+
+    intake_calls: list[tuple] = []
+    monkeypatch.setattr(
+        "workers.discovery._gate_intake",
+        lambda session, job, contract, request: intake_calls.append((contract, request)),
+    )
 
     worker = DiscoveryWorker()
     monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
@@ -563,17 +563,16 @@ def test_fetch_path_adopts_existing_row_from_request_sources(monkeypatch):
 
     worker._process_address(session, job)
 
-    assert existing_row.protocol_id == 1
-    assert "inventory" in (existing_row.discovery_sources or [])
+    assert len(intake_calls) == 1
+    assert intake_calls[0][0] is existing_row
+    # The stamp is the gate's alone: the fetch path never set it.
+    assert existing_row.protocol_id is None
 
 
-def test_fetch_path_leaves_low_confidence_orphan_unadopted(monkeypatch):
-    """The BoringGovernance→WETH9 leak path, driven through the worker.
-
-    A dependency-spawned analysis job carries the parent's ``protocol_id``.
-    The existing row is an orphan whose only discovery source is LOW
-    (``dapp_crawl``) and whose deployer is unwitnessed, so no branch of the
-    adoption gate applies: ownership must stay unclaimed."""
+def test_fetch_path_never_stamps_protocol_id_at_write(monkeypatch):
+    """The new-row arm writes ``protocol_id=None`` regardless of the job's
+    protocol or its request sources — membership is earned in the gate, never
+    conferred by a source's identity (invariant 1)."""
     from services.concurrency import RpcExecutor
 
     RpcExecutor.reset_for_tests()
@@ -581,26 +580,26 @@ def test_fetch_path_leaves_low_confidence_orphan_unadopted(monkeypatch):
     _patch_discovery(monkeypatch, result)
 
     monkeypatch.setattr("workers.discovery.find_completed_static_cache", lambda *a, **kw: None)
-    monkeypatch.setattr(
-        "services.monitoring.enrollment.mark_enrollment_dirty",
-        lambda session, pid, reason: True,
-    )
 
-    existing_row = MagicMock()
-    existing_row.protocol_id = None
-    existing_row.discovery_sources = ["dapp_crawl"]
-    existing_row.deployer = None
+    intake_calls: list[tuple] = []
+    monkeypatch.setattr(
+        "workers.discovery._gate_intake",
+        lambda session, job, contract, request: intake_calls.append((contract, request)),
+    )
 
     worker = DiscoveryWorker()
     monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
     session = MagicMock()
-    session.execute.return_value.scalar_one_or_none.return_value = existing_row
-    job = _job(protocol_id=1, request={"discovery_sources": ["dapp_crawl"]})
+    session.execute.return_value.scalar_one_or_none.return_value = None
+    job = _job(protocol_id=1, request={"discovery_sources": ["defillama", "inventory"]})
 
     worker._process_address(session, job)
 
-    assert existing_row.protocol_id is None
-    assert existing_row.discovery_sources == ["dapp_crawl"]
+    contract = session.add.call_args[0][0]
+    assert contract.protocol_id is None
+    assert contract.discovery_sources == ["defillama", "inventory"]
+    assert len(intake_calls) == 1
+    assert intake_calls[0][0] is contract
 
 
 def test_process_address_failed_creators_keeps_prior_deployer(monkeypatch):

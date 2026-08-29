@@ -56,6 +56,8 @@ from db.models import (  # noqa: E402
     ProtocolSubscription,
     ProxySubscription,
     ProxyUpgradeEvent,
+    RoleHolderPlane,
+    RoleHolderPlaneRefresh,
     TokenDeliveryEvidence,
     TvlSnapshot,
     UpgradeTransaction,
@@ -760,6 +762,13 @@ def db_session():
             # so it needs no line of its own.
             ContractBalance,
             ContractBalanceFetch,
+            # Role planes are keyed by (chain, registry, role) and hold no FK
+            # anything above cascades — same shape as TokenDeliveryEvidence.
+            # A committed plane row left behind is the next test's stored
+            # floor, and the refresh watermark would mark its registry
+            # not-due, so both arms are swept together.
+            RoleHolderPlane,
+            RoleHolderPlaneRefresh,
         ]:
             session.query(model).delete()
         session.commit()

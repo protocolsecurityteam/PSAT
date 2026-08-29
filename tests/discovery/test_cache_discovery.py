@@ -21,6 +21,12 @@ pytestmark = [requires_postgres, pytest.mark.usefixtures("_stub_defillama_protoc
 ADDR_C = "0x1111111111111111111111111111111111111111"
 
 
+@pytest.fixture(autouse=True)
+def _stub_membership_probe(monkeypatch):
+    """Stub-the-wire: the gate intake's near-line §3.5 probe never leaves the machine."""
+    monkeypatch.setattr("services.discovery.membership_gate.probe", lambda session, contract: None)
+
+
 # ---------------------------------------------------------------------------
 # Discovery worker cache hit
 # ---------------------------------------------------------------------------

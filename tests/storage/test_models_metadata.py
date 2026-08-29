@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from db.models import Base
 
-EXPECTED_TABLE_COUNT = 54
+EXPECTED_TABLE_COUNT = 59
 
 EXPECTED_TABLES = [
     "address_labels",
@@ -25,6 +25,8 @@ EXPECTED_TABLES = [
     "contract_creation_witnesses",
     "contract_dependencies",
     "contract_materializations",
+    "contract_membership_witnesses",
+    "contract_probe_attempts",
     "contract_summaries",
     "contracts",
     "control_graph_edges",
@@ -32,6 +34,7 @@ EXPECTED_TABLES = [
     "controller_values",
     "daemon_leases",
     "dapp_interactions",
+    "deployer_affinity_challenges",
     "effect_behavior_cache",
     "effect_verdicts",
     "effective_functions",
@@ -47,7 +50,9 @@ EXPECTED_TABLES = [
     "monitored_contracts",
     "monitored_events",
     "monitoring_enrollment_queue",
+    "ops_kv",
     "principal_labels",
+    "protocol_deployers",
     "protocol_score_queue",
     "protocol_scores",
     "protocol_scores_latest",
