@@ -489,7 +489,6 @@ def test_build_effective_permissions_handles_vyper_dynarray_signatures():
         {
             "controller_id": "state_variable:SEALING_COMMITTEE",
             "label": "SEALING_COMMITTEE",
-            "source": "SEALING_COMMITTEE",
             "kind": "state_variable",
             "principals": [
                 {
@@ -614,7 +613,6 @@ def test_build_effective_permissions_includes_generic_controller_grants():
         {
             "controller_id": "state_variable:governance",
             "label": "governance",
-            "source": "governance",
             "kind": "state_variable",
             "principals": [
                 {
@@ -689,7 +687,6 @@ def test_build_effective_permissions_uses_resolved_role_principals_and_skips_non
         {
             "controller_id": "role_identifier:PAUSE_ROLE",
             "label": "PAUSE_ROLE",
-            "source": "PAUSE_ROLE",
             "kind": "role_identifier",
             "principals": [
                 {

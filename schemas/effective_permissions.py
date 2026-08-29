@@ -44,7 +44,6 @@ class AuthorityRoleGrant(TypedDict):
 class ResolvedControllerGrant(TypedDict):
     controller_id: str
     label: str
-    source: str
     kind: str
     principals: list[ResolvedPrincipal]
     notes: list[str]

@@ -297,7 +297,6 @@ def _controller_grants_for_refs(
                 {
                     "controller_id": controller_id,
                     "label": ref,
-                    "source": ref,
                     "kind": kind,
                     "principals": principals,
                     "notes": notes,

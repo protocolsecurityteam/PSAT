@@ -283,20 +283,33 @@ class ControllerWriterFunction(TypedDict):
     evidence: list[Evidence]
 
 
-class ControllerTrackingTarget(TypedDict):
+class ControllerSpec(TypedDict):
+    """The identity kernel of one tracked controller: which controller, where
+    it comes from, and how its value is read. Shared verbatim between the
+    static stage's observation record (``ControllerTrackingTarget``) and the
+    resolution stage's watch instruction (``control_tracking.TrackedController``)
+    — the plan builder copies these fields one-for-one, so they are one fact,
+    defined once."""
+
     controller_id: str
     label: str
     source: str
     kind: ControllerKind
     read_spec: ControllerReadSpec | None
-    confidence: ControllerConfidence | None
     tracking_mode: ControllerTrackingMode
-    writer_functions: list[ControllerWriterFunction]
-    associated_events: list[AssociatedEvent]
-    polling_sources: list[str]
     notes: list[str]
     # Absent = not determined. See ``ControllerProvenance``.
     authority_provenance: NotRequired[ControllerProvenance]
+
+
+class ControllerTrackingTarget(ControllerSpec):
+    """The static stage's controller observation: a kernel plus what the source
+    says about it (confidence, writer functions, emitted events, polling)."""
+
+    confidence: ControllerConfidence | None
+    writer_functions: list[ControllerWriterFunction]
+    associated_events: list[AssociatedEvent]
+    polling_sources: list[str]
 
 
 class SecondaryImplPointer(TypedDict):

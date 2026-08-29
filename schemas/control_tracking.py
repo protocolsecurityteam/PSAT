@@ -8,10 +8,8 @@ from typing_extensions import NotRequired, TypedDict
 
 from .contract_analysis import (
     AssociatedEvent,
-    ControllerKind,
     ControllerProvenance,
-    ControllerReadSpec,
-    ControllerTrackingMode,
+    ControllerSpec,
 )
 
 # Core principal vocabulary — defined once in ``schemas.core`` and re-exported
@@ -70,18 +68,12 @@ class PollingFallback(TypedDict):
     notes: list[str]
 
 
-class TrackedController(TypedDict):
-    controller_id: str
-    label: str
-    source: str
-    kind: ControllerKind
-    read_spec: ControllerReadSpec | None
-    tracking_mode: ControllerTrackingMode
+class TrackedController(ControllerSpec):
+    """The resolution stage's watch instruction for one controller: the shared
+    identity kernel plus HOW it is watched (event subscription and polling)."""
+
     event_watch: EventWatch | None
     polling_fallback: PollingFallback
-    notes: list[str]
-    # Absent = not determined. See ``ControllerProvenance``.
-    authority_provenance: NotRequired[ControllerProvenance]
 
 
 class ControlTrackingPlan(ArtifactEnvelope):
