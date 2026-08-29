@@ -21,7 +21,7 @@ from db.models import (
     Protocol,
     TvlSnapshot,
 )
-from schemas.api_responses import CompanyOverviewResponse, ReachBlock, TvlSummary
+from schemas.api_responses import CompanyOverviewResponse, ReachBlock, TvlPoint
 from schemas.control_tracking import MonitoredContractType
 from services.clients.rpc import chain_id_for_chain_name
 from services.discovery.membership_gate import membership_state, witness_is_heuristic
@@ -245,7 +245,7 @@ def all_addresses_for_protocol(
     )
 
 
-def _latest_tvl(session: Session, protocol_row: Protocol | None) -> TvlSummary | None:
+def _latest_tvl(session: Session, protocol_row: Protocol | None) -> TvlPoint | None:
     if protocol_row is None:
         return None
     latest_tvl = session.execute(

@@ -60,6 +60,7 @@ ResolvedEdgeRelation = Literal[
     "controller_value_unattributed",
 ]
 
+
 class ResolvedGraphNode(TypedDict):
     id: str
     address: str
@@ -75,6 +76,7 @@ class ResolvedGraphNode(TypedDict):
     details: dict[str, object]
     artifacts: dict[str, str]
 
+
 class ResolvedGraphEdge(TypedDict):
     from_id: str
     to_id: str
@@ -82,6 +84,7 @@ class ResolvedGraphEdge(TypedDict):
     label: str
     source_controller_id: str | None
     notes: list[str]
+
 
 class ResolvedControlGraph(TypedDict):
     schema_version: str

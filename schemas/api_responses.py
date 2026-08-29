@@ -71,21 +71,9 @@ class DeleteCompanyAddressResponse(TypedDict):
     deleted: bool
 
 
-class JobStageTimingsResponse(TypedDict):
-    job_id: str
-    stage_timings: dict[str, Any]
-
-
 # ---------------------------------------------------------------------------
 # Company overview + sub-payloads (routers/company.py)
 # ---------------------------------------------------------------------------
-
-
-class TvlSummary(TypedDict):
-    total_usd: float | None
-    defillama_tvl: float | None
-    source: str | None
-    timestamp: str
 
 
 class ReachBlock(TypedDict):
@@ -100,21 +88,13 @@ class CompanyOverviewResponse(TypedDict):
     company: str
     protocol_id: int | None
     contract_count: int
-    tvl: TvlSummary | None
+    tvl: TvlPoint | None
     contracts: list[dict[str, Any]]
     principals: list[dict[str, Any]]
     ownership_hierarchy: list[dict[str, Any]]
     fund_flows: list[dict[str, Any]]
     reach: ReachBlock
     all_addresses_count: int
-
-
-class CompanyAddressesResponse(TypedDict):
-    all_addresses: list[dict[str, Any]]
-
-
-class CompanyFunctionsResponse(TypedDict):
-    functions: dict[str, list[dict[str, Any]]]
 
 
 class CompanyScoreResponse(TypedDict):
