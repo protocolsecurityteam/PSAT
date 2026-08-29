@@ -41,8 +41,8 @@ from services.monitoring.restaking_enrollment import (
     node_addresses_from_fold,
 )
 from services.resolution.role_holder_plane import ROLE_GRANTED_TOPIC0, ROLE_REVOKED_TOPIC0
-from workers.resolution_worker import ResolutionWorker
 from tests.support.resolution_worker_stubs import _minimal_contract_analysis, _minimal_tracking_plan
+from workers.resolution_worker import ResolutionWorker
 
 # The measured EtherFiNodesManager PROXY. Its ``contracts`` row is keyed at the
 # implementation, which emits nothing — the enrollment target is this address.
