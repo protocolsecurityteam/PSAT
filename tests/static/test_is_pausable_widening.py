@@ -139,16 +139,18 @@ def test_struct_member_latch_is_pausable(tmp_path):
     assert _pause_claims(effects) == ({"pause()"}, {"unpause()"}, {"state.isPaused"})
 
 
-def test_bitmap_pause_family_is_not_widened_into(tmp_path):
-    """NEGATIVE CONTROL, and the leg's hard ordering constraint: the bitmap
-    family must not start publishing a pause capability before A7 can bound the
-    duration. The exclusion is a property of the evidence -- the new bitmap
-    comes from a parameter, so no definite constant-bool toggle exists -- not a
-    contract-name or signature list."""
+def test_bitmap_pause_family_reports_the_proven_pause_all_path(tmp_path):
+    """Pause existence is independent of duration analysis.
+
+    The parameter-driven pause/unpause functions remain directionally
+    unresolved, but ``pauseAll()`` passes a proven non-zero constant through an
+    internal setter and therefore establishes ``pause.set``. An unknown duration
+    belongs to a separate assessment and cannot turn a real effect into False.
+    """
     result, effects = _analyse(tmp_path, BITMAP_LATCH)
-    assert _pause_claims(effects) == (set(), set(), set()), "the widening's input must be empty here"
-    assert result["is_pausable"] is False, result
-    assert result["pause_functions"] == []
+    assert _pause_claims(effects) == ({"pauseAll()"}, set(), {"_paused"})
+    assert result["is_pausable"] is True, result
+    assert result["pause_functions"] == ["pauseAll()"]
     assert result["unpause_functions"] == []
 
 

@@ -713,6 +713,15 @@ def test_resolution_worker_rewrites_address_for_impl_jobs(monkeypatch):
     artifacts = {
         "control_tracking_plan": tracking_plan,
         "contract_analysis": contract_analysis,
+        "predicate_trees": {"schema_version": "semantic", "trees": {}},
+        "effects": {
+            "schema_version": "semantic-2",
+            "contract_name": "VaultImpl",
+            "functions": {},
+            "claims_schema_version": "claims/1",
+            "claim_analyses": {},
+            "claim_diagnostics": [],
+        },
     }
 
     monkeypatch.setattr(

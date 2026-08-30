@@ -24,7 +24,7 @@ from sqlalchemy.orm import sessionmaker
 
 from db.models import Contract, EffectiveFunction, Job, JobStage, JobStatus
 from db.queue import store_artifact
-from services.static.claims import Claim
+from services.static.claims import ClaimProjection
 from tests.conftest import requires_postgres
 from workers.policy_worker import PolicyWorker
 
@@ -232,7 +232,7 @@ def test_apply_cross_contract_claims_merges_and_dedups():
             {"function": "noop()", "abi_signature": "noop()", "claims": []},
         ]
     }
-    enriched: dict[str, list[Claim]] = {
+    enriched: dict[str, list[ClaimProjection]] = {
         "sweep(address)": [{"claim_id": "flow.out", "tier": "policy_derived", "witness": {"policy": True}}],
     }
     PolicyWorker()._apply_cross_contract_claims(payload, enriched)
@@ -259,8 +259,8 @@ def test_equal_tier_merge_keeps_the_first_claim():
     keeps it harmless is the precondition below."""
     from services.static.claims.registry import resolve_claim_precedence
 
-    stale: Claim = {"claim_id": "flow.out", "tier": "policy_derived", "witness": {"sink_id": "stale"}}
-    fresh: Claim = {"claim_id": "flow.out", "tier": "policy_derived", "witness": {"sink_id": "fresh"}}
+    stale: ClaimProjection = {"claim_id": "flow.out", "tier": "policy_derived", "witness": {"sink_id": "stale"}}
+    fresh: ClaimProjection = {"claim_id": "flow.out", "tier": "policy_derived", "witness": {"sink_id": "fresh"}}
     survivor = resolve_claim_precedence([stale, fresh])
     assert len(survivor) == 1
     assert survivor[0]["witness"]["sink_id"] == "stale"

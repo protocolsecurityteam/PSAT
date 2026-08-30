@@ -1,8 +1,9 @@
 """Two-plane claims subsystem (Plane 1).
 
-Facts (``effects.py``, Plane 0) are the substrate; this package turns them into
-typed, machine-checkable CLAIM objects ``{claim_id, tier, witness}`` minted only
-through a code registry. Public surface:
+Facts (``effects.py``, Plane 0) are the substrate; this package runs the matcher
+registry and emits the historical per-function ``ClaimProjection`` shape. The
+assessment builder turns each successful projection into first-class Evidence,
+Basis, and Claim records; matcher failures ride analysis receipts instead.
 
 - ``build_claims`` / ``attach_claims_to_effects`` — produce the claims artifact
   and ride it through the effects transport (called from the static pipeline).
@@ -32,8 +33,8 @@ from .types import (
     CONSUMER_FAMILIES,
     SCHEMA_VERSION,
     TIERS,
-    Claim,
     ClaimEvidence,
+    ClaimProjection,
     ClaimsArtifact,
     ConsumerFamily,
     Tier,
@@ -43,9 +44,9 @@ from .types import (
 __all__ = [
     "CONSUMER_FAMILIES",
     "CONSUMER_REFERENCED_CLAIM_IDS",
-    "Claim",
     "ClaimContext",
     "ClaimEvidence",
+    "ClaimProjection",
     "ClaimsArtifact",
     "ConsumerFamily",
     "RegistryEntry",

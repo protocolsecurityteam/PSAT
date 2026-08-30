@@ -314,7 +314,7 @@ def test_provenance_upgrade_emits_policy_derived():
 def test_provenance_does_not_override_static_standard_exact():
     """A static standard_exact upgrade claim on the same function survives the
     per-function precedence merge; the policy_derived duplicate is dropped."""
-    from services.static.claims import Claim, resolve_claim_precedence
+    from services.static.claims import ClaimProjection, resolve_claim_precedence
 
     pp = proxy_provenance_from_classifications(
         TELLER, _classifications(TELLER, type="proxy", proxy_type="eip1967", implementation=IMPL)
@@ -325,7 +325,11 @@ def test_provenance_does_not_override_static_standard_exact():
         {},
         proxy_provenance=pp,
     )
-    static_claim: Claim = {"claim_id": "upgrade.implementation", "tier": "standard_exact", "witness": {"static": True}}
+    static_claim: ClaimProjection = {
+        "claim_id": "upgrade.implementation",
+        "tier": "standard_exact",
+        "witness": {"static": True},
+    }
     merged = resolve_claim_precedence([static_claim, *out["upgradeTo(address)"]])
     assert len(merged) == 1
     assert merged[0]["tier"] == "standard_exact"

@@ -389,8 +389,9 @@ def _guard_refusal(reason: str, declaration: str | None = None) -> VerifiedGuard
 
 
 class PauseAnalyzer:
-    """Identify pause state-vars: a state var written by an auth-
-    gated function and read with revert in other functions."""
+    """Identify latch state written by a recurring callable function and used
+    to revert state-changing entry points. Authority is classified separately;
+    a public pauser is still a pause capability."""
 
     def __init__(self, contract: Any, predicate_trees: dict[str, PredicateTree]) -> None:
         if not SLITHER_AVAILABLE:
@@ -414,7 +415,7 @@ class PauseAnalyzer:
                 continue
             if not self._is_latch_shaped(sv, var_name, writers):
                 continue
-            if any(self._writer_is_auth_gated(w) for w in writers):
+            if any(self._writer_is_recurring(w) for w in writers):
                 if self._read_with_revert_in_others(var_name, writers):
                     pause_vars.add(var_name)
         return pause_vars
@@ -558,11 +559,11 @@ class PauseAnalyzer:
                         return True
         return False
 
-    def _writer_is_auth_gated(self, fn: Any) -> bool:
+    def _writer_is_recurring(self, fn: Any) -> bool:
         tree = self.predicate_trees.get(fn.full_name)
         if tree is None:
-            return False
-        return _tree_has_authority(tree)
+            return True
+        return not _tree_has_role(tree, "one_shot")
 
     def _read_with_revert_in_others(self, var_name: str, writer_fns: list[Any]) -> bool:
         writer_ids = {id(w) for w in writer_fns}
@@ -576,7 +577,7 @@ class PauseAnalyzer:
         # up in the modifier's body IRs but the predicate builder has
         # already resolved it via cross-fn provenance walking.
         for fn in self.contract.functions:
-            if fn.is_constructor or id(fn) in writer_ids:
+            if not _is_state_changing_entry_point(fn) or id(fn) in writer_ids:
                 continue
             full_name = getattr(fn, "full_name", None)
             if not isinstance(full_name, str):
@@ -590,7 +591,7 @@ class PauseAnalyzer:
         # might emit unsupported but the underlying body still has a
         # direct revert-with-statevar read.
         for fn in self.contract.functions:
-            if fn.is_constructor or id(fn) in writer_ids:
+            if not _is_state_changing_entry_point(fn) or id(fn) in writer_ids:
                 continue
             containers = [fn] + (list(getattr(fn, "modifiers", []) or []))
             for c in containers:
@@ -848,6 +849,21 @@ def _tree_has_authority(tree: PredicateTree) -> bool:
     return False
 
 
+def _tree_has_role(tree: PredicateTree, role: str) -> bool:
+    if tree.get("op") == "LEAF":
+        leaf = tree.get("leaf")
+        return leaf is not None and leaf.get("authority_role") == role
+    return any(_tree_has_role(child, role) for child in tree.get("children") or [])
+
+
+def _is_state_changing_entry_point(fn: Any) -> bool:
+    return (
+        not bool(getattr(fn, "is_constructor", False))
+        and getattr(fn, "visibility", "") in ("public", "external")
+        and not bool(getattr(fn, "view", False) or getattr(fn, "pure", False))
+    )
+
+
 # ---------------------------------------------------------------------------
 # Apply pass: classify gate leaves whose operand reads a guard var.
 # ---------------------------------------------------------------------------
@@ -917,7 +933,7 @@ def _build_pause_info(
 
     if pause_vars:
         for fn in getattr(contract, "functions", []) or []:
-            if getattr(fn, "is_constructor", False):
+            if not _is_state_changing_entry_point(fn):
                 continue
             written = {getattr(v, "name", "") for v in (getattr(fn, "state_variables_written", []) or [])}
             if written & pause_vars:

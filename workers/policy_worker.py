@@ -26,6 +26,7 @@ from db.nested_artifacts import store_bundle as store_nested_artifacts
 from db.queue import get_artifact, store_artifact
 from db.queue.typed import (
     ArtifactSchemaError,
+    load_assessment,
     load_contract_analysis,
     load_control_snapshot,
     load_control_tracking_plan,
@@ -53,7 +54,7 @@ from services.resolution.cross_chain_authority import make_cross_chain_recognize
 from services.resolution.graph_tables import replace_control_graph_rows
 from services.resolution.recursive import LoadedArtifacts, resolve_control_graph
 from services.resolution.tracking import classify_resolved_address_with_status, read_contract_controllers
-from services.static.claims import Claim, resolve_claim_precedence
+from services.static.claims import ClaimProjection, resolve_claim_precedence
 from utils.chains import UnknownChainError, chain_by_id, chain_by_name, require_chain
 from utils.logging import log_timed_phase, record_degraded, record_stage_metric
 from workers.base import BaseWorker
@@ -585,6 +586,33 @@ class PolicyWorker(BaseWorker):
         if control_snapshot is None:
             raise RuntimeError("control_snapshot artifact not found")
 
+        try:
+            assessment = load_assessment(get_artifact, session, job.id)
+        except ArtifactSchemaError as exc:
+            raise RuntimeError(f"{exc.artifact_name} artifact failed validation") from exc
+        if assessment is None:
+            from services.assessment import build_static_assessment
+
+            assessment = build_static_assessment(
+                chain_id=chain_id,
+                address=contract_analysis["subject"]["address"],
+                contract_name=contract_analysis["subject"]["name"],
+                code_hash=None,
+                source_hash=getattr(job, "source_content_hash", None),
+                analysis=contract_analysis,
+                effects=(
+                    effects_artifact
+                    if isinstance(effects_artifact, dict)
+                    else {"schema_version": "missing", "error": "effects artifact missing"}
+                ),
+                predicate_trees=(
+                    predicate_trees
+                    if isinstance(predicate_trees, dict)
+                    else {"schema_version": "missing", "error": "predicate_trees artifact missing"}
+                ),
+            )
+            store_artifact(session, job.id, "assessment", data=assessment)
+
         nested_artifacts = _load_nested_artifacts(session, job.id, chain=chain_name)
 
         # Determine nested controller context for effective-permission enrichment.
@@ -646,6 +674,26 @@ class PolicyWorker(BaseWorker):
                 effects=effects_artifact if isinstance(effects_artifact, dict) else None,
             )
             ph["function_count"] = len(ep_data["functions"])
+
+        # Cross-contract claims must land before row materialization so the DB
+        # remains a projection of the canonical assessment rather than an older
+        # pre-enrichment vocabulary.
+        with log_timed_phase(logger, "cross_contract_enrichment", durations_ms=durations_ms):
+            enriched = self._enrich_cross_contract(
+                session,
+                job,
+                contract_analysis,
+                control_snapshot,
+                function_records=ep_data.get("functions"),
+            )
+            if enriched:
+                self._apply_cross_contract_claims(ep_data, enriched)
+
+        from services.assessment import add_policy, project_effective_permissions
+
+        assessment = add_policy(assessment, ep_data, chain_id=chain_id)
+        ep_data = cast(EffectivePermissions, project_effective_permissions(assessment, ep_data))
+        store_artifact(session, job.id, "assessment", data=assessment)
 
         # Write to effective_functions and function_principals tables from
         # resolver-native semantic capability rows only.
@@ -994,18 +1042,13 @@ class PolicyWorker(BaseWorker):
             job.name or "Contract",
         )
 
-        # Cross-contract enrichment: mint policy-derived claims from sibling facts.
-        with log_timed_phase(logger, "cross_contract_enrichment", durations_ms=durations_ms):
-            enriched = self._enrich_cross_contract(
-                session,
-                job,
-                contract_analysis,
-                control_snapshot,
-                function_records=ep_data.get("functions") if isinstance(ep_data, dict) else None,
-            )
-            if enriched and ep_data is not None:
-                self._apply_cross_contract_claims(ep_data, enriched)
-                store_artifact(session, job.id, "effective_permissions", data=ep_data)
+        # Canonical cutover: graph relations and effective permissions enrich
+        # the same assessment rather than becoming new sources of truth.
+        from services.assessment import add_resolution
+
+        if isinstance(resolved_control_graph, dict):
+            assessment = add_resolution(assessment, resolved_control_graph, chain_id=chain_id)
+        store_artifact(session, job.id, "assessment", data=assessment)
 
         self.update_detail(
             session,
@@ -1131,7 +1174,9 @@ class PolicyWorker(BaseWorker):
             },
         )
 
-    def _apply_cross_contract_claims(self, payload: Mapping[str, Any], enriched: dict[str, list[Claim]]) -> None:
+    def _apply_cross_contract_claims(
+        self, payload: Mapping[str, Any], enriched: dict[str, list[ClaimProjection]]
+    ) -> None:
         for fn in payload.get("functions", []):
             fn_sig = fn.get("function") or fn.get("abi_signature")
             additions = enriched.get(fn_sig) if fn_sig else None
@@ -1147,7 +1192,7 @@ class PolicyWorker(BaseWorker):
         contract_analysis: Mapping[str, Any],
         control_snapshot: Mapping[str, Any],
         function_records: Sequence[Mapping[str, Any]] | None = None,
-    ) -> dict[str, list[Claim]]:
+    ) -> dict[str, list[ClaimProjection]]:
         """Mint policy-derived claims from sibling facts.
 
         Replaces propagate-every-label with the four typed derivations in

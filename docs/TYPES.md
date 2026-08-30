@@ -1,27 +1,86 @@
 # PSAT Type Reference
 
-Every schema type in the pipeline, what it means, and where it flows.
+The canonical assessment vocabulary, followed by the compatibility schemas that
+carry low-level facts and derived views during the cutover.
 
 **How the type system works here**
 
-- Stage documents are **TypedDicts** (`typing_extensions.TypedDict`, not `typing` —
-  pydantic refuses the latter on Python < 3.12). They annotate plain dicts: zero
-  runtime cost, checked by pyright, and validated at the artifact-read boundary by
-  pydantic `TypeAdapter` (see [The Typed Wire](#the-typed-wire)).
-- **Three-valued discipline.** Throughout, absence is evidence, never silence:
-  - `None` / missing key = *not determined* (the stage didn't look, or couldn't)
-  - `False` / `[]` = *proven absent* (the stage looked and found nothing)
-  A consumer that folds one into the other re-creates a class of bug this codebase
-  has repeatedly paid to remove. Field comments below flag the important cases.
-- **Inheritance means specialization.** `ArtifactEnvelope` is the stage-document
-  header; `Principal` is the authority identity; `ControllerSpec` is the controller
-  identity kernel. Anything extending them *is* that thing plus its own fields.
+- Wire documents are `typing_extensions.TypedDict` values, checked by pyright and
+  validated with pydantic `TypeAdapter` at artifact ingress.
+- A `Claim` contains only a supported proposition. It never represents a
+  rejection, missing input, or failure.
+- `Evidence` records what PSAT observed. `Basis` names the rule and evidence (or
+  prior claims) supporting a claim.
+- `Analysis` records completion, coverage, omissions, and diagnostics. The
+  absence of a claim means false only when the relevant analysis receipt says its
+  coverage completed; otherwise the projection is not determined.
+- Relationships use stable ids. The vocabulary uses domain names (`Contract`,
+  `Function`, `Controller`) rather than transport-oriented `*Ref` / `*Model`
+  names.
 
-**Class counts (as of PR #188):** 120 TypedDicts + 13 pydantic models.
+## Canonical assessment (`schemas/assessment.py`)
+
+```text
+Account  Contract  Function  Controller  Entity
+Guard    Authority Effect
+Evidence Basis     Claim
+Analysis Coverage  Omission Diagnostic
+Assessment
+```
+
+`Assessment` is the durable analytical result:
+
+```python
+Assessment(
+    accounts=...,
+    contract=...,
+    functions=...,
+    controllers=...,
+    entities=...,
+    authority_edges=...,
+    dependency_edges=...,
+    claims=...,
+    evidence=...,
+    analyses=...,
+)
+```
+
+### Claim, evidence, and failure boundary
+
+```text
+Evidence: pause() writes paused = true
+Evidence: withdraw() necessarily reverts when paused = true
+Basis:    pause-latch rule over those evidence ids
+Claim:    pause() causes pause.set and affects withdraw()
+```
+
+A predicate-lowering failure creates an `Analysis` diagnostic and omission. It
+does not create a failure-shaped claim. A public pause writer still creates the
+effect claim; authority is a separate `PublicAuthority` capability claim.
+
+### Derived three-state views
+
+The canonical document does not store `Determination[T]`. For a view such as
+`is_pausable`:
+
+```text
+pause.set claim exists                         -> true
+no claim + pause.set analysis fully completed -> false
+no claim + partial/failed/missing analysis     -> null
+```
+
+`services.assessment.views` owns these projections. The relational
+`ContractSummary.is_pausable` column and legacy permission claim lists are
+written from the assessment, so they are indexes/views rather than parallel
+truth.
 
 ---
 
-## Layer 0 — Core vocabulary (`schemas/core.py`)
+## Compatibility vocabulary (`schemas/core.py`)
+
+The schemas below remain as low-level analyzer fact shards, legacy-ingress
+adapters, and API/database projections while stored historical jobs are read.
+They are not the canonical claim ledger.
 
 The shapes every stage shares. Defined once, specialized everywhere.
 
@@ -223,13 +282,14 @@ What a function *does* to the world. `SCHEMA_VERSION = "semantic-3"`.
 
 #### Claims (`services/static/claims/types.py`, artifact `claims`)
 
-- **`Claim`** — `{claim_id, tier, witness}`; `tier` ∈
-  `dispositive_ast | structural | heuristic | derived` (T1–T4 scoring tiers);
-  `witness` is an open replayable pointer into the evidence plane.
+- **`ClaimProjection`** — compatibility shape `{claim_id, tier, witness}`;
+  `tier` is `behavioral_observed | standard_exact | idiom_structural |
+  policy_derived`. It is projected from the canonical `Claim` and its
+  `Evidence`; it is not another claim source.
 - **`ClaimsArtifact`** — `{schema_version, contract_name, functions:
-  dict[full_name, list[Claim]], abi_selectors?}`. `abi_selectors` is three-state
-  per function: present = lowered+proven; absent key = not determined;
-  fallback/receive never appear.
+  dict[full_name, list[ClaimProjection]], abi_selectors?, analyses?,
+  diagnostics?}`. Matcher failures are recorded in the analysis receipts and
+  diagnostics, never encoded as missing or failure-shaped claims.
 
 #### Verdict containers (three-valued, purpose-built)
 

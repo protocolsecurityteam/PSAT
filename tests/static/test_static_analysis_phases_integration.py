@@ -76,10 +76,11 @@ class TestAnalysisPhaseSuccess:
 
         assert result == analysis_data
         names = [call["name"] for call in calls]
-        assert names == ["contract_analysis", "predicate_trees", "effects"]
+        assert names == ["contract_analysis", "assessment", "predicate_trees", "effects"]
         assert calls[0]["data"] == analysis_data
-        assert calls[1]["data"] == predicate_trees
-        assert calls[2]["data"] == effects
+        assert calls[1]["data"]["schema_version"] == "assessment/1"
+        assert calls[2]["data"] == predicate_trees
+        assert calls[3]["data"] == effects
 
     def test_stores_predicate_trees_and_effects_side_artifacts(self, monkeypatch, tmp_path):
         worker = StaticWorker()
@@ -107,7 +108,7 @@ class TestAnalysisPhaseSuccess:
         result = worker._run_analysis_phase(session, job, tmp_path, "TestContract", job.address)
 
         assert result == analysis_data
-        assert [call["name"] for call in calls] == ["contract_analysis", "predicate_trees", "effects"]
+        assert [call["name"] for call in calls] == ["contract_analysis", "assessment", "predicate_trees", "effects"]
 
     def test_skips_predicate_trees_for_vyper(self, monkeypatch, tmp_path):
         """Vyper projects return ``None`` for predicate_trees + effects;
@@ -127,7 +128,7 @@ class TestAnalysisPhaseSuccess:
         result = worker._run_analysis_phase(session, job, tmp_path, "TestContract", job.address)
 
         assert result == {"schema_version": "0.1"}
-        assert [call["name"] for call in calls] == ["contract_analysis"]
+        assert [call["name"] for call in calls] == ["contract_analysis", "assessment"]
 
 
 class TestAnalysisPhaseFailure:

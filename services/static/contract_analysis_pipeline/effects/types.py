@@ -355,6 +355,12 @@ class EffectsArtifact(TypedDict):
     contract_name: str | None
     functions: dict[str, EffectInfo]
     token_slots: NotRequired[TokenSlots]
+    # Written by ``attach_claims_to_effects`` even when ``functions`` is empty.
+    # Its presence proves the claims plane completed; per-function ``claims``
+    # keys cannot carry that fact for a contract with no observable functions.
+    claims_schema_version: NotRequired[str]
+    claim_analyses: NotRequired[dict[str, object]]
+    claim_diagnostics: NotRequired[list[dict[str, object]]]
 
 
 # ERC-20 pull/send selectors used for value-flow direction facts. ``pull``

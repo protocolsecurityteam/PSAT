@@ -21,9 +21,9 @@ import services.effects.claims_bridge
 import services.static.cross_contract  # noqa: F401
 from services.static.claims import (
     CONSUMER_REFERENCED_CLAIM_IDS,
-    Claim,
     ClaimContext,
     ClaimEvidence,
+    ClaimProjection,
     RegistryEntry,
     attach_claims_to_effects,
     build_claims,
@@ -366,7 +366,7 @@ def test_every_registry_id_is_produced_by_the_corpus_or_exempt():
 def test_precedence_keeps_strongest_tier_of_the_same_claim():
     """Two witnesses for the SAME claim on one function collapse to the strongest
     tier — a standard proof supersedes a structural idiom / policy derivation."""
-    claims: list[Claim] = [
+    claims: list[ClaimProjection] = [
         {"claim_id": "upgrade.implementation", "tier": "idiom_structural", "witness": {"w": 1}},
         {"claim_id": "upgrade.implementation", "tier": "standard_exact", "witness": {"w": 2}},
         {"claim_id": "upgrade.implementation", "tier": "policy_derived", "witness": {"w": 3}},
@@ -380,7 +380,7 @@ def test_precedence_keeps_strongest_tier_of_the_same_claim():
 def test_precedence_preserves_distinct_sibling_claims_in_one_family():
     """Sibling operations in a namespace are different sentences, never collapsed:
     pause.set and pause.unset both survive even at different tiers."""
-    claims: list[Claim] = [
+    claims: list[ClaimProjection] = [
         {"claim_id": "pause.unset", "tier": "idiom_structural", "witness": {}},
         {"claim_id": "pause.set", "tier": "standard_exact", "witness": {}},
         {"claim_id": "flow.out", "tier": "idiom_structural", "witness": {}},
@@ -390,7 +390,7 @@ def test_precedence_preserves_distinct_sibling_claims_in_one_family():
 
 
 def test_precedence_output_is_deterministically_sorted():
-    claims: list[Claim] = [
+    claims: list[ClaimProjection] = [
         {"claim_id": "supply.mint", "tier": "standard_exact", "witness": {}},
         {"claim_id": "authority.replace", "tier": "standard_exact", "witness": {}},
     ]

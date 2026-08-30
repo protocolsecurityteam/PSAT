@@ -42,7 +42,9 @@ def _pause_evidence(ctx: ClaimContext, function: str, want: str) -> ClaimEvidenc
     if not targets:
         return None
     tree = ctx.predicate_tree(function)
-    if tree is None or not _facts.tree_is_authority_gated(tree) or _facts.tree_is_one_shot(tree):
+    # Effect detection is independent of authority. An unguarded pauser is a
+    # public capability, not an absence. Authority resolution is a later claim.
+    if tree is not None and _facts.tree_is_one_shot(tree):
         return None
 
     fn = _facts.contract_function(ctx, function)
@@ -62,6 +64,12 @@ def _pause_evidence(ctx: ClaimContext, function: str, want: str) -> ClaimEvidenc
             # constant-bool toggle of a guard-read member is a pause; anything
             # else fails closed.
             continue
+        declared_types = _facts.pause_target_declared_types(ctx, function, (var, member))
+        if polarity == "both" and declared_types & {"uint8", "uint256"}:
+            # Parameter-driven bitmap writes need a directional proof. A sibling
+            # constant writer such as pauseAll() can still establish pause.set;
+            # this ambiguous function establishes neither direction by itself.
+            continue
         if polarity in (want, "both"):
             matched.append({"var": var, "member": member})
     if not matched:
@@ -70,7 +78,12 @@ def _pause_evidence(ctx: ClaimContext, function: str, want: str) -> ClaimEvidenc
     standard = ctx.canonical_selector(function) in _TOGGLE_SELECTORS and _oz_pausable_standard(ctx)
     return ClaimEvidence(
         tier="standard_exact" if standard else "idiom_structural",
-        witness={"kind": "pause_flag", "flags": matched, "polarity": want},
+        witness={
+            "kind": "pause_flag",
+            "flags": matched,
+            "polarity": want,
+            "affected_functions": _facts.pause_affected_functions(ctx, targets),
+        },
     )
 
 

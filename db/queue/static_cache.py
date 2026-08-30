@@ -41,6 +41,7 @@ logger = logging.getLogger("db.queue")
 # required by resolution and policy, so cache hits must carry them forward.
 _STATIC_ARTIFACT_NAMES = frozenset(
     {
+        "assessment",
         "contract_analysis",
         "control_tracking_plan",
         "predicate_trees",
@@ -62,6 +63,48 @@ _SEED_ARTIFACT_NAMES = frozenset(
 # Contract columns that are mutable (resolved live by _resolve_proxy) and
 # must NOT be carried over from a cached job.
 _MUTABLE_CONTRACT_FIELDS = frozenset({"is_proxy", "proxy_type", "implementation", "beacon", "admin"})
+
+
+def _store_assessment_from_static_facts(
+    session: Session,
+    *,
+    job: Job,
+    contract: Contract,
+    address: str,
+    source_hash_fallback: str | None = None,
+) -> None:
+    """Rebuild chain-qualified assessment identity after a cache copy."""
+
+    copied_analysis = get_artifact(session, job.id, "contract_analysis")
+    copied_effects = get_artifact(session, job.id, "effects")
+    copied_trees = get_artifact(session, job.id, "predicate_trees")
+    if not (isinstance(copied_analysis, dict) and isinstance(copied_effects, dict) and isinstance(copied_trees, dict)):
+        return
+
+    request = job.request if isinstance(job.request, dict) else {}
+    chain_id = job.chain_id or derive_job_chain_id(request.get("chain"), job.address)
+    if chain_id is None:
+        return
+
+    from services.assessment import build_static_assessment
+
+    subject = copied_analysis.get("subject")
+    subject_name = subject.get("name") if isinstance(subject, dict) else None
+    assessment = build_static_assessment(
+        chain_id=chain_id,
+        address=address.lower(),
+        contract_name=(
+            subject_name
+            if isinstance(subject_name, str) and subject_name
+            else contract.contract_name or job.name or "Contract"
+        ),
+        code_hash=None,
+        source_hash=job.source_content_hash or source_hash_fallback,
+        analysis=copied_analysis,
+        effects=copied_effects,
+        predicate_trees=copied_trees,
+    )
+    store_artifact(session, job.id, "assessment", data=assessment)
 
 
 def copy_row(session: Session, source: Base, *, exclude: frozenset[str] = frozenset(), **overrides: Any) -> Base:
@@ -523,6 +566,16 @@ def copy_static_cache(session: Session, source_job_id: Any, target_job_id: Any) 
         else:
             store_artifact(session, target_job_id, art.name, data=art.data, text_data=art.text_data)
 
+    target_job = session.get(Job, target_job_id)
+    if target_job is not None:
+        _store_assessment_from_static_facts(
+            session,
+            job=target_job,
+            contract=new_contract,
+            address=target_job.address or src_contract.address,
+            source_hash_fallback=src_job.source_content_hash,
+        )
+
     session.commit()
     return new_contract.id
 
@@ -624,6 +677,19 @@ def copy_static_cache_cross_chain(
         elif name == "control_tracking_plan" and isinstance(payload, dict):
             payload = {**payload, "contract_address": target_addr_norm}
         store_artifact(session, target_job_id, name, data=payload)
+
+    # ``assessment`` contains chain-qualified identities and therefore cannot
+    # be copied byte-for-byte from the donor. Rebuild it from the copied code
+    # facts under the target deployment's account identity.
+    target_job = session.get(Job, target_job_id)
+    if target_job is not None:
+        _store_assessment_from_static_facts(
+            session,
+            job=target_job,
+            contract=target_contract,
+            address=target_addr_norm,
+            source_hash_fallback=src_job.source_content_hash,
+        )
 
     session.commit()
     return target_contract.id

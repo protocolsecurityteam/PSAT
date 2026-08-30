@@ -928,15 +928,18 @@ def _claims_plane_ran(effects: Mapping[str, Any] | None) -> bool:
     see a latch/timelock through claims must answer not-determined rather than
     ``false``.
 
-    An artifact with no externally-observable functions at all is likewise
-    not-determined: there is no record to carry the key, so nothing here can
-    tell a clean claims run from a missing one.
+    Fresh artifacts also carry the top-level ``claims_schema_version`` marker,
+    which proves completion even when there are no externally-observable
+    functions and therefore no function record capable of carrying ``claims``.
+    The per-record discriminator remains the legacy fallback.
 
     **Scope of what this proves.** The key proves the matcher *completed*; it
     does not prove the matcher could *see* anything, because its own inputs
     come from a third plane ``core`` degrades separately
     (:func:`_predicate_trees_plane_ran`). A detector whose evidence is only
     reachable through the trees must test that plane too."""
+    if isinstance(effects, Mapping) and isinstance(effects.get("claims_schema_version"), str):
+        return True
     functions = (effects or {}).get("functions")
     if not isinstance(functions, Mapping):
         return False
@@ -1110,7 +1113,10 @@ def _detect_pausability(
                 gating_modifiers.append(modifier.name)
                 evidence.append(_source_evidence(modifier, project_dir))
 
-    if pause_functions or unpause_functions or gating_modifiers or pause_state_vars:
+    # The question is whether some callable path can SET the pause state.
+    # An unpause-only mechanism, a latch declaration, or a gating modifier is
+    # descriptive evidence but cannot establish that pausing is possible.
+    if pause_functions:
         is_pausable: bool | None = True
     elif _claims_plane_ran(effects) and _predicate_trees_plane_ran(predicate_trees):
         is_pausable = False

@@ -22,6 +22,7 @@ from db.queue import (
     reconcile_impl_job_for_proxy,
     store_artifact,
 )
+from schemas.assessment import Assessment
 from schemas.contract_analysis import ContractAnalysis
 from services.clients.rpc import default_rpc_url, normalize_hex  # used for address comparison
 from services.discovery import (
@@ -1606,6 +1607,26 @@ class StaticWorker(BaseWorker):
             analysis_data, semantic_predicate_trees, semantic_effects = collect_contract_analysis_with_artifacts(
                 project_dir
             )
+            from services.assessment import build_static_assessment
+
+            assessment = build_static_assessment(
+                chain_id=_parent_chain_id(job),
+                address=address,
+                contract_name=contract_name,
+                code_hash=None,
+                source_hash=getattr(job, "source_content_hash", None),
+                analysis=analysis_data,
+                effects=(
+                    semantic_effects
+                    if isinstance(semantic_effects, dict)
+                    else {"schema_version": "missing", "error": "effects artifact missing"}
+                ),
+                predicate_trees=(
+                    semantic_predicate_trees
+                    if isinstance(semantic_predicate_trees, dict)
+                    else {"schema_version": "missing", "error": "predicate_trees artifact missing"}
+                ),
+            )
         except Exception as exc:
             record_degraded(
                 phase="contract_analysis",
@@ -1622,6 +1643,7 @@ class StaticWorker(BaseWorker):
         # ``derived_from.callee`` before provenance stringified it) must
         # degrade to its string form rather than kill the whole static job.
         (project_dir / "contract_analysis.json").write_text(json.dumps(analysis_data, indent=2, default=str) + "\n")
+        (project_dir / "assessment.json").write_text(json.dumps(assessment, indent=2, default=str) + "\n")
         if semantic_predicate_trees is not None:
             (project_dir / "predicate_trees.json").write_text(
                 json.dumps(semantic_predicate_trees, indent=2, default=str) + "\n"
@@ -1630,6 +1652,7 @@ class StaticWorker(BaseWorker):
             (project_dir / "effects.json").write_text(json.dumps(semantic_effects, indent=2, default=str) + "\n")
 
         store_artifact(session, job.id, "contract_analysis", data=analysis_data)
+        store_artifact(session, job.id, "assessment", data=assessment)
         if semantic_predicate_trees is not None:
             try:
                 store_artifact(session, job.id, "predicate_trees", data=semantic_predicate_trees)
@@ -1656,7 +1679,7 @@ class StaticWorker(BaseWorker):
                     "Static stage: effects artifact store failed for job %s",
                     job.id,
                 )
-        self._write_analysis_tables(session, job, analysis_data)
+        self._write_analysis_tables(session, job, analysis_data, assessment)
         logger.info(
             "Static stage contract analysis complete for job %s address=%s contract=%s",
             job.id,
@@ -1665,7 +1688,13 @@ class StaticWorker(BaseWorker):
         )
         return analysis_data
 
-    def _write_analysis_tables(self, session, job: Job, analysis: ContractAnalysis | dict) -> None:
+    def _write_analysis_tables(
+        self,
+        session,
+        job: Job,
+        analysis: ContractAnalysis | dict,
+        assessment: Assessment,
+    ) -> None:
         """Extract structured data from contract_analysis JSON into relational tables."""
         from sqlalchemy import select as sa_select
 
@@ -1690,12 +1719,15 @@ class StaticWorker(BaseWorker):
             session.delete(existing_summary)
             session.flush()
 
+        from services.assessment import effect_presence
+
         session.add(
             ContractSummary(
                 contract_id=contract_row.id,
                 control_model=summary.get("control_model"),
                 is_upgradeable=summary.get("is_upgradeable"),
-                is_pausable=summary.get("is_pausable"),
+                # Compatibility projection from canonical claims + coverage.
+                is_pausable=effect_presence(assessment, "pause.set"),
                 has_timelock=summary.get("has_timelock"),
                 is_factory=summary.get("is_factory"),
                 is_nft=summary.get("is_nft"),

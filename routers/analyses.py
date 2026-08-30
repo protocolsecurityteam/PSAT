@@ -27,7 +27,9 @@ router = APIRouter()
 # Artifact names the consumer frontend fetches via ``/artifact/``. Any other
 # name is operator/internal and gated behind a valid admin key. Compared
 # against the requested name after extension-stripping and lower-casing.
-_CONSUMER_SAFE_ARTIFACTS = frozenset({"upgrade_history", "dependencies", "dependency_graph_viz", "policy_state"})
+_CONSUMER_SAFE_ARTIFACTS = frozenset(
+    {"assessment", "upgrade_history", "dependencies", "dependency_graph_viz", "policy_state"}
+)
 
 # Internal/operator artifacts excluded from the public ``/api/analyses``
 # listing so their existence isn't enumerable to anonymous callers.

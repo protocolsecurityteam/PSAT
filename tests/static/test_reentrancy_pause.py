@@ -181,9 +181,8 @@ def test_renamed_pause_detected(tmp_path):
     assert "flag" in pause_vars
 
 
-def test_unauth_writer_does_not_trigger_pause(tmp_path):
-    """A bool toggled by anyone isn't a pause flag — needs an
-    auth-gated writer."""
+def test_unguarded_writer_is_a_public_pause_capability(tmp_path):
+    """Effect detection is independent of authority; no guard means public."""
     sl = _compile(
         tmp_path,
         """
@@ -191,7 +190,7 @@ def test_unauth_writer_does_not_trigger_pause(tmp_path):
         contract C {
             bool public _paused;
             function pause() external { _paused = true; }
-            function someAction() external view {
+            function someAction() external {
                 require(!_paused);
             }
         }
@@ -200,7 +199,29 @@ def test_unauth_writer_does_not_trigger_pause(tmp_path):
     contract = sl.contracts[0]
     trees = _build_trees(contract)
     pause_vars = PauseAnalyzer(contract, trees).run()
-    assert pause_vars == set()
+    assert pause_vars == {"_paused"}
+
+
+def test_flag_that_only_blocks_a_view_is_not_a_pause_effect(tmp_path):
+    """The claimed effect is blocking state-changing entry points."""
+
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            bool public _paused;
+            function pause() external { _paused = true; }
+            function status() external view returns (bool) {
+                require(!_paused);
+                return true;
+            }
+        }
+    """,
+    )
+    contract = sl.contracts[0]
+    trees = _build_trees(contract)
+    assert PauseAnalyzer(contract, trees).run() == set()
 
 
 # ---------------------------------------------------------------------------
@@ -544,6 +565,44 @@ def test_detect_pausability_empty_when_no_pause(tmp_path):
     pausability = _detect_pausability(contract, tmp_path, pause_info, with_claims, trees)
     assert pausability["is_pausable"] is False
     assert pausability["pause_variables"] == []
+
+
+def test_public_pause_emits_a_claim_and_publishes_true(tmp_path):
+    """An unguarded pause path is public authority, not an absent effect."""
+
+    from services.static.contract_analysis_pipeline.summaries import _detect_pausability, _pause_claims
+
+    source = """
+        pragma solidity ^0.8.19;
+        contract C {
+            bool private stopped;
+            function stop() external { stopped = true; }
+            function act() external { require(!stopped, "stopped"); }
+        }
+    """
+    contract, pause_info, trees, with_claims, _ = _pause_inputs(tmp_path, source)
+    assert _pause_claims(with_claims) == ({"stop()"}, set(), {"stopped"})
+    assert _detect_pausability(contract, tmp_path, pause_info, with_claims, trees)["is_pausable"] is True
+
+
+def test_unpause_only_does_not_claim_that_pausing_is_possible(tmp_path):
+    """A callable unset path describes recovery, not a pause capability."""
+
+    from services.static.contract_analysis_pipeline.summaries import _detect_pausability, _pause_claims
+
+    source = """
+        pragma solidity ^0.8.19;
+        contract C {
+            bool private stopped = true;
+            function resume() external { stopped = false; }
+            function act() external { require(!stopped, "stopped"); }
+        }
+    """
+    contract, pause_info, trees, with_claims, _ = _pause_inputs(tmp_path, source)
+    assert _pause_claims(with_claims) == (set(), {"resume()"}, {"stopped"})
+    result = _detect_pausability(contract, tmp_path, pause_info, with_claims, trees)
+    assert result["is_pausable"] is False
+    assert result["unpause_functions"] == ["resume()"]
 
 
 def test_detect_pausability_is_not_determined_without_the_claims_plane(tmp_path):

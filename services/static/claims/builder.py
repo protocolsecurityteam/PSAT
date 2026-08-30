@@ -15,12 +15,12 @@ artifact plumbing. Both functions fail soft on a degraded (errored) artifact.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Literal
 
 from .context import ClaimContext
 from .matchers import discover
 from .registry import emit_claim, legacy_projections, registry, resolve_claim_precedence
-from .types import SCHEMA_VERSION, Claim, ClaimsArtifact
+from .types import SCHEMA_VERSION, ClaimAnalysis, ClaimDiagnostic, ClaimOmission, ClaimProjection, ClaimsArtifact
 
 logger = logging.getLogger(__name__)
 
@@ -35,24 +35,89 @@ def build_claims(contract: Any, effects: Any, predicate_trees: Any) -> ClaimsArt
     discover()
     ctx = ClaimContext(contract, effects, predicate_trees)
     signatures = ctx.function_signatures()
-    functions: dict[str, list[Claim]] = {signature: [] for signature in signatures}
+    functions: dict[str, list[ClaimProjection]] = {signature: [] for signature in signatures}
+
+    analyses: dict[str, ClaimAnalysis] = {}
+    diagnostics: list[ClaimDiagnostic] = []
 
     for entry in registry().values():
+        omissions: list[ClaimOmission] = []
+        completed = 0
         try:
-            if not entry.gate(ctx):
-                continue
-            for signature in signatures:
-                evidence = entry.trigger(ctx, signature)
-                if evidence is None:
-                    continue
-                functions[signature].append(emit_claim(entry.claim_id, evidence.tier, evidence.witness))
-        except Exception:
+            enabled = entry.gate(ctx)
+        except Exception as exc:
             logger.warning(
-                "claim matcher %s failed",
+                "claim matcher %s gate failed",
                 entry.claim_id,
                 extra={"claim_id": entry.claim_id},
                 exc_info=True,
             )
+            diagnostics.append(
+                {
+                    "claim_id": entry.claim_id,
+                    "function": None,
+                    "exc_type": type(exc).__name__,
+                    "message": str(exc),
+                }
+            )
+            analyses[entry.claim_id] = {
+                "detector": entry.claim_id,
+                "status": "failed",
+                "targets_total": len(signatures),
+                "targets_completed": 0,
+                "omissions": [{"function": signature, "reason": "matcher_gate_failed"} for signature in signatures],
+            }
+            continue
+
+        if not enabled:
+            analyses[entry.claim_id] = {
+                "detector": entry.claim_id,
+                "status": "completed",
+                "targets_total": 0,
+                "targets_completed": 0,
+                "omissions": [],
+            }
+            continue
+
+        for signature in signatures:
+            try:
+                evidence = entry.trigger(ctx, signature)
+                completed += 1
+                if evidence is None:
+                    continue
+                functions[signature].append(emit_claim(entry.claim_id, evidence.tier, evidence.witness))
+            except Exception as exc:
+                logger.warning(
+                    "claim matcher %s failed for %s",
+                    entry.claim_id,
+                    signature,
+                    extra={"claim_id": entry.claim_id, "function": signature},
+                    exc_info=True,
+                )
+                omissions.append({"function": signature, "reason": "matcher_trigger_failed"})
+                diagnostics.append(
+                    {
+                        "claim_id": entry.claim_id,
+                        "function": signature,
+                        "exc_type": type(exc).__name__,
+                        "message": str(exc),
+                    }
+                )
+
+        status: Literal["completed", "partial", "failed"]
+        if not omissions:
+            status = "completed"
+        elif completed:
+            status = "partial"
+        else:
+            status = "failed"
+        analyses[entry.claim_id] = {
+            "detector": entry.claim_id,
+            "status": status,
+            "targets_total": len(signatures),
+            "targets_completed": completed,
+            "omissions": omissions,
+        }
 
     for signature in functions:
         functions[signature] = resolve_claim_precedence(functions[signature])
@@ -79,6 +144,8 @@ def build_claims(contract: Any, effects: Any, predicate_trees: Any) -> ClaimsArt
         "contract_name": ctx.contract_name,
         "functions": functions,
         "abi_selectors": abi_selectors,
+        "analyses": analyses,
+        "diagnostics": diagnostics,
     }
 
 
@@ -99,6 +166,15 @@ def attach_claims_to_effects(effects: Any, claims_artifact: Any) -> None:
     functions = effects.get("functions")
     if not isinstance(functions, dict):
         return
+    schema_version = claims_artifact.get("schema_version") if isinstance(claims_artifact, dict) else None
+    if isinstance(schema_version, str):
+        effects["claims_schema_version"] = schema_version
+    analyses = claims_artifact.get("analyses") if isinstance(claims_artifact, dict) else None
+    if isinstance(analyses, dict):
+        effects["claim_analyses"] = analyses
+    diagnostics = claims_artifact.get("diagnostics") if isinstance(claims_artifact, dict) else None
+    if isinstance(diagnostics, list):
+        effects["claim_diagnostics"] = diagnostics
     by_function = claims_artifact.get("functions") if isinstance(claims_artifact, dict) else None
     if not isinstance(by_function, dict):
         by_function = {}

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
@@ -26,6 +26,7 @@ from db.models import (
 # Indirect through ``routers.deps`` so tests get a single patch point for
 # ``SessionLocal``/``get_all_artifacts``.
 from routers import deps
+from schemas.assessment import Assessment
 from services.aggregations.action_summary import describe_action
 from services.policy.capability_surface import capability_currency, exact_empty_credit
 
@@ -175,6 +176,7 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
     }
 
     for artifact_name in (
+        "assessment",
         "contract_analysis",
         "control_snapshot",
         "dependencies",
@@ -267,6 +269,17 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
         subject = all_artifacts["contract_analysis"].get("subject", {})
         payload["contract_name"] = subject.get("name", payload["run_name"])
         payload["summary"] = all_artifacts["contract_analysis"].get("summary")
+
+    # Canonical claims + detector coverage own the compatibility boolean.
+    if isinstance(all_artifacts.get("assessment"), dict):
+        from services.assessment import effect_presence
+
+        assessment = cast(Assessment, all_artifacts["assessment"])
+        payload["assessment"] = assessment
+        summary = payload.get("summary")
+        summary = dict(summary) if isinstance(summary, dict) else {}
+        summary["is_pausable"] = effect_presence(assessment, "pause.set")
+        payload["summary"] = summary
 
     # Synthesis fallback for upgrade_history. Mirrors the per-artifact
     # endpoint at /api/analyses/{job}/artifact/upgrade_history. Runs after
@@ -531,6 +544,7 @@ def _inherit_from_impl(
         body_absent if body_absent is not None else {},
     )
     for fallback_name in (
+        "assessment",
         "contract_analysis",
         "control_snapshot",
         "resolved_control_graph",

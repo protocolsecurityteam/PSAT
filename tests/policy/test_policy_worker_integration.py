@@ -363,7 +363,7 @@ class TestCrossContractEnrichmentArtifactSync:
         worker.process(session, cast(Any, job))
 
         effective_payloads = [data for name, data in store_calls if name == "effective_permissions"]
-        assert len(effective_payloads) == 2
+        assert len(effective_payloads) == 1
         fn = effective_payloads[-1]["functions"][0]
         # The policy-derived claim merged into the claims plane; legacy labels are
         # left exactly as the static stage produced them.

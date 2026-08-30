@@ -516,7 +516,13 @@ def test_end_to_end_heal_standalone_impl_resolves_after_backpatch(db_session, mo
         db_session,
         job.id,
         "control_tracking_plan",
-        data={"schema_version": "0.1", "contract_address": impl, "contract_name": "Core", "tracked_controllers": []},
+        data={
+            "schema_version": "0.1",
+            "contract_address": impl,
+            "contract_name": "Core",
+            "tracking_strategy": "event_first_with_polling_fallback",
+            "tracked_controllers": [],
+        },
     )
     store_artifact(
         db_session,

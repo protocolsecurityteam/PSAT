@@ -58,8 +58,9 @@ from db.effect_cache import (
     record_effect_verdict,
     upsert_cached_verdict,
 )
-from db.models import EffectBehaviorCache, EffectiveFunction, EffectVerdict, Job, JobStage
-from db.queue import advance_job, store_artifact
+from db.models import Contract, EffectBehaviorCache, EffectiveFunction, EffectVerdict, Job, JobStage
+from db.queue import advance_job, get_artifact, store_artifact
+from db.queue.typed import ArtifactSchemaError, load_assessment
 from services.effects import claims_bridge
 from services.effects.config import (
     EFFECT_CLASS_VALUE_OUT,
@@ -708,6 +709,7 @@ class EffectsWorker(BaseWorker):
             self._write_verdicts(session, job, items, seams, counters)
             ph["verdicts_written"] = counters.verdicts_written
             ph["labeled"] = self._bridge_claims(session, items)
+            ph["assessments_updated"] = self._update_assessments(session, items)
 
         # Layer-1 distillation, after the bridge so it reads the
         # ``behavioral_observed`` claims this job just merged. Deliberately
@@ -1241,6 +1243,90 @@ class EffectsWorker(BaseWorker):
             ef.claims, ef.effect_labels = merged
             labeled += 1
         return labeled
+
+    def _update_assessments(self, session: Session, items: list[_Item]) -> int:
+        """Attach verdict evidence to each affected contract's assessment.
+
+        Effects jobs may be protocol-wide, so the current job is not always the
+        owner of the functions being probed. Group through EffectiveFunction ->
+        Contract and update the originating contract job instead of writing one
+        incoherent multi-contract document on the effects job.
+        """
+
+        fn_ids = {it.candidate.function_id for it in items if it.candidate.function_id is not None}
+        if not fn_ids:
+            return 0
+        verdicts = session.query(EffectVerdict).filter(EffectVerdict.function_id.in_(fn_ids)).all()
+        rows = session.query(EffectiveFunction).filter(EffectiveFunction.id.in_(fn_ids)).all()
+        row_by_id = {row.id: row for row in rows if row.id is not None}
+        contract_ids = {row.contract_id for row in rows}
+        contracts = session.query(Contract).filter(Contract.id.in_(contract_ids)).all()
+        contract_by_id = {contract.id: contract for contract in contracts}
+
+        verdicts_by_contract: dict[int, list[EffectVerdict]] = {}
+        signatures_by_contract: dict[int, dict[int, str]] = {}
+        for verdict in verdicts:
+            if verdict.function_id is None:
+                continue
+            row = row_by_id.get(verdict.function_id)
+            if row is None:
+                continue
+            verdicts_by_contract.setdefault(row.contract_id, []).append(verdict)
+            signatures_by_contract.setdefault(row.contract_id, {})[row.id] = row.abi_signature or row.function_name
+
+        updated = 0
+        for contract_id, contract_verdicts in verdicts_by_contract.items():
+            contract = contract_by_id.get(contract_id)
+            if contract is None or contract.job_id is None:
+                record_degraded(
+                    phase="effects_assessment",
+                    exc=RuntimeError("effect verdict contract has no assessment-owning job"),
+                    context={"contract_id": contract_id},
+                )
+                continue
+            try:
+                assessment = load_assessment(get_artifact, session, contract.job_id)
+            except ArtifactSchemaError as exc:
+                record_degraded(
+                    phase="effects_assessment",
+                    exc=exc,
+                    context={"contract_id": contract_id, "job_id": str(contract.job_id)},
+                )
+                continue
+            if assessment is None:
+                record_degraded(
+                    phase="effects_assessment",
+                    exc=RuntimeError("assessment artifact missing for effect verdict contract"),
+                    context={"contract_id": contract_id, "job_id": str(contract.job_id)},
+                )
+                continue
+
+            from services.assessment import add_effects, legacy_claims_by_function
+            from services.static.claims import legacy_projections
+
+            assessment = add_effects(
+                assessment,
+                contract_verdicts,
+                signatures_by_function_row=signatures_by_contract.get(contract_id, {}),
+            )
+            store_artifact(session, contract.job_id, "assessment", data=assessment)
+            projected_claims = legacy_claims_by_function(assessment)
+            label_projection = legacy_projections()
+            for row in rows:
+                if row.contract_id != contract_id:
+                    continue
+                signature = row.abi_signature or row.function_name
+                row_claims = projected_claims.get(signature, [])
+                row.claims = row_claims
+                labels = set(row.effect_labels or [])
+                labels.update(
+                    label
+                    for claim in row_claims
+                    if (label := label_projection.get(str(claim.get("claim_id")))) is not None
+                )
+                row.effect_labels = sorted(labels)
+            updated += 1
+        return updated
 
     def _distill_score_signals(self, session: Session, job: Job) -> None:
         """Distil this job's contracts into ``function_score_signals`` + mark the

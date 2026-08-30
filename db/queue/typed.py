@@ -29,6 +29,7 @@ from typing import Any
 
 from pydantic import TypeAdapter, ValidationError
 
+from schemas.assessment import Assessment, assessment_problems
 from schemas.contract_analysis import ContractAnalysis
 from schemas.control_tracking import ControlSnapshot, ControlTrackingPlan
 from schemas.effective_permissions import EffectivePermissions
@@ -37,6 +38,7 @@ from schemas.resolved_control_graph import ResolvedControlGraph
 
 __all__ = [
     "ArtifactSchemaError",
+    "load_assessment",
     "load_contract_analysis",
     "load_control_snapshot",
     "load_control_tracking_plan",
@@ -79,6 +81,7 @@ def _load_typed(
 
 
 _CONTRACT_ANALYSIS_ADAPTER = TypeAdapter(ContractAnalysis)
+_ASSESSMENT_ADAPTER = TypeAdapter(Assessment)
 _CONTROL_SNAPSHOT_ADAPTER = TypeAdapter(ControlSnapshot)
 _CONTROL_TRACKING_PLAN_ADAPTER = TypeAdapter(ControlTrackingPlan)
 _EFFECTIVE_PERMISSIONS_ADAPTER = TypeAdapter(EffectivePermissions)
@@ -89,6 +92,17 @@ _RESOLVED_CONTROL_GRAPH_ADAPTER = TypeAdapter(ResolvedControlGraph)
 def load_contract_analysis(read: Any, session: Any, job_id: Any) -> ContractAnalysis | None:
     """The static stage's dossier. ``None`` when the artifact is absent."""
     return _load_typed(read, session, job_id, "contract_analysis", _CONTRACT_ANALYSIS_ADAPTER)
+
+
+def load_assessment(read: Any, session: Any, job_id: Any) -> Assessment | None:
+    """The canonical evidence-backed pipeline output."""
+    assessment = _load_typed(read, session, job_id, "assessment", _ASSESSMENT_ADAPTER)
+    if assessment is None:
+        return None
+    problems = assessment_problems(assessment)
+    if problems:
+        raise ArtifactSchemaError("assessment", problems)
+    return assessment
 
 
 def load_control_snapshot(read: Any, session: Any, job_id: Any) -> ControlSnapshot | None:

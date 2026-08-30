@@ -28,10 +28,10 @@ from services.effects.config import (
     VERDICT_UNKNOWN,
 )
 from services.static.claims.registry import resolve_claim_precedence
-from services.static.claims.types import Claim
+from services.static.claims.types import ClaimProjection
 
 
-def _static(claim_id: str, tier: str = "standard_exact", **witness: Any) -> Claim:
+def _static(claim_id: str, tier: str = "standard_exact", **witness: Any) -> ClaimProjection:
     return {"claim_id": claim_id, "tier": tier, "witness": witness}  # pyright: ignore[reportReturnType]
 
 
@@ -669,7 +669,7 @@ def test_row_delete_without_recreate_nulls_function_id(db_session):
 # ---------------------------------------------------------------------------
 
 
-def _static_flow_out() -> Claim:
+def _static_flow_out() -> ClaimProjection:
     return {
         "claim_id": "flow.out",
         "tier": "standard_exact",
@@ -740,7 +740,7 @@ def test_an_observed_claim_with_no_static_counterpart_is_unchanged():
 # ---------------------------------------------------------------------------
 
 
-def _damaged_observed_flow_out() -> Claim:
+def _damaged_observed_flow_out() -> ClaimProjection:
     """A ``flow.out`` claim as the bug left it on disk: the observed pointer, and
     nothing else. 19 rows in the preview DB look exactly like this."""
     return {
@@ -805,7 +805,7 @@ def test_a_pause_claim_keeps_its_flags_and_polarity():
     """The erasure was never flow-specific. ``pause.set`` witnesses carry
     ``flags``/``polarity`` — which flags, and whether this is the set or the unset
     direction — and a per-family allowlist named for flows carried neither."""
-    static: Claim = {
+    static: ClaimProjection = {
         "claim_id": "pause.set",
         "tier": "idiom_structural",
         "witness": {"kind": "pause", "flags": ["deposit", "withdraw"], "polarity": "set"},
@@ -818,7 +818,7 @@ def test_a_pause_claim_keeps_its_flags_and_polarity():
 
 
 def test_a_supply_claim_keeps_its_supply_and_selector():
-    static: Claim = {
+    static: ClaimProjection = {
         "claim_id": "supply.mint",
         "tier": "standard_exact",
         "witness": {"kind": "supply", "supply": "increase", "selector": "0x40c10f19"},
@@ -837,7 +837,7 @@ def test_a_policy_derived_donor_is_stamped_as_such():
     riding on a ``behavioral_observed`` claim reads as observed-quality unless the
     witness says where it came from. The scorer discounts on ``static_tier``, so
     the stamp has to be the donor's tier and not the claim's."""
-    static: Claim = {
+    static: ClaimProjection = {
         "claim_id": "flow.out",
         "tier": "policy_derived",
         "witness": {

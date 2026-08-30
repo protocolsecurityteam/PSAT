@@ -23,7 +23,7 @@ from db.models import (
 )
 from db.nested_artifacts import store_bundle as store_nested_artifacts
 from db.queue import create_job, get_artifact, store_artifact
-from db.queue.typed import ArtifactSchemaError, load_contract_analysis, load_control_tracking_plan
+from db.queue.typed import ArtifactSchemaError, load_assessment, load_contract_analysis, load_control_tracking_plan
 from schemas.control_tracking import ControlSnapshot, ControlTrackingPlan
 from services.clients.rpc import require_rpc_url
 from services.discovery.perimeter import queue_discovered_contracts
@@ -207,6 +207,37 @@ class ResolutionWorker(BaseWorker):
         if not isinstance(predicate_trees, dict):
             predicate_trees = None
 
+        try:
+            assessment = load_assessment(get_artifact, session, job.id)
+        except ArtifactSchemaError as exc:
+            raise RuntimeError(f"{exc.artifact_name} artifact failed validation") from exc
+        if assessment is None:
+            # Compatibility ingress for jobs queued before the assessment
+            # cutover. New jobs always receive this artifact from static.
+            effects = get_artifact(session, job.id, "effects")
+            from services.assessment import build_static_assessment
+
+            subject = contract_analysis["subject"]
+            assessment = build_static_assessment(
+                chain_id=chain_id,
+                address=subject["address"],
+                contract_name=subject["name"],
+                code_hash=None,
+                source_hash=getattr(job, "source_content_hash", None),
+                analysis=contract_analysis,
+                effects=(
+                    effects
+                    if isinstance(effects, dict)
+                    else {"schema_version": "missing", "error": "effects artifact missing"}
+                ),
+                predicate_trees=(
+                    predicate_trees
+                    if predicate_trees is not None
+                    else {"schema_version": "missing", "error": "predicate_trees artifact missing"}
+                ),
+            )
+            store_artifact(session, job.id, "assessment", data=assessment)
+
         # For impl jobs, read storage from the proxy address (where state lives)
         request = job.request if isinstance(job.request, dict) else {}
         proxy_address = request.get("proxy_address")
@@ -252,6 +283,10 @@ class ResolutionWorker(BaseWorker):
         )
         # Keep as artifact — policy stage reads it as JSON
         store_artifact(session, job.id, "control_snapshot", data=snapshot)
+        from services.assessment import add_observations
+
+        assessment = add_observations(assessment, snapshot)
+        store_artifact(session, job.id, "assessment", data=assessment)
         # A reverting controller read is recorded as an ``eth_call_error`` NULL
         # entry (see build_control_snapshot); counting those as resolved hid the
         # etherfi NULL-controller incident. Split the count so the resolved metric
@@ -356,6 +391,10 @@ class ResolutionWorker(BaseWorker):
             store_nested_artifacts(session, job.id, nested_artifacts)
             # Keep as artifact — policy stage reads it as JSON
             store_artifact(session, job.id, "resolved_control_graph", data=resolved_graph)
+            from services.assessment import add_resolution
+
+            assessment = add_resolution(assessment, resolved_graph, chain_id=chain_id)
+            store_artifact(session, job.id, "assessment", data=assessment)
             # Persist the classify cache so the policy stage skips re-running
             # the 6-10 RPC fan-out per address. dict[str, tuple] → JSON-friendly
             # dict[str, list] for storage.

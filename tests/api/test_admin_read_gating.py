@@ -84,7 +84,7 @@ def test_ops_reads_require_admin_key(monkeypatch) -> None:
 
 
 def test_artifact_allowlist_gates_internal_names(monkeypatch) -> None:
-    """Internal artifact names are admin-gated before any lookup; the four
+    """Internal artifact names are admin-gated before any lookup; the five
     consumer-safe names stay reachable without a key."""
     client = _client_without_bypass(monkeypatch)
     cm = _session_cm(_fake_job(str(uuid.uuid4())))
@@ -105,7 +105,13 @@ def test_artifact_allowlist_gates_internal_names(monkeypatch) -> None:
         assert admin.status_code != 401
 
         # Consumer-safe names (incl. the .json the graph fetches with no key).
-        for name in ("upgrade_history", "dependencies", "dependency_graph_viz.json", "policy_state.json"):
+        for name in (
+            "assessment.json",
+            "upgrade_history",
+            "dependencies",
+            "dependency_graph_viz.json",
+            "policy_state.json",
+        ):
             resp = client.get(f"/api/analyses/demo_run/artifact/{name}")
             assert resp.status_code != 401, f"{name} must be reachable without a key (got {resp.status_code})"
 
