@@ -1272,8 +1272,15 @@ def function_pause_targets(ctx: ClaimContext, function: str) -> set[tuple[str, s
 def pause_affected_functions(ctx: ClaimContext, targets: set[tuple[str, str | None]]) -> list[str]:
     """State-changing entry points mandatorily gated by one of ``targets``."""
 
+    toggle_functions = {
+        signature
+        for signature in ctx.function_signatures()
+        if (bool_write_targets(ctx, signature) | numeric_latch_write_targets(ctx, signature)) & targets
+    }
     out: list[str] = []
     for signature, reads in mandatory_latch_reads_by_function(ctx).items():
+        if signature in toggle_functions:
+            continue
         if any(_pair_is_gate_read(target, reads) for target in targets):
             out.append(signature)
     return sorted(out)
@@ -1298,11 +1305,11 @@ def pause_target_declared_types(ctx: ClaimContext, function: str, target: tuple[
 
 
 def toggle_polarity(function: Any, var: str, member: str | None, *, alias_members: frozenset[str] = frozenset()) -> str:
-    """``"set"`` (writes the flag true), ``"unset"`` (writes it false), or
-    ``"both"`` (parameter-driven / branch-dependent). Member writes are paired
-    through their ``Member`` reference the way the effects builder pairs them.
-    Walks internal callees so an OZ ``_pause()``/``_unpause()`` indirection is
-    attributed to the entry point.
+    """``set`` / ``unset`` / ``both`` (indeterminate write) / ``none``.
+
+    Member writes are paired through their ``Member`` reference the way the
+    effects builder pairs them. Walks internal callees so an OZ
+    ``_pause()``/``_unpause()`` indirection is attributed to the entry point.
 
     ``alias_members`` handles the ERC-7201 namespaced latch, where the write is
     attributed to the slot pseudo-variable but the IR assigns through a LOCAL
@@ -1312,9 +1319,11 @@ def toggle_polarity(function: Any, var: str, member: str | None, *, alias_member
     this the polarity is indeterminate and every namespaced pauser would claim
     both directions — asserting that ``pause()`` also unpauses."""
     polarities: set[str] = set()
+    matched_write = False
     visited: set[tuple[int, tuple[tuple[str, str], ...]]] = set()
 
     def walk(unit: Any, bound_polarities: dict[str, str] | None = None) -> None:
+        nonlocal matched_write
         bound = dict(bound_polarities or {})
         visit_key = (id(unit), tuple(sorted(bound.items())))
         if visit_key in visited:
@@ -1350,6 +1359,7 @@ def toggle_polarity(function: Any, var: str, member: str | None, *, alias_member
                         continue
                 elif lvalue is None or ref_pair.get(id(lvalue)) != (var, member):
                     continue
+                matched_write = True
                 if polarity:
                     polarities.add(polarity)
             for ir in irs:
@@ -1374,6 +1384,8 @@ def toggle_polarity(function: Any, var: str, member: str | None, *, alias_member
         return "set"
     if polarities == {"unset"}:
         return "unset"
+    if not matched_write:
+        return "none"
     return "both"
 
 

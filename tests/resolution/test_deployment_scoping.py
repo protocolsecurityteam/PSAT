@@ -495,6 +495,7 @@ def test_end_to_end_heal_standalone_impl_resolves_after_backpatch(db_session, mo
     """
     from db.models import Contract, JobStage, JobStatus
     from db.queue import reconcile_impl_job_for_proxy, store_artifact
+    from tests.support.policy_builders import _minimal_contract_analysis
     from workers.resolution_worker import ResolutionWorker
 
     impl, proxy = _addr(), _addr()
@@ -510,7 +511,7 @@ def test_end_to_end_heal_standalone_impl_resolves_after_backpatch(db_session, mo
         db_session,
         job.id,
         "contract_analysis",
-        data={"subject": {"address": impl}, "contract_name": "Core", "functions": []},
+        data=_minimal_contract_analysis(address=impl, name="Core"),
     )
     store_artifact(
         db_session,

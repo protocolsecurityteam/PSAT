@@ -1275,14 +1275,15 @@ class EffectsWorker(BaseWorker):
             signatures_by_contract.setdefault(row.contract_id, {})[row.id] = row.abi_signature or row.function_name
 
         updated = 0
+        ownerless = 0
         for contract_id, contract_verdicts in verdicts_by_contract.items():
             contract = contract_by_id.get(contract_id)
             if contract is None or contract.job_id is None:
-                record_degraded(
-                    phase="effects_assessment",
-                    exc=RuntimeError("effect verdict contract has no assessment-owning job"),
-                    context={"contract_id": contract_id},
-                )
+                # Historical/adopted contracts can legitimately outlive the job
+                # that produced their static rows. There is no artifact owner to
+                # update; the relational projection remains their compatibility
+                # surface and this does not degrade the behavioral verdict.
+                ownerless += 1
                 continue
             try:
                 assessment = load_assessment(get_artifact, session, contract.job_id)
@@ -1326,6 +1327,8 @@ class EffectsWorker(BaseWorker):
                 )
                 row.effect_labels = sorted(labels)
             updated += 1
+        if ownerless:
+            record_stage_metric("assessment_owner_missing", ownerless)
         return updated
 
     def _distill_score_signals(self, session: Session, job: Job) -> None:

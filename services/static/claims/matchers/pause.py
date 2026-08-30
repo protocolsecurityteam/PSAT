@@ -57,12 +57,17 @@ def _pause_evidence(ctx: ClaimContext, function: str, want: str) -> ClaimEvidenc
         # the assignment touched.
         aliases = frozenset(m for v, m in gate_reads if v == var and m) if member is None else frozenset()
         polarity = _facts.toggle_polarity(fn, var, member, alias_members=aliases) if fn is not None else "both"
-        if var in namespaced and polarity == "both":
-            # An ERC-7201 slot holds the whole struct, so writing it proves
-            # nothing about a boolean latch on its own — `transferOwnership`
-            # writes the same slot the owner gate reads. Only a definite
-            # constant-bool toggle of a guard-read member is a pause; anything
-            # else fails closed.
+        if var in namespaced and member is None:
+            # Resolve the exact member written through the local storage
+            # pointer. A namespaced slot also carries owner/admin fields; a
+            # memberless witness makes their authority guards look like pause
+            # victims merely because they share the slot.
+            matched.extend(
+                {"var": var, "member": alias}
+                for alias in sorted(aliases)
+                if fn is not None
+                and _facts.toggle_polarity(fn, var, None, alias_members=frozenset({alias})) == want
+            )
             continue
         declared_types = _facts.pause_target_declared_types(ctx, function, (var, member))
         if polarity == "both" and declared_types & {"uint8", "uint256"}:

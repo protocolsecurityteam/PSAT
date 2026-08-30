@@ -115,6 +115,11 @@
               "claim_id": "pause.set",
               "tier": "standard_exact",
               "witness": {
+                "affected_functions": [
+                  "approve(address,uint256)",
+                  "transfer(address,uint256)",
+                  "transferFrom(address,address,uint256)"
+                ],
                 "flags": [
                   {
                     "member": null,
@@ -235,6 +240,11 @@
               "claim_id": "pause.unset",
               "tier": "standard_exact",
               "witness": {
+                "affected_functions": [
+                  "approve(address,uint256)",
+                  "transfer(address,uint256)",
+                  "transferFrom(address,address,uint256)"
+                ],
                 "flags": [
                   {
                     "member": null,
@@ -1100,9 +1110,12 @@
               "claim_id": "pause.set",
               "tier": "standard_exact",
               "witness": {
+                "affected_functions": [
+                  "transfer(address,uint256)"
+                ],
                 "flags": [
                   {
-                    "member": null,
+                    "member": "paused",
                     "var": "PAUSABLE_STORAGE_SLOT"
                   }
                 ],
@@ -1184,9 +1197,12 @@
               "claim_id": "pause.unset",
               "tier": "standard_exact",
               "witness": {
+                "affected_functions": [
+                  "transfer(address,uint256)"
+                ],
                 "flags": [
                   {
-                    "member": null,
+                    "member": "paused",
                     "var": "PAUSABLE_STORAGE_SLOT"
                   }
                 ],
@@ -5742,6 +5758,9 @@
               "claim_id": "pause.set",
               "tier": "idiom_structural",
               "witness": {
+                "affected_functions": [
+                  "transferFreezable(address,uint256)"
+                ],
                 "flags": [
                   {
                     "member": null,
@@ -5859,6 +5878,9 @@
               "claim_id": "pause.unset",
               "tier": "idiom_structural",
               "witness": {
+                "affected_functions": [
+                  "transferFreezable(address,uint256)"
+                ],
                 "flags": [
                   {
                     "member": null,
