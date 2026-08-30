@@ -771,6 +771,23 @@ def test_forkfixture_backward_compatible_defaults():
     assert _has_verify_spec(_verified_fixture("0x" + "00" * 32)) is True
 
 
+def test_deploy_waits_for_receipt_index_visibility(monkeypatch):
+    """A submitted transaction can briefly have no receipt on a loaded runner."""
+
+    from types import SimpleNamespace
+
+    from services.effects.anvil import SubprocessAnvil
+
+    anvil = object.__new__(SubprocessAnvil)
+    responses = iter([None, None, {"contractAddress": CONTRACT}])
+    anvil._rpc = lambda method, params: next(responses)  # type: ignore[method-assign]
+    anvil._proc = SimpleNamespace(poll=lambda: None)  # pyright: ignore[reportAttributeAccessIssue]
+    monkeypatch.setattr("services.effects.anvil.time.sleep", lambda _seconds: None)
+
+    receipt = anvil._wait_transaction_receipt("0xtx", timeout=1)
+    assert receipt["contractAddress"] == CONTRACT
+
+
 # ---------------------------------------------------------------------------
 # Localhost NON-FORKING anvil integration — GATED behind availability
 # ---------------------------------------------------------------------------

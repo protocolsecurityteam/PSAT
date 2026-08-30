@@ -65,8 +65,7 @@ def _pause_evidence(ctx: ClaimContext, function: str, want: str) -> ClaimEvidenc
             matched.extend(
                 {"var": var, "member": alias}
                 for alias in sorted(aliases)
-                if fn is not None
-                and _facts.toggle_polarity(fn, var, None, alias_members=frozenset({alias})) == want
+                if fn is not None and _facts.toggle_polarity(fn, var, None, alias_members=frozenset({alias})) == want
             )
             continue
         declared_types = _facts.pause_target_declared_types(ctx, function, (var, member))
