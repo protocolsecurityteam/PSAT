@@ -99,6 +99,7 @@ def add_effects(
                 "tier": getattr(verdict, "tier", None),
                 "behavior_hash": getattr(verdict, "behavior_hash", None),
                 "current_check_passed": getattr(verdict, "current_check_passed", None),
+                "claim_witness": legacy_claim["witness"],
                 "witness": getattr(verdict, "witness", None),
                 "observed_residue": getattr(verdict, "observed_residue", None),
                 "transcript_ptr": getattr(verdict, "transcript_ptr", None),

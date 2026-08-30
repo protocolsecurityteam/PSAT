@@ -83,6 +83,10 @@ def legacy_claims_by_function(assessment: Assessment) -> dict[str, list[dict[str
             # than overwriting the replayable static witness.
             if evidence["method"] != "execution":
                 witness.update(evidence["observation"])
+            else:
+                claim_witness = evidence["observation"].get("claim_witness")
+                if isinstance(claim_witness, dict):
+                    witness.update(claim_witness)
         witness["evidence_ids"] = list(claim["basis"]["evidence_ids"])
         out.setdefault(signature, []).append(
             {
