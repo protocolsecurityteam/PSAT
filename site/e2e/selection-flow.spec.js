@@ -34,7 +34,7 @@ const FIXTURE = {
         {
           function: "pauseContract()",
           selector: "0x11111111",
-          effect_labels: ["pause_toggle"],
+          claims: [{ claim_id: "pause.set", tier: "standard_exact", witness: {} }],
           direct_owner: {
             address: GOV_SAFE,
             resolved_type: "safe",
@@ -57,7 +57,7 @@ const FIXTURE = {
         {
           function: "setOracle()",
           selector: "0x22222222",
-          effect_labels: ["config"],
+          claims: [{ claim_id: "authority.replace", tier: "standard_exact", witness: {} }],
           direct_owner: {
             address: CO_SAFE,
             resolved_type: "safe",
@@ -103,12 +103,23 @@ const FIXTURE = {
 
 /** The safe's controlled contract names — the entities that must NOT leak. */
 const CONTROLLED_NAMES = ["Vault", "LiquidityPool"];
+const FUNCTIONS_FIXTURE = {
+  functions: Object.fromEntries(
+    FIXTURE.contracts.map((contract) => [
+      `ethereum::${contract.address.toLowerCase()}`,
+      contract.functions || [],
+    ]),
+  ),
+};
 
 async function goToSurface(page, { admin = false } = {}) {
   if (admin) {
     // The Agent tab gates on the presence of an admin key only.
     await page.addInitScript(() => window.localStorage.setItem("psat_admin_key", "e2e"));
   }
+  await page.route("**/api/company/seltest/functions", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(FUNCTIONS_FIXTURE) })
+  );
   await page.route("**/api/company/seltest", (route) =>
     route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(FIXTURE) })
   );

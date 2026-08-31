@@ -26,7 +26,7 @@ const FIXTURE = {
         {
           function: "pauseContract()",
           selector: "0x11111111",
-          effect_labels: ["pause_toggle"],
+          claims: [{ claim_id: "pause.set", tier: "standard_exact", witness: {} }],
           direct_owner: {
             address: GUARDIAN,
             resolved_type: "safe",
@@ -83,7 +83,16 @@ const FIXTURE = {
   fund_flows: [],
 };
 
+const FUNCTIONS_FIXTURE = {
+  functions: {
+    [`ethereum::${VAULT}`]: FIXTURE.contracts[0].functions,
+  },
+};
+
 async function goToSurface(page) {
+  await page.route("**/api/company/cctest/functions", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(FUNCTIONS_FIXTURE) })
+  );
   await page.route("**/api/company/cctest", (route) =>
     route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(FIXTURE) })
   );

@@ -40,9 +40,7 @@ function ProtocolSurface({
   const isAdmin = useIsAdmin();
   // initialData / initialFunctions let a parent (CompanyOverview) hand
   // us the /api/company/{name} payload and /functions map it already
-  // fetched, so we don't fire duplicate requests on mount. Fixtures
-  // (vitest, e2e) still embed functions on each contract entry, so
-  // fall back to those when neither prop is provided.
+  // fetched, so we don't fire duplicate requests on mount.
   const [companyData, setCompanyData] = useState(initialData);
   const { availableChains, activeChain, isMultichain, rescopeChain } = useChainScope({
     companyData,
@@ -54,27 +52,13 @@ function ProtocolSurface({
   // resolves after /api/company) flows in. The previous
   // useState(initialFunctionData) seeded once and never resynced, so
   // the embedded surface stayed permanently empty on hard refresh.
-  // Precedence: prop > locally fetched > inline-on-contract fixtures.
+  // Precedence: prop > locally fetched.
   const [locallyFetched, setLocallyFetched] = useState(null);
   const functionData = useMemo(() => {
     if (initialFunctions && Object.keys(initialFunctions).length > 0) return initialFunctions;
     if (locallyFetched && Object.keys(locallyFetched).length > 0) return locallyFetched;
-    const source = companyData?.contracts || initialData?.contracts;
-    if (Array.isArray(source) && source.some((c) => Array.isArray(c.functions))) {
-      // Key by the composite (chain, address) token — uniform with the
-      // /functions endpoint payload (initialFunctions/locallyFetched), which is
-      // now composite-keyed too. Two chains can share an address, so a bare key
-      // would last-wins one chain's functions onto the other (inv. 13). The
-      // per-chain filter is redundant given the composite key but kept so the
-      // inline fixture map stays scoped to what the canvas renders.
-      return Object.fromEntries(
-        source
-          .filter((c) => c.address && coalesceChain(c.chain) === activeChain)
-          .map((c) => [entityKey(c.chain, c.address), c.functions || []]),
-      );
-    }
     return {};
-  }, [initialFunctions, locallyFetched, companyData, initialData, activeChain]);
+  }, [initialFunctions, locallyFetched]);
   const [functionsLoading, setFunctionsLoading] = useState(false);
   // Single URL writer. Persists a committed selection as ?sel=<addr> — the
   // address alone determines which card renders, so no view axis is stored.
@@ -84,8 +68,7 @@ function ProtocolSurface({
   // pager) and never on plain render. Because it fires only after a user commit
   // (which can only happen after the machines-gated mount restore has run and
   // read the params), it cannot race the restore; no separate write gate is
-  // needed beyond the per-restore refs below. Legacy ?focus and ?view are
-  // dropped on every write so old-style params don't linger next to ?sel.
+  // needed beyond the per-restore refs below.
   const syncUrl = useCallback(({ sel = null, radar: radarSig = null } = {}) => {
     if (embedded) return;
     const url = new URL(window.location.href);
@@ -94,8 +77,6 @@ function ProtocolSurface({
     } else {
       url.searchParams.delete("sel");
     }
-    url.searchParams.delete("view");
-    url.searchParams.delete("focus");
     if (radarSig) {
       url.searchParams.set("score", "1");
       if (radarSig.signature) url.searchParams.set("fn", radarSig.signature);
@@ -155,13 +136,7 @@ function ProtocolSurface({
     let cancelled = false;
 
     const haveCompanyData = Boolean(initialData);
-    // Fixtures (vitest, e2e) still embed functions on each contract,
-    // so detect that and skip the /functions fetch in that case.
-    const initialFixtureFunctions =
-      !initialFunctions &&
-      Array.isArray(initialData?.contracts) &&
-      initialData.contracts.some((c) => Array.isArray(c.functions));
-    const haveFunctions = Boolean(initialFunctions) || initialFixtureFunctions;
+    const haveFunctions = Boolean(initialFunctions);
 
     if (haveCompanyData) setCompanyData(initialData);
 
@@ -178,10 +153,6 @@ function ProtocolSurface({
         .then((d) => {
           if (cancelled) return;
           setCompanyData(d);
-          // Older / mocked /api/company responses still embed functions
-          // on contract entries (e2e fixtures, legacy backend). The
-          // functionData memo picks those up from companyData.contracts;
-          // no explicit copy needed here.
         })
         .catch((err) => { if (!cancelled) setError(err.message || "Failed to load surface"); });
     }
@@ -242,11 +213,8 @@ function ProtocolSurface({
     focusPreview,
   } = useSurfaceSelection({ entityIndex, machines: allMachines, companyName, chain: activeChain });
 
-  // Restore a persisted selection from the URL on initial data load. Reads
-  // ?sel=, falling back to the legacy ?focus= param so old links still resolve.
-  // A legacy ?view= is parsed and IGNORED — the address alone determines the
-  // card now, which also un-breaks old ?sel=<addr>&view=principal links whose
-  // stored view contradicted the entity's facets. A radar deep-link (?score) is
+  // Restore a persisted selection from ?sel= on initial data load. The address
+  // alone determines the card. A radar deep-link (?score) is
   // left to the radar-restore effect below. Runs once, gated on machines so the
   // entity index can resolve the address; this read happens before any user
   // commit can fire the URL writer, so the writer never clobbers these params
@@ -256,7 +224,7 @@ function ProtocolSurface({
     if (embedded || restoredSelection.current || !allMachines.length) return;
     const params = new URLSearchParams(window.location.search);
     if (params.get("score")) return;
-    const addr = params.get("sel") || params.get("focus");
+    const addr = params.get("sel");
     if (!addr) return;
     restoredSelection.current = true;
     if (entityIndex.get(entityKey(activeChain, addr))) {
@@ -510,7 +478,7 @@ function ProtocolSurface({
     // contract alone and latch, losing the named function the link carried.
     if (functionsLoading) return;
     const params = new URLSearchParams(window.location.search);
-    const focus = params.get("sel") || params.get("focus");
+    const focus = params.get("sel");
     const fn = params.get("fn");
     if (!focus || !params.get("score")) return;
     const target = { contractAddress: focus, functionSignature: fn || "", selector: fn || "" };

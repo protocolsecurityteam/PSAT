@@ -35,7 +35,7 @@ function contract(address, name, ownerSafe, ownerThreshold) {
       {
         function: "poke()",
         selector: "0x12345678",
-        effect_labels: ["pause_toggle"],
+        claims: [{ claim_id: "pause.set", tier: "standard_exact", witness: {} }],
         direct_owner: { address: ownerSafe, resolved_type: "safe", details: { threshold: ownerThreshold, owners: ["0x01", "0x02", "0x03"] } },
         authority_roles: [],
         controllers: [],
@@ -78,7 +78,19 @@ const FIXTURE = {
   ],
 };
 
+const FUNCTIONS_FIXTURE = {
+  functions: Object.fromEntries(
+    FIXTURE.contracts.map((entry) => [
+      `ethereum::${entry.address.toLowerCase()}`,
+      entry.functions || [],
+    ]),
+  ),
+};
+
 async function goToSurface(page) {
+  await page.route("**/api/company/xgtest/functions", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(FUNCTIONS_FIXTURE) })
+  );
   await page.route("**/api/company/xgtest", (route) =>
     route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(FIXTURE) })
   );
