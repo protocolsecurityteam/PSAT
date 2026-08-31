@@ -112,8 +112,20 @@ def _controllers(contract_id: str, analysis: Mapping[str, Any]) -> dict[str, Con
             "id": controller_id,
             "contract_id": contract_id,
             "key": local_id,
+            "label": str(raw.get("label") or local_id),
+            "kind": str(raw.get("kind") or "unknown"),
             "source": _json(raw.get("source")),
             "read_strategy": _json(raw.get("read_spec")),
+            "tracking": _json(
+                {
+                    "mode": raw.get("tracking_mode"),
+                    "writer_functions": raw.get("writer_functions") or [],
+                    "associated_events": raw.get("associated_events") or [],
+                    "polling_sources": raw.get("polling_sources") or [],
+                    "notes": raw.get("notes") or [],
+                    "authority_provenance": raw.get("authority_provenance"),
+                }
+            ),
         }
     return controllers
 

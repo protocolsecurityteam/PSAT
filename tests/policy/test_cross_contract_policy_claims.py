@@ -24,8 +24,9 @@ from sqlalchemy.orm import sessionmaker
 
 from db.models import Contract, EffectiveFunction, Job, JobStage, JobStatus
 from db.queue import store_artifact
-from services.static.claims import ClaimProjection
+from services.static.claims import EffectMatch
 from tests.conftest import requires_postgres
+from tests.support.policy_builders import _assessment, _minimal_contract_analysis
 from workers.policy_worker import PolicyWorker
 
 pytestmark = requires_postgres
@@ -66,6 +67,15 @@ def _make_job(session, *, address: str, company: str, request: dict | None = Non
     session.add(job)
     session.commit()
     return job
+
+
+def _store_empty_assessment(session, job: Job, address: str) -> None:
+    store_artifact(
+        session,
+        job.id,
+        "assessment",
+        data=_assessment(analysis=_minimal_contract_analysis(address=address, name="C")),
+    )
 
 
 def _make_target_functions(session, target_job: Job, signatures: list[str]) -> Contract:
@@ -115,7 +125,7 @@ def test_value_flow_claim_propagates_to_effective_function(db_session, _repoint_
             "functions": {"transfer(address,uint256)": {"selector": TRANSFER_SELECTOR, "claims": [_std("flow.out")]}},
         },
     )
-    store_artifact(db_session, sibling_job.id, "control_snapshot", data={"controller_values": {}})
+    _store_empty_assessment(db_session, sibling_job, TOKEN)
 
     store_artifact(
         db_session,
@@ -183,7 +193,7 @@ def test_no_claims_without_matching_evidence(db_session, _repoint_session_local)
             "functions": {"transfer(address,uint256)": {"selector": TRANSFER_SELECTOR, "claims": [_std("flow.out")]}},
         },
     )
-    store_artifact(db_session, sibling_job.id, "control_snapshot", data={"controller_values": {}})
+    _store_empty_assessment(db_session, sibling_job, TOKEN)
     # Target calls a DIFFERENT (unresolved) contract var.
     store_artifact(
         db_session,
@@ -232,7 +242,7 @@ def test_apply_cross_contract_claims_merges_and_dedups():
             {"function": "noop()", "abi_signature": "noop()", "claims": []},
         ]
     }
-    enriched: dict[str, list[ClaimProjection]] = {
+    enriched: dict[str, list[EffectMatch]] = {
         "sweep(address)": [{"claim_id": "flow.out", "tier": "policy_derived", "witness": {"policy": True}}],
     }
     PolicyWorker()._apply_cross_contract_claims(payload, enriched)
@@ -259,8 +269,8 @@ def test_equal_tier_merge_keeps_the_first_claim():
     keeps it harmless is the precondition below."""
     from services.static.claims.registry import resolve_claim_precedence
 
-    stale: ClaimProjection = {"claim_id": "flow.out", "tier": "policy_derived", "witness": {"sink_id": "stale"}}
-    fresh: ClaimProjection = {"claim_id": "flow.out", "tier": "policy_derived", "witness": {"sink_id": "fresh"}}
+    stale: EffectMatch = {"claim_id": "flow.out", "tier": "policy_derived", "witness": {"sink_id": "stale"}}
+    fresh: EffectMatch = {"claim_id": "flow.out", "tier": "policy_derived", "witness": {"sink_id": "fresh"}}
     survivor = resolve_claim_precedence([stale, fresh])
     assert len(survivor) == 1
     assert survivor[0]["witness"]["sink_id"] == "stale"
@@ -340,7 +350,7 @@ def test_struct_param_function_still_matches_its_row(db_session, _repoint_sessio
             "functions": {"transfer(address,uint256)": {"selector": TRANSFER_SELECTOR, "claims": [_std("flow.out")]}},
         },
     )
-    store_artifact(db_session, sibling_job.id, "control_snapshot", data={"controller_values": {}})
+    _store_empty_assessment(db_session, sibling_job, TOKEN)
     store_artifact(
         db_session,
         target_job.id,
@@ -428,7 +438,7 @@ def test_enrichment_lands_only_on_this_job_s_deployment(db_session, _repoint_ses
             "functions": {"transfer(address,uint256)": {"selector": TRANSFER_SELECTOR, "claims": [_std("flow.out")]}},
         },
     )
-    store_artifact(db_session, sibling_job.id, "control_snapshot", data={"controller_values": {}})
+    _store_empty_assessment(db_session, sibling_job, TOKEN)
     store_artifact(
         db_session,
         target_job.id,
@@ -510,7 +520,7 @@ def test_ambiguous_row_match_is_skipped_not_raised(db_session, _repoint_session_
             "functions": {"transfer(address,uint256)": {"selector": TRANSFER_SELECTOR, "claims": [_std("flow.out")]}},
         },
     )
-    store_artifact(db_session, sibling_job.id, "control_snapshot", data={"controller_values": {}})
+    _store_empty_assessment(db_session, sibling_job, TOKEN)
     store_artifact(
         db_session,
         target_job.id,

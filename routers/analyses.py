@@ -33,7 +33,7 @@ _CONSUMER_SAFE_ARTIFACTS = frozenset(
 
 # Internal/operator artifacts excluded from the public ``/api/analyses``
 # listing so their existence isn't enumerable to anonymous callers.
-_INTERNAL_ARTIFACT_NAMES = frozenset({"stage_errors", "stage_timings", "predicate_trees", "control_tracking_plan"})
+_INTERNAL_ARTIFACT_NAMES = frozenset({"stage_errors", "stage_timings", "predicate_trees", "static_facts"})
 
 
 def _is_internal_artifact_name(name: str) -> bool:

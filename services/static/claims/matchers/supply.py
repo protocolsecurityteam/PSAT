@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from ..context import ClaimContext, abi_selector, selectors_of
 from ..decorator import claim_matcher
-from ..types import ClaimEvidence
+from ..types import MatchedEvidence
 from . import _facts
 
 _OWN_SELECTORS = {
@@ -45,10 +45,10 @@ def _weth_gate(ctx: ClaimContext) -> bool:
     return _facts.is_erc20(ctx) and ctx.has_selectors(_DEPOSIT, _WITHDRAW)
 
 
-def _supply_evidence(ctx: ClaimContext, function: str, kind: str) -> ClaimEvidence | None:
+def _supply_evidence(ctx: ClaimContext, function: str, kind: str) -> MatchedEvidence | None:
     selector = ctx.canonical_selector(function)
     if _token_gate(ctx) and selector in _OWN_SELECTORS[kind]:
-        return ClaimEvidence(
+        return MatchedEvidence(
             tier="standard_exact",
             witness={"kind": "own_selector", "selector": selector, "supply": kind},
         )
@@ -59,7 +59,7 @@ def _supply_evidence(ctx: ClaimContext, function: str, kind: str) -> ClaimEviden
         if s.get("kind") == "external_call" and s.get("selector") in _CALLEE_SELECTORS[kind]
     ]
     if callee_sink_ids:
-        return ClaimEvidence(
+        return MatchedEvidence(
             tier="standard_exact",
             witness={"kind": "callee_selector", "sink_ids": sorted(set(callee_sink_ids)), "supply": kind},
         )
@@ -67,12 +67,12 @@ def _supply_evidence(ctx: ClaimContext, function: str, kind: str) -> ClaimEviden
     fn = _facts.contract_function(ctx, function) if _facts.is_erc20(ctx) else None
     if fn is not None:
         if _facts.total_supply_sign(fn, _facts.total_supply_vars(ctx)) == kind:
-            return ClaimEvidence(
+            return MatchedEvidence(
                 tier="idiom_structural",
                 witness={"kind": "total_supply_sign", "supply": kind},
             )
         if _facts.mint_burn_transfer_sign(fn) == kind:
-            return ClaimEvidence(
+            return MatchedEvidence(
                 tier="idiom_structural",
                 witness={"kind": "mint_burn_transfer", "supply": kind},
             )
@@ -81,9 +81,9 @@ def _supply_evidence(ctx: ClaimContext, function: str, kind: str) -> ClaimEviden
         # created or destroyed anything.
         if _weth_gate(ctx) and _facts.monotone_balance_delta(fn) == kind:
             if kind == "mint" and selector == _DEPOSIT:
-                return ClaimEvidence(tier="idiom_structural", witness={"kind": "weth_wrap", "supply": "mint"})
+                return MatchedEvidence(tier="idiom_structural", witness={"kind": "weth_wrap", "supply": "mint"})
             if kind == "burn" and selector == _WITHDRAW:
-                return ClaimEvidence(tier="idiom_structural", witness={"kind": "weth_unwrap", "supply": "burn"})
+                return MatchedEvidence(tier="idiom_structural", witness={"kind": "weth_unwrap", "supply": "burn"})
     return None
 
 
@@ -93,7 +93,7 @@ def _supply_evidence(ctx: ClaimContext, function: str, kind: str) -> ClaimEviden
     legacy_projection="mint",
     consumer_family="flow",
 )
-def supply_mint(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
+def supply_mint(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
     return _supply_evidence(ctx, function, "mint")
 
 
@@ -103,5 +103,5 @@ def supply_mint(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     legacy_projection="burn",
     consumer_family="flow",
 )
-def supply_burn(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
+def supply_burn(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
     return _supply_evidence(ctx, function, "burn")

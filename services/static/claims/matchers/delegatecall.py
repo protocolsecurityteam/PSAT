@@ -57,7 +57,7 @@ from ...contract_analysis_pipeline.predicate_types import (
 )
 from ..context import ClaimContext
 from ..decorator import claim_matcher
-from ..types import ClaimEvidence
+from ..types import MatchedEvidence
 from . import _facts
 from ._taint import UNDETERMINED, _definitions, _origin, _root_variable
 
@@ -313,7 +313,7 @@ def _explained_by_upgrade(ctx: ClaimContext, function: str) -> bool:
     legacy_projection="delegatecall_execution",
     consumer_family="exec",
 )
-def delegatecall_execute(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
+def delegatecall_execute(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
     sink_ids = [
         str(sink["id"])
         for sink in _facts.body_sinks(ctx, function)
@@ -331,7 +331,7 @@ def delegatecall_execute(ctx: ClaimContext, function: str) -> ClaimEvidence | No
         "destination": destination,
         "destination_constraint": _destination_constraint(ctx, function, unit, destination),
     }
-    return ClaimEvidence(tier="idiom_structural", witness=witness)
+    return MatchedEvidence(tier="idiom_structural", witness=witness)
 
 
 def _destination_constraint(ctx: ClaimContext, function: str, unit: Any, destination: dict[str, Any]) -> dict[str, Any]:

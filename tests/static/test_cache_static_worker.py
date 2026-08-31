@@ -50,7 +50,9 @@ def test_static_worker_cache_hit_skips_analysis(db_session, monkeypatch):
     db_session.commit()
 
     store_source_files(db_session, job.id, {"src/TestContract.sol": "contract TestContract {}"})
-    store_artifact(db_session, job.id, "contract_analysis", data={"summary": {}})
+    from tests.support.policy_builders import _assessment
+
+    store_artifact(db_session, job.id, "assessment", data=_assessment())
 
     worker = StaticWorker()
     phases_run = _patch_static_worker_phases(monkeypatch, worker)
@@ -104,7 +106,7 @@ def test_static_worker_cache_miss_runs_analysis(db_session, monkeypatch):
     assert "resolve_proxy" in phases_run
     assert "dependency" in phases_run
     assert "analysis" in phases_run
-    assert "tracking_plan" in phases_run
+    assert "tracking_plan" not in phases_run
 
 
 # ---------------------------------------------------------------------------
@@ -607,4 +609,4 @@ def test_e2e_discovery_then_static_with_cache(db_session, monkeypatch):
     # Data should be intact
     sources = get_source_files(db_session, new_job.id)
     assert len(sources) == 2
-    assert get_artifact(db_session, new_job.id, "contract_analysis") is not None
+    assert get_artifact(db_session, new_job.id, "assessment") is not None

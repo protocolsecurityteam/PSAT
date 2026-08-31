@@ -40,6 +40,7 @@ from db.contract_materializations import (
 from db.models import ContractMaterialization, Job, JobStage, JobStatus
 from db.queue import proven_analysis_schema_version
 from tests.conftest import requires_postgres
+from tests.support.policy_builders import _assessment, _minimal_contract_analysis
 
 ADDR = "0x" + "a1" * 20
 OTHER_ADDR = "0x" + "b2" * 20
@@ -49,6 +50,7 @@ OTHER_KECCAK = "0x" + "22" * 32
 ANALYSIS = {"subject": {"address": ADDR, "name": "C"}, "functions": []}
 PLAN = {"contract_address": ADDR, "tracked_controllers": []}
 TREES = {"schema_version": "semantic", "trees": {}}
+ASSESSMENT = _assessment(analysis=_minimal_contract_analysis(address=ADDR, name="C"))
 
 
 @pytest.fixture()
@@ -403,7 +405,7 @@ def _stub_artifacts(monkeypatch, mapping: dict[str, Any]) -> None:
 def test_static_stage_publishes_the_artifacts_it_stored(monkeypatch, captured_publish):
     _stub_artifacts(
         monkeypatch,
-        {"contract_analysis": ANALYSIS, "control_tracking_plan": PLAN, "predicate_trees": TREES},
+        {"static_facts": ANALYSIS, "assessment": ASSESSMENT, "predicate_trees": TREES},
     )
     job = _fake_job()
     _FakeStaticWorker()._publish_materialization(None, job, ADDR, "C")
@@ -412,7 +414,8 @@ def test_static_stage_publishes_the_artifacts_it_stored(monkeypatch, captured_pu
     call = captured_publish[0]
     assert call["address"] == ADDR
     assert call["bytecode_keccak"] == KECCAK
-    assert call["tracking_plan"] == PLAN
+    assert call["tracking_plan"]["contract_address"] == ADDR
+    assert call["tracking_plan"]["tracked_controllers"] == []
     assert call["analysis"] == ANALYSIS
     assert call["predicate_trees"] == TREES
     assert call["source_content_hash"] == job.source_content_hash
@@ -429,7 +432,7 @@ def test_static_stage_publishes_nothing_for_an_unproven_analyzer_era(monkeypatch
     discovery's stamp, leaving the column NULL — and NULL is not "current"."""
     _stub_artifacts(
         monkeypatch,
-        {"contract_analysis": ANALYSIS, "control_tracking_plan": PLAN, "predicate_trees": TREES},
+        {"static_facts": ANALYSIS, "assessment": ASSESSMENT, "predicate_trees": TREES},
     )
     monkeypatch.setattr("db.queue.proven_analysis_schema_version", lambda _s, _j: None)
     _FakeStaticWorker()._publish_materialization(None, _fake_job(version=None), ADDR, "C")
@@ -445,7 +448,7 @@ def test_static_stage_publishes_a_cache_hit_whose_donor_proves_the_era(monkeypat
     donor's artifacts, so the donor's stamp IS this job's artifacts' era."""
     _stub_artifacts(
         monkeypatch,
-        {"contract_analysis": ANALYSIS, "control_tracking_plan": PLAN, "predicate_trees": TREES},
+        {"static_facts": ANALYSIS, "assessment": ASSESSMENT, "predicate_trees": TREES},
     )
     monkeypatch.setattr("db.queue.proven_analysis_schema_version", lambda _s, _j: ANALYSIS_SCHEMA_VERSION)
     job = _fake_job(version=None, request={"static_cached": True, "cache_source_job_id": str(uuid.uuid4())})
@@ -461,7 +464,7 @@ def test_only_a_bundle_this_job_produced_may_refresh(monkeypatch, captured_publi
     watches."""
     _stub_artifacts(
         monkeypatch,
-        {"contract_analysis": ANALYSIS, "control_tracking_plan": PLAN, "predicate_trees": TREES},
+        {"static_facts": ANALYSIS, "assessment": ASSESSMENT, "predicate_trees": TREES},
     )
     _FakeStaticWorker()._publish_materialization(None, _fake_job(), ADDR, "C")
     assert captured_publish[0]["refresh_on_differ"] is True
@@ -486,7 +489,7 @@ def test_a_copied_bundle_does_not_overwrite_a_freshly_analyzed_row(cm_db):
 
 
 def test_static_stage_publishes_nothing_without_a_plan(monkeypatch, captured_publish):
-    _stub_artifacts(monkeypatch, {"contract_analysis": ANALYSIS})
+    _stub_artifacts(monkeypatch, {"static_facts": ANALYSIS})
     _FakeStaticWorker()._publish_materialization(None, _fake_job(), ADDR, "C")
     assert captured_publish == []
 
@@ -495,7 +498,7 @@ def test_static_stage_publishes_nothing_without_a_keccak(monkeypatch, captured_p
     """The row is keyed on bytecode; a key we could not read is not a key."""
     _stub_artifacts(
         monkeypatch,
-        {"contract_analysis": ANALYSIS, "control_tracking_plan": PLAN, "predicate_trees": TREES},
+        {"static_facts": ANALYSIS, "assessment": ASSESSMENT, "predicate_trees": TREES},
     )
 
     def _boom(*_a, **_k):
@@ -511,7 +514,7 @@ def test_static_stage_never_fails_the_job_on_a_publish_error(monkeypatch, captur
     analysis succeeded."""
     _stub_artifacts(
         monkeypatch,
-        {"contract_analysis": ANALYSIS, "control_tracking_plan": PLAN, "predicate_trees": TREES},
+        {"static_facts": ANALYSIS, "assessment": ASSESSMENT, "predicate_trees": TREES},
     )
 
     def _boom(**_k):

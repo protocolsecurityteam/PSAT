@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from ..context import ClaimContext
 from ..decorator import claim_matcher
-from ..types import ClaimEvidence
+from ..types import MatchedEvidence
 from . import _authcommon as ac
 
 
@@ -37,8 +37,8 @@ def _ownership_present(ctx: ClaimContext) -> bool:
     )
 
 
-def _evidence(standard: str, selector: str, corroboration: str) -> ClaimEvidence:
-    return ClaimEvidence(
+def _evidence(standard: str, selector: str, corroboration: str) -> MatchedEvidence:
+    return MatchedEvidence(
         tier="standard_exact",
         witness={
             "kind": "selector",
@@ -56,7 +56,7 @@ def _evidence(standard: str, selector: str, corroboration: str) -> ClaimEvidence
     consumer_family="control_plane",
     gate=_ownership_present,
 )
-def ownership_transfer(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
+def ownership_transfer(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
     selector = ac.canonical_selector(ctx, function)
     if selector is None:
         return None
@@ -79,7 +79,7 @@ def ownership_transfer(ctx: ClaimContext, function: str) -> ClaimEvidence | None
     consumer_family="control_plane",
     gate=_ownership_present,
 )
-def ownership_renounce(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
+def ownership_renounce(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
     selector = ac.canonical_selector(ctx, function)
     if selector is None:
         return None
@@ -99,7 +99,7 @@ def ownership_renounce(ctx: ClaimContext, function: str) -> ClaimEvidence | None
     consumer_family="control_plane",
     gate=_ownership_present,
 )
-def ownership_accept(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
+def ownership_accept(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
     selector = ac.canonical_selector(ctx, function)
     if selector is None:
         return None

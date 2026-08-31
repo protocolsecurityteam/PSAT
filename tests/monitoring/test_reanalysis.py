@@ -543,7 +543,7 @@ class TestMaybeQueueReanalysis:
         """A re-analysis job does not break find_completed_static_cache.
 
         The cache finder looks for completed+done jobs with source files and
-        contract_analysis artifacts. A queued re-analysis job should not
+        assessment artifacts. A queued re-analysis job should not
         interfere because it has status=queued, stage=discovery.
         """
         from db.queue import find_completed_static_cache, store_artifact, store_source_files
@@ -562,7 +562,14 @@ class TestMaybeQueueReanalysis:
         db_session.refresh(old_job)
 
         store_source_files(db_session, old_job.id, {"src/A.sol": "contract A {}"})
-        store_artifact(db_session, old_job.id, "contract_analysis", data={"functions": []})
+        from tests.support.policy_builders import _assessment, _minimal_contract_analysis
+
+        store_artifact(
+            db_session,
+            old_job.id,
+            "assessment",
+            data=_assessment(analysis=_minimal_contract_analysis(address=addr.lower())),
+        )
 
         # Create Contract + ContractSummary (required by find_completed_static_cache)
         contract = Contract(

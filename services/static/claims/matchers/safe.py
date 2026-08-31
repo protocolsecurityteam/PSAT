@@ -11,12 +11,12 @@ from __future__ import annotations
 
 from ..context import ClaimContext
 from ..decorator import claim_matcher
-from ..types import ClaimEvidence
+from ..types import MatchedEvidence
 from ._gates import SAFE_MODULE_SELECTORS, SAFE_SET_GUARD, SAFE_SIGNER_SELECTORS, is_safe_gate
 
 
-def _safe_evidence(selector: str) -> ClaimEvidence:
-    return ClaimEvidence(
+def _safe_evidence(selector: str) -> MatchedEvidence:
+    return MatchedEvidence(
         tier="standard_exact",
         witness={"kind": "selector+gate", "standard": "safe", "selector": selector},
     )
@@ -29,7 +29,7 @@ def _safe_evidence(selector: str) -> ClaimEvidence:
     consumer_family="control_plane",
     gate=is_safe_gate,
 )
-def safe_signer_mgmt(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
+def safe_signer_mgmt(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
     selector = ctx.canonical_selector(function)
     if selector is None or selector not in SAFE_SIGNER_SELECTORS:
         return None
@@ -43,7 +43,7 @@ def safe_signer_mgmt(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     consumer_family="control_plane",
     gate=is_safe_gate,
 )
-def safe_module_mgmt(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
+def safe_module_mgmt(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
     selector = ctx.canonical_selector(function)
     if selector is None or selector not in SAFE_MODULE_SELECTORS:
         return None
@@ -57,7 +57,7 @@ def safe_module_mgmt(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     consumer_family="control_plane",
     gate=is_safe_gate,
 )
-def safe_set_guard(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
+def safe_set_guard(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
     if ctx.canonical_selector(function) != SAFE_SET_GUARD:
         return None
     return _safe_evidence(SAFE_SET_GUARD)

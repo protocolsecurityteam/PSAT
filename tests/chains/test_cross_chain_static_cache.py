@@ -24,6 +24,7 @@ from db.queue import (
     store_source_files,
 )
 from tests.cache_helpers import db_session, requires_postgres  # noqa: F401
+from tests.support.policy_builders import _assessment, _minimal_contract_analysis
 
 pytestmark = requires_postgres
 
@@ -39,16 +40,13 @@ _SOURCES = {
 
 
 def _analysis(address: str) -> dict:
-    return {
-        "schema_version": "1",
-        "subject": {"address": address, "name": "Vault", "compiler_version": "v0.8.24", "source_verified": True},
-        "summary": {"control_model": "ownable", "standards": ["ERC20"]},
-        "semantic_control": {"role_definitions": [{"role": "ADMIN_ROLE", "declared_in": "Vault.sol"}]},
+    facts = _minimal_contract_analysis(address=address, name="Vault")
+    facts["summary"] = {**facts["summary"], "control_model": "ownable", "standards": ["ERC20"]}
+    facts["semantic_control"] = {
+        **facts["semantic_control"],
+        "role_definitions": [{"role": "ADMIN_ROLE", "declared_in": "Vault.sol"}],
     }
-
-
-def _tracking_plan(address: str) -> dict:
-    return {"contract_address": address, "controllers": [{"id": "owner", "getter": "owner()"}]}
+    return facts
 
 
 _PREDICATE_TREES = {"schema_version": "semantic", "trees": {"pause()": {"node_type": "caller"}}}
@@ -99,12 +97,13 @@ def _make_donor(
 
     store_source_files(session, job.id, dict(_SOURCES))
     if with_analysis:
-        store_artifact(session, job.id, "contract_analysis", data=_analysis(address.lower()))
-        store_artifact(session, job.id, "control_tracking_plan", data=_tracking_plan(address.lower()))
+        facts = _analysis(address.lower())
+        store_artifact(session, job.id, "static_facts", data=facts)
+        store_artifact(session, job.id, "assessment", data=_assessment(analysis=facts, chain_id=job.chain_id or 1))
         store_artifact(session, job.id, "predicate_trees", data=dict(_PREDICATE_TREES))
         store_artifact(session, job.id, "effects", data=dict(_EFFECTS))
     else:
-        # Proxy donor: contract_flags, no contract_analysis.
+        # Proxy donor: contract_flags, no assessment.
         store_artifact(session, job.id, "contract_flags", data={"is_proxy": True, "proxy_type": "eip1967"})
     for name, data in (extra_artifacts or {}).items():
         store_artifact(session, job.id, name, data=data)
@@ -151,12 +150,14 @@ def test_copy_restamps_address_scopes_artifacts_and_leaves_donor_untouched(db_se
     assert cid == target_contract.id
 
     # Address re-stamped on the copied code plane.
-    ca = get_artifact(db_session, target_job.id, "contract_analysis")
+    ca = get_artifact(db_session, target_job.id, "static_facts")
     assert isinstance(ca, dict)
     assert ca["subject"]["address"] == ADDR_BASE.lower()
-    tp = get_artifact(db_session, target_job.id, "control_tracking_plan")
-    assert isinstance(tp, dict)
-    assert tp["contract_address"] == ADDR_BASE.lower()
+    assessment = get_artifact(db_session, target_job.id, "assessment")
+    assert isinstance(assessment, dict)
+    account = assessment["accounts"][assessment["scope"]["account_id"]]
+    assert account["address"] == ADDR_BASE.lower()
+    assert account["chain_id"] == 8453
 
     # Source-only artifacts reused byte-for-byte.
     assert get_artifact(db_session, target_job.id, "predicate_trees") == _PREDICATE_TREES
@@ -182,7 +183,7 @@ def test_copy_restamps_address_scopes_artifacts_and_leaves_donor_untouched(db_se
 
     # Donor untouched: its analysis still points at its own address, its contract
     # still belongs to the donor job (NOT reassigned like same-chain copy).
-    donor_ca = get_artifact(db_session, donor_job.id, "contract_analysis")
+    donor_ca = get_artifact(db_session, donor_job.id, "static_facts")
     assert isinstance(donor_ca, dict)
     assert donor_ca["subject"]["address"] == ADDR_MAINNET.lower()
     db_session.refresh(donor_contract)
@@ -198,13 +199,15 @@ def test_parity_fresh_vs_cross_chain_copy(db_session):
 
     # What a fresh static analysis of the identical source at ADDR_BASE emits.
     expected = {
-        "contract_analysis": _analysis(ADDR_BASE.lower()),
-        "control_tracking_plan": _tracking_plan(ADDR_BASE.lower()),
+        "static_facts": _analysis(ADDR_BASE.lower()),
         "predicate_trees": _PREDICATE_TREES,
         "effects": _EFFECTS,
     }
     for name, want in expected.items():
         assert get_artifact(db_session, target_job.id, name) == want, name
+    assessment = get_artifact(db_session, target_job.id, "assessment")
+    assert isinstance(assessment, dict)
+    assert assessment["accounts"][assessment["scope"]["account_id"]]["chain_id"] == 8453
 
 
 def test_copy_returns_none_without_target_contract(db_session):
@@ -306,7 +309,7 @@ def test_discovery_reuses_cross_chain_donor(db_session, monkeypatch):
     assert target_job.source_content_hash == donor_hash
 
     # The reused analysis is re-stamped to the Base deployment.
-    ca = get_artifact(db_session, target_job.id, "contract_analysis")
+    ca = get_artifact(db_session, target_job.id, "static_facts")
     assert isinstance(ca, dict)
     assert ca["subject"]["address"] == ADDR_BASE.lower()
     # The Base deployment got its own per-chain Contract row.

@@ -12,6 +12,8 @@ from typing import Any
 
 import pytest
 
+from tests.support.policy_builders import _assessment
+
 TARGET_ADDRESS = "0x1111111111111111111111111111111111111111"
 PROXY_ADDRESS = "0x2222222222222222222222222222222222222222"
 CHILD_ADDRESS = "0x3333333333333333333333333333333333333333"
@@ -135,8 +137,8 @@ def _resolved_graph(nodes: list[dict] | None = None, edges: list[dict] | None = 
 
 def _patch_all(monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> dict[str, Any]:
     """Patch all external dependencies for ResolutionWorker and return tracking dicts."""
-    tracking_plan = overrides.get("tracking_plan", _minimal_tracking_plan())
     contract_analysis = overrides.get("contract_analysis", _minimal_contract_analysis())
+    assessment = overrides.get("assessment", _assessment(analysis=contract_analysis))
     snapshot = overrides.get("snapshot", _minimal_snapshot())
     resolved_graph = overrides.get("resolved_graph", _resolved_graph())
     dependencies = overrides.get("dependencies", None)  # None = no artifact
@@ -145,8 +147,7 @@ def _patch_all(monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> dict[str, A
 
     def fake_get_artifact(_session: Any, _job_id: Any, name: str) -> Any:
         lookup: dict[str, Any] = {
-            "control_tracking_plan": tracking_plan,
-            "contract_analysis": contract_analysis,
+            "assessment": assessment,
             "dependencies": dependencies,
         }
         return lookup.get(name)

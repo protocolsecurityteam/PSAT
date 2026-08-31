@@ -13,7 +13,7 @@ from typing import Any
 
 from ..context import ClaimContext
 from ..decorator import claim_matcher
-from ..types import ClaimEvidence
+from ..types import MatchedEvidence
 from . import _facts
 
 
@@ -67,7 +67,7 @@ def _carries(sink: dict[str, Any], flows: list[dict[str, Any]]) -> bool:
     return False
 
 
-def _flow_evidence(ctx: ClaimContext, function: str, direction: str) -> ClaimEvidence | None:
+def _flow_evidence(ctx: ClaimContext, function: str, direction: str) -> MatchedEvidence | None:
     flows = [f for f in _facts.value_flows(ctx, function) if f.get("direction") == direction]
     if not flows:
         return None
@@ -92,7 +92,7 @@ def _flow_evidence(ctx: ClaimContext, function: str, direction: str) -> ClaimEvi
     }
     if sink_receivers:
         witness["sink_receivers"] = sink_receivers
-    return ClaimEvidence(tier="standard_exact" if exact else "idiom_structural", witness=witness)
+    return MatchedEvidence(tier="standard_exact" if exact else "idiom_structural", witness=witness)
 
 
 def _flow_entry(ctx: ClaimContext, function: str, f: dict[str, Any]) -> dict[str, Any]:
@@ -175,7 +175,7 @@ def _is_value_call(sink: dict[str, Any]) -> bool:
     legacy_projection="asset_send",
     consumer_family="flow",
 )
-def flow_out(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
+def flow_out(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
     return _flow_evidence(ctx, function, "out")
 
 
@@ -185,7 +185,7 @@ def flow_out(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     legacy_projection="asset_pull",
     consumer_family="flow",
 )
-def flow_in(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
+def flow_in(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
     return _flow_evidence(ctx, function, "in")
 
 
@@ -195,7 +195,7 @@ def flow_in(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     legacy_projection=None,
     consumer_family="flow",
 )
-def value_router(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
+def value_router(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
     """A function that itself neither holds nor sends value but CALLS an in-unit
     contract whose body moves it (a Teller forwarding into a BoringVault). The
     fact layer tags such moves ``direction: "value_router"`` and carries the

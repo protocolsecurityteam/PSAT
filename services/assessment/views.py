@@ -53,12 +53,8 @@ def effect_presence(assessment: Assessment, effect_kind: str, *, detector: str |
     return None
 
 
-def legacy_claims_by_function(assessment: Assessment) -> dict[str, list[dict[str, Any]]]:
-    """Compatibility projection for consumers not yet reading Assessment.
-
-    The projection is rebuilt from canonical claims and evidence; legacy rows
-    therefore remain indexes rather than an independent source of truth.
-    """
+def effect_matches_by_function(assessment: Assessment) -> dict[str, list[dict[str, Any]]]:
+    """Build the compact effect matches used by relational index writers."""
 
     signatures = {function_id: function["signature"] for function_id, function in assessment["functions"].items()}
     out: dict[str, list[dict[str, Any]]] = {}
@@ -78,7 +74,7 @@ def legacy_claims_by_function(assessment: Assessment) -> dict[str, list[dict[str
             evidence = assessment["evidence"].get(evidence_id)
             if evidence is None or not isinstance(evidence["observation"], dict):
                 continue
-            # Structural detail is what legacy consumers inspect. Execution
+            # Structural detail is what index writers inspect. Execution
             # evidence strengthens the same claim but stays referenced rather
             # than overwriting the replayable static witness.
             if evidence["method"] != "execution":
@@ -100,11 +96,11 @@ def legacy_claims_by_function(assessment: Assessment) -> dict[str, list[dict[str
     return out
 
 
-def project_effective_permissions(assessment: Assessment, permissions: Mapping[str, Any]) -> dict[str, Any]:
-    """Return the legacy permission document with claims projected canonically."""
+def project_permission_index(assessment: Assessment, permissions: Mapping[str, Any]) -> dict[str, Any]:
+    """Attach canonical effect matches to the transient permission rows."""
 
     projected = copy.deepcopy(dict(permissions))
-    claims = legacy_claims_by_function(assessment)
+    claims = effect_matches_by_function(assessment)
     known_signatures = {function["signature"] for function in assessment["functions"].values()}
     functions = projected.get("functions")
     if not isinstance(functions, list):
@@ -122,6 +118,6 @@ __all__ = [
     "capability_claims",
     "effect_presence",
     "function_effect_claims",
-    "legacy_claims_by_function",
-    "project_effective_permissions",
+    "effect_matches_by_function",
+    "project_permission_index",
 ]

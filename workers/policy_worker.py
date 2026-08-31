@@ -27,9 +27,6 @@ from db.queue import get_artifact, store_artifact
 from db.queue.typed import (
     ArtifactSchemaError,
     load_assessment,
-    load_contract_analysis,
-    load_control_snapshot,
-    load_control_tracking_plan,
 )
 from schemas.control_tracking import ControlSnapshot
 from schemas.effective_permissions import EffectivePermissions, PrincipalResolution
@@ -54,7 +51,7 @@ from services.resolution.cross_chain_authority import make_cross_chain_recognize
 from services.resolution.graph_tables import replace_control_graph_rows
 from services.resolution.recursive import LoadedArtifacts, resolve_control_graph
 from services.resolution.tracking import classify_resolved_address_with_status, read_contract_controllers
-from services.static.claims import ClaimProjection, resolve_claim_precedence
+from services.static.claims import EffectMatch, resolve_claim_precedence
 from utils.chains import UnknownChainError, chain_by_id, chain_by_name, require_chain
 from utils.logging import log_timed_phase, record_degraded, record_stage_metric
 from workers.base import BaseWorker
@@ -536,13 +533,6 @@ class PolicyWorker(BaseWorker):
         chain_name = _chain_name_for_job(job)
         durations_ms: dict[str, int] = {}
 
-        # Load required artifacts from DB
-        try:
-            contract_analysis = load_contract_analysis(get_artifact, session, job.id)
-            control_snapshot = load_control_snapshot(get_artifact, session, job.id)
-        except ArtifactSchemaError as exc:
-            raise RuntimeError(f"{exc.artifact_name} artifact not found") from exc
-        resolved_control_graph = get_artifact(session, job.id, "resolved_control_graph")
         # ``predicate_trees`` and ``effects`` are the semantic inputs to
         # ``build_effective_permissions``.
         predicate_trees = get_artifact(session, job.id, "predicate_trees")
@@ -565,13 +555,6 @@ class PolicyWorker(BaseWorker):
                 ", ".join(sorted(missing_semantic_inputs)),
                 extra={"missing_artifacts": sorted(missing_semantic_inputs)},
             )
-        try:
-            tracking_plan = load_control_tracking_plan(get_artifact, session, job.id)
-        except ArtifactSchemaError as exc:
-            # The plan was historically optional here (``{}`` fallback); a
-            # schema violation degrades + surfaces instead of failing the stage.
-            record_degraded(phase="control_tracking_plan_load", exc=exc, context={"job_id": str(job.id)})
-            tracking_plan = None
         # Optional: classify cache populated by the resolution stage. Lets the
         # refresh + labeling passes skip 6-10 RPCs per address.
         classify_cache_raw = get_artifact(session, job.id, "classified_addresses")
@@ -581,37 +564,19 @@ class PolicyWorker(BaseWorker):
                 if isinstance(val, list) and len(val) == 2:
                     classify_cache[addr] = (str(val[0]), dict(val[1]) if isinstance(val[1], dict) else {})
 
-        if contract_analysis is None:
-            raise RuntimeError("contract_analysis artifact not found")
-        if control_snapshot is None:
-            raise RuntimeError("control_snapshot artifact not found")
-
         try:
             assessment = load_assessment(get_artifact, session, job.id)
         except ArtifactSchemaError as exc:
             raise RuntimeError(f"{exc.artifact_name} artifact failed validation") from exc
         if assessment is None:
-            from services.assessment import build_static_assessment
+            raise RuntimeError("assessment artifact not found")
 
-            assessment = build_static_assessment(
-                chain_id=chain_id,
-                address=contract_analysis["subject"]["address"],
-                contract_name=contract_analysis["subject"]["name"],
-                code_hash=None,
-                source_hash=getattr(job, "source_content_hash", None),
-                analysis=contract_analysis,
-                effects=(
-                    effects_artifact
-                    if isinstance(effects_artifact, dict)
-                    else {"schema_version": "missing", "error": "effects artifact missing"}
-                ),
-                predicate_trees=(
-                    predicate_trees
-                    if isinstance(predicate_trees, dict)
-                    else {"schema_version": "missing", "error": "predicate_trees artifact missing"}
-                ),
-            )
-            store_artifact(session, job.id, "assessment", data=assessment)
+        from services.assessment import contract_subject, control_graph, controller_observations, observation_plan
+
+        contract_analysis = contract_subject(assessment)
+        control_snapshot = controller_observations(assessment)
+        resolved_control_graph = control_graph(assessment)
+        tracking_plan = observation_plan(assessment)
 
         nested_artifacts = _load_nested_artifacts(session, job.id, chain=chain_name)
 
@@ -689,10 +654,10 @@ class PolicyWorker(BaseWorker):
             if enriched:
                 self._apply_cross_contract_claims(ep_data, enriched)
 
-        from services.assessment import add_policy, project_effective_permissions
+        from services.assessment import add_policy, project_permission_index
 
         assessment = add_policy(assessment, ep_data, chain_id=chain_id)
-        ep_data = cast(EffectivePermissions, project_effective_permissions(assessment, ep_data))
+        ep_data = cast(EffectivePermissions, project_permission_index(assessment, ep_data))
         store_artifact(session, job.id, "assessment", data=assessment)
 
         # Write to effective_functions and function_principals tables from
@@ -756,7 +721,6 @@ class PolicyWorker(BaseWorker):
                 context=f"policy_function_principals:{job.id}",
             )
 
-        store_artifact(session, job.id, "effective_permissions", data=ep_data)
         record_stage_metric("effective_functions", len(ep_data.get("functions", [])))
         if contract_row and isinstance(predicate_trees, dict):
             job_chain = job.request.get("chain") if isinstance(job.request, dict) else None
@@ -820,12 +784,10 @@ class PolicyWorker(BaseWorker):
         # so semantic role/controller principals can be projected into the graph.
         # The refresh reuses the nested artifacts persisted during resolution.
         self.update_detail(session, job, "Refreshing resolved control graph")
-        if tracking_plan is None:
-            tracking_plan = {}
         # Attach the target contract's updated effective_permissions to the
         # root bundle so role/controller principals can be projected when
         # re-traversing the graph.
-        root_bundle = _root_artifacts(contract_analysis, tracking_plan, control_snapshot)
+        root_bundle = _root_artifacts(contract_analysis, tracking_plan, cast(ControlSnapshot, control_snapshot))
         root_bundle["effective_permissions"] = ep_data
         with log_timed_phase(logger, "graph_refresh", durations_ms=durations_ms) as ph:
             refreshed_graph, refreshed_nested = resolve_control_graph(
@@ -848,7 +810,6 @@ class PolicyWorker(BaseWorker):
             )
             if refreshed_graph:
                 resolved_control_graph = refreshed_graph
-                store_artifact(session, job.id, "resolved_control_graph", data=refreshed_graph)
                 # Rewrite the CGN/CGE tables to the refreshed graph too — the
                 # same scoped replace the resolution stage used. Rewriting only
                 # the artifact left the table plane a strict subset: every
@@ -1032,7 +993,6 @@ class PolicyWorker(BaseWorker):
                     )
             session.commit()
 
-        store_artifact(session, job.id, "principal_labels", data=pl_data)
         record_stage_metric("principals_labeled", len(pl_data.get("principals", [])))
 
         logger.info(
@@ -1174,9 +1134,7 @@ class PolicyWorker(BaseWorker):
             },
         )
 
-    def _apply_cross_contract_claims(
-        self, payload: Mapping[str, Any], enriched: dict[str, list[ClaimProjection]]
-    ) -> None:
+    def _apply_cross_contract_claims(self, payload: Mapping[str, Any], enriched: dict[str, list[EffectMatch]]) -> None:
         for fn in payload.get("functions", []):
             fn_sig = fn.get("function") or fn.get("abi_signature")
             additions = enriched.get(fn_sig) if fn_sig else None
@@ -1192,7 +1150,7 @@ class PolicyWorker(BaseWorker):
         contract_analysis: Mapping[str, Any],
         control_snapshot: Mapping[str, Any],
         function_records: Sequence[Mapping[str, Any]] | None = None,
-    ) -> dict[str, list[ClaimProjection]]:
+    ) -> dict[str, list[EffectMatch]]:
         """Mint policy-derived claims from sibling facts.
 
         Replaces propagate-every-label with the four typed derivations in
@@ -1250,7 +1208,12 @@ class PolicyWorker(BaseWorker):
             sj_id, addr = target
             with SessionLocal() as s:
                 effects_payload = get_artifact(s, sj_id, "effects")
-                snapshot_payload = get_artifact(s, sj_id, "control_snapshot")
+                assessment_payload = get_artifact(s, sj_id, "assessment")
+            snapshot_payload = None
+            if isinstance(assessment_payload, dict):
+                from services.assessment import controller_observations
+
+                snapshot_payload = controller_observations(cast(Any, assessment_payload))
             return (
                 addr,
                 effects_payload if isinstance(effects_payload, dict) else None,

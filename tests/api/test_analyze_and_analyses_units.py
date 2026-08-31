@@ -682,24 +682,18 @@ def test_analysis_detail_proxy_inherits_impl_artifacts(mock_session_cls, mock_ge
         "dependency_graph_viz": {"nodes": [], "edges": []},
     }
 
-    # Impl artifacts (from get_all_artifacts)
-    impl_analysis = {
-        "subject": {"name": "VaultImpl"},
-        "summary": {"control_model": "authority"},
-    }
-    impl_permissions = {"functions": [{"function": "pause()", "selector": "0x12"}]}
+    # Impl assessment (from get_all_artifacts)
+    from tests.support.policy_builders import _assessment, _minimal_contract_analysis
+
+    impl_assessment = _assessment(analysis=_minimal_contract_analysis(address=impl_addr, name="VaultImpl"))
     impl_all_artifacts = {
-        "contract_analysis": impl_analysis,
-        "effective_permissions": impl_permissions,
-        "principal_labels": {"principals": []},
+        "assessment": impl_assessment,
         "principal_history": {
             "schema_version": "principal_history.v1",
             "contract_address": impl_addr,
             "status": "ok",
             "function_permissions": [{"function": "pause()", "principal": "0xowner"}],
         },
-        "resolved_control_graph": {"nodes": [], "edges": []},
-        "control_snapshot": {"controller_values": {}},
     }
 
     def fake_get_artifact(session, jid, name):
@@ -730,12 +724,9 @@ def test_analysis_detail_proxy_inherits_impl_artifacts(mock_session_cls, mock_ge
     assert "dependencies" in body
     assert "dependency_graph_viz" in body
 
-    # Should have inherited impl's analysis artifacts
-    assert body["contract_analysis"]["summary"]["control_model"] == "authority"
-    assert body["effective_permissions"]["functions"][0]["function"] == "pause()"
-    assert "principal_labels" in body
+    # Should have inherited the impl's canonical assessment.
+    assert body["assessment"]["contract"]["name"] == "VaultImpl"
     assert body["principal_history"]["function_permissions"][0]["principal"] == "0xowner"
-    assert "resolved_control_graph" in body
     assert body["contract_name"] == "VaultImpl"
     assert body["implementation_address"] == impl_addr
 

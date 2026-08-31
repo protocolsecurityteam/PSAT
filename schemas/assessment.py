@@ -70,8 +70,11 @@ class Controller(TypedDict):
     id: ControllerId
     contract_id: ContractId
     key: str
+    label: str
+    kind: str
     source: JsonValue
     read_strategy: JsonValue
+    tracking: JsonValue
 
 
 EntityKind = Literal["account", "contract"]

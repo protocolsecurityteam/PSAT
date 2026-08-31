@@ -25,9 +25,9 @@ from .types import (
     CONSUMER_FAMILIES,
     TIER_PRECEDENCE,
     TIERS,
-    ClaimEvidence,
-    ClaimProjection,
     ConsumerFamily,
+    EffectMatch,
+    MatchedEvidence,
     Tier,
     Witness,
 )
@@ -36,7 +36,7 @@ from .types import (
 # standard mandates). ``True`` means "this claim may apply to this contract".
 Gate = Callable[[ClaimContext], bool]
 # Per-function evidence check. Returns the tier + witness on a hit, else ``None``.
-Trigger = Callable[[ClaimContext, str], ClaimEvidence | None]
+Trigger = Callable[[ClaimContext, str], MatchedEvidence | None]
 
 
 @dataclass(frozen=True)
@@ -91,7 +91,7 @@ def legacy_projections() -> dict[str, str | None]:
     return {claim_id: entry.legacy_projection for claim_id, entry in _REGISTRY.items()}
 
 
-def emit_claim(claim_id: str, tier: Tier, witness: Witness) -> ClaimProjection:
+def emit_claim(claim_id: str, tier: Tier, witness: Witness) -> EffectMatch:
     """Mint a claim, or fail closed. An unregistered ``claim_id`` or a ``tier``
     outside the Literal is a hard error — the whole point of the registry."""
     if claim_id not in _REGISTRY:
@@ -105,7 +105,7 @@ def _tier_rank(tier: str) -> int:
     return TIER_PRECEDENCE.get(tier, 0)
 
 
-def resolve_claim_precedence(claims: Iterable[ClaimProjection]) -> list[ClaimProjection]:
+def resolve_claim_precedence(claims: Iterable[EffectMatch]) -> list[EffectMatch]:
     """The per-function precedence/dedup rule: collapse witnesses that assert the
     SAME ``claim_id`` and keep only the strongest tier (``standard_exact`` beats
     ``idiom_structural`` beats ``policy_derived``), so a consumer never sees one
@@ -116,7 +116,7 @@ def resolve_claim_precedence(claims: Iterable[ClaimProjection]) -> list[ClaimPro
     ``pause.unset``, ``supply.mint`` and ``supply.burn``, ``timelock.execute``
     and ``exec.arbitrary`` — and are all preserved. Returns a deterministically
     sorted list."""
-    best: dict[str, ClaimProjection] = {}
+    best: dict[str, EffectMatch] = {}
     for claim in claims:
         claim_id = claim["claim_id"]
         incumbent = best.get(claim_id)

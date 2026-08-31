@@ -31,7 +31,7 @@ from eth_utils.crypto import keccak
 from utils.evm import EIP1967_IMPL_SLOT
 
 from .claims import (
-    ClaimProjection,
+    EffectMatch,
     RegistryEntry,
     discover,
     emit_claim,
@@ -125,18 +125,18 @@ def _propagatable(claim: Any) -> bool:
 
 def build_callee_claim_map(
     effects_by_address: dict[str, dict[str, Any]] | None,
-) -> dict[str, dict[str, list[ClaimProjection]]]:
+) -> dict[str, dict[str, list[EffectMatch]]]:
     """``{callee_address -> {selector -> [propagatable claims]}}`` from siblings.
 
     Reads the ``claims`` list the static plane attached to each sibling
     ``effects`` record, keeping only the standard-tier flow/supply/upgrade
     claims a caller may inherit."""
     discover()  # the policy process may not have run build_claims; register the matchers
-    callee_map: dict[str, dict[str, list[ClaimProjection]]] = {}
+    callee_map: dict[str, dict[str, list[EffectMatch]]] = {}
     for address, effects_artifact in (effects_by_address or {}).items():
         if not isinstance(address, str) or not isinstance(effects_artifact, dict):
             continue
-        selector_claims: dict[str, list[ClaimProjection]] = {}
+        selector_claims: dict[str, list[EffectMatch]] = {}
         for fn_sig, fn_record in (effects_artifact.get("functions") or {}).items():
             if not isinstance(fn_record, dict):
                 continue
@@ -204,15 +204,15 @@ def _body_external_calls(target_effects: Any) -> dict[str, list[dict[str, Any]]]
 def _derive_value_flow_claims(
     target_effects: Any,
     controller_values: Any,
-    callee_claim_map: dict[str, dict[str, list[ClaimProjection]]],
-) -> dict[str, list[ClaimProjection]]:
+    callee_claim_map: dict[str, dict[str, list[EffectMatch]]],
+) -> dict[str, list[EffectMatch]]:
     """Derivations 1 (value flow) + 3 (beacon upgrade): a body call resolved via
     ``controller_values`` inherits the callee's propagatable standard-tier claims
     at ``policy_derived``."""
     var_to_address = _var_to_address(controller_values)
-    enriched: dict[str, list[ClaimProjection]] = {}
+    enriched: dict[str, list[EffectMatch]] = {}
     for fn_sig, sinks in _body_external_calls(target_effects).items():
-        new_claims: list[ClaimProjection] = []
+        new_claims: list[EffectMatch] = []
         for sink in sinks:
             var_name = str(sink.get("target", "")).lower().split(".", 1)[0]
             callee_addr = var_to_address.get(var_name)
@@ -258,7 +258,7 @@ def _is_bool_mapping(declared_type: Any) -> bool:
 def _derive_transfer_policy_claims(
     target_effects: Any,
     sibling_transfer_hooks: list[dict[str, str]] | None,
-) -> dict[str, list[ClaimProjection]]:
+) -> dict[str, list[EffectMatch]]:
     """Derivation 2 (``transfer_policy.configure``).
 
     ``sibling_transfer_hooks`` are the siblings whose runtime transfer-hook
@@ -274,7 +274,7 @@ def _derive_transfer_policy_claims(
     functions = target_effects.get("functions") if isinstance(target_effects, dict) else None
     if not isinstance(functions, dict):
         return {}
-    enriched: dict[str, list[ClaimProjection]] = {}
+    enriched: dict[str, list[EffectMatch]] = {}
     for fn_sig, record in functions.items():
         if not isinstance(fn_sig, str) or not isinstance(record, dict):
             continue
@@ -311,7 +311,7 @@ def _derive_transfer_policy_claims(
 def _derive_provenance_upgrade_claims(
     target_effects: Any,
     proxy_provenance: dict[str, str] | None,
-) -> dict[str, list[ClaimProjection]]:
+) -> dict[str, list[EffectMatch]]:
     """Derivation 4 (upgrade provenance).
 
     When the classifier confirms this deployment's EIP-1967 implementation slot,
@@ -324,7 +324,7 @@ def _derive_provenance_upgrade_claims(
     functions = target_effects.get("functions") if isinstance(target_effects, dict) else None
     if not isinstance(functions, dict):
         return {}
-    enriched: dict[str, list[ClaimProjection]] = {}
+    enriched: dict[str, list[EffectMatch]] = {}
     for fn_sig, record in functions.items():
         if not isinstance(fn_sig, str) or not isinstance(record, dict):
             continue
@@ -430,18 +430,18 @@ def proxy_provenance_from_classifications(
 def derive_cross_contract_claims(
     target_effects: Any,
     controller_values: Any,
-    callee_claim_map: dict[str, dict[str, list[ClaimProjection]]],
+    callee_claim_map: dict[str, dict[str, list[EffectMatch]]],
     *,
     sibling_transfer_hooks: list[dict[str, str]] | None = None,
     proxy_provenance: dict[str, str] | None = None,
-) -> dict[str, list[ClaimProjection]]:
+) -> dict[str, list[EffectMatch]]:
     """Run the four policy-tier derivations and merge their claims per function.
 
     Returns ``{function_signature -> [policy_derived claims]}`` for functions that
     gained at least one; the policy stage merges these onto each function's
     existing claim list (precedence-resolved)."""
     discover()  # ensure flow/supply/upgrade ids are registered before emit_claim
-    merged: dict[str, list[ClaimProjection]] = {}
+    merged: dict[str, list[EffectMatch]] = {}
     for derivation in (
         _derive_value_flow_claims(target_effects, controller_values, callee_claim_map),
         _derive_transfer_policy_claims(target_effects, sibling_transfer_hooks),

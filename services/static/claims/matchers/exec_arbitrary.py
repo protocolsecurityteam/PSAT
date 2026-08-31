@@ -30,7 +30,7 @@ from __future__ import annotations
 
 from ..context import ClaimContext
 from ..decorator import claim_matcher
-from ..types import ClaimEvidence
+from ..types import MatchedEvidence
 from . import _facts
 from ._gates import (
     SAFE_EXEC_SELECTORS,
@@ -73,7 +73,7 @@ def _body_external_call_sink_ids(ctx: ClaimContext, function: str) -> list[str]:
     legacy_projection="arbitrary_external_call",
     consumer_family="exec",
 )
-def exec_arbitrary(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
+def exec_arbitrary(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
     selector = ctx.canonical_selector(function)
     sink_ids = _body_external_call_sink_ids(ctx, function)
 
@@ -90,7 +90,7 @@ def exec_arbitrary(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
         constraint = _facts.standard_destination_commitment(ctx, function)
         if constraint is None:
             constraint = _facts.param_constraint(ctx, function, 0, mode="external_call")
-        return ClaimEvidence(
+        return MatchedEvidence(
             tier="standard_exact",
             witness={
                 "kind": "selector+gate",
@@ -101,7 +101,7 @@ def exec_arbitrary(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
             },
         )
     if selector in TIMELOCK_EXECUTE_SELECTORS and is_oz_timelock_gate(ctx):
-        return ClaimEvidence(
+        return MatchedEvidence(
             tier="standard_exact",
             witness={
                 "kind": "selector+gate",
@@ -155,4 +155,4 @@ def exec_arbitrary(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     # as a proof in either direction.
     if taint["destination_kind"] == "param":
         witness["destination_constraint"] = _destination_constraint(ctx, function, taint["destination_param"])
-    return ClaimEvidence(tier="idiom_structural", witness=witness)
+    return MatchedEvidence(tier="idiom_structural", witness=witness)

@@ -1302,7 +1302,7 @@ class EffectsWorker(BaseWorker):
                 )
                 continue
 
-            from services.assessment import add_effects, legacy_claims_by_function
+            from services.assessment import add_effects, effect_matches_by_function
             from services.static.claims import legacy_projections
 
             assessment = add_effects(
@@ -1311,7 +1311,7 @@ class EffectsWorker(BaseWorker):
                 signatures_by_function_row=signatures_by_contract.get(contract_id, {}),
             )
             store_artifact(session, contract.job_id, "assessment", data=assessment)
-            projected_claims = legacy_claims_by_function(assessment)
+            projected_claims = effect_matches_by_function(assessment)
             label_projection = legacy_projections()
             for row in rows:
                 if row.contract_id != contract_id:

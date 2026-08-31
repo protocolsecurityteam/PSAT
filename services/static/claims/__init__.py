@@ -1,8 +1,8 @@
-"""Two-plane claims subsystem (Plane 1).
+"""Static effect matcher subsystem.
 
 Facts (``effects.py``, Plane 0) are the substrate; this package runs the matcher
-registry and emits the historical per-function ``ClaimProjection`` shape. The
-assessment builder turns each successful projection into first-class Evidence,
+registry emits positive ``EffectMatch`` records. The assessment builder turns
+each successful match into first-class Evidence,
 Basis, and Claim records; matcher failures ride analysis receipts instead.
 
 - ``build_claims`` / ``attach_claims_to_effects`` — produce the claims artifact
@@ -33,10 +33,10 @@ from .types import (
     CONSUMER_FAMILIES,
     SCHEMA_VERSION,
     TIERS,
-    ClaimEvidence,
-    ClaimProjection,
-    ClaimsArtifact,
     ConsumerFamily,
+    EffectMatch,
+    MatchedEvidence,
+    MatchResults,
     Tier,
     Witness,
 )
@@ -45,9 +45,9 @@ __all__ = [
     "CONSUMER_FAMILIES",
     "CONSUMER_REFERENCED_CLAIM_IDS",
     "ClaimContext",
-    "ClaimEvidence",
-    "ClaimProjection",
-    "ClaimsArtifact",
+    "MatchedEvidence",
+    "EffectMatch",
+    "MatchResults",
     "ConsumerFamily",
     "RegistryEntry",
     "SCHEMA_VERSION",

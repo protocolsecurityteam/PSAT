@@ -121,7 +121,7 @@ def _load_contract_facts_uncached(session: Session, address: str) -> ContractFac
         if isinstance(sig, str) and "(" in sig and sig.endswith(")")
     }
 
-    analysis = get_artifact(session, job_id, "contract_analysis")
+    analysis = get_artifact(session, job_id, "static_facts")
     legacy_flows = _legacy_value_flow_map(analysis)
 
     raw_slots = effects_art.get("token_slots") if isinstance(effects_art, dict) else None

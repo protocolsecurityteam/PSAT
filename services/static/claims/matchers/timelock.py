@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from ..context import ClaimContext
 from ..decorator import claim_matcher
-from ..types import ClaimEvidence
+from ..types import MatchedEvidence
 from ._gates import (
     TIMELOCK_CANCEL,
     TIMELOCK_EXECUTE_SELECTORS,
@@ -21,8 +21,8 @@ from ._gates import (
 )
 
 
-def _timelock_evidence(selector: str) -> ClaimEvidence:
-    return ClaimEvidence(
+def _timelock_evidence(selector: str) -> MatchedEvidence:
+    return MatchedEvidence(
         tier="standard_exact",
         witness={"kind": "selector+gate", "standard": "oz_timelock", "selector": selector},
     )
@@ -35,7 +35,7 @@ def _timelock_evidence(selector: str) -> ClaimEvidence:
     consumer_family="control_plane",
     gate=is_oz_timelock_gate,
 )
-def timelock_schedule(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
+def timelock_schedule(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
     selector = ctx.canonical_selector(function)
     if selector is None or selector not in TIMELOCK_SCHEDULE_SELECTORS:
         return None
@@ -49,7 +49,7 @@ def timelock_schedule(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     consumer_family="control_plane",
     gate=is_oz_timelock_gate,
 )
-def timelock_execute(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
+def timelock_execute(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
     selector = ctx.canonical_selector(function)
     if selector is None or selector not in TIMELOCK_EXECUTE_SELECTORS:
         return None
@@ -63,7 +63,7 @@ def timelock_execute(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     consumer_family="control_plane",
     gate=is_oz_timelock_gate,
 )
-def timelock_cancel(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
+def timelock_cancel(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
     if ctx.canonical_selector(function) != TIMELOCK_CANCEL:
         return None
     return _timelock_evidence(TIMELOCK_CANCEL)
@@ -76,7 +76,7 @@ def timelock_cancel(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     consumer_family="control_plane",
     gate=is_oz_timelock_gate,
 )
-def timelock_set_delay(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
+def timelock_set_delay(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
     if ctx.canonical_selector(function) != TIMELOCK_UPDATE_DELAY:
         return None
     return _timelock_evidence(TIMELOCK_UPDATE_DELAY)

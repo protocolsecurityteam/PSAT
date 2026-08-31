@@ -30,10 +30,10 @@ import pytest
 
 from tests.support.policy_builders import (
     TARGET_ADDRESS,
+    _assessment,
     _graph_with_nodes,
     _minimal_contract_analysis,
     _minimal_snapshot,
-    _tracking_plan,
 )
 from utils.logging import (
     bind_trace_context,
@@ -87,14 +87,11 @@ def _drive_process_with_missing_contract_row(monkeypatch: pytest.MonkeyPatch) ->
     # A non-empty controller_values + dict graph drives _resolve_authority.
     control_snapshot = _minimal_snapshot({"some_key:admin": {"value": "0xbbb"}})
     resolved_graph = _graph_with_nodes([])
-    tracking_plan = _tracking_plan()
+    assessment = _assessment(analysis=contract_analysis, snapshot=control_snapshot, graph=resolved_graph)
 
     def fake_get_artifact(_session: Any, _job_id: Any, name: str) -> Any:
         return {
-            "contract_analysis": contract_analysis,
-            "control_snapshot": control_snapshot,
-            "resolved_control_graph": resolved_graph,
-            "control_tracking_plan": tracking_plan,
+            "assessment": assessment,
         }.get(name)
 
     monkeypatch.setattr("workers.policy_worker.get_artifact", fake_get_artifact)

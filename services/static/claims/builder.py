@@ -20,12 +20,12 @@ from typing import Any, Literal
 from .context import ClaimContext
 from .matchers import discover
 from .registry import emit_claim, legacy_projections, registry, resolve_claim_precedence
-from .types import SCHEMA_VERSION, ClaimAnalysis, ClaimDiagnostic, ClaimOmission, ClaimProjection, ClaimsArtifact
+from .types import SCHEMA_VERSION, EffectMatch, MatchAnalysis, MatchDiagnostic, MatchOmission, MatchResults
 
 logger = logging.getLogger(__name__)
 
 
-def build_claims(contract: Any, effects: Any, predicate_trees: Any) -> ClaimsArtifact:
+def build_claims(contract: Any, effects: Any, predicate_trees: Any) -> MatchResults:
     """Run all registered matchers over the facts, returning the claims artifact.
 
     A matcher that raises is isolated: it forfeits only its own claims (logged),
@@ -35,13 +35,13 @@ def build_claims(contract: Any, effects: Any, predicate_trees: Any) -> ClaimsArt
     discover()
     ctx = ClaimContext(contract, effects, predicate_trees)
     signatures = ctx.function_signatures()
-    functions: dict[str, list[ClaimProjection]] = {signature: [] for signature in signatures}
+    functions: dict[str, list[EffectMatch]] = {signature: [] for signature in signatures}
 
-    analyses: dict[str, ClaimAnalysis] = {}
-    diagnostics: list[ClaimDiagnostic] = []
+    analyses: dict[str, MatchAnalysis] = {}
+    diagnostics: list[MatchDiagnostic] = []
 
     for entry in registry().values():
-        omissions: list[ClaimOmission] = []
+        omissions: list[MatchOmission] = []
         completed = 0
         try:
             enabled = entry.gate(ctx)

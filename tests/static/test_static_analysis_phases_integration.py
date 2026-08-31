@@ -2,10 +2,8 @@
 
 The Slither CLI subprocess + its slither_results / analysis_report
 artifacts were removed when vulnerability-detector triage was split
-out of PSAT's cascade pipeline. The structured ``contract_analysis``
-artifact (built from Slither's Python IR) is what every downstream
-stage reads, so its phase is the only one with integration coverage
-here.
+out of PSAT's cascade pipeline. Static facts and the canonical Assessment are
+the only outputs covered here.
 """
 
 from __future__ import annotations
@@ -51,7 +49,7 @@ def _capture_store_artifact(monkeypatch):
 class TestAnalysisPhaseSuccess:
     """Mock collect_contract_analysis() to return a dict; verify artifact is stored."""
 
-    def test_stores_contract_analysis_artifact(self, monkeypatch, tmp_path):
+    def test_stores_static_facts_and_assessment(self, monkeypatch, tmp_path):
         worker = StaticWorker()
         monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
         monkeypatch.setattr(worker, "_write_analysis_tables", lambda *a, **kw: None)
@@ -76,7 +74,7 @@ class TestAnalysisPhaseSuccess:
 
         assert result == analysis_data
         names = [call["name"] for call in calls]
-        assert names == ["contract_analysis", "assessment", "predicate_trees", "effects"]
+        assert names == ["static_facts", "assessment", "predicate_trees", "effects"]
         assert calls[0]["data"] == analysis_data
         assert calls[1]["data"]["schema_version"] == "assessment/1"
         assert calls[2]["data"] == predicate_trees
@@ -96,7 +94,7 @@ class TestAnalysisPhaseSuccess:
         }
         predicate_trees = {"schema_version": "semantic", "trees": {}}
         effects = {"schema_version": "semantic", "functions": {}}
-        analysis_path = tmp_path / "contract_analysis.json"
+        analysis_path = tmp_path / "static_facts.json"
         analysis_path.write_text(json.dumps(analysis_data))
 
         monkeypatch.setattr(
@@ -108,11 +106,11 @@ class TestAnalysisPhaseSuccess:
         result = worker._run_analysis_phase(session, job, tmp_path, "TestContract", job.address)
 
         assert result == analysis_data
-        assert [call["name"] for call in calls] == ["contract_analysis", "assessment", "predicate_trees", "effects"]
+        assert [call["name"] for call in calls] == ["static_facts", "assessment", "predicate_trees", "effects"]
 
     def test_skips_predicate_trees_for_vyper(self, monkeypatch, tmp_path):
         """Vyper projects return ``None`` for predicate_trees + effects;
-        only contract_analysis is stored."""
+        only static facts and the assessment are stored."""
         worker = StaticWorker()
         monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
         monkeypatch.setattr(worker, "_write_analysis_tables", lambda *a, **kw: None)
@@ -128,7 +126,7 @@ class TestAnalysisPhaseSuccess:
         result = worker._run_analysis_phase(session, job, tmp_path, "TestContract", job.address)
 
         assert result == {"schema_version": "0.1"}
-        assert [call["name"] for call in calls] == ["contract_analysis", "assessment"]
+        assert [call["name"] for call in calls] == ["static_facts", "assessment"]
 
 
 class TestAnalysisPhaseFailure:

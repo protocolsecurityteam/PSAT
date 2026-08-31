@@ -48,7 +48,7 @@ from services.static.claims.registry import (
     register,
     resolve_claim_precedence,
 )
-from services.static.claims.types import TIER_PRECEDENCE, ClaimProjection, Tier
+from services.static.claims.types import TIER_PRECEDENCE, EffectMatch, Tier
 from utils.execution_record import PROVING_EXECUTION_KEY
 from utils.scoring_status import WITNESS_TIER_BEHAVIORAL_OBSERVED
 
@@ -159,7 +159,7 @@ def _mints(verdict: VerdictLike) -> bool:
     return True
 
 
-def verdict_to_claim(verdict: VerdictLike) -> ClaimProjection | None:
+def verdict_to_claim(verdict: VerdictLike) -> EffectMatch | None:
     """Mint the registry claim for one proven verdict, or ``None`` when the
     verdict fails the fail-closed gate or maps to no claim. The witness is a pointer to the
     verdict (never the transcript)."""
@@ -406,10 +406,10 @@ def _execution_summary(verdict: VerdictLike) -> dict[str, Any]:
     return {PROVING_EXECUTION_KEY: residue[PROVING_EXECUTION_KEY]}
 
 
-def claims_from_verdicts(verdicts: Iterable[Any]) -> list[ClaimProjection]:
+def claims_from_verdicts(verdicts: Iterable[Any]) -> list[EffectMatch]:
     """Every mintable proven verdict, mapped to its claim (fail-closed drops
     filtered out)."""
-    out: list[ClaimProjection] = []
+    out: list[EffectMatch] = []
     for verdict in verdicts:
         claim = verdict_to_claim(verdict)
         if claim is not None:
@@ -428,14 +428,14 @@ def _tier_rank(tier: str | None) -> int:
     return TIER_PRECEDENCE.get(tier or "", 0)
 
 
-def _carries_static_detail(claim: ClaimProjection) -> bool:
+def _carries_static_detail(claim: EffectMatch) -> bool:
     witness = claim.get("witness")
     if not isinstance(witness, dict):
         return False
     return any(key not in _OBSERVED_WITNESS_KEYS for key in witness)
 
 
-def _donor_for(claim_id: str, prior: list[ClaimProjection]) -> ClaimProjection | None:
+def _donor_for(claim_id: str, prior: list[EffectMatch]) -> EffectMatch | None:
     """The prior claim whose structural detail a freshly observed claim inherits:
     the strongest one that HAS any, not simply the strongest one.
 
@@ -444,8 +444,8 @@ def _donor_for(claim_id: str, prior: list[ClaimProjection]) -> ClaimProjection |
     static claim sitting beside it, gets picked as its own donor, and donates
     nothing — so a re-run of the policy stage, which exists to re-supply the
     static claim, could not repair a single damaged row."""
-    fallback: ClaimProjection | None = None
-    donor: ClaimProjection | None = None
+    fallback: EffectMatch | None = None
+    donor: EffectMatch | None = None
     for claim in prior:
         if claim.get("claim_id") != claim_id:
             continue
@@ -457,7 +457,7 @@ def _donor_for(claim_id: str, prior: list[ClaimProjection]) -> ClaimProjection |
     return donor if donor is not None else fallback
 
 
-def _carry_forward_static_witness(donor: ClaimProjection, observed: dict[str, Any]) -> dict[str, Any]:
+def _carry_forward_static_witness(donor: EffectMatch, observed: dict[str, Any]) -> dict[str, Any]:
     """Keep the superseded static witness's structural facts on the observed one.
 
     Precedence is about TIER — how well we know the claim is true — and a fork
@@ -504,7 +504,7 @@ def _carry_forward_static_witness(donor: ClaimProjection, observed: dict[str, An
     return merged
 
 
-def _drop_superseded(prior: list[ClaimProjection], minted: list[ClaimProjection]) -> list[ClaimProjection]:
+def _drop_superseded(prior: list[EffectMatch], minted: list[EffectMatch]) -> list[EffectMatch]:
     """Drop any prior claim a freshly minted one restates at the same tier.
 
     ``resolve_claim_precedence`` keeps the FIRST claim at the strongest tier, so
@@ -516,7 +516,7 @@ def _drop_superseded(prior: list[ClaimProjection], minted: list[ClaimProjection]
     return [claim for claim in prior if (claim.get("claim_id"), claim.get("tier")) not in restated]
 
 
-def merge_observed_claims(existing: Iterable[ClaimProjection], verdicts: Iterable[Any]) -> list[ClaimProjection]:
+def merge_observed_claims(existing: Iterable[EffectMatch], verdicts: Iterable[Any]) -> list[EffectMatch]:
     """Fold this function's proven verdicts into its existing claim list under the
     registry precedence rule. Idempotent: re-merging the same verdicts is a no-op
     because ``resolve_claim_precedence`` keeps one claim per (id, strongest tier)
@@ -532,7 +532,7 @@ def merge_observed_claims(existing: Iterable[ClaimProjection], verdicts: Iterabl
     return resolve_claim_precedence([*_drop_superseded(prior, minted), *minted])
 
 
-def reproject_effect_labels(existing_labels: Iterable[str], claims: Iterable[ClaimProjection]) -> list[str]:
+def reproject_effect_labels(existing_labels: Iterable[str], claims: Iterable[EffectMatch]) -> list[str]:
     """Re-derive the legacy ``effect_labels`` as the union of the labels already
     present and the registry ``legacy_projection`` of every claim on the function
     (the same additive dual-write discipline ``project_effect_labels`` uses), so
@@ -547,10 +547,10 @@ def reproject_effect_labels(existing_labels: Iterable[str], claims: Iterable[Cla
 
 
 def merge_into_function(
-    existing_claims: Iterable[ClaimProjection] | None,
+    existing_claims: Iterable[EffectMatch] | None,
     existing_labels: Iterable[str] | None,
     verdicts: Iterable[Any],
-) -> tuple[list[ClaimProjection], list[str]] | None:
+) -> tuple[list[EffectMatch], list[str]] | None:
     """The whole per-function merge: fold proven verdicts into the claims, then
     re-project the legacy labels. Returns ``(claims, effect_labels)`` or ``None``
     when nothing minted (so a caller leaves untouched rows exactly as written —

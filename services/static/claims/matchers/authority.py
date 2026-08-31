@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from ..context import ClaimContext
 from ..decorator import claim_matcher
-from ..types import ClaimEvidence
+from ..types import MatchedEvidence
 from . import _authcommon as ac
 
 
@@ -28,13 +28,13 @@ from . import _authcommon as ac
     legacy_projection="authority_update",
     consumer_family="control_plane",
 )
-def authority_replace(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
+def authority_replace(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
     if ac.canonical_selector(ctx, function) != ac.SET_AUTHORITY:
         return None
     replaced = sorted(ac.clean_scalar_writes(ctx, function) & ac.delegated_authority_vars(ctx))
     if not replaced:
         return None
-    return ClaimEvidence(
+    return MatchedEvidence(
         tier="standard_exact",
         witness={
             "kind": "selector",

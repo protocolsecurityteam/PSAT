@@ -102,7 +102,6 @@ def test_process_attempts_semantic_proxy_classification_for_non_obvious_names(mo
     monkeypatch.setattr(worker, "_scaffold_project", lambda *args, **kwargs: None)
     monkeypatch.setattr(worker, "_run_dependency_phase", lambda *args, **kwargs: None)
     monkeypatch.setattr(worker, "_run_analysis_phase", lambda *args, **kwargs: True)
-    monkeypatch.setattr(worker, "_run_tracking_plan_phase", lambda *args, **kwargs: None)
     monkeypatch.setattr(worker, "update_detail", lambda *args, **kwargs: None)
 
     worker.process(session, cast(Any, job))

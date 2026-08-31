@@ -19,7 +19,6 @@ from tests.support.resolution_worker_stubs import (
     TARGET_ADDRESS,
     _job,
     _minimal_snapshot,
-    _minimal_tracking_plan,
     _patch_all,
     _resolved_graph,
 )
@@ -73,9 +72,9 @@ def db_session_for_resolution():
 
 
 class TestProcessHappyPath:
-    """Snapshot built, graph resolved, artifacts stored."""
+    """Snapshot and graph enrich the canonical assessment."""
 
-    def test_stores_snapshot_and_graph(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_stores_assessment_only(self, monkeypatch: pytest.MonkeyPatch) -> None:
         worker = ResolutionWorker()
         session = MagicMock()
         # Make scalar_one_or_none return None (no contract row) so DB writes are skipped
@@ -87,8 +86,8 @@ class TestProcessHappyPath:
         worker.process(session, cast(Any, job))
 
         stored_names = [name for name, _ in ctx["store_calls"]]
-        assert "control_snapshot" in stored_names
-        assert "resolved_control_graph" in stored_names
+        assert "assessment" in stored_names
+        assert not {"control_snapshot", "resolved_control_graph"} & set(stored_names)
 
 
 # ---------------------------------------------------------------------------
@@ -105,13 +104,12 @@ class TestProxyAddressOverride:
         session.execute.return_value.scalar_one_or_none.return_value = None
 
         captured_plan: list[Any] = []
-        original_tracking = _minimal_tracking_plan()
 
         def fake_build(plan: Any, rpc_url: str, **_kw: Any) -> dict:
             captured_plan.append(plan)
             return _minimal_snapshot()
 
-        _patch_all(monkeypatch, tracking_plan=original_tracking)
+        _patch_all(monkeypatch)
         monkeypatch.setattr("workers.resolution_worker.build_control_snapshot", fake_build)
 
         job = _job(request={"rpc_url": "https://rpc.example", "proxy_address": PROXY_ADDRESS})
@@ -435,9 +433,9 @@ class TestQueueDiscoveredContractsCompanyInheritance:
 
 
 class TestMissingArtifactsRaise:
-    """process() raises RuntimeError when required artifacts are missing."""
+    """process() raises RuntimeError when the canonical assessment is missing or invalid."""
 
-    def test_missing_tracking_plan_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_missing_assessment_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         worker = ResolutionWorker()
         session = MagicMock()
         job = _job()
@@ -445,37 +443,21 @@ class TestMissingArtifactsRaise:
         monkeypatch.setattr("workers.resolution_worker.get_artifact", lambda _s, _j, name: None)
         monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
 
-        with pytest.raises(RuntimeError, match="control_tracking_plan artifact not found"):
+        with pytest.raises(RuntimeError, match="assessment artifact not found"):
             worker.process(session, cast(Any, job))
 
-    def test_missing_contract_analysis_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        worker = ResolutionWorker()
-        session = MagicMock()
-        job = _job()
-
-        def fake_get_artifact(_s: Any, _j: Any, name: str) -> Any:
-            if name == "control_tracking_plan":
-                return _minimal_tracking_plan()
-            return None
-
-        monkeypatch.setattr("workers.resolution_worker.get_artifact", fake_get_artifact)
-        monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
-
-        with pytest.raises(RuntimeError, match="contract_analysis artifact not found"):
-            worker.process(session, cast(Any, job))
-
-    def test_non_dict_tracking_plan_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_non_dict_assessment_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         worker = ResolutionWorker()
         session = MagicMock()
         job = _job()
 
         monkeypatch.setattr(
             "workers.resolution_worker.get_artifact",
-            lambda _s, _j, name: "not a dict" if name == "control_tracking_plan" else None,
+            lambda _s, _j, name: "not a dict" if name == "assessment" else None,
         )
         monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
 
-        with pytest.raises(RuntimeError, match="control_tracking_plan artifact not found"):
+        with pytest.raises(RuntimeError, match="assessment artifact failed validation"):
             worker.process(session, cast(Any, job))
 
 
@@ -648,7 +630,14 @@ def test_dependency_emission_walks_check_trees(db_session_for_resolution):
     )
     provider_job.status = JobStatus.queued
     session.commit()
-    store_artifact(session, provider_job.id, "effective_permissions", data={"functions": []})
+    from tests.support.policy_builders import _assessment, _minimal_contract_analysis
+
+    store_artifact(
+        session,
+        provider_job.id,
+        "assessment",
+        data=_assessment(analysis=_minimal_contract_analysis(address=provider_addr, name="Provider")),
+    )
 
     depender_job = create_job(
         session,
@@ -1330,7 +1319,7 @@ class TestStructuralOwnershipPropagation:
 
 
 class TestResolvedGraphEmpty:
-    """When resolve_control_graph returns an empty graph the artifact is skipped."""
+    """An empty graph does not create a second artifact."""
 
     def test_graph_empty_skips_store(self, monkeypatch: pytest.MonkeyPatch) -> None:
         worker = ResolutionWorker()
@@ -1355,7 +1344,8 @@ class TestResolvedGraphEmpty:
         worker.process(session, cast(Any, job))
 
         stored_names = [name for name, _ in ctx["store_calls"]]
-        assert "control_snapshot" in stored_names
+        assert "assessment" in stored_names
+        assert "control_snapshot" not in stored_names
         assert "resolved_control_graph" not in stored_names
 
 

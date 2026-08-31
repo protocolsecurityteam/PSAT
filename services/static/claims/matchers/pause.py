@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from ..context import ClaimContext, abi_selector
 from ..decorator import claim_matcher
-from ..types import ClaimEvidence
+from ..types import MatchedEvidence
 from . import _facts
 
 # OpenZeppelin Pausable's published ABI.
@@ -37,7 +37,7 @@ def _oz_pausable_standard(ctx: ClaimContext) -> bool:
     return ctx.has_selectors(PAUSE, UNPAUSE, PAUSED)
 
 
-def _pause_evidence(ctx: ClaimContext, function: str, want: str) -> ClaimEvidence | None:
+def _pause_evidence(ctx: ClaimContext, function: str, want: str) -> MatchedEvidence | None:
     targets = _facts.function_pause_targets(ctx, function)
     if not targets:
         return None
@@ -80,7 +80,7 @@ def _pause_evidence(ctx: ClaimContext, function: str, want: str) -> ClaimEvidenc
         return None
 
     standard = ctx.canonical_selector(function) in _TOGGLE_SELECTORS and _oz_pausable_standard(ctx)
-    return ClaimEvidence(
+    return MatchedEvidence(
         tier="standard_exact" if standard else "idiom_structural",
         witness={
             "kind": "pause_flag",
@@ -97,7 +97,7 @@ def _pause_evidence(ctx: ClaimContext, function: str, want: str) -> ClaimEvidenc
     legacy_projection="pause_toggle",
     consumer_family="control_plane",
 )
-def pause_set(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
+def pause_set(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
     return _pause_evidence(ctx, function, "set")
 
 
@@ -107,5 +107,5 @@ def pause_set(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     legacy_projection="pause_toggle",
     consumer_family="control_plane",
 )
-def pause_unset(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
+def pause_unset(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
     return _pause_evidence(ctx, function, "unset")

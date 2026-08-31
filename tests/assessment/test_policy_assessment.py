@@ -5,7 +5,7 @@ from __future__ import annotations
 from pydantic import TypeAdapter
 
 from schemas.assessment import Assessment
-from services.assessment import add_policy, build_static_assessment, project_effective_permissions
+from services.assessment import add_policy, build_static_assessment, project_permission_index
 
 
 def _base() -> Assessment:
@@ -132,7 +132,7 @@ def test_unresolved_authority_is_an_omission_not_a_claim() -> None:
 
 def test_legacy_permission_claims_are_projected_from_the_assessment() -> None:
     assessment = _base()
-    projected = project_effective_permissions(assessment, _permission())
+    projected = project_permission_index(assessment, _permission())
     claims = projected["functions"][0]["claims"]
     assert [claim["claim_id"] for claim in claims] == ["pause.set"]
     assert claims[0]["witness"]["flags"] == [{"var": "paused", "member": None}]

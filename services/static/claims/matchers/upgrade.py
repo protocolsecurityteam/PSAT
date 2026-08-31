@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from ..context import ClaimContext
 from ..decorator import claim_matcher
-from ..types import ClaimEvidence
+from ..types import MatchedEvidence
 from ._gates import UPGRADE_SELECTORS, is_upgrade_gate, is_uups_gate
 
 
@@ -23,7 +23,7 @@ from ._gates import UPGRADE_SELECTORS, is_upgrade_gate, is_uups_gate
     consumer_family="control_plane",
     gate=is_upgrade_gate,
 )
-def upgrade_implementation(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
+def upgrade_implementation(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
     selector = ctx.canonical_selector(function)
     if selector not in UPGRADE_SELECTORS:
         return None
@@ -31,7 +31,7 @@ def upgrade_implementation(ctx: ClaimContext, function: str) -> ClaimEvidence | 
     # layer can suppress the standalone delegatecall_execution emphasis on the
     # same entry.
     explained = ctx.sink_ids(function, "delegatecall")
-    return ClaimEvidence(
+    return MatchedEvidence(
         tier="standard_exact",
         witness={
             "kind": "selector+gate",

@@ -731,5 +731,6 @@ def test_a_failing_writer_degrades_the_step_not_the_stage(monkeypatch: pytest.Mo
     assert [d["phase"] for d in degraded] == ["resolution_flow_asset_plane"]
     # The stage still stored what it did prove.
     stored = [name for name, _ in ctx["store_calls"]]
-    assert "control_snapshot" in stored
-    assert "resolved_control_graph" in stored
+    assert "assessment" in stored
+    assert "control_snapshot" not in stored
+    assert "resolved_control_graph" not in stored

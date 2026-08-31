@@ -2,47 +2,42 @@
 
 from __future__ import annotations
 
-from typing import Literal, get_args
+from typing import Literal, TypedDict, cast, get_args
 
-from typing_extensions import NotRequired, TypedDict
+from typing_extensions import NotRequired
 
 from .contract_analysis import (
     AssociatedEvent,
+    ControllerKind,
     ControllerProvenance,
-    ControllerSpec,
+    ControllerReadSpec,
+    ControllerTrackingMode,
 )
-
-# Core principal vocabulary — defined once in ``schemas.core`` and re-exported
-# here so the many ``from schemas.control_tracking import ResolvedControllerType``
-# sites keep working unchanged.
-from .core import (
-    RESOLVED_CONTROLLER_TYPES,
-    ArtifactEnvelope,
-    ResolvedControllerType,
-    coerce_resolved_controller_type,
-)
-
-__all__ = [
-    "RESOLVED_CONTROLLER_TYPES",
-    "ArtifactEnvelope",
-    "ControlSnapshot",
-    "ControlSnapshotValue",
-    "ControlTrackingPlan",
-    "EventWatch",
-    "MONITORED_CONTRACT_TYPES",
-    "MonitoredContractType",
-    "PollingCadence",
-    "PollingFallback",
-    "ResolvedControllerType",
-    "TrackingStrategy",
-    "TrackedController",
-    "WatchTransport",
-    "coerce_resolved_controller_type",
-]
 
 TrackingStrategy = Literal["event_first_with_polling_fallback"]
 PollingCadence = Literal["realtime_confirm", "periodic_reconciliation", "state_only"]
 WatchTransport = Literal["wss_logs"]
+ResolvedControllerType = Literal[
+    "zero",
+    "eoa",
+    "safe",
+    "timelock",
+    "proxy_admin",
+    "contract",
+    "unknown",
+    "off_chain_witness",
+    "cross_chain_authority",
+]
+RESOLVED_CONTROLLER_TYPES: frozenset[str] = frozenset(get_args(ResolvedControllerType))
+
+
+def coerce_resolved_controller_type(value: object) -> ResolvedControllerType:
+    if value is None:
+        return "unknown"
+    text = str(value)
+    if text in RESOLVED_CONTROLLER_TYPES:
+        return cast(ResolvedControllerType, text)
+    return "unknown"
 
 
 # ``monitored_contracts.contract_type``. ``proxy_admin`` controllers are stored
@@ -68,15 +63,23 @@ class PollingFallback(TypedDict):
     notes: list[str]
 
 
-class TrackedController(ControllerSpec):
-    """The resolution stage's watch instruction for one controller: the shared
-    identity kernel plus HOW it is watched (event subscription and polling)."""
-
+class TrackedController(TypedDict):
+    controller_id: str
+    label: str
+    source: str
+    kind: ControllerKind
+    read_spec: ControllerReadSpec | None
+    tracking_mode: ControllerTrackingMode
     event_watch: EventWatch | None
     polling_fallback: PollingFallback
+    notes: list[str]
+    authority_provenance: NotRequired[ControllerProvenance]
 
 
-class ControlTrackingPlan(ArtifactEnvelope):
+class ControlTrackingPlan(TypedDict):
+    schema_version: str
+    contract_address: str
+    contract_name: str
     tracking_strategy: TrackingStrategy
     # Required on every fresh build; legacy persisted artifacts may lack it,
     # but those are read as untyped JSONB (``.get``), never as this type.
@@ -96,9 +99,12 @@ class ControlSnapshotValue(TypedDict):
     authority_provenance: NotRequired[ControllerProvenance]
 
 
-class ControlSnapshot(ArtifactEnvelope):
+class ControlSnapshot(TypedDict):
+    schema_version: str
+    contract_address: str
     # contract_name/controller_values: required on every fresh build; legacy
     # persisted artifacts may lack them, but those are read as untyped JSONB
     # (``.get``), never as this type.
+    contract_name: str
     block_number: int
     controller_values: dict[str, ControlSnapshotValue]

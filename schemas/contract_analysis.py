@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Literal, TypedDict
 
-from typing_extensions import NotRequired, Required, TypedDict
+from typing_extensions import NotRequired
 
 ControlModel = Literal["ownable", "role_control", "auth", "governance", "custom", "unknown"]
 UpgradeabilityPattern = Literal["uups", "transparent", "beacon", "custom", "none", "unknown"]
@@ -227,12 +227,14 @@ class EffectTags(TypedDict, total=False):
     is_initializer: bool
 
 
-class AssociatedEvent(TypedDict, total=False):
-    # Required core: the identity of the event the writer emits.
-    name: Required[str]
-    signature: Required[str]
-    topic0: Required[str]
-    inputs: Required[list[AssociatedEventInput]]
+class AssociatedEventRequired(TypedDict):
+    name: str
+    signature: str
+    topic0: str
+    inputs: list[AssociatedEventInput]
+
+
+class AssociatedEvent(AssociatedEventRequired, total=False):
     effect_tags: EffectTags
     # F3 qualification, both absent unless PROVEN
     # (services/static/contract_analysis_pipeline/writer_openness.py):
@@ -261,10 +263,12 @@ class ControllerTypeComponent(TypedDict):
     type_kind: str
 
 
-class ControllerReadSpec(TypedDict, total=False):
-    # Required core: how the controller's value is read.
-    strategy: Required[ControllerReadStrategy]
-    target: Required[str]
+class ControllerReadSpecRequired(TypedDict):
+    strategy: ControllerReadStrategy
+    target: str
+
+
+class ControllerReadSpec(ControllerReadSpecRequired, total=False):
     kind: str
     state_variable_name: str
     type: str
@@ -283,33 +287,20 @@ class ControllerWriterFunction(TypedDict):
     evidence: list[Evidence]
 
 
-class ControllerSpec(TypedDict):
-    """The identity kernel of one tracked controller: which controller, where
-    it comes from, and how its value is read. Shared verbatim between the
-    static stage's observation record (``ControllerTrackingTarget``) and the
-    resolution stage's watch instruction (``control_tracking.TrackedController``)
-    — the plan builder copies these fields one-for-one, so they are one fact,
-    defined once."""
-
+class ControllerTrackingTarget(TypedDict):
     controller_id: str
     label: str
     source: str
     kind: ControllerKind
     read_spec: ControllerReadSpec | None
-    tracking_mode: ControllerTrackingMode
-    notes: list[str]
-    # Absent = not determined. See ``ControllerProvenance``.
-    authority_provenance: NotRequired[ControllerProvenance]
-
-
-class ControllerTrackingTarget(ControllerSpec):
-    """The static stage's controller observation: a kernel plus what the source
-    says about it (confidence, writer functions, emitted events, polling)."""
-
     confidence: ControllerConfidence | None
+    tracking_mode: ControllerTrackingMode
     writer_functions: list[ControllerWriterFunction]
     associated_events: list[AssociatedEvent]
     polling_sources: list[str]
+    notes: list[str]
+    # Absent = not determined. See ``ControllerProvenance``.
+    authority_provenance: NotRequired[ControllerProvenance]
 
 
 class SecondaryImplPointer(TypedDict):

@@ -7,9 +7,9 @@ Validates behavior that spans multiple modules:
   4. Graph builder label resolution via contract_meta
   5. Full dependency data flow: unified deps -> graph viz -> upgrade history
   6. Discovery -> Static artifact handoff (contract_meta, build_settings, source files)
-  7. Static -> Resolution artifact handoff (contract_analysis, control_tracking_plan)
-  8. Resolution -> Policy artifact handoff (control_snapshot, resolved_control_graph)
-  9. Policy final artifact storage (effective_permissions, principal_labels)
+  7. Static -> Resolution assessment handoff
+  8. Resolution -> Policy assessment handoff
+  9. Policy assessment enrichment
   10. API analyses list and detail endpoints serve worker-stored artifacts correctly
   11. Resolution worker proxy_address override for impl jobs
   12. Tracking plan construction from contract_analysis output
@@ -30,8 +30,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from tests.support.balance_stubs import page, pinned_native_unavailable
-from tests.support.policy_builders import _minimal_contract_analysis
-from tests.support.resolution_worker_stubs import _minimal_tracking_plan
+from tests.support.policy_builders import _assessment, _minimal_contract_analysis
 
 # offline: the dependency phase probes eth_getCode and company mode resolves the
 # protocol via DefiLlama — stub both so the cross-module wiring runs with no wire.
@@ -381,7 +380,6 @@ def test_detail_inlines_upgrade_history_and_graph_viz(mock_session_cls, mock_get
     _mock_session_ctx(mock_session_cls, mock_session)
 
     mock_get_all_artifacts.return_value = {
-        "contract_analysis": {"subject": {"name": "Pool"}, "summary": {"control_model": "proxy"}},
         "upgrade_history": {"schema_version": "0.1", "proxies": {PROXY: {}}, "total_upgrades": 3},
         "dependency_graph_viz": {"nodes": [{"id": "addr:" + TARGET}], "edges": []},
         "dependencies": {"address": TARGET, "dependencies": {}},
@@ -392,7 +390,6 @@ def test_detail_inlines_upgrade_history_and_graph_viz(mock_session_cls, mock_get
     body = resp.json()
     assert body["upgrade_history"]["total_upgrades"] == 3
     assert len(body["dependency_graph_viz"]["nodes"]) == 1
-    assert body["contract_name"] == "Pool"
 
 
 # ===================================================================
@@ -481,10 +478,8 @@ def test_full_data_flow_unified_through_graph_and_upgrade_history(monkeypatch, t
 
 @patch("routers.deps.get_all_artifacts")
 @patch("routers.deps.SessionLocal")
-def test_detail_inlines_all_pipeline_artifacts(mock_session_cls, mock_get_all_artifacts):
-    """The API detail endpoint must inline effective_permissions,
-    principal_labels, principal_history, control_snapshot, and resolved_control_graph
-    alongside the already-tested contract_analysis and dependencies."""
+def test_detail_projects_query_views_from_assessment_indexes(mock_session_cls, mock_get_all_artifacts):
+    """The API combines Assessment with relational query views."""
     from fastapi.testclient import TestClient
 
     import api
@@ -558,9 +553,6 @@ def test_detail_inlines_all_pipeline_artifacts(mock_session_cls, mock_get_all_ar
     _mock_session_ctx(mock_session_cls, mock_session)
 
     mock_get_all_artifacts.return_value = {
-        "contract_analysis": {"subject": {"name": "Vault"}, "summary": {"control_model": "authority"}},
-        "control_snapshot": {"schema_version": "0.1", "controller_values": {"state_variable:owner": {"value": "0xaa"}}},
-        "resolved_control_graph": {"nodes": [{"id": "a", "address": TARGET}], "edges": []},
         "dependencies": {"address": TARGET, "dependencies": {}},
         "principal_history": {
             "schema_version": "principal_history.v1",
@@ -574,10 +566,6 @@ def test_detail_inlines_all_pipeline_artifacts(mock_session_cls, mock_get_all_ar
     assert resp.status_code == 200
     body = resp.json()
 
-    # JSON artifacts inlined from all_artifacts
-    assert body["contract_analysis"]["summary"]["control_model"] == "authority"
-    assert "state_variable:owner" in body["control_snapshot"]["controller_values"]
-    assert len(body["resolved_control_graph"]["nodes"]) == 1
     assert body["dependencies"]["address"] == TARGET
     assert body["principal_history"]["function_permissions"][0]["principal"] == "0xaa"
 
@@ -638,24 +626,7 @@ def test_analyses_list_reads_contract_flags_from_static_worker(mock_session_cls)
         implementation=IMPL,
     )
 
-    artifacts = [
-        SimpleNamespace(
-            job_id=proxy_job.id,
-            name="contract_analysis",
-            storage_key=None,
-            data={"subject": {"name": "MyProxy"}, "summary": {"control_model": "proxy"}},
-            text_data=None,
-            content_type=None,
-        ),
-        SimpleNamespace(
-            job_id=impl_job.id,
-            name="contract_analysis",
-            storage_key=None,
-            data={"subject": {"name": "VaultImpl"}, "summary": {"control_model": "authority"}},
-            text_data=None,
-            content_type=None,
-        ),
-    ]
+    artifacts = []
 
     call_count = {"n": 0}
 
@@ -706,13 +677,11 @@ def test_resolution_worker_rewrites_address_for_impl_jobs(monkeypatch):
         request={"rpc_url": "https://rpc.example", "proxy_address": PROXY, "chain_id": 1},
     )
 
-    # What static worker stored
-    tracking_plan = {**_minimal_tracking_plan(), "contract_address": IMPL, "contract_name": "VaultImpl"}
     contract_analysis = _minimal_contract_analysis(address=IMPL, name="VaultImpl")
+    assessment = _assessment(analysis=contract_analysis)
 
     artifacts = {
-        "control_tracking_plan": tracking_plan,
-        "contract_analysis": contract_analysis,
+        "assessment": assessment,
         "predicate_trees": {"schema_version": "semantic", "trees": {}},
         "effects": {
             "schema_version": "semantic-2",
@@ -770,9 +739,10 @@ def test_resolution_worker_rewrites_address_for_impl_jobs(monkeypatch):
     # The analysis written to disk should have proxy address
     assert captured_analyses[0]["subject"]["address"] == PROXY
 
-    # Artifacts should be stored
-    assert "control_snapshot" in stored_artifacts
-    assert "resolved_control_graph" in stored_artifacts
+    # The enriched Assessment is the only analytical artifact stored.
+    assert "assessment" in stored_artifacts
+    assert "control_snapshot" not in stored_artifacts
+    assert "resolved_control_graph" not in stored_artifacts
 
 
 # ===================================================================
@@ -1086,7 +1056,6 @@ def test_static_worker_reads_discovery_artifacts(monkeypatch):
     monkeypatch.setattr(worker, "_resolve_proxy", lambda *_a, **_kw: None)
     monkeypatch.setattr(worker, "_run_dependency_phase", lambda *_a, **_kw: None)
     monkeypatch.setattr(worker, "_run_analysis_phase", lambda *_a, **_kw: True)
-    monkeypatch.setattr(worker, "_run_tracking_plan_phase", lambda *_a, **_kw: None)
     monkeypatch.setattr(worker, "update_detail", lambda *_a, **_kw: None)
 
     worker.process(session, job)
@@ -1168,19 +1137,19 @@ def test_artifact_endpoint_strips_json_extension(mock_session_cls, mock_get_arti
 
     def _get_artifact(_session, _job_id, name):
         call_names.append(name)
-        if name == "effective_permissions":
-            return {"functions": []}
+        if name == "assessment":
+            return _assessment()
         return None
 
     mock_get_artifact.side_effect = _get_artifact
 
     resp = client.get(
-        "/api/analyses/test_run/artifact/effective_permissions.json",
+        "/api/analyses/test_run/artifact/assessment.json",
         headers={"X-PSAT-Admin-Key": deps.ADMIN_KEY or ""},
     )
     assert resp.status_code == 200
     # First call should be with stripped name
-    assert call_names[0] == "effective_permissions"
+    assert call_names[0] == "assessment"
 
 
 # ===================================================================
@@ -1303,7 +1272,6 @@ def test_static_worker_proxy_skips_analysis_and_completes(monkeypatch):
     # (proxies short-circuit to spawn an impl child job).
     slither_called = []
     monkeypatch.setattr(worker, "_run_analysis_phase", lambda *_a, **_kw: slither_called.append(True) or True)
-    monkeypatch.setattr(worker, "_run_tracking_plan_phase", lambda *_a, **_kw: slither_called.append(True))
 
     try:
         worker.process(session, job)
@@ -1367,17 +1335,14 @@ def test_worker_stage_chain_is_complete(monkeypatch):
 # ===================================================================
 
 
-def test_policy_worker_fails_cleanly_on_missing_artifacts(monkeypatch):
-    """Policy worker should raise RuntimeError if contract_analysis or
-    control_snapshot are missing. These are produced by the static and
-    resolution workers respectively."""
+def test_policy_worker_fails_cleanly_on_missing_assessment(monkeypatch):
+    """Policy requires the canonical assessment handoff."""
     from workers.policy_worker import PolicyWorker
 
     worker = PolicyWorker()
     session = MagicMock()
     job = _job(request={"rpc_url": "https://rpc.example", "chain_id": 1})
 
-    # Missing contract_analysis
     monkeypatch.setattr(
         "workers.policy_worker.get_artifact",
         lambda _s, _j, name: None,
@@ -1385,18 +1350,7 @@ def test_policy_worker_fails_cleanly_on_missing_artifacts(monkeypatch):
 
     import pytest
 
-    with pytest.raises(RuntimeError, match="contract_analysis"):
-        worker.process(session, job)
-
-    # contract_analysis present but control_snapshot missing
-    monkeypatch.setattr(
-        "workers.policy_worker.get_artifact",
-        lambda _s, _j, name: (
-            _minimal_contract_analysis(address=TARGET, name="T") if name == "contract_analysis" else None
-        ),
-    )
-
-    with pytest.raises(RuntimeError, match="control_snapshot"):
+    with pytest.raises(RuntimeError, match="assessment"):
         worker.process(session, job)
 
 
@@ -1405,9 +1359,8 @@ def test_policy_worker_fails_cleanly_on_missing_artifacts(monkeypatch):
 # ===================================================================
 
 
-def test_resolution_worker_fails_on_missing_artifacts(monkeypatch):
-    """Resolution worker should raise RuntimeError if control_tracking_plan
-    or contract_analysis are missing from the DB."""
+def test_resolution_worker_fails_on_missing_assessment(monkeypatch):
+    """Resolution requires the canonical assessment handoff."""
     from workers.resolution_worker import ResolutionWorker
 
     worker = ResolutionWorker()
@@ -1416,18 +1369,9 @@ def test_resolution_worker_fails_on_missing_artifacts(monkeypatch):
 
     import pytest
 
-    # Missing tracking plan
     monkeypatch.setattr(
         "workers.resolution_worker.get_artifact",
         lambda _s, _j, name: None,
     )
-    with pytest.raises(RuntimeError, match="control_tracking_plan"):
-        worker.process(session, job)
-
-    # tracking plan present but contract_analysis missing
-    monkeypatch.setattr(
-        "workers.resolution_worker.get_artifact",
-        lambda _s, _j, name: _minimal_tracking_plan() if name == "control_tracking_plan" else None,
-    )
-    with pytest.raises(RuntimeError, match="contract_analysis"):
+    with pytest.raises(RuntimeError, match="assessment"):
         worker.process(session, job)

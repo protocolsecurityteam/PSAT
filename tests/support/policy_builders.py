@@ -12,6 +12,8 @@ import uuid
 from types import SimpleNamespace
 from typing import Any
 
+from schemas.assessment import Assessment
+
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 AUTH_ADDRESS = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 TARGET_ADDRESS = "0x1111111111111111111111111111111111111111"
@@ -152,6 +154,64 @@ def _tracking_plan(address: str = TARGET_ADDRESS, name: str = "TestContract") ->
         "tracking_strategy": "event_first_with_polling_fallback",
         "tracked_controllers": [],
     }
+
+
+def _assessment(
+    *,
+    analysis: dict | None = None,
+    snapshot: dict | None = None,
+    graph: dict | None = None,
+    chain_id: int = 1,
+) -> Assessment:
+    """Canonical worker handoff fixture built from the old algorithm inputs."""
+
+    from services.assessment import add_observations, add_resolution, build_static_assessment
+
+    facts = analysis or _minimal_contract_analysis()
+    snapshot = snapshot or _minimal_snapshot()
+    if snapshot.get("controller_values"):
+        facts = {**facts, "controller_tracking": list(facts.get("controller_tracking") or [])}
+        known = {item.get("controller_id") for item in facts["controller_tracking"]}
+        for key, value in snapshot["controller_values"].items():
+            if key in known:
+                continue
+            facts["controller_tracking"].append(
+                {
+                    "controller_id": key,
+                    "label": key,
+                    "source": value.get("source") or key,
+                    "kind": "state_variable",
+                    "read_spec": {"strategy": "getter_call", "target": key},
+                    "confidence": "exact",
+                    "tracking_mode": "state_only",
+                    "writer_functions": [],
+                    "associated_events": [],
+                    "polling_sources": [],
+                    "notes": [],
+                }
+            )
+    subject = facts["subject"]
+    result = build_static_assessment(
+        chain_id=chain_id,
+        address=subject["address"],
+        contract_name=subject["name"],
+        code_hash=None,
+        source_hash="test-source",
+        analysis=facts,
+        effects={
+            "schema_version": "semantic-3",
+            "contract_name": subject["name"],
+            "functions": {},
+            "claims_schema_version": "claims/1",
+            "claim_analyses": {},
+            "claim_diagnostics": [],
+        },
+        predicate_trees={"schema_version": "semantic", "trees": {}},
+    )
+    result = add_observations(result, snapshot)
+    if graph is not None:
+        result = add_resolution(result, graph, chain_id=chain_id)
+    return result
 
 
 def _authority_bundle(snapshot: dict | None = None) -> dict:

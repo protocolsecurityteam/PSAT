@@ -41,7 +41,8 @@ from services.monitoring.restaking_enrollment import (
     node_addresses_from_fold,
 )
 from services.resolution.role_holder_plane import ROLE_GRANTED_TOPIC0, ROLE_REVOKED_TOPIC0
-from tests.support.resolution_worker_stubs import _minimal_contract_analysis, _minimal_tracking_plan
+from tests.support.policy_builders import _assessment
+from tests.support.resolution_worker_stubs import _minimal_contract_analysis
 from workers.resolution_worker import ResolutionWorker
 
 # The measured EtherFiNodesManager PROXY. Its ``contracts`` row is keyed at the
@@ -330,18 +331,17 @@ class TestRoleHolderPlaneColdCursor:
 
 
 def _stub_stage(monkeypatch, **overrides: Any) -> None:
-    tracking_plan = {**_minimal_tracking_plan(), "contract_address": REGISTRY, "contract_name": "Registry"}
     contract_analysis = {
         **_minimal_contract_analysis(),
         "subject": {"address": REGISTRY, "name": "Registry", "compiler_version": "unknown", "source_verified": None},
     }
+    assessment = _assessment(analysis=contract_analysis)
     snapshot = {"contract_address": REGISTRY, "controller_values": {}, "block_number": BLOCK}
 
     monkeypatch.setattr(
         "workers.resolution_worker.get_artifact",
         lambda _s, _j, name: {
-            "control_tracking_plan": tracking_plan,
-            "contract_analysis": contract_analysis,
+            "assessment": assessment,
         }.get(name),
     )
     monkeypatch.setattr("workers.resolution_worker.store_artifact", lambda *a, **kw: None)

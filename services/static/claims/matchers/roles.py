@@ -30,7 +30,7 @@ from __future__ import annotations
 
 from ..context import ClaimContext
 from ..decorator import claim_matcher
-from ..types import ClaimEvidence
+from ..types import MatchedEvidence
 from . import _authcommon as ac
 
 
@@ -43,15 +43,15 @@ def _roles_present(ctx: ClaimContext) -> bool:
     )
 
 
-def _evidence(standard: str, selector: str) -> ClaimEvidence:
-    return ClaimEvidence(
+def _evidence(standard: str, selector: str) -> MatchedEvidence:
+    return MatchedEvidence(
         tier="standard_exact",
         witness={"kind": "selector", "selector": selector, "standard": standard},
     )
 
 
-def _wards_evidence(selector: str) -> ClaimEvidence:
-    return ClaimEvidence(
+def _wards_evidence(selector: str) -> MatchedEvidence:
+    return MatchedEvidence(
         tier="idiom_structural",
         witness={"kind": "selector+wards_idiom", "selector": selector, "standard": "maker_wards"},
     )
@@ -64,7 +64,7 @@ def _wards_evidence(selector: str) -> ClaimEvidence:
     consumer_family="control_plane",
     gate=_roles_present,
 )
-def roles_grant(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
+def roles_grant(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
     selector = ac.canonical_selector(ctx, function)
     if selector is None:
         return None
@@ -84,7 +84,7 @@ def roles_grant(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     consumer_family="control_plane",
     gate=_roles_present,
 )
-def roles_revoke(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
+def roles_revoke(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
     selector = ac.canonical_selector(ctx, function)
     if selector is None:
         return None
@@ -104,7 +104,7 @@ def roles_revoke(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     consumer_family="control_plane",
     gate=ac.solmate_roles_gate,
 )
-def roles_configure(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
+def roles_configure(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
     selector = ac.canonical_selector(ctx, function)
     if selector is None:
         return None

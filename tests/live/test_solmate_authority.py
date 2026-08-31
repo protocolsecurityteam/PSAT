@@ -98,7 +98,7 @@ def _finite_set_members(node: object, out: set[str]) -> None:
 def test_veda_teller_cancall_resolves_without_preempt(analyzed_veda_teller, live_client: LiveClient):
     """canCall is detected, dispatched, and resolved — never the pre-#104
     ``delegated_check_not_materialized`` inline-preempt dead-end."""
-    ep = live_client.artifact(analyzed_veda_teller["name"], "effective_permissions")
+    ep = live_client.analysis_detail(analyzed_veda_teller["name"]).get("effective_permissions")
     if not isinstance(ep, dict):
         pytest.skip("effective_permissions artifact not available")
 
@@ -122,7 +122,7 @@ def test_veda_teller_cancall_recovers_governing_safe(analyzed_veda_teller, live_
     deferred to a probe. That's fail-safe, not a regression; the recovery path is
     pinned deterministically offline.
     """
-    ep = live_client.artifact(analyzed_veda_teller["name"], "effective_permissions")
+    ep = live_client.analysis_detail(analyzed_veda_teller["name"]).get("effective_permissions")
     if not isinstance(ep, dict):
         pytest.skip("effective_permissions artifact not available")
 

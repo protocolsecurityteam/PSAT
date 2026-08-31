@@ -23,7 +23,7 @@ from db.models import (
 )
 from db.nested_artifacts import store_bundle as store_nested_artifacts
 from db.queue import create_job, get_artifact, store_artifact
-from db.queue.typed import ArtifactSchemaError, load_assessment, load_contract_analysis, load_control_tracking_plan
+from db.queue.typed import ArtifactSchemaError, load_assessment
 from schemas.control_tracking import ControlSnapshot, ControlTrackingPlan
 from services.clients.rpc import require_rpc_url
 from services.discovery.perimeter import queue_discovered_contracts
@@ -188,21 +188,6 @@ class ResolutionWorker(BaseWorker):
         rpc_url = _rpc_url_for_job(job)
         chain_id = _chain_id_for_job(job)
 
-        # Read the static stage's typed wire artifacts
-        try:
-            tracking_plan = load_control_tracking_plan(get_artifact, session, job.id)
-        except ArtifactSchemaError as exc:
-            raise RuntimeError(f"{exc.artifact_name} artifact not found") from exc
-        if tracking_plan is None:
-            raise RuntimeError("control_tracking_plan artifact not found")
-
-        # contract_analysis is needed for recursive resolution
-        try:
-            contract_analysis = load_contract_analysis(get_artifact, session, job.id)
-        except ArtifactSchemaError as exc:
-            raise RuntimeError(f"{exc.artifact_name} artifact not found") from exc
-        if contract_analysis is None:
-            raise RuntimeError("contract_analysis artifact not found")
         predicate_trees = get_artifact(session, job.id, "predicate_trees")
         if not isinstance(predicate_trees, dict):
             predicate_trees = None
@@ -212,31 +197,12 @@ class ResolutionWorker(BaseWorker):
         except ArtifactSchemaError as exc:
             raise RuntimeError(f"{exc.artifact_name} artifact failed validation") from exc
         if assessment is None:
-            # Compatibility ingress for jobs queued before the assessment
-            # cutover. New jobs always receive this artifact from static.
-            effects = get_artifact(session, job.id, "effects")
-            from services.assessment import build_static_assessment
+            raise RuntimeError("assessment artifact not found")
 
-            subject = contract_analysis["subject"]
-            assessment = build_static_assessment(
-                chain_id=chain_id,
-                address=subject["address"],
-                contract_name=subject["name"],
-                code_hash=None,
-                source_hash=getattr(job, "source_content_hash", None),
-                analysis=contract_analysis,
-                effects=(
-                    effects
-                    if isinstance(effects, dict)
-                    else {"schema_version": "missing", "error": "effects artifact missing"}
-                ),
-                predicate_trees=(
-                    predicate_trees
-                    if predicate_trees is not None
-                    else {"schema_version": "missing", "error": "predicate_trees artifact missing"}
-                ),
-            )
-            store_artifact(session, job.id, "assessment", data=assessment)
+        from services.assessment import contract_subject, observation_plan
+
+        tracking_plan = observation_plan(assessment)
+        contract_analysis = contract_subject(assessment)
 
         # For impl jobs, read storage from the proxy address (where state lives)
         request = job.request if isinstance(job.request, dict) else {}
@@ -281,8 +247,6 @@ class ResolutionWorker(BaseWorker):
             "resolution phase complete: control snapshot",
             extra={"duration_ms": int((time.monotonic() - t0) * 1000), "phase": "control_snapshot"},
         )
-        # Keep as artifact — policy stage reads it as JSON
-        store_artifact(session, job.id, "control_snapshot", data=snapshot)
         from services.assessment import add_observations
 
         assessment = add_observations(assessment, snapshot)
@@ -389,8 +353,6 @@ class ResolutionWorker(BaseWorker):
             # Persist each nested contract's artifacts so the policy stage can
             # read them back by address (no local filesystem).
             store_nested_artifacts(session, job.id, nested_artifacts)
-            # Keep as artifact — policy stage reads it as JSON
-            store_artifact(session, job.id, "resolved_control_graph", data=resolved_graph)
             from services.assessment import add_resolution
 
             assessment = add_resolution(assessment, resolved_graph, chain_id=chain_id)
@@ -1061,7 +1023,7 @@ class ResolutionWorker(BaseWorker):
             satisfied_lookup = find_analysis_job_for_address(
                 session,
                 target_addr,
-                required_artifact="effective_permissions",
+                required_artifact="assessment",
                 chain=chain,
                 completed_only=False,
             )

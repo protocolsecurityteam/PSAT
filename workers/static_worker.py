@@ -36,7 +36,6 @@ from services.discovery import (
 from services.discovery.dynamic_dependencies import NoNewTransactionsError
 from services.discovery.fetch import _confine, sanitize_evm_version
 from services.monitoring.proxy_watcher import resolve_current_implementation
-from services.resolution.tracking_plan import build_control_tracking_plan
 from services.static.contract_analysis_pipeline import collect_contract_analysis_with_artifacts
 from utils.chains import UnknownChainError, chain_by_id, chain_enabled, require_chain
 from utils.logging import log_timed_phase, record_degraded, record_stage_metric
@@ -775,10 +774,10 @@ class StaticWorker(BaseWorker):
                     contract_name,
                 )
                 self.update_detail(session, job, "Static analysis complete (cached)")
-                # The cached contract_analysis still carries secondary_impl_pointers
+                # The cached static facts still carry secondary_impl_pointers
                 # (copy_static_cache copies it), so secondaries get resolved on the
                 # cache path too — not only on a fresh (Slither) analysis.
-                cached_analysis = get_artifact(session, job.id, "contract_analysis")
+                cached_analysis = get_artifact(session, job.id, "static_facts")
                 secondary_analysis = cached_analysis if isinstance(cached_analysis, dict) else None
             else:
                 # Phase 1: Contract analysis (uses Slither's Python IR — the
@@ -791,9 +790,6 @@ class StaticWorker(BaseWorker):
                 if analysis_data is None:
                     raise RuntimeError(f"Contract analysis failed for {contract_name} ({address}).")
 
-                # Phase 2: Control tracking plan
-                with log_timed_phase(logger, "tracking_plan"):
-                    self._run_tracking_plan_phase(session, job, analysis_data, contract_name, address)
                 secondary_analysis = analysis_data if isinstance(analysis_data, dict) else None
 
             # 1A: queue split-proxy secondary implementations (best-effort). SINGLE
@@ -1642,7 +1638,7 @@ class StaticWorker(BaseWorker):
         # a stray non-JSON analyzer object (a Slither ``Constant`` reached
         # ``derived_from.callee`` before provenance stringified it) must
         # degrade to its string form rather than kill the whole static job.
-        (project_dir / "contract_analysis.json").write_text(json.dumps(analysis_data, indent=2, default=str) + "\n")
+        (project_dir / "static_facts.json").write_text(json.dumps(analysis_data, indent=2, default=str) + "\n")
         (project_dir / "assessment.json").write_text(json.dumps(assessment, indent=2, default=str) + "\n")
         if semantic_predicate_trees is not None:
             (project_dir / "predicate_trees.json").write_text(
@@ -1651,7 +1647,7 @@ class StaticWorker(BaseWorker):
         if semantic_effects is not None:
             (project_dir / "effects.json").write_text(json.dumps(semantic_effects, indent=2, default=str) + "\n")
 
-        store_artifact(session, job.id, "contract_analysis", data=analysis_data)
+        store_artifact(session, job.id, "static_facts", data=analysis_data)
         store_artifact(session, job.id, "assessment", data=assessment)
         if semantic_predicate_trees is not None:
             try:
@@ -1812,8 +1808,8 @@ class StaticWorker(BaseWorker):
             return
 
         try:
-            analysis = get_artifact(session, job.id, "contract_analysis")
-            tracking_plan = get_artifact(session, job.id, "control_tracking_plan")
+            analysis = get_artifact(session, job.id, "static_facts")
+            assessment = get_artifact(session, job.id, "assessment")
             predicate_trees = get_artifact(session, job.id, "predicate_trees")
         except Exception as exc:
             record_degraded(phase="materialization_publish", exc=exc, context={"address": address})
@@ -1824,14 +1820,15 @@ class StaticWorker(BaseWorker):
                 extra={"exc_type": type(exc).__name__},
             )
             return
-        if not isinstance(analysis, dict) or not isinstance(tracking_plan, dict):
-            # The plan phase records its own failure; a row without both halves
-            # would read downstream as a contract with no analysis and no plan.
+        if not isinstance(analysis, dict) or not isinstance(assessment, dict):
             logger.info(
-                "Static stage: no materialization published for %s — analysis or tracking plan absent",
+                "Static stage: no materialization published for %s — facts or assessment absent",
                 address,
             )
             return
+        from services.assessment import observation_plan
+
+        tracking_plan = observation_plan(cast(Assessment, assessment))
 
         chain = _parent_chain_name(job)
         request = job.request if isinstance(job.request, dict) else {}
@@ -1897,29 +1894,6 @@ class StaticWorker(BaseWorker):
             chain,
             extra={"address": address, "chain": chain, "outcome": outcome},
         )
-
-    def _run_tracking_plan_phase(
-        self, session, job, analysis: ContractAnalysis | dict, contract_name: str, address: str
-    ) -> None:
-        """Build control tracking plan. Non-fatal on failure."""
-        self.update_detail(session, job, "Building control tracking plan")
-        try:
-            tracking_plan = build_control_tracking_plan(cast(ContractAnalysis, analysis))
-            store_artifact(session, job.id, "control_tracking_plan", data=tracking_plan)
-            logger.info(
-                "Static stage tracking plan complete for job %s address=%s contract=%s",
-                job.id,
-                address,
-                contract_name,
-            )
-        except Exception as exc:
-            record_degraded(
-                phase="tracking_plan",
-                exc=exc,
-                context={"address": address, "contract_name": contract_name},
-            )
-            _log_phase_error(str(job.id), address, contract_name, "tracking_plan", str(exc))
-            store_artifact(session, job.id, "tracking_plan_error", data={"error": str(exc)})
 
 
 def main():

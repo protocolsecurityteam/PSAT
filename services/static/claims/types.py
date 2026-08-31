@@ -1,8 +1,8 @@
-"""Compatibility vocabulary for the static matcher subsystem.
+"""Positive matcher results and detector receipts for static effects.
 
-The registry's successful matcher result is projected into the legacy
-``{claim_id, tier, witness}`` function shape, then converted into canonical
-assessment Evidence/Basis/Claim records. ``tier`` has no heuristic/guess value:
+The registry's successful matcher result is a compact internal effect match,
+then converted into canonical assessment Evidence/Basis/Claim records. ``tier``
+has no heuristic/guess value:
 introducing one requires editing the Literal, registry contract, and CI gate.
 """
 
@@ -47,19 +47,19 @@ CONSUMER_FAMILIES: frozenset[str] = frozenset(get_args(ConsumerFamily))
 Witness = dict[str, Any]
 
 
-class ClaimProjection(TypedDict):
-    """Legacy per-function projection of a canonical assessment Claim."""
+class EffectMatch(TypedDict):
+    """A positive matcher hit awaiting canonical evidence construction."""
 
     claim_id: str
     tier: Tier
     witness: Witness
 
 
-class ClaimsArtifact(TypedDict):
+class MatchResults(TypedDict):
     schema_version: str
     contract_name: str | None
     # Function full-name -> its claims (empty list is valid and common).
-    functions: dict[str, list[ClaimProjection]]
+    functions: dict[str, list[EffectMatch]]
     # Function full-name -> the 4-byte selector of its CANONICAL ABI signature
     # (enum/interface/struct params lowered) — the value a caller puts in
     # ``msg.sig``. Three states per function, and consumers must keep them
@@ -71,24 +71,24 @@ class ClaimsArtifact(TypedDict):
     # One receipt per registered matcher. A clean miss is completed work; only
     # an exception creates an omission. These receipts, not missing claims,
     # carry failure and coverage semantics into the canonical Assessment.
-    analyses: NotRequired[dict[str, "ClaimAnalysis"]]
-    diagnostics: NotRequired[list["ClaimDiagnostic"]]
+    analyses: NotRequired[dict[str, "MatchAnalysis"]]
+    diagnostics: NotRequired[list["MatchDiagnostic"]]
 
 
-class ClaimOmission(TypedDict):
+class MatchOmission(TypedDict):
     function: str
     reason: str
 
 
-class ClaimAnalysis(TypedDict):
+class MatchAnalysis(TypedDict):
     detector: str
     status: Literal["completed", "partial", "failed"]
     targets_total: int
     targets_completed: int
-    omissions: list[ClaimOmission]
+    omissions: list[MatchOmission]
 
 
-class ClaimDiagnostic(TypedDict):
+class MatchDiagnostic(TypedDict):
     claim_id: str
     function: str | None
     exc_type: str
@@ -96,7 +96,7 @@ class ClaimDiagnostic(TypedDict):
 
 
 @dataclass(frozen=True)
-class ClaimEvidence:
+class MatchedEvidence:
     """What a matcher trigger returns on a hit: the tier it proved the claim at
     and the replayable witness. A trigger returns ``None`` for no claim."""
 

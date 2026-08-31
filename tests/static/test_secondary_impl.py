@@ -463,11 +463,11 @@ def test_static_cache_hit_still_resolves_secondary_impls(db_session, monkeypatch
         Contract(address=core, chain="ethereum", is_proxy=False, contract_name="LRTSquaredCore", job_id=impl_job.id)
     )
     db_session.commit()
-    # The cached contract_analysis carries the detected pointer (copy_static_cache copies it).
+    # The cached static facts carry the detected pointer.
     store_artifact(
         db_session,
         impl_job.id,
-        "contract_analysis",
+        "static_facts",
         data={
             "schema_version": "0.1",
             "subject": {"name": "LRTSquaredCore"},

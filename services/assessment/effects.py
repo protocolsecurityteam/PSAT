@@ -77,8 +77,8 @@ def add_effects(
             )
             continue
 
-        legacy_claim = verdict_to_claim(verdict)
-        if getattr(verdict, "verdict", None) != VERDICT_PROVEN or legacy_claim is None:
+        match = verdict_to_claim(verdict)
+        if getattr(verdict, "verdict", None) != VERDICT_PROVEN or match is None:
             witness = getattr(verdict, "witness", None)
             reason = witness.get("reason") if isinstance(witness, Mapping) else None
             omissions.append(
@@ -91,7 +91,7 @@ def add_effects(
             continue
 
         completed += 1
-        kind = legacy_claim["claim_id"]
+        kind = match["claim_id"]
         observation = _json(
             {
                 "effect_class": getattr(verdict, "effect_class", None),
@@ -99,7 +99,7 @@ def add_effects(
                 "tier": getattr(verdict, "tier", None),
                 "behavior_hash": getattr(verdict, "behavior_hash", None),
                 "current_check_passed": getattr(verdict, "current_check_passed", None),
-                "claim_witness": legacy_claim["witness"],
+                "claim_witness": match["witness"],
                 "witness": getattr(verdict, "witness", None),
                 "observed_residue": getattr(verdict, "observed_residue", None),
                 "transcript_ptr": getattr(verdict, "transcript_ptr", None),

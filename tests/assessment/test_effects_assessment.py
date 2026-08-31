@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from pydantic import TypeAdapter
 
 from schemas.assessment import Assessment
-from services.assessment import add_effects, build_static_assessment, legacy_claims_by_function
+from services.assessment import add_effects, build_static_assessment, effect_matches_by_function
 from services.effects.config import EFFECT_CLASS_FREEZE_PAUSE, VERDICT_PROVEN, VERDICT_UNKNOWN
 
 
@@ -85,7 +85,7 @@ def test_proven_verdict_adds_execution_evidence_to_the_effect_claim() -> None:
     methods = {assessment["evidence"][evidence_id]["method"] for evidence_id in pause_claim["basis"]["evidence_ids"]}
     assert methods == {"static_ir", "execution"}
     assert pause_claim["basis"]["rule"] == "pause.set/behavioral_observed"
-    projection = legacy_claims_by_function(assessment)["pause()"][0]
+    projection = effect_matches_by_function(assessment)["pause()"][0]
     assert projection["witness"]["observed"]["observed_blast_radius"] == ["withdraw()"]
 
 

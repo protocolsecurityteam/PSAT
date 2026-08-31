@@ -86,10 +86,13 @@ def _create_completed_job_with_chain(session, address, chain, name="TestContract
         },
     )
 
-    store_artifact(session, job.id, "contract_analysis", data={"summary": {"control_model": "ownable"}})
+    from tests.support.policy_builders import _assessment, _minimal_contract_analysis
+
+    facts = _minimal_contract_analysis(address=address, name="TestContract")
+    store_artifact(session, job.id, "static_facts", data=facts)
+    store_artifact(session, job.id, "assessment", data=_assessment(analysis=facts, chain_id=job.chain_id or 1))
     store_artifact(session, job.id, "slither_results", data={"results": {"detectors": []}})
     store_artifact(session, job.id, "analysis_report", text_data="Test analysis report")
-    store_artifact(session, job.id, "control_tracking_plan", data={"controllers": []})
 
     return job
 

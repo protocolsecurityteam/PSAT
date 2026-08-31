@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Literal, TypedDict
 
-from typing_extensions import NotRequired, TypedDict
+from typing_extensions import NotRequired
 
-from .core import ArtifactEnvelope, Principal, ResolvedControllerType
+from .control_tracking import ResolvedControllerType
 
-# One vocabulary with ``schemas.core``: persisted rows carry
+# One vocabulary with ``schemas.control_tracking``: persisted rows carry
 # ``off_chain_witness`` (the PR #48 sink bridge wrote it), so the narrower
 # 8-member copy this alias used to be was a lie at the cast sites.
 ResolvedAddressType = ResolvedControllerType
@@ -25,12 +25,10 @@ class PrincipalResolution(TypedDict):
     reason: str
 
 
-class ResolvedPrincipal(Principal):
-    """A principal witnessed by the resolution stage. The three extension
-    fields name WHERE it was witnessed (the contract whose snapshot carried
-    it and the controller that pointed at it); ``principal_type`` is a
-    free-text classifier some producers attach."""
-
+class ResolvedPrincipal(TypedDict):
+    address: str
+    resolved_type: ResolvedAddressType
+    details: dict[str, object]
     source_contract: NotRequired[str]
     source_controller_id: NotRequired[str]
     principal_type: NotRequired[str]
@@ -44,6 +42,7 @@ class AuthorityRoleGrant(TypedDict):
 class ResolvedControllerGrant(TypedDict):
     controller_id: str
     label: str
+    source: NotRequired[str]
     kind: str
     principals: list[ResolvedPrincipal]
     notes: list[str]
@@ -96,7 +95,10 @@ class EffectiveFunctionPermission(TypedDict):
     writer_selectors: NotRequired[list[str] | None]
 
 
-class EffectivePermissions(ArtifactEnvelope):
+class EffectivePermissions(TypedDict):
+    schema_version: str
+    contract_address: str
+    contract_name: str
     authority_contract: str | None
     principal_resolution: PrincipalResolution
     artifacts: dict[str, str]

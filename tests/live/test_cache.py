@@ -17,9 +17,9 @@ def test_first_run_completes(analyzed_weth):
 
 
 def test_first_run_has_artifacts(analyzed_weth, live_client: LiveClient):
-    analysis = live_client.artifact(analyzed_weth["name"], "contract_analysis")
+    analysis = live_client.artifact(analyzed_weth["name"], "assessment")
     assert isinstance(analysis, dict)
-    assert "subject" in analysis or "summary" in analysis
+    assert analysis.get("schema_version") == "assessment/1"
 
 
 def test_second_run_uses_cache(analyzed_weth, cached_weth, live_client: LiveClient):
@@ -37,10 +37,10 @@ def test_second_run_uses_cache(analyzed_weth, cached_weth, live_client: LiveClie
         f"than the second run ({analyzed_weth.get('address')})"
     )
 
-    a1 = live_client.artifact(analyzed_weth["name"], "contract_analysis")
-    a2 = live_client.artifact(cached_weth["name"], "contract_analysis")
+    a1 = live_client.artifact(analyzed_weth["name"], "assessment")
+    a2 = live_client.artifact(cached_weth["name"], "assessment")
     assert isinstance(a1, dict) and isinstance(a2, dict)
-    assert a1.get("subject", {}).get("name") == a2.get("subject", {}).get("name")
+    assert a1["contract"]["name"] == a2["contract"]["name"]
 
 
 def test_second_run_completed_faster(analyzed_weth, cached_weth, live_client: LiveClient):

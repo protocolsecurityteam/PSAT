@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from ..context import ClaimContext, abi_selector, abi_topic0
 from ..decorator import claim_matcher
-from ..types import ClaimEvidence
+from ..types import MatchedEvidence
 from . import _facts
 
 # LayerZero OApp published configuration ABI.
@@ -22,10 +22,10 @@ _DEPOSIT = abi_selector("deposit()")
 _WITHDRAW = abi_selector("withdraw(uint256)")
 
 
-def _erc20_op(ctx: ClaimContext, function: str, selector: str) -> ClaimEvidence | None:
+def _erc20_op(ctx: ClaimContext, function: str, selector: str) -> MatchedEvidence | None:
     if not _facts.is_erc20(ctx) or ctx.canonical_selector(function) != selector:
         return None
-    return ClaimEvidence(tier="standard_exact", witness={"kind": "erc20_selector", "selector": selector})
+    return MatchedEvidence(tier="standard_exact", witness={"kind": "erc20_selector", "selector": selector})
 
 
 @claim_matcher(
@@ -34,7 +34,7 @@ def _erc20_op(ctx: ClaimContext, function: str, selector: str) -> ClaimEvidence 
     legacy_projection=None,
     consumer_family="user_plane",
 )
-def erc20_approve(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
+def erc20_approve(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
     return _erc20_op(ctx, function, "0x095ea7b3")
 
 
@@ -44,7 +44,7 @@ def erc20_approve(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     legacy_projection=None,
     consumer_family="user_plane",
 )
-def erc20_transfer(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
+def erc20_transfer(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
     return _erc20_op(ctx, function, "0xa9059cbb")
 
 
@@ -54,7 +54,7 @@ def erc20_transfer(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     legacy_projection=None,
     consumer_family="user_plane",
 )
-def erc20_transfer_from(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
+def erc20_transfer_from(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
     return _erc20_op(ctx, function, "0x23b872dd")
 
 
@@ -68,10 +68,10 @@ def _weth_gate(ctx: ClaimContext) -> bool:
     legacy_projection=None,
     consumer_family="user_plane",
 )
-def weth_deposit(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
+def weth_deposit(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
     if ctx.canonical_selector(function) != _DEPOSIT or not _weth_gate(ctx):
         return None
-    return ClaimEvidence(tier="idiom_structural", witness={"kind": "weth", "op": "deposit"})
+    return MatchedEvidence(tier="idiom_structural", witness={"kind": "weth", "op": "deposit"})
 
 
 @claim_matcher(
@@ -80,10 +80,10 @@ def weth_deposit(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     legacy_projection=None,
     consumer_family="user_plane",
 )
-def weth_withdraw(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
+def weth_withdraw(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
     if ctx.canonical_selector(function) != _WITHDRAW or not _weth_gate(ctx):
         return None
-    return ClaimEvidence(tier="idiom_structural", witness={"kind": "weth", "op": "withdraw"})
+    return MatchedEvidence(tier="idiom_structural", witness={"kind": "weth", "op": "withdraw"})
 
 
 # The Compound/OZ Votes delegation log. Its argument list is fixed by the
@@ -97,7 +97,7 @@ DELEGATE_CHANGED_TOPIC0 = abi_topic0("DelegateChanged(address,address,address)")
     legacy_projection=None,
     consumer_family="user_plane",
 )
-def gov_delegate(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
+def gov_delegate(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
     """Comp/OZ-Votes delegation.
 
     ``standard_exact`` when the call emits ``DelegateChanged`` — the published
@@ -108,13 +108,13 @@ def gov_delegate(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     """
     fn = _facts.contract_function(ctx, function)
     if fn is not None and _facts.emits_event_topic(ctx, fn, DELEGATE_CHANGED_TOPIC0):
-        return ClaimEvidence(
+        return MatchedEvidence(
             tier="standard_exact",
             witness={"kind": "delegate_changed_log", "topic0": DELEGATE_CHANGED_TOPIC0},
         )
     written = {w["var"] for w in _facts.state_writes(ctx, function)}
     if "delegates" in written and "checkpoints" in written:
-        return ClaimEvidence(
+        return MatchedEvidence(
             tier="idiom_structural", witness={"kind": "comp_votes_writes", "writes": ["delegates", "checkpoints"]}
         )
     return None
@@ -130,10 +130,10 @@ def _lz_oapp_gate(ctx: ClaimContext) -> bool:
     legacy_projection=None,
     consumer_family="control_plane",
 )
-def lz_oapp_set_peer(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
+def lz_oapp_set_peer(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
     if ctx.canonical_selector(function) != _SET_PEER or not _lz_oapp_gate(ctx):
         return None
-    return ClaimEvidence(tier="standard_exact", witness={"kind": "lz_oapp", "op": "set_peer"})
+    return MatchedEvidence(tier="standard_exact", witness={"kind": "lz_oapp", "op": "set_peer"})
 
 
 @claim_matcher(
@@ -142,7 +142,7 @@ def lz_oapp_set_peer(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     legacy_projection=None,
     consumer_family="control_plane",
 )
-def lz_oapp_set_delegate(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
+def lz_oapp_set_delegate(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
     if ctx.canonical_selector(function) != _SET_DELEGATE or not _lz_oapp_gate(ctx):
         return None
-    return ClaimEvidence(tier="standard_exact", witness={"kind": "lz_oapp", "op": "set_delegate"})
+    return MatchedEvidence(tier="standard_exact", witness={"kind": "lz_oapp", "op": "set_delegate"})

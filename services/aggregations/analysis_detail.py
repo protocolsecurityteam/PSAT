@@ -177,10 +177,7 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
 
     for artifact_name in (
         "assessment",
-        "contract_analysis",
-        "control_snapshot",
         "dependencies",
-        "resolved_control_graph",
         "dependency_graph_viz",
         "upgrade_history",
         "principal_history",
@@ -264,12 +261,6 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
         if impl_job:
             _inherit_from_impl(session, payload, job, impl_job, impl_addr, not_determined, body_absent)
 
-    # Add subject info from contract_analysis if available
-    if isinstance(all_artifacts.get("contract_analysis"), dict):
-        subject = all_artifacts["contract_analysis"].get("subject", {})
-        payload["contract_name"] = subject.get("name", payload["run_name"])
-        payload["summary"] = all_artifacts["contract_analysis"].get("summary")
-
     # Canonical claims + detector coverage own the compatibility boolean.
     if isinstance(all_artifacts.get("assessment"), dict):
         from services.assessment import effect_presence
@@ -305,10 +296,23 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
         # above, re-asking will not change the answer.
         payload["artifacts_body_absent"] = dict(sorted(body_absent.items()))
 
+    if contract_row is not None:
+        payload.setdefault("contract_name", contract_row.contract_name or payload["run_name"])
+
     return payload
 
 
 def _populate_from_contract(session: Session, payload: dict[str, Any], contract_row: Contract) -> None:
+    if not contract_row.is_proxy:
+        payload["contract_name"] = contract_row.contract_name or payload["run_name"]
+    if not contract_row.is_proxy and contract_row.summary:
+        payload["summary"] = {
+            "control_model": contract_row.summary.control_model,
+            "is_upgradeable": contract_row.summary.is_upgradeable,
+            "is_pausable": contract_row.summary.is_pausable,
+            "has_timelock": contract_row.summary.has_timelock,
+            "standards": list(contract_row.summary.standards or []),
+        }
     ef_rows = list(
         session.execute(
             select(EffectiveFunction)
@@ -545,11 +549,6 @@ def _inherit_from_impl(
     )
     for fallback_name in (
         "assessment",
-        "contract_analysis",
-        "control_snapshot",
-        "resolved_control_graph",
-        "effective_permissions",
-        "principal_labels",
         "principal_history",
     ):
         if fallback_name not in payload:
