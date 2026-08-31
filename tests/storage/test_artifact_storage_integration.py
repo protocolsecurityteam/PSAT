@@ -656,12 +656,12 @@ def test_end_to_end_stubbed_worker(api_with, db_session, storage_bucket):
     assert payload["assessment"]["contract"]["name"] == "Main"
 
     artifact = client.get(
-        "/api/analyses/e2e-test/artifact/slither_results.json",
+        "/api/analyses/e2e-test/artifact/assessment.json",
         headers=_admin_headers(),
         follow_redirects=True,
     )
     assert artifact.status_code == 200
-    assert artifact.json() == {"results": {"detectors": []}}
+    assert artifact.json()["contract"]["name"] == "Main"
 
 
 # ---------------------------------------------------------------------------
