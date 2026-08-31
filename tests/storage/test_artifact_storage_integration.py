@@ -627,8 +627,9 @@ def test_health_endpoint_503_when_storage_unreachable(api_with, monkeypatch):
 
 
 def test_end_to_end_stubbed_worker(api_with, db_session, storage_bucket):
-    """Simulate a worker writing all the artifacts a real job would."""
+    """Simulate a worker writing the canonical assessment and static inputs."""
     from db.queue import store_artifact, store_source_files
+    from tests.support.policy_builders import _assessment, _minimal_contract_analysis
 
     job = _completed_job(db_session, "e2e-test", address="0xabcdef0000000000000000000000000000000003")
 
@@ -641,14 +642,9 @@ def test_end_to_end_stubbed_worker(api_with, db_session, storage_bucket):
         },
     )
     store_artifact(db_session, job.id, "contract_flags", data={"is_proxy": False})
-    store_artifact(
-        db_session,
-        job.id,
-        "contract_analysis",
-        data={"subject": {"name": "Main"}, "summary": {"control_model": "ownable"}},
-    )
-    store_artifact(db_session, job.id, "slither_results", data={"results": {"detectors": []}})
-    store_artifact(db_session, job.id, "analysis_report", text_data="Test analysis report content")
+    facts = _minimal_contract_analysis(address=job.address or "0x" + "00" * 20, name="Main")
+    store_artifact(db_session, job.id, "static_facts", data=facts)
+    store_artifact(db_session, job.id, "assessment", data=_assessment(analysis=facts))
 
     client = TestClient(api_with.app)
 
@@ -656,8 +652,8 @@ def test_end_to_end_stubbed_worker(api_with, db_session, storage_bucket):
     assert detail.status_code == 200, detail.text
     payload = detail.json()
     assert payload["run_name"] == "e2e-test"
-    assert "contract_analysis" in payload["available_artifacts"]
-    assert payload["contract_analysis"]["subject"]["name"] == "Main"
+    assert "assessment" in payload["available_artifacts"]
+    assert payload["assessment"]["contract"]["name"] == "Main"
 
     artifact = client.get(
         "/api/analyses/e2e-test/artifact/slither_results.json",
