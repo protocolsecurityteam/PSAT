@@ -17,7 +17,6 @@ from ._gates import CHANGE_ADMIN, is_admin_change_gate
 @claim_matcher(
     claim_id="proxy.admin_change",
     sentence="changes the proxy admin who can upgrade this deployment",
-    legacy_projection=None,
     consumer_family="control_plane",
     gate=is_admin_change_gate,
 )

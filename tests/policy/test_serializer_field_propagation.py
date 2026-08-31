@@ -24,9 +24,6 @@ def _ef_namespace(**overrides: Any) -> SimpleNamespace:
         "abi_signature": "doThing()",
         "function_name": "doThing",
         "selector": "0xdeadbeef",
-        "effect_labels": [],
-        "effect_targets": [],
-        "action_summary": "stub",
         "authority_public": False,
         "authority_roles": [],
         "capability_expr": None,
@@ -87,43 +84,6 @@ def test_signature_witness_bucket_in_company_function_entry() -> None:
     assert result["direct_owner"]["address"] == "0x" + "b" * 40
 
 
-def test_signature_witness_in_serialize_effective_functions() -> None:
-    """The analysis-detail serializer also routes signature_witness
-    principals to a dedicated bucket and surfaces the principal_type
-    on the principal dict."""
-    from services.aggregations.analysis_detail import _serialize_effective_functions
-
-    ef = _ef_namespace(abi_signature="permit(address,uint256,bytes)")
-    ef.principals = [
-        _fp_namespace(
-            address="0x" + "a" * 40,
-            resolved_type="eoa",
-            origin="ecrecover_signer",
-            principal_type="signature_witness",
-        ),
-        _fp_namespace(
-            address="0x" + "c" * 40,
-            resolved_type="contract",
-            origin="role_registry",
-            principal_type="controller",
-        ),
-    ]
-
-    out = _serialize_effective_functions(cast(Any, [ef]))
-
-    assert len(out) == 1
-    fn = out[0]
-    assert "signature_witnesses" in fn
-    assert len(fn["signature_witnesses"]) == 1
-    assert fn["signature_witnesses"][0]["principal_type"] == "signature_witness"
-    # The non-witness controller principal still surfaces in controllers.
-    assert any(
-        p["principal_type"] == "controller" and p["address"] == "0x" + "c" * 40
-        for ctrl in fn["controllers"]
-        for p in ctrl["principals"]
-    )
-
-
 def test_capability_expr_propagates_through_company_serializer() -> None:
     """``EffectiveFunction.capability_expr`` reaches the company
     payload's per-function entry verbatim."""
@@ -145,29 +105,11 @@ def test_capability_expr_propagates_through_company_serializer() -> None:
     assert result["status"] == "public"
 
 
-def test_capability_expr_propagates_through_analysis_detail_serializer() -> None:
-    """The ``EffectiveFunction`` columns reach ``/api/analyses/{run}`` payload via
-    ``_serialize_effective_functions``."""
-    from services.aggregations.analysis_detail import _serialize_effective_functions
-
-    cap_expr = {"kind": "unsupported", "reason": "external_check_only_unresolved"}
-    ef = _ef_namespace(capability_expr=cap_expr, conditions=[], status="unsupported")
-    ef.principals = []
-
-    out = _serialize_effective_functions(cast(Any, [ef]))
-
-    assert len(out) == 1
-    fn = out[0]
-    assert fn["capability_expr"] == cap_expr
-    assert fn["conditions"] == []
-    assert fn["status"] == "unsupported"
-
-
 def test_safe_role_int_handles_string_and_dict_without_crashing() -> None:
     """A direct ``int(role_grant["role"])`` cast crashes on the
     string role-name and Condition-mapping shapes. ``_safe_role_int``
     must coerce ints, return ``None`` for non-int, and never raise."""
-    from services.policy.principal_enrichment import _safe_role_int as _safe_role_int_pe
+    from services.policy.principal_index import _safe_role_int as _safe_role_int_pe
     from services.resolution.recursive import _safe_role_int as _safe_role_int_rr
 
     for safe_role_int in (_safe_role_int_pe, _safe_role_int_rr):
@@ -186,11 +128,11 @@ def test_safe_role_int_handles_string_and_dict_without_crashing() -> None:
         assert safe_role_int([1, 2, 3]) is None
 
 
-def test_principal_enrichment_skips_non_int_role_without_crashing() -> None:
+def test_principal_index_skips_non_int_role_without_crashing() -> None:
     """The principal-enrichment path swallows non-int role grants
     instead of crashing, dropping
     unrecognized shapes onto the ``role_<label>`` controller bucket."""
-    from services.policy.principal_enrichment import _collect_permissions
+    from services.policy.principal_index import _collect_permissions
 
     eff_perms = {
         "contract_name": "T",
@@ -198,7 +140,6 @@ def test_principal_enrichment_skips_non_int_role_without_crashing() -> None:
         "functions": [
             {
                 "function": "doThing()",
-                "effect_labels": ["pause_toggle"],
                 "authority_public": False,
                 "direct_owner": None,
                 "controllers": [],
@@ -234,7 +175,7 @@ def test_recursive_role_principals_skips_non_int_role_without_crashing() -> None
     """The recursive resolver's role-principal accumulator (``set[int]``)
     cannot hold a non-int role; the helper must skip those grants
     rather than crash."""
-    from services.resolution.recursive import _role_principals_from_effective_permissions
+    from services.resolution.recursive import _role_principals_from_permission_index
 
     eff_perms = {
         "functions": [
@@ -268,7 +209,7 @@ def test_recursive_role_principals_skips_non_int_role_without_crashing() -> None
         ]
     }
 
-    out = _role_principals_from_effective_permissions(eff_perms)
+    out = _role_principals_from_permission_index(eff_perms)
     addrs = {p["address"]: p for p in out}
     # The non-int role grant was skipped — its principal didn't make it
     # into the accumulator (it had no other source).

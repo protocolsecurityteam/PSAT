@@ -33,13 +33,13 @@ from services.resolution.predicate_evaluator import (  # noqa: E402
     EvaluationContext,
     evaluate_tree,
 )
-from services.static.contract_analysis_pipeline.predicates import (  # noqa: E402
+from services.static.static_analysis.predicates import (  # noqa: E402
     build_predicate_tree,
 )
-from services.static.contract_analysis_pipeline.reentrancy_pause import (  # noqa: E402
+from services.static.static_analysis.reentrancy_pause import (  # noqa: E402
     apply_reentrancy_pause_pass,
 )
-from services.static.contract_analysis_pipeline.writer_gate import (  # noqa: E402
+from services.static.static_analysis.writer_gate import (  # noqa: E402
     apply_writer_gate_pass,
 )
 
@@ -1106,7 +1106,7 @@ def test_collapsed_caller_taint_does_not_fire_on_value_bounds_or_signature_check
     from typing import cast
 
     from services.resolution.permissionless_shapes import leaf_caller_taint_is_collapsed as _collapsed
-    from services.static.contract_analysis_pipeline.predicate_types import LeafPredicate
+    from services.static.static_analysis.predicate_types import LeafPredicate
 
     def leaf_caller_taint_is_collapsed(leaf: dict) -> bool:
         return _collapsed(cast(LeafPredicate, leaf))

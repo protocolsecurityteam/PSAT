@@ -21,11 +21,11 @@ import pytest
 slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
 
-from services.static.contract_analysis_pipeline.effects import build_effects  # noqa: E402
-from services.static.contract_analysis_pipeline.predicate_artifacts import (  # noqa: E402
+from services.static.static_analysis.effects import build_effects  # noqa: E402
+from services.static.static_analysis.predicate_artifacts import (  # noqa: E402
     build_predicate_artifacts,
 )
-from services.static.contract_analysis_pipeline.summaries import (  # noqa: E402
+from services.static.static_analysis.summaries import (  # noqa: E402
     _build_semantic_control_summary,
 )
 

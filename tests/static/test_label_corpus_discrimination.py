@@ -147,8 +147,12 @@ def test_the_constraint_is_present_in_the_corpus_even_though_the_flow_fact_ignor
 def test_the_corpus_has_delegatecall_execution_rows_at_all():
     """There were zero, so every A8 assertion held vacuously."""
     fns = _functions(DELEGATECALL)
-    labelled = [n for n, f in fns.items() if "delegatecall_execution" in f["effect_labels"]]
-    assert sorted(labelled) == [
+    claimed = [
+        name
+        for name, function in fns.items()
+        if any(claim["claim_id"] == "delegatecall.execute" for claim in function["claims"])
+    ]
+    assert sorted(claimed) == [
         "execBothModules(bytes)",
         "execFixedSlot(bytes)",
         "execModule(bytes)",
@@ -271,11 +275,8 @@ def test_the_library_route_records_a_symbol_that_does_not_exist_in_this_contract
     library = fns["execModuleViaLibrary(bytes)"]["delegatecall_sinks"]
     assert direct == [{"target": "module", "origin": "body"}]
     assert library == [{"target": "target", "origin": "body"}]
-    # "target" is the library's parameter name. It is not a state variable here,
-    # and that is the whole point.
-    setter_targets = fns["setModule(address)"]["effect_targets"]
-    assert setter_targets == ["module"]
-    assert "target" not in setter_targets
+    # "target" is the library's parameter name. It is not the direct route's
+    # state variable, and that distinction remains explicit in the sink facts.
 
 
 def test_a_caller_keyed_mapping_destination_names_no_variable_at_all():
@@ -347,8 +348,7 @@ def test_class_F_a_value_returning_forwarder_keeps_its_caller_gate():
     assert fns["pokeAll()"]["predicate_tree"]["present"] is True
     assert fns["pokeTo(uint256)"]["predicate_tree"]["present"] is True
     # The two forwarders differ ONLY in whether the result is consumed, and
-    # they must now agree on the gate as well as on the labels.
-    assert fns["withdrawAll()"]["effect_labels"] == fns["pokeAll()"]["effect_labels"]
+    # they must now agree on the gate.
     assert (
         fns["withdrawAll()"]["predicate_tree"]["authority_roles"]
         == fns["pokeAll()"]["predicate_tree"]["authority_roles"]

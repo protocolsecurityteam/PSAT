@@ -1,6 +1,6 @@
 """Predicate-tree evaluator — the bridge from static stage to resolver.
 
-Takes a ``PredicateTree`` (from ``services.static.contract_analysis_pipeline.
+Takes a ``PredicateTree`` (from ``services.static.static_analysis.
 predicates.build_predicate_tree``) and produces a ``CapabilityExpr``
 describing the principal set / capability shape that gates the
 function. Recursive: AND/OR nodes compose via the closed combinators

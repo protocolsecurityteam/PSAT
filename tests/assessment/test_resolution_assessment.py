@@ -17,7 +17,7 @@ def _base() -> Assessment:
         contract_name="Vault",
         code_hash=None,
         source_hash="0xsource",
-        analysis={"controller_tracking": []},
+        static_facts={"controller_tracking": []},
         effects={
             "schema_version": "semantic-2",
             "claims_schema_version": "claims/1",
@@ -105,7 +105,7 @@ def test_proxy_deployment_scope_does_not_mutate_static_claim_identity() -> None:
         contract_name="Vault",
         code_hash=None,
         source_hash="0xsource",
-        analysis={"controller_tracking": []},
+        static_facts={"controller_tracking": []},
         effects={
             "schema_version": "semantic-2",
             "claims_schema_version": "claims/1",
@@ -114,7 +114,6 @@ def test_proxy_deployment_scope_does_not_mutate_static_claim_identity() -> None:
                     "selector": "0x8456cb59",
                     "state_changing": True,
                     "state_writes": [],
-                    "effect_targets": [],
                     "claims": [
                         {
                             "claim_id": "pause.set",

@@ -23,8 +23,8 @@ import pytest
 slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
 
-from services.static.contract_analysis_pipeline.predicate_types import Operand  # noqa: E402
-from services.static.contract_analysis_pipeline.predicates import (  # noqa: E402
+from services.static.static_analysis.predicate_types import Operand  # noqa: E402
+from services.static.static_analysis.predicates import (  # noqa: E402
     _operand_sort_key,
     build_predicate_tree,
     build_return_predicate_tree,
@@ -1548,7 +1548,7 @@ def test_uncertain_marker_fires_on_unlowerable_caller_eq_gate(tmp_path, monkeypa
     function whose gate IS a direct caller EQ/NEQ compare, the builder must
     flag the full_name instead of silently returning None (which the policy
     would then read as 'unguarded')."""
-    import services.static.contract_analysis_pipeline.predicates.tree as predicates_mod
+    import services.static.static_analysis.predicates.tree as predicates_mod
 
     sl = _compile(tmp_path, _CALLER_EQ_GATED)
     fn = _function(sl, "sweep")
@@ -1565,7 +1565,7 @@ def test_uncertain_marker_not_fired_for_value_gate_under_same_failure(tmp_path, 
     on a value-check gate (``require(amount > 0)``) must NOT flag the function
     — a fail-closed sweep that marks real public functions unsupported is an
     over-hedge the spec forbids."""
-    import services.static.contract_analysis_pipeline.predicates.tree as predicates_mod
+    import services.static.static_analysis.predicates.tree as predicates_mod
 
     sl = _compile(tmp_path, _VALUE_GATED)
     fn = _function(sl, "sweep")
@@ -1592,12 +1592,12 @@ def test_uncertain_marker_not_fired_when_gate_lowers(tmp_path):
 def test_uncertain_marker_reaches_artifact_and_policy_routes_unsupported(tmp_path, monkeypatch):
     """End-to-end (compiled source -> artifact -> policy): the flagged
     signature is carried as ``guard_extraction_uncertain`` on the predicate
-    artifact and build_effective_permissions routes it to ``unsupported`` with
+    artifact and build_permission_index routes it to ``unsupported`` with
     the truthful reason, while a genuinely gate-less public function on the
     same contract stays public."""
-    import services.static.contract_analysis_pipeline.predicates.tree as predicates_mod
-    from services.policy.effective_permissions import build_effective_permissions
-    from services.static.contract_analysis_pipeline.predicate_artifacts import build_predicate_artifacts
+    import services.static.static_analysis.predicates.tree as predicates_mod
+    from services.policy.permission_index import build_permission_index
+    from services.static.static_analysis.predicate_artifacts import build_predicate_artifacts
 
     sl = _compile(
         tmp_path,
@@ -1642,7 +1642,7 @@ def test_uncertain_marker_reaches_artifact_and_policy_routes_unsupported(tmp_pat
             },
         }
     }
-    payload = build_effective_permissions(
+    payload = build_permission_index(
         target,
         capability_resolver_output={},
         effects=effects,

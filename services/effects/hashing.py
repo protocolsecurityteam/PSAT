@@ -12,7 +12,7 @@ declared-name or file hash (inv. 2). The override and the mixin default must
 hash apart.
 
 All function-shaped access is duck-typed via ``getattr`` (mirroring
-``contract_analysis_pipeline/effects/build.py``), so the normalizer runs on real
+``static_analysis/effects/build.py``), so the normalizer runs on real
 Slither ``Function``/``Modifier`` objects in production and on lightweight
 structural doubles in the offline suite without a solc compile.
 """

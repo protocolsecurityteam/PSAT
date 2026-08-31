@@ -11,7 +11,7 @@ from dataclasses import replace
 from typing import Any, cast
 
 from services.resolution.caller_sources import CALLER_SOURCES as _CALLER_SOURCES
-from services.static.contract_analysis_pipeline.predicate_types import (
+from services.static.static_analysis.predicate_types import (
     LeafPredicate,
     PredicateTree,
     SetDescriptor,

@@ -14,7 +14,7 @@ if TYPE_CHECKING:  # typing-only: the effects plane stays off static's runtime i
 from sqlalchemy.orm import Session
 
 from db.queue import get_artifact
-from services.policy.effective_permissions import _abi_signature
+from services.policy.permission_index import _abi_signature
 from utils.logging import record_degraded
 
 from .flows import _selector_of
@@ -37,7 +37,7 @@ class ContractFacts:
     # predicate_trees ``trees``: full_name -> guard tree.
     trees: Mapping[str, Any] = field(default_factory=dict)
     canonical_signatures: Mapping[str, str] = field(default_factory=dict)
-    # contract_analysis semantic value_flows (the shape carrying ``is_parameter``).
+    # static_facts semantic value_flows (the shape carrying ``is_parameter``).
     legacy_value_flows: Mapping[str, list[dict[str, Any]]] = field(default_factory=dict)
     by_selector: Mapping[str, str] = field(default_factory=dict)
     # effects artifact ``token_slots.entries`` — mapping base slots (balance,
@@ -155,7 +155,7 @@ def _load_contract_facts_uncached(session: Session, address: str) -> ContractFac
 
 
 def _legacy_value_flow_map(analysis: Any) -> dict[str, list[dict[str, Any]]]:
-    """``full_name -> value_flows`` from ``contract_analysis`` — the ONLY shape
+    """``full_name -> value_flows`` from ``static_facts`` — the ONLY shape
     carrying ``is_parameter`` (the effects artifact's own value_flows do not)."""
     out: dict[str, list[dict[str, Any]]] = {}
     if not isinstance(analysis, dict):

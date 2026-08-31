@@ -16,12 +16,12 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import services.static.contract_analysis_pipeline.core as core
-from services.static.contract_analysis_pipeline.core import (
+import services.static.static_analysis.core as core
+from services.static.static_analysis.core import (
     _emit_pipeline_profile,
-    collect_contract_analysis_with_artifacts,
+    collect_static_inputs,
 )
-from services.static.contract_analysis_pipeline.predicate_artifacts import (
+from services.static.static_analysis.predicate_artifacts import (
     build_predicate_artifacts_with_pause_info,
 )
 from utils.logging import (
@@ -46,7 +46,7 @@ def test_emit_pipeline_profile_folds_phase_ms_metrics():
 
     assert metrics["phase_ms_slither_parse"] == 50
     assert metrics["phase_ms_predicate_trees"] == 200
-    assert metrics["contract_analysis_total_ms"] == 300
+    assert metrics["static_facts_total_ms"] == 300
 
 
 def test_predicate_artifacts_emits_attempted_and_built_metrics():
@@ -112,7 +112,7 @@ def test_core_predicate_emit_failure_records_degraded_not_exception(monkeypatch,
     try:
         with bind_trace_context(trace_id="t", job_id="j", stage="static", worker_id="StaticWorker-1"):
             with caplog.at_level("WARNING"):
-                analysis, trees, _effects = collect_contract_analysis_with_artifacts(tmp_path)
+                analysis, trees, _effects = collect_static_inputs(tmp_path)
     finally:
         stage_metrics_var.reset(met_token)
         degraded_errors_var.reset(deg_token)
@@ -132,7 +132,7 @@ def test_core_predicate_emit_failure_records_degraded_not_exception(monkeypatch,
 
     # Pipeline continued: degraded artifact + stage metrics still emitted.
     assert trees is not None and trees["error"]
-    assert analysis["analysis_status"]["static_analysis_completed"] is True
+    assert analysis["static_status"]["static_analysis_completed"] is True
     assert metrics["secondary_impl_pointers"] == 0
     assert any(k.startswith("phase_ms_") for k in metrics)
 

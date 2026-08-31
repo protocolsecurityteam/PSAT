@@ -262,9 +262,7 @@ def test_build_company_overview_omits_functions_field(db_session):
             function_name="pause",
             selector="0xabcdef01",
             abi_signature="pause()",
-            effect_labels=["pause_toggle"],
-            effect_targets=[],
-            action_summary="pause",
+            claims=[_claim("pause.set")],
             authority_public=False,
             authority_roles=[],
         )
@@ -275,7 +273,7 @@ def test_build_company_overview_omits_functions_field(db_session):
     entry = next(c for c in payload["contracts"] if c["address"] == addr)
     assert "functions" not in entry
     # value_effects / capabilities should still derive from the lightweight
-    # ef_effects projection — pause_toggle → "pause" capability.
+    # claim projection — pause.set → "pause" capability.
     assert "pause" in entry["capabilities"]
 
 
@@ -284,63 +282,44 @@ def _claim(claim_id: str, tier: str = "standard_exact") -> dict:
 
 
 def test_capability_chips_key_on_claims(db_session):
-    """Contract capability chips key off Plane-1 claims (with the new
-    ``timelock`` / ``safe`` chips and a finally-producible ``arbitrary-call``);
-    the hook/external exclusion is structural — a claim-bearing row's legacy
-    hook_update/external label contributes no chip, and claims win over legacy
-    labels on the same row. A claim-less row falls back to the legacy map.
-    """
+    """Contract capability chips key only off supported claims."""
     p = _add_protocol(db_session, f"cap-claims-{uuid.uuid4().hex[:8]}")
     addr = _addr("capc1")
     job = _add_job(db_session, address=addr, protocol_id=p.id, name="Governor")
     c = _add_contract(db_session, address=addr, job=job, protocol_id=p.id, contract_name="Governor")
 
-    def _ef(fname, selector, *, claims=None, effect_labels=None):
+    def _ef(fname, selector, *, claims):
         db_session.add(
             EffectiveFunction(
                 contract_id=c.id,
                 function_name=fname,
                 selector=selector,
                 abi_signature=f"{fname}()",
-                effect_labels=effect_labels or [],
                 claims=claims,
-                effect_targets=[],
-                action_summary=fname,
                 authority_public=False,
                 authority_roles=[],
             )
         )
 
-    # New chips from claim families that had no legacy label.
-    _ef("schedule", "0x01000001", claims=[_claim("timelock.schedule")], effect_labels=["external_contract_call"])
-    _ef("addSigner", "0x01000002", claims=[_claim("safe.signer_mgmt")], effect_labels=["hook_update"])
-    _ef("manage", "0x01000003", claims=[_claim("exec.arbitrary")], effect_labels=["external_contract_call"])
-    # Claims win over legacy labels on the same row: flow.out → fund-out, and the
-    # ownership_transfer legacy label must NOT surface an "ownership" chip.
-    _ef("sweep", "0x01000004", claims=[_claim("flow.out")], effect_labels=["ownership_transfer"])
-    # A claim-less row falls back to the legacy map (chip + value_effects).
-    _ef("pause", "0x01000005", effect_labels=["pause_toggle"])
-    _ef("payout", "0x01000006", effect_labels=["asset_send"])
+    _ef("schedule", "0x01000001", claims=[_claim("timelock.schedule")])
+    _ef("addSigner", "0x01000002", claims=[_claim("safe.signer_mgmt")])
+    _ef("manage", "0x01000003", claims=[_claim("exec.arbitrary")])
+    _ef("sweep", "0x01000004", claims=[_claim("flow.out")])
     db_session.commit()
 
     payload = build_company_overview(db_session, p.name)
     entry = next(e for e in payload["contracts"] if e["address"] == addr)
     caps = set(entry["capabilities"])
 
-    assert {"timelock", "safe", "arbitrary-call", "fund-out", "pause"} <= caps
-    # Structural exclusion: hook_update / external_contract_call carry no chip.
-    # Claims-first: the ownership_transfer legacy label on the sweep row is
-    # ignored because that row has a claim.
+    assert {"timelock", "safe", "arbitrary-call", "fund-out"} <= caps
     assert "ownership" not in caps
-    # value_effects stays a Plane-0 fact off the legacy labels.
-    assert "asset_send" in entry["value_effects"]
+    assert "flow.out" in entry["value_effects"]
 
 
 def test_controls_detail_capabilities_from_claims(db_session):
     """A principal's ``controls_detail`` capability chips flow from the
     ``fp_function_detail`` projection's Plane-1 claims: a Safe holding a
-    ``safe.signer_mgmt`` function surfaces the ``safe`` chip, and the row's
-    legacy hook_update label contributes nothing.
+    ``safe.signer_mgmt`` function surfaces the ``safe`` chip.
     """
     p = _add_protocol(db_session, f"cap-detail-{uuid.uuid4().hex[:8]}")
     addr = _addr("capd1")
@@ -353,10 +332,7 @@ def test_controls_detail_capabilities_from_claims(db_session):
         function_name="addSigner",
         selector="0x02000001",
         abi_signature="addSigner(address)",
-        effect_labels=["hook_update"],  # legacy label must not surface a chip
         claims=[_claim("safe.signer_mgmt")],
-        effect_targets=[],
-        action_summary="add signer",
         authority_public=False,
         authority_roles=[],
     )
@@ -403,9 +379,7 @@ def test_build_functions_for_protocol_returns_keyed_function_list(db_session):
         function_name="transfer",
         selector="0xa9059cbb",
         abi_signature="transfer(address,uint256)",
-        effect_labels=["asset_send"],
-        effect_targets=[],
-        action_summary="transfer assets",
+        claims=[_claim("flow.out")],
         authority_public=True,
         authority_roles=[],
     )
@@ -431,7 +405,7 @@ def test_build_functions_for_protocol_returns_keyed_function_list(db_session):
     entry = entries[0]
     assert entry["function"] == "transfer(address,uint256)"
     assert entry["selector"] == "0xa9059cbb"
-    assert entry["effect_labels"] == ["asset_send"]
+    assert [claim["claim_id"] for claim in entry["claims"]] == ["flow.out"]
     assert entry["authority_public"] is True
     # The FP row was principal_type=authority_role, so it should bucket
     # under authority_roles rather than direct_owner.
@@ -470,9 +444,6 @@ def test_build_functions_for_protocol_proxy_uses_impl(db_session):
             function_name="upgradeTo",
             selector="0x3659cfe6",
             abi_signature="upgradeTo(address)",
-            effect_labels=["implementation_update"],
-            effect_targets=[],
-            action_summary="upgrade",
             authority_public=False,
             authority_roles=[],
         )
@@ -522,9 +493,6 @@ def test_build_functions_for_protocol_two_chains_shared_address(db_session):
             function_name="pause",
             selector="0x8456cb59",
             abi_signature="pause()",
-            effect_labels=["pause_toggle"],
-            effect_targets=[],
-            action_summary="pause",
             authority_public=False,
             authority_roles=[],
         )
@@ -535,9 +503,6 @@ def test_build_functions_for_protocol_two_chains_shared_address(db_session):
             function_name="pause",
             selector="0x8456cb59",
             abi_signature="pause()",
-            effect_labels=["pause_toggle"],
-            effect_targets=[],
-            action_summary="pause",
             authority_public=True,
             authority_roles=[],
         )
@@ -815,10 +780,7 @@ def _normalize_prefetch(result: dict) -> dict:
         "controller_values": {
             cid: sorted(cv_key(r) for r in rows) for cid, rows in result["controller_values"].items()
         },
-        "ef_effects": {
-            cid: sorted((tuple(rec["labels"]), tuple(rec["claims"])) for rec in rows)
-            for cid, rows in result["ef_effects"].items()
-        },
+        "ef_effects": {cid: sorted(tuple(rec["claims"]) for rec in rows) for cid, rows in result["ef_effects"].items()},
         "fp_governance_rows": {
             cid: sorted((d["address"], d["resolved_type"], repr(d["details"])) for d in rows)
             for cid, rows in result["fp_governance_rows"].items()
@@ -919,9 +881,6 @@ def test_prefetch_child_tables_parallel_sequential_parity(db_session):
         function_name="pause",
         selector="0x8456cb59",
         abi_signature="pause()",
-        effect_labels=["pause_toggle"],
-        effect_targets=[],
-        action_summary="pause",
         authority_public=False,
         authority_roles=[],
     )
@@ -982,9 +941,6 @@ def test_prefetch_child_tables_parallel_sequential_parity(db_session):
         function_name="transfer",
         selector="0xa9059cbb",
         abi_signature="transfer(address,uint256)",
-        effect_labels=["asset_send"],
-        effect_targets=[],
-        action_summary="transfer",
         authority_public=True,
         authority_roles=[],
     )
@@ -1408,7 +1364,7 @@ def test_fund_flows_controller_requires_authorization_relation(db_session):
     walks the contract entry's ``controllers`` dict, which is populated
     at lines 752-753 from *every* ControllerValue row regardless of
     semantics. CV rows include any address-typed tracked state variable
-    (per ``tracking_plan._is_address_like_read_spec``):
+    (per ``observation_plan._is_address_like_read_spec``):
 
       - real authorizers (``owner``, ``admin``, ``governor``)
       - money-routing targets (``treasury``, ``feeRecipient``)
@@ -1742,6 +1698,7 @@ def test_primary_for_resolves_safe_through_in_protocol_timelock(db_session):
         function_name="execute",
         selector="0x22222222",
         abi_signature="execute(address,uint256,bytes)",
+        claims=[_claim("timelock.execute")],
         authority_public=False,
     )
     db_session.add(ef_tl)
@@ -1932,6 +1889,7 @@ def test_primary_for_surfaces_safe_typed_only_via_function_principal(db_session)
         function_name="execute",
         selector="0x22222222",
         abi_signature="execute(address,uint256,bytes)",
+        claims=[_claim("timelock.execute")],
         authority_public=False,
     )
     db_session.add(ef_tl)
@@ -2011,7 +1969,6 @@ def test_standalone_twins_do_not_merge_controller_attribution(db_session):
             function_name="setFee",
             selector=selector,
             abi_signature="setFee(uint256)",
-            effect_labels=["pause_toggle"],
             authority_public=False,
         )
         db_session.add(ef)
@@ -2143,7 +2100,6 @@ def test_controls_detail_rows_carry_chain_for_twins(db_session):
             function_name="setFee",
             selector=selector,
             abi_signature="setFee(uint256)",
-            effect_labels=["pause_toggle"],
             authority_public=False,
         )
         db_session.add(ef)
@@ -2871,7 +2827,7 @@ def test_last_upgrade_pair_comes_from_one_event(db_session):
 
     payload = build_company_overview(db_session, p.name)
     entry = next(e for e in payload["contracts"] if e["address"] == addr)
-    assert entry["last_upgrade_timestamp"] == "2025-06-01T00:00:00+00:00"
+    assert datetime.fromisoformat(entry["last_upgrade_timestamp"]) == datetime(2025, 6, 1, tzinfo=timezone.utc)
     assert entry["last_upgrade_block"] is None, (
         "the newest upgrade is poll-detected (block not determined); pairing "
         "the older event's block 500 with the poll timestamp fabricates a "
@@ -2915,18 +2871,16 @@ def test_last_upgrade_pair_block_carrying_control(db_session):
     entry = next(e for e in payload["contracts"] if e["address"] == addr)
     assert entry["upgrade_count"] == 2
     assert entry["last_upgrade_block"] == 900
-    assert entry["last_upgrade_timestamp"] == "2024-09-01T00:00:00+00:00"
+    assert datetime.fromisoformat(entry["last_upgrade_timestamp"]) == datetime(2024, 9, 1, tzinfo=timezone.utc)
 
 
-def _add_ef_with_fp(session, contract, fname, selector, labels, fp_addr, fp_type=None):
+def _add_ef_with_fp(session, contract, fname, selector, claim_ids, fp_addr, fp_type=None):
     ef = EffectiveFunction(
         contract_id=contract.id,
         function_name=fname,
         selector=selector,
         abi_signature=f"{fname}()",
-        effect_labels=labels,
-        effect_targets=[],
-        action_summary=fname,
+        claims=[_claim(claim_id) for claim_id in claim_ids],
         authority_public=False,
         authority_roles=[],
     )
@@ -2964,8 +2918,8 @@ def test_fund_flow_capabilities_are_source_scoped_not_target_union(db_session):
     _add_contract(db_session, address=a_addr, job=a_job, protocol_id=p.id, contract_name="Pauser")
     _add_contract(db_session, address=b_addr, job=b_job, protocol_id=p.id, contract_name="Upgrader")
 
-    _add_ef_with_fp(db_session, t, "pause", "0x8456cb59", ["pause_toggle"], a_addr.lower())
-    _add_ef_with_fp(db_session, t, "upgradeTo", "0x3659cfe6", ["implementation_update"], b_addr.lower())
+    _add_ef_with_fp(db_session, t, "pause", "0x8456cb59", ["pause.set"], a_addr.lower())
+    _add_ef_with_fp(db_session, t, "upgradeTo", "0x3659cfe6", ["upgrade.implementation"], b_addr.lower())
 
     payload = build_company_overview(db_session, p.name)
     target_entry = next(c for c in payload["contracts"] if c["address"] == t_addr)
@@ -3012,7 +2966,7 @@ def test_fund_flow_capabilities_empty_when_source_has_no_capability_witness(db_s
     # A's right: a function with no capability-mapped effect label.
     _add_ef_with_fp(db_session, t, "poke", "0xdeadbe01", [], a_addr.lower())
     # B's right gives the TARGET a non-empty union A must not inherit.
-    _add_ef_with_fp(db_session, t, "pause", "0x8456cb59", ["pause_toggle"], b_addr.lower())
+    _add_ef_with_fp(db_session, t, "pause", "0x8456cb59", ["pause.set"], b_addr.lower())
 
     payload = build_company_overview(db_session, p.name)
     target_entry = next(c for c in payload["contracts"] if c["address"] == t_addr)
@@ -3039,7 +2993,7 @@ def test_fund_flow_capabilities_agree_with_controls_detail(db_session):
     t_job = _add_job(db_session, address=t_addr, protocol_id=p.id, name="Vault", is_proxy=True)
     t = _add_contract(db_session, address=t_addr, job=t_job, protocol_id=p.id, is_proxy=True, contract_name="Vault")
 
-    _add_ef_with_fp(db_session, t, "pause", "0x8456cb59", ["pause_toggle"], safe_addr.lower(), fp_type="safe")
+    _add_ef_with_fp(db_session, t, "pause", "0x8456cb59", ["pause.set"], safe_addr.lower(), fp_type="safe")
     db_session.add(
         ControlGraphNode(
             contract_id=t.id,

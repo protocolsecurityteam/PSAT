@@ -19,8 +19,8 @@ from typing import Any, cast
 from sqlalchemy import text
 
 from db.models import Contract
-from services.policy.effective_permissions import build_effective_permissions
-from services.policy.effective_permissions_writer import write_effective_function_rows
+from services.policy.permission_index import build_permission_index
+from services.policy.permission_index_writer import write_permission_rows
 from tests.conftest import requires_postgres
 
 _TARGET = {"subject": {"address": "0x" + "ce" * 20, "name": "CensusTarget"}}
@@ -57,7 +57,7 @@ def test_fall_through_public_persists_json_null_conditions_never_empty_array(db_
     db_session.add(contract)
     db_session.flush()
 
-    payload = build_effective_permissions(
+    payload = build_permission_index(
         _TARGET,
         capability_resolver_output={},
         effects=_effects("sweep(address)"),
@@ -66,7 +66,7 @@ def test_fall_through_public_persists_json_null_conditions_never_empty_array(db_
     fn = next(f for f in payload["functions"] if f["function"] == "sweep(address)")
     assert fn.get("status") == "public"
 
-    write_effective_function_rows(
+    write_permission_rows(
         db_session,
         contract_id=contract.id,
         function_records=cast("list[dict[str, Any]]", payload["functions"]),
@@ -88,13 +88,13 @@ def test_witnessed_public_with_conditions_persists_the_array(db_session):
         "membership_quality": "exact",
         "confidence": "enumerable",
     }
-    payload = build_effective_permissions(
+    payload = build_permission_index(
         _TARGET,
         capability_resolver_output={"sweep(address)": capability},
         effects=_effects("sweep(address)"),
         predicate_trees={"schema_version": "semantic", "trees": {}},
     )
-    write_effective_function_rows(
+    write_permission_rows(
         db_session,
         contract_id=contract.id,
         function_records=cast("list[dict[str, Any]]", payload["functions"]),
@@ -111,8 +111,8 @@ def test_policy_minted_rows_carry_openness_and_roles_on_the_production_path(db_s
     reroute) must reach the table with ``authority_openness`` and
     ``authority_roles`` PROJECTED FROM the capability_expr the row itself
     publishes — never the NULL that is documented as "written before the
-    column existed". Exercises the real path: ``build_effective_permissions``
-    → ``write_effective_function_rows`` with an EMPTY resolver output, which
+    column existed". Exercises the real path: ``build_permission_index``
+    → ``write_permission_rows`` with an EMPTY resolver output, which
     is exactly the branch that dropped the answers.
 
     Input-shape → published-state table this test pins:
@@ -151,7 +151,7 @@ def test_policy_minted_rows_carry_openness_and_roles_on_the_production_path(db_s
             },
         }
     }
-    payload = build_effective_permissions(
+    payload = build_permission_index(
         _TARGET,
         capability_resolver_output={},
         effects=effects,
@@ -161,7 +161,7 @@ def test_policy_minted_rows_carry_openness_and_roles_on_the_production_path(db_s
             "guard_extraction_uncertain": ["gated(address)"],
         },
     )
-    write_effective_function_rows(
+    write_permission_rows(
         db_session,
         contract_id=contract.id,
         function_records=cast("list[dict[str, Any]]", payload["functions"]),
@@ -211,7 +211,7 @@ def test_observed_claim_carry_does_not_cross_selectorless_entry_points(db_sessio
     }
 
     def _write(fallback_claims):
-        write_effective_function_rows(
+        write_permission_rows(
             db_session,
             contract_id=contract.id,
             function_records=cast(
@@ -222,18 +222,12 @@ def test_observed_claim_carry_does_not_cross_selectorless_entry_points(db_sessio
                         "abi_signature": "fallback()",
                         "selector": "",
                         "claims": fallback_claims,
-                        "effect_labels": [],
-                        "effect_targets": [],
-                        "action_summary": "stub",
                     },
                     {
                         "function": "receive()",
                         "abi_signature": "receive()",
                         "selector": "",
                         "claims": [],
-                        "effect_labels": [],
-                        "effect_targets": [],
-                        "action_summary": "stub",
                     },
                 ],
             ),

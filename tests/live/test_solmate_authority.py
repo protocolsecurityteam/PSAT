@@ -95,12 +95,23 @@ def _finite_set_members(node: object, out: set[str]) -> None:
             _finite_set_members(node["signer"], out)
 
 
+def _capability_rows(live_client: LiveClient) -> dict:
+    response = live_client._session.get(
+        live_client._url(f"/api/contract/{VEDA_TELLER}/capabilities"),
+        timeout=30,
+    )
+    assert response.status_code == 200, response.text
+    capabilities = response.json().get("capabilities")
+    assert isinstance(capabilities, dict)
+    return {
+        "functions": [{"function": signature, "capability_expr": value} for signature, value in capabilities.items()]
+    }
+
+
 def test_veda_teller_cancall_resolves_without_preempt(analyzed_veda_teller, live_client: LiveClient):
     """canCall is detected, dispatched, and resolved — never the pre-#104
     ``delegated_check_not_materialized`` inline-preempt dead-end."""
-    ep = live_client.analysis_detail(analyzed_veda_teller["name"]).get("effective_permissions")
-    if not isinstance(ep, dict):
-        pytest.skip("effective_permissions artifact not available")
+    ep = _capability_rows(live_client)
 
     cancall = _cancall_functions(ep)
     assert cancall, "no canCall-guarded functions resolved — static missed the Solmate Auth pattern"
@@ -122,9 +133,7 @@ def test_veda_teller_cancall_recovers_governing_safe(analyzed_veda_teller, live_
     deferred to a probe. That's fail-safe, not a regression; the recovery path is
     pinned deterministically offline.
     """
-    ep = live_client.analysis_detail(analyzed_veda_teller["name"]).get("effective_permissions")
-    if not isinstance(ep, dict):
-        pytest.skip("effective_permissions artifact not available")
+    ep = _capability_rows(live_client)
 
     members: set[str] = set()
     for fn in ep.get("functions") or []:

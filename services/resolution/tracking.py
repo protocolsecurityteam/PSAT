@@ -12,13 +12,13 @@ from typing import Any
 
 from eth_abi.abi import decode
 
-from schemas.contract_analysis import ControllerReadSpec
-from schemas.control_tracking import (
-    ControlSnapshot,
-    ControlTrackingPlan,
+from schemas.observations import (
+    ControllerInstruction,
+    ObservationBatch,
+    ObservationPlan,
     ResolvedControllerType,
-    TrackedController,
 )
+from schemas.static_facts import ControllerReadSpec
 from services.clients.rpc import (
     eth_call_batch as _eth_call_batch,
 )
@@ -35,7 +35,7 @@ from services.clients.rpc import (
     selector as _selector,
 )
 from services.monitoring.restaking_reads import decode_word as _decode_word
-from services.resolution.tracking_plan import is_primitive_scalar_read_spec
+from services.resolution.observation_plan import is_primitive_scalar_read_spec
 from utils.evm import EIP1967_IMPL_SLOT, SAFE_GUARD_SLOT, SAFE_MODULES_HEAD_SLOT
 from utils.logging import record_degraded
 from utils.scoring_status import NOT_DETERMINED
@@ -143,7 +143,7 @@ def _decode_controller_value(
     # Refuse an unstorable value here rather than letting the resolution
     # worker's controller_values INSERT raise StringDataRightTruncation
     # mid-commit (which poisons the worker session). The caller
-    # (build_control_snapshot) turns this into a value=None entry.
+    # (observe_controllers) turns this into a value=None entry.
     if len(decoded) > _CONTROLLER_VALUE_MAX_LEN:
         member_path = read_spec.get("member_path") if isinstance(read_spec, dict) else None
         raise ValueError(
@@ -1130,7 +1130,7 @@ def _read_polling_source(
 
 
 def _prewarm_snapshot_getters(
-    rpc_url: str, plan: ControlTrackingPlan, block_tag: str, *, chain_id: int | None = None
+    rpc_url: str, plan: ObservationPlan, block_tag: str, *, chain_id: int | None = None
 ) -> dict[tuple[str, str], str]:
     """Pre-read every tracked controller's ``{target}()`` getter on the contract in ONE Multicall3, at the
     same ``block_tag`` the per-controller path uses.
@@ -1172,8 +1172,8 @@ def _prewarm_snapshot_getters(
     return prewarm
 
 
-def build_control_snapshot(
-    plan: ControlTrackingPlan,
+def observe_controllers(
+    plan: ObservationPlan,
     rpc_url: str,
     block_tag: str = "latest",
     *,
@@ -1181,7 +1181,7 @@ def build_control_snapshot(
     getter_fallback_address: str | None = None,
     beacon_address: str | None = None,
     chain_id: int | None = None,
-) -> ControlSnapshot:
+) -> ObservationBatch:
     """Resolve every tracked controller's value at the given block.
 
     The classification cache is the process-wide ``_CLASSIFY_CACHE`` (see
@@ -1225,7 +1225,7 @@ def build_control_snapshot(
     )
     controller_values: dict[str, Any] = {}
 
-    def _compute_controller(controller: TrackedController) -> tuple[str, dict[str, Any] | None]:
+    def _compute_controller(controller: ControllerInstruction) -> tuple[str, dict[str, Any] | None]:
         """Pure function: compute one controller's value dict, or None to skip."""
         controller_id = controller["controller_id"]
         source = controller["source"]

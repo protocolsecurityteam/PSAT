@@ -20,7 +20,7 @@ from utils.scoring_status import (
     SELF_SERVICE_STATE_PROVEN,
 )
 
-from ...contract_analysis_pipeline.record_ordering import W2_BASIS_CLEAR_DOMINATES_CALLS
+from ...static_analysis.record_ordering import W2_BASIS_CLEAR_DOMINATES_CALLS
 from ..context import ClaimContext, abi_selector, selector_of
 
 # Per-context memo tables (keyed by the ClaimContext instance, which lives only
@@ -905,7 +905,7 @@ def _verified_guard_verdicts(ctx: ClaimContext) -> dict[str, Any]:
         return cached
     verdicts: dict[str, Any] = {}
     if ctx.contract is not None:
-        from ...contract_analysis_pipeline.reentrancy_pause import verified_guard_verdicts
+        from ...static_analysis.reentrancy_pause import verified_guard_verdicts
 
         try:
             verdicts = verified_guard_verdicts(ctx.contract)

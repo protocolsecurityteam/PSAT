@@ -5,7 +5,7 @@ from __future__ import annotations
 from eth_utils.crypto import keccak
 from typing_extensions import TypeGuard
 
-from schemas.contract_analysis import ControllerProvenance
+from schemas.static_facts import ControllerProvenance
 from services.discovery.upgrade_history import (
     EVENT_TOPICS as PROXY_EVENT_TOPICS,
 )
@@ -122,7 +122,7 @@ ALL_EVENT_TOPICS: dict[str, str] = {**PROXY_EVENT_TOPICS, **GOVERNANCE_EVENT_TOP
 #
 #   1. ``parse_governance_log`` / ``parse_any_log`` attach tags to every
 #      hand-rolled event so downstream sees the same shape ``parse_tracked_log``
-#      produces from the static analysis tracking_plan.
+#      produces from the static analysis observation_plan.
 #   2. ``_update_state_from_event`` / ``_should_watch`` /
 #      ``_sync_relational_tables`` / ``should_trigger_reanalysis`` fall
 #      back to this map when ``parsed["effect_tags"]`` is missing —
@@ -483,7 +483,7 @@ def parse_any_log(log: dict) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
-# Per-contract topic extraction from the analysis tracking_plan
+# Per-contract topic extraction from the analysis observation_plan
 # ---------------------------------------------------------------------------
 
 # Map canonical event_type → ``(old_key, new_key)`` semantic-key pair.
@@ -714,7 +714,7 @@ def _assign_semantic_keys(
 
 # The one ``authority_provenance`` value that PROVES a tracked write target
 # is a controller: a lowered predicate leaf requires the caller to equal / be
-# a member of it (schemas/contract_analysis.py ``ControllerProvenance``).
+# a member of it (schemas/static_facts.py ``ControllerProvenance``).
 # ``call_target`` — "called, and no gate was proven" — is not that proof, and
 # an absent key is the third state, not determined. Only the proven value may
 # mint the ``controller_changed`` claim.
@@ -1055,25 +1055,25 @@ def classify_witness_tier(
     return WITNESS_TIER_ACTIVITY
 
 
-def extract_governance_topics(tracking_plan: dict | None) -> list[dict]:
-    """Walk a ``ControlTrackingPlan`` and return per-contract topic specs.
+def extract_governance_topics(observation_plan: dict | None) -> list[dict]:
+    """Walk a ``ObservationPlan`` and return per-contract topic specs.
 
     Each entry has shape ``{topic0, signature, event_type, controller_id,
     inputs, effect_tags, witness_tier, writer_openness}`` (plus
     ``member_witness`` when the plan carries one). Topic0s already in
     ``ALL_EVENT_TOPICS`` are skipped so the hand-rolled decoders keep
     ownership of OZ / Safe / Timelock / proxy events. Returns ``[]`` when
-    *tracking_plan* is None or has no events.
+    *observation_plan* is None or has no events.
 
     ``effect_tags`` flows through from the static analysis pipeline
-    (``services/static/contract_analysis_pipeline/tracking.py``). The
+    (``services/static/static_analysis/tracking.py``). The
     watcher reads them to classify and route events without falling
     back on a hand-curated event-name list.
 
     ``witness_tier`` is what decides at runtime whether an occurrence may
     publish a change claim at all — see :func:`classify_witness_tier`.
     """
-    if not tracking_plan:
+    if not observation_plan:
         return []
     # Local import: polling_plan defers its own event_topics import to call
     # time to keep the two modules acyclic; keep the favour symmetrical.
@@ -1081,7 +1081,7 @@ def extract_governance_topics(tracking_plan: dict | None) -> list[dict]:
 
     by_topic: dict[str, dict] = {}
     order: list[str] = []
-    for tc in tracking_plan.get("tracked_controllers") or []:
+    for tc in observation_plan.get("tracked_controllers") or []:
         ew = tc.get("event_watch")
         if not ew:
             continue
@@ -1221,7 +1221,7 @@ def parse_tracked_log(log: dict, spec: dict) -> dict | None:
     # branch on them (state sync, relational sync, reanalysis trigger)
     # without re-deriving from event_type. Absent on hand-rolled
     # events (parse_governance_log path), present on every per-contract
-    # event whose tracking_plan carries them.
+    # event whose observation_plan carries them.
     spec_tags = spec.get("effect_tags")
     if isinstance(spec_tags, dict) and spec_tags:
         event["effect_tags"] = spec_tags

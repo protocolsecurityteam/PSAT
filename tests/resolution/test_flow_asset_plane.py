@@ -732,5 +732,5 @@ def test_a_failing_writer_degrades_the_step_not_the_stage(monkeypatch: pytest.Mo
     # The stage still stored what it did prove.
     stored = [name for name, _ in ctx["store_calls"]]
     assert "assessment" in stored
-    assert "control_snapshot" not in stored
-    assert "resolved_control_graph" not in stored
+    assert "observation_batch" not in stored
+    assert "resolution_graph" not in stored

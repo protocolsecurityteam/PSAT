@@ -26,15 +26,15 @@ import pytest
 slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
 
-from services.resolution.tracking_plan import build_control_tracking_plan  # noqa: E402
-from services.static.contract_analysis_pipeline.effects import build_effects  # noqa: E402
-from services.static.contract_analysis_pipeline.predicate_artifacts import (  # noqa: E402
+from services.resolution.observation_plan import build_observation_plan  # noqa: E402
+from services.static.static_analysis.effects import build_effects  # noqa: E402
+from services.static.static_analysis.predicate_artifacts import (  # noqa: E402
     build_predicate_artifacts,
 )
-from services.static.contract_analysis_pipeline.summaries import (  # noqa: E402
+from services.static.static_analysis.summaries import (  # noqa: E402
     _build_semantic_control_summary,
 )
-from services.static.contract_analysis_pipeline.tracking import build_controller_tracking  # noqa: E402
+from services.static.static_analysis.tracking import build_controller_tracking  # noqa: E402
 
 SOURCE = """
     pragma solidity ^0.8.20;
@@ -169,18 +169,18 @@ def test_treeless_artifact_keeps_the_control_edge_through_the_plan(tmp_path, sha
         "subject": {"address": "0x" + "11" * 20, "name": "Vault"},
         "controller_tracking": list(by_source.values()),
     }
-    plan = build_control_tracking_plan(analysis)  # pyright: ignore[reportArgumentType]
+    plan = build_observation_plan(analysis)  # pyright: ignore[reportArgumentType]
     assert plan["tracked_controllers"], "plan lost every controller"
     assert not any(c.get("authority_provenance") for c in plan["tracked_controllers"])
 
 
-def test_provenance_survives_the_tracking_plan(tmp_path):
+def test_provenance_survives_the_observation_plan(tmp_path):
     by_source = _targets(tmp_path)
     analysis = {
         "subject": {"address": "0x" + "11" * 20, "name": "Vault"},
         "controller_tracking": list(by_source.values()),
     }
-    plan = build_control_tracking_plan(analysis)  # pyright: ignore[reportArgumentType]
+    plan = build_observation_plan(analysis)  # pyright: ignore[reportArgumentType]
     by_id = {c["controller_id"]: c for c in plan["tracked_controllers"]}
     assert by_id["external_contract:roleRegistry"].get("authority_provenance") == "caller_gate"
     assert by_id["external_contract:eETH"].get("authority_provenance") == "call_target"
@@ -368,7 +368,7 @@ def test_plan_built_from_a_pre_provenance_artifact_claims_nothing(tmp_path):
         "subject": {"address": "0x" + "11" * 20, "name": "Vault"},
         "controller_tracking": legacy,
     }
-    plan = build_control_tracking_plan(analysis)  # pyright: ignore[reportArgumentType]
+    plan = build_observation_plan(analysis)  # pyright: ignore[reportArgumentType]
     assert all("authority_provenance" not in c for c in plan["tracked_controllers"])
 
 

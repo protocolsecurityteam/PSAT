@@ -205,7 +205,7 @@ def _caller_relative_destination(shape: str, basis: str, openness: str) -> _Dest
       that produces it.
 
     ``token_owner`` — the payee is the CURRENT OWNER of a token id the caller
-    passed (``ownerOf``, ``contract_analysis_pipeline.effects._TOKEN_OWNER_SELECTOR``).
+    passed (``ownerOf``, ``static_analysis.effects._TOKEN_OWNER_SELECTOR``).
     The caller chooses the id; the token's transfer history chooses the address.
     That is a real constraint and it is NOT the caller gate, so the restricted arm
     keeps the constrained convention but says what actually holds it. The OPEN

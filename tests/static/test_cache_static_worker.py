@@ -64,7 +64,7 @@ def test_static_worker_cache_hit_skips_analysis(db_session, monkeypatch):
     assert "dependency" in phases_run
     assert "slither" not in phases_run
     assert "analysis" not in phases_run
-    assert "tracking_plan" not in phases_run
+    assert "observation_plan" not in phases_run
 
 
 # ---------------------------------------------------------------------------
@@ -106,7 +106,7 @@ def test_static_worker_cache_miss_runs_analysis(db_session, monkeypatch):
     assert "resolve_proxy" in phases_run
     assert "dependency" in phases_run
     assert "analysis" in phases_run
-    assert "tracking_plan" not in phases_run
+    assert "observation_plan" not in phases_run
 
 
 # ---------------------------------------------------------------------------
@@ -602,7 +602,7 @@ def test_e2e_discovery_then_static_with_cache(db_session, monkeypatch):
     # Slither/analysis/tracking should be skipped
     assert "slither" not in phases_run
     assert "analysis" not in phases_run
-    assert "tracking_plan" not in phases_run
+    assert "observation_plan" not in phases_run
     # But dependency and proxy resolution should run
     assert "dependency" in phases_run
 

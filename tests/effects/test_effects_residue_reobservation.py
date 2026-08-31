@@ -104,7 +104,6 @@ def _protocol_with_functions(session, addresses: list[str]) -> tuple[int, dict[s
             function_name="f",
             selector=SELECTOR,
             authority_public=False,
-            effect_targets=["slot0"],
         )
         session.add(fn)
         session.flush()
@@ -790,7 +789,6 @@ def test_a_partly_unplannable_contract_is_not_marked(clean_effects, monkeypatch)
             function_name=f"f{sel}",
             selector=sel,
             authority_public=False,
-            effect_targets=["slot0"],
         )
         session.add(fn)
         session.flush()

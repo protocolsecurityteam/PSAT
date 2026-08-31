@@ -1,13 +1,13 @@
 """Cross-chain authority labeling (MULTICHAIN_INVARIANTS.md invariant 15).
 
-Covers the pure recognizer, its wiring into ``build_principal_labels`` and the
+Covers the pure recognizer, its wiring into ``build_principal_index`` and the
 FunctionPrincipal type resolver, and the mainnet byte-identity guarantee.
 """
 
 import pytest
 
 from services.concurrency import RpcExecutor
-from services.policy.principal_enrichment import build_principal_labels
+from services.policy.principal_index import build_principal_index
 from services.resolution.cross_chain_authority import (
     CROSS_CHAIN_AUTHORITY_TYPE,
     L1_TO_L2_ALIAS_OFFSET,
@@ -126,10 +126,10 @@ def test_recognizer_bound_to_base_recognizes_messenger():
     )
 
 
-# --- build_principal_labels wiring -------------------------------------------
+# --- build_principal_index wiring -------------------------------------------
 
 
-def _effective_permissions_with_principal(principal_addr: str) -> dict:
+def _permission_index_with_principal(principal_addr: str) -> dict:
     """A single role-gated function granting ``principal_addr`` role 1."""
     return {
         "contract_address": "0x1111111111111111111111111111111111111111",
@@ -137,7 +137,6 @@ def _effective_permissions_with_principal(principal_addr: str) -> dict:
         "functions": [
             {
                 "function": "setOwner(address)",
-                "effect_labels": ["ownership_transfer"],
                 "authority_public": False,
                 "authority_roles": [
                     {
@@ -164,11 +163,11 @@ def _classify_stub(kind: str):
 def test_labels_classifies_messenger_as_cross_chain_authority(monkeypatch):
     # Generic classify would call this a bare contract; the recognizer wins.
     monkeypatch.setattr(
-        "services.policy.principal_enrichment.classify_resolved_address_with_status",
+        "services.policy.principal_index.classify_resolved_address_with_status",
         _classify_stub("contract"),
     )
-    payload = build_principal_labels(
-        _effective_permissions_with_principal(BASE_MESSENGER),
+    payload = build_principal_index(
+        _permission_index_with_principal(BASE_MESSENGER),
         rpc_url="http://rpc.example",
         cross_chain_recognizer=make_cross_chain_recognizer(BASE_CHAIN_ID),
     )
@@ -181,11 +180,11 @@ def test_labels_classifies_messenger_as_cross_chain_authority(monkeypatch):
 
 def test_labels_classifies_bridge_as_cross_chain_authority(monkeypatch):
     monkeypatch.setattr(
-        "services.policy.principal_enrichment.classify_resolved_address_with_status",
+        "services.policy.principal_index.classify_resolved_address_with_status",
         _classify_stub("contract"),
     )
-    payload = build_principal_labels(
-        _effective_permissions_with_principal(BASE_BRIDGE),
+    payload = build_principal_index(
+        _permission_index_with_principal(BASE_BRIDGE),
         rpc_url="http://rpc.example",
         cross_chain_recognizer=make_cross_chain_recognizer(BASE_CHAIN_ID),
     )
@@ -198,13 +197,13 @@ def test_labels_classifies_bridge_as_cross_chain_authority(monkeypatch):
 def test_labels_classifies_aliased_owner_with_hint(monkeypatch):
     # An aliased L1 owner reads as a codeless EOA to the generic classifier.
     monkeypatch.setattr(
-        "services.policy.principal_enrichment.classify_resolved_address_with_status",
+        "services.policy.principal_index.classify_resolved_address_with_status",
         _classify_stub("eoa"),
     )
     l1 = "0x00000000000000000000000000000000000000ff"
     principal_addr = _alias(l1)
-    payload = build_principal_labels(
-        _effective_permissions_with_principal(principal_addr),
+    payload = build_principal_index(
+        _permission_index_with_principal(principal_addr),
         rpc_url="http://rpc.example",
         cross_chain_recognizer=make_cross_chain_recognizer(BASE_CHAIN_ID, known_addresses={l1}),
     )
@@ -220,13 +219,13 @@ def test_labels_mainnet_output_is_byte_identical(monkeypatch):
     Base's messenger is classified by the generic path, and the payload is
     identical to omitting the recognizer argument entirely."""
     monkeypatch.setattr(
-        "services.policy.principal_enrichment.classify_resolved_address_with_status",
+        "services.policy.principal_index.classify_resolved_address_with_status",
         _classify_stub("eoa"),
     )
-    ep = _effective_permissions_with_principal(BASE_MESSENGER)
+    ep = _permission_index_with_principal(BASE_MESSENGER)
 
-    without_arg = build_principal_labels(ep, rpc_url="http://rpc.example")
-    with_mainnet_recognizer = build_principal_labels(
+    without_arg = build_principal_index(ep, rpc_url="http://rpc.example")
+    with_mainnet_recognizer = build_principal_index(
         ep, rpc_url="http://rpc.example", cross_chain_recognizer=make_cross_chain_recognizer(1)
     )
 

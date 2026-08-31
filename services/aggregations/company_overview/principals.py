@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from db.models import Contract, ControlGraphNode, ControllerValue
-from schemas.control_tracking import MonitoredContractType, ResolvedControllerType
+from schemas.observations import MonitoredContractType, ResolvedControllerType
 
 _PRINCIPAL_TYPES: frozenset[ResolvedControllerType] = frozenset({"contract", "safe", "timelock", "eoa", "proxy_admin"})
 _PRINCIPAL_TYPES_SQL = tuple(sorted(_PRINCIPAL_TYPES))

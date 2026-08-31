@@ -5,7 +5,7 @@ from db.models import (
     EDGE_RELATION_CONTROLLER_VALUE_UNATTRIBUTED,
 )
 from services.concurrency import RpcExecutor
-from services.policy.principal_enrichment import build_principal_labels
+from services.policy.principal_index import build_principal_index
 
 
 @pytest.fixture(autouse=True)
@@ -16,14 +16,14 @@ def _reset_executor():
     RpcExecutor.reset_for_tests()
 
 
-def test_build_principal_labels_enriches_safe_admin_and_operator(monkeypatch):
-    effective_permissions = {
+def test_build_principal_index_enriches_safe_admin_and_operator(monkeypatch):
+    permission_index = {
         "contract_address": "0x1111111111111111111111111111111111111111",
         "contract_name": "BoringVault",
         "functions": [
             {
                 "function": "manage(address,bytes,uint256)",
-                "effect_labels": ["arbitrary_external_call"],
+                "claims": [_claim("exec.arbitrary")],
                 "authority_public": False,
                 "authority_roles": [
                     {
@@ -41,7 +41,7 @@ def test_build_principal_labels_enriches_safe_admin_and_operator(monkeypatch):
             },
             {
                 "function": "setAuthority(address)",
-                "effect_labels": ["authority_update"],
+                "claims": [_claim("authority.replace")],
                 "authority_public": False,
                 "authority_roles": [
                     {
@@ -76,7 +76,7 @@ def test_build_principal_labels_enriches_safe_admin_and_operator(monkeypatch):
                 "label": "BoringVault",
                 "contract_name": "BoringVault",
                 "depth": 0,
-                "analyzed": True,
+                "analysis_state": "analyzed",
                 "details": {"address": "0x1111111111111111111111111111111111111111"},
                 "artifacts": {},
             },
@@ -88,7 +88,7 @@ def test_build_principal_labels_enriches_safe_admin_and_operator(monkeypatch):
                 "label": "owner",
                 "contract_name": None,
                 "depth": 2,
-                "analyzed": False,
+                "analysis_state": None,
                 "details": {
                     "address": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                     "owners": [
@@ -113,13 +113,13 @@ def test_build_principal_labels_enriches_safe_admin_and_operator(monkeypatch):
     }
 
     monkeypatch.setattr(
-        "services.policy.principal_enrichment.classify_resolved_address_with_status",
+        "services.policy.principal_index.classify_resolved_address_with_status",
         lambda rpc_url, address, **_kw: ("eoa", {"address": address}, True),
     )
 
-    payload = build_principal_labels(
-        effective_permissions,
-        resolved_control_graph=resolved_graph,
+    payload = build_principal_index(
+        permission_index,
+        resolution_graph=resolved_graph,
         rpc_url="http://rpc.example",
     )
 
@@ -138,11 +138,10 @@ def test_build_principal_labels_enriches_safe_admin_and_operator(monkeypatch):
     assert "safe_multisig" in admin_safe["labels"]
 
 
-def _role_fn(name: str, role: int, principal_addr: str, *, claims=None, effect_labels=None) -> dict:
+def _role_fn(name: str, role: int, principal_addr: str, *, claims=None) -> dict:
     """One authority-role-gated function granting ``principal_addr`` a role."""
     fn: dict = {
         "function": name,
-        "effect_labels": list(effect_labels or []),
         "authority_public": False,
         "authority_roles": [
             {
@@ -161,10 +160,10 @@ def _claim(claim_id: str, tier: str = "standard_exact") -> dict:
     return {"claim_id": claim_id, "tier": tier, "witness": {}}
 
 
-def test_build_principal_labels_derives_enrichment_tags_from_claims(monkeypatch):
+def test_build_principal_index_derives_enrichment_tags_from_claims(monkeypatch):
     """Plane-1 claim families drive the admin/operator/manager tags: control-plane
     (incl. ``callee_pointer.rotate`` and ``safe.*``) → admin, flow/supply →
-    operator, ``exec.arbitrary`` → manager. Legacy effect_labels on the same rows
+    operator, ``exec.arbitrary`` → manager
     are ignored when claims are present (claims-first)."""
     admin_safe = "0x" + "a1" * 20
     operator_addr = "0x" + "a2" * 20
@@ -177,7 +176,6 @@ def test_build_principal_labels_derives_enrichment_tags_from_claims(monkeypatch)
     def _controller_fn(name: str, principal_addr: str, claims: list[dict]) -> dict:
         return {
             "function": name,
-            "effect_labels": [],
             "claims": claims,
             "authority_public": False,
             "authority_roles": [],
@@ -195,7 +193,7 @@ def test_build_principal_labels_derives_enrichment_tags_from_claims(monkeypatch)
             ],
         }
 
-    effective_permissions = {
+    permission_index = {
         "contract_address": "0x1111111111111111111111111111111111111111",
         "contract_name": "Vault",
         "functions": [
@@ -203,14 +201,12 @@ def test_build_principal_labels_derives_enrichment_tags_from_claims(monkeypatch)
             _role_fn("withdraw(uint256)", 2, operator_addr, claims=[_claim("flow.out")]),
             _role_fn("manage(address,bytes,uint256)", 3, manager_addr, claims=[_claim("exec.arbitrary")]),
             _role_fn("setHook(address)", 4, hook_admin, claims=[_claim("callee_pointer.rotate")]),
-            # Claims present (flow.out → operator) must win over the legacy
-            # ownership_transfer label (which would otherwise imply admin).
+            # A flow claim grants operator authority without implying admin authority.
             _role_fn(
                 "swap(uint256)",
                 5,
                 precedence_addr,
                 claims=[_claim("flow.out")],
-                effect_labels=["ownership_transfer"],
             ),
             # Controller-path principals also earn admin/manager from claims.
             _controller_fn("upgradeTo(address)", ctrl_admin, [_claim("upgrade.implementation")]),
@@ -219,11 +215,11 @@ def test_build_principal_labels_derives_enrichment_tags_from_claims(monkeypatch)
     }
 
     monkeypatch.setattr(
-        "services.policy.principal_enrichment.classify_resolved_address_with_status",
+        "services.policy.principal_index.classify_resolved_address_with_status",
         lambda rpc_url, address, **_kw: ("eoa", {"address": address}, True),
     )
 
-    payload = build_principal_labels(effective_permissions, rpc_url="http://rpc.example")
+    payload = build_principal_index(permission_index, rpc_url="http://rpc.example")
     principals = {item["address"]: set(item["labels"]) for item in payload["principals"]}
 
     assert "vault_admin" in principals[admin_safe]
@@ -231,7 +227,7 @@ def test_build_principal_labels_derives_enrichment_tags_from_claims(monkeypatch)
     assert "vault_manager" in principals[manager_addr]
     # The precise use-link idiom (formerly the diluted hook_update) IS an admin.
     assert "vault_admin" in principals[hook_admin]
-    # Claims-first: flow.out grants operator; the legacy ownership label is not
+    # Claims-first: flow.out grants operator; the unsupported ownership label is not
     # consulted, so no admin tag leaks in.
     assert "vault_operator" in principals[precedence_addr]
     assert "vault_admin" not in principals[precedence_addr]
@@ -241,49 +237,13 @@ def test_build_principal_labels_derives_enrichment_tags_from_claims(monkeypatch)
     assert "vault_manager" in principals[ctrl_manager]
 
 
-def test_build_principal_labels_legacy_hook_update_not_admin(monkeypatch):
-    """A claim-less row falls back to legacy effect_labels, but ``hook_update`` is
-    dropped from the admin set — no measured prod principal depends on it."""
-    hook_addr = "0x" + "b1" * 20
-    real_admin = "0x" + "b2" * 20
-    legacy_operator = "0x" + "b3" * 20
-
-    effective_permissions = {
-        "contract_address": "0x1111111111111111111111111111111111111111",
-        "contract_name": "Vault",
-        "functions": [
-            # No ``claims`` key → legacy fallback. hook_update must NOT grant admin.
-            _role_fn("setHook(address)", 1, hook_addr, effect_labels=["hook_update"]),
-            # A real legacy admin label still grants admin via the fallback.
-            _role_fn("transferOwnership(address)", 2, real_admin, effect_labels=["ownership_transfer"]),
-            # Legacy asset label → operator via the fallback.
-            _role_fn("withdraw(uint256)", 3, legacy_operator, effect_labels=["asset_send"]),
-        ],
-    }
-
-    monkeypatch.setattr(
-        "services.policy.principal_enrichment.classify_resolved_address_with_status",
-        lambda rpc_url, address, **_kw: ("eoa", {"address": address}, True),
-    )
-
-    payload = build_principal_labels(effective_permissions, rpc_url="http://rpc.example")
-    principals = {item["address"]: set(item["labels"]) for item in payload["principals"]}
-
-    assert "vault_admin" not in principals[hook_addr]
-    assert "vault_operator" not in principals[hook_addr]
-    assert "vault_manager" not in principals[hook_addr]
-    assert "vault_admin" in principals[real_admin]
-    assert "vault_operator" in principals[legacy_operator]
-
-
-def test_build_principal_labels_with_resolved_graph_admin_safe():
-    effective_permissions = {
+def test_build_principal_index_with_resolved_graph_admin_safe():
+    permission_index = {
         "contract_address": "0x1111111111111111111111111111111111111111",
         "contract_name": "Target",
         "functions": [
             {
                 "function": "setAuthority(address)",
-                "effect_labels": ["authority_update"],
                 "authority_public": False,
                 "authority_roles": [
                     {
@@ -315,7 +275,7 @@ def test_build_principal_labels_with_resolved_graph_admin_safe():
                 "label": "Target",
                 "contract_name": "Target",
                 "depth": 0,
-                "analyzed": True,
+                "analysis_state": "analyzed",
                 "details": {"address": "0x1111111111111111111111111111111111111111"},
                 "artifacts": {},
             },
@@ -327,7 +287,7 @@ def test_build_principal_labels_with_resolved_graph_admin_safe():
                 "label": "owner",
                 "contract_name": None,
                 "depth": 1,
-                "analyzed": False,
+                "analysis_state": None,
                 "details": {
                     "address": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                     "owners": ["0xcccccccccccccccccccccccccccccccccccccccc"],
@@ -348,21 +308,20 @@ def test_build_principal_labels_with_resolved_graph_admin_safe():
         ],
     }
 
-    payload = build_principal_labels(effective_permissions, resolved_control_graph=resolved_graph)
+    payload = build_principal_index(permission_index, resolution_graph=resolved_graph)
 
     assert payload["contract_name"] == "Target"
     principals = {item["address"]: item for item in payload["principals"]}
-    assert principals["0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]["display_name"] == "Target admin Safe"
+    assert principals["0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]["display_name"] == "Target owner Safe"
 
 
-def test_build_principal_labels_includes_generic_controller_principals(monkeypatch):
-    effective_permissions = {
+def test_build_principal_index_includes_generic_controller_principals(monkeypatch):
+    permission_index = {
         "contract_address": "0x1111111111111111111111111111111111111111",
         "contract_name": "Target",
         "functions": [
             {
                 "function": "pause()",
-                "effect_labels": ["pause_toggle"],
                 "authority_public": False,
                 "authority_roles": [],
                 "direct_owner": None,
@@ -395,7 +354,7 @@ def test_build_principal_labels_includes_generic_controller_principals(monkeypat
                 "label": "Target",
                 "contract_name": "Target",
                 "depth": 0,
-                "analyzed": True,
+                "analysis_state": "analyzed",
                 "details": {"address": "0x1111111111111111111111111111111111111111"},
                 "artifacts": {},
             },
@@ -407,7 +366,7 @@ def test_build_principal_labels_includes_generic_controller_principals(monkeypat
                 "label": "governance",
                 "contract_name": None,
                 "depth": 1,
-                "analyzed": False,
+                "analysis_state": None,
                 "details": {"address": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
                 "artifacts": {},
             },
@@ -425,13 +384,13 @@ def test_build_principal_labels_includes_generic_controller_principals(monkeypat
     }
 
     monkeypatch.setattr(
-        "services.policy.principal_enrichment.classify_resolved_address_with_status",
+        "services.policy.principal_index.classify_resolved_address_with_status",
         lambda rpc_url, address, **_kw: ("eoa", {"address": address}, True),
     )
 
-    payload = build_principal_labels(
-        effective_permissions,
-        resolved_control_graph=resolved_graph,
+    payload = build_principal_index(
+        permission_index,
+        resolution_graph=resolved_graph,
         rpc_url="http://rpc.example",
     )
 
@@ -442,8 +401,8 @@ def test_build_principal_labels_includes_generic_controller_principals(monkeypat
     assert governance["controller_context"] == ["governance"]
 
 
-def test_build_principal_labels_prefers_analyzed_contract_name_for_contract_principals():
-    effective_permissions = {
+def test_build_principal_index_prefers_analyzed_contract_name_for_contract_principals():
+    permission_index = {
         "contract_address": "0x1111111111111111111111111111111111111111",
         "contract_name": "Target",
         "functions": [],
@@ -458,7 +417,7 @@ def test_build_principal_labels_prefers_analyzed_contract_name_for_contract_prin
                 "label": "Target",
                 "contract_name": "Target",
                 "depth": 0,
-                "analyzed": True,
+                "analysis_state": "analyzed",
                 "details": {"address": "0x1111111111111111111111111111111111111111"},
                 "artifacts": {},
             },
@@ -470,7 +429,7 @@ def test_build_principal_labels_prefers_analyzed_contract_name_for_contract_prin
                 "label": "role principal",
                 "contract_name": "Executor",
                 "depth": 1,
-                "analyzed": True,
+                "analysis_state": "analyzed",
                 "details": {"address": "0x2222222222222222222222222222222222222222"},
                 "artifacts": {},
             },
@@ -487,17 +446,17 @@ def test_build_principal_labels_prefers_analyzed_contract_name_for_contract_prin
         ],
     }
 
-    payload = build_principal_labels(
-        effective_permissions,
-        resolved_control_graph=resolved_graph,
+    payload = build_principal_index(
+        permission_index,
+        resolution_graph=resolved_graph,
     )
 
     principals = {item["address"]: item for item in payload["principals"]}
     assert principals["0x2222222222222222222222222222222222222222"]["display_name"] == "Executor"
 
 
-def test_build_principal_labels_uses_graph_context_for_unnamed_contract_principals():
-    effective_permissions = {
+def test_build_principal_index_uses_graph_context_for_unnamed_contract_principals():
+    permission_index = {
         "contract_address": "0x1111111111111111111111111111111111111111",
         "contract_name": "Target",
         "functions": [],
@@ -512,7 +471,7 @@ def test_build_principal_labels_uses_graph_context_for_unnamed_contract_principa
                 "label": "Target",
                 "contract_name": "Target",
                 "depth": 0,
-                "analyzed": True,
+                "analysis_state": "analyzed",
                 "details": {"address": "0x1111111111111111111111111111111111111111"},
                 "artifacts": {},
             },
@@ -524,7 +483,7 @@ def test_build_principal_labels_uses_graph_context_for_unnamed_contract_principa
                 "label": "role principal",
                 "contract_name": None,
                 "depth": 1,
-                "analyzed": False,
+                "analysis_state": None,
                 "details": {"address": "0x3333333333333333333333333333333333333333"},
                 "artifacts": {},
             },
@@ -549,23 +508,23 @@ def test_build_principal_labels_uses_graph_context_for_unnamed_contract_principa
             "label": "TokenManager",
             "contract_name": "TokenManager",
             "depth": 0,
-            "analyzed": True,
+            "analysis_state": "analyzed",
             "details": {"address": "0x4444444444444444444444444444444444444444"},
             "artifacts": {},
         }
     )
 
-    payload = build_principal_labels(
-        effective_permissions,
-        resolved_control_graph=resolved_graph,
+    payload = build_principal_index(
+        permission_index,
+        resolution_graph=resolved_graph,
     )
 
     principals = {item["address"]: item for item in payload["principals"]}
     assert principals["0x3333333333333333333333333333333333333333"]["display_name"] == "TokenManager token"
 
 
-def test_build_principal_labels_skips_nonterminal_contract_principals():
-    effective_permissions = {
+def test_build_principal_index_skips_nonterminal_contract_principals():
+    permission_index = {
         "contract_address": "0x1111111111111111111111111111111111111111",
         "contract_name": "Target",
         "functions": [],
@@ -580,7 +539,7 @@ def test_build_principal_labels_skips_nonterminal_contract_principals():
                 "label": "Target",
                 "contract_name": "Target",
                 "depth": 0,
-                "analyzed": True,
+                "analysis_state": "analyzed",
                 "details": {"address": "0x1111111111111111111111111111111111111111"},
                 "artifacts": {},
             },
@@ -592,7 +551,7 @@ def test_build_principal_labels_skips_nonterminal_contract_principals():
                 "label": "Executor",
                 "contract_name": "Executor",
                 "depth": 1,
-                "analyzed": True,
+                "analysis_state": "analyzed",
                 "details": {"address": "0x2222222222222222222222222222222222222222"},
                 "artifacts": {},
             },
@@ -604,7 +563,7 @@ def test_build_principal_labels_skips_nonterminal_contract_principals():
                 "label": "owner",
                 "contract_name": None,
                 "depth": 2,
-                "analyzed": False,
+                "analysis_state": None,
                 "details": {
                     "address": "0x3333333333333333333333333333333333333333",
                     "owners": ["0x4444444444444444444444444444444444444444"],
@@ -633,9 +592,9 @@ def test_build_principal_labels_skips_nonterminal_contract_principals():
         ],
     }
 
-    payload = build_principal_labels(
-        effective_permissions,
-        resolved_control_graph=resolved_graph,
+    payload = build_principal_index(
+        permission_index,
+        resolution_graph=resolved_graph,
     )
 
     principals = {item["address"]: item for item in payload["principals"]}
@@ -643,8 +602,8 @@ def test_build_principal_labels_skips_nonterminal_contract_principals():
     assert "0x3333333333333333333333333333333333333333" in principals
 
 
-def test_build_principal_labels_skips_permission_controller_contract_principals():
-    effective_permissions = {
+def test_build_principal_index_skips_permission_controller_contract_principals():
+    permission_index = {
         "contract_address": "0x1111111111111111111111111111111111111111",
         "contract_name": "Target",
         "functions": [],
@@ -659,7 +618,7 @@ def test_build_principal_labels_skips_permission_controller_contract_principals(
                 "label": "Target",
                 "contract_name": "Target",
                 "depth": 0,
-                "analyzed": True,
+                "analysis_state": "analyzed",
                 "details": {"address": "0x1111111111111111111111111111111111111111"},
                 "artifacts": {},
             },
@@ -671,7 +630,7 @@ def test_build_principal_labels_skips_permission_controller_contract_principals(
                 "label": "PermissionController",
                 "contract_name": "PermissionController",
                 "depth": 1,
-                "analyzed": True,
+                "analysis_state": "analyzed",
                 "details": {
                     "address": "0x2222222222222222222222222222222222222222",
                     "controller_label": "permissionController",
@@ -691,9 +650,9 @@ def test_build_principal_labels_skips_permission_controller_contract_principals(
         ],
     }
 
-    payload = build_principal_labels(
-        effective_permissions,
-        resolved_control_graph=resolved_graph,
+    payload = build_principal_index(
+        permission_index,
+        resolution_graph=resolved_graph,
     )
 
     principals = {item["address"]: item for item in payload["principals"]}
@@ -701,7 +660,7 @@ def test_build_principal_labels_skips_permission_controller_contract_principals(
 
 
 # ---------------------------------------------------------------------------
-# Parity: ``build_principal_labels`` produces identical output under
+# Parity: ``build_principal_index`` produces identical output under
 # ``PSAT_RPC_FANOUT=1`` (sequential) and ``=8`` (parallel). The per-job
 # ``classify_cache`` must stay consistent across worker threads.
 # ---------------------------------------------------------------------------
@@ -718,20 +677,18 @@ def _principal_labels_parity_helper(monkeypatch, fanout: str):
     def role_principals(addrs):
         return [{"address": a, "resolved_type": "unknown", "details": {}} for a in addrs]
 
-    effective_permissions = {
+    permission_index = {
         "contract_address": target,
         "contract_name": "VaultBig",
         "functions": [
             {
                 "function": "manage(address,bytes,uint256)",
-                "effect_labels": ["arbitrary_external_call"],
                 "authority_public": False,
                 "authority_roles": [{"role": 1, "principals": role_principals(principal_addrs[:30])}],
                 "direct_owner": None,
             },
             {
                 "function": "setAuthority(address)",
-                "effect_labels": ["authority_update"],
                 "authority_public": False,
                 "authority_roles": [{"role": 8, "principals": role_principals(principal_addrs[30:])}],
                 "direct_owner": None,
@@ -748,7 +705,7 @@ def _principal_labels_parity_helper(monkeypatch, fanout: str):
                 "label": "VaultBig",
                 "contract_name": "VaultBig",
                 "depth": 0,
-                "analyzed": True,
+                "analysis_state": "analyzed",
                 "details": {"address": target},
                 "artifacts": {},
             }
@@ -766,14 +723,14 @@ def _principal_labels_parity_helper(monkeypatch, fanout: str):
         return "eoa", {"address": address}, True
 
     monkeypatch.setattr(
-        "services.policy.principal_enrichment.classify_resolved_address_with_status",
+        "services.policy.principal_index.classify_resolved_address_with_status",
         fake_classify,
     )
 
     classify_cache: dict = {}
-    payload = build_principal_labels(
-        effective_permissions,
-        resolved_control_graph=resolved_graph,
+    payload = build_principal_index(
+        permission_index,
+        resolution_graph=resolved_graph,
         rpc_url="http://rpc.example",
         classify_cache=classify_cache,
     )
@@ -796,7 +753,7 @@ def _principal_labels_parity_helper(monkeypatch, fanout: str):
     return canonical, dict(classify_cache), call_counter["n"]
 
 
-def test_build_principal_labels_parity_parallel_vs_sequential(monkeypatch):
+def test_build_principal_index_parity_parallel_vs_sequential(monkeypatch):
     """``PSAT_RPC_FANOUT=1`` and ``=8`` must produce identical principals + cache."""
     seq_principals, seq_cache, seq_calls = _principal_labels_parity_helper(monkeypatch, "1")
     par_principals, par_cache, par_calls = _principal_labels_parity_helper(monkeypatch, "8")
@@ -808,19 +765,18 @@ def test_build_principal_labels_parity_parallel_vs_sequential(monkeypatch):
     assert par_calls <= seq_calls + len(seq_cache)
 
 
-def test_build_principal_labels_parallel_handles_per_address_runtimeerror(monkeypatch):
+def test_build_principal_index_parallel_handles_per_address_runtimeerror(monkeypatch):
     """A classify error on one address must propagate, not silently drop principals."""
     monkeypatch.setenv("PSAT_RPC_FANOUT", "8")
     target = "0x1111111111111111111111111111111111111111"
     bad_address = "0x" + "b" * 40
     principal_addrs = [f"0x{(i + 0x20):040x}" for i in range(5)] + [bad_address]
-    effective_permissions = {
+    permission_index = {
         "contract_address": target,
         "contract_name": "Vault",
         "functions": [
             {
                 "function": "manage()",
-                "effect_labels": ["arbitrary_external_call"],
                 "authority_public": False,
                 "authority_roles": [
                     {
@@ -844,7 +800,7 @@ def test_build_principal_labels_parallel_handles_per_address_runtimeerror(monkey
                 "label": "Vault",
                 "contract_name": "Vault",
                 "depth": 0,
-                "analyzed": True,
+                "analysis_state": "analyzed",
                 "details": {"address": target},
                 "artifacts": {},
             }
@@ -858,14 +814,14 @@ def test_build_principal_labels_parallel_handles_per_address_runtimeerror(monkey
         return "eoa", {"address": address}, True
 
     monkeypatch.setattr(
-        "services.policy.principal_enrichment.classify_resolved_address_with_status",
+        "services.policy.principal_index.classify_resolved_address_with_status",
         fake_classify,
     )
 
     with pytest.raises(RuntimeError, match="classify boom"):
-        build_principal_labels(
-            effective_permissions,
-            resolved_control_graph=resolved_graph,
+        build_principal_index(
+            permission_index,
+            resolution_graph=resolved_graph,
             rpc_url="http://rpc.example",
         )
 
@@ -896,7 +852,7 @@ def test_callee_edge_does_not_mint_controller_labels():
             "label": name,
             "contract_name": name,
             "depth": 0 if address == target else 1,
-            "analyzed": address == target,
+            "analysis_state": "analyzed" if address == target else None,
             "details": {"address": address},
             "artifacts": {},
         }
@@ -923,9 +879,9 @@ def test_callee_edge_does_not_mint_controller_labels():
         ],
     }
 
-    payload = build_principal_labels(
+    payload = build_principal_index(
         {"contract_address": target, "contract_name": "StakingManager", "functions": []},
-        resolved_control_graph=resolved_graph,
+        resolution_graph=resolved_graph,
     )
     principals = {item["address"]: item for item in payload["principals"]}
 
@@ -969,7 +925,7 @@ def test_unattributed_edge_does_not_mint_controller_labels():
             "label": name,
             "contract_name": name,
             "depth": 0 if address == target else 1,
-            "analyzed": address == target,
+            "analysis_state": "analyzed" if address == target else None,
             "details": {"address": address},
             "artifacts": {},
         }
@@ -996,9 +952,9 @@ def test_unattributed_edge_does_not_mint_controller_labels():
         ],
     }
 
-    payload = build_principal_labels(
+    payload = build_principal_index(
         {"contract_address": target, "contract_name": "Vault", "functions": []},
-        resolved_control_graph=resolved_graph,
+        resolution_graph=resolved_graph,
     )
     principals = {item["address"]: item for item in payload["principals"]}
 
@@ -1025,7 +981,7 @@ def test_authority_roles_present_with_none_does_not_crash_enrichment():
     ``dict.get(key, [])`` only supplies its default for an ABSENT key — so the
     plain default iterated ``None`` and raised. Not-determined must contribute no
     role principals, exactly as ``[]`` did."""
-    from services.policy.principal_enrichment import _collect_permissions
+    from services.policy.principal_index import _collect_permissions
 
     permissions, labels = _collect_permissions(
         {
@@ -1034,7 +990,6 @@ def test_authority_roles_present_with_none_does_not_crash_enrichment():
             "functions": [
                 {
                     "function": "f()",
-                    "effect_labels": [],
                     "authority_public": False,
                     "authority_roles": None,
                     "controllers": [],

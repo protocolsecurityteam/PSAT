@@ -60,8 +60,7 @@ def _prefetch_child_tables(
     ``/api/company/{name}/functions`` and fetched lazily by the frontend.
     Two narrow projections replace the heavy row+selectinload pair:
 
-    * ``ef_effects`` — ``{contract_id: list[list[str]]}`` of per-function
-      ``effect_labels`` arrays. Drives the contract entry's
+    * ``ef_effects`` — per-function claim ids. Drives the contract entry's
       ``value_effects`` / ``capabilities`` / ``role`` fields.
     * ``fp_governance_rows`` — non-contract principals (safe/timelock/
       eoa/proxy_admin) from ``function_principals``, joined back to
@@ -199,19 +198,16 @@ def _prefetch_child_tables(
         return or_(*clauses)
 
     def _ef_effects(s: Session) -> tuple[dict[int, list[dict[str, list[str]]]], int]:
-        # Per function: legacy labels (drive value_effects) + Plane-1 claim_ids
-        # (drive the capability chips, claims-first). One record per function so
-        # the claims-vs-legacy choice stays per-function through aggregation.
+        # One supported claim-id set per function.
         local: dict[int, list[dict[str, list[str]]]] = {}
         rows = 0
-        for cid, labels, claims in s.execute(
+        for cid, claims in s.execute(
             select(
                 EffectiveFunction.contract_id,
-                EffectiveFunction.effect_labels,
                 EffectiveFunction.claims,
             ).where(EffectiveFunction.contract_id.in_(id_list))
         ).all():
-            local.setdefault(cid, []).append({"labels": list(labels or []), "claims": _claim_ids_list(claims)})
+            local.setdefault(cid, []).append({"claims": _claim_ids_list(claims)})
             rows += 1
         return local, rows
 
@@ -343,12 +339,11 @@ def _prefetch_child_tables(
         sibling FP projections: a signer of a message isn't a caller."""
         by_ef: dict[int, dict[str, Any]] = {}
         rows = 0
-        for cid, ef_id, fname, labels, claims, addr in s.execute(
+        for cid, ef_id, fname, claims, addr in s.execute(
             select(
                 EffectiveFunction.contract_id,
                 EffectiveFunction.id,
                 EffectiveFunction.function_name,
-                EffectiveFunction.effect_labels,
                 EffectiveFunction.claims,
                 func.lower(FunctionPrincipal.address),
             )
@@ -369,7 +364,6 @@ def _prefetch_child_tables(
                 entry = {
                     "contract_id": cid,
                     "function": fname,
-                    "labels": set(labels or ()),
                     "claims": _claim_ids_list(claims),
                     "callers": set(),
                 }
@@ -381,7 +375,6 @@ def _prefetch_child_tables(
             local.setdefault(entry["contract_id"], []).append(
                 {
                     "function": entry["function"],
-                    "labels": entry["labels"],
                     "claims": entry["claims"],
                     "callers": entry["callers"],
                 }

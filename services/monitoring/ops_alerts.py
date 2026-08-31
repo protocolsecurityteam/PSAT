@@ -43,8 +43,8 @@ from db.queue import (
 )
 from services.monitoring.materialization_reconciler import materialization_backlog
 from services.monitoring.notifier import _send_discord
+from services.monitoring.observation_plan_state import CONFIG_SUPPLIED_BY_CALLER, plan_coverage_counts
 from services.monitoring.process_meta import ERROR, PROCESS_META, STALE, classify, stale_after_seconds
-from services.monitoring.tracking_plan_state import CONFIG_SUPPLIED_BY_CALLER, plan_coverage_counts
 from services.monitoring.verify_status import count_verification_read_gaps
 from utils.chains import UnknownChainError, chain_by_id, chain_cache_token
 
@@ -61,7 +61,7 @@ _BEHIND_SUFFIX = ":behind"
 # Third alarm family: monitored contracts watching without a current tracking
 # plan (dated, or none at all). Not a daemon — the processes are all fresh; the
 # thing that has degraded is what they are watching FOR.
-_COVERAGE_KEY = "tracking_plan_coverage"
+_COVERAGE_KEY = "observation_plan_coverage"
 
 # Log-only, never an alert dedupe key — see :func:`collect_verification_gaps`.
 _VERIFICATION_GAP_KEY = "verification_read_gaps"
@@ -314,7 +314,7 @@ def _current_problems(
     Three independent alarm families, each its own key:
       * ``<process>``               — a daemon gone stale/error ("dead").
       * ``<scanner>:behind``        — the scanner's head-lag over threshold.
-      * ``tracking_plan_coverage``  — contracts watching without a current plan,
+      * ``observation_plan_coverage``  — contracts watching without a current plan,
         over an operator-set threshold (off by default).
     The alerter never pages on its own silence (it is the thing running).
     """

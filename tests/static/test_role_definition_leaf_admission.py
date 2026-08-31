@@ -45,11 +45,11 @@ from pathlib import Path
 
 import pytest
 
-from services.static.contract_analysis_pipeline.summaries import (
+from services.static.static_analysis.summaries import (
     _role_names_from_predicate_trees,
     _role_names_from_tree,
 )
-from services.static.contract_analysis_pipeline.tracking import _is_storage_layout_constant
+from services.static.static_analysis.tracking import _is_storage_layout_constant
 
 
 class _Bytes32Constant:
@@ -475,11 +475,11 @@ def test_slot_route_leafless_call_is_unchanged():
 slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
 
-from services.static.contract_analysis_pipeline.effects import build_effects  # noqa: E402
-from services.static.contract_analysis_pipeline.predicate_artifacts import (  # noqa: E402
+from services.static.static_analysis.effects import build_effects  # noqa: E402
+from services.static.static_analysis.predicate_artifacts import (  # noqa: E402
     build_predicate_artifacts,
 )
-from services.static.contract_analysis_pipeline.summaries import (  # noqa: E402
+from services.static.static_analysis.summaries import (  # noqa: E402
     _build_semantic_control_summary,
 )
 

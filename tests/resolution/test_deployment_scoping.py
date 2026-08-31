@@ -36,8 +36,6 @@ def _fn_record(status: str = "resolved_empty") -> dict:
         "function": "f()",
         "abi_signature": "f()",
         "selector": "0xdeadbeef",
-        "effect_labels": [],
-        "effect_targets": [],
         "authority_public": False,
         "status": status,
     }
@@ -201,7 +199,7 @@ def test_reconcile_force_scopes_by_root_job(db_session):
 @requires_postgres
 def test_writer_isolates_deployments(db_session):
     from db.models import Contract, EffectiveFunction
-    from services.policy.effective_permissions_writer import write_effective_function_rows
+    from services.policy.permission_index_writer import write_permission_rows
 
     addr, p1, p2 = _addr(), _addr(), _addr()
     c = Contract(address=addr, chain="ethereum")
@@ -209,7 +207,7 @@ def test_writer_isolates_deployments(db_session):
     db_session.commit()
 
     def _write(dep):
-        write_effective_function_rows(
+        write_permission_rows(
             db_session,
             contract_id=c.id,
             function_records=[_fn_record()],
@@ -236,7 +234,7 @@ def test_writer_sweeps_legacy_null_rows(db_session):
     """A legacy untagged (NULL) row is swept the first time the deployment
     re-resolves — the back-patch/re-resolution cleanup path."""
     from db.models import Contract, EffectiveFunction
-    from services.policy.effective_permissions_writer import write_effective_function_rows
+    from services.policy.permission_index_writer import write_permission_rows
 
     addr, proxy = _addr(), _addr()
     c = Contract(address=addr, chain="ethereum")
@@ -244,7 +242,7 @@ def test_writer_sweeps_legacy_null_rows(db_session):
     db_session.commit()
 
     # Legacy standalone resolution: deployment NULL.
-    write_effective_function_rows(
+    write_permission_rows(
         db_session,
         contract_id=c.id,
         function_records=[_fn_record()],
@@ -253,7 +251,7 @@ def test_writer_sweeps_legacy_null_rows(db_session):
     )
     db_session.commit()
     # Re-resolve in proxy context → sweeps the NULL row.
-    write_effective_function_rows(
+    write_permission_rows(
         db_session,
         contract_id=c.id,
         function_records=[_fn_record()],
@@ -369,7 +367,7 @@ def test_resolve_proxy_backpatches_standalone_impl(db_session, monkeypatch):
 #
 # This is the verdict's regression point (d) — driven through the REAL
 # resolution + policy stack. Only the snapshot/graph/balance wire is stubbed,
-# and ``build_control_snapshot`` keys its governor read off the address the
+# and ``observe_controllers`` keys its governor read off the address the
 # worker hands it: the proxy when ``request.proxy_address`` is set (the fix),
 # else the impl's own (empty) storage. So if the proxy-override regresses, the
 # governor reads 0x0 here and the function stays resolved_empty — the test fails.
@@ -404,15 +402,13 @@ def _gate_fn_record() -> dict:
         "function": _GATE_FN,
         "abi_signature": _GATE_FN,
         "selector": "0x1c0d2bf2",
-        "effect_labels": [],
-        "effect_targets": [],
         "authority_public": False,
     }
 
 
 def _stub_resolution_wire(monkeypatch, worker, *, proxy: str, governor: str) -> None:
     """Stub only the RPC-touching seams of ResolutionWorker so the test stays
-    offline. ``build_control_snapshot`` models proxy-vs-impl storage: the
+    offline. ``observe_controllers`` models proxy-vs-impl storage: the
     governor lives in the proxy's storage and reads 0x0 against the impl's own.
     The address it sees is whatever the worker put on the plan — the proxy iff
     ``request.proxy_address`` was honored, which is exactly the behavior the fix
@@ -440,9 +436,8 @@ def _stub_resolution_wire(monkeypatch, worker, *, proxy: str, governor: str) -> 
     def fake_graph(*, root_artifacts=None, rpc_url="", **_k):
         return {"root_contract_address": root_artifacts and "", "nodes": [], "edges": []}, {}
 
-    monkeypatch.setattr("workers.resolution_worker.build_control_snapshot", fake_snapshot)
+    monkeypatch.setattr("workers.resolution_worker.observe_controllers", fake_snapshot)
     monkeypatch.setattr("workers.resolution_worker.resolve_control_graph", fake_graph)
-    monkeypatch.setattr("workers.resolution_worker.store_nested_artifacts", lambda *a, **k: None)
     monkeypatch.setattr(worker, "_fetch_balances", lambda *a, **k: None)
     monkeypatch.setattr(worker, "_queue_discovered_contracts", lambda *a, **k: None)
     monkeypatch.setattr(worker, "_emit_dependency_edges_from_predicate_trees", lambda *a, **k: None)
@@ -454,12 +449,12 @@ def _gate_status_and_principal(db_session, job, contract, deployment):
     """Run the REAL policy resolve + writer for ``job`` and return
     ``(status, principal_addresses)`` for the governor-gated function."""
     from db.models import EffectiveFunction, FunctionPrincipal
-    from services.policy.effective_permissions_writer import write_effective_function_rows
+    from services.policy.permission_index_writer import write_permission_rows
     from services.resolution.capability_resolver import resolve_contract_capabilities
 
     caps = resolve_contract_capabilities(db_session, address=contract.address, chain_id=1, job_id=job.id)
     assert caps is not None and _GATE_FN in caps, f"resolver returned no capability for {_GATE_FN}: {caps}"
-    write_effective_function_rows(
+    write_permission_rows(
         db_session,
         contract_id=contract.id,
         function_records=[_gate_fn_record()],
@@ -495,7 +490,7 @@ def test_end_to_end_heal_standalone_impl_resolves_after_backpatch(db_session, mo
     """
     from db.models import Contract, JobStage, JobStatus
     from db.queue import reconcile_impl_job_for_proxy, store_artifact
-    from tests.support.policy_builders import _assessment, _minimal_contract_analysis
+    from tests.support.policy_builders import _assessment, _minimal_static_facts
     from workers.resolution_worker import ResolutionWorker
 
     impl, proxy = _addr(), _addr()
@@ -507,9 +502,9 @@ def test_end_to_end_heal_standalone_impl_resolves_after_backpatch(db_session, mo
     contract = Contract(address=impl, chain="ethereum", contract_name="Core", job_id=job.id)
     db_session.add(contract)
     db_session.commit()
-    facts = _minimal_contract_analysis(address=impl, name="Core")
+    facts = _minimal_static_facts(address=impl, name="Core")
     store_artifact(db_session, job.id, "static_facts", data=facts)
-    store_artifact(db_session, job.id, "assessment", data=_assessment(analysis=facts))
+    store_artifact(db_session, job.id, "assessment", data=_assessment(static_facts=facts))
     store_artifact(
         db_session,
         job.id,

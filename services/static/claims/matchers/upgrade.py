@@ -19,7 +19,6 @@ from ._gates import UPGRADE_SELECTORS, is_upgrade_gate, is_uups_gate
 @claim_matcher(
     claim_id="upgrade.implementation",
     sentence="changes which code executes behind this deployment",
-    legacy_projection="implementation_update",
     consumer_family="control_plane",
     gate=is_upgrade_gate,
 )

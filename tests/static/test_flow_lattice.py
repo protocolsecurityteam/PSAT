@@ -23,7 +23,7 @@ slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
 
 from services.static.claims import build_claims  # noqa: E402
-from services.static.contract_analysis_pipeline.effects import build_effects  # noqa: E402
+from services.static.static_analysis.effects import build_effects  # noqa: E402
 
 
 def _compile(tmp_path: Path, source: str, name: str):
@@ -564,7 +564,7 @@ contract Shared {
 
 def test_shared_helper_engine_built_once(tmp_path, monkeypatch):
     contract = _compile(tmp_path, _SHARED_HELPER_SRC, "Shared")
-    import services.static.contract_analysis_pipeline.effects.origins as eff_mod
+    import services.static.static_analysis.effects.origins as eff_mod
 
     real_engine = eff_mod.ProvenanceEngine
     counts: dict[str, int] = {}
@@ -730,7 +730,7 @@ def test_agreeing_sites_carry_no_breakdown(tmp_path):
 
 
 def test_sites_agreeing_on_a_kind_carry_no_breakdown_even_at_mixed_tiers():
-    from services.static.contract_analysis_pipeline.effects import _fold_sites, _site_breakdown
+    from services.static.static_analysis.effects import _fold_sites, _site_breakdown
 
     sites = [("msg_sender", "dispositive_ast"), ("msg_sender", "static_trace")]
     # The fold keeps the kind and takes the weaker tier, so it already says

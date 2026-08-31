@@ -12,7 +12,7 @@
 
 #4 ``predicate_trees`` was dropped on the write path
    (``services/resolution/recursive.py``: ``_builder`` returned only
-   ``contract_name``, ``analysis``, ``tracking_plan``) and the cache row
+   ``contract_name``, ``static_facts``, ``observation_plan``) and the cache row
    had no column to store it anyway. Every cache hit therefore returned
    ``predicate_trees=None`` and silently skipped mapping-writer
    enumeration downstream. The fix adds a JSONB + blob column and
@@ -122,8 +122,8 @@ def test_concurrent_materialize_runs_builder_exactly_once(_route_to_test_db, _cl
         time.sleep(0.6)
         return {
             "contract_name": "ConcurrentDedup",
-            "analysis": {"controllers": []},
-            "tracking_plan": {"slots": []},
+            "static_facts": {"controllers": []},
+            "observation_plan": {"slots": []},
             "predicate_trees": {"schema_version": "semantic", "trees": {}},
         }
 
@@ -195,8 +195,8 @@ def test_stale_building_row_is_taken_over(_route_to_test_db, _clean_cm, monkeypa
         invocations["n"] += 1
         return {
             "contract_name": "TakeoverSuccess",
-            "analysis": {"controllers": []},
-            "tracking_plan": {"slots": []},
+            "static_facts": {"controllers": []},
+            "observation_plan": {"slots": []},
         }
 
     with patch("db.contract_materializations.get_storage_client", return_value=None):
@@ -262,8 +262,8 @@ def test_predicate_trees_cached_inline(_route_to_test_db, _clean_cm):
     def winner_builder() -> dict[str, Any]:
         return {
             "contract_name": "MapEnumProbe",
-            "analysis": {"controllers": []},
-            "tracking_plan": {"slots": []},
+            "static_facts": {"controllers": []},
+            "observation_plan": {"slots": []},
             "predicate_trees": predicate_payload,
         }
 
@@ -326,8 +326,8 @@ def test_predicate_trees_cached_via_blob(_route_to_test_db, _clean_cm):
     def builder() -> dict[str, Any]:
         return {
             "contract_name": "BlobSemanticProbe",
-            "analysis": {"controllers": []},
-            "tracking_plan": {"slots": []},
+            "static_facts": {"controllers": []},
+            "observation_plan": {"slots": []},
             "predicate_trees": predicate_payload,
         }
 
@@ -340,7 +340,7 @@ def test_predicate_trees_cached_via_blob(_route_to_test_db, _clean_cm):
         )
 
     # Blob path: predicate_trees_blob_key set, JSONB NULL, three puts
-    # total (analysis, tracking_plan, predicate_trees).
+    # total (static_facts, observation_plan, predicate_trees).
     assert row.predicate_trees is None
     assert row.predicate_trees_blob_key is not None
     keys_written = sorted(storage.put_calls)
@@ -356,10 +356,10 @@ def _row_stub(**kwargs: Any) -> Any:
     Returning ``Any`` keeps pyright from rejecting the stub at the
     typed ``ContractMaterialization`` parameter boundary."""
     defaults = dict(
-        analysis=None,
-        analysis_blob_key=None,
-        tracking_plan=None,
-        tracking_plan_blob_key=None,
+        static_facts=None,
+        static_facts_blob_key=None,
+        observation_plan=None,
+        observation_plan_blob_key=None,
         predicate_trees=None,
         predicate_trees_blob_key=None,
     )
@@ -369,9 +369,9 @@ def _row_stub(**kwargs: Any) -> Any:
 
 def test_hydrate_predicate_trees_unit():
     """Unit-level smoke: ``hydrate_predicate_trees`` reads the
-    ``predicate_trees`` column, not ``analysis`` or ``tracking_plan``."""
+    ``predicate_trees`` column, not ``static_facts`` or ``observation_plan``."""
     row = _row_stub(
-        analysis={"should": "not appear"},
+        static_facts={"should": "not appear"},
         predicate_trees={"trees": {"f()": {}}},
     )
     assert cm.hydrate_predicate_trees(row) == {"trees": {"f()": {}}}
@@ -382,21 +382,21 @@ def test_hydrate_predicate_trees_returns_none_for_pre_migration_row():
     JSONB column nor the blob key. Returning None lets the caller fall
     back to its "no semantic artifact" path instead of crashing."""
     row = _row_stub(
-        analysis={"controllers": []},
-        tracking_plan={"slots": []},
+        static_facts={"controllers": []},
+        observation_plan={"slots": []},
     )
     assert cm.hydrate_predicate_trees(row) is None
 
 
 # ---------------------------------------------------------------------------
-# analysis_schema_version: an analyzer bump invalidates old rows
+# static_facts_schema_version: an analyzer bump invalidates old rows
 # ---------------------------------------------------------------------------
 
 
 @requires_postgres
 def test_find_by_keccak_filters_on_schema_version(_clean_cm):
     """``find_by_keccak`` serves only a row stamped with the current
-    ``ANALYSIS_SCHEMA_VERSION``. An older-version row reads as a miss so
+    ``STATIC_FACTS_SCHEMA_VERSION``. An older-version row reads as a miss so
     a bumped analyzer rebuilds instead of serving a stale bundle."""
     chain = "1"
     keccak_old = "0x" + "a1" * 32
@@ -409,14 +409,14 @@ def test_find_by_keccak_filters_on_schema_version(_clean_cm):
                 bytecode_keccak=keccak_old,
                 address="0x" + "1" * 40,
                 status="ready",
-                analysis_schema_version=cm.ANALYSIS_SCHEMA_VERSION - 1,
+                static_facts_schema_version=cm.STATIC_FACTS_SCHEMA_VERSION - 1,
             ),
             ContractMaterialization(
                 chain=chain,
                 bytecode_keccak=keccak_cur,
                 address="0x" + "2" * 40,
                 status="ready",
-                analysis_schema_version=cm.ANALYSIS_SCHEMA_VERSION,
+                static_facts_schema_version=cm.STATIC_FACTS_SCHEMA_VERSION,
             ),
         ]
     )
@@ -442,14 +442,14 @@ def test_find_by_address_filters_on_schema_version(_clean_cm):
                 bytecode_keccak="0x" + "b3" * 32,
                 address=addr_old,
                 status="ready",
-                analysis_schema_version=cm.ANALYSIS_SCHEMA_VERSION - 1,
+                static_facts_schema_version=cm.STATIC_FACTS_SCHEMA_VERSION - 1,
             ),
             ContractMaterialization(
                 chain=chain,
                 bytecode_keccak="0x" + "b4" * 32,
                 address=addr_cur,
                 status="ready",
-                analysis_schema_version=cm.ANALYSIS_SCHEMA_VERSION,
+                static_facts_schema_version=cm.STATIC_FACTS_SCHEMA_VERSION,
             ),
         ]
     )
@@ -465,7 +465,7 @@ def test_find_by_address_filters_on_schema_version(_clean_cm):
 def test_materialize_rebuilds_old_schema_version_row(_route_to_test_db, _clean_cm, _short_wait_poll):
     """A 'ready' row built by an older analyzer must NOT be served — it
     reads as a miss, the builder runs once, and the row is rewritten at
-    the current ``ANALYSIS_SCHEMA_VERSION``."""
+    the current ``STATIC_FACTS_SCHEMA_VERSION``."""
     chain = "1"
     keccak = "0x" + "c1" * 32
 
@@ -476,7 +476,7 @@ def test_materialize_rebuilds_old_schema_version_row(_route_to_test_db, _clean_c
             address="0x" + "1" * 40,
             contract_name="StaleAnalyzer",
             status="ready",
-            analysis_schema_version=cm.ANALYSIS_SCHEMA_VERSION - 1,
+            static_facts_schema_version=cm.STATIC_FACTS_SCHEMA_VERSION - 1,
         )
     )
     _clean_cm.commit()
@@ -487,8 +487,8 @@ def test_materialize_rebuilds_old_schema_version_row(_route_to_test_db, _clean_c
         invocations["n"] += 1
         return {
             "contract_name": "FreshAnalyzer",
-            "analysis": {"controllers": []},
-            "tracking_plan": {"slots": []},
+            "static_facts": {"controllers": []},
+            "observation_plan": {"slots": []},
         }
 
     with patch("db.contract_materializations.get_storage_client", return_value=None):
@@ -502,7 +502,7 @@ def test_materialize_rebuilds_old_schema_version_row(_route_to_test_db, _clean_c
     assert invocations["n"] == 1, "an old-schema-version row must miss and rebuild"
     assert row.status == "ready"
     assert row.contract_name == "FreshAnalyzer"
-    assert row.analysis_schema_version == cm.ANALYSIS_SCHEMA_VERSION
+    assert row.static_facts_schema_version == cm.STATIC_FACTS_SCHEMA_VERSION
 
 
 @requires_postgres
@@ -519,7 +519,7 @@ def test_materialize_serves_current_schema_version_row(_route_to_test_db, _clean
             address="0x" + "1" * 40,
             contract_name="CurrentAnalyzer",
             status="ready",
-            analysis_schema_version=cm.ANALYSIS_SCHEMA_VERSION,
+            static_facts_schema_version=cm.STATIC_FACTS_SCHEMA_VERSION,
         )
     )
     _clean_cm.commit()
@@ -537,15 +537,15 @@ def test_materialize_serves_current_schema_version_row(_route_to_test_db, _clean
 
     assert row.status == "ready"
     assert row.contract_name == "CurrentAnalyzer"
-    assert row.analysis_schema_version == cm.ANALYSIS_SCHEMA_VERSION
+    assert row.static_facts_schema_version == cm.STATIC_FACTS_SCHEMA_VERSION
 
 
 @requires_postgres
 def test_migration_backfills_existing_rows_to_launch_version(_clean_cm):
-    """A row inserted without an explicit ``analysis_schema_version`` — the
+    """A row inserted without an explicit ``static_facts_schema_version`` — the
     shape a pre-column row takes after the migration backfill — carries the
     ``server_default`` the migration installed: schema version 1, the launch
-    value of ``ANALYSIS_SCHEMA_VERSION``. This keeps a deploy from
+    value of ``STATIC_FACTS_SCHEMA_VERSION``. This keeps a deploy from
     invalidating the whole cache at once."""
     chain = "1"
     keccak = "0x" + "d1" * 32
@@ -561,7 +561,7 @@ def test_migration_backfills_existing_rows_to_launch_version(_clean_cm):
 
     version = _clean_cm.execute(
         text(
-            "SELECT analysis_schema_version FROM contract_materializations "
+            "SELECT static_facts_schema_version FROM contract_materializations "
             "WHERE chain = :chain AND bytecode_keccak = :keccak"
         ),
         {"chain": chain, "keccak": keccak},

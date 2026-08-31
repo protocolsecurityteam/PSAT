@@ -156,7 +156,7 @@ def analyses(response: Response) -> list[AnalysisListEntry]:
                     contracts_by_key.setdefault((_coalesce_chain(c.chain), addr_lower), c)
 
         job_ids = [job.id for job in jobs]
-        # Earlier code fetched every job's ``contract_analysis`` artifact body
+        # Earlier code fetched every job's ``static_facts`` artifact body
         # from object storage just to read ``subject.name`` and ``summary``.
         # Both were redundant: ``contract_name`` is on the prefetched
         # ``Contract`` row and ``summary`` is never consumed by the frontend

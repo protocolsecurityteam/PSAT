@@ -51,7 +51,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ...contract_analysis_pipeline.predicate_types import (
+from ...static_analysis.predicate_types import (
     TARGET_KIND_STORAGE_NO_SETTER,
     TARGET_KIND_STORAGE_SETTER,
 )
@@ -296,7 +296,6 @@ def _explained_by_upgrade(ctx: ClaimContext, function: str) -> bool:
     """True when this entry IS a standard upgrade, whose delegatecall sink is
     the upgrade mechanism rather than a separate capability.
 
-    Mirrors the suppression ``project_effect_labels`` already applies to the
     ``delegatecall_execution`` LABEL: without it every UUPS ``upgradeToAndCall``
     — whose OZ implementation delegatecalls the new logic to run its initializer
     — would carry both claims and be counted twice by an exec consumer. The
@@ -310,7 +309,6 @@ def _explained_by_upgrade(ctx: ClaimContext, function: str) -> bool:
 @claim_matcher(
     claim_id="delegatecall.execute",
     sentence="executes foreign code in this contract's storage context (delegatecall)",
-    legacy_projection="delegatecall_execution",
     consumer_family="exec",
 )
 def delegatecall_execute(ctx: ClaimContext, function: str) -> MatchedEvidence | None:

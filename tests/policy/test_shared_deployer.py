@@ -2,7 +2,7 @@
 
 Same-deployer is a Tier-1 on-chain fact but NOT proof of same organization
 (factories defeat it) — the fact carries a heuristic marker and never mints an
-org-identity label. Pure fact + DB grouping + build_principal_labels integration.
+org-identity label. Pure fact + DB grouping + build_principal_index integration.
 """
 
 from typing import Any, cast
@@ -11,9 +11,9 @@ import pytest
 
 from db.models import Contract, Protocol
 from services.concurrency import RpcExecutor
-from services.policy.principal_enrichment import (
+from services.policy.principal_index import (
     _shared_deployer_fact,
-    build_principal_labels,
+    build_principal_index,
     load_protocol_deployer_groups,
 )
 
@@ -92,21 +92,20 @@ def test_load_deployer_groups_scoped_to_protocol(db_session):
     assert load_protocol_deployer_groups(db_session, p2.id) == {}
 
 
-# --- build_principal_labels integration --------------------------------------
+# --- build_principal_index integration --------------------------------------
 
 TARGET = "0x1111111111111111111111111111111111111111"
 PRINCIPAL = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 SIBLING = "0xffffffffffffffffffffffffffffffffffffffff"
 
 
-def _effective_permissions():
+def _permission_index():
     return {
         "contract_address": TARGET,
         "contract_name": "BoringVault",
         "functions": [
             {
                 "function": "manage(address,bytes,uint256)",
-                "effect_labels": ["arbitrary_external_call"],
                 "authority_public": False,
                 "authority_roles": [
                     {"role": 1, "principals": [{"address": PRINCIPAL, "resolved_type": "contract", "details": {}}]}
@@ -127,7 +126,7 @@ def _graph():
                 "resolved_type": "contract",
                 "label": "BoringVault",
                 "depth": 0,
-                "analyzed": True,
+                "analysis_state": "analyzed",
                 "details": {"address": TARGET},
             },
             {
@@ -137,7 +136,7 @@ def _graph():
                 "resolved_type": "contract",
                 "label": "manager",
                 "depth": 1,
-                "analyzed": False,
+                "analysis_state": None,
                 "details": {"address": PRINCIPAL},
             },
         ],
@@ -156,16 +155,16 @@ def _graph():
 
 def test_shared_deployer_lands_on_principal_without_org_label(monkeypatch):
     monkeypatch.setattr(
-        "services.policy.principal_enrichment.classify_resolved_address_with_status",
+        "services.policy.principal_index.classify_resolved_address_with_status",
         lambda rpc_url, address, **_kw: ("contract", {"address": address}, True),
     )
     groups = {
         PRINCIPAL: {"deployer": DEPLOYER, "addresses": [PRINCIPAL, SIBLING]},
         SIBLING: {"deployer": DEPLOYER, "addresses": [PRINCIPAL, SIBLING]},
     }
-    payload = build_principal_labels(
-        _effective_permissions(),
-        resolved_control_graph=_graph(),
+    payload = build_principal_index(
+        _permission_index(),
+        resolution_graph=_graph(),
         rpc_url="http://rpc.example",
         protocol_deployer_groups=groups,
     )
@@ -184,12 +183,12 @@ def test_shared_deployer_lands_on_principal_without_org_label(monkeypatch):
 
 def test_shared_deployer_omitted_when_no_groups(monkeypatch):
     monkeypatch.setattr(
-        "services.policy.principal_enrichment.classify_resolved_address_with_status",
+        "services.policy.principal_index.classify_resolved_address_with_status",
         lambda rpc_url, address, **_kw: ("contract", {"address": address}, True),
     )
-    payload = build_principal_labels(
-        _effective_permissions(),
-        resolved_control_graph=_graph(),
+    payload = build_principal_index(
+        _permission_index(),
+        resolution_graph=_graph(),
         rpc_url="http://rpc.example",
         protocol_deployer_groups=None,
     )

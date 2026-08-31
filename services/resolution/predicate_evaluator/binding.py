@@ -9,11 +9,11 @@ from typing import TYPE_CHECKING, Any, cast
 from eth_utils.crypto import keccak
 
 from services.resolution.caller_sources import CALLER_SOURCES as _CALLER_SOURCES
-from services.static.contract_analysis_pipeline.predicate_types import (
+from services.static.static_analysis.predicate_types import (
     LeafPredicate,
     PredicateTree,
 )
-from services.static.contract_analysis_pipeline.shared import external_bool_leaf_is_gate_shape
+from services.static.static_analysis.shared import external_bool_leaf_is_gate_shape
 
 from .telemetry import _pass_live_read_memo, _state_var_lookup_key
 

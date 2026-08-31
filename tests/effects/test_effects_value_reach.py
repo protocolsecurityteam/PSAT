@@ -47,9 +47,7 @@ def test_balances_are_keyed_on_the_address_that_holds_them(db_session):
     p = _protocol(db_session, "reach-keying")
     impl = _contract(db_session, p.id, ADDR(0x2001))
     deployment = ADDR(0x2002)
-    _fn(
-        db_session, impl.id, name="withdraw", selector="0xbbbb0001", effect_targets=["S"], deployment_address=deployment
-    )
+    _fn(db_session, impl.id, name="withdraw", selector="0xbbbb0001", deployment_address=deployment)
     _balance(db_session, impl.id, 1_000.0)
     db_session.flush()
 
@@ -71,7 +69,6 @@ def test_two_implementations_behind_one_proxy_do_not_double_count(db_session):
             c.id,
             name=f"f{n}",
             selector=f"0xbbbb010{n}",
-            effect_targets=["S"],
             deployment_address=deployment,
         )
         _balance(db_session, c.id, 500.0)
@@ -90,7 +87,6 @@ def test_candidate_floor_and_holder_set_use_the_holding_address(db_session):
         impl.id,
         name="withdraw",
         selector="0xbbbb0201",
-        effect_targets=["S"],
         deployment_address=deployment,
     )
     _principal(db_session, fn.id, ADDR(0x2203))
@@ -124,7 +120,6 @@ def test_a_contract_with_no_balance_row_carries_no_floor_not_a_zero(db_session):
         impl.id,
         name="route",
         selector="0xbbbb0301",
-        effect_targets=["S"],
         deployment_address=deployment,
     )
     db_session.flush()
@@ -153,7 +148,6 @@ def test_a_priced_zero_balance_row_carries_a_floor_of_zero(db_session):
         impl.id,
         name="route",
         selector="0xbbbb0401",
-        effect_targets=["S"],
         deployment_address=deployment,
     )
     _balance(db_session, impl.id, 0.0)

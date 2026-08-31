@@ -12,7 +12,7 @@ def _base():
         contract_name="Vault",
         code_hash=None,
         source_hash=None,
-        analysis={
+        static_facts={
             "controller_tracking": [
                 {
                     "controller_id": "state:owner",

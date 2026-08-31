@@ -526,8 +526,8 @@ def _selector_for_signature(
     if isinstance(canonical, str) and "(" in canonical and canonical.endswith(")"):
         return "0x" + keccak(text=canonical).hex()[:8]
 
-    from services.policy.effective_permissions import _abi_signature
-    from services.static.contract_analysis_pipeline.predicate_artifacts import is_canonical_abi_signature
+    from services.policy.permission_index import _abi_signature
+    from services.static.static_analysis.predicate_artifacts import is_canonical_abi_signature
 
     # Fallback: string normalization of full_name. Correct for contract/interface
     # params (→ ``address``); enum/struct params can't be recovered from the name

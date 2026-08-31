@@ -31,7 +31,6 @@ def _erc20_op(ctx: ClaimContext, function: str, selector: str) -> MatchedEvidenc
 @claim_matcher(
     claim_id="erc20.approve",
     sentence="approves a token allowance (user operation)",
-    legacy_projection=None,
     consumer_family="user_plane",
 )
 def erc20_approve(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
@@ -41,7 +40,6 @@ def erc20_approve(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
 @claim_matcher(
     claim_id="erc20.transfer",
     sentence="transfers tokens (user operation)",
-    legacy_projection=None,
     consumer_family="user_plane",
 )
 def erc20_transfer(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
@@ -51,7 +49,6 @@ def erc20_transfer(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
 @claim_matcher(
     claim_id="erc20.transfer_from",
     sentence="transfers tokens on behalf of another account (user operation)",
-    legacy_projection=None,
     consumer_family="user_plane",
 )
 def erc20_transfer_from(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
@@ -65,7 +62,6 @@ def _weth_gate(ctx: ClaimContext) -> bool:
 @claim_matcher(
     claim_id="weth.deposit",
     sentence="wraps ETH into the token (user deposit)",
-    legacy_projection=None,
     consumer_family="user_plane",
 )
 def weth_deposit(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
@@ -77,7 +73,6 @@ def weth_deposit(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
 @claim_matcher(
     claim_id="weth.withdraw",
     sentence="unwraps ETH from the token (user withdrawal)",
-    legacy_projection=None,
     consumer_family="user_plane",
 )
 def weth_withdraw(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
@@ -94,7 +89,6 @@ DELEGATE_CHANGED_TOPIC0 = abi_topic0("DelegateChanged(address,address,address)")
 @claim_matcher(
     claim_id="gov.delegate",
     sentence="delegates voting power (user operation)",
-    legacy_projection=None,
     consumer_family="user_plane",
 )
 def gov_delegate(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
@@ -127,7 +121,6 @@ def _lz_oapp_gate(ctx: ClaimContext) -> bool:
 @claim_matcher(
     claim_id="lz_oapp.set_peer",
     sentence="sets the trusted remote peer (LayerZero OApp configuration)",
-    legacy_projection=None,
     consumer_family="control_plane",
 )
 def lz_oapp_set_peer(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
@@ -139,7 +132,6 @@ def lz_oapp_set_peer(ctx: ClaimContext, function: str) -> MatchedEvidence | None
 @claim_matcher(
     claim_id="lz_oapp.set_delegate",
     sentence="sets the LayerZero endpoint delegate",
-    legacy_projection=None,
     consumer_family="control_plane",
 )
 def lz_oapp_set_delegate(ctx: ClaimContext, function: str) -> MatchedEvidence | None:

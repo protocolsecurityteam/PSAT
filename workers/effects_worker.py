@@ -1237,10 +1237,10 @@ class EffectsWorker(BaseWorker):
         rows = session.query(EffectiveFunction).filter(EffectiveFunction.id.in_(by_fn)).all()
         labeled = 0
         for ef in rows:
-            merged = claims_bridge.merge_into_function(ef.claims, ef.effect_labels, by_fn.get(ef.id, ()))
+            merged = claims_bridge.merge_into_function(ef.claims, by_fn.get(ef.id, ()))
             if merged is None:
                 continue
-            ef.claims, ef.effect_labels = merged
+            ef.claims = merged
             labeled += 1
         return labeled
 
@@ -1303,7 +1303,6 @@ class EffectsWorker(BaseWorker):
                 continue
 
             from services.assessment import add_effects, effect_matches_by_function
-            from services.static.claims import legacy_projections
 
             assessment = add_effects(
                 assessment,
@@ -1312,20 +1311,12 @@ class EffectsWorker(BaseWorker):
             )
             store_artifact(session, contract.job_id, "assessment", data=assessment)
             projected_claims = effect_matches_by_function(assessment)
-            label_projection = legacy_projections()
             for row in rows:
                 if row.contract_id != contract_id:
                     continue
                 signature = row.abi_signature or row.function_name
                 row_claims = projected_claims.get(signature, [])
                 row.claims = row_claims
-                labels = set(row.effect_labels or [])
-                labels.update(
-                    label
-                    for claim in row_claims
-                    if (label := label_projection.get(str(claim.get("claim_id")))) is not None
-                )
-                row.effect_labels = sorted(labels)
             updated += 1
         if ownerless:
             record_stage_metric("assessment_owner_missing", ownerless)

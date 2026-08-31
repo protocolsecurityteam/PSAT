@@ -12,7 +12,7 @@ from sqlalchemy import func, select, text, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
-from db.contract_materializations import find_by_address, hydrate_tracking_plan
+from db.contract_materializations import find_by_address, hydrate_observation_plan
 from db.models import (
     Contract,
     ContractSummary,
@@ -24,13 +24,12 @@ from db.models import (
     WatchedProxy,
 )
 from db.storage import StorageContentAbsent, StorageContentIncomplete
-from schemas.control_tracking import MonitoredContractType
+from schemas.observations import MonitoredContractType
 from services.clients.rpc import rpc_request
 from services.governance.control_graph_types import reconcile_control_graph_types
 from services.monitoring.chain_rpc import chain_id_for, rpc_for_chain
 from services.monitoring.event_topics import extract_governance_topics
-from services.monitoring.polling_plan import build_polling_plan
-from services.monitoring.tracking_plan_state import (
+from services.monitoring.observation_plan_state import (
     CONTRACT_NOT_ANALYZED,
     HEAD_NOT_DETERMINED_REASON,
     MATERIALIZATION_LOOKUP_FAILED,
@@ -39,9 +38,10 @@ from services.monitoring.tracking_plan_state import (
     PLAN_NOT_READABLE,
     PLAN_OBJECT_ABSENT,
     POLLING_PLAN_KEY,
-    merge_stale_tracking_plan,
+    merge_stale_observation_plan,
     preserve_scan_plane_facts,
 )
+from services.monitoring.polling_plan import build_polling_plan
 from utils.chains import chain_enabled
 
 logger = logging.getLogger(__name__)
@@ -355,14 +355,14 @@ def enroll_protocol_contracts(
         # feeds the watcher's event dispatcher, and the raw plan feeds
         # ``build_polling_plan`` which projects pollable getters /
         # storage slots from the analyzer's tracked_controllers.
-        tracked_topics, tracking_plan, plan_not_determined = _load_tracking_plan_artifacts(session, contract)
+        tracked_topics, observation_plan, plan_not_determined = _load_observation_plan_artifacts(session, contract)
         if plan_not_determined:
             plan_not_determined_counts[plan_not_determined] = plan_not_determined_counts.get(plan_not_determined, 0) + 1
 
         polling_plan = build_polling_plan(
             contract_type=contract_type,
             proxy_type=contract.proxy_type,
-            tracking_plan=tracking_plan,
+            observation_plan=observation_plan,
             tracked_topics=tracked_topics,
         )
 
@@ -385,7 +385,7 @@ def enroll_protocol_contracts(
             # and an empty watch list. Merge first — everything below derives
             # from the config, so the merged plan is what seeds the state and
             # decides whether this row still polls.
-            monitoring_config = merge_stale_tracking_plan(monitoring_config, existing.monitoring_config)
+            monitoring_config = merge_stale_observation_plan(monitoring_config, existing.monitoring_config)
             # Independent of the plan state: what this row's scanner never
             # covered stays recorded across every rebuild of the config.
             monitoring_config = preserve_scan_plane_facts(monitoring_config, existing.monitoring_config)
@@ -633,16 +633,16 @@ def _determine_contract_type(
 _EVENT_BASED_PROXY_TYPES = {"eip1967", "eip1167", "eip1822"}
 
 
-def _load_tracking_plan_artifacts(
+def _load_observation_plan_artifacts(
     session: Session,
     contract: Contract,
 ) -> tuple[list[dict], dict | None, str | None]:
-    """Hydrate the analysis ``tracking_plan`` for *contract* once and
+    """Hydrate the analysis ``observation_plan`` for *contract* once and
     return the three things the enrollment path needs:
 
       * ``tracked_topics`` — per-contract event-topic specs the watcher
         dispatches on. Same shape as ``extract_governance_topics``.
-      * the raw ``tracking_plan`` dict — the polling-plan builder walks
+      * the raw ``observation_plan`` dict — the polling-plan builder walks
         ``tracked_controllers`` directly so it can read each entry's
         ``read_spec`` / ``polling_fallback`` without losing context.
       * ``not_determined`` — ``None`` when we read the plan and can therefore
@@ -681,7 +681,7 @@ def _load_tracking_plan_artifacts(
     if row is None:
         # ``find_by_address`` collapses three distinct facts into ``None``: no
         # materialization row exists, a row exists but is not status='ready',
-        # and a row exists at a superseded ``analysis_schema_version`` (its
+        # and a row exists at a superseded ``static_facts_schema_version`` (its
         # docstring: "reads as a miss so a bumped analyzer rebuilds rather
         # than serving a stale bundle"). None of the three is "we found out
         # what the plan says", so none of them may be persisted as an empty
@@ -691,17 +691,17 @@ def _load_tracking_plan_artifacts(
         # yet, and one INFO per contract per pass was 26% of a pipeline run's
         # log volume while saying the same thing every time.
         logger.debug(
-            "no current tracking_plan materialization; enrolling from the baseline registry only",
+            "no current observation_plan materialization; enrolling from the baseline registry only",
             extra={"address": contract.address, "chain": contract.chain},
         )
         return [], None, NO_CURRENT_MATERIALIZATION
 
     try:
-        # ``hydrate_tracking_plan`` keeps the same three states: a dict is
+        # ``hydrate_observation_plan`` keeps the same three states: a dict is
         # proven-present, ``None`` is proven-absent (the row stored no plan at
         # all), and ``StorageContentIncomplete`` is the read falling short.
         # Only the raise is a not-a-plan answer here.
-        plan = hydrate_tracking_plan(row)
+        plan = hydrate_observation_plan(row)
     except StorageContentIncomplete as exc:
         # Two different remedies, so two different tokens: an object the bucket
         # says it does not hold will read the same on every retry; a bucket that
@@ -710,7 +710,7 @@ def _load_tracking_plan_artifacts(
         # Degraded, not failing: enrollment continues on the baseline registry
         # and this handler returns rather than raising.
         logger.warning(
-            "tracking_plan is not determined; enrolling from the baseline registry only",
+            "observation_plan is not determined; enrolling from the baseline registry only",
             extra={
                 "address": contract.address,
                 "exc_type": type(exc).__name__,
@@ -720,10 +720,10 @@ def _load_tracking_plan_artifacts(
         )
         return [], None, token
     except Exception as exc:
-        # Schema drift in tracking_plan shouldn't block enrollment — the
+        # Schema drift in observation_plan shouldn't block enrollment — the
         # hand-rolled registry still catches the OZ/Safe/Timelock baseline.
         logger.warning(
-            "Failed to load tracking_plan for %s: %s",
+            "Failed to load observation_plan for %s: %s",
             contract.address,
             exc,
             extra={"exc_type": type(exc).__name__},
@@ -750,8 +750,8 @@ def _build_monitoring_config(
       * ``tracked_topics`` (a list, possibly empty) = the plan was read.
         A non-empty list is the witnessed plan; ``[]`` is the witnessed
         "read and named nothing" finding and may be relied on.
-      * ``tracking_plan_not_determined`` = the plan was NOT read; the reason
-        token from ``_load_tracking_plan_artifacts`` (or the enrollment
+      * ``observation_plan_not_determined`` = the plan was NOT read; the reason
+        token from ``_load_observation_plan_artifacts`` (or the enrollment
         path) says why. ``tracked_topics`` is then absent — we cannot speak
         about the plan.
 
@@ -763,7 +763,7 @@ def _build_monitoring_config(
 
     The builder never emits BOTH keys — it has no access to any earlier read.
     A persisted config carrying both is the staleness merge its caller applies
-    (``tracking_plan_state.merge_stale_tracking_plan``): topics from the last
+    (``observation_plan_state.merge_stale_observation_plan``): topics from the last
     plan we read, plus the reason we cannot re-read them now."""
     config: dict[str, Any] = {
         "watch_upgrades": contract_type == "proxy",
@@ -784,7 +784,7 @@ def _build_monitoring_config(
             config["watch_roles"] = True
 
     if plan_not_determined:
-        config["tracking_plan_not_determined"] = plan_not_determined
+        config["observation_plan_not_determined"] = plan_not_determined
     else:
         config["tracked_topics"] = list(tracked_topics or [])
         # Default-on the authority flag if any tracked event_type drives it.
@@ -1124,7 +1124,7 @@ def _enroll_controller_addresses(
             polling_plan = build_polling_plan(
                 contract_type=monitored_type,
                 proxy_type=None,
-                tracking_plan=None,
+                observation_plan=None,
                 tracked_topics=None,
             )
             # No analysis was ever run on this address, so nothing here has

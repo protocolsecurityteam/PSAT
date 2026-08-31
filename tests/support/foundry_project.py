@@ -1,6 +1,6 @@
 """Shared helper: scaffold a minimal Foundry project the static pipeline can
 compile. Used by the claims integration/matcher tests that drive
-``collect_contract_analysis_with_artifacts`` over a single hand-written source."""
+``collect_static_inputs`` over a single hand-written source."""
 
 from __future__ import annotations
 

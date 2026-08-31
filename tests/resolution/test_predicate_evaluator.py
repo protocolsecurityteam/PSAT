@@ -20,14 +20,14 @@ from services.resolution.predicate_evaluator import (  # noqa: E402
     _bind_callee_parameters,
     evaluate_tree,
 )
-from services.static.contract_analysis_pipeline.predicate_types import PredicateTree  # noqa: E402
-from services.static.contract_analysis_pipeline.predicates import (  # noqa: E402
+from services.static.static_analysis.predicate_types import PredicateTree  # noqa: E402
+from services.static.static_analysis.predicates import (  # noqa: E402
     build_predicate_tree,
 )
-from services.static.contract_analysis_pipeline.reentrancy_pause import (  # noqa: E402
+from services.static.static_analysis.reentrancy_pause import (  # noqa: E402
     apply_reentrancy_pause_pass,
 )
-from services.static.contract_analysis_pipeline.writer_gate import (  # noqa: E402
+from services.static.static_analysis.writer_gate import (  # noqa: E402
     apply_writer_gate_pass,
 )
 

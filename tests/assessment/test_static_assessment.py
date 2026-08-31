@@ -15,7 +15,6 @@ def _effect(signature: str, *, state_changing: bool, claims: list[dict] | None =
         "abi_signature": signature,
         "state_changing": state_changing,
         "state_writes": [],
-        "effect_targets": [],
         "claims": claims or [],
     }
 
@@ -92,7 +91,7 @@ def test_pause_claim_has_first_class_evidence_and_state_changing_victim() -> Non
         contract_name="Vault",
         code_hash=None,
         source_hash="0xsource",
-        analysis=analysis,
+        static_facts=analysis,
         effects=effects,
         predicate_trees=trees,
     )
@@ -118,7 +117,7 @@ def test_static_assessment_ids_are_deterministic() -> None:
         "contract_name": "Vault",
         "code_hash": None,
         "source_hash": "0xsource",
-        "analysis": analysis,
+        "static_facts": analysis,
         "effects": effects,
         "predicate_trees": trees,
     }
@@ -150,7 +149,7 @@ def test_matcher_failure_is_an_analysis_diagnostic_not_a_claim() -> None:
         contract_name="Vault",
         code_hash=None,
         source_hash="0xsource",
-        analysis=analysis,
+        static_facts=analysis,
         effects=effects,
         predicate_trees=trees,
     )
@@ -171,7 +170,7 @@ def test_complete_empty_detector_projects_false() -> None:
         contract_name="Vault",
         code_hash=None,
         source_hash="0xsource",
-        analysis=analysis,
+        static_facts=analysis,
         effects=effects,
         predicate_trees=trees,
     )

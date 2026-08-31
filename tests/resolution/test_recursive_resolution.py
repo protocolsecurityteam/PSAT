@@ -3,7 +3,7 @@ from typing import cast
 
 import pytest
 
-from schemas.resolved_control_graph import ResolvedGraphEdge, ResolvedGraphNode
+from schemas.resolution_graph import ResolutionEdge, ResolutionNode
 from services.discovery.classifier import ClassificationIncompleteError
 from services.resolution import recursive
 from services.resolution.recursive import (
@@ -48,7 +48,7 @@ def _stub_failed_node_name(monkeypatch):
     monkeypatch.setattr("services.resolution.recursive._contract_name_for_address", lambda address, chain_id=1: None)
 
 
-def _bundle(address: str, contract_name: str, *, snapshot: dict, effective_permissions: dict | None = None) -> dict:
+def _bundle(address: str, contract_name: str, *, snapshot: dict, permission_index: dict | None = None) -> dict:
     """Build an in-memory ``LoadedArtifacts`` for a contract."""
     plan = {
         "schema_version": "0.1",
@@ -64,12 +64,12 @@ def _bundle(address: str, contract_name: str, *, snapshot: dict, effective_permi
         }
     }
     bundle = {
-        "analysis": analysis,
-        "tracking_plan": plan,
+        "static_facts": analysis,
+        "observation_plan": plan,
         "snapshot": snapshot,
     }
-    if effective_permissions is not None:
-        bundle["effective_permissions"] = effective_permissions
+    if permission_index is not None:
+        bundle["permission_index"] = permission_index
     return bundle
 
 
@@ -416,9 +416,9 @@ def test_resolve_control_graph_recurses_to_contract_and_safe(monkeypatch):
     nodes = {node["address"]: node for node in graph["nodes"]}
     edges = {(edge["from_id"], edge["relation"], edge["to_id"]) for edge in graph["edges"]}
 
-    assert nodes[root_address]["analyzed"] is True
+    assert nodes[root_address]["analysis_state"] == "analyzed"
     assert nodes[root_address]["contract_name"] == "Vault"
-    assert nodes[authority_address]["analyzed"] is True
+    assert nodes[authority_address]["analysis_state"] == "analyzed"
     assert nodes[authority_address]["contract_name"] == "RolesAuthority"
     assert nodes[safe_address]["resolved_type"] == "safe"
     assert nodes[signer_address]["resolved_type"] == "eoa"
@@ -510,7 +510,7 @@ def test_resolve_control_graph_dedupes_recursive_contract_addresses(monkeypatch)
         max_depth=2,
     )
 
-    analyzed_addresses = [node["address"] for node in graph["nodes"] if node.get("analyzed")]
+    analyzed_addresses = [node["address"] for node in graph["nodes"] if node.get("analysis_state") == "analyzed"]
     assert analyzed_addresses.count(shared_address) == 1
     assert materialize_calls == [shared_address]
 
@@ -531,7 +531,7 @@ def test_resolve_control_graph_recurses_into_role_holder_contracts(monkeypatch):
             "block_number": 1,
             "controller_values": {},
         },
-        effective_permissions={
+        permission_index={
             "schema_version": "0.1",
             "contract_address": root_address,
             "contract_name": "Vault",
@@ -621,7 +621,7 @@ def test_resolve_control_graph_recurses_into_role_holder_contracts(monkeypatch):
 # test no longer has a code path to exercise.
 
 
-def test_materialize_contract_artifacts_builds_effective_permissions(monkeypatch):
+def test_materialize_contract_artifacts_builds_permission_index(monkeypatch):
     address = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
     monkeypatch.setattr(
@@ -638,7 +638,7 @@ def test_materialize_contract_artifacts_builds_effective_permissions(monkeypatch
         lambda *_args, **_kwargs: None,
     )
     monkeypatch.setattr(
-        "services.resolution.recursive.collect_contract_analysis_with_artifacts",
+        "services.resolution.recursive.collect_static_inputs",
         lambda _project_dir: (
             {
                 "subject": {"address": address, "name": "TestContract"},
@@ -649,7 +649,7 @@ def test_materialize_contract_artifacts_builds_effective_permissions(monkeypatch
         ),
     )
     monkeypatch.setattr(
-        "services.resolution.recursive.build_control_tracking_plan",
+        "services.resolution.recursive.build_observation_plan",
         lambda _analysis: {
             "schema_version": "0.1",
             "contract_address": address,
@@ -659,7 +659,7 @@ def test_materialize_contract_artifacts_builds_effective_permissions(monkeypatch
         },
     )
     monkeypatch.setattr(
-        "services.resolution.recursive.build_control_snapshot",
+        "services.resolution.recursive.observe_controllers",
         lambda _plan, _rpc, **_kw: {
             "schema_version": "0.1",
             "contract_address": address,
@@ -670,7 +670,7 @@ def test_materialize_contract_artifacts_builds_effective_permissions(monkeypatch
     )
     marker = {"schema_version": "0.1", "functions": []}
     monkeypatch.setattr(
-        "services.resolution.recursive._build_effective_permissions",
+        "services.resolution.recursive._build_permission_index",
         lambda _analysis, _snapshot: marker,
     )
 
@@ -681,7 +681,7 @@ def test_materialize_contract_artifacts_builds_effective_permissions(monkeypatch
         chain="ethereum",
     )
 
-    assert loaded.get("effective_permissions") is marker
+    assert loaded.get("permission_index") is marker
 
 
 # ---------------------------------------------------------------------------
@@ -747,13 +747,13 @@ def test_materialize_contract_artifacts_resolved_proxy_retargets_to_impl(monkeyp
         return "Impl", analysis, plan, None
 
     monkeypatch.setattr(recursive, "_materialize_with_cross_process_cache", fake_cache)
-    monkeypatch.setattr(recursive, "build_control_snapshot", lambda _plan, _rpc, **_kw: {"controllers": []})
-    monkeypatch.setattr(recursive, "_build_effective_permissions", lambda _a, _s: {"functions": []})
+    monkeypatch.setattr(recursive, "observe_controllers", lambda _plan, _rpc, **_kw: {"controllers": []})
+    monkeypatch.setattr(recursive, "_build_permission_index", lambda _a, _s: {"functions": []})
 
     loaded = _materialize_contract_artifacts(proxy, "http://rpc.example", workspace_prefix="t")
 
     assert captured["effective_address"] == impl  # retargeted to the logic contract
-    assert loaded["analysis"]["subject"]["address"] == impl
+    assert loaded["static_facts"]["subject"]["address"] == impl
 
 
 def test_materialize_contract_artifacts_swallows_generic_classify_error(monkeypatch):
@@ -776,20 +776,20 @@ def test_materialize_contract_artifacts_swallows_generic_classify_error(monkeypa
         return "AsIs", analysis, plan, None
 
     monkeypatch.setattr(recursive, "_materialize_with_cross_process_cache", fake_cache)
-    monkeypatch.setattr(recursive, "build_control_snapshot", lambda _plan, _rpc, **_kw: {"controllers": []})
-    monkeypatch.setattr(recursive, "_build_effective_permissions", lambda _a, _s: None)
+    monkeypatch.setattr(recursive, "observe_controllers", lambda _plan, _rpc, **_kw: {"controllers": []})
+    monkeypatch.setattr(recursive, "_build_permission_index", lambda _a, _s: None)
 
     loaded = _materialize_contract_artifacts(addr, "http://rpc.example", workspace_prefix="t")
 
     # Swallowed → analyze the address as-is (no retarget, no raise).
     assert captured["effective_address"] == addr
-    assert loaded["analysis"]["subject"]["address"] == addr
+    assert loaded["static_facts"]["subject"]["address"] == addr
 
 
 def test_resolve_control_graph_no_impl_proxy_controller_is_degraded(monkeypatch):
     """#122 end-to-end: a nested controller that classifies as a no-impl proxy
-    (eip2535 diamond) becomes a degraded analyzed=False node with a
-    materialize_error — the shell's empty guard set never enters nested_artifacts,
+    (eip2535 diamond) becomes a degraded analysis_state=None node with a
+    materialize_error — the shell's empty guard set never enters materialized_contracts,
     so nothing it would guard is reported permissionless."""
     root_address = "0x1111111111111111111111111111111111111111"
     diamond_address = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -832,7 +832,7 @@ def test_resolve_control_graph_no_impl_proxy_controller_is_degraded(monkeypatch)
     )
 
     nodes = {node["address"]: node for node in graph["nodes"]}
-    assert nodes[diamond_address]["analyzed"] is False
+    assert nodes[diamond_address]["analysis_state"] != "analyzed"
     assert "materialize_error" in nodes[diamond_address]["details"]
     assert "implementation unresolved" in str(nodes[diamond_address]["details"]["materialize_error"])
     assert diamond_address not in nested  # shell never entered the artifact map
@@ -878,7 +878,7 @@ def test_resolve_control_graph_skips_failed_nested_materialization(monkeypatch):
     )
 
     nodes = {node["address"]: node for node in graph["nodes"]}
-    assert nodes[nested_address]["analyzed"] is False
+    assert nodes[nested_address]["analysis_state"] != "analyzed"
     assert "materialize_error" in nodes[nested_address]["details"]
 
 
@@ -948,8 +948,8 @@ def test_add_edge_dedupes_nested_safe_owner_edges_across_sources():
         "notes": ["path=role"],
     }
 
-    _add_edge(edges, cast(ResolvedGraphEdge, first))
-    _add_edge(edges, cast(ResolvedGraphEdge, second))
+    _add_edge(edges, cast(ResolutionEdge, first))
+    _add_edge(edges, cast(ResolutionEdge, second))
 
     assert len(edges) == 1
     merged = next(iter(edges.values()))
@@ -969,7 +969,7 @@ def test_resolve_control_graph_skips_self_referential_role_principal_edges(monke
             "block_number": 1,
             "controller_values": {},
         },
-        effective_permissions={
+        permission_index={
             "schema_version": "0.1",
             "contract_address": root_address,
             "contract_name": "Voting",
@@ -1190,9 +1190,9 @@ def test_resolve_control_graph_parallel_handles_partial_materialize_failure(monk
     assert bad_addr in by_addr
     # Failed sibling is recorded as unanalyzed with the materialize_error
     # surfaced on details — same surface as the prior sequential code path.
-    assert by_addr[bad_addr]["analyzed"] is False
+    assert by_addr[bad_addr]["analysis_state"] != "analyzed"
     assert "materialize_error" in by_addr[bad_addr]["details"]
-    assert by_addr[good_addr]["analyzed"] is True
+    assert by_addr[good_addr]["analysis_state"] == "analyzed"
     assert good_addr in nested
     assert bad_addr not in nested
 
@@ -1217,7 +1217,7 @@ def test_unreadable_materialization_does_not_become_an_empty_analysis(monkeypatc
     monkeypatch.setattr(cm, "materialize_or_wait", lambda **_kw: SimpleNamespace(contract_name="C"))
     monkeypatch.setattr(
         cm,
-        "hydrate_analysis",
+        "hydrate_static_facts",
         lambda _row: (_ for _ in ()).throw(StorageContentNotDetermined("bucket unreachable")),
     )
 
@@ -1261,7 +1261,7 @@ def test_storage_not_determined_escapes_resolve_control_graph(monkeypatch, fanou
     altitude where the BFS actually handles it.
 
     ``_materialize_for_pending`` wraps every failure into ``(None, exc)``, and
-    the caller turns that into a node stamped ``analyzed=False`` and walks on —
+    the caller turns that into a node stamped ``analysis_state=None`` and walks on —
     so ``resolve_control_graph`` returned NORMALLY on an unreachable bucket and
     no stage above it ever saw a failure to retry. A graph that returns
     normally is a finished answer about the protocol's control chain, assembled
@@ -1294,7 +1294,7 @@ def test_storage_not_determined_escapes_resolve_control_graph(monkeypatch, fanou
         if address == unread_addr:
             raise StorageContentNotDetermined(
                 "bucket unreachable",
-                not_determined={"analysis_blob_key": "connection refused"},
+                not_determined={"static_facts_blob_key": "connection refused"},
             )
         return good_bundle
 
@@ -1405,9 +1405,9 @@ def test_an_ordinary_materialize_failure_still_degrades_one_node(monkeypatch):
     )
 
     by_addr = {(node.get("details") or {}).get("address"): node for node in graph["nodes"]}
-    assert by_addr[bad_addr]["analyzed"] is False
+    assert by_addr[bad_addr]["analysis_state"] != "analyzed"
     assert "forge build failed" in str(by_addr[bad_addr]["details"]["materialize_error"])
-    assert by_addr[good_addr]["analyzed"] is True
+    assert by_addr[good_addr]["analysis_state"] == "analyzed"
     assert bad_addr not in nested
 
 
@@ -1578,7 +1578,7 @@ def test_analyzed_timelock_keeps_its_type_and_delay(monkeypatch):
     )
     nodes = {node["address"]: node for node in graph["nodes"]}
 
-    assert nodes[timelock_address]["analyzed"] is True
+    assert nodes[timelock_address]["analysis_state"] == "analyzed"
     assert nodes[timelock_address]["resolved_type"] == "timelock"
     assert nodes[timelock_address]["details"]["delay"] == 259200
     assert nodes[plain_address]["resolved_type"] == "contract"
@@ -1592,11 +1592,17 @@ def test_generic_type_never_overwrites_a_specific_one():
 
     recursive._ensure_node(nodes, address=address, resolved_type="timelock", label="TL", depth=1, node_type="contract")
     recursive._ensure_node(
-        nodes, address=address, resolved_type="contract", label="TL", depth=0, node_type="contract", analyzed=True
+        nodes,
+        address=address,
+        resolved_type="contract",
+        label="TL",
+        depth=0,
+        node_type="contract",
+        analysis_state="analyzed",
     )
     node = nodes[f"address:{address}"]
     assert node["resolved_type"] == "timelock"
-    assert node["analyzed"] is True
+    assert node["analysis_state"] == "analyzed"
 
     # unknown must not overwrite a real answer either, and a specific type may
     # still replace the generic one (the direction that adds information).
@@ -1609,14 +1615,14 @@ def test_generic_type_never_overwrites_a_specific_one():
     assert nodes[f"address:{other}"]["resolved_type"] == "safe"
 
 
-def test_analysis_state_splits_the_analyzed_bool():
-    """``analyzed=False`` is four populations; ``analysis_state`` names which.
+def test_analysis_state_names_each_resolution_outcome():
+    """``analysis_state`` keeps distinct resolution outcomes.
 
     The counts quoted for this field
     — 1,183 analyzed / 1,236 not_analyzable / 28 attempt_failed / 29
     beyond_depth_horizon / 55 not-determined — are a RECOMPUTATION of
     ``_analysis_state`` over the node dicts in the 107 stored
-    resolved_control_graph artifacts, not a census of persisted values. The field
+    resolution_graph artifacts, not a census of persisted values. The field
     itself is ABSENT on all 2,531 of those artifact nodes and SQL NULL on all
     2,506 ``control_graph_nodes`` rows, because the column is newer than the last
     analysis run. So the numbers say what the producer WOULD emit per branch, and
@@ -1625,7 +1631,7 @@ def test_analysis_state_splits_the_analyzed_bool():
     """
     max_depth = 6
 
-    def node(**kw) -> ResolvedGraphNode:
+    def node(**kw) -> ResolutionNode:
         base: dict = {
             "id": "address:0x00",
             "address": "0x00",
@@ -1634,14 +1640,14 @@ def test_analysis_state_splits_the_analyzed_bool():
             "label": "n",
             "contract_name": None,
             "depth": 1,
-            "analyzed": False,
+            "analysis_state": None,
             "details": {},
             "artifacts": {},
         }
         base.update(kw)
-        return cast(ResolvedGraphNode, base)
+        return cast(ResolutionNode, base)
 
-    assert recursive._analysis_state(node(analyzed=True), max_depth) == "analyzed"
+    assert recursive._analysis_state(node(analysis_state="analyzed"), max_depth) == "analyzed"
     # Not an ANALYZABLE type — analysis was never applicable, so its absence
     # says nothing adverse. The token is ``not_analyzable``, never
     # ``not_a_contract``. A ``safe`` is the discriminating case, because a Safe
@@ -1716,7 +1722,7 @@ def test_resolved_graph_stamps_analysis_state_on_every_node(monkeypatch):
 
 
 def _role_principal_bundle(root_address: str, principal_address: str, resolved_type) -> dict:
-    """Root bundle whose effective_permissions grant role 1 to *principal_address*
+    """Root bundle whose permission_index grant role 1 to *principal_address*
     with the given ``resolved_type`` value PRESENT in the payload (the shape a
     policy-stage refresh feeds back in)."""
     return _bundle(
@@ -1729,7 +1735,7 @@ def _role_principal_bundle(root_address: str, principal_address: str, resolved_t
             "block_number": 1,
             "controller_values": {},
         },
-        effective_permissions={
+        permission_index={
             "schema_version": "0.1",
             "contract_address": root_address,
             "contract_name": "Vault",
@@ -1844,12 +1850,12 @@ def test_analysis_state_treats_fabricated_none_token_as_undetermined():
     ``_analysis_state`` must read it as undetermined, never as the positive
     ``not_analyzable`` claim — while a genuinely determined non-analyzable
     type still fires the sentinel."""
-    node_none = {"analyzed": False, "details": {}, "resolved_type": "None", "depth": 1}
-    node_eoa = {"analyzed": False, "details": {}, "resolved_type": "eoa", "depth": 1}
-    node_empty = {"analyzed": False, "details": {}, "resolved_type": "", "depth": 1}
-    assert recursive._analysis_state(cast(ResolvedGraphNode, node_none), 6) is None
-    assert recursive._analysis_state(cast(ResolvedGraphNode, node_empty), 6) is None
-    assert recursive._analysis_state(cast(ResolvedGraphNode, node_eoa), 6) == "not_analyzable"
+    node_none = {"analysis_state": None, "details": {}, "resolved_type": "None", "depth": 1}
+    node_eoa = {"analysis_state": None, "details": {}, "resolved_type": "eoa", "depth": 1}
+    node_empty = {"analysis_state": None, "details": {}, "resolved_type": "", "depth": 1}
+    assert recursive._analysis_state(cast(ResolutionNode, node_none), 6) is None
+    assert recursive._analysis_state(cast(ResolutionNode, node_empty), 6) is None
+    assert recursive._analysis_state(cast(ResolutionNode, node_eoa), 6) == "not_analyzable"
 
 
 def test_initial_graph_preseed_sanitizes_fabricated_none_type(monkeypatch):
@@ -1873,7 +1879,6 @@ def test_initial_graph_preseed_sanitizes_fabricated_none_type(monkeypatch):
                 "label": "role principal",
                 "contract_name": None,
                 "depth": 1,
-                "analyzed": False,
                 "analysis_state": "not_analyzable",
                 "details": {"address": stale_address},
                 "artifacts": {},
@@ -1899,7 +1904,7 @@ def test_initial_graph_preseed_sanitizes_fabricated_none_type(monkeypatch):
         rpc_url="http://rpc.example",
         chain_id=1,
         max_depth=3,
-        initial_graph=cast(recursive.ResolvedControlGraph, initial_graph),
+        initial_graph=cast(recursive.ResolutionGraph, initial_graph),
     )
 
     nodes = {node["address"]: node for node in graph["nodes"]}

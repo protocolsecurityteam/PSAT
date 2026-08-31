@@ -8,7 +8,7 @@ valid and common).
 
 :func:`attach_claims_to_effects` merges that artifact back onto the ``effects``
 artifact's per-function records. The policy stage already carries ``effects``
-end to end, so claims reach ``build_effective_permissions`` with no new
+end to end, so claims reach ``build_permission_index`` with no new
 artifact plumbing. Both functions fail soft on a degraded (errored) artifact.
 """
 
@@ -19,7 +19,7 @@ from typing import Any, Literal
 
 from .context import ClaimContext
 from .matchers import discover
-from .registry import emit_claim, legacy_projections, registry, resolve_claim_precedence
+from .registry import emit_claim, registry, resolve_claim_precedence
 from .types import SCHEMA_VERSION, EffectMatch, MatchAnalysis, MatchDiagnostic, MatchOmission, MatchResults
 
 logger = logging.getLogger(__name__)
@@ -187,57 +187,3 @@ def attach_claims_to_effects(effects: Any, claims_artifact: Any) -> None:
             abi_selector = abi_selectors.get(signature)
             if isinstance(abi_selector, str) and abi_selector.startswith("0x"):
                 record["abi_selector"] = abi_selector
-
-
-def project_effect_labels(effects: Any) -> None:
-    """Rewrite each function's legacy ``effect_labels`` as the union of the
-    retained fact-tier labels already on the record (value-flow / selector
-    facts, sink-kind capabilities, body external calls) and the registry
-    ``legacy_projection`` of every claim on the function, then refresh the
-    action summary. Runs after :func:`attach_claims_to_effects`; a no-op on a
-    degraded artifact or a record without claims.
-
-    An ``upgrade.implementation`` claim suppresses the standalone
-    ``delegatecall_execution`` emphasis on the delegatecall sink it explains
-    (the sink IS the upgrade mechanism, not a separate capability).
-    """
-    if not isinstance(effects, dict):
-        return
-    functions = effects.get("functions")
-    if not isinstance(functions, dict):
-        return
-    # Deferred so importing the claims package never pulls in the static
-    # pipeline (the module that defines this summary imports the claims
-    # package at build time).
-    from ..contract_analysis_pipeline.summaries import _action_summary
-
-    projections = legacy_projections()
-    for record in functions.values():
-        if not isinstance(record, dict):
-            continue
-        labels = set(record.get("effect_labels") or [])
-        upgrade_explains_delegatecall = False
-        for claim in record.get("claims") or []:
-            if not isinstance(claim, dict):
-                continue
-            claim_id = claim.get("claim_id")
-            if not isinstance(claim_id, str):
-                continue
-            projected = projections.get(claim_id)
-            if projected:
-                labels.add(projected)
-            if claim_id == "upgrade.implementation":
-                witness = claim.get("witness") or {}
-                if isinstance(witness, dict) and witness.get("explained_delegatecall_sink_ids"):
-                    upgrade_explains_delegatecall = True
-        if upgrade_explains_delegatecall:
-            labels.discard("delegatecall_execution")
-        # ``external_contract_call`` is the lowest-value fact (a body external
-        # call exists, incl. SafeMath library calls); it stays only when no more
-        # specific label explains the function, mirroring the build-time
-        # downgrade so a claim never co-renders with the bare-call fact.
-        if labels - {"external_contract_call"}:
-            labels.discard("external_contract_call")
-        ordered = sorted(labels)
-        record["effect_labels"] = ordered
-        record["action_summary"] = _action_summary(ordered, list(record.get("effect_targets") or []))

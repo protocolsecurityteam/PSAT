@@ -2,7 +2,7 @@
 
 Compiles each corpus contract with Slither and runs the exact production static
 label sequence, then flattens the result into deterministic
-``(contract, address, function, selector, effect_labels, claims)`` tuples for the
+``(contract, address, function, selector, claims)`` tuples for the
 A/B golden gate in ``tests/static/test_label_corpus.py`` and the per-family assertions in
 ``tests/static/test_claims_behavior_families.py``. It has no import-time side effects.
 
@@ -15,8 +15,7 @@ installs — so the gate runs (never skips) in the default suite.
 The golden format carries a per-function ``claims`` list of
 ``{claim_id, tier, witness}`` records, so the gate pins the Plane-1
 ``(contract, selector, claim_id, tier)`` tuples alongside the legacy
-``effect_labels``. A matcher edit that silently mints or drops a claim on a
-corpus function fails the gate.
+A matcher edit that silently mints or drops a claim on a corpus function fails the gate.
 
 The ``witness`` is pinned in full. It was not, and that made every field INSIDE a
 witness invisible to this gate: a producer could move a destination from proven
@@ -53,16 +52,16 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from services.static.claims import attach_claims_to_effects
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 GOLDEN_PATH = REPO_ROOT / "tests" / "fixtures" / "label_corpus" / "golden.json"
 
 # 4: ``claims[].witness`` and ``predicate_tree`` pinned per function.
-# 5: per-function ``action_summary`` pinned — the PROSE copy of the labels, which a
-# narrowed structured witness does not move.
 # 6: the amount-record identity (``amount_record_*``) and the W2 ordering witness
 # (``record_ordering``) pinned per flow — the substrate the self-service payout
 # join reads. Until these were pinned a zero-diff said nothing about them.
-GOLDEN_SCHEMA_VERSION = 6
+GOLDEN_SCHEMA_VERSION = 7
 
 # Frozen fixture corpus for the effect-labels A/B golden gate. Every entry is a
 # small synthetic source that reproduces one real-world claim SHAPE — either a
@@ -372,11 +371,11 @@ def _compile_subject(entry: dict[str, Any], workdir: Path):
 
 def _run_static_sequence(slither: Any, entry: dict[str, Any]):
     from services.static.claims import build_claims
-    from services.static.contract_analysis_pipeline.effects import build_effects
-    from services.static.contract_analysis_pipeline.predicate_artifacts import (
+    from services.static.static_analysis.effects import build_effects
+    from services.static.static_analysis.predicate_artifacts import (
         build_predicate_artifacts_with_pause_info,
     )
-    from services.static.contract_analysis_pipeline.shared import _select_subject_contract
+    from services.static.static_analysis.shared import _select_subject_contract
 
     subject = _select_subject_contract(slither, entry["name"])
     if subject is None:
@@ -476,8 +475,7 @@ def _predicate_tree_record(tree: Any) -> dict[str, Any]:
     function with a real caller gate whose tree the extractor never built reads
     from every consumer as *unguarded*. Pinning presence here is what lets a
     corpus fixture of that class go red when the extractor starts finding the
-    gate; ``effect_labels``, ``claims`` and ``value_flows`` all stay identical
-    across exactly that fix.
+    gate; ``claims`` and ``value_flows`` stay identical across exactly that fix.
     """
     if tree is None:
         return {"present": False}
@@ -565,11 +563,9 @@ def extract_contract(
 def _compile_and_attach(entry: dict[str, Any], workdir: Path):
     """Compile one corpus contract and run the static plane's attach/project
     steps, returning ``(subject, effects, predicate_trees)``."""
-    from services.static.claims import attach_claims_to_effects, project_effect_labels
 
     subject, effects, predicate_trees, claims_artifact = _compile_subject(entry, workdir)
     attach_claims_to_effects(effects, claims_artifact)
-    project_effect_labels(effects)
     return subject, effects, predicate_trees
 
 
@@ -591,15 +587,6 @@ def _flatten_record(
             {
                 "full_name": full_name,
                 "selector": selector,
-                "effect_labels": sorted(info.get("effect_labels") or []),
-                # The PROSE COPY of the labels/targets, and the version a reader
-                # quotes (``summaries._action_summary``). Pinned because a witness
-                # narrowed in the structured plane leaves this sentence intact: the
-                # corpus already holds functions whose ``destination_kind`` is
-                # ``not_determined`` while this string says "Executes arbitrary
-                # external calldata from the contract.", and the gate could see
-                # only the former. Empty string, never None, so presence is uniform.
-                "action_summary": str(info.get("action_summary") or ""),
                 # Plane-1 claims: claim_id, tier AND the full witness. The
                 # witness is where the evidence lives — which parameter a call
                 # target bound to, which gate corroborated a selector, whether a
@@ -669,10 +656,6 @@ def _flatten_record(
                     ),
                     key=lambda s: (s["target"], s["origin"]),
                 ),
-                # The persisted compatibility display targets
-                # (``EffectiveFunction.effect_targets``): a resolved head changes
-                # this user-visible string, so pin it too.
-                "effect_targets": sorted(str(t) for t in (info.get("effect_targets") or [])),
                 # Plane-0 guard evidence. Keyed by the function's full name, the
                 # same key ``predicate_trees["trees"]`` uses.
                 "predicate_tree": _predicate_tree_record(trees.get(full_name)),

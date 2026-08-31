@@ -86,7 +86,6 @@ def _protocol(session, addresses: list[str]):
             function_name="withdraw",
             selector=SELECTOR,
             authority_public=False,
-            effect_targets=["slot0"],
         )
         session.add(fn)
         session.flush()

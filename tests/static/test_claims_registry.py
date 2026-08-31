@@ -20,7 +20,6 @@ import pytest
 import services.effects.claims_bridge
 import services.static.cross_contract  # noqa: F401
 from services.static.claims import (
-    CONSUMER_REFERENCED_CLAIM_IDS,
     ClaimContext,
     EffectMatch,
     MatchedEvidence,
@@ -29,7 +28,6 @@ from services.static.claims import (
     build_claims,
     emit_claim,
     is_registered,
-    legacy_projections,
     register,
     registry,
     resolve_claim_precedence,
@@ -61,7 +59,6 @@ def _facts(*, with_creation: bool = True) -> dict:
                 "function": "deploy()",
                 "selector": "0x775c300c",
                 "sinks": deploy_sinks,
-                "effect_labels": ["contract_deployment"] if with_creation else [],
             },
             "ping()": {
                 "function": "ping()",
@@ -75,7 +72,6 @@ def _facts(*, with_creation: bool = True) -> dict:
                         "selector": None,
                     }
                 ],
-                "effect_labels": [],
             },
         },
     }
@@ -91,9 +87,7 @@ def test_registry_populated_by_autodiscovery():
     assert is_registered("contract_deployment")
     entry = registry()["contract_deployment"]
     assert entry.sentence.strip()
-    assert entry.legacy_projection == "contract_deployment"
     assert entry.consumer_family == "exec"
-    assert legacy_projections()["contract_deployment"] == "contract_deployment"
 
 
 def test_registry_view_is_read_only():
@@ -139,7 +133,6 @@ def test_register_enforces_entry_contract(mutate, match):
         sentence="a sentence",
         gate=lambda _ctx: True,
         trigger=lambda _ctx, _fn: None,
-        legacy_projection=None,
         consumer_family="control_plane",
     )
     with pytest.raises((ValueError, TypeError), match=match):
@@ -153,7 +146,6 @@ def test_register_rejects_duplicate():
         sentence="dup",
         gate=lambda _ctx: True,
         trigger=lambda _ctx, _fn: None,
-        legacy_projection=None,
         consumer_family="control_plane",
     )
     register(entry)
@@ -179,7 +171,6 @@ def test_claim_context_accessors():
     assert ctx.function_names() == {"deploy", "ping"}
     assert ctx.sink_ids("deploy()", "contract_creation") == ["deploy():sink0:contract_creation:Child"]
     assert ctx.sink_ids("ping()", "contract_creation") == []
-    assert ctx.effect_labels("deploy()") == ["contract_deployment"]
     assert ctx.selector("deploy()") == "0x775c300c"
     assert ctx.canonical_signature("deploy()") == "deploy()"
     assert ctx.predicate_tree("deploy()") is not None
@@ -191,7 +182,6 @@ def test_claim_context_tolerates_degraded_effects():
     ctx = ClaimContext(contract=None, effects={"schema_version": "semantic", "error": "boom"}, predicate_trees=None)
     assert ctx.function_signatures() == []
     assert ctx.sinks("anything()") == []
-    assert ctx.effect_labels("anything()") == []
     assert ctx.selector("anything()") == ""
     assert ctx.canonical_signature("anything()") is None
 
@@ -249,7 +239,6 @@ def test_build_claims_isolates_a_failing_matcher():
         sentence="always explodes",
         gate=lambda _ctx: True,
         trigger=_boom,
-        legacy_projection=None,
         consumer_family="control_plane",
     )
     register(entry)
@@ -259,16 +248,6 @@ def test_build_claims_isolates_a_failing_matcher():
         _REGISTRY.pop("test.raising_matcher", None)
     assert artifact["functions"]["deploy()"][0]["claim_id"] == "contract_deployment"
     assert all(c["claim_id"] != "test.raising_matcher" for c in artifact["functions"]["deploy()"])
-
-
-# ---------------------------------------------------------------------------
-# Consumer-coverage invariant (registry-side)
-# ---------------------------------------------------------------------------
-
-
-def test_consumer_referenced_ids_are_subset_of_registry():
-    build_claims(None, _facts(with_creation=False), {})  # ensure discovery ran
-    assert CONSUMER_REFERENCED_CLAIM_IDS <= set(registry())
 
 
 # The produced-side half of the coverage invariant: registry ids must

@@ -59,7 +59,7 @@ PIPELINE_SERVICE_GLOBS: tuple[str, ...] = (
     "services/scoring/distill/*.py",
     "services/discovery/**/*.py",
     "services/policy/*.py",
-    "services/static/contract_analysis_pipeline/**/*.py",
+    "services/static/static_analysis/**/*.py",
     "services/resolution/**/*.py",
     "services/monitoring/balance_reads.py",
 )
@@ -84,7 +84,7 @@ ALLOW_LIST: dict[str, dict[int, str]] = {
         # doesn't change the job's stage output. record_degraded would
         # mislead callers of /api/jobs/{id}/errors into thinking the
         # reanalysis was degraded.
-        1119: "Notifier side-effect; reanalysis already completed before this fired.",
+        923: "Notifier side-effect; reanalysis already completed before this fired.",
     },
     "workers/effects_worker.py": {
         # Fork-close cleanup: the anvil subprocess close failing is a resource

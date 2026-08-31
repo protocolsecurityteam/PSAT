@@ -41,7 +41,7 @@ from db.models import (
     ProxyUpgradeEvent,
     WatchedProxy,
 )
-from schemas.control_tracking import MonitoredContractType
+from schemas.observations import MonitoredContractType
 from services.monitoring.reanalysis import (
     _REANALYSIS_WRITE_TARGETS,
     REANALYSIS_POLL_FIELDS_VENDORED,
@@ -227,7 +227,7 @@ def _make_monitored_contract(
     # assembly; default to the matching vendored entry so the storage-
     # slot poll dispatch actually reads the upgraded value.
     plan_proxy_type = proxy_type or ("eip1967" if contract_type == "proxy" else None)
-    tracking_plan: dict | None = None
+    observation_plan: dict | None = None
     if contract_type in ("regular", "pausable", "proxy"):
         tracked: list[dict] = [
             {
@@ -256,11 +256,11 @@ def _make_monitored_contract(
                     },
                 }
             )
-        tracking_plan = {"tracked_controllers": tracked}
+        observation_plan = {"tracked_controllers": tracked}
     polling_plan = build_polling_plan(
         contract_type=contract_type,
         proxy_type=plan_proxy_type,
-        tracking_plan=tracking_plan,
+        observation_plan=observation_plan,
         tracked_topics=None,
     )
 
@@ -562,13 +562,13 @@ class TestMaybeQueueReanalysis:
         db_session.refresh(old_job)
 
         store_source_files(db_session, old_job.id, {"src/A.sol": "contract A {}"})
-        from tests.support.policy_builders import _assessment, _minimal_contract_analysis
+        from tests.support.policy_builders import _assessment, _minimal_static_facts
 
         store_artifact(
             db_session,
             old_job.id,
             "assessment",
-            data=_assessment(analysis=_minimal_contract_analysis(address=addr.lower())),
+            data=_assessment(static_facts=_minimal_static_facts(address=addr.lower())),
         )
 
         # Create Contract + ContractSummary (required by find_completed_static_cache)

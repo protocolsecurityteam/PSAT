@@ -22,7 +22,7 @@ from db.models import (
     TvlSnapshot,
 )
 from schemas.api_responses import CompanyOverviewResponse, ReachBlock, TvlPoint
-from schemas.control_tracking import MonitoredContractType
+from schemas.observations import MonitoredContractType
 from services.clients.rpc import chain_id_for_chain_name
 from services.discovery.membership_gate import membership_state, witness_is_heuristic
 from services.discovery.probes import STATUS_NOT_ROUTABLE, STATUS_PROBED, UNRESOLVABLE_CHAIN_ID

@@ -32,7 +32,7 @@ pytest.importorskip("slither")
 from eth_utils.crypto import keccak
 from slither import Slither
 
-from services.static.contract_analysis_pipeline.effects import build_effects
+from services.static.static_analysis.effects import build_effects
 from tests.support.foundry_project import write_foundry_project
 
 pytestmark = pytest.mark.compile
@@ -388,10 +388,10 @@ def test_witness_joins_each_receiver_to_its_own_sink(tmp_path):
     direction). A per-flow list would leave the consumer unable to say which
     receiver carried which move; the map is keyed by sink id so the join is
     exact."""
-    from services.static.contract_analysis_pipeline import collect_contract_analysis_with_artifacts
+    from services.static.static_analysis import collect_static_inputs
 
     project = write_foundry_project(tmp_path, "Receivers", textwrap.dedent(_SRC).strip() + "\n")
-    _analysis, _trees, effects = collect_contract_analysis_with_artifacts(project)
+    _analysis, _trees, effects = collect_static_inputs(project)
     assert effects is not None
 
     record = effects["functions"]["payTwoTokens(address,uint256)"]

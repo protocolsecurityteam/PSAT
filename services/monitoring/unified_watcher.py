@@ -75,10 +75,10 @@ from services.monitoring.event_topics import (
     read_spec_is_scalar_slot,
     value_changed_event_type,
 )
+from services.monitoring.observation_plan_state import TRACKED_TOPICS_STALE_SINCE_KEY
 from services.monitoring.polling_plan import decode_poll_outcome, project_entry_return
 from services.monitoring.reanalysis import maybe_queue_reanalysis
 from services.monitoring.salience import assign_salience, stamp_signal_class
-from services.monitoring.tracking_plan_state import TRACKED_TOPICS_STALE_SINCE_KEY
 from services.monitoring.verify_status import (
     VERIFY_ERROR,
     VERIFY_NO_VALUE,
@@ -394,7 +394,7 @@ def _process_window(
         return []
 
     # Per-emitter topic0 → tracked-topic spec, built from the hydrated rows'
-    # monitoring_config (the analysis tracking_plan persisted at enrollment).
+    # monitoring_config (the analysis observation_plan persisted at enrollment).
     tracked_specs_by_emitter: dict[str, dict[str, dict]] = {}
     for addr, mc in mc_by_addr.items():
         topics_list = (mc.monitoring_config or {}).get("tracked_topics") or []
@@ -1454,8 +1454,7 @@ def _update_controller_value_rows(
     map, capability_resolver, enrollment, chat) with no ordering or dedup, and
     the resolution worker deletes-then-reinserts the whole per-contract set on
     each run, so an append-only key would multiply every existing read without
-    accumulating coherent history. The history planes are ``upgrade_events``
-    and the ``principal_history`` artifact.
+    accumulating coherent history. Upgrade history belongs to ``upgrade_events``.
     """
     if not mc.contract_id:
         return False

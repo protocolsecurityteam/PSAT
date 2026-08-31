@@ -4,7 +4,7 @@ Two layers, both driving the production stack (registry, gates, taint helper,
 ``build_claims``) — nothing under test is faked:
 
 * Slither-driven: each fixture under ``fixtures/contracts/claims_upgrade_exec``
-  is compiled by the real static pipeline (``collect_contract_analysis_with_artifacts``
+  is compiled by the real static pipeline (``collect_static_inputs``
   → Slither → effects → the claims phase) and the minted claims are asserted.
   Every registry entry gets a positive fixture, and the corpus carries the
   mandated counterexample + adversarial near-miss (non-proxy ``upgradeTo``; plain
@@ -57,11 +57,11 @@ def _pipeline_claim_records(tmp_path: Path, fixture_file: str, contract_name: st
     """Run the full static pipeline and return ``{signature: [claim dicts]}`` —
     the full rows, so a test can hold the WITNESS to account, not only the
     (claim_id, tier) pair a false verdict can hide behind."""
-    from services.static.contract_analysis_pipeline import collect_contract_analysis_with_artifacts
+    from services.static.static_analysis import collect_static_inputs
 
     source = (FIXTURES_DIR / fixture_file).read_text()
     project_dir = write_foundry_project(tmp_path, contract_name, source)
-    _analysis, _trees, effects = collect_contract_analysis_with_artifacts(project_dir)
+    _analysis, _trees, effects = collect_static_inputs(project_dir)
     assert effects is not None and "functions" in effects
     out: dict[str, list[dict]] = {}
     for signature, record in effects["functions"].items():
@@ -199,11 +199,11 @@ def test_the_manage_positive_still_names_its_two_parameters(tmp_path):
 
     ``manage`` reaches its call through the library and ``manageDirect`` calls
     directly, so the two bases are exercised on the same contract."""
-    from services.static.contract_analysis_pipeline import collect_contract_analysis_with_artifacts
+    from services.static.static_analysis import collect_static_inputs
 
     source = (FIXTURES_DIR / "boring_vault_manage.sol").read_text()
     project_dir = write_foundry_project(tmp_path, "BoringVault", source)
-    _analysis, _trees, effects = collect_contract_analysis_with_artifacts(project_dir)
+    _analysis, _trees, effects = collect_static_inputs(project_dir)
     assert effects is not None
     witnesses = {
         signature.split("(", 1)[0]: claim["witness"]
@@ -266,11 +266,11 @@ def test_batch_of_fixed_width_digests_is_a_near_miss_negative(tmp_path):
 
 def _binding_witnesses(tmp_path: Path) -> dict[str, dict]:
     """``{function name: exec.arbitrary witness}`` over the binding corpus."""
-    from services.static.contract_analysis_pipeline import collect_contract_analysis_with_artifacts
+    from services.static.static_analysis import collect_static_inputs
 
     source = (FIXTURES_DIR / "exec_arbitrary_binding.sol").read_text()
     project_dir = write_foundry_project(tmp_path, "ExecBinding", source)
-    _analysis, _trees, effects = collect_contract_analysis_with_artifacts(project_dir)
+    _analysis, _trees, effects = collect_static_inputs(project_dir)
     assert effects is not None
     out: dict[str, dict] = {}
     for signature, record in effects["functions"].items():
@@ -336,8 +336,8 @@ def test_the_state_var_destination_state_is_still_produced(tmp_path):
 
     from services.static.claims.context import ClaimContext
     from services.static.claims.matchers._taint import arbitrary_exec_taint
-    from services.static.contract_analysis_pipeline.effects import build_effects
-    from services.static.contract_analysis_pipeline.shared import _select_subject_contract
+    from services.static.static_analysis.effects import build_effects
+    from services.static.static_analysis.shared import _select_subject_contract
 
     source = (FIXTURES_DIR / "exec_arbitrary_binding.sol").read_text()
     project_dir = write_foundry_project(tmp_path, "ExecBinding", source)
@@ -550,7 +550,7 @@ def test_plain_transfer_is_taint_near_miss_negative(tmp_path):
 
 
 def _fn(selector: str, *, sinks: list[dict] | None = None) -> dict:
-    return {"selector": selector, "sinks": sinks or [], "effect_labels": []}
+    return {"selector": selector, "sinks": sinks or []}
 
 
 def _external_call_sink(name: str) -> list[dict]:

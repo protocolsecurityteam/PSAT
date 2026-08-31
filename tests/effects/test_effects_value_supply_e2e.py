@@ -281,8 +281,6 @@ def _fn_facts(signature: str, selector: str, *, names: list[str], flows: list[di
             "sinks": [],
             "state_writes": [],
             "value_flows": flows,
-            "effect_labels": [],
-            "effect_targets": [],
             "state_changing": True,
             "parameter_names": names,
         },

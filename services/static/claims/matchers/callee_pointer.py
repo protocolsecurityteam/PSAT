@@ -26,7 +26,6 @@ from . import _facts
 @claim_matcher(
     claim_id="callee_pointer.rotate",
     sentence="changes a code pointer that another entry point of this contract invokes at runtime",
-    legacy_projection="hook_update",
     consumer_family="control_plane",
 )
 def callee_pointer_rotate(ctx: ClaimContext, function: str) -> MatchedEvidence | None:

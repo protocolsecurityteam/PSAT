@@ -87,7 +87,7 @@ class TestProcessHappyPath:
 
         stored_names = [name for name, _ in ctx["store_calls"]]
         assert "assessment" in stored_names
-        assert not {"control_snapshot", "resolved_control_graph"} & set(stored_names)
+        assert not {"observation_batch", "resolution_graph"} & set(stored_names)
 
 
 # ---------------------------------------------------------------------------
@@ -110,12 +110,12 @@ class TestProxyAddressOverride:
             return _minimal_snapshot()
 
         _patch_all(monkeypatch)
-        monkeypatch.setattr("workers.resolution_worker.build_control_snapshot", fake_build)
+        monkeypatch.setattr("workers.resolution_worker.observe_controllers", fake_build)
 
         job = _job(request={"rpc_url": "https://rpc.example", "proxy_address": PROXY_ADDRESS})
         worker.process(session, cast(Any, job))
 
-        # The plan passed to build_control_snapshot should have proxy address
+        # The plan passed to observe_controllers should have proxy address
         assert captured_plan[0]["contract_address"] == PROXY_ADDRESS
 
 
@@ -311,7 +311,7 @@ class TestQueueDiscoveredContracts:
                 {
                     "address": CHILD_ADDRESS,
                     "node_type": "contract",
-                    "analyzed": True,
+                    "analysis_state": "analyzed",
                     "contract_name": "ChildContract",
                 },
             ]
@@ -339,7 +339,9 @@ class TestQueueDiscoveredContracts:
         monkeypatch.setattr("workers.resolution_worker.create_job", _fake_create)
         monkeypatch.setattr("services.discovery.perimeter.create_job", _fake_create)
 
-        graph = _resolved_graph(nodes=[{"address": CHILD_ADDRESS, "node_type": "contract", "analyzed": True}])
+        graph = _resolved_graph(
+            nodes=[{"address": CHILD_ADDRESS, "node_type": "contract", "analysis_state": "analyzed"}]
+        )
 
         job = _job(request={"rpc_url": "https://rpc.example", "chain": "ethereum"})
         worker._queue_discovered_contracts(session, cast(Any, job), graph, "https://rpc.example")
@@ -391,7 +393,9 @@ class TestQueueDiscoveredContractsCompanyInheritance:
         # bindings are stubbed and the assertions below are unchanged.
         monkeypatch.setattr("services.discovery.perimeter.create_job", fake_create_job)
 
-        graph = _resolved_graph(nodes=[{"address": CHILD_ADDRESS, "node_type": "contract", "analyzed": True}])
+        graph = _resolved_graph(
+            nodes=[{"address": CHILD_ADDRESS, "node_type": "contract", "analysis_state": "analyzed"}]
+        )
 
         job = _job(company=None, request={"rpc_url": "https://rpc.example", "parent_job_id": parent_id})
         worker._queue_discovered_contracts(session, cast(Any, job), graph, "https://rpc.example")
@@ -418,7 +422,9 @@ class TestQueueDiscoveredContractsCompanyInheritance:
         # bindings are stubbed and the assertions below are unchanged.
         monkeypatch.setattr("services.discovery.perimeter.create_job", fake_create_job)
 
-        graph = _resolved_graph(nodes=[{"address": CHILD_ADDRESS, "node_type": "contract", "analyzed": True}])
+        graph = _resolved_graph(
+            nodes=[{"address": CHILD_ADDRESS, "node_type": "contract", "analysis_state": "analyzed"}]
+        )
 
         job = _job(company="Direct Corp")
         worker._queue_discovered_contracts(session, cast(Any, job), graph, "https://rpc.example")
@@ -557,7 +563,9 @@ class TestQueueDiscoveredContractsParentChainEdgeCases:
         monkeypatch.setattr("workers.resolution_worker.create_job", _fake_create)
         monkeypatch.setattr("services.discovery.perimeter.create_job", _fake_create)
 
-        graph = _resolved_graph(nodes=[{"address": CHILD_ADDRESS, "node_type": "contract", "analyzed": True}])
+        graph = _resolved_graph(
+            nodes=[{"address": CHILD_ADDRESS, "node_type": "contract", "analysis_state": "analyzed"}]
+        )
         job = _job(company=None, request={"rpc_url": "https://rpc.example", "parent_job_id": str(uuid.uuid4())})
         worker._queue_discovered_contracts(session, cast(Any, job), graph, "https://rpc.example")
 
@@ -602,7 +610,9 @@ class TestQueueDiscoveredContractsParentChainEdgeCases:
         # bindings are stubbed and the assertions below are unchanged.
         monkeypatch.setattr("services.discovery.perimeter.create_job", fake_create_job)
 
-        graph = _resolved_graph(nodes=[{"address": CHILD_ADDRESS, "node_type": "contract", "analyzed": True}])
+        graph = _resolved_graph(
+            nodes=[{"address": CHILD_ADDRESS, "node_type": "contract", "analysis_state": "analyzed"}]
+        )
         job = _job(company=None, request={"rpc_url": "https://rpc.example", "parent_job_id": parent_id})
         worker._queue_discovered_contracts(session, cast(Any, job), graph, "https://rpc.example")
 
@@ -630,13 +640,13 @@ def test_dependency_emission_walks_check_trees(db_session_for_resolution):
     )
     provider_job.status = JobStatus.queued
     session.commit()
-    from tests.support.policy_builders import _assessment, _minimal_contract_analysis
+    from tests.support.policy_builders import _assessment, _minimal_static_facts
 
     store_artifact(
         session,
         provider_job.id,
         "assessment",
-        data=_assessment(analysis=_minimal_contract_analysis(address=provider_addr, name="Provider")),
+        data=_assessment(static_facts=_minimal_static_facts(address=provider_addr, name="Provider")),
     )
 
     depender_job = create_job(
@@ -1019,7 +1029,7 @@ class TestStructuralOwnershipPropagation:
         monkeypatch.setattr("workers.resolution_worker.create_job", _fake_create)
         monkeypatch.setattr("services.discovery.perimeter.create_job", _fake_create)
 
-        graph = _resolved_graph(nodes=[{"address": dep_addr, "node_type": "contract", "analyzed": True}])
+        graph = _resolved_graph(nodes=[{"address": dep_addr, "node_type": "contract", "analysis_state": "analyzed"}])
         ResolutionWorker()._queue_discovered_contracts(session, cast(Any, job), graph, "rpc")
 
         assert len(create_calls) == 1
@@ -1053,7 +1063,7 @@ class TestStructuralOwnershipPropagation:
         monkeypatch.setattr("workers.resolution_worker.create_job", _fake_create)
         monkeypatch.setattr("services.discovery.perimeter.create_job", _fake_create)
 
-        graph = _resolved_graph(nodes=[{"address": dep_addr, "node_type": "contract", "analyzed": True}])
+        graph = _resolved_graph(nodes=[{"address": dep_addr, "node_type": "contract", "analysis_state": "analyzed"}])
         ResolutionWorker()._queue_discovered_contracts(session, cast(Any, job), graph, "rpc")
 
         assert len(create_calls) == 1
@@ -1138,7 +1148,7 @@ class TestStructuralOwnershipPropagation:
         monkeypatch.setattr("workers.resolution_worker.create_job", _fake_create)
         monkeypatch.setattr("services.discovery.perimeter.create_job", _fake_create)
 
-        graph = _resolved_graph(nodes=[{"address": dep_addr, "node_type": "contract", "analyzed": True}])
+        graph = _resolved_graph(nodes=[{"address": dep_addr, "node_type": "contract", "analysis_state": "analyzed"}])
         ResolutionWorker()._queue_discovered_contracts(session, cast(Any, job), graph, "rpc")
 
         assert len(create_calls) == 1
@@ -1228,7 +1238,7 @@ class TestStructuralOwnershipPropagation:
         monkeypatch.setattr("workers.resolution_worker.create_job", _fake_create)
         monkeypatch.setattr("services.discovery.perimeter.create_job", _fake_create)
 
-        graph = _resolved_graph(nodes=[{"address": dep_addr, "node_type": "contract", "analyzed": True}])
+        graph = _resolved_graph(nodes=[{"address": dep_addr, "node_type": "contract", "analysis_state": "analyzed"}])
         ResolutionWorker()._queue_discovered_contracts(session, cast(Any, job), graph, "rpc")
 
         assert len(create_calls) == 1
@@ -1270,7 +1280,7 @@ class TestStructuralOwnershipPropagation:
         monkeypatch.setattr("workers.resolution_worker.create_job", _fake_create)
         monkeypatch.setattr("services.discovery.perimeter.create_job", _fake_create)
 
-        graph = _resolved_graph(nodes=[{"address": dep_addr, "node_type": "contract", "analyzed": True}])
+        graph = _resolved_graph(nodes=[{"address": dep_addr, "node_type": "contract", "analysis_state": "analyzed"}])
         ResolutionWorker()._queue_discovered_contracts(session, cast(Any, job), graph, "rpc")
 
         assert len(create_calls) == 1
@@ -1308,7 +1318,7 @@ class TestStructuralOwnershipPropagation:
         monkeypatch.setattr("workers.resolution_worker.create_job", _fake_create)
         monkeypatch.setattr("services.discovery.perimeter.create_job", _fake_create)
 
-        graph = _resolved_graph(nodes=[{"address": dep_addr, "node_type": "contract", "analyzed": True}])
+        graph = _resolved_graph(nodes=[{"address": dep_addr, "node_type": "contract", "analysis_state": "analyzed"}])
         ResolutionWorker()._queue_discovered_contracts(session, cast(Any, job), graph, "rpc")
 
         assert len(create_calls) == 1
@@ -1333,7 +1343,7 @@ class TestResolvedGraphEmpty:
             rpc_url: str = "",
             max_depth: int = 6,
             workspace_prefix: str = "",
-            nested_artifacts_override: Any = None,
+            materialized_contracts_override: Any = None,
             **_kw: Any,
         ) -> tuple[dict, dict]:
             return {}, {}
@@ -1345,8 +1355,8 @@ class TestResolvedGraphEmpty:
 
         stored_names = [name for name, _ in ctx["store_calls"]]
         assert "assessment" in stored_names
-        assert "control_snapshot" not in stored_names
-        assert "resolved_control_graph" not in stored_names
+        assert "observation_batch" not in stored_names
+        assert "resolution_graph" not in stored_names
 
 
 # ---------------------------------------------------------------------------
@@ -1421,7 +1431,6 @@ def test_three_state_columns_reach_postgres_and_absence_lands_sql_null(
                 "resolved_type": "safe",
                 "label": "Gate",
                 "depth": 1,
-                "analyzed": False,
                 "analysis_state": "not_analyzable",
             },
             {
@@ -1430,7 +1439,7 @@ def test_three_state_columns_reach_postgres_and_absence_lands_sql_null(
                 "resolved_type": "unknown",
                 "label": "Silent",
                 "depth": 1,
-                "analyzed": False,
+                "analysis_state": None,
                 # analysis_state ABSENT — the honest fifth state.
             },
         ],
@@ -1458,20 +1467,17 @@ def test_three_state_columns_reach_postgres_and_absence_lands_sql_null(
     assert cv_rows["silent"] == (None, None, True)
 
     node_rows = {
-        addr: (state, max_depth, analyzed)
-        for addr, state, max_depth, analyzed in db_session.execute(
-            text(
-                "select address, analysis_state, graph_max_depth, analyzed"
-                " from control_graph_nodes where contract_id = :cid"
-            ),
+        addr: (state, max_depth)
+        for addr, state, max_depth in db_session.execute(
+            text("select address, analysis_state, graph_max_depth from control_graph_nodes where contract_id = :cid"),
             {"cid": contract.id},
         ).all()
     }
     # Proven-present, plus the walk's horizon that makes ``depth`` interpretable.
-    assert node_rows[determined] == ("not_analyzable", 6, False)
+    assert node_rows[determined] == ("not_analyzable", 6)
     # Absent in the graph => SQL NULL, never a guessed token. ``graph_max_depth``
     # is a fact about the WALK, so it is present on every node of that walk.
-    assert node_rows[undetermined] == (None, 6, False)
+    assert node_rows[undetermined] == (None, 6)
     assert (
         db_session.execute(
             text("select count(*) from control_graph_nodes where contract_id = :cid and analysis_state = 'null'"),
@@ -1512,7 +1518,6 @@ def test_graph_without_max_depth_persists_sql_null_not_zero(db_session, monkeypa
                 "resolved_type": "eoa",
                 "label": "child",
                 "depth": 1,
-                "analyzed": False,
                 "analysis_state": "not_analyzable",
             }
         ]

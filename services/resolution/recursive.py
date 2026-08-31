@@ -21,34 +21,34 @@ from db.models import (
     EDGE_RELATION_EXTERNAL_CALL_TARGET,
 )
 from db.storage import StorageContentIncomplete, StorageUnavailable
-from schemas.contract_analysis import ContractAnalysis, ControllerProvenance
-from schemas.control_tracking import (
-    ControlSnapshot,
-    ControlTrackingPlan,
+from schemas.observations import (
+    ObservationBatch,
+    ObservationPlan,
     ResolvedControllerType,
     coerce_resolved_controller_type,
 )
-from schemas.resolved_control_graph import (
-    ResolvedAnalysisState,
-    ResolvedControlGraph,
-    ResolvedEdgeRelation,
-    ResolvedGraphEdge,
-    ResolvedGraphNode,
-    ResolvedNodeType,
+from schemas.resolution_graph import (
+    ResolutionEdge,
+    ResolutionGraph,
+    ResolutionNode,
+    ResolutionNodeKind,
+    ResolutionRelation,
+    ResolutionState,
 )
+from schemas.static_facts import ControllerProvenance, StaticFacts
 from services.discovery.classifier import ClassificationIncompleteError
 from services.discovery.fetch import fetch, scaffold
-from services.static.contract_analysis_pipeline.core import collect_contract_analysis_with_artifacts
-from services.static.contract_analysis_pipeline.mapping_events import WriterEventSpec
+from services.static.static_analysis.core import collect_static_inputs
+from services.static.static_analysis.mapping_events import WriterEventSpec
 from utils.logging import record_degraded, record_stage_metric, stage_metrics_var
 
+from .observation_plan import build_observation_plan
 from .tracking import (
-    build_control_snapshot,
     classify_resolved_address,
     classify_resolved_address_with_status,
+    observe_controllers,
     probe_declared_vault_backlink,
 )
-from .tracking_plan import build_control_tracking_plan
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +81,7 @@ def _coerce_resolved_type(value: object) -> ResolvedControllerType:
     ``str(payload.get("resolved_type", "unknown"))`` only defaults on an
     ABSENT key; a key PRESENT with value ``None`` reaches ``str(None)`` and
     mints the literal ``"None"`` — a token in no vocabulary
-    (``schemas.control_tracking.ResolvedControllerType``) that is truthy and
+    (``schemas.observations.ResolvedControllerType``) that is truthy and
     ``!= "unknown"``, so every downstream three-way branch reads it as a
     concrete, determined type. The literal string ``"None"`` is likewise
     coerced: it can arrive from a previously stored graph (the policy-stage
@@ -126,14 +126,14 @@ class LoadedArtifacts(TypedDict):
     has two provenances: the root's in-memory freshly-built documents, and
     nested bundles hydrated from persisted JSONB rows (unverified shapes).
     Every consumer reads via ``.get()`` anyway; the strict types live at the
-    producers (``build_control_tracking_plan`` / ``build_control_snapshot``).
+    producers (``build_observation_plan`` / ``observe_controllers``).
     """
 
-    analysis: Mapping[str, Any]
-    tracking_plan: Mapping[str, Any]
+    static_facts: Mapping[str, Any]
+    observation_plan: Mapping[str, Any]
     snapshot: Mapping[str, Any]
     predicate_trees: NotRequired[dict[str, Any] | None]
-    effective_permissions: NotRequired[Mapping[str, Any] | None]
+    permission_index: NotRequired[Mapping[str, Any] | None]
 
 
 class PendingContract(TypedDict):
@@ -185,24 +185,24 @@ def _contract_name_for_address(address: str, chain_id: int) -> str | None:
     return name or None
 
 
-def _build_effective_permissions(
-    analysis: Mapping[str, Any],
-    snapshot: ControlSnapshot,
+def _build_permission_index(
+    static_facts: Mapping[str, Any],
+    snapshot: ObservationBatch,
 ) -> dict[str, Any] | None:
     """Compute the effective-permissions payload for nested resolution."""
     # Function-scope import: the module-level form is the back-edge of the
-    # policy↔resolution package cycle (policy.__init__ → effective_permissions
+    # policy↔resolution package cycle (policy.__init__ → permission_index
     # → capability_surface → permissionless_shapes → resolution.__init__ →
     # here), which import-crashes any process that touches services.policy
     # first — policy_worker died on boot and took the whole worker pool with
     # it (deploy/start_workers.sh exits on first death).
-    from services.policy.effective_permissions import build_effective_permissions
+    from services.policy.permission_index import build_permission_index
 
     try:
         return cast(
             dict,
-            build_effective_permissions(
-                analysis,
+            build_permission_index(
+                static_facts,
                 target_snapshot=cast(dict, snapshot),
                 principal_resolution={"status": "no_authority", "reason": "No non-zero authority found"},
             ),
@@ -210,18 +210,18 @@ def _build_effective_permissions(
     except Exception as exc:
         # A nested contract whose effective-permissions build fails silently drops
         # its role principals from the graph (consumed below in
-        # ``_role_principals_from_effective_permissions``). Was debug-only — surface
+        # ``_role_principals_from_permission_index``). Was debug-only — surface
         # it as a degraded breadcrumb so the gap is visible in stage_errors.
         # ``or ""`` before ``str``: a subject with ``address: None`` must fall
         # through to "<unknown>", not read as the truthy string "None".
-        address = str((analysis.get("subject") or {}).get("address") or "") or "<unknown>"
+        address = str((static_facts.get("subject") or {}).get("address") or "") or "<unknown>"
         record_degraded(
-            phase="recursive_effective_permissions",
+            phase="recursive_permission_index",
             exc=exc,
             context={"address": address},
         )
         logger.warning(
-            "Recursive resolve: effective_permissions build failed for %s: %s",
+            "Recursive resolve: permission_index build failed for %s: %s",
             address,
             exc,
             extra={"exc_type": type(exc).__name__},
@@ -234,10 +234,10 @@ def _build_static_artifacts(
     workspace_prefix: str,
     *,
     chain_id: int,
-) -> tuple[str, ContractAnalysis, ControlTrackingPlan, dict[str, Any] | None]:
+) -> tuple[str, StaticFacts, ObservationPlan, dict[str, Any] | None]:
     """Run the expensive forge+Slither+predicate pipeline for *effective_address*.
 
-    Returns ``(contract_name, analysis, tracking_plan, predicate_trees)``.
+    Returns ``(contract_name, static_facts, observation_plan, predicate_trees)``.
     ``effects`` is also produced by the predicate pipeline but is not
     plumbed back here: the recursive resolver doesn't consume it, and
     the policy stage reads the per-job ``effects`` artifact written by
@@ -256,10 +256,10 @@ def _build_static_artifacts(
     with tempfile.TemporaryDirectory(prefix=f"psat_{workspace_prefix}_") as tmp:
         project_dir = Path(tmp) / project_name
         scaffold(effective_address, result, project_dir)
-        analysis, predicate_trees, _effects = collect_contract_analysis_with_artifacts(project_dir)
+        static_facts, predicate_trees, _effects = collect_static_inputs(project_dir)
 
-    plan = build_control_tracking_plan(analysis)
-    return contract_name, analysis, plan, predicate_trees
+    plan = build_observation_plan(static_facts)
+    return contract_name, static_facts, plan, predicate_trees
 
 
 def _chain_name_for_materialization(chain_id: int) -> str:
@@ -274,7 +274,7 @@ def _chain_name_for_materialization(chain_id: int) -> str:
 
 
 def _widen_built(
-    built: tuple[str, ContractAnalysis, ControlTrackingPlan, dict[str, Any] | None],
+    built: tuple[str, StaticFacts, ObservationPlan, dict[str, Any] | None],
 ) -> tuple[str, dict[str, Any], dict[str, Any], dict[str, Any] | None]:
     """Widen a fresh build to the mixed-provenance materialize shape.
 
@@ -282,8 +282,8 @@ def _widen_built(
     and persisted JSONB rows (shape unverified), so its tuple stays wide; the
     fresh arm is only ever widened, never the reverse.
     """
-    name, analysis, plan, predicate_trees = built
-    return name, cast("dict[str, Any]", analysis), cast("dict[str, Any]", plan), predicate_trees
+    name, static_facts, plan, predicate_trees = built
+    return name, cast("dict[str, Any]", static_facts), cast("dict[str, Any]", plan), predicate_trees
 
 
 def _materialize_with_cross_process_cache(
@@ -295,7 +295,7 @@ def _materialize_with_cross_process_cache(
 ) -> tuple[str, dict[str, Any], dict[str, Any], dict[str, Any] | None]:
     """Consult the persistent contract_materializations table; build on miss.
 
-    Returns ``(contract_name, analysis, tracking_plan, predicate_trees)``.
+    Returns ``(contract_name, static_facts, observation_plan, predicate_trees)``.
     ``predicate_trees`` round-trips through the cache so mapping-writer
     enumeration stays functional on cache hits (pre-c1d2e3f4a5b6 the
     builder dropped it and downstream silently disabled enumeration).
@@ -336,13 +336,13 @@ def _materialize_with_cross_process_cache(
     def _builder() -> Mapping[str, Any]:
         built["ran"] = True
         _bump_materialize_metric("materialize_builds")
-        name, analysis, plan, predicate_trees = _build_static_artifacts(
+        name, static_facts, plan, predicate_trees = _build_static_artifacts(
             effective_address, workspace_prefix, chain_id=build_chain_id
         )
         return {
             "contract_name": name,
-            "analysis": analysis,
-            "tracking_plan": plan,
+            "static_facts": static_facts,
+            "observation_plan": plan,
             "predicate_trees": predicate_trees,
         }
 
@@ -402,20 +402,20 @@ def _materialize_with_cross_process_cache(
     # proven-absent one terminal so it does not re-ask an answered question).
     # ``or {}`` below is therefore only ever
     # applied to a *proven* absence — a row that stored nothing. If the payload
-    # merely could not be read, an empty analysis here means "this contract has
+    # merely could not be read, an empty static_facts here means "this contract has
     # no functions, no plan and no predicate trees", and that verdict is what
     # the effects probe is seeded from and what gets cached under the witness
     # schema version. A retried stage can still become right; a witness built
     # on {} is already wrong and cached.
-    analysis = copy.deepcopy(cm.hydrate_analysis(row) or {})
-    plan = copy.deepcopy(cm.hydrate_tracking_plan(row) or {})
+    static_facts = copy.deepcopy(cm.hydrate_static_facts(row) or {})
+    plan = copy.deepcopy(cm.hydrate_observation_plan(row) or {})
     # ``predicate_trees`` is absent on rows written before the
     # c1d2e3f4a5b6 migration; hydrate returns None in that case and
     # ``_mapping_writer_specs_from_predicate_trees`` short-circuits.
     predicate_trees_cached = cm.hydrate_predicate_trees(row)
     predicate_trees = copy.deepcopy(predicate_trees_cached) if predicate_trees_cached else None
     contract_name = row.contract_name or "Contract"
-    return contract_name, analysis, plan, predicate_trees
+    return contract_name, static_facts, plan, predicate_trees
 
 
 def _is_builder_exception(exc: BaseException) -> bool:
@@ -423,7 +423,7 @@ def _is_builder_exception(exc: BaseException) -> bool:
     rather than the DB cache layer?
 
     Builder exceptions are anything raised by ``fetch`` / ``scaffold`` /
-    ``collect_contract_analysis`` — broadly Etherscan / Slither errors.
+    ``collect_static_facts`` — broadly Etherscan / Slither errors.
     DB-layer errors are SQLAlchemy / psycopg2 exceptions. We can't
     cleanly distinguish without a type sniff; treat anything from the
     sqlalchemy module as a DB-layer error and let other exceptions
@@ -441,7 +441,7 @@ def _materialize_contract_artifacts(
     chain: str | None = None,
     chain_id: int | None = None,
 ) -> LoadedArtifacts:
-    """Build analysis + plan + snapshot + effective permissions in memory (tempdir cleaned up before return)."""
+    """Build static_facts + plan + snapshot + effective permissions in memory (tempdir cleaned up before return)."""
     # Proxy check — analyze the implementation but read storage from the proxy.
     effective_address = address
     snapshot_address = address
@@ -450,7 +450,7 @@ def _materialize_contract_artifacts(
     # "analyze the address as-is" (historical behavior). The retarget /
     # fail-closed decision runs OUTSIDE this except — otherwise the
     # ``UnresolvedProxyError`` raise below would be swallowed into a silent
-    # shell analysis. ``ClassificationIncompleteError`` (proxy-slot read
+    # shell static_facts. ``ClassificationIncompleteError`` (proxy-slot read
     # failure) is propagated, not swallowed, for the same reason.
     classification: dict | None = None
     try:
@@ -510,7 +510,7 @@ def _materialize_contract_artifacts(
     # ``materialize_or_wait`` ensures concurrent same-bytecode requests
     # across processes only run the builder once; the loser blocks on the
     # lock and reads the result.
-    contract_name, analysis, plan, predicate_trees = _materialize_with_cross_process_cache(
+    contract_name, static_facts, plan, predicate_trees = _materialize_with_cross_process_cache(
         effective_address=effective_address,
         bytecode_keccak=bytecode_keccak,
         workspace_prefix=workspace_prefix,
@@ -519,43 +519,40 @@ def _materialize_contract_artifacts(
     # Address-mismatch retarget: when the persistent row was populated for
     # a different address that shares this bytecode, the cached
     # plan["contract_address"] points at the OTHER address. Stamp it for
-    # THIS call so build_control_snapshot reads from the right contract.
-    if isinstance(analysis.get("subject"), dict):
-        analysis["subject"]["address"] = effective_address
+    # THIS call so observe_controllers reads from the right contract.
+    if isinstance(static_facts.get("subject"), dict):
+        static_facts["subject"]["address"] = effective_address
     plan["contract_address"] = effective_address
     if snapshot_address != effective_address:
         plan = {**plan, "contract_address": snapshot_address}
 
-    snapshot = build_control_snapshot(cast(ControlTrackingPlan, plan), rpc_url, chain_id=chain_id)
-    effective_permissions = _build_effective_permissions(analysis, snapshot)
+    snapshot = observe_controllers(cast(ObservationPlan, plan), rpc_url, chain_id=chain_id)
+    permission_index = _build_permission_index(static_facts, snapshot)
 
     return {
-        "analysis": analysis,
-        "tracking_plan": plan,
+        "static_facts": static_facts,
+        "observation_plan": plan,
         "snapshot": snapshot,
         "predicate_trees": predicate_trees,
-        "effective_permissions": effective_permissions,
+        "permission_index": permission_index,
     }
 
 
-def _analysis_state(node: ResolvedGraphNode, max_depth: int) -> ResolvedAnalysisState | None:
+def _analysis_state(node: ResolutionNode, max_depth: int) -> ResolutionState | None:
     """Why this node is (or is not) analysed.
 
-    ``analyzed`` is a non-nullable bool, so its ``False`` is four different
-    populations at once — a principal that was never a candidate, a contract
-    whose materialization failed, a contract the depth horizon cut off, and
-    "cannot say". The first says nothing adverse, the second is a fact about
-    the contract, the third is a fact about *our walk*, and only the fourth is
-    an absence of knowledge. Derived once here, at the end of the walk, because
-    this is the only place that holds ``max_depth`` alongside every node.
+    Derived once at the end of the walk because this is the only place that
+    holds ``max_depth`` alongside every node.
 
     Returns ``None`` — not determined — for an analyzable contract inside the
     horizon that is nonetheless unanalysed with no recorded failure. That
     combination is not known to be reachable, and inventing a value for it
     would be exactly the error this field exists to remove.
     """
-    if node.get("analyzed"):
+    if node.get("analysis_state") == "analyzed":
         return "analyzed"
+    if node.get("analysis_state") == "attempt_failed":
+        return "attempt_failed"
     details = node.get("details")
     if isinstance(details, dict) and details.get("materialize_error"):
         return "attempt_failed"
@@ -575,7 +572,7 @@ def _analysis_state(node: ResolvedGraphNode, max_depth: int) -> ResolvedAnalysis
         # stringification (producers now coerce it via ``_coerce_resolved_type``,
         # but a stored graph from before that fix can still carry the token
         # into this recomputation via the policy refresh's pre-seed).
-        # ``not_analyzable`` is a positive claim — "analysis was never
+        # ``not_analyzable`` is a positive claim — "static_facts was never
         # applicable" — and an undetermined type proves no such thing.
         return "not_analyzable"
     return None
@@ -606,22 +603,22 @@ def _resolved_type_rank(resolved_type: str | None) -> int:
 
 
 def _ensure_node(
-    nodes: dict[str, ResolvedGraphNode],
+    nodes: dict[str, ResolutionNode],
     *,
     address: str,
     resolved_type: ResolvedControllerType,
     label: str,
     depth: int,
-    node_type: ResolvedNodeType,
+    node_type: ResolutionNodeKind,
     contract_name: str | None = None,
-    analyzed: bool = False,
+    analysis_state: ResolutionState | None = None,
     details: dict[str, object] | None = None,
     artifacts: dict[str, str] | None = None,
 ) -> str:
     normalized = address.lower()
     node_id = _address_node_id(normalized)
     current = nodes.get(node_id)
-    payload: ResolvedGraphNode = {
+    payload: ResolutionNode = {
         "id": node_id,
         "address": normalized,
         "node_type": node_type,
@@ -629,7 +626,7 @@ def _ensure_node(
         "label": label,
         "contract_name": contract_name,
         "depth": depth,
-        "analyzed": analyzed,
+        "analysis_state": analysis_state,
         "details": details or {},
         "artifacts": artifacts or {},
     }
@@ -640,9 +637,11 @@ def _ensure_node(
     current["depth"] = min(current.get("depth", depth), depth)
     if contract_name:
         current["contract_name"] = contract_name
-    if analyzed:
-        current["analyzed"] = True
+    if analysis_state == "analyzed":
+        current["analysis_state"] = "analyzed"
         current["node_type"] = "contract"
+    elif analysis_state == "attempt_failed" and current.get("analysis_state") != "analyzed":
+        current["analysis_state"] = "attempt_failed"
     if _resolved_type_rank(resolved_type) >= _resolved_type_rank(current.get("resolved_type")):
         current["resolved_type"] = resolved_type
     if label:
@@ -658,7 +657,7 @@ def _ensure_node(
     return node_id
 
 
-def _edge_key(edge: ResolvedGraphEdge) -> tuple:
+def _edge_key(edge: ResolutionEdge) -> tuple:
     relation = edge["relation"]
     # Nested holder edges often appear via multiple upstream controller paths; keep one edge and merge notes.
     if relation in {"safe_owner", "timelock_owner", "proxy_admin_owner"}:
@@ -677,7 +676,7 @@ def _edge_key(edge: ResolvedGraphEdge) -> tuple:
     )
 
 
-def _add_edge(edges: dict[tuple, ResolvedGraphEdge], edge: ResolvedGraphEdge) -> None:
+def _add_edge(edges: dict[tuple, ResolutionEdge], edge: ResolutionEdge) -> None:
     key = _edge_key(edge)
     if key in edges:
         existing_notes = set(edges[key].get("notes", []))
@@ -689,8 +688,8 @@ def _add_edge(edges: dict[tuple, ResolvedGraphEdge], edge: ResolvedGraphEdge) ->
 
 def _nested_principals_for_details(
     resolved_type: ResolvedControllerType, details: dict[str, object]
-) -> list[tuple[str, ResolvedEdgeRelation, str]]:
-    principals: list[tuple[str, ResolvedEdgeRelation, str]] = []
+) -> list[tuple[str, ResolutionRelation, str]]:
+    principals: list[tuple[str, ResolutionRelation, str]] = []
     if resolved_type == "safe":
         owners = details.get("owners")
         for owner in owners if isinstance(owners, list) else []:
@@ -758,9 +757,9 @@ def _safe_role_int(role: Any) -> int | None:
         return None
 
 
-def _role_principals_from_effective_permissions(effective_permissions: Mapping[str, Any]) -> list[RolePrincipal]:
+def _role_principals_from_permission_index(permission_index: Mapping[str, Any]) -> list[RolePrincipal]:
     principals: dict[str, RolePrincipalAccumulator] = {}
-    for function in effective_permissions.get("functions", []):
+    for function in permission_index.get("functions", []):
         if not isinstance(function, dict):
             continue
         function_signature = str(function.get("function") or "")
@@ -854,7 +853,7 @@ def _role_principals_from_effective_permissions(effective_permissions: Mapping[s
 
 # Only these leaf roles prove that being IN the mapping confers authority;
 # same set as the static plane's caller-gate promotion (`_AUTHORITY_LEAF_ROLES`
-# in services/static/contract_analysis_pipeline/tracking.py).
+# in services/static/static_analysis/tracking.py).
 _MAPPING_HARVEST_AUTHORITY_ROLES = frozenset({"caller_authority", "delegated_authority"})
 
 
@@ -974,8 +973,8 @@ def _replay_mapping_principals(
     mapping_specs: list[WriterEventSpec],
     contract_node_id: str,
     depth: int,
-    nodes: dict[str, ResolvedGraphNode],
-    edges: dict[tuple, ResolvedGraphEdge],
+    nodes: dict[str, ResolutionNode],
+    edges: dict[tuple, ResolutionEdge],
     chain_id: int,
 ) -> str:
     """Replay mapping-writer events for *address* into principal nodes/edges,
@@ -1071,7 +1070,7 @@ def _replay_mapping_principals(
             # timelock granting itself a Solady `_roles` role) is real on-chain
             # state, but as a control edge it is degenerate: X->X asserts
             # nothing, yet the raw graph plane serves it verbatim through the
-            # analysis-detail API, and the _ensure_node call below would merge
+            # static_facts-detail API, and the _ensure_node call below would merge
             # principal fields (controller_label/mapping_name/...) onto the
             # contract's own node and clobber its label with the mapping name.
             # Skip the self edge. (The value closure and the Surface
@@ -1088,7 +1087,6 @@ def _replay_mapping_principals(
             label=principal["mapping_name"],
             depth=depth + 1,
             node_type="principal",
-            analyzed=False,
             details={
                 "address": member_addr,
                 "controller_label": principal["mapping_name"],
@@ -1122,8 +1120,8 @@ def _maybe_queue_address(
 
 def _add_nested_principals(
     *,
-    nodes: dict[str, ResolvedGraphNode],
-    edges: dict[tuple, ResolvedGraphEdge],
+    nodes: dict[str, ResolutionNode],
+    edges: dict[tuple, ResolutionEdge],
     queue: deque[PendingContract],
     queued: set[str],
     rpc_url: str,
@@ -1171,19 +1169,21 @@ def resolve_control_graph(
     chain_id: int,
     max_depth: int = DEFAULT_RECURSION_MAX_DEPTH,
     workspace_prefix: str = "recursive",
-    nested_artifacts_override: dict[str, LoadedArtifacts] | None = None,
+    materialized_contracts_override: dict[str, LoadedArtifacts] | None = None,
     classify_cache: dict[str, tuple[str, dict[str, object]]] | None = None,
-    initial_graph: ResolvedControlGraph | None = None,
+    initial_graph: ResolutionGraph | None = None,
     heartbeat: Callable[[], None] | None = None,
-) -> tuple[ResolvedControlGraph, dict[str, LoadedArtifacts]]:
-    """BFS the control chain. Returns ``(graph, nested_artifacts_by_address)``; classify_cache is mutated in place.
+) -> tuple[ResolutionGraph, dict[str, LoadedArtifacts]]:
+    """BFS the control chain.
+
+    Returns ``(graph, materialized_contracts_by_address)``; classify_cache is mutated in place.
 
     ``chain_id`` is required: it scopes the two chain-sensitive reads
     inside the walk — the ``contract_materializations`` cache key (via the
     chain's canonical name) and the mapping-writer replay's scan floor. A
     chainless walk can no longer run as mainnet; callers thread the job's chain."""
     chain_name = _chain_name_for_materialization(chain_id)
-    root_analysis = root_artifacts["analysis"]
+    root_analysis = root_artifacts["static_facts"]
     root_subject = root_analysis.get("subject", {})
     root_address = str(root_subject.get("address", "")).lower()
 
@@ -1199,7 +1199,7 @@ def resolve_control_graph(
     queued = {root_address}
     processed: set[str] = set()
     _classify_cache: dict[str, tuple[str, dict[str, object]]] = classify_cache if classify_cache is not None else {}
-    nested_artifacts: dict[str, LoadedArtifacts] = dict(nested_artifacts_override or {})
+    materialized_contracts: dict[str, LoadedArtifacts] = dict(materialized_contracts_override or {})
 
     classify_stats: dict[str, int] = {"hits": 0, "misses": 0}
 
@@ -1219,8 +1219,8 @@ def resolve_control_graph(
             _classify_cache[key] = (kind, details)
         return kind, details
 
-    nodes: dict[str, ResolvedGraphNode] = {}
-    edges: dict[tuple, ResolvedGraphEdge] = {}
+    nodes: dict[str, ResolutionNode] = {}
+    edges: dict[tuple, ResolutionEdge] = {}
 
     # Pre-seed the graph from a prior walk so the policy refresh path skips re-analyzing already-processed nested
     # contracts.
@@ -1236,15 +1236,15 @@ def resolve_control_graph(
                 # not-determined token at the boundary so it can neither win a
                 # ``_resolved_type_rank`` merge nor read as a concrete type.
                 seeded["resolved_type"] = _coerce_resolved_type(seeded.get("resolved_type"))
-                nodes[node_id] = cast(ResolvedGraphNode, seeded)
+                nodes[node_id] = cast(ResolutionNode, seeded)
         for edge in initial_graph.get("edges", []):
             if not isinstance(edge, dict):
                 continue
-            edges[_edge_key(cast(ResolvedGraphEdge, edge))] = cast(ResolvedGraphEdge, dict(edge))
+            edges[_edge_key(cast(ResolutionEdge, edge))] = cast(ResolutionEdge, dict(edge))
         # Mark already-analyzed nested contracts as processed; the root must re-walk so freshly-computed role principals
         # get projected.
         for node in initial_graph.get("nodes", []):
-            if not isinstance(node, dict) or not node.get("analyzed"):
+            if not isinstance(node, dict) or node.get("analysis_state") != "analyzed":
                 continue
             node_address = (node.get("details") or {}).get("address")
             if isinstance(node_address, str):
@@ -1262,8 +1262,8 @@ def resolve_control_graph(
         Storage failing to answer is the one case that does NOT come back as an
         error tuple. Every other materialize failure is a fact about the
         contract or its compile, and the caller degrades that contract to
-        ``analyzed=False`` and walks on. An unreadable bucket is a fact about
-        us: the analysis may exist and simply be out of reach, the same outage
+        ``attempt_failed`` and walks on. An unreadable bucket is a fact about
+        us: the static_facts may exist and simply be out of reach, the same outage
         hits every sibling in the level, and degrading would let the whole walk
         return normally so nothing above ever re-runs. Propagating is what makes
         the stage retryable (``workers/retry_policy`` classifies both storage
@@ -1274,8 +1274,8 @@ def resolve_control_graph(
         preloaded = pending.get("artifacts")
         if preloaded is not None:
             return preloaded, None
-        if address in nested_artifacts:
-            return nested_artifacts[address], None
+        if address in materialized_contracts:
+            return materialized_contracts[address], None
         try:
             artifacts = _materialize_contract_artifacts(
                 address,
@@ -1367,21 +1367,21 @@ def resolve_control_graph(
                     label=contract_name or address,
                     depth=depth,
                     node_type="contract",
-                    analyzed=False,
+                    analysis_state="attempt_failed",
                     contract_name=contract_name,
                     details={"address": address, "materialize_error": err_text},
                 )
                 processed.add(address)
                 continue
 
-            if address not in nested_artifacts:
-                nested_artifacts[address] = artifacts
+            if address not in materialized_contracts:
+                materialized_contracts[address] = artifacts
 
             processed.add(address)
-            analysis = artifacts["analysis"]
+            static_facts = artifacts["static_facts"]
             snapshot = artifacts["snapshot"]
-            effective_permissions = artifacts.get("effective_permissions")
-            subject = analysis.get("subject", {})
+            permission_index = artifacts.get("permission_index")
+            subject = static_facts.get("subject", {})
             contract_name = str(subject.get("name") or address)
             # The classifier's answer, not a hardcoded "contract". A timelock
             # that is itself analysed used to lose its type AND its ``delay``
@@ -1407,7 +1407,7 @@ def resolve_control_graph(
                 depth=depth,
                 node_type="contract",
                 contract_name=contract_name,
-                analyzed=True,
+                analysis_state="analyzed",
                 details=node_details,
                 artifacts={"data_key": f"recursive:{address.lower()}"},
             )
@@ -1504,7 +1504,7 @@ def resolve_control_graph(
                     chain_id=chain_id,
                 )
 
-            for principal_value in _role_principals_from_effective_permissions(effective_permissions or {}):
+            for principal_value in _role_principals_from_permission_index(permission_index or {}):
                 principal_address = str(principal_value["address"]).lower()
                 if principal_address == address:
                     continue
@@ -1605,11 +1605,11 @@ def resolve_control_graph(
     for _node in nodes.values():
         _node["analysis_state"] = _analysis_state(_node, max_depth)
 
-    graph: ResolvedControlGraph = {
+    graph: ResolutionGraph = {
         "schema_version": "0.1",
         "root_contract_address": root_address,
         "max_depth": max_depth,
         "nodes": sorted(nodes.values(), key=lambda item: item["id"]),
         "edges": sorted(edges.values(), key=lambda item: (item["from_id"], item["relation"], item["to_id"])),
     }
-    return graph, nested_artifacts
+    return graph, materialized_contracts

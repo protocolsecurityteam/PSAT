@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from sqlalchemy import select
 
-from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
+from db.contract_materializations import STATIC_FACTS_SCHEMA_VERSION
 from db.models import Contract, ContractSummary, JobStage, JobStatus, RoleDefinition
 from db.queue import (
     copy_static_cache_cross_chain,
@@ -24,7 +24,7 @@ from db.queue import (
     store_source_files,
 )
 from tests.cache_helpers import db_session, requires_postgres  # noqa: F401
-from tests.support.policy_builders import _assessment, _minimal_contract_analysis
+from tests.support.policy_builders import _assessment, _minimal_static_facts
 
 pytestmark = requires_postgres
 
@@ -40,7 +40,7 @@ _SOURCES = {
 
 
 def _analysis(address: str) -> dict:
-    facts = _minimal_contract_analysis(address=address, name="Vault")
+    facts = _minimal_static_facts(address=address, name="Vault")
     facts["summary"] = {**facts["summary"], "control_model": "ownable", "standards": ["ERC20"]}
     facts["semantic_control"] = {
         **facts["semantic_control"],
@@ -59,7 +59,7 @@ def _make_donor(
     address: str = ADDR_MAINNET,
     chain: str = "ethereum",
     source_content_hash: str | None = HASH,
-    schema_version: int | None = ANALYSIS_SCHEMA_VERSION,
+    schema_version: int | None = STATIC_FACTS_SCHEMA_VERSION,
     with_analysis: bool = True,
     extra_artifacts: dict | None = None,
 ):
@@ -68,7 +68,7 @@ def _make_donor(
     job.status = JobStatus.completed
     job.stage = JobStage.done
     job.source_content_hash = source_content_hash
-    job.analysis_schema_version = schema_version
+    job.static_facts_schema_version = schema_version
     session.commit()
 
     contract = Contract(
@@ -99,7 +99,7 @@ def _make_donor(
     if with_analysis:
         facts = _analysis(address.lower())
         store_artifact(session, job.id, "static_facts", data=facts)
-        store_artifact(session, job.id, "assessment", data=_assessment(analysis=facts, chain_id=job.chain_id or 1))
+        store_artifact(session, job.id, "assessment", data=_assessment(static_facts=facts, chain_id=job.chain_id or 1))
         store_artifact(session, job.id, "predicate_trees", data=dict(_PREDICATE_TREES))
         store_artifact(session, job.id, "effects", data=dict(_EFFECTS))
     else:
@@ -242,7 +242,7 @@ def test_version_mismatch_misses(db_session):
         address=ADDR_OTHER,
         chain="base",
         source_content_hash=HASH,
-        schema_version=ANALYSIS_SCHEMA_VERSION + 1000,
+        schema_version=STATIC_FACTS_SCHEMA_VERSION + 1000,
     )
     assert find_completed_static_cache(db_session, ADDR_BASE, chain="base", source_content_hash=HASH) is None
 

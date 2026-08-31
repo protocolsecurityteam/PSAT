@@ -108,7 +108,7 @@ def _effect_info(
     selector: str,
     *,
     state_writes: list[dict[str, Any]] | None = None,
-    effect_labels: list[str] | None = None,
+    claims: list[dict[str, Any]] | None = None,
     value_flows: list[dict[str, Any]] | None = None,
     parameter_names: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -119,8 +119,7 @@ def _effect_info(
         "sinks": [],
         "state_writes": state_writes or [],
         "value_flows": value_flows or [],
-        "effect_labels": effect_labels or [],
-        "effect_targets": [],
+        "claims": claims or [],
         "state_changing": True,
         # Real artifacts always carry these; the prober needs a NAMED quantity
         # before it may substitute one (``integer_param_roles``).
@@ -154,7 +153,10 @@ def _token_facts(**overrides: Any) -> cd.ContractFacts:
             parameter_names=["to", "amount"],
         ),
         "mint(address,uint256)": _effect_info(
-            "mint(address,uint256)", MINT, effect_labels=["mint"], parameter_names=["to", "amount"]
+            "mint(address,uint256)",
+            MINT,
+            claims=[{"claim_id": "supply.mint", "tier": "standard_exact", "witness": {}}],
+            parameter_names=["to", "amount"],
         ),
         "pause()": _effect_info("pause()", PAUSE_SEL, state_writes=[_write("paused", "bool")]),
         "deposit()": _effect_info("deposit()", DEPOSIT),
@@ -868,7 +870,11 @@ def _redeem_fn() -> cd.FunctionFacts:
         selector=BURN_SEL,
         canonical_signature=BURN_SIG,
         effect_info=_effect_info(
-            BURN_SIG, BURN_SEL, effect_labels=["burn"], value_flows=[flow], parameter_names=["n", "dst"]
+            BURN_SIG,
+            BURN_SEL,
+            claims=[{"claim_id": "supply.burn", "tier": "standard_exact", "witness": {}}],
+            value_flows=[flow],
+            parameter_names=["n", "dst"],
         ),
         tree=None,
         legacy_value_flows=(),
@@ -1453,7 +1459,6 @@ def _pause_contract(session) -> tuple[Contract, dict[str, int]]:
             function_name=name,
             selector=selector,
             authority_public=False,
-            effect_targets=["paused"],
         )
         session.add(fn)
         session.flush()
@@ -1540,7 +1545,6 @@ def test_synthesize_pause_adds_pauser_identity_probe_for_unresolved_victim(db_se
             function_name=name,
             selector=selector,
             authority_public=False,
-            effect_targets=["paused"],
         )
         db_session.add(f)
         db_session.flush()
@@ -1741,7 +1745,6 @@ def _eeth_candidate(session, latch_var: str) -> tuple[Candidate, dict[str, int]]
             function_name=full_name.split("(")[0],
             selector=cd._selector_of(full_name),
             authority_public=False,
-            effect_targets=[latch_var],
         )
         session.add(fn)
         session.flush()

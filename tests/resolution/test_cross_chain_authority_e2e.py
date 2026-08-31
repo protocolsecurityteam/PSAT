@@ -33,7 +33,7 @@ import pytest
 
 import services.resolution.tracking as tracking
 from services.concurrency import RpcExecutor
-from services.policy.principal_enrichment import build_principal_labels
+from services.policy.principal_index import build_principal_index
 from services.resolution.cross_chain_authority import (
     CROSS_CHAIN_AUTHORITY_TYPE,
     make_cross_chain_recognizer,
@@ -111,7 +111,6 @@ def wire(monkeypatch):
 def _role_fn(name: str, role: int, principal: str) -> dict:
     return {
         "function": name,
-        "effect_labels": ["ownership_transfer"],
         "authority_public": False,
         "authority_roles": [
             {"role": role, "principals": [{"address": principal, "resolved_type": "unknown", "details": {}}]}
@@ -120,7 +119,7 @@ def _role_fn(name: str, role: int, principal: str) -> dict:
     }
 
 
-def _base_effective_permissions() -> dict:
+def _base_permission_index() -> dict:
     """A Base L2Vault whose five authorities span every cross-chain arm plus two
     native controls (the same-harness true-negative)."""
     return {
@@ -150,7 +149,7 @@ def _scope_graph() -> dict:
                 "label": "L2Vault",
                 "contract_name": "L2Vault",
                 "depth": 0,
-                "analyzed": True,
+                "analysis_state": "analyzed",
                 "details": {"address": TARGET},
                 "artifacts": {},
             },
@@ -162,7 +161,7 @@ def _scope_graph() -> dict:
                 "label": "l1Owner",
                 "contract_name": None,
                 "depth": 1,
-                "analyzed": False,
+                "analysis_state": None,
                 "details": {"address": L1_PROXY_ADMIN_OWNER},
                 "artifacts": {},
             },
@@ -171,20 +170,20 @@ def _scope_graph() -> dict:
     }
 
 
-# --- build_principal_labels, real classify wire ------------------------------
+# --- build_principal_index, real classify wire ------------------------------
 
 
 def test_base_positive_arm_and_native_true_negative_through_real_classify(wire):
     """Base run: aliased L1 owner, messenger, and bridge classify as
     ``cross_chain_authority`` with no RPC; native owners fall through to the
     real classifier (stubbed wire) and are typed ``eoa``/``contract``."""
-    ep = _base_effective_permissions()
+    ep = _base_permission_index()
     graph = _scope_graph()
     recognizer = make_cross_chain_recognizer(BASE_CHAIN_ID, _known_addresses_for_scope(graph, TARGET))
 
-    payload = build_principal_labels(
+    payload = build_principal_index(
         ep,
-        resolved_control_graph=graph,
+        resolution_graph=graph,
         rpc_url="http://base.rpc.example",
         classify_cache={},
         cross_chain_recognizer=recognizer,
@@ -219,13 +218,13 @@ def test_base_positive_arm_and_native_true_negative_through_real_classify(wire):
 def test_recognized_principals_never_touch_the_wire(wire):
     """The recognizer runs before classification, so an aliased/bridge principal
     issues zero RPCs; only the native owners (and the L1 reference) do."""
-    ep = _base_effective_permissions()
+    ep = _base_permission_index()
     graph = _scope_graph()
     recognizer = make_cross_chain_recognizer(BASE_CHAIN_ID, _known_addresses_for_scope(graph, TARGET))
 
-    build_principal_labels(
+    build_principal_index(
         ep,
-        resolved_control_graph=graph,
+        resolution_graph=graph,
         rpc_url="http://base.rpc.example",
         classify_cache={},
         cross_chain_recognizer=recognizer,
@@ -245,14 +244,14 @@ def test_mainnet_run_classifies_everything_through_the_wire(wire):
     """chain_id=1 → recognizer is None: the Base predeploy / aliased addresses
     carry no special meaning and are classified by the real wire path, so none
     is labelled cross-chain and each is probed."""
-    ep = _base_effective_permissions()
+    ep = _base_permission_index()
     graph = _scope_graph()
     recognizer = make_cross_chain_recognizer(1, _known_addresses_for_scope(graph, TARGET))
     assert recognizer is None
 
-    payload = build_principal_labels(
+    payload = build_principal_index(
         ep,
-        resolved_control_graph=graph,
+        resolution_graph=graph,
         rpc_url="http://eth.rpc.example",
         classify_cache={},
         cross_chain_recognizer=recognizer,

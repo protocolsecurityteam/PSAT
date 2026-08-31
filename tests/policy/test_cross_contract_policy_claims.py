@@ -1,7 +1,7 @@
 """Two-contract integration tests for the policy-stage cross-contract path.
 
 Drives ``PolicyWorker._enrich_cross_contract`` end to end against a real
-Postgres session: a sibling job whose stored ``effects``/``control_snapshot``
+Postgres session: a sibling job whose stored ``effects``/``observation_batch``
 carry Plane-1 claims, a target job whose ``effects`` are stored, and target
 ``EffectiveFunction`` rows the derivation must update. The only wire stubbed is
 ``SessionLocal`` — repointed at the test engine so the parallel sibling fetch
@@ -26,7 +26,7 @@ from db.models import Contract, EffectiveFunction, Job, JobStage, JobStatus
 from db.queue import store_artifact
 from services.static.claims import EffectMatch
 from tests.conftest import requires_postgres
-from tests.support.policy_builders import _assessment, _minimal_contract_analysis
+from tests.support.policy_builders import _assessment, _minimal_static_facts
 from workers.policy_worker import PolicyWorker
 
 pytestmark = requires_postgres
@@ -74,7 +74,7 @@ def _store_empty_assessment(session, job: Job, address: str) -> None:
         session,
         job.id,
         "assessment",
-        data=_assessment(analysis=_minimal_contract_analysis(address=address, name="C")),
+        data=_assessment(static_facts=_minimal_static_facts(address=address, name="C")),
     )
 
 
@@ -89,7 +89,6 @@ def _make_target_functions(session, target_job: Job, signatures: list[str]) -> C
                 function_name=sig.split("(", 1)[0],
                 selector=_selector(sig)[:10],
                 abi_signature=sig,
-                effect_labels=["external_contract_call"],
                 claims=None,
             )
         )
@@ -152,9 +151,9 @@ def test_value_flow_claim_propagates_to_effective_function(db_session, _repoint_
     )
 
     contract = _make_target_functions(db_session, target_job, ["sweep(address)"])
-    control_snapshot = {"controller_values": {"state_variable:token": {"value": TOKEN}}}
+    observation_batch = {"controller_values": {"state_variable:token": {"value": TOKEN}}}
 
-    enriched = PolicyWorker()._enrich_cross_contract(db_session, target_job, {}, control_snapshot)
+    enriched = PolicyWorker()._enrich_cross_contract(db_session, target_job, {}, observation_batch)
 
     assert "sweep(address)" in enriched
     claim = enriched["sweep(address)"][0]
@@ -165,8 +164,6 @@ def test_value_flow_claim_propagates_to_effective_function(db_session, _repoint_
     ef = _ef(db_session, contract, "sweep(address)")
     ids = {c["claim_id"] for c in (ef.claims or [])}
     assert "flow.out" in ids
-    # Legacy label column is left exactly as it was — no propagate-every-label.
-    assert ef.effect_labels == ["external_contract_call"]
 
 
 # ---------------------------------------------------------------------------
@@ -227,7 +224,7 @@ def test_no_claims_without_matching_evidence(db_session, _repoint_session_local)
 
 
 # ---------------------------------------------------------------------------
-# _apply_cross_contract_claims merges onto the effective_permissions payload
+# _apply_cross_contract_claims merges onto the permission_index payload
 # ---------------------------------------------------------------------------
 
 
@@ -290,7 +287,7 @@ def test_the_row_replace_drops_last_run_s_policy_derived_claims(db_session):
     coupling that let the effects bridge diverge unnoticed. If the carry is ever
     widened past observed-tier, this goes red and both merge sites need the same
     explicit stale-drop the bridge now uses."""
-    from services.policy.effective_permissions_writer import write_effective_function_rows
+    from services.policy.permission_index_writer import write_permission_rows
 
     company = f"co-{uuid.uuid4()}"
     job = _make_job(db_session, address=TARGET, company=company)
@@ -303,7 +300,7 @@ def test_the_row_replace_drops_last_run_s_policy_derived_claims(db_session):
     ]
     db_session.commit()
 
-    write_effective_function_rows(
+    write_permission_rows(
         db_session,
         contract_id=contract.id,
         function_records=[
@@ -385,18 +382,17 @@ def test_struct_param_function_still_matches_its_row(db_session, _repoint_sessio
             function_name="sweepWithPermit",
             selector=selector,
             abi_signature=canonical,
-            effect_labels=["external_contract_call"],
             claims=None,
         )
     )
     db_session.commit()
 
-    control_snapshot = {"controller_values": {"state_variable:token": {"value": TOKEN}}}
+    observation_batch = {"controller_values": {"state_variable:token": {"value": TOKEN}}}
     enriched = PolicyWorker()._enrich_cross_contract(
         db_session,
         target_job,
         {},
-        control_snapshot,
+        observation_batch,
         function_records=[{"function": full_name, "abi_signature": canonical, "selector": selector}],
     )
 
@@ -475,14 +471,13 @@ def test_enrichment_lands_only_on_this_job_s_deployment(db_session, _repoint_ses
                 function_name="sweep",
                 selector=_selector("sweep(address)")[:10],
                 abi_signature="sweep(address)",
-                effect_labels=["external_contract_call"],
                 claims=None,
             )
         )
     db_session.commit()
 
-    control_snapshot = {"controller_values": {"state_variable:token": {"value": TOKEN}}}
-    PolicyWorker()._enrich_cross_contract(db_session, target_job, {}, control_snapshot)
+    observation_batch = {"controller_values": {"state_variable:token": {"value": TOKEN}}}
+    PolicyWorker()._enrich_cross_contract(db_session, target_job, {}, observation_batch)
 
     def _claims_for(deployment: str) -> set[str]:
         row = (
@@ -557,15 +552,14 @@ def test_ambiguous_row_match_is_skipped_not_raised(db_session, _repoint_session_
                 function_name="sweep",
                 selector=_selector("sweep(address)")[:10],
                 abi_signature="sweep(address)",
-                effect_labels=["external_contract_call"],
                 claims=None,
             )
         )
     db_session.commit()
 
-    control_snapshot = {"controller_values": {"state_variable:token": {"value": TOKEN}}}
+    observation_batch = {"controller_values": {"state_variable:token": {"value": TOKEN}}}
     with caplog.at_level("WARNING", logger="workers.policy_worker"):
-        enriched = PolicyWorker()._enrich_cross_contract(db_session, target_job, {}, control_snapshot)
+        enriched = PolicyWorker()._enrich_cross_contract(db_session, target_job, {}, observation_batch)
 
     # The derivation still ran; only the placement was declined.
     assert "sweep(address)" in enriched

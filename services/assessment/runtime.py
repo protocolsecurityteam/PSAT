@@ -148,7 +148,6 @@ def control_graph(assessment: Assessment) -> dict[str, Any]:
             "label": observation.get("label") or account["address"],
             "contract_name": observation.get("contract_name"),
             "depth": observation.get("depth") or 0,
-            "analyzed": observation.get("analyzed") is True,
             "analysis_state": observation.get("analysis_state"),
             "details": observation.get("details") or {},
             "artifacts": observation.get("artifacts") or {},

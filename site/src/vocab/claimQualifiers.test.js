@@ -624,12 +624,4 @@ describe("delegatecall.execute — where the foreign code comes from", () => {
     expect(q).not.toContain("immutable");
   });
 
-  it("lanes to control and keeps its own legacy label", () => {
-    // Foreign code in this contract's storage is the same severity class as an
-    // arbitrary external call; what it must NOT do is join the
-    // upgrade.implementation population and move that claim's statistics.
-    expect(laneForClaims({ claims: [dc({ target_kind: "storage_setter" })] })).toBe("top");
-    expect(CLAIM_VOCAB["delegatecall.execute"].legacy).toBe("delegatecall_execution");
-    expect(CLAIM_VOCAB["delegatecall.execute"].legacy).not.toBe(CLAIM_VOCAB["upgrade.implementation"].legacy);
-  });
 });

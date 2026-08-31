@@ -22,7 +22,7 @@ def _time_phase(timings_ms: dict[str, int], name: str) -> Iterator[None]:
     """Record the elapsed ms of the wrapped block into ``timings_ms[name]``.
 
     Mirrors the ``_phase`` helper in
-    ``services.static.contract_analysis_pipeline.core``; the bundled-timing
+    ``services.static.static_analysis.core``; the bundled-timing
     style (single log line per request with every stage as a field) keeps
     log volume bounded and groups well in Loki.
     """

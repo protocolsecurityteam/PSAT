@@ -25,7 +25,6 @@ def _safe_evidence(selector: str) -> MatchedEvidence:
 @claim_matcher(
     claim_id="safe.signer_mgmt",
     sentence="changes the Safe signer set or approval threshold",
-    legacy_projection=None,
     consumer_family="control_plane",
     gate=is_safe_gate,
 )
@@ -39,7 +38,6 @@ def safe_signer_mgmt(ctx: ClaimContext, function: str) -> MatchedEvidence | None
 @claim_matcher(
     claim_id="safe.module_mgmt",
     sentence="grants or revokes Safe module execution rights",
-    legacy_projection=None,
     consumer_family="control_plane",
     gate=is_safe_gate,
 )
@@ -53,7 +51,6 @@ def safe_module_mgmt(ctx: ClaimContext, function: str) -> MatchedEvidence | None
 @claim_matcher(
     claim_id="safe.set_guard",
     sentence="sets the Safe transaction guard hook",
-    legacy_projection=None,
     consumer_family="control_plane",
     gate=is_safe_gate,
 )

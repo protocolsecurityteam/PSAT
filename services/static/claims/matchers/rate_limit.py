@@ -83,7 +83,6 @@ def _mandatory_callee_names(ctx: ClaimContext, function: str) -> set[str]:
 @claim_matcher(
     claim_id="rate_limit.consume",
     sentence="passes an amount through a bucket rate limiter",
-    legacy_projection=None,
     consumer_family="fact",
 )
 def rate_limit_consume(ctx: ClaimContext, function: str) -> MatchedEvidence | None:

@@ -71,7 +71,6 @@ if not is_registered(TRANSFER_POLICY_CONFIGURE):
             sentence="changes another contract's transfer gating",
             gate=_no_static_gate,
             trigger=_no_static_trigger,
-            legacy_projection=None,
             consumer_family="control_plane",
         )
     )

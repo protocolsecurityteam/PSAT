@@ -1,11 +1,10 @@
 """Effects → claims bridge.
 
 Pure-mapping honesty per effect class, the two fail-closed directions,
-idempotent double-merge, behavioral_observed precedence over a static claim, and
-legacy effect_labels re-projection staying in sync. The DB-backed writer
-regression (call site 2 preserves observed claims across a policy rewrite) and
+idempotent double-merge, and behavioral_observed precedence over a static claim.
+The DB-backed writer regression (call site 2 preserves observed claims across a policy rewrite) and
 the end-to-end worker labeling (call site 1) live in
-``test_effective_permissions_semantic``-style / ``test_effects_worker_integration``
+``test_permission_index_semantic``-style / ``test_effects_worker_integration``
 files respectively; this file owns the bridge's own contract.
 """
 
@@ -332,11 +331,9 @@ def test_authority_change_maps_to_registered_authority_grant():
     # for a mechanism-agnostic gate-open; the bridge mints its own registered id.
     claim = claims_bridge.verdict_to_claim(_verdict(EFFECT_CLASS_AUTHORITY_CHANGE, witness={"gate_mutation": True}))
     assert claim is not None and claim["claim_id"] == claims_bridge.AUTHORITY_GRANT
-    # Registered, so it can be rendered / projected like any static claim.
-    from services.static.claims.registry import is_registered, legacy_projections
+    from services.static.claims.registry import is_registered
 
     assert is_registered(claims_bridge.AUTHORITY_GRANT)
-    assert legacy_projections()[claims_bridge.AUTHORITY_GRANT] == "authority_update"
 
 
 # ---------------------------------------------------------------------------
@@ -397,29 +394,17 @@ def test_distinct_sibling_claims_are_both_kept():
     assert ids == ["supply.burn", "supply.mint"]
 
 
-def test_reproject_effect_labels_stays_in_sync():
-    merged = claims_bridge.merge_observed_claims([], [_verdict(EFFECT_CLASS_VALUE_OUT)])
-    labels = claims_bridge.reproject_effect_labels(["some_prior_label"], merged)
-    # flow.out projects the legacy "asset_send"; prior labels are preserved (union).
-    assert "asset_send" in labels
-    assert "some_prior_label" in labels
-
-
 def test_merge_into_function_identity_when_no_verdict_mints():
     # No mintable verdict ⇒ None, so the caller leaves the row byte-identical.
-    assert (
-        claims_bridge.merge_into_function([], [], [_verdict(EFFECT_CLASS_VALUE_OUT, verdict=VERDICT_UNKNOWN)]) is None
-    )
+    assert claims_bridge.merge_into_function([], [_verdict(EFFECT_CLASS_VALUE_OUT, verdict=VERDICT_UNKNOWN)]) is None
 
 
-def test_merge_into_function_returns_claims_and_labels():
+def test_merge_into_function_returns_claims():
     result = claims_bridge.merge_into_function(
-        [], ["prior"], [_verdict(EFFECT_CLASS_SUPPLY, witness={"supply_delta_sign": "mint"})]
+        [], [_verdict(EFFECT_CLASS_SUPPLY, witness={"supply_delta_sign": "mint"})]
     )
     assert result is not None
-    claims, labels = result
-    assert [c["claim_id"] for c in claims] == ["supply.mint"]
-    assert "mint" in labels and "prior" in labels
+    assert [c["claim_id"] for c in result] == ["supply.mint"]
 
 
 def test_merge_preserves_unrelated_static_claims():
@@ -436,7 +421,7 @@ def test_merge_preserves_unrelated_static_claims():
 # ---------------------------------------------------------------------------
 
 from db.models import Contract, EffectiveFunction, EffectVerdict  # noqa: E402
-from services.policy.effective_permissions_writer import write_effective_function_rows  # noqa: E402
+from services.policy.permission_index_writer import write_permission_rows  # noqa: E402
 from tests.conftest import requires_postgres  # noqa: E402
 
 _SELECTOR = "0x40c10f19"
@@ -459,7 +444,6 @@ def _seed_contract_with_observed_function(session, *, with_verdict: bool):
         function_name="mint",
         selector=_SELECTOR,
         abi_signature="mint(address,uint256)",
-        effect_labels=["mint"],
         claims=[observed],
         authority_public=False,
     )
@@ -490,9 +474,6 @@ def _fn_record() -> dict[str, Any]:
         "function": "mint(address,uint256)",
         "abi_signature": "mint(address,uint256)",
         "selector": _SELECTOR,
-        "effect_labels": [],
-        "effect_targets": [],
-        "action_summary": "stub",
         "authority_public": False,
         "authority_roles": [],
         "claims": [],
@@ -504,7 +485,7 @@ def test_policy_rewrite_preserves_observed_claims_from_verdicts(db_session):
     """Call site 2, verdict path: proven effect_verdicts survive the capture and
     re-merge onto the re-created row."""
     contract_id = _seed_contract_with_observed_function(db_session, with_verdict=True)
-    write_effective_function_rows(
+    write_permission_rows(
         db_session,
         contract_id=contract_id,
         function_records=[_fn_record()],
@@ -516,16 +497,15 @@ def test_policy_rewrite_preserves_observed_claims_from_verdicts(db_session):
     ids = [c["claim_id"] for c in (ef.claims or [])]
     assert "supply.mint" in ids
     assert any(c["tier"] == "behavioral_observed" for c in ef.claims)
-    assert "mint" in (ef.effect_labels or [])
 
 
 @requires_postgres
 def test_policy_rewrite_preserves_observed_claims_without_surviving_verdict(db_session):
     """Call site 2, durable path: even when the proven verdict was already cascade-
     deleted by an earlier replace, the observed claims on the outgoing rows are
-    carried forward — so repeated policy-only re-runs never blank the labels."""
+    carried forward across repeated policy-only re-runs."""
     contract_id = _seed_contract_with_observed_function(db_session, with_verdict=False)
-    write_effective_function_rows(
+    write_permission_rows(
         db_session,
         contract_id=contract_id,
         function_records=[_fn_record()],
@@ -536,7 +516,6 @@ def test_policy_rewrite_preserves_observed_claims_without_surviving_verdict(db_s
     ef = db_session.query(EffectiveFunction).filter(EffectiveFunction.contract_id == contract_id).one()
     ids = [c["claim_id"] for c in (ef.claims or [])]
     assert "supply.mint" in ids
-    assert "mint" in (ef.effect_labels or [])
 
 
 @requires_postgres
@@ -548,17 +527,16 @@ def test_policy_rewrite_leaves_claimless_functions_byte_identical(db_session):
     db_session.flush()
     cid = contract.id
     db_session.commit()
-    write_effective_function_rows(
+    write_permission_rows(
         db_session,
         contract_id=cid,
-        function_records=[dict(_fn_record(), effect_labels=["some_label"])],
+        function_records=[_fn_record()],
         capability_by_function=None,
         deployment_address="0x" + "cd" * 20,
     )
     db_session.commit()
     ef = db_session.query(EffectiveFunction).filter(EffectiveFunction.contract_id == cid).one()
     assert (ef.claims or []) == []
-    assert ef.effect_labels == ["some_label"]
     _cleanup(db_session, cid)
 
 
@@ -587,7 +565,6 @@ def _seed_with_real_verdict(session):
         function_name="mint",
         selector=_SELECTOR,
         abi_signature="mint(address,uint256)",
-        effect_labels=["mint"],
         claims=[],
         authority_public=False,
     )
@@ -623,7 +600,7 @@ def test_policy_rewrite_keeps_verdict_row_and_relinks(db_session):
     row relinks to the re-created function row and no carried observed claim's
     witness may point at a dead verdict."""
     contract_id, verdict_id = _seed_with_real_verdict(db_session)
-    write_effective_function_rows(
+    write_permission_rows(
         db_session,
         contract_id=contract_id,
         function_records=[_fn_record()],
@@ -649,7 +626,7 @@ def test_row_delete_without_recreate_nulls_function_id(db_session):
     """A function dropped from the new surface keeps its verdict rows (identity =
     deployment coordinates) with the convenience join nulled, not cascaded away."""
     contract_id, verdict_id = _seed_with_real_verdict(db_session)
-    write_effective_function_rows(
+    write_permission_rows(
         db_session,
         contract_id=contract_id,
         function_records=[],
@@ -763,10 +740,9 @@ def test_merge_into_function_keeps_the_static_lattice():
     """``effects_worker`` merges through ``merge_into_function``, and that is the
     only path that MINTS observed claims — so a carry-forward the other seam does
     and this one does not is a carry-forward that never runs in production."""
-    result = claims_bridge.merge_into_function([_static_flow_out()], [], [_executed()])
+    result = claims_bridge.merge_into_function([_static_flow_out()], [_executed()])
     assert result is not None
-    claims, _labels = result
-    flow_out = next(c for c in claims if c["claim_id"] == "flow.out")
+    flow_out = next(c for c in result if c["claim_id"] == "flow.out")
     assert flow_out["tier"] == "behavioral_observed"
     assert flow_out["witness"]["flows"][0]["target_kind"] == {"kind": "immutable", "tier": "dispositive_ast"}
     assert flow_out["witness"]["direction"] == "out"
@@ -779,10 +755,9 @@ def test_a_damaged_row_is_repaired_by_the_next_policy_rerun():
     replacement — which is why a fix that only repairs pristine rows leaves every
     row already on disk damaged forever."""
     prior = [_static_flow_out(), _damaged_observed_flow_out()]
-    result = claims_bridge.merge_into_function(prior, [], [_executed()])
+    result = claims_bridge.merge_into_function(prior, [_executed()])
     assert result is not None
-    claims, _labels = result
-    flow_out = [c for c in claims if c["claim_id"] == "flow.out"]
+    flow_out = [c for c in result if c["claim_id"] == "flow.out"]
     assert len(flow_out) == 1
     witness = flow_out[0]["witness"]
     assert witness["flows"][0]["target_kind"] == {"kind": "immutable", "tier": "dispositive_ast"}
@@ -887,7 +862,6 @@ def test_destination_shape_survives_the_writer_onto_the_function_row(db_session)
             function_name="manage",
             selector="0xf6e715d0",
             abi_signature="manage(address,bytes,uint256)",
-            effect_labels=[],
             claims=[],
             authority_public=False,
         )
@@ -913,7 +887,7 @@ def test_destination_shape_survives_the_writer_onto_the_function_row(db_session)
         )
         db_session.commit()
 
-        write_effective_function_rows(
+        write_permission_rows(
             db_session,
             contract_id=contract.id,
             function_records=[
@@ -921,9 +895,6 @@ def test_destination_shape_survives_the_writer_onto_the_function_row(db_session)
                     "function": "manage(address,bytes,uint256)",
                     "abi_signature": "manage(address,bytes,uint256)",
                     "selector": "0xf6e715d0",
-                    "effect_labels": [],
-                    "effect_targets": [],
-                    "action_summary": "stub",
                     "authority_public": False,
                     "authority_roles": [],
                     "claims": [],

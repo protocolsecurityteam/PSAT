@@ -147,10 +147,24 @@ def _targets(permission: Mapping[str, Any], witness: Mapping[str, Any]) -> list[
             targets.append(target)
         if targets:
             return targets
-    raw_targets = permission.get("effect_targets")
-    if not isinstance(raw_targets, list):
-        return []
-    return [{"kind": "operation", "value": target} for target in raw_targets if isinstance(target, str) and target]
+    targets: list[EffectTarget] = []
+    state_names: set[str] = set()
+    writes = permission.get("state_writes")
+    if isinstance(writes, list):
+        for write in writes:
+            if not isinstance(write, Mapping) or not isinstance(write.get("var"), str):
+                continue
+            state_names.add(str(write["var"]))
+    targets.extend({"kind": "state", "value": name} for name in sorted(state_names))
+    sinks = permission.get("sinks")
+    if isinstance(sinks, list):
+        for sink in sinks:
+            if not isinstance(sink, Mapping) or sink.get("origin") == "guard":
+                continue
+            raw_target = sink.get("target")
+            if isinstance(raw_target, str) and raw_target and raw_target not in state_names:
+                targets.append({"kind": "operation", "value": raw_target})
+    return targets
 
 
 def _function_ids(assessment: Assessment) -> dict[str, str]:

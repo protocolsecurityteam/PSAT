@@ -21,8 +21,7 @@ summary reads it instead of re-deriving it.
 ``pause(uint256 newPausedStatus)`` assigns the new bitmap from a *parameter*,
 so the matcher's toggle polarity is never a definite constant bool and it fails
 closed. Measured: 0 of the 8 local bitmap contracts mint a ``pause.*`` claim,
-and their 24 ``effective_functions`` rows are inert
-(``status`` NULL, ``authority_public`` false, ``effect_labels`` [], 0 claims).
+and their 24 permission rows are inert (0 claims).
 """
 
 from __future__ import annotations
@@ -35,12 +34,12 @@ import pytest
 pytest.importorskip("slither")
 from slither import Slither
 
-from services.static.claims import attach_claims_to_effects, build_claims, project_effect_labels
-from services.static.contract_analysis_pipeline.effects import build_effects
-from services.static.contract_analysis_pipeline.predicate_artifacts import (
+from services.static.claims import attach_claims_to_effects, build_claims
+from services.static.static_analysis.effects import build_effects
+from services.static.static_analysis.predicate_artifacts import (
     build_predicate_artifacts_with_pause_info,
 )
-from services.static.contract_analysis_pipeline.summaries import (
+from services.static.static_analysis.summaries import (
     _detect_pausability,
     _pause_claims,
 )
@@ -55,7 +54,6 @@ def _analyse(tmp_path: Path, source: str, name: str = "C"):
     trees, pause_info = build_predicate_artifacts_with_pause_info(contract)
     effects = build_effects(contract)
     attach_claims_to_effects(effects, build_claims(contract, effects, trees))
-    project_effect_labels(effects)
     return _detect_pausability(contract, tmp_path, pause_info, effects, trees), effects
 
 
@@ -228,13 +226,13 @@ def test_is_pausable_is_not_determined_when_the_trees_stage_raised(tmp_path, mon
 
     The healthy arm runs first and must say ``True``, so a fixture that
     silently stopped being pausable cannot make this test vacuous."""
-    from services.static.contract_analysis_pipeline import core
+    from services.static.static_analysis import core
     from tests.support.foundry_project import write_foundry_project
 
     body = textwrap.dedent(source).strip() + "\n"
 
     healthy_project = write_foundry_project(tmp_path / "healthy", "C", body)
-    healthy, _t, _e = core.collect_contract_analysis_with_artifacts(healthy_project)
+    healthy, _t, _e = core.collect_static_inputs(healthy_project)
     assert healthy["pausability"]["is_pausable"] is True, f"{label}: fixture must be pausable when nothing raises"
 
     def _boom(*_a, **_k):
@@ -242,7 +240,7 @@ def test_is_pausable_is_not_determined_when_the_trees_stage_raised(tmp_path, mon
 
     monkeypatch.setattr(core, "build_predicate_artifacts_with_pause_info", _boom)
     degraded_project = write_foundry_project(tmp_path / "degraded", "C", body)
-    degraded, trees_artifact, effects_artifact = core.collect_contract_analysis_with_artifacts(degraded_project)
+    degraded, trees_artifact, effects_artifact = core.collect_static_inputs(degraded_project)
 
     # The trap, asserted rather than assumed: the claims plane looks healthy.
     assert isinstance(trees_artifact, dict) and isinstance(effects_artifact, dict)

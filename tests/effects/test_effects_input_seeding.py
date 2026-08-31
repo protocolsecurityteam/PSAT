@@ -70,7 +70,6 @@ def _facts(
         effect_info={
             "sinks": sinks,
             "value_flows": [],
-            "effect_labels": [],
             # wrap/unwrap take one quantity; the seeded retry may only scale a
             # parameter the static plane names as one.
             "parameter_names": list(param_names),

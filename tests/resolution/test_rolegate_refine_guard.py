@@ -56,10 +56,10 @@ from services.resolution.predicate_evaluator import (  # noqa: E402
     evaluate_tree,
 )
 from services.resolution.role_store_standards import SOLADY_ENUMERABLE_ROLES  # noqa: E402
-from services.static.contract_analysis_pipeline.predicate_types import LeafPredicate  # noqa: E402
-from services.static.contract_analysis_pipeline.predicates import build_predicate_tree  # noqa: E402
-from services.static.contract_analysis_pipeline.reentrancy_pause import apply_reentrancy_pause_pass  # noqa: E402
-from services.static.contract_analysis_pipeline.writer_gate import apply_writer_gate_pass  # noqa: E402
+from services.static.static_analysis.predicate_types import LeafPredicate  # noqa: E402
+from services.static.static_analysis.predicates import build_predicate_tree  # noqa: E402
+from services.static.static_analysis.reentrancy_pause import apply_reentrancy_pause_pass  # noqa: E402
+from services.static.static_analysis.writer_gate import apply_writer_gate_pass  # noqa: E402
 from tests.conftest import DATABASE_URL as _DB_URL  # noqa: E402
 from tests.conftest import _can_connect  # noqa: E402
 

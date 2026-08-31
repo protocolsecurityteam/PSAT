@@ -60,7 +60,6 @@ def _wards_evidence(selector: str) -> MatchedEvidence:
 @claim_matcher(
     claim_id="roles.grant",
     sentence="grants membership in a role-based access-control scheme (per a recognized standard)",
-    legacy_projection="role_management",
     consumer_family="control_plane",
     gate=_roles_present,
 )
@@ -80,7 +79,6 @@ def roles_grant(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
 @claim_matcher(
     claim_id="roles.revoke",
     sentence="revokes membership in a role-based access-control scheme (per a recognized standard)",
-    legacy_projection="role_management",
     consumer_family="control_plane",
     gate=_roles_present,
 )
@@ -100,7 +98,6 @@ def roles_revoke(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
 @claim_matcher(
     claim_id="roles.configure",
     sentence="configures role or capability membership in a Solmate RolesAuthority scheme",
-    legacy_projection="role_management",
     consumer_family="control_plane",
     gate=ac.solmate_roles_gate,
 )

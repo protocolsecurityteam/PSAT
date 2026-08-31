@@ -101,8 +101,8 @@ def test_mode1_cross_attach_functions(db_session):
     _newer(base_impl_job)
     base_impl_c = _add_contract(s, address=impl, job=base_impl_job, protocol_id=p.id, chain="base")
 
-    _ef(s, eth_impl_c, "ethOnly", effect_labels=["pause_toggle"])
-    _ef(s, base_impl_c, "baseOnly", effect_labels=["pause_toggle"])
+    _ef(s, eth_impl_c, "ethOnly", claim_id="pause.set")
+    _ef(s, base_impl_c, "baseOnly", claim_id="pause.set")
     s.commit()
 
     funcs = build_functions_for_protocol(s, p.name)
@@ -158,9 +158,9 @@ def test_mode2_drop_entry_functions(db_session):
     _newer(base_job)
     base_c = _add_contract(s, address=shared, job=base_job, protocol_id=p.id, chain="base")
 
-    _ef(s, core_c, "coreFn", effect_labels=["asset_pull"])
-    _ef(s, admin_c, "adminFn", effect_labels=["pause_toggle"])
-    _ef(s, base_c, "baseFn", effect_labels=["mint"])
+    _ef(s, core_c, "coreFn", claim_id="flow.in")
+    _ef(s, admin_c, "adminFn", claim_id="pause.set")
+    _ef(s, base_c, "baseFn", claim_id="supply.mint")
     s.commit()
 
     funcs = build_functions_for_protocol(s, p.name)
@@ -181,7 +181,7 @@ def test_mode1_cross_attach_overview(db_session):
     (which read from the resolved impl contract).
 
     Pre-fix: the ethereum proxy resolves to base's impl and surfaces base's
-    ``mint`` effect instead of ethereum's ``asset_pull``.
+    ``supply.mint`` claim instead of ethereum's ``flow.in`` claim.
     """
     s = db_session
     p = _add_protocol(s, f"m1ov-{uuid.uuid4().hex[:8]}")
@@ -214,8 +214,8 @@ def test_mode1_cross_attach_overview(db_session):
     _newer(base_impl_job)
     base_impl_c = _add_contract(s, address=impl, job=base_impl_job, protocol_id=p.id, chain="base")
 
-    _ef(s, eth_impl_c, "deposit", effect_labels=["asset_pull"])
-    _ef(s, base_impl_c, "wrap", effect_labels=["mint"])
+    _ef(s, eth_impl_c, "deposit", claim_id="flow.in")
+    _ef(s, base_impl_c, "wrap", claim_id="supply.mint")
     s.commit()
 
     overview = build_company_overview(s, p.name)
@@ -223,10 +223,10 @@ def test_mode1_cross_attach_overview(db_session):
     eth_entry = by_addr[proxy_eth.lower()]
     base_entry = by_addr[proxy_base.lower()]
 
-    assert "asset_pull" in eth_entry["value_effects"] and "mint" not in eth_entry["value_effects"], (
+    assert "flow.in" in eth_entry["value_effects"] and "supply.mint" not in eth_entry["value_effects"], (
         f"ethereum proxy must surface ethereum impl effects, got {eth_entry['value_effects']}"
     )
-    assert "mint" in base_entry["value_effects"] and "asset_pull" not in base_entry["value_effects"], (
+    assert "supply.mint" in base_entry["value_effects"] and "flow.in" not in base_entry["value_effects"], (
         f"base proxy must surface base impl effects, got {base_entry['value_effects']}"
     )
 
@@ -266,7 +266,7 @@ def test_mode2_drop_entry_overview(db_session):
     )
     _newer(base_job)
     base_c = _add_contract(s, address=shared, job=base_job, protocol_id=p.id, chain="base")
-    _ef(s, base_c, "baseFn", effect_labels=["mint"])
+    _ef(s, base_c, "baseFn", claim_id="supply.mint")
     s.commit()
 
     overview = build_company_overview(s, p.name)
@@ -300,12 +300,12 @@ def test_nullchain_linkage_preserved(db_session):
     )
     # Impl contract also NULL-chain (legacy).
     impl_c = _add_contract(s, address=impl, job=impl_job, protocol_id=p.id, chain=None)
-    _ef(s, impl_c, "legacyFn", effect_labels=["pause_toggle"])
+    _ef(s, impl_c, "currentFn", claim_id="pause.set")
     s.commit()
 
     funcs = build_functions_for_protocol(s, p.name)
     proxy_fns = {f["function"] for f in funcs.get(f"ethereum::{proxy_addr.lower()}", [])}
-    assert "legacyFn()" in proxy_fns, f"NULL-chain impl must fold into the ethereum proxy entry, got {proxy_fns}"
+    assert "currentFn()" in proxy_fns, f"NULL-chain impl must fold into the ethereum proxy entry, got {proxy_fns}"
     assert f"ethereum::{impl.lower()}" not in funcs, "NULL-chain impl must not also render standalone"
 
 
@@ -350,7 +350,7 @@ def test_f1_controller_attribution_no_cross_chain_fold(db_session):
         s, address=impl, protocol_id=p.id, name="EthImpl", request={"address": impl, "proxy_address": proxy_eth}
     )
     eth_impl_c = _add_contract(s, address=impl, job=eth_impl_job, protocol_id=p.id, chain="ethereum")
-    eth_ef = _ef(s, eth_impl_c, "ethGov", effect_labels=["pause_toggle"])
+    eth_ef = _ef(s, eth_impl_c, "ethGov", claim_id="pause.set")
     _fp_safe(s, eth_ef, eth_safe)
 
     base_job = _add_job(
@@ -358,7 +358,7 @@ def test_f1_controller_attribution_no_cross_chain_fold(db_session):
     )
     _newer(base_job)
     base_c = _add_contract(s, address=impl, job=base_job, protocol_id=p.id, chain="base")
-    base_ef = _ef(s, base_c, "baseGov", effect_labels=["pause_toggle"])
+    base_ef = _ef(s, base_c, "baseGov", claim_id="pause.set")
     _fp_safe(s, base_ef, base_safe)
     s.commit()
 

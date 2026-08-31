@@ -21,7 +21,7 @@ Design constraints this module honours verbatim:
   ``EffectiveFunction.claims`` — they live in the artifact store.
 
 Pure functions, no I/O: the two call sites (``workers.effects_worker`` and
-``services.policy.effective_permissions_writer``) do the DB reads/writes and
+``services.policy.permission_index_writer``) do the DB reads/writes and
 hand this module plain verdict-shaped objects.
 """
 
@@ -44,7 +44,6 @@ from services.static.claims.registry import (
     RegistryEntry,
     emit_claim,
     is_registered,
-    legacy_projections,
     register,
     resolve_claim_precedence,
 )
@@ -87,7 +86,6 @@ if not is_registered(AUTHORITY_GRANT):
             sentence="lets a caller pass a permission gate that previously rejected it",
             gate=_no_static_gate,
             trigger=_no_static_trigger,
-            legacy_projection="authority_update",
             consumer_family="control_plane",
         )
     )
@@ -532,29 +530,11 @@ def merge_observed_claims(existing: Iterable[EffectMatch], verdicts: Iterable[An
     return resolve_claim_precedence([*_drop_superseded(prior, minted), *minted])
 
 
-def reproject_effect_labels(existing_labels: Iterable[str], claims: Iterable[EffectMatch]) -> list[str]:
-    """Re-derive the legacy ``effect_labels`` as the union of the labels already
-    present and the registry ``legacy_projection`` of every claim on the function
-    (the same additive dual-write discipline ``project_effect_labels`` uses), so
-    the legacy display path stays in sync with the claims plane."""
-    projections = legacy_projections()
-    labels = {str(label) for label in existing_labels}
-    for claim in claims:
-        projected = projections.get(claim.get("claim_id", ""))
-        if projected:
-            labels.add(projected)
-    return sorted(labels)
-
-
 def merge_into_function(
     existing_claims: Iterable[EffectMatch] | None,
-    existing_labels: Iterable[str] | None,
     verdicts: Iterable[Any],
-) -> tuple[list[EffectMatch], list[str]] | None:
-    """The whole per-function merge: fold proven verdicts into the claims, then
-    re-project the legacy labels. Returns ``(claims, effect_labels)`` or ``None``
-    when nothing minted (so a caller leaves untouched rows exactly as written —
-    the identity path keeps every claim-free function byte-identical).
+) -> list[EffectMatch] | None:
+    """Fold proven verdicts into the function's canonical claim index.
 
     The fold itself is :func:`merge_observed_claims` and must stay that way. This
     seam once inlined its own precedence call instead, which is how the two paths
@@ -564,6 +544,4 @@ def merge_into_function(
     existing_claims = list(existing_claims or [])
     if not claims_from_verdicts(verdicts):
         return None
-    merged_claims = merge_observed_claims(existing_claims, verdicts)
-    merged_labels = reproject_effect_labels(existing_labels or [], merged_claims)
-    return merged_claims, merged_labels
+    return merge_observed_claims(existing_claims, verdicts)

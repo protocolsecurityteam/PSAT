@@ -3,7 +3,7 @@
 The current static pipeline still emits its historical artifacts while the
 single-PR rewrite is in progress.  This module is the cutover boundary: it
 turns those facts into stable domain objects, evidence-backed claims, and
-analysis receipts.  Downstream stages will update this document rather than
+static_facts receipts.  Downstream stages will update this document rather than
 inventing another stage-shaped source of truth.
 """
 
@@ -96,8 +96,8 @@ def _functions(contract_id: str, effects: Mapping[str, Any]) -> tuple[dict[str, 
     return functions, ids_by_signature
 
 
-def _controllers(contract_id: str, analysis: Mapping[str, Any]) -> dict[str, Controller]:
-    raw_controllers = analysis.get("controller_tracking")
+def _controllers(contract_id: str, static_facts: Mapping[str, Any]) -> dict[str, Controller]:
+    raw_controllers = static_facts.get("controller_tracking")
     if not isinstance(raw_controllers, list):
         return {}
     controllers: dict[str, Controller] = {}
@@ -243,19 +243,19 @@ def _effect_targets(info: Mapping[str, Any], witness: Mapping[str, Any]) -> list
     state_names: set[str] = set()
     if isinstance(writes, list):
         state_names = {str(write.get("var")) for write in writes if isinstance(write, Mapping) and write.get("var")}
-    raw_targets = info.get("effect_targets")
-    if not isinstance(raw_targets, list):
-        return []
     targets: list[EffectTarget] = []
-    for raw in raw_targets:
-        if not isinstance(raw, str) or not raw:
+    for name in sorted(state_names):
+        targets.append({"kind": "state", "value": name})
+    sinks = info.get("sinks")
+    if not isinstance(sinks, list):
+        return targets
+    for sink in sinks:
+        if not isinstance(sink, Mapping) or sink.get("origin") == "guard":
             continue
-        if raw in state_names:
-            kind = "state"
-        elif raw.startswith("0x") and len(raw) == 42:
-            kind = "account"
-        else:
-            kind = "operation"
+        raw = sink.get("target")
+        if not isinstance(raw, str) or not raw or raw in state_names:
+            continue
+        kind = "account" if raw.startswith("0x") and len(raw) == 42 else "operation"
         targets.append({"kind": kind, "value": raw})
     return targets
 
@@ -453,7 +453,7 @@ def build_static_assessment(
     contract_name: str,
     code_hash: str | None,
     source_hash: str | None,
-    analysis: Mapping[str, Any],
+    static_facts: Mapping[str, Any],
     effects: Mapping[str, Any],
     predicate_trees: Mapping[str, Any],
 ) -> Assessment:
@@ -478,7 +478,7 @@ def build_static_assessment(
         "source_hash": source_hash,
     }
     functions, ids_by_signature = _functions(contract_id, effects)
-    controllers = _controllers(contract_id, analysis)
+    controllers = _controllers(contract_id, static_facts)
     root_entity_id = stable_id("entity", {"account_id": account_id})
     claims, evidence, claim_ids_by_kind = _claims_and_evidence(
         scope=scope,

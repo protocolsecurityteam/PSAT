@@ -90,7 +90,6 @@ def _supply_evidence(ctx: ClaimContext, function: str, kind: str) -> MatchedEvid
 @claim_matcher(
     claim_id="supply.mint",
     sentence="increases token supply or share balances",
-    legacy_projection="mint",
     consumer_family="flow",
 )
 def supply_mint(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
@@ -100,7 +99,6 @@ def supply_mint(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
 @claim_matcher(
     claim_id="supply.burn",
     sentence="decreases token supply or share balances",
-    legacy_projection="burn",
     consumer_family="flow",
 )
 def supply_burn(ctx: ClaimContext, function: str) -> MatchedEvidence | None:

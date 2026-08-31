@@ -20,7 +20,7 @@ from eth_utils.crypto import keccak
 slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
 
-from services.static.contract_analysis_pipeline.effects import build_effects  # noqa: E402
+from services.static.static_analysis.effects import build_effects  # noqa: E402
 
 
 def _sel(sig: str) -> str:

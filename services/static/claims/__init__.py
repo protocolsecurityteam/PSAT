@@ -14,8 +14,7 @@ Basis, and Claim records; matcher failures ride analysis receipts instead.
 
 from __future__ import annotations
 
-from .builder import attach_claims_to_effects, build_claims, project_effect_labels
-from .consumers import CONSUMER_REFERENCED_CLAIM_IDS
+from .builder import attach_claims_to_effects, build_claims
 from .context import ClaimContext
 from .decorator import claim_matcher
 from .matchers import discover
@@ -24,7 +23,6 @@ from .registry import (
     emit_claim,
     entry_for,
     is_registered,
-    legacy_projections,
     register,
     registry,
     resolve_claim_precedence,
@@ -43,7 +41,6 @@ from .types import (
 
 __all__ = [
     "CONSUMER_FAMILIES",
-    "CONSUMER_REFERENCED_CLAIM_IDS",
     "ClaimContext",
     "MatchedEvidence",
     "EffectMatch",
@@ -58,11 +55,9 @@ __all__ = [
     "build_claims",
     "claim_matcher",
     "discover",
-    "project_effect_labels",
     "emit_claim",
     "entry_for",
     "is_registered",
-    "legacy_projections",
     "register",
     "registry",
     "resolve_claim_precedence",

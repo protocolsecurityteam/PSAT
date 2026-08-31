@@ -1,4 +1,4 @@
-"""F4a — coverage is a guarantee of analysis, not a side effect of recursion.
+"""F4a — coverage is a guarantee of static_facts, not a side effect of recursion.
 
 Enrollment reads ``contract_materializations``; until now only the authority
 recursion wrote it, as a side effect of which dependencies it happened to visit.
@@ -23,7 +23,6 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from db import contract_materializations as cm
 from db.contract_materializations import (
-    ANALYSIS_SCHEMA_VERSION,
     PRODUCED_BY_PIPELINE,
     PRODUCED_BY_PROMOTION_SWEEP,
     PRODUCED_BY_RESOLUTION,
@@ -33,14 +32,15 @@ from db.contract_materializations import (
     PUBLISH_KECCAK_BOUND_TO_OTHER_ADDRESS,
     PUBLISH_REFRESHED,
     PUBLISH_WRITTEN,
+    STATIC_FACTS_SCHEMA_VERSION,
     build_provenance,
     builder_claim_is_stale,
     publish_materialization,
 )
 from db.models import ContractMaterialization, Job, JobStage, JobStatus
-from db.queue import proven_analysis_schema_version
+from db.queue import proven_static_facts_schema_version
 from tests.conftest import requires_postgres
-from tests.support.policy_builders import _assessment, _minimal_contract_analysis
+from tests.support.policy_builders import _assessment, _minimal_static_facts
 
 ADDR = "0x" + "a1" * 20
 OTHER_ADDR = "0x" + "b2" * 20
@@ -50,7 +50,7 @@ OTHER_KECCAK = "0x" + "22" * 32
 ANALYSIS = {"subject": {"address": ADDR, "name": "C"}, "functions": []}
 PLAN = {"contract_address": ADDR, "tracked_controllers": []}
 TREES = {"schema_version": "semantic", "trees": {}}
-ASSESSMENT = _assessment(analysis=_minimal_contract_analysis(address=ADDR, name="C"))
+ASSESSMENT = _assessment(static_facts=_minimal_static_facts(address=ADDR, name="C"))
 
 
 @pytest.fixture()
@@ -79,8 +79,8 @@ def _publish(**overrides: Any) -> str:
         "address": ADDR,
         "bytecode_keccak": KECCAK,
         "contract_name": "C",
-        "analysis": ANALYSIS,
-        "tracking_plan": PLAN,
+        "static_facts": ANALYSIS,
+        "observation_plan": PLAN,
         "predicate_trees": TREES,
         "source_content_hash": "0x" + "de" * 32,
         "provenance": build_provenance(PRODUCED_BY_PIPELINE, source_job_id="job-1"),
@@ -117,9 +117,9 @@ def test_publish_writes_a_current_row_with_provenance(cm_db):
     # The chain key is the id token, never the name it was passed.
     assert row.chain == "1"
     assert row.status == "ready"
-    assert row.analysis_schema_version == ANALYSIS_SCHEMA_VERSION
-    assert row.tracking_plan == PLAN
-    assert row.analysis == ANALYSIS
+    assert row.static_facts_schema_version == STATIC_FACTS_SCHEMA_VERSION
+    assert row.observation_plan == PLAN
+    assert row.static_facts == ANALYSIS
     assert _provenance(row) == {
         "produced_by": PRODUCED_BY_PIPELINE,
         "source_job_id": "job-1",
@@ -154,10 +154,10 @@ def test_publish_leaves_a_current_row_alone(cm_db):
 
 @requires_postgres
 def test_publish_refuses_a_bundle_without_an_analysis(cm_db):
-    """A ready row whose analysis hydrates to None reads to the resolution stage
-    as *this contract has no analysis* — a claim a missing artifact never made."""
-    assert _publish(analysis=None) == PUBLISH_INCOMPLETE_BUNDLE
-    assert _publish(tracking_plan=None) == PUBLISH_INCOMPLETE_BUNDLE
+    """A ready row whose static_facts hydrates to None reads to the resolution stage
+    as *this contract has no static_facts* — a claim a missing artifact never made."""
+    assert _publish(static_facts=None) == PUBLISH_INCOMPLETE_BUNDLE
+    assert _publish(observation_plan=None) == PUBLISH_INCOMPLETE_BUNDLE
     assert _row(cm_db) is None
 
 
@@ -174,12 +174,12 @@ def test_publish_refuses_an_address_already_bound_to_other_bytecode(cm_db):
 @pytest.mark.parametrize(
     "status,version,builder_started_at",
     [
-        ("failed", ANALYSIS_SCHEMA_VERSION, None),
-        ("pending", ANALYSIS_SCHEMA_VERSION, None),
-        ("ready", ANALYSIS_SCHEMA_VERSION - 1, None),
+        ("failed", STATIC_FACTS_SCHEMA_VERSION, None),
+        ("pending", STATIC_FACTS_SCHEMA_VERSION, None),
+        ("ready", STATIC_FACTS_SCHEMA_VERSION - 1, None),
         # A live builder claim included deliberately: that builder's phase-3
         # recheck finds our ready row and drops its duplicate build.
-        ("building", ANALYSIS_SCHEMA_VERSION, "now"),
+        ("building", STATIC_FACTS_SCHEMA_VERSION, "now"),
     ],
 )
 def test_publish_replaces_a_row_that_serves_nobody(cm_db, status, version, builder_started_at):
@@ -190,7 +190,7 @@ def test_publish_replaces_a_row_that_serves_nobody(cm_db, status, version, build
             address=ADDR.lower(),
             status=status,
             builder_started_at=datetime.now(timezone.utc) if builder_started_at else None,
-            analysis_schema_version=version,
+            static_facts_schema_version=version,
         )
     )
     cm_db.commit()
@@ -199,7 +199,7 @@ def test_publish_replaces_a_row_that_serves_nobody(cm_db, status, version, build
     cm_db.expire_all()
     row = _row(cm_db)
     assert row is not None
-    assert (row.status, row.analysis_schema_version) == ("ready", ANALYSIS_SCHEMA_VERSION)
+    assert (row.status, row.static_facts_schema_version) == ("ready", STATIC_FACTS_SCHEMA_VERSION)
     assert _provenance(row)["produced_by"] == PRODUCED_BY_PIPELINE
 
 
@@ -212,7 +212,7 @@ def test_recursion_written_rows_name_their_producer(cm_db):
         chain="ethereum",
         address=ADDR,
         bytecode_keccak=KECCAK,
-        builder=lambda: {"contract_name": "C", "analysis": ANALYSIS, "tracking_plan": PLAN},
+        builder=lambda: {"contract_name": "C", "static_facts": ANALYSIS, "observation_plan": PLAN},
     )
     cm_db.expire_all()
     row = _row(cm_db)
@@ -239,15 +239,15 @@ def test_the_pipeline_refreshes_a_current_row_whose_bundle_differs(cm_db):
     _publish()
     improved = {"contract_address": ADDR, "tracked_controllers": [{"controller_id": "state_variable:owner"}]}
 
-    assert _publish(tracking_plan=improved, refresh_on_differ=True) == PUBLISH_REFRESHED
+    assert _publish(observation_plan=improved, refresh_on_differ=True) == PUBLISH_REFRESHED
     cm_db.expire_all()
     row = _row(cm_db)
     assert row is not None
-    assert row.tracking_plan == improved
+    assert row.observation_plan == improved
     assert row.status == "ready"
 
     # Identical bundle, same flag: nothing to say, nothing written.
-    assert _publish(tracking_plan=improved, refresh_on_differ=True) == PUBLISH_ALREADY_CURRENT
+    assert _publish(observation_plan=improved, refresh_on_differ=True) == PUBLISH_ALREADY_CURRENT
 
 
 @requires_postgres
@@ -256,10 +256,10 @@ def test_the_sweep_never_overwrites_a_current_row_with_an_older_bundle(cm_db):
     it would be a downgrade, so the row stands."""
     _publish()
     older = {"contract_address": ADDR, "tracked_controllers": [{"controller_id": "stale"}]}
-    assert _publish(tracking_plan=older) == PUBLISH_ALREADY_CURRENT
+    assert _publish(observation_plan=older) == PUBLISH_ALREADY_CURRENT
     cm_db.expire_all()
     row = _row(cm_db)
-    assert row is not None and row.tracking_plan == PLAN
+    assert row is not None and row.observation_plan == PLAN
 
 
 @requires_postgres
@@ -285,7 +285,7 @@ def test_a_stale_builder_claim_does_not_read_as_a_running_builder(cm_db):
             address=ADDR.lower(),
             status="building",
             builder_started_at=datetime.now(timezone.utc) - timedelta(hours=6),
-            analysis_schema_version=ANALYSIS_SCHEMA_VERSION,
+            static_facts_schema_version=STATIC_FACTS_SCHEMA_VERSION,
         )
     )
     cm_db.commit()
@@ -309,7 +309,7 @@ def _job_row(session, *, version: int | None, donor: Any = None) -> Job:
         status=JobStatus.completed,
         stage=JobStage.done,
         request=request,
-        analysis_schema_version=version,
+        static_facts_schema_version=version,
     )
     session.add(job)
     session.commit()
@@ -322,13 +322,13 @@ def test_a_cache_hit_jobs_era_is_the_donors(cm_db):
     hit leaves the column NULL on a job whose artifacts are perfectly current.
     The stamp is still findable where it was witnessed: all 32 of the working
     DB's NULL-version cache-hit jobs resolve to a stamped v5 donor."""
-    donor = _job_row(cm_db, version=ANALYSIS_SCHEMA_VERSION)
+    donor = _job_row(cm_db, version=STATIC_FACTS_SCHEMA_VERSION)
     hit = _job_row(cm_db, version=None, donor=donor.id)
     second_hop = _job_row(cm_db, version=None, donor=hit.id)
 
-    assert proven_analysis_schema_version(cm_db, donor) == ANALYSIS_SCHEMA_VERSION
-    assert proven_analysis_schema_version(cm_db, hit) == ANALYSIS_SCHEMA_VERSION
-    assert proven_analysis_schema_version(cm_db, second_hop) == ANALYSIS_SCHEMA_VERSION
+    assert proven_static_facts_schema_version(cm_db, donor) == STATIC_FACTS_SCHEMA_VERSION
+    assert proven_static_facts_schema_version(cm_db, hit) == STATIC_FACTS_SCHEMA_VERSION
+    assert proven_static_facts_schema_version(cm_db, second_hop) == STATIC_FACTS_SCHEMA_VERSION
 
 
 @requires_postgres
@@ -338,10 +338,10 @@ def test_a_long_cache_chain_is_walked_to_its_terminus(cm_db):
     between 1 and 14 hops out; a fixed hop budget would silently convert the far
     end of that distribution into "no witnessed era" and refuse supply for the
     busiest contracts."""
-    job = _job_row(cm_db, version=ANALYSIS_SCHEMA_VERSION)
+    job = _job_row(cm_db, version=STATIC_FACTS_SCHEMA_VERSION)
     for _ in range(20):
         job = _job_row(cm_db, version=None, donor=job.id)
-    assert proven_analysis_schema_version(cm_db, job) == ANALYSIS_SCHEMA_VERSION
+    assert proven_static_facts_schema_version(cm_db, job) == STATIC_FACTS_SCHEMA_VERSION
 
 
 @requires_postgres
@@ -349,10 +349,10 @@ def test_an_unwitnessed_era_stays_unwitnessed(cm_db):
     """A chain that ends without a stamp anywhere is the third state, not
     "current"."""
     unstamped = _job_row(cm_db, version=None)
-    assert proven_analysis_schema_version(cm_db, unstamped) is None
-    assert proven_analysis_schema_version(cm_db, _job_row(cm_db, version=None, donor=unstamped.id)) is None
+    assert proven_static_facts_schema_version(cm_db, unstamped) is None
+    assert proven_static_facts_schema_version(cm_db, _job_row(cm_db, version=None, donor=unstamped.id)) is None
     # A dangling donor reference resolves to nothing rather than raising.
-    assert proven_analysis_schema_version(cm_db, _job_row(cm_db, version=None, donor=uuid.uuid4())) is None
+    assert proven_static_facts_schema_version(cm_db, _job_row(cm_db, version=None, donor=uuid.uuid4())) is None
 
 
 @requires_postgres
@@ -361,7 +361,7 @@ def test_a_donor_cycle_terminates(cm_db):
     b = _job_row(cm_db, version=None, donor=a.id)
     a.request = {**(a.request or {}), "cache_source_job_id": str(b.id)}
     cm_db.commit()
-    assert proven_analysis_schema_version(cm_db, a) is None
+    assert proven_static_facts_schema_version(cm_db, a) is None
 
 
 # ---------------------------------------------------------------------------
@@ -377,13 +377,13 @@ class _FakeStaticWorker:
     _publish_materialization = StaticWorker._publish_materialization
 
 
-def _fake_job(version: int | None = ANALYSIS_SCHEMA_VERSION, request: dict | None = None) -> Any:
+def _fake_job(version: int | None = STATIC_FACTS_SCHEMA_VERSION, request: dict | None = None) -> Any:
     return SimpleNamespace(
         id=uuid.uuid4(),
         request=request if request is not None else {},
         chain_id=1,
         source_content_hash="0x" + "fe" * 32,
-        analysis_schema_version=version,
+        static_facts_schema_version=version,
     )
 
 
@@ -414,9 +414,9 @@ def test_static_stage_publishes_the_artifacts_it_stored(monkeypatch, captured_pu
     call = captured_publish[0]
     assert call["address"] == ADDR
     assert call["bytecode_keccak"] == KECCAK
-    assert call["tracking_plan"]["contract_address"] == ADDR
-    assert call["tracking_plan"]["tracked_controllers"] == []
-    assert call["analysis"] == ANALYSIS
+    assert call["observation_plan"]["contract_address"] == ADDR
+    assert call["observation_plan"]["tracked_controllers"] == []
+    assert call["static_facts"] == ANALYSIS
     assert call["predicate_trees"] == TREES
     assert call["source_content_hash"] == job.source_content_hash
     assert call["provenance"] == {
@@ -434,11 +434,11 @@ def test_static_stage_publishes_nothing_for_an_unproven_analyzer_era(monkeypatch
         monkeypatch,
         {"static_facts": ANALYSIS, "assessment": ASSESSMENT, "predicate_trees": TREES},
     )
-    monkeypatch.setattr("db.queue.proven_analysis_schema_version", lambda _s, _j: None)
+    monkeypatch.setattr("db.queue.proven_static_facts_schema_version", lambda _s, _j: None)
     _FakeStaticWorker()._publish_materialization(None, _fake_job(version=None), ADDR, "C")
     assert captured_publish == []
 
-    monkeypatch.setattr("db.queue.proven_analysis_schema_version", lambda _s, _j: ANALYSIS_SCHEMA_VERSION - 1)
+    monkeypatch.setattr("db.queue.proven_static_facts_schema_version", lambda _s, _j: STATIC_FACTS_SCHEMA_VERSION - 1)
     _FakeStaticWorker()._publish_materialization(None, _fake_job(version=None), ADDR, "C")
     assert captured_publish == []
 
@@ -450,7 +450,7 @@ def test_static_stage_publishes_a_cache_hit_whose_donor_proves_the_era(monkeypat
         monkeypatch,
         {"static_facts": ANALYSIS, "assessment": ASSESSMENT, "predicate_trees": TREES},
     )
-    monkeypatch.setattr("db.queue.proven_analysis_schema_version", lambda _s, _j: ANALYSIS_SCHEMA_VERSION)
+    monkeypatch.setattr("db.queue.proven_static_facts_schema_version", lambda _s, _j: STATIC_FACTS_SCHEMA_VERSION)
     job = _fake_job(version=None, request={"static_cached": True, "cache_source_job_id": str(uuid.uuid4())})
     _FakeStaticWorker()._publish_materialization(None, job, ADDR, "C")
     assert len(captured_publish) == 1
@@ -459,7 +459,7 @@ def test_static_stage_publishes_a_cache_hit_whose_donor_proves_the_era(monkeypat
 def test_only_a_bundle_this_job_produced_may_refresh(monkeypatch, captured_publish):
     """A static-cache job's artifacts are an ancestor's, copied. They pass the
     era gate (era equality is not recency) but they are not the later record: let
-    them refresh and a fresh analysis and a later cache hit reproducing its
+    them refresh and a fresh static_facts and a later cache hit reproducing its
     ancestor take turns overwriting each other, each flip moving where monitoring
     watches."""
     _stub_artifacts(
@@ -476,16 +476,16 @@ def test_only_a_bundle_this_job_produced_may_refresh(monkeypatch, captured_publi
 
 @requires_postgres
 def test_a_copied_bundle_does_not_overwrite_a_freshly_analyzed_row(cm_db):
-    """End to end on the row itself: the fresh analysis stands, and the cache
+    """End to end on the row itself: the fresh static_facts stands, and the cache
     hit reports ``already_current`` rather than flipping it back."""
     fresh_plan = {"contract_address": ADDR, "tracked_controllers": [{"controller_id": "state_variable:authority"}]}
     ancestor_plan = {"contract_address": ADDR, "tracked_controllers": [{"controller_id": "ancestors_authority"}]}
-    assert _publish(tracking_plan=fresh_plan, refresh_on_differ=True) == PUBLISH_WRITTEN
+    assert _publish(observation_plan=fresh_plan, refresh_on_differ=True) == PUBLISH_WRITTEN
 
-    assert _publish(tracking_plan=ancestor_plan, refresh_on_differ=False) == PUBLISH_ALREADY_CURRENT
+    assert _publish(observation_plan=ancestor_plan, refresh_on_differ=False) == PUBLISH_ALREADY_CURRENT
     cm_db.expire_all()
     row = _row(cm_db)
-    assert row is not None and row.tracking_plan == fresh_plan
+    assert row is not None and row.observation_plan == fresh_plan
 
 
 def test_static_stage_publishes_nothing_without_a_plan(monkeypatch, captured_publish):
@@ -510,8 +510,8 @@ def test_static_stage_publishes_nothing_without_a_keccak(monkeypatch, captured_p
 
 
 def test_static_stage_never_fails_the_job_on_a_publish_error(monkeypatch, captured_publish):
-    """Supply is not the analysis: a failed publish must not sink a job whose
-    analysis succeeded."""
+    """Supply is not the static_facts: a failed publish must not sink a job whose
+    static_facts succeeded."""
     _stub_artifacts(
         monkeypatch,
         {"static_facts": ANALYSIS, "assessment": ASSESSMENT, "predicate_trees": TREES},

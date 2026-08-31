@@ -96,18 +96,16 @@ const OWNER_1 = "0xd111000000000000000000000000000000000111";
 const OWNER_2 = "0xd222000000000000000000000000000000000222";
 const OWNER_3 = "0xd333000000000000000000000000000000000333";
 
-function fn(name, effectLabels, principals = [], extra = {}) {
+function fn(name, claimIds, principals = [], extra = {}) {
   return {
     function: name,
     selector: `0x${name.slice(0, 8).padEnd(8, "0")}`,
     abi_signature: name,
-    effect_labels: effectLabels,
-    action_summary: `${name} action`,
+    claims: claimIds.map((claim_id) => ({ claim_id, tier: "standard_exact", witness: {} })),
     authority_public: extra.public ?? false,
     direct_owner: principals[0] || null,
     authority_roles: extra.roles || [],
     controllers: extra.controllers || [],
-    effect_targets: extra.targets || [],
     ...extra.fields,
   };
 }
@@ -139,12 +137,12 @@ export const ETHERFI_COMPANY_RICH = {
       controllers: { owner: SAFE_ADDR },
       job_id: "vault-job",
       functions: [
-        fn("upgrade", ["upgrade"], [principal(TIMELOCK_ADDR, "timelock", { delay: 86400 })]),
-        fn("pause", ["pause"], [principal(SAFE_ADDR, "safe", { owners: ["0x1", "0x2", "0x3"], threshold: 2 })]),
-        fn("unpause", ["unpause"], [principal(SAFE_ADDR, "safe", { owners: ["0x1", "0x2", "0x3"], threshold: 2 })]),
-        fn("deposit", ["asset_pull"], [], { public: true }),
-        fn("withdraw", ["asset_send"], [principal(EOA_ADDR, "eoa")]),
-        fn("setFee", ["config"], [principal(SAFE_ADDR, "safe", { owners: ["0x1", "0x2", "0x3"], threshold: 2 })]),
+        fn("upgrade", ["upgrade.implementation"], [principal(TIMELOCK_ADDR, "timelock", { delay: 86400 })]),
+        fn("pause", ["pause.set"], [principal(SAFE_ADDR, "safe", { owners: ["0x1", "0x2", "0x3"], threshold: 2 })]),
+        fn("unpause", ["pause.unset"], [principal(SAFE_ADDR, "safe", { owners: ["0x1", "0x2", "0x3"], threshold: 2 })]),
+        fn("deposit", ["flow.in"], [], { public: true }),
+        fn("withdraw", ["flow.out"], [principal(EOA_ADDR, "eoa")]),
+        fn("setFee", ["authority.replace"], [principal(SAFE_ADDR, "safe", { owners: ["0x1", "0x2", "0x3"], threshold: 2 })]),
       ],
     },
     {
@@ -155,9 +153,9 @@ export const ETHERFI_COMPANY_RICH = {
       controllers: {},
       job_id: "pool-job",
       functions: [
-        fn("rebalance", ["asset_send"], [principal(VAULT_ADDR, "contract", {}, "Vault")]),
-        fn("setOracle", ["config"], [], {}), // no principals → unknown guard
-        fn("addLiquidity", ["asset_pull"], [], { public: true }),
+        fn("rebalance", ["flow.out"], [principal(VAULT_ADDR, "contract", {}, "Vault")]),
+        fn("setOracle", ["authority.replace"], [], {}), // no principals → unknown guard
+        fn("addLiquidity", ["flow.in"], [], { public: true }),
       ],
     },
   ],

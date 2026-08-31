@@ -44,7 +44,7 @@ from typing import Any
 # Self-auth shapes are excluded by the equality arm below, and permit flows
 # resolve through the ``signature_auth`` leaf kind.
 from services.resolution.caller_sources import CALLER_SOURCES as _CALLER_TAINT_SOURCES
-from services.static.contract_analysis_pipeline.predicate_types import LeafPredicate
+from services.static.static_analysis.predicate_types import LeafPredicate
 
 
 def earned_public_enabled() -> bool:

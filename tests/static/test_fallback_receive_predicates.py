@@ -30,10 +30,10 @@ import pytest
 pytest.importorskip("slither")
 from slither import Slither
 
-from services.policy.effective_permissions import _abi_signature_and_selector
+from services.policy.permission_index import _abi_signature_and_selector
 from services.resolution.predicate_evaluator import evaluate_tree
-from services.static.contract_analysis_pipeline.effects import build_effects
-from services.static.contract_analysis_pipeline.predicate_artifacts import (
+from services.static.static_analysis.effects import build_effects
+from services.static.static_analysis.predicate_artifacts import (
     build_predicate_artifacts,
     has_no_selector,
     is_canonical_abi_signature,

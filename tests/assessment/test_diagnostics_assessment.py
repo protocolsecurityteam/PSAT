@@ -14,7 +14,7 @@ def test_stage_error_adds_no_claim() -> None:
         contract_name="Vault",
         code_hash=None,
         source_hash=None,
-        analysis={"controller_tracking": []},
+        static_facts={"controller_tracking": []},
         effects={"schema_version": "semantic", "functions": {}},
         predicate_trees={"schema_version": "semantic", "trees": {}},
     )

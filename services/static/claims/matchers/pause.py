@@ -94,7 +94,6 @@ def _pause_evidence(ctx: ClaimContext, function: str, want: str) -> MatchedEvide
 @claim_matcher(
     claim_id="pause.set",
     sentence="sets a flag that blocks other state-changing entry points of this contract (pauses it)",
-    legacy_projection="pause_toggle",
     consumer_family="control_plane",
 )
 def pause_set(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
@@ -104,7 +103,6 @@ def pause_set(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
 @claim_matcher(
     claim_id="pause.unset",
     sentence="clears a flag that blocks other state-changing entry points of this contract (unpauses it)",
-    legacy_projection="pause_toggle",
     consumer_family="control_plane",
 )
 def pause_unset(ctx: ClaimContext, function: str) -> MatchedEvidence | None:

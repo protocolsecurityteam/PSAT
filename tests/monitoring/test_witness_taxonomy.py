@@ -46,8 +46,8 @@ from services.monitoring.verify_status import (
     count_verification_read_gaps,
     record_unresolvable_read,
 )
+from services.resolution.observation_plan import build_observation_plan
 from services.resolution.repos.event_logs_rpc import FetchedEventLog
-from services.resolution.tracking_plan import build_control_tracking_plan
 
 
 def ADDR(n: int) -> str:
@@ -335,7 +335,7 @@ def test_qualification_fields_round_trip_through_the_plan_assembler():
             }
         ],
     }
-    plan = dict(build_control_tracking_plan(analysis))  # pyright: ignore[reportArgumentType]
+    plan = dict(build_observation_plan(analysis))  # pyright: ignore[reportArgumentType]
     event = dict(plan["tracked_controllers"][0]["event_watch"]["events"][0])  # pyright: ignore[reportIndexIssue]
     assert event["member_witness"] == {
         "mapping_name": "fromDenyList",
@@ -349,7 +349,7 @@ def test_qualification_fields_round_trip_through_the_plan_assembler():
 def test_polling_plan_suppresses_the_verified_type_it_would_double_report():
     plan = build_polling_plan(
         contract_type="regular",
-        tracking_plan=_plan_with(
+        observation_plan=_plan_with(
             {"strategy": "getter_call", "type_kind": "primitive", "type": "uint256", "target": "rate"}
         ),
     )

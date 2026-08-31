@@ -136,7 +136,7 @@ def test_analyses_list_does_not_enumerate_internal_artifacts(monkeypatch) -> Non
             "stage_errors",
             "stage_timing_discovery",
             "predicate_trees",
-            "control_tracking_plan",
+            "observation_plan",
             "classification_error",
             "polling_plan",
         )

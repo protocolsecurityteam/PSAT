@@ -20,7 +20,6 @@ def _base() -> Assessment:
                 "abi_signature": "pause()",
                 "state_changing": True,
                 "state_writes": [{"var": "paused", "declared_type": "bool"}],
-                "effect_targets": ["paused"],
                 "claims": [
                     {
                         "claim_id": "pause.set",
@@ -40,7 +39,6 @@ def _base() -> Assessment:
                 "abi_signature": "withdraw()",
                 "state_changing": True,
                 "state_writes": [],
-                "effect_targets": [],
                 "claims": [],
             },
         },
@@ -61,7 +59,7 @@ def _base() -> Assessment:
         contract_name="Vault",
         code_hash=None,
         source_hash="0xsource",
-        analysis={"controller_tracking": []},
+        static_facts={"controller_tracking": []},
         effects=effects,
         predicate_trees={
             "schema_version": "semantic",
@@ -90,8 +88,6 @@ def _permission(**overrides: object) -> dict:
                 "direct_owner": None,
                 "authority_roles": [],
                 "controllers": [],
-                "effect_targets": ["paused"],
-                "effect_labels": ["pause_toggle"],
                 **overrides,
             }
         ],

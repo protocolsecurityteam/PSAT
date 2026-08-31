@@ -277,7 +277,7 @@ class Claim(TypedDict):
     scope: Scope
 
 
-AnalysisStatus = Literal["completed", "partial", "failed"]
+StaticStatus = Literal["completed", "partial", "failed"]
 DiagnosticSeverity = Literal["degraded", "error"]
 TargetKind = Literal["contract", "function", "controller", "entity", "effect"]
 
@@ -305,7 +305,7 @@ class Diagnostic(TypedDict):
 class Analysis(TypedDict):
     detector: str
     version: str
-    status: AnalysisStatus
+    status: StaticStatus
     coverage: Coverage
     diagnostics: list[Diagnostic]
     claim_ids: list[ClaimId]
@@ -332,7 +332,7 @@ __all__ = [
     "AccountId",
     "AllAuthority",
     "Analysis",
-    "AnalysisStatus",
+    "StaticStatus",
     "AnyAuthority",
     "Assessment",
     "AssessmentVersion",

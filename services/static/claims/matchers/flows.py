@@ -172,7 +172,6 @@ def _is_value_call(sink: dict[str, Any]) -> bool:
 @claim_matcher(
     claim_id="flow.out",
     sentence="sends value out of the contract",
-    legacy_projection="asset_send",
     consumer_family="flow",
 )
 def flow_out(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
@@ -182,7 +181,6 @@ def flow_out(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
 @claim_matcher(
     claim_id="flow.in",
     sentence="pulls value into the contract",
-    legacy_projection="asset_pull",
     consumer_family="flow",
 )
 def flow_in(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
@@ -192,7 +190,6 @@ def flow_in(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
 @claim_matcher(
     claim_id="value_router",
     sentence="routes value through a contract it calls",
-    legacy_projection=None,
     consumer_family="flow",
 )
 def value_router(ctx: ClaimContext, function: str) -> MatchedEvidence | None:

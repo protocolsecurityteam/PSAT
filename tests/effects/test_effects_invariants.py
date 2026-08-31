@@ -151,7 +151,6 @@ def test_inv4_value_never_gates_cap_logs_drops(clean_effects, caplog):
                 function_name=f"f{i}",
                 selector=f"0x0000000{i}",
                 authority_public=False,
-                effect_targets=["slot0"],
             )
         )
     session.commit()

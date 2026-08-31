@@ -14,98 +14,13 @@ import pytest
 from tests.support.policy_builders import (
     AUTH_ADDRESS,
     TARGET_ADDRESS,
-    ZERO_ADDRESS,
     _assessment,
-    _authority_bundle,
     _graph_with_nodes,
     _job,
-    _minimal_contract_analysis,
     _minimal_snapshot,
+    _minimal_static_facts,
 )
 from workers.policy_worker import PolicyWorker
-
-# ---------------------------------------------------------------------------
-# _resolve_authority tests (now takes session, job, graph, snapshot, nested)
-# ---------------------------------------------------------------------------
-
-
-class TestResolveAuthorityNoAuthority:
-    """controller_values has keys but none resolve to a nested snapshot bundle."""
-
-    def test_returns_no_authority(self) -> None:
-        worker = PolicyWorker()
-        session = MagicMock()
-        job = _job()
-
-        snapshot = _minimal_snapshot({"owner_slot:admin": {"value": "0xbbb"}})
-        graph = _graph_with_nodes([])
-
-        result = worker._resolve_authority(session, cast(Any, job), graph, snapshot, {})
-
-        assert result["principal_resolution"]["status"] == "no_authority"
-
-
-class TestResolveAuthorityZeroAddress:
-    """Authority exists but is the zero address."""
-
-    def test_returns_no_authority(self) -> None:
-        worker = PolicyWorker()
-        session = MagicMock()
-        job = _job()
-
-        snapshot = _minimal_snapshot({"state_variable:authority": {"value": ZERO_ADDRESS}})
-        graph = _graph_with_nodes([])
-
-        result = worker._resolve_authority(session, cast(Any, job), graph, snapshot, {})
-
-        assert result["principal_resolution"]["status"] == "no_authority"
-        assert "non-zero" in result["principal_resolution"]["reason"].lower()
-
-
-class TestResolveAuthorityNoSnapshot:
-    """A nested controller address is known but its snapshot is missing."""
-
-    def test_returns_no_authority_snapshot(self) -> None:
-        worker = PolicyWorker()
-        session = MagicMock()
-        job = _job()
-
-        snapshot = _minimal_snapshot({"external_contract:policy": {"value": AUTH_ADDRESS}})
-        graph = _graph_with_nodes([{"address": AUTH_ADDRESS, "artifacts": {}}])
-        nested = cast(
-            Any,
-            {
-                AUTH_ADDRESS: {
-                    "analysis": {
-                        "subject": {"address": AUTH_ADDRESS, "name": "Policy"},
-                    }
-                }
-            },
-        )
-
-        result = worker._resolve_authority(session, cast(Any, job), graph, snapshot, nested)
-
-        assert result["principal_resolution"]["status"] == "no_authority_snapshot"
-
-
-class TestResolveAuthorityWithSnapshot:
-    """A nested controller snapshot is joined without any policy-state backfill."""
-
-    def test_returns_authority_snapshot(self) -> None:
-        worker = PolicyWorker()
-        session = MagicMock()
-        job = _job()
-
-        snapshot = _minimal_snapshot({"external_contract:policy": {"value": AUTH_ADDRESS}})
-        graph = _graph_with_nodes([{"address": AUTH_ADDRESS, "artifacts": {"data_key": f"recursive:{AUTH_ADDRESS}"}}])
-        nested = cast(Any, {AUTH_ADDRESS: _authority_bundle()})
-
-        result = worker._resolve_authority(session, cast(Any, job), graph, snapshot, nested)
-
-        assert result["authority_snapshot"] == nested[AUTH_ADDRESS]["snapshot"]
-        assert result["principal_resolution"]["status"] == "complete"
-        assert "semantic" in result["principal_resolution"]["reason"]
-
 
 # ---------------------------------------------------------------------------
 # process() integration tests
@@ -121,10 +36,10 @@ class TestProcessStoresAssessment:
         session.execute.return_value.scalar_one_or_none.return_value = None
         job = _job()
 
-        contract_analysis = _minimal_contract_analysis()
-        control_snapshot = _minimal_snapshot({"some_key:admin": {"value": "0xbbb"}})
+        static_facts = _minimal_static_facts()
+        observation_batch = _minimal_snapshot({"some_key:admin": {"value": "0xbbb"}})
         resolved_graph = _graph_with_nodes([])
-        assessment = _assessment(analysis=contract_analysis, snapshot=control_snapshot, graph=resolved_graph)
+        assessment = _assessment(static_facts=static_facts, snapshot=observation_batch, graph=resolved_graph)
 
         def fake_get_artifact(_session: Any, _job_id: Any, name: str) -> Any:
             return {
@@ -144,9 +59,8 @@ class TestProcessStoresAssessment:
 
         monkeypatch.setattr("workers.policy_worker.get_artifact", fake_get_artifact)
         monkeypatch.setattr("workers.policy_worker.store_artifact", fake_store_artifact)
-        monkeypatch.setattr("workers.policy_worker._load_nested_artifacts", lambda *_a, **_kw: {})
         monkeypatch.setattr(
-            "workers.policy_worker.build_effective_permissions",
+            "workers.policy_worker.build_permission_index",
             lambda *a, **kw: {"schema_version": "1", "functions": []},
         )
         monkeypatch.setattr(
@@ -154,7 +68,7 @@ class TestProcessStoresAssessment:
             lambda **kw: ({"nodes": [], "edges": [], "refreshed": True}, {}),
         )
         monkeypatch.setattr(
-            "workers.policy_worker.build_principal_labels",
+            "workers.policy_worker.build_principal_index",
             lambda *a, **kw: {"principals": []},
         )
 
@@ -162,7 +76,7 @@ class TestProcessStoresAssessment:
 
         stored_names = [name for name, _ in store_calls]
         assert "assessment" in stored_names
-        assert not {"effective_permissions", "resolved_control_graph", "principal_labels"} & set(stored_names)
+        assert not {"permission_index", "resolution_graph", "principal_labels"} & set(stored_names)
 
 
 class TestProcessSemanticInputs:
@@ -174,10 +88,10 @@ class TestProcessSemanticInputs:
         session.execute.return_value.scalar_one_or_none.return_value = None
         job = _job()
 
-        contract_analysis = _minimal_contract_analysis()
-        control_snapshot = _minimal_snapshot()
+        static_facts = _minimal_static_facts()
+        observation_batch = _minimal_snapshot()
         resolved_graph = _graph_with_nodes([])
-        assessment = _assessment(analysis=contract_analysis, snapshot=control_snapshot, graph=resolved_graph)
+        assessment = _assessment(static_facts=static_facts, snapshot=observation_batch, graph=resolved_graph)
 
         def fake_get_artifact(_session: Any, _job_id: Any, name: str) -> Any:
             return {
@@ -203,42 +117,41 @@ class TestProcessSemanticInputs:
         monkeypatch.setattr("workers.policy_worker.get_artifact", fake_get_artifact)
         monkeypatch.setattr("workers.policy_worker.store_artifact", lambda *a, **kw: None)
         monkeypatch.setattr("workers.policy_worker.record_degraded", fake_record_degraded)
-        monkeypatch.setattr("workers.policy_worker._load_nested_artifacts", lambda *_a, **_kw: {})
-        monkeypatch.setattr("workers.policy_worker.build_effective_permissions", fake_build_ep)
+        monkeypatch.setattr("workers.policy_worker.build_permission_index", fake_build_ep)
         monkeypatch.setattr(
             "workers.policy_worker.resolve_control_graph",
             lambda **kw: ({"nodes": [], "edges": []}, {}),
         )
         monkeypatch.setattr(
-            "workers.policy_worker.build_principal_labels",
+            "workers.policy_worker.build_principal_index",
             lambda *a, **kw: {"principals": []},
         )
         monkeypatch.setattr(
             PolicyWorker,
             "_enrich_cross_contract",
-            lambda self, session, job, contract_analysis, control_snapshot, **kw: {},
+            lambda self, session, job, static_facts, observation_batch, **kw: {},
         )
 
         worker.process(session, cast(Any, job))
 
-        semantic_errors = [entry for entry in degraded if entry["phase"] == "effective_permissions_semantic_inputs"]
+        semantic_errors = [entry for entry in degraded if entry["phase"] == "permission_index_semantic_inputs"]
         assert len(semantic_errors) == 1
         assert semantic_errors[0]["context"]["missing_artifacts"] == ["effects", "predicate_trees"]
 
 
-class TestGraphRefreshAfterEffectivePermissions:
-    """resolve_control_graph refresh runs AFTER build_effective_permissions."""
+class TestGraphRefreshAfterPermissionIndex:
+    """resolve_control_graph refresh runs AFTER build_permission_index."""
 
-    def test_refresh_runs_after_effective_permissions(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_refresh_runs_after_permission_index(self, monkeypatch: pytest.MonkeyPatch) -> None:
         worker = PolicyWorker()
         session = MagicMock()
         session.execute.return_value.scalar_one_or_none.return_value = None
         job = _job()
 
-        contract_analysis = _minimal_contract_analysis()
-        control_snapshot = _minimal_snapshot()
+        static_facts = _minimal_static_facts()
+        observation_batch = _minimal_snapshot()
         resolved_graph = _graph_with_nodes([])
-        assessment = _assessment(analysis=contract_analysis, snapshot=control_snapshot, graph=resolved_graph)
+        assessment = _assessment(static_facts=static_facts, snapshot=observation_batch, graph=resolved_graph)
 
         def fake_get_artifact(_session: Any, _job_id: Any, name: str) -> Any:
             return {
@@ -248,11 +161,11 @@ class TestGraphRefreshAfterEffectivePermissions:
         call_order: list[str] = []
 
         def fake_build_ep(*args: Any, **kwargs: Any) -> dict:
-            call_order.append("effective_permissions")
+            call_order.append("permission_index")
             return {"schema_version": "1", "functions": []}
 
         def fake_resolve_graph(**kwargs: Any) -> tuple[dict, dict]:
-            call_order.append("resolved_control_graph")
+            call_order.append("resolution_graph")
             return {"nodes": [], "edges": [], "refreshed": True}, {}
 
         def fake_build_labels(*args: Any, **kwargs: Any) -> dict:
@@ -261,18 +174,17 @@ class TestGraphRefreshAfterEffectivePermissions:
 
         monkeypatch.setattr("workers.policy_worker.get_artifact", fake_get_artifact)
         monkeypatch.setattr("workers.policy_worker.store_artifact", lambda *a, **kw: None)
-        monkeypatch.setattr("workers.policy_worker._load_nested_artifacts", lambda *_a, **_kw: {})
-        monkeypatch.setattr("workers.policy_worker.build_effective_permissions", fake_build_ep)
+        monkeypatch.setattr("workers.policy_worker.build_permission_index", fake_build_ep)
         monkeypatch.setattr("workers.policy_worker.resolve_control_graph", fake_resolve_graph)
-        monkeypatch.setattr("workers.policy_worker.build_principal_labels", fake_build_labels)
+        monkeypatch.setattr("workers.policy_worker.build_principal_index", fake_build_labels)
 
         worker.process(session, cast(Any, job))
 
-        ep_idx = call_order.index("effective_permissions")
-        rg_idx = call_order.index("resolved_control_graph")
+        ep_idx = call_order.index("permission_index")
+        rg_idx = call_order.index("resolution_graph")
         assert ep_idx < rg_idx, (
-            f"effective_permissions (index {ep_idx}) must be called "
-            f"before resolved_control_graph (index {rg_idx}); "
+            f"permission_index (index {ep_idx}) must be called "
+            f"before resolution_graph (index {rg_idx}); "
             f"actual order: {call_order}"
         )
 
@@ -286,10 +198,10 @@ class TestCrossContractEnrichmentAssessmentSync:
         session = MagicMock()
         job = _job()
 
-        contract_analysis = _minimal_contract_analysis()
-        control_snapshot = _minimal_snapshot({"state_variable:token": {"value": AUTH_ADDRESS}})
+        static_facts = _minimal_static_facts()
+        observation_batch = _minimal_snapshot({"state_variable:token": {"value": AUTH_ADDRESS}})
         resolved_graph = _graph_with_nodes([])
-        assessment = _assessment(analysis=contract_analysis, snapshot=control_snapshot, graph=resolved_graph)
+        assessment = _assessment(static_facts=static_facts, snapshot=observation_batch, graph=resolved_graph)
 
         def fake_get_artifact(_session: Any, _job_id: Any, name: str) -> Any:
             return {
@@ -315,15 +227,13 @@ class TestCrossContractEnrichmentAssessmentSync:
 
         monkeypatch.setattr("workers.policy_worker.get_artifact", fake_get_artifact)
         monkeypatch.setattr("workers.policy_worker.store_artifact", fake_store_artifact)
-        monkeypatch.setattr("workers.policy_worker._load_nested_artifacts", lambda *_a, **_kw: {})
         monkeypatch.setattr(
-            "workers.policy_worker.build_effective_permissions",
+            "workers.policy_worker.build_permission_index",
             lambda *a, **kw: {
                 "schema_version": "1",
                 "functions": [
                     {
                         "function": "mintRewards()",
-                        "effect_labels": ["role_management"],
                         "claims": [],
                         "controllers": [],
                         "authority_roles": [],
@@ -337,20 +247,20 @@ class TestCrossContractEnrichmentAssessmentSync:
             lambda **kw: ({"nodes": [], "edges": []}, {}),
         )
         monkeypatch.setattr(
-            "workers.policy_worker.build_principal_labels",
+            "workers.policy_worker.build_principal_index",
             lambda *a, **kw: {"principals": []},
         )
         policy_claim = {"claim_id": "flow.out", "tier": "policy_derived", "witness": {"callee": AUTH_ADDRESS}}
         monkeypatch.setattr(
             PolicyWorker,
             "_enrich_cross_contract",
-            lambda self, session, job, contract_analysis, control_snapshot, **kw: {"mintRewards()": [policy_claim]},
+            lambda self, session, job, static_facts, observation_batch, **kw: {"mintRewards()": [policy_claim]},
         )
 
         worker.process(session, cast(Any, job))
 
         assert [name for name, _data in store_calls if name == "assessment"]
-        assert not [name for name, _data in store_calls if name == "effective_permissions"]
+        assert not [name for name, _data in store_calls if name == "permission_index"]
 
 
 # ---------------------------------------------------------------------------
@@ -361,7 +271,7 @@ class TestCrossContractEnrichmentAssessmentSync:
 
 
 class TestProcessFanoutParity:
-    """Drive ``PolicyWorker.process`` end-to-end (real ``build_principal_labels``)
+    """Drive ``PolicyWorker.process`` end-to-end (real ``build_principal_index``)
     with a 50+ principal fixture and assert sequential vs parallel parity."""
 
     @staticmethod
@@ -395,9 +305,6 @@ class TestProcessFanoutParity:
                     "authority_public": False,
                     "authority_roles": [{"role": 1, "principals": role_principals(principal_addrs[:30])}],
                     "controllers": [],
-                    "effect_targets": [],
-                    "effect_labels": ["arbitrary_external_call"],
-                    "action_summary": "Manage",
                     "notes": [],
                 },
                 {
@@ -408,15 +315,12 @@ class TestProcessFanoutParity:
                     "authority_public": False,
                     "authority_roles": [{"role": 8, "principals": role_principals(principal_addrs[30:])}],
                     "controllers": [],
-                    "effect_targets": [],
-                    "effect_labels": ["authority_update"],
-                    "action_summary": "Set authority",
                     "notes": [],
                 },
             ],
         }
-        contract_analysis = _minimal_contract_analysis()
-        control_snapshot = _minimal_snapshot({})
+        static_facts = _minimal_static_facts()
+        observation_batch = _minimal_snapshot({})
         resolved_graph = _graph_with_nodes(
             [
                 {
@@ -427,13 +331,13 @@ class TestProcessFanoutParity:
                     "label": "VaultBig",
                     "contract_name": "VaultBig",
                     "depth": 0,
-                    "analyzed": True,
+                    "analysis_state": "analyzed",
                     "details": {"address": target},
                     "artifacts": {},
                 }
             ]
         )
-        assessment = _assessment(analysis=contract_analysis, snapshot=control_snapshot, graph=resolved_graph)
+        assessment = _assessment(static_facts=static_facts, snapshot=observation_batch, graph=resolved_graph)
 
         def fake_get_artifact(_session: Any, _job_id: Any, name: str) -> Any:
             return {
@@ -458,9 +362,8 @@ class TestProcessFanoutParity:
 
         monkeypatch.setattr("workers.policy_worker.get_artifact", fake_get_artifact)
         monkeypatch.setattr("workers.policy_worker.store_artifact", fake_store_artifact)
-        monkeypatch.setattr("workers.policy_worker._load_nested_artifacts", lambda *_a, **_kw: {})
         monkeypatch.setattr(
-            "workers.policy_worker.build_effective_permissions",
+            "workers.policy_worker.build_permission_index",
             lambda *a, **kw: ep_data,
         )
         monkeypatch.setattr(
@@ -468,17 +371,17 @@ class TestProcessFanoutParity:
             lambda **kw: (resolved_graph, {}),
         )
         monkeypatch.setattr(
-            "services.policy.principal_enrichment.classify_resolved_address_with_status",
+            "services.policy.principal_index.classify_resolved_address_with_status",
             fake_classify,
         )
         monkeypatch.setattr(
             PolicyWorker,
             "_enrich_cross_contract",
-            lambda self, session, job, contract_analysis, control_snapshot, **kw: {},
+            lambda self, session, job, static_facts, observation_batch, **kw: {},
         )
         from workers import policy_worker as policy_worker_module
 
-        real_build_labels = policy_worker_module.build_principal_labels
+        real_build_labels = policy_worker_module.build_principal_index
         label_payloads: list[Any] = []
 
         def capture_labels(*args: Any, **kwargs: Any) -> Any:
@@ -486,7 +389,7 @@ class TestProcessFanoutParity:
             label_payloads.append(payload)
             return payload
 
-        monkeypatch.setattr(policy_worker_module, "build_principal_labels", capture_labels)
+        monkeypatch.setattr(policy_worker_module, "build_principal_index", capture_labels)
 
         worker.process(session, cast(Any, job))
 
@@ -527,10 +430,10 @@ class TestGraphRefreshRewritesTables:
         session.execute.return_value.scalar_one_or_none.return_value = contract_row
         job = _job(request={"rpc_url": "https://rpc.example", "chain_id": 1, "proxy_address": "0x" + "77" * 20})
 
-        contract_analysis = _minimal_contract_analysis()
-        control_snapshot = _minimal_snapshot()
+        static_facts = _minimal_static_facts()
+        observation_batch = _minimal_snapshot()
         resolved_graph = _graph_with_nodes([])
-        assessment = _assessment(analysis=contract_analysis, snapshot=control_snapshot, graph=resolved_graph)
+        assessment = _assessment(static_facts=static_facts, snapshot=observation_batch, graph=resolved_graph)
         refreshed_graph = {
             "schema_version": "0.1",
             "root_contract_address": TARGET_ADDRESS,
@@ -567,19 +470,18 @@ class TestGraphRefreshRewritesTables:
 
         monkeypatch.setattr("workers.policy_worker.get_artifact", fake_get_artifact)
         monkeypatch.setattr("workers.policy_worker.store_artifact", lambda *a, **kw: None)
-        monkeypatch.setattr("workers.policy_worker._load_nested_artifacts", lambda *_a, **_kw: {})
         monkeypatch.setattr(
-            "workers.policy_worker.build_effective_permissions",
+            "workers.policy_worker.build_permission_index",
             lambda *a, **kw: {"schema_version": "1", "functions": []},
         )
         monkeypatch.setattr("workers.policy_worker.resolve_control_graph", lambda **kw: (refreshed_graph, {}))
-        monkeypatch.setattr("workers.policy_worker.build_principal_labels", lambda *a, **kw: {"principals": []})
-        monkeypatch.setattr("workers.policy_worker.write_effective_function_rows", lambda *a, **kw: 0)
+        monkeypatch.setattr("workers.policy_worker.build_principal_index", lambda *a, **kw: {"principals": []})
+        monkeypatch.setattr("workers.policy_worker.write_permission_rows", lambda *a, **kw: 0)
         monkeypatch.setattr("workers.policy_worker.replace_control_graph_rows", fake_replace)
         monkeypatch.setattr(
             PolicyWorker,
             "_enrich_cross_contract",
-            lambda self, session, job, contract_analysis, control_snapshot, **kw: {},
+            lambda self, session, job, static_facts, observation_batch, **kw: {},
         )
 
         worker.process(session, cast(Any, job))

@@ -409,8 +409,7 @@ describe("ProtocolSurface — per-chain function verdicts (functions chain axis)
         function: "pauseOnEth",
         selector: "0xeth00000",
         abi_signature: "pauseOnEth()",
-        effect_labels: ["pause"],
-        action_summary: "pause eth",
+        claims: [{ claim_id: "pause.set", tier: "standard_exact", witness: {} }],
         authority_public: false,
       },
     ],
@@ -419,8 +418,7 @@ describe("ProtocolSurface — per-chain function verdicts (functions chain axis)
         function: "pauseOnBase",
         selector: "0xbase0000",
         abi_signature: "pauseOnBase()",
-        effect_labels: ["pause"],
-        action_summary: "pause base",
+        claims: [{ claim_id: "pause.set", tier: "standard_exact", witness: {} }],
         authority_public: true,
       },
     ],
@@ -537,12 +535,12 @@ describe("rich fixture", () => {
     expect(nonProxies.length).toBeGreaterThan(0);
   });
 
-  it("has functions covering every lane", () => {
-    const allEffects = ETHERFI_COMPANY_RICH.contracts.flatMap((c) =>
-      c.functions.flatMap((f) => f.effect_labels),
+  it("has functions covering every claim lane", () => {
+    const allClaims = ETHERFI_COMPANY_RICH.contracts.flatMap((c) =>
+      c.functions.flatMap((f) => (f.claims || []).map((claim) => claim.claim_id)),
     );
-    expect(allEffects).toEqual(
-      expect.arrayContaining(["upgrade", "pause", "asset_pull", "asset_send", "config"]),
+    expect(allClaims).toEqual(
+      expect.arrayContaining(["upgrade.implementation", "pause.set", "flow.in", "flow.out", "authority.replace"]),
     );
   });
 
@@ -810,8 +808,7 @@ describe("ProtocolSurface — stage-1 selection model", () => {
                 function: "upgrade",
                 selector: "0xupgrade0",
                 abi_signature: "upgrade",
-                effect_labels: ["upgrade"],
-                action_summary: "upgrade action",
+                claims: [{ claim_id: "upgrade.implementation", tier: "standard_exact", witness: {} }],
               },
             ],
           },
@@ -1031,20 +1028,18 @@ describe("ProtocolSurface — machine-only authority (motivating bug)", () => {
   const GOV = "0x9999999999999999999999999999999999999999";
   const GPOOL = "0x8888888888888888888888888888888888888888";
 
-  function mkFn(name, effectLabels, owner) {
+  function mkFn(name, claimIds, owner) {
     return {
       function: name,
       selector: `0x${name.slice(0, 8).padEnd(8, "0")}`,
       abi_signature: name,
-      effect_labels: effectLabels,
-      action_summary: `${name} action`,
+      claims: claimIds.map((claim_id) => ({ claim_id, tier: "standard_exact", witness: {} })),
       authority_public: false,
       direct_owner: owner
         ? { ...owner, label: null, source_contract: null, source_controller_id: null }
         : null,
       authority_roles: [],
       controllers: [],
-      effect_targets: [],
     };
   }
 
@@ -1059,7 +1054,7 @@ describe("ProtocolSurface — machine-only authority (motivating bug)", () => {
         is_proxy: false,
         controllers: {},
         job_id: "gov-job",
-        functions: [mkFn("schedule", ["config"], null)],
+        functions: [mkFn("schedule", ["timelock.schedule"], null)],
       },
       {
         address: GPOOL,
@@ -1070,7 +1065,7 @@ describe("ProtocolSurface — machine-only authority (motivating bug)", () => {
         controllers: {},
         job_id: "gpool-job",
         functions: [
-          mkFn("upgradeTo", ["upgrade"], {
+          mkFn("upgradeTo", ["upgrade.implementation"], {
             address: GOV,
             resolved_type: "timelock",
             details: { delay: 864000 },

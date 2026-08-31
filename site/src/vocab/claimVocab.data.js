@@ -33,7 +33,6 @@ export const CLAIM_VOCAB = {
     tone: "#9b8a9e",
     sentence: "changes logic",
     priority: 0,
-    legacy: "implementation_update",
   },
   "proxy.admin_change": {
     family: "control_plane",
@@ -41,7 +40,6 @@ export const CLAIM_VOCAB = {
     tone: "#9b8a9e",
     sentence: "changes proxy admin",
     priority: 0,
-    legacy: null,
   },
 
   // ── arbitrary execution / deployment (exec family, top lane) ──────────────
@@ -51,7 +49,6 @@ export const CLAIM_VOCAB = {
     tone: "#7a8098",
     sentence: "arbitrary external call",
     priority: 1,
-    legacy: "arbitrary_external_call",
   },
   // Foreign code running in THIS contract's storage. Kept out of
   // upgrade.implementation on purpose: that claim carries the EIP-1967/UUPS
@@ -64,7 +61,6 @@ export const CLAIM_VOCAB = {
     tone: "#7a8098",
     sentence: "runs foreign code in its own storage",
     priority: 1,
-    legacy: "delegatecall_execution",
   },
   contract_deployment: {
     family: "exec",
@@ -72,7 +68,6 @@ export const CLAIM_VOCAB = {
     tone: "#7a8098",
     sentence: "deploys a contract",
     priority: 1,
-    legacy: "contract_deployment",
   },
 
   // ── ownership (top lane) ──────────────────────────────────────────────────
@@ -82,7 +77,6 @@ export const CLAIM_VOCAB = {
     tone: "#9e8a8d",
     sentence: "changes owner",
     priority: 2,
-    legacy: "ownership_transfer",
   },
   "ownership.renounce": {
     family: "control_plane",
@@ -90,7 +84,6 @@ export const CLAIM_VOCAB = {
     tone: "#9e8a8d",
     sentence: "renounces ownership",
     priority: 2,
-    legacy: "ownership_transfer",
   },
   "ownership.accept": {
     family: "control_plane",
@@ -98,7 +91,6 @@ export const CLAIM_VOCAB = {
     tone: "#9e8a8d",
     sentence: "accepts ownership",
     priority: 2,
-    legacy: "ownership_transfer",
   },
 
   // ── role / authority / pointer admin (top lane) ───────────────────────────
@@ -108,7 +100,6 @@ export const CLAIM_VOCAB = {
     tone: "#7a8098",
     sentence: "grants role",
     priority: 3,
-    legacy: "role_management",
   },
   "roles.revoke": {
     family: "control_plane",
@@ -116,7 +107,6 @@ export const CLAIM_VOCAB = {
     tone: "#7a8098",
     sentence: "revokes role",
     priority: 3,
-    legacy: "role_management",
   },
   "roles.configure": {
     family: "control_plane",
@@ -124,7 +114,6 @@ export const CLAIM_VOCAB = {
     tone: "#7a8098",
     sentence: "configures roles",
     priority: 3,
-    legacy: "role_management",
   },
   "authority.replace": {
     family: "control_plane",
@@ -132,7 +121,6 @@ export const CLAIM_VOCAB = {
     tone: "#7a8098",
     sentence: "changes authority",
     priority: 3,
-    legacy: "authority_update",
   },
   "authorized_caller.rotate": {
     family: "control_plane",
@@ -140,7 +128,6 @@ export const CLAIM_VOCAB = {
     tone: "#7a8098",
     sentence: "rotates caller authority",
     priority: 3,
-    legacy: null,
   },
   // Minted only by the effects claims bridge (behavioral_observed): a simulated
   // call opened a permission gate to previously-rejected callers. Displayed like
@@ -151,7 +138,6 @@ export const CLAIM_VOCAB = {
     tone: "#7a8098",
     sentence: "opens a gate",
     priority: 3,
-    legacy: "authority_update",
   },
   "callee_pointer.rotate": {
     family: "control_plane",
@@ -159,7 +145,6 @@ export const CLAIM_VOCAB = {
     tone: "#7a8098",
     sentence: "changes hook",
     priority: 3,
-    legacy: "hook_update",
   },
   "safe.signer_mgmt": {
     family: "control_plane",
@@ -167,7 +152,6 @@ export const CLAIM_VOCAB = {
     tone: "#7a8098",
     sentence: "changes signers",
     priority: 3,
-    legacy: null,
   },
   "safe.module_mgmt": {
     family: "control_plane",
@@ -175,7 +159,6 @@ export const CLAIM_VOCAB = {
     tone: "#7a8098",
     sentence: "changes modules",
     priority: 3,
-    legacy: null,
   },
   "safe.set_guard": {
     family: "control_plane",
@@ -183,7 +166,6 @@ export const CLAIM_VOCAB = {
     tone: "#7a8098",
     sentence: "sets guard",
     priority: 3,
-    legacy: null,
   },
   "lz_oapp.set_peer": {
     family: "control_plane",
@@ -191,7 +173,6 @@ export const CLAIM_VOCAB = {
     tone: "#7a8098",
     sentence: "sets peer",
     priority: 3,
-    legacy: null,
   },
   "lz_oapp.set_delegate": {
     family: "control_plane",
@@ -199,7 +180,6 @@ export const CLAIM_VOCAB = {
     tone: "#7a8098",
     sentence: "sets delegate",
     priority: 3,
-    legacy: null,
   },
 
   // ── pause (top lane, split set/unset) ─────────────────────────────────────
@@ -209,7 +189,6 @@ export const CLAIM_VOCAB = {
     tone: "#998a6a",
     sentence: "pauses",
     priority: 4,
-    legacy: "pause_toggle",
   },
   "pause.unset": {
     family: "control_plane",
@@ -217,7 +196,6 @@ export const CLAIM_VOCAB = {
     tone: "#998a6a",
     sentence: "unpauses",
     priority: 4,
-    legacy: "pause_toggle",
   },
 
   // ── timelock ops (top lane) ───────────────────────────────────────────────
@@ -227,7 +205,6 @@ export const CLAIM_VOCAB = {
     tone: "#8a7e6a",
     sentence: "schedules op",
     priority: 5,
-    legacy: "timelock_operation",
   },
   "timelock.execute": {
     family: "control_plane",
@@ -235,7 +212,6 @@ export const CLAIM_VOCAB = {
     tone: "#8a7e6a",
     sentence: "executes op",
     priority: 5,
-    legacy: "timelock_operation",
   },
   "timelock.cancel": {
     family: "control_plane",
@@ -243,7 +219,6 @@ export const CLAIM_VOCAB = {
     tone: "#8a7e6a",
     sentence: "cancels op",
     priority: 5,
-    legacy: "timelock_operation",
   },
   "timelock.set_delay": {
     family: "control_plane",
@@ -251,7 +226,6 @@ export const CLAIM_VOCAB = {
     tone: "#8a7e6a",
     sentence: "changes delay",
     priority: 5,
-    legacy: "timelock_operation",
   },
 
   // ── flow / supply (inflow / outflow lanes) ────────────────────────────────
@@ -261,7 +235,6 @@ export const CLAIM_VOCAB = {
     tone: "#6a9e94",
     sentence: "moves value in",
     priority: 6,
-    legacy: "asset_pull",
   },
   "supply.mint": {
     family: "flow",
@@ -269,7 +242,6 @@ export const CLAIM_VOCAB = {
     tone: "#6a9e94",
     sentence: "mints supply",
     priority: 6,
-    legacy: "mint",
   },
   "flow.out": {
     family: "flow",
@@ -277,7 +249,6 @@ export const CLAIM_VOCAB = {
     tone: "#9a8a6e",
     sentence: "moves value out",
     priority: 7,
-    legacy: "asset_send",
   },
   // The entry neither holds nor sends the value — it calls a contract that does.
   // Same risk class as a direct out-flow when the routed value LEAVES that
@@ -291,7 +262,6 @@ export const CLAIM_VOCAB = {
     tone: "#9a8a6e",
     sentence: "routes value through a contract it calls",
     priority: 7,
-    legacy: null,
   },
   "supply.burn": {
     family: "flow",
@@ -299,7 +269,6 @@ export const CLAIM_VOCAB = {
     tone: "#9a8a6e",
     sentence: "burns supply",
     priority: 7,
-    legacy: "burn",
   },
 
   // ── user-plane operations (never the control lane) ────────────────────────
@@ -309,7 +278,6 @@ export const CLAIM_VOCAB = {
     tone: "#6a9e94",
     sentence: "wraps ETH",
     priority: 8,
-    legacy: null,
   },
   "weth.withdraw": {
     family: "user_plane",
@@ -317,7 +285,6 @@ export const CLAIM_VOCAB = {
     tone: "#9a8a6e",
     sentence: "unwraps ETH",
     priority: 9,
-    legacy: null,
   },
   "erc20.transfer": {
     family: "user_plane",
@@ -325,7 +292,6 @@ export const CLAIM_VOCAB = {
     tone: "#9a8a6e",
     sentence: "transfers tokens",
     priority: 9,
-    legacy: null,
   },
   "erc20.transfer_from": {
     family: "user_plane",
@@ -333,7 +299,6 @@ export const CLAIM_VOCAB = {
     tone: "#9a8a6e",
     sentence: "transfers tokens",
     priority: 9,
-    legacy: null,
   },
   "erc20.approve": {
     family: "user_plane",
@@ -341,7 +306,6 @@ export const CLAIM_VOCAB = {
     tone: null,
     sentence: "approves allowance",
     priority: 10,
-    legacy: null,
   },
   "gov.delegate": {
     family: "user_plane",
@@ -349,7 +313,6 @@ export const CLAIM_VOCAB = {
     tone: null,
     sentence: "delegates votes",
     priority: 10,
-    legacy: null,
   },
 
   // ── facts (present for provenance; contribute nothing to severity) ────────
@@ -367,7 +330,6 @@ export const CLAIM_VOCAB = {
     tone: null,
     sentence: "passes through a rate limiter",
     priority: 11,
-    legacy: null,
   },
 };
 

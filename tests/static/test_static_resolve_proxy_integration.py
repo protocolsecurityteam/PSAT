@@ -703,7 +703,7 @@ def test_dependency_provider_lookup_returns_impl_child_for_proxy(session):
         "parent_job_id": str(proxy_job.id),
         "proxy_address": proxy_addr,
     }
-    store_artifact(session, impl_job.id, "effective_permissions", data={"functions": []})
+    store_artifact(session, impl_job.id, "permission_index", data={"functions": []})
     session.commit()
 
     lookup = find_dependency_provider_job_for_address(session, proxy_addr, chain="ethereum")

@@ -31,7 +31,6 @@ def _timelock_evidence(selector: str) -> MatchedEvidence:
 @claim_matcher(
     claim_id="timelock.schedule",
     sentence="schedules a timelocked operation",
-    legacy_projection="timelock_operation",
     consumer_family="control_plane",
     gate=is_oz_timelock_gate,
 )
@@ -45,7 +44,6 @@ def timelock_schedule(ctx: ClaimContext, function: str) -> MatchedEvidence | Non
 @claim_matcher(
     claim_id="timelock.execute",
     sentence="executes a matured timelocked operation",
-    legacy_projection="timelock_operation",
     consumer_family="control_plane",
     gate=is_oz_timelock_gate,
 )
@@ -59,7 +57,6 @@ def timelock_execute(ctx: ClaimContext, function: str) -> MatchedEvidence | None
 @claim_matcher(
     claim_id="timelock.cancel",
     sentence="cancels a scheduled timelocked operation",
-    legacy_projection="timelock_operation",
     consumer_family="control_plane",
     gate=is_oz_timelock_gate,
 )
@@ -72,7 +69,6 @@ def timelock_cancel(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
 @claim_matcher(
     claim_id="timelock.set_delay",
     sentence="changes the timelock minimum delay",
-    legacy_projection="timelock_operation",
     consumer_family="control_plane",
     gate=is_oz_timelock_gate,
 )

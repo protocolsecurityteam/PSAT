@@ -11,7 +11,7 @@ This module derives entries from three sources, mirroring how the event
 side splits work between vendored standards and per-contract analyzer
 output:
 
-  1. **Per-contract entries** from ``tracking_plan.tracked_controllers``.
+  1. **Per-contract entries** from ``observation_plan.tracked_controllers``.
      Any controller whose ``read_spec.strategy == "getter_call"`` and
      whose ``type_kind`` is poll-decodable (``address``, ``contract``,
      or a ``primitive`` bool/uint) becomes a getter_call entry. This is
@@ -40,8 +40,8 @@ from typing import Any
 
 from eth_utils.crypto import keccak
 
-from schemas.contract_analysis import ControllerProvenance
-from schemas.control_tracking import MonitoredContractType
+from schemas.observations import MonitoredContractType
+from schemas.static_facts import ControllerProvenance
 from services.monitoring.event_topics import SIGNAL_CLASS_CONFIG, SIGNAL_CLASS_METRIC
 from utils.evm import (
     EIP1822_LOGIC_SLOT,
@@ -561,7 +561,7 @@ def build_polling_plan(
     *,
     contract_type: MonitoredContractType,
     proxy_type: str | None = None,
-    tracking_plan: Mapping[str, Any] | None = None,
+    observation_plan: Mapping[str, Any] | None = None,
     tracked_topics: Iterable[Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Project per-contract polling intent into a flat list of entries.
@@ -599,8 +599,8 @@ def build_polling_plan(
         by_field.setdefault(copy["field"], copy)
 
     # Analyzer-derived entries from the tracking plan.
-    if isinstance(tracking_plan, Mapping):
-        for tc in tracking_plan.get("tracked_controllers") or []:
+    if isinstance(observation_plan, Mapping):
+        for tc in observation_plan.get("tracked_controllers") or []:
             if not isinstance(tc, Mapping):
                 continue
             read_spec = tc.get("read_spec")
@@ -646,7 +646,7 @@ def build_polling_plan(
             if suppress:
                 entry["suppress_when_scan_event_types"] = suppress
             # First-write-wins for analyzer entries so the deterministic
-            # tracking_plan iteration order (already sorted by label)
+            # observation_plan iteration order (already sorted by label)
             # doesn't churn between runs.
             by_field.setdefault(field, entry)
 

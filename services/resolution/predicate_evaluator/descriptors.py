@@ -6,7 +6,7 @@ import logging
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, cast
 
-from services.static.contract_analysis_pipeline.predicate_types import (
+from services.static.static_analysis.predicate_types import (
     LeafPredicate,
     SetDescriptor,
 )

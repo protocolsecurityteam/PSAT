@@ -18,7 +18,6 @@ pytestmark = pytest.mark.usefixtures("_stub_live_authority")
 
 
 from tests.conftest import requires_postgres  # noqa: E402
-from tests.support.overview_builders import _addr  # noqa: E402
 
 
 def _seed_completed_job(db_session, *, address: str):
@@ -175,7 +174,7 @@ def test_endpoint_names_artifacts_it_could_not_read_instead_of_omitting_them(api
         raise StorageContentNotDetermined(
             "bucket unreachable",
             values={"predicate_trees": _semantic_artifact()},
-            not_determined={"effective_permissions": "could not read artifacts/j/effective_permissions"},
+            not_determined={"assessment": "could not read artifacts/j/assessment"},
         )
 
     monkeypatch.setattr(deps, "get_all_artifacts", _partial)
@@ -186,8 +185,8 @@ def test_endpoint_names_artifacts_it_could_not_read_instead_of_omitting_them(api
     # What did read is still rendered.
     assert body["predicate_trees"]["schema_version"] == "semantic"
     # What did not is named, rather than reading as "the analysis has none".
-    assert "effective_permissions" in body["artifacts_not_determined"]
-    assert "effective_permissions" not in body["available_artifacts"]
+    assert "assessment" in body["artifacts_not_determined"]
+    assert "assessment" not in body["available_artifacts"]
 
 
 @requires_postgres
@@ -211,7 +210,7 @@ def test_endpoint_keeps_a_lost_body_apart_from_one_it_could_not_ask_about(api_cl
         raise StorageContentAbsent(
             "1/2 artifact bodies proven absent",
             values={"predicate_trees": _semantic_artifact()},
-            proven_absent={"effective_permissions": "no object at any candidate for artifacts/j/eff"},
+            proven_absent={"assessment": "no object at any candidate for artifacts/j/eff"},
         )
 
     monkeypatch.setattr(deps, "get_all_artifacts", _partial)
@@ -220,53 +219,6 @@ def test_endpoint_keeps_a_lost_body_apart_from_one_it_could_not_ask_about(api_cl
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["predicate_trees"]["schema_version"] == "semantic"
-    assert "effective_permissions" in body["artifacts_body_absent"]
+    assert "assessment" in body["artifacts_body_absent"]
     assert "artifacts_not_determined" not in body
-    assert "effective_permissions" not in body["available_artifacts"]
-
-
-def test_principal_label_payload_narrows_confidence_and_the_duplicate_label():
-    """``principal_labels.confidence`` carries no epistemic content: it is a
-    naming-branch label, two-valued in practice (high 1,376 / medium 180 / low 0
-    — ``low`` needs ``resolved_type == "unknown"`` and no such row exists), ~97%
-    a restatement of ``resolved_type``, and cannot say "I did not
-    determine this". ``label`` is byte-identical to ``display_name`` on 1,556/1,556
-    rows, so a consumer reading both believed there were two facts.
-    """
-    from db.models import PrincipalLabel
-    from services.aggregations.analysis_detail import _principal_label_payload
-
-    identical = PrincipalLabel(
-        contract_id=1,
-        address=_addr("plc1"),
-        label="EtherFi admin Safe",
-        display_name="EtherFi admin Safe",
-        resolved_type="safe",
-        labels=["etherfi_admin"],
-        confidence="high",
-        details={},
-        graph_context=[],
-    )
-    out = _principal_label_payload(identical)
-    assert out["naming_rule"] == "high"
-    assert "confidence" not in out
-    # One fact, published once.
-    assert "label" not in out
-    assert out["display_name"] == "EtherFi admin Safe"
-
-    # POSITIVE CONTROL: when the two really differ, both ship.
-    differing = PrincipalLabel(
-        contract_id=1,
-        address=_addr("plc2"),
-        label="raw-label",
-        display_name="Pretty Name",
-        resolved_type="contract",
-        labels=[],
-        confidence="medium",
-        details={},
-        graph_context=[],
-    )
-    out = _principal_label_payload(differing)
-    assert out["label"] == "raw-label"
-    assert out["display_name"] == "Pretty Name"
-    assert out["naming_rule"] == "medium"
+    assert "assessment" not in body["available_artifacts"]

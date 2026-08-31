@@ -16,7 +16,7 @@ import pytest
 slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
 
-from services.static.contract_analysis_pipeline.predicate_artifacts import (  # noqa: E402
+from services.static.static_analysis.predicate_artifacts import (  # noqa: E402
     SCHEMA_VERSION,
     build_predicate_artifacts,
 )
@@ -513,7 +513,7 @@ def test_artifact_does_not_invent_role_event_hints_from_names(tmp_path):
 
 
 def test_non_address_constant_does_not_make_caller_authority():
-    from services.static.contract_analysis_pipeline.predicates import _classify_authority_equality
+    from services.static.static_analysis.predicates import _classify_authority_equality
 
     leaf = {
         "kind": "equality",
@@ -613,8 +613,8 @@ def test_artifact_helper_engine_cache_skips_repeated_callees(tmp_path):
     cache active, fewer engines should be created than without.
     Correctness is validated by every other corpus test — this
     test specifically guards the cache HITS HAPPEN."""
-    from services.static.contract_analysis_pipeline import predicates
-    from services.static.contract_analysis_pipeline.predicates import (
+    from services.static.static_analysis import predicates
+    from services.static.static_analysis.predicates import (
         _helper_engine_cache,
     )
 
@@ -674,7 +674,7 @@ def test_artifact_helper_engine_cache_skips_repeated_callees(tmp_path):
             for fn in contract.functions:
                 if getattr(fn, "visibility", None) in ("external", "public"):
                     if not getattr(fn, "is_constructor", False):
-                        from services.static.contract_analysis_pipeline.predicates import (
+                        from services.static.static_analysis.predicates import (
                             build_predicate_tree,
                         )
 

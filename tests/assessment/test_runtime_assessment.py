@@ -8,11 +8,11 @@ from services.assessment import (
     controller_observations,
     observation_plan,
 )
-from tests.support.policy_builders import TARGET_ADDRESS, _assessment, _minimal_contract_analysis, _minimal_snapshot
+from tests.support.policy_builders import TARGET_ADDRESS, _assessment, _minimal_snapshot, _minimal_static_facts
 
 
 def test_runtime_inputs_are_transient_assessment_projections() -> None:
-    facts = _minimal_contract_analysis()
+    facts = _minimal_static_facts()
     facts["controller_tracking"] = [
         {
             "controller_id": "state_variable:owner",
@@ -29,7 +29,7 @@ def test_runtime_inputs_are_transient_assessment_projections() -> None:
             "authority_provenance": "caller_gate",
         }
     ]
-    assessment = _assessment(analysis=facts)
+    assessment = _assessment(static_facts=facts)
     plan = observation_plan(assessment)
 
     assert plan["contract_address"] == TARGET_ADDRESS
@@ -39,7 +39,7 @@ def test_runtime_inputs_are_transient_assessment_projections() -> None:
 
 
 def test_observations_and_graph_project_from_evidence() -> None:
-    facts = _minimal_contract_analysis()
+    facts = _minimal_static_facts()
     snapshot = _minimal_snapshot(
         {
             "state_variable:owner": {
@@ -48,7 +48,7 @@ def test_observations_and_graph_project_from_evidence() -> None:
             }
         }
     )
-    assessment = _assessment(analysis=facts, snapshot=snapshot)
+    assessment = _assessment(static_facts=facts, snapshot=snapshot)
     projected_snapshot = controller_observations(assessment)
     assert projected_snapshot["controller_values"]["state_variable:owner"]["resolved_type"] == "eoa"
 
@@ -65,7 +65,7 @@ def test_observations_and_graph_project_from_evidence() -> None:
                 "label": "TestContract",
                 "contract_name": "TestContract",
                 "depth": 0,
-                "analyzed": True,
+                "analysis_state": "analyzed",
                 "details": {},
                 "artifacts": {},
             }
@@ -75,11 +75,11 @@ def test_observations_and_graph_project_from_evidence() -> None:
     assessment = add_resolution(assessment, graph, chain_id=1)
     projected_graph = control_graph(assessment)
     assert projected_graph["nodes"][0]["label"] == "TestContract"
-    assert projected_graph["nodes"][0]["analyzed"] is True
+    assert projected_graph["nodes"][0]["analysis_state"] == "analyzed"
 
 
 def test_failed_observation_is_analysis_not_projected_state() -> None:
-    facts = _minimal_contract_analysis()
+    facts = _minimal_static_facts()
     facts["controller_tracking"] = [
         {
             "controller_id": "state_variable:owner",
@@ -95,7 +95,7 @@ def test_failed_observation_is_analysis_not_projected_state() -> None:
             "notes": [],
         }
     ]
-    assessment = _assessment(analysis=facts)
+    assessment = _assessment(static_facts=facts)
     failed = add_observations(
         assessment,
         {

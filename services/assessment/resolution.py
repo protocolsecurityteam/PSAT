@@ -73,7 +73,6 @@ def _node_evidence(scope: Scope, entity: Entity, node: Mapping[str, Any]) -> Evi
             "label": node.get("label"),
             "contract_name": node.get("contract_name"),
             "depth": node.get("depth"),
-            "analyzed": node.get("analyzed"),
             "analysis_state": node.get("analysis_state"),
             "details": node.get("details") or {},
             "artifacts": node.get("artifacts") or {},

@@ -12,7 +12,7 @@ Validates behavior that spans multiple modules:
   9. Policy assessment enrichment
   10. API analyses list and detail endpoints serve worker-stored artifacts correctly
   11. Resolution worker proxy_address override for impl jobs
-  12. Tracking plan construction from contract_analysis output
+  12. Tracking plan construction from static_facts output
   13. Discovery company mode child job creation
 
 All tests run without live services (no RPC, no Etherscan, no database).
@@ -30,7 +30,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from tests.support.balance_stubs import page, pinned_native_unavailable
-from tests.support.policy_builders import _assessment, _minimal_contract_analysis
+from tests.support.policy_builders import _assessment, _minimal_static_facts
 
 # offline: the dependency phase probes eth_getCode and company mode resolves the
 # protocol via DefiLlama — stub both so the cross-module wiring runs with no wire.
@@ -476,109 +476,6 @@ def test_full_data_flow_unified_through_graph_and_upgrade_history(monkeypatch, t
 # ===================================================================
 
 
-@patch("routers.deps.get_all_artifacts")
-@patch("routers.deps.SessionLocal")
-def test_detail_projects_query_views_from_assessment_indexes(mock_session_cls, mock_get_all_artifacts):
-    """The API combines Assessment with relational query views."""
-    from fastapi.testclient import TestClient
-
-    import api
-
-    client = TestClient(api.app)
-    fake_job = _fake_api_job(name="full_run", address=TARGET)
-
-    mock_session = MagicMock()
-
-    # Build mock relational objects for effective_permissions and principal_labels.
-    # The API now reads these from the EffectiveFunction / PrincipalLabel tables,
-    # not from artifacts.
-    fake_contract_row = MagicMock()
-    fake_contract_row.id = "contract-1"
-    fake_contract_row.contract_name = "Vault"
-    fake_contract_row.address = TARGET
-    fake_contract_row.is_proxy = False
-    fake_contract_row.implementation = None
-    fake_contract_row.summary = None
-
-    fake_ef = MagicMock()
-    fake_ef.id = "ef-1"
-    fake_ef.abi_signature = "pause()"
-    fake_ef.function_name = "pause"
-    fake_ef.selector = "0x12"
-    fake_ef.effect_labels = []
-    fake_ef.action_summary = None
-    fake_ef.authority_public = False
-
-    fake_fp = MagicMock()
-    fake_fp.address = "0xaa"
-    fake_fp.resolved_type = "admin"
-    fake_fp.origin = None
-    fake_fp.details = {}
-
-    fake_pl = MagicMock()
-    fake_pl.address = "0xaa"
-    fake_pl.label = "admin"
-    fake_pl.resolved_type = "eoa"
-
-    # Route session.execute calls based on what the API queries
-    call_count = {"n": 0}
-
-    def route_execute(stmt, *args, **kwargs):
-        call_count["n"] += 1
-        result = MagicMock()
-        stmt_str = str(stmt)
-        # api.py now iterates Result.scalars() directly in the batched
-        # prefetch paths, so MagicMock needs an explicit __iter__.
-        items: list = []
-        if call_count["n"] == 1:
-            # First call: select(Job) to find job by name
-            result.scalar_one_or_none.return_value = fake_job
-        elif "contract" in stmt_str.lower() and "job_id" in stmt_str.lower() and call_count["n"] == 2:
-            # Second call: select(Contract) for contract_row
-            result.scalar_one_or_none.return_value = fake_contract_row
-        elif "effective" in stmt_str.lower():
-            items = [fake_ef]
-        elif "function_principal" in stmt_str.lower():
-            items = [fake_fp]
-        elif "principal_label" in stmt_str.lower():
-            items = [fake_pl]
-        else:
-            result.scalar_one_or_none.return_value = None
-        result.scalars.return_value.all.return_value = items
-        result.scalars.return_value.__iter__ = lambda s: iter(items)
-        return result
-
-    mock_session.execute.side_effect = route_execute
-    mock_session.get.return_value = None
-    _mock_session_ctx(mock_session_cls, mock_session)
-
-    mock_get_all_artifacts.return_value = {
-        "dependencies": {"address": TARGET, "dependencies": {}},
-        "principal_history": {
-            "schema_version": "principal_history.v1",
-            "contract_address": TARGET,
-            "status": "ok",
-            "function_permissions": [{"function": "pause()", "principal": "0xaa"}],
-        },
-    }
-
-    resp = client.get("/api/analyses/full_run")
-    assert resp.status_code == 200
-    body = resp.json()
-
-    assert body["dependencies"]["address"] == TARGET
-    assert body["principal_history"]["function_permissions"][0]["principal"] == "0xaa"
-
-    # effective_permissions built from EffectiveFunction + FunctionPrincipal tables
-    assert body["effective_permissions"]["functions"][0]["function"] == "pause()"
-
-    # principal_labels built from PrincipalLabel table
-    assert body["principal_labels"]["principals"][0]["label"] == "admin"
-
-    # Subject info should be extracted
-    assert body["contract_name"] == "Vault"
-
-
 # ===================================================================
 # 12. API analyses list serves contract_flags stored by static worker
 # ===================================================================
@@ -665,7 +562,7 @@ def test_analyses_list_reads_contract_flags_from_static_worker(mock_session_cls)
 def test_resolution_worker_rewrites_address_for_impl_jobs(monkeypatch):
     """When a job has proxy_address in its request, the resolution worker
     should override contract_address in the tracking plan and subject.address
-    in the contract_analysis so state is read from the proxy, not the impl."""
+    in the static_facts so state is read from the proxy, not the impl."""
     from workers.resolution_worker import ResolutionWorker
 
     worker = ResolutionWorker()
@@ -677,8 +574,8 @@ def test_resolution_worker_rewrites_address_for_impl_jobs(monkeypatch):
         request={"rpc_url": "https://rpc.example", "proxy_address": PROXY, "chain_id": 1},
     )
 
-    contract_analysis = _minimal_contract_analysis(address=IMPL, name="VaultImpl")
-    assessment = _assessment(analysis=contract_analysis)
+    static_facts = _minimal_static_facts(address=IMPL, name="VaultImpl")
+    assessment = _assessment(static_facts=static_facts)
 
     artifacts = {
         "assessment": assessment,
@@ -698,7 +595,7 @@ def test_resolution_worker_rewrites_address_for_impl_jobs(monkeypatch):
         lambda _session, _job_id, name: artifacts.get(name),
     )
 
-    # Capture what build_control_snapshot receives
+    # Capture what observe_controllers receives
     captured_plans: list[dict] = []
     captured_analyses: list[dict] = []
 
@@ -713,7 +610,7 @@ def test_resolution_worker_rewrites_address_for_impl_jobs(monkeypatch):
         }
 
     stored_artifacts: dict[str, Any] = {}
-    monkeypatch.setattr("workers.resolution_worker.build_control_snapshot", fake_build_snapshot)
+    monkeypatch.setattr("workers.resolution_worker.observe_controllers", fake_build_snapshot)
     monkeypatch.setattr(
         "workers.resolution_worker.store_artifact",
         lambda _s, _j, name, data=None, text_data=None: stored_artifacts.update({name: data or text_data}),
@@ -722,11 +619,11 @@ def test_resolution_worker_rewrites_address_for_impl_jobs(monkeypatch):
 
     # Mock resolve_control_graph to capture the analysis it receives.
     # Accept **_kw so the mock survives signature growth in the production
-    # function (classify_cache, initial_graph, nested_artifacts_override
+    # function (classify_cache, initial_graph, materialized_contracts_override
     # have all been threaded through during Phase A — pinning each kwarg
     # name here would create a brittle test-vs-prod coupling).
     def fake_resolve_graph(*, root_artifacts, rpc_url, max_depth, workspace_prefix, **_kw):
-        captured_analyses.append(root_artifacts["analysis"])
+        captured_analyses.append(root_artifacts["static_facts"])
         return {"nodes": [], "edges": []}, {}
 
     monkeypatch.setattr("workers.resolution_worker.resolve_control_graph", fake_resolve_graph)
@@ -741,8 +638,8 @@ def test_resolution_worker_rewrites_address_for_impl_jobs(monkeypatch):
 
     # The enriched Assessment is the only analytical artifact stored.
     assert "assessment" in stored_artifacts
-    assert "control_snapshot" not in stored_artifacts
-    assert "resolved_control_graph" not in stored_artifacts
+    assert "observation_batch" not in stored_artifacts
+    assert "resolution_graph" not in stored_artifacts
 
 
 # ===================================================================
@@ -750,11 +647,11 @@ def test_resolution_worker_rewrites_address_for_impl_jobs(monkeypatch):
 # ===================================================================
 
 
-def test_tracking_plan_preserves_controller_ids_and_read_specs():
+def test_observation_plan_preserves_controller_ids_and_read_specs():
     """The tracking plan builder must carry forward controller_id, read_spec,
-    and associated_events from contract_analysis.controller_tracking. These
-    are consumed by build_control_snapshot in the resolution stage."""
-    from services.resolution.tracking_plan import build_control_tracking_plan
+    and associated_events from static_facts.controller_tracking. These
+    are consumed by observe_controllers in the resolution stage."""
+    from services.resolution.observation_plan import build_observation_plan
 
     analysis = {
         "subject": {"address": "0x1111111111111111111111111111111111111111", "name": "Vault"},
@@ -806,7 +703,7 @@ def test_tracking_plan_preserves_controller_ids_and_read_specs():
         ],
     }
 
-    plan = build_control_tracking_plan(analysis)  # pyright: ignore[reportArgumentType]
+    plan = build_observation_plan(analysis)  # pyright: ignore[reportArgumentType]
 
     assert plan["contract_address"] == "0x1111111111111111111111111111111111111111"
     assert plan["contract_name"] == "Vault"
@@ -816,7 +713,7 @@ def test_tracking_plan_preserves_controller_ids_and_read_specs():
     ids = {tc["controller_id"] for tc in plan["tracked_controllers"]}
     assert ids == {"state_variable:owner", "external_contract:authority"}
 
-    # Read specs carry through (build_control_snapshot uses these)
+    # Read specs carry through (observe_controllers uses these)
     for tc in plan["tracked_controllers"]:
         assert tc["read_spec"] is not None
         assert tc["read_spec"]["strategy"] == "getter_call"
@@ -1055,7 +952,7 @@ def test_static_worker_reads_discovery_artifacts(monkeypatch):
     )
     monkeypatch.setattr(worker, "_resolve_proxy", lambda *_a, **_kw: None)
     monkeypatch.setattr(worker, "_run_dependency_phase", lambda *_a, **_kw: None)
-    monkeypatch.setattr(worker, "_run_analysis_phase", lambda *_a, **_kw: True)
+    monkeypatch.setattr(worker, "_run_static_facts_phase", lambda *_a, **_kw: True)
     monkeypatch.setattr(worker, "update_detail", lambda *_a, **_kw: None)
 
     worker.process(session, job)
@@ -1223,7 +1120,7 @@ def test_dep_phase_records_degraded_on_failure(monkeypatch, tmp_path):
 
 def test_static_worker_proxy_skips_analysis_and_completes(monkeypatch):
     """When the static worker detects a proxy contract, it should skip
-    Slither/analysis/tracking_plan, call complete_job, and raise
+    Slither/analysis/observation_plan, call complete_job, and raise
     JobHandledDirectly.  This test exercises the actual process() method
     to catch import errors and wiring bugs."""
     from workers.base import JobHandledDirectly
@@ -1271,7 +1168,7 @@ def test_static_worker_proxy_skips_analysis_and_completes(monkeypatch):
     # Analysis/tracking-plan should NOT be called for a proxy parent
     # (proxies short-circuit to spawn an impl child job).
     slither_called = []
-    monkeypatch.setattr(worker, "_run_analysis_phase", lambda *_a, **_kw: slither_called.append(True) or True)
+    monkeypatch.setattr(worker, "_run_static_facts_phase", lambda *_a, **_kw: slither_called.append(True) or True)
 
     try:
         worker.process(session, job)

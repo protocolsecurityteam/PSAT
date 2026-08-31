@@ -45,7 +45,6 @@ class RegistryEntry:
     sentence: str
     gate: Gate
     trigger: Trigger
-    legacy_projection: str | None
     consumer_family: ConsumerFamily
 
 
@@ -83,12 +82,6 @@ def is_registered(claim_id: str) -> bool:
 
 def entry_for(claim_id: str) -> RegistryEntry:
     return _REGISTRY[claim_id]
-
-
-def legacy_projections() -> dict[str, str | None]:
-    """``claim_id -> legacy effect_labels string`` so consumers migrate on their
-    own schedule."""
-    return {claim_id: entry.legacy_projection for claim_id, entry in _REGISTRY.items()}
 
 
 def emit_claim(claim_id: str, tier: Tier, witness: Witness) -> EffectMatch:

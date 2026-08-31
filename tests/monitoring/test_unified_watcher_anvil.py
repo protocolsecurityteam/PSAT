@@ -358,8 +358,8 @@ def test_db():
         engine.dispose()
 
 
-def _synthetic_tracking_plan_for(contract_type: str) -> dict | None:
-    """Mint a minimal ``ControlTrackingPlan``-shaped dict for tests
+def _synthetic_observation_plan_for(contract_type: str) -> dict | None:
+    """Mint a minimal ``ObservationPlan``-shaped dict for tests
     whose anvil-deployed contracts never went through the static
     analyzer.
 
@@ -433,7 +433,7 @@ def _register_contract(
         # CHECK admits them as vocabulary members.
         contract_type=contract_type,  # pyright: ignore[reportArgumentType]
         proxy_type=plan_proxy_type,
-        tracking_plan=_synthetic_tracking_plan_for(contract_type),
+        observation_plan=_synthetic_observation_plan_for(contract_type),
         tracked_topics=None,
     )
 
@@ -779,7 +779,7 @@ def test_pre_fix_filter_drops_non_oz_event(anvil_env, test_db):
     but *no* tracked_topics. Transfers ownership. Asserts the scanner
     detects nothing — proves the pre-fix scanner behavior is preserved
     when tracked_topics is absent (so the fix is purely additive: zero
-    new events when no tracking_plan has been threaded through
+    new events when no observation_plan has been threaded through
     enrollment). Pair with ``test_solmate_owner_updated_detected``:
     same contract + same on-chain action, only the monitoring_config
     differs. If this test ever starts catching the event, something
@@ -792,7 +792,7 @@ def test_pre_fix_filter_drops_non_oz_event(anvil_env, test_db):
     current_block = int(_cast(["block-number"], rpc_url))
 
     # No tracked_topics — simulates a row that was enrolled before the
-    # general fix landed (or a contract whose tracking_plan is still
+    # general fix landed (or a contract whose observation_plan is still
     # pending materialization).
     _register_contract(
         test_db,
@@ -1678,7 +1678,7 @@ def _custom_admin_polling_plan(extra_controllers: list[dict] | None = None) -> l
     return build_polling_plan(
         contract_type="regular",
         proxy_type=None,
-        tracking_plan={"tracked_controllers": tracked_controllers},
+        observation_plan={"tracked_controllers": tracked_controllers},
         tracked_topics=None,
     )
 
@@ -1811,7 +1811,7 @@ def test_poll_suppressed_for_custom_slot_when_scanner_fires(anvil_env, test_db):
     plan = build_polling_plan(
         contract_type="regular",
         proxy_type=None,
-        tracking_plan={
+        observation_plan={
             "tracked_controllers": [
                 {
                     "controller_id": "state_variable:protocolAdmin",
@@ -1959,11 +1959,11 @@ def test_poll_and_event_paths_write_same_state_key(anvil_env, test_db):
     )
 
 
-def test_enrollment_builds_polling_plan_for_custom_slot_from_tracking_plan(anvil_env, test_db):
-    """End-to-end: ContractMaterialization tracking_plan → polling_plan.
+def test_enrollment_builds_polling_plan_for_custom_slot_from_observation_plan(anvil_env, test_db):
+    """End-to-end: ContractMaterialization observation_plan → polling_plan.
 
     Validates the full enrollment pipeline:
-      * ``_load_tracking_plan_artifacts`` reads the materialization
+      * ``_load_observation_plan_artifacts`` reads the materialization
       * ``build_polling_plan`` projects ``tracked_controllers`` to entries
       * The persisted ``MonitoredContract.monitoring_config["polling_plan"]``
         carries the analyzer-derived custom-slot entry alongside any
@@ -1972,7 +1972,7 @@ def test_enrollment_builds_polling_plan_for_custom_slot_from_tracking_plan(anvil
     This is the integration regression for the "custom slots become
     visible to polling once the analyzer surfaces them" claim — proves
     the data flow works without test-helper short-circuits."""
-    from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
+    from db.contract_materializations import STATIC_FACTS_SCHEMA_VERSION
     from db.models import Contract, ContractMaterialization, Job, Protocol
     from services.monitoring.enrollment import enroll_protocol_contracts
 
@@ -2028,7 +2028,7 @@ def test_enrollment_builds_polling_plan_for_custom_slot_from_tracking_plan(anvil
     )
     test_db.flush()
 
-    tracking_plan = {
+    observation_plan = {
         "schema_version": "0.1",
         "contract_address": addr.lower(),
         "contract_name": "CustomAdminContract",
@@ -2065,12 +2065,12 @@ def test_enrollment_builds_polling_plan_for_custom_slot_from_tracking_plan(anvil
             bytecode_keccak=bytecode_keccak,
             address=addr.lower(),
             contract_name="CustomAdminContract",
-            tracking_plan=tracking_plan,
+            observation_plan=observation_plan,
             status="ready",
             # Enrollment reads via the version-filtered ``find_by_address``; seed
             # at the current analyzer version so the row is visible after an
-            # ANALYSIS_SCHEMA_VERSION bump, not just at the DB default.
-            analysis_schema_version=ANALYSIS_SCHEMA_VERSION,
+            # STATIC_FACTS_SCHEMA_VERSION bump, not just at the DB default.
+            static_facts_schema_version=STATIC_FACTS_SCHEMA_VERSION,
         )
     )
     test_db.commit()
@@ -2082,7 +2082,7 @@ def test_enrollment_builds_polling_plan_for_custom_slot_from_tracking_plan(anvil
     plan = (mc.monitoring_config or {}).get("polling_plan") or []
     fields = sorted(e.get("field") for e in plan)
     assert "protocolAdmin" in fields, (
-        f"enrollment did not project the tracking_plan's protocolAdmin controller "
+        f"enrollment did not project the observation_plan's protocolAdmin controller "
         f"into the polling_plan — got fields {fields}"
     )
 
@@ -2123,7 +2123,7 @@ def test_poll_custom_admin_slot_triggers_reanalysis_via_unified_vocab(anvil_env,
     plan = build_polling_plan(
         contract_type="regular",
         proxy_type=None,
-        tracking_plan={
+        observation_plan={
             "tracked_controllers": [
                 {
                     "controller_id": "state_variable:admin",

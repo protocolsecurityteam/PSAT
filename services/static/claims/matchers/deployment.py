@@ -16,7 +16,6 @@ from ..types import MatchedEvidence
 @claim_matcher(
     claim_id="contract_deployment",
     sentence="deploys a new contract",
-    legacy_projection="contract_deployment",
     consumer_family="exec",
 )
 def contract_deployment(ctx: ClaimContext, function: str) -> MatchedEvidence | None:

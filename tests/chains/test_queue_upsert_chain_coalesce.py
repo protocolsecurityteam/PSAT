@@ -214,13 +214,13 @@ def _completed_source_with_null_contract(session, address, request_chain):
     session.commit()
 
     store_source_files(session, job.id, {"src/Legacy.sol": "contract Legacy {}"})
-    from tests.support.policy_builders import _assessment, _minimal_contract_analysis
+    from tests.support.policy_builders import _assessment, _minimal_static_facts
 
     store_artifact(
         session,
         job.id,
         "assessment",
-        data=_assessment(analysis=_minimal_contract_analysis(address=address)),
+        data=_assessment(static_facts=_minimal_static_facts(address=address)),
     )
     return job
 

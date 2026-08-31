@@ -32,8 +32,8 @@ from tests.support.policy_builders import (
     TARGET_ADDRESS,
     _assessment,
     _graph_with_nodes,
-    _minimal_contract_analysis,
     _minimal_snapshot,
+    _minimal_static_facts,
 )
 from utils.logging import (
     bind_trace_context,
@@ -83,11 +83,11 @@ def _drive_process_with_missing_contract_row(monkeypatch: pytest.MonkeyPatch) ->
     session.execute.return_value.scalar_one_or_none.return_value = None
     job = _job()
 
-    contract_analysis = _minimal_contract_analysis()
+    static_facts = _minimal_static_facts()
     # A non-empty controller_values + dict graph drives _resolve_authority.
-    control_snapshot = _minimal_snapshot({"some_key:admin": {"value": "0xbbb"}})
+    observation_batch = _minimal_snapshot({"some_key:admin": {"value": "0xbbb"}})
     resolved_graph = _graph_with_nodes([])
-    assessment = _assessment(analysis=contract_analysis, snapshot=control_snapshot, graph=resolved_graph)
+    assessment = _assessment(static_facts=static_facts, snapshot=observation_batch, graph=resolved_graph)
 
     def fake_get_artifact(_session: Any, _job_id: Any, name: str) -> Any:
         return {
@@ -96,9 +96,8 @@ def _drive_process_with_missing_contract_row(monkeypatch: pytest.MonkeyPatch) ->
 
     monkeypatch.setattr("workers.policy_worker.get_artifact", fake_get_artifact)
     monkeypatch.setattr("workers.policy_worker.store_artifact", lambda *a, **kw: None)
-    monkeypatch.setattr("workers.policy_worker._load_nested_artifacts", lambda *_a, **_kw: {})
     monkeypatch.setattr(
-        "workers.policy_worker.build_effective_permissions",
+        "workers.policy_worker.build_permission_index",
         lambda *a, **kw: {"schema_version": "1", "functions": []},
     )
     monkeypatch.setattr(
@@ -106,13 +105,13 @@ def _drive_process_with_missing_contract_row(monkeypatch: pytest.MonkeyPatch) ->
         lambda **kw: ({"nodes": [], "edges": []}, {}),
     )
     monkeypatch.setattr(
-        "workers.policy_worker.build_principal_labels",
+        "workers.policy_worker.build_principal_index",
         lambda *a, **kw: {"principals": []},
     )
     monkeypatch.setattr(
         PolicyWorker,
         "_enrich_cross_contract",
-        lambda self, session, job, contract_analysis, control_snapshot, **kw: {},
+        lambda self, session, job, static_facts, observation_batch, **kw: {},
     )
 
     worker.process(session, cast(Any, job))
@@ -158,90 +157,10 @@ def test_zero_write_path_degrades_and_records_metric(monkeypatch: pytest.MonkeyP
     assert getattr(warnings[0], "address", None) == TARGET_ADDRESS
 
 
-def test_authority_status_in_extra_and_metric(monkeypatch: pytest.MonkeyPatch) -> None:
-    _degraded, metrics, records = _run_capturing(monkeypatch)
-
-    # #16-policy: authority status is a metric + an extra field, not %s text.
-    assert metrics["authority_status"] == "no_authority"
-
-    auth_lines = [r for r in records if "authority resolution complete" in r.getMessage()]
-    assert len(auth_lines) == 1
-    assert getattr(auth_lines[0], "authority_status", None) == "no_authority"
-    assert getattr(auth_lines[0], "authority_reason", None)
-
-    # #16-policy: phase timers fold phase_ms_<phase> via log_timed_phase.
-    assert "phase_ms_effective_permissions" in metrics
-    assert "phase_ms_principal_labels" in metrics
-
-
-def _drive_hydration(monkeypatch: pytest.MonkeyPatch, *, raises: bool) -> tuple[Any, list, list[logging.LogRecord]]:
-    """Drive ``_load_nested_artifacts`` over one nested bundle whose
-    ``contract_materializations`` lookup either raises or misses."""
-    from unittest.mock import MagicMock
-
-    from db.nested_artifacts import artifact_key
-    from workers import policy_worker
-
-    row = SimpleNamespace(name=artifact_key(TARGET_ADDRESS, "snapshot"))
-    session = MagicMock()
-    session.execute.return_value.scalars.return_value.all.return_value = [row]
-
-    monkeypatch.setattr(policy_worker, "get_artifact", lambda *_a, **_kw: {"contract_address": TARGET_ADDRESS})
-
-    def _lookup(_session: Any, *, chain: str, address: str) -> Any:
-        if raises:
-            raise RuntimeError("connection reset")
-        return None
-
-    monkeypatch.setattr("db.contract_materializations.find_by_address", _lookup)
-
-    collector = _RecordCollector()
-    module_logger = logging.getLogger("workers.policy_worker")
-    module_logger.addHandler(collector)
-    degraded: list = []
-    dtoken = degraded_errors_var.set(degraded)
-    try:
-        with bind_trace_context(trace_id="t", job_id="j", stage="policy", worker_id="PolicyWorker-1"):
-            policy_worker._load_nested_artifacts(session, "job-1", chain="ethereum")
-    finally:
-        degraded_errors_var.reset(dtoken)
-        module_logger.removeHandler(collector)
-    return session, degraded, collector.records
-
-
-def test_hydration_db_error_warns_and_rolls_back(monkeypatch: pytest.MonkeyPatch) -> None:
-    session, degraded, records = _drive_hydration(monkeypatch, raises=True)
-
-    warnings = [
-        r for r in records if r.levelno == logging.WARNING and "Materialization hydration failed" in r.getMessage()
-    ]
-    assert len(warnings) == 1
-    assert getattr(warnings[0], "exc_type", None) == "RuntimeError"
-    # ``bundle_address``, not ``address``: JsonFormatter drops an extra whose
-    # key collides with a bound context field (the job's own address).
-    assert getattr(warnings[0], "bundle_address", None) == TARGET_ADDRESS
-    assert getattr(warnings[0], "bundle_chain", None) == "ethereum"
-
-    hydration = [e for e in degraded if e.phase == "nested_artifact_hydration"]
-    assert len(hydration) == 1
-    assert hydration[0].severity == "degraded"
-
-    # A failed query leaves the session pending-rollback; the handler clears it.
-    assert session.rollback.called
-
-
-def test_hydration_row_miss_stays_silent(monkeypatch: pytest.MonkeyPatch) -> None:
-    session, degraded, records = _drive_hydration(monkeypatch, raises=False)
-
-    assert [r for r in records if r.levelno >= logging.WARNING] == []
-    assert degraded == []
-    assert not session.rollback.called
-
-
 def test_principal_classification_failures_collect_per_contract() -> None:
     """D5: resolver crashes are collected so the writer can report them once
     per contract rather than once per principal."""
-    from services.policy import effective_permissions_writer as writer
+    from services.policy import permission_index_writer as writer
 
     memo: dict[str, Any] = {}
     failures: list[BaseException] = []

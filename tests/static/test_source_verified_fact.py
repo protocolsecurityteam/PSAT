@@ -19,8 +19,8 @@ import json
 from pathlib import Path
 
 from services.discovery.fetch import scaffold
-from services.static import collect_contract_analysis
-from services.static.contract_analysis_pipeline.core import _source_verified
+from services.static import collect_static_facts
+from services.static.static_analysis.core import _source_verified
 from tests.cache_helpers import (  # noqa: F401
     _patch_static_worker_phases,
     db_session,
@@ -179,7 +179,7 @@ def test_a_verified_contract_with_no_src_tree_publishes_verified(tmp_path: Path)
     project_dir = _project(tmp_path, "contracts", {"source_verified": True})
     assert not list(project_dir.rglob("src/**/*.sol")), "the old expression's input must be empty here"
 
-    assert collect_contract_analysis(project_dir)["subject"]["source_verified"] is True
+    assert collect_static_facts(project_dir)["subject"]["source_verified"] is True
 
 
 def test_an_unverified_fetch_still_publishes_false_from_a_foundry_layout(tmp_path: Path):
@@ -189,7 +189,7 @@ def test_an_unverified_fetch_still_publishes_false_from_a_foundry_layout(tmp_pat
     project_dir = _project(tmp_path, "src", {"source_verified": False})
     assert list(project_dir.rglob("src/**/*.sol")), "the old expression's input must be non-empty here"
 
-    assert collect_contract_analysis(project_dir)["subject"]["source_verified"] is False
+    assert collect_static_facts(project_dir)["subject"]["source_verified"] is False
 
 
 def test_a_project_with_no_recorded_fact_publishes_not_determined(tmp_path: Path):
@@ -200,4 +200,4 @@ def test_a_project_with_no_recorded_fact_publishes_not_determined(tmp_path: Path
     directory listing."""
     project_dir = _project(tmp_path, "src", {})
 
-    assert collect_contract_analysis(project_dir)["subject"]["source_verified"] is None
+    assert collect_static_facts(project_dir)["subject"]["source_verified"] is None

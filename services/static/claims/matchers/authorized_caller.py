@@ -31,7 +31,6 @@ def _has_rotatable_scalar(ctx: ClaimContext) -> bool:
 @claim_matcher(
     claim_id="authorized_caller.rotate",
     sentence="rotates a non-owner scalar address that authorizes callers of specific gated functions",
-    legacy_projection=None,
     consumer_family="control_plane",
     gate=_has_rotatable_scalar,
 )

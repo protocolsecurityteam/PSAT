@@ -70,7 +70,6 @@ def _body_external_call_sink_ids(ctx: ClaimContext, function: str) -> list[str]:
 @claim_matcher(
     claim_id="exec.arbitrary",
     sentence="forwards a caller-supplied target and calldata (arbitrary execution)",
-    legacy_projection="arbitrary_external_call",
     consumer_family="exec",
 )
 def exec_arbitrary(ctx: ClaimContext, function: str) -> MatchedEvidence | None:

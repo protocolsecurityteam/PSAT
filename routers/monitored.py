@@ -14,7 +14,7 @@ from schemas.api_requests import UpdateMonitoredContractRequest, UpsertMonitored
 from schemas.api_responses import MonitoredContractItem, MonitoredEventItem
 from services.clients.rpc import rpc_request
 from services.monitoring.chain_rpc import chain_id_for, rpc_for_chain
-from services.monitoring.tracking_plan_state import CONFIG_SUPPLIED_BY_CALLER, preserve_scan_plane_facts
+from services.monitoring.observation_plan_state import CONFIG_SUPPLIED_BY_CALLER, preserve_scan_plane_facts
 from utils.chains import UnsupportedChainError, require_supported_chain
 
 from . import deps
@@ -62,7 +62,7 @@ def _current_head_block(chain: str | None) -> int | None:
 #: path (``services/monitoring/enrollment._build_monitoring_config``) always
 #: emits a positive tracking-plan token: ``tracked_topics`` present = the plan
 #: was read (a non-empty list is the witnessed plan, ``[]`` the witnessed
-#: read-and-named-nothing finding); ``tracking_plan_not_determined`` present =
+#: read-and-named-nothing finding); ``observation_plan_not_determined`` present =
 #: the plan was not read and the reason token says why. A config authored by an
 #: API caller has none of that provenance, and storing it verbatim with neither
 #: key would read as a builder output that never existed. This token is the
@@ -77,7 +77,7 @@ def _stamp_caller_supplied(
 ) -> dict[str, Any]:
     """The stored config for a caller-authored enrollment, provenance-stamped.
 
-    The route OWNS ``tracking_plan_not_determined`` here: a caller value is
+    The route OWNS ``observation_plan_not_determined`` here: a caller value is
     overwritten, not merged, so the token cannot be forged into asserting some
     analyzer reason (``plan_not_readable``, ``contract_not_analyzed``, …) for a
     config no analyzer produced. Overwriting rather than rejecting also keeps a
@@ -96,7 +96,7 @@ def _stamp_caller_supplied(
     let the row present continuous coverage over an interval nothing read.
     """
     stamped = dict(monitoring_config or {})
-    stamped["tracking_plan_not_determined"] = CALLER_SUPPLIED_TRACKING_PLAN
+    stamped["observation_plan_not_determined"] = CALLER_SUPPLIED_TRACKING_PLAN
     return preserve_scan_plane_facts(stamped, existing_config)
 
 

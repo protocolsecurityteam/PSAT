@@ -36,8 +36,8 @@ import pytest
 
 from services.resolution.capabilities import CapabilityExpr
 from services.resolution.predicate_evaluator import EvaluationContext, evaluate_tree
-from services.static.contract_analysis_pipeline.predicate_types import PredicateTree
-from services.static.contract_analysis_pipeline.tracking import (
+from services.static.static_analysis.predicate_types import PredicateTree
+from services.static.static_analysis.tracking import (
     _emit_oz_v5_owner_target,
     _oz_v5_ownership_getter_for_accessor,
     _oz_v5_ownership_getter_for_slot_constant,
@@ -299,11 +299,11 @@ def test_emit_owner_target_dedupes_on_seen_id() -> None:
 slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
 
-from services.static.contract_analysis_pipeline.effects import build_effects  # noqa: E402
-from services.static.contract_analysis_pipeline.predicate_artifacts import (  # noqa: E402
+from services.static.static_analysis.effects import build_effects  # noqa: E402
+from services.static.static_analysis.predicate_artifacts import (  # noqa: E402
     build_predicate_artifacts,
 )
-from services.static.contract_analysis_pipeline.tracking import build_controller_tracking  # noqa: E402
+from services.static.static_analysis.tracking import build_controller_tracking  # noqa: E402
 from tests.support.solc import solc_path_for as _solc_path_for  # noqa: E402
 
 pytestmark = pytest.mark.compile

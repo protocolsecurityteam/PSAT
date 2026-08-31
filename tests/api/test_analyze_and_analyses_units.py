@@ -344,7 +344,7 @@ def test_analyses_list_non_proxy_has_is_proxy_false(mock_session_cls):
     _mock_session_ctx(mock_session_cls, mock_session)
 
     artifacts = [
-        _fake_artifact(fake_job.id, "contract_analysis", {"subject": {"name": "Regular"}, "summary": {}}),
+        _fake_artifact(fake_job.id, "static_facts", {"subject": {"name": "Regular"}, "summary": {}}),
     ]
 
     call_count = {"n": 0}
@@ -435,7 +435,7 @@ def test_analysis_detail_falls_back_to_proxy_artifacts(mock_session_cls, mock_ge
     mock_session.execute.side_effect = route_execute
 
     impl_artifacts = {
-        "contract_analysis": {
+        "static_facts": {
             "subject": {"name": "ImplContract"},
             "summary": {"control_model": "ownable"},
         },
@@ -510,7 +510,7 @@ def test_analysis_detail_no_fallback_when_impl_has_artifacts(
 
     # Impl job already has dependency_graph_viz and dependencies
     mock_get_all_artifacts.return_value = {
-        "contract_analysis": {
+        "static_facts": {
             "subject": {"name": "ImplContract"},
             "summary": {},
         },
@@ -575,7 +575,7 @@ def test_analysis_detail_no_fallback_without_proxy_address(mock_session_cls, moc
 
     # No dependency_graph_viz in artifacts
     mock_get_all_artifacts.return_value = {
-        "contract_analysis": {
+        "static_facts": {
             "subject": {"name": "Standalone"},
             "summary": {},
         },
@@ -592,143 +592,6 @@ def test_analysis_detail_no_fallback_without_proxy_address(mock_session_cls, moc
 # ---------------------------------------------------------------------------
 # 5. GET /api/analyses/{run_name} — proxy detail inherits impl artifacts
 # ---------------------------------------------------------------------------
-
-
-@patch("routers.deps.get_all_artifacts")
-@patch("routers.deps.get_artifact")
-@patch("routers.deps.SessionLocal")
-def test_analysis_detail_proxy_inherits_impl_artifacts(mock_session_cls, mock_get_artifact, mock_get_all_artifacts):
-    """When loading a proxy job's detail, analysis artifacts (contract_analysis,
-    effective_permissions, etc.) should be inherited from the impl child job.
-    This is the reverse of the impl->proxy fallback for dependency artifacts."""
-    client = _make_client()
-
-    proxy_addr = "0x1111111111111111111111111111111111111111"
-    impl_addr = "0x2222222222222222222222222222222222222222"
-    proxy_job_id = uuid.uuid4()
-    impl_job_id = uuid.uuid4()
-
-    proxy_job = _fake_api_job(
-        job_id=str(proxy_job_id),
-        address=proxy_addr,
-        name="MyProxy",
-        status="completed",
-        stage="done",
-        request={"address": proxy_addr},
-    )
-    impl_job = _fake_api_job(
-        job_id=str(impl_job_id),
-        address=impl_addr,
-        name="MyProxy: (impl)",
-        status="completed",
-        stage="done",
-        request={"address": impl_addr, "proxy_address": proxy_addr},
-    )
-
-    mock_session = MagicMock()
-    _mock_session_ctx(mock_session_cls, mock_session)
-
-    # Build Contract mocks for the relational-table queries
-    proxy_contract = MagicMock()
-    proxy_contract.id = uuid.uuid4()
-    proxy_contract.is_proxy = True
-    proxy_contract.implementation = impl_addr
-    proxy_contract.contract_name = "MyProxy"
-    proxy_contract.address = proxy_addr
-    proxy_contract.summary = None
-
-    impl_contract = MagicMock()
-    impl_contract.id = uuid.uuid4()
-    impl_contract.is_proxy = False
-    impl_contract.implementation = None
-    impl_contract.contract_name = "VaultImpl"
-    impl_contract.address = impl_addr
-    impl_contract.summary = None
-
-    # The endpoint calls session.execute() many times:
-    # 1. select(Job) by name -> proxy_job
-    # 2. select(Contract) by job_id (proxy) -> proxy_contract
-    # 3-7. EffectiveFunction/PrincipalLabel/ControllerValue/CGN/CGE for proxy -> empty
-    # 8. select(Job) by address==impl_addr -> impl_job
-    #    (get_all_artifacts for impl is not an execute call)
-    # 9. select(Contract) by job_id (impl) -> impl_contract
-    #    (relational queries for impl are skipped since artifacts already filled them)
-    call_count = 0
-
-    def route_execute(stmt, *args, **kwargs):
-        nonlocal call_count
-        call_count += 1
-        result = MagicMock()
-        if call_count == 1:
-            result.scalar_one_or_none.return_value = proxy_job
-        elif call_count == 2:
-            result.scalar_one_or_none.return_value = proxy_contract
-        elif call_count == 8:
-            result.scalar_one_or_none.return_value = impl_job
-        elif call_count == 9:
-            result.scalar_one_or_none.return_value = impl_contract
-        else:
-            # Relational queries for proxy/impl → empty
-            result.scalar_one_or_none.return_value = None
-            result.scalars.return_value.all.return_value = []
-        return result
-
-    mock_session.execute.side_effect = route_execute
-    mock_session.get.return_value = None
-
-    # Proxy job has only dependency artifacts (no analysis)
-    proxy_artifacts = {
-        "dependencies": {"address": proxy_addr, "dependencies": {}},
-        "dependency_graph_viz": {"nodes": [], "edges": []},
-    }
-
-    # Impl assessment (from get_all_artifacts)
-    from tests.support.policy_builders import _assessment, _minimal_contract_analysis
-
-    impl_assessment = _assessment(analysis=_minimal_contract_analysis(address=impl_addr, name="VaultImpl"))
-    impl_all_artifacts = {
-        "assessment": impl_assessment,
-        "principal_history": {
-            "schema_version": "principal_history.v1",
-            "contract_address": impl_addr,
-            "status": "ok",
-            "function_permissions": [{"function": "pause()", "principal": "0xowner"}],
-        },
-    }
-
-    def fake_get_artifact(session, jid, name):
-        if str(jid) == str(proxy_job_id) and name == "contract_flags":
-            return {"is_proxy": True, "proxy_type": "eip1967", "implementation": impl_addr}
-        return None
-
-    mock_get_artifact.side_effect = fake_get_artifact
-
-    # get_all_artifacts: first call for proxy, second for impl
-    call_count_artifacts = 0
-
-    def fake_get_all(session, jid):
-        nonlocal call_count_artifacts
-        call_count_artifacts += 1
-        if call_count_artifacts == 1:
-            return proxy_artifacts
-        return impl_all_artifacts
-
-    mock_get_all_artifacts.side_effect = fake_get_all
-
-    response = client.get("/api/analyses/MyProxy")
-
-    assert response.status_code == 200
-    body = response.json()
-
-    # Should have proxy's own dependency artifacts
-    assert "dependencies" in body
-    assert "dependency_graph_viz" in body
-
-    # Should have inherited the impl's canonical assessment.
-    assert body["assessment"]["contract"]["name"] == "VaultImpl"
-    assert body["principal_history"]["function_permissions"][0]["principal"] == "0xowner"
-    assert body["contract_name"] == "VaultImpl"
-    assert body["implementation_address"] == impl_addr
 
 
 # ---------------------------------------------------------------------------

@@ -215,7 +215,7 @@ def input_token_hints(fn: FunctionFacts, *, token_addresses: Sequence[str] = ())
     target of a body sink calling a token-only METHOD, which is how a
     library-wrapped pull surfaces (``nativeWrapper.safeApprove`` ⇒
     ``nativeWrapper()``, whose selector belongs to the library, not to ERC-20);
-    and the ``token_var`` of a ``contract_analysis`` value flow whose direction is
+    and the ``token_var`` of a ``static_facts`` value flow whose direction is
     a pull or burn. A head that is a declared PARAMETER names no getter — there is
     no state variable behind it — which is what ``token_addresses`` is for: the
     caller supplies the assets the acting deployment provably holds, and

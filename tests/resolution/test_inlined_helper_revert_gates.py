@@ -32,7 +32,7 @@ import pytest
 slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
 
-from services.static.contract_analysis_pipeline.predicate_artifacts import (  # noqa: E402
+from services.static.static_analysis.predicate_artifacts import (  # noqa: E402
     build_predicate_artifacts,
 )
 
@@ -118,7 +118,7 @@ def _authority_public(tree) -> bool:
     from services.resolution.predicate_evaluator import evaluate_tree
 
     if tree is None:
-        # effective_permissions._public_capability(): absent from trees -> public.
+        # permission_index._public_capability(): absent from trees -> public.
         return True
     cap = evaluate_tree(tree)
     cap_dict = capability_to_dict(cap)

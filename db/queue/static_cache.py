@@ -34,7 +34,7 @@ logger = logging.getLogger("db.queue")
 # ---------------------------------------------------------------------------
 
 # Artifact names that constitute cached static data (immutable, never change).
-# slither_results / analysis_report were removed when vulnerability-detector
+# slither_results / static_facts_report were removed when vulnerability-detector
 # triage was split out of PSAT's pipeline; downstream stages don't depend on
 # them, and the only writer (StaticWorker._run_slither_phase) is gone.
 # predicate_trees / effects are emitted by semantic static analysis and are
@@ -99,7 +99,7 @@ def _store_assessment_from_static_facts(
         ),
         code_hash=None,
         source_hash=job.source_content_hash or source_hash_fallback,
-        analysis=copied_analysis,
+        static_facts=copied_analysis,
         effects=copied_effects,
         predicate_trees=copied_trees,
     )
@@ -145,10 +145,10 @@ def copy_row(session: Session, source: Base, *, exclude: frozenset[str] = frozen
     return new_row
 
 
-def proven_analysis_schema_version(session: Session, job: Job) -> int | None:
+def proven_static_facts_schema_version(session: Session, job: Job) -> int | None:
     """The analyzer era *job*'s static artifacts were produced under, or None.
 
-    ``jobs.analysis_schema_version`` is stamped only on the fetch path
+    ``jobs.static_facts_schema_version`` is stamped only on the fetch path
     (``workers/discovery``): a same-address cache hit copies the donor's
     artifacts and returns before the stamp, so the column reads NULL on 32 of
     the working DB's 86 completed cache-hit jobs. NULL is not "current" — it is
@@ -168,7 +168,7 @@ def proven_analysis_schema_version(session: Session, job: Job) -> int | None:
     rests on the visited set instead: each hop moves to a distinct job id, so a
     finite table is exhausted in finite steps whatever the links look like.
     """
-    version = getattr(job, "analysis_schema_version", None)
+    version = getattr(job, "static_facts_schema_version", None)
     if isinstance(version, int):
         return version
 
@@ -203,7 +203,7 @@ def proven_analysis_schema_version(session: Session, job: Job) -> int | None:
             return None
         if current is None:
             return None
-        version = getattr(current, "analysis_schema_version", None)
+        version = getattr(current, "static_facts_schema_version", None)
         if isinstance(version, int):
             return version
 
@@ -319,7 +319,7 @@ def _find_static_cache_by_source_hash(session: Session, source_content_hash: str
     carry ``contract_flags`` rather than ``assessment`` and are analyzed
     per chain.
     """
-    from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
+    from db.contract_materializations import STATIC_FACTS_SCHEMA_VERSION
 
     candidates = (
         session.execute(
@@ -328,7 +328,7 @@ def _find_static_cache_by_source_hash(session: Session, source_content_hash: str
                 Job.status == JobStatus.completed,
                 Job.stage == JobStage.done,
                 Job.source_content_hash == source_content_hash,
-                Job.analysis_schema_version == ANALYSIS_SCHEMA_VERSION,
+                Job.static_facts_schema_version == STATIC_FACTS_SCHEMA_VERSION,
             )
             .order_by(Job.updated_at.desc())
         )
@@ -606,7 +606,7 @@ def copy_static_cache_cross_chain(
     artifacts, re-stamping the contract address in ``static_facts`` so
     resolution reads the target deployment's state,
     and it copies the summary + role definitions (the static worker skips
-    ``_write_analysis_tables`` on a cache hit). The STATE plane (proxy impl,
+    ``_write_static_fact_indexes`` on a cache hit). The STATE plane (proxy impl,
     controllers, balances, events, monitoring) is untouched and resolved per
     ``(chain, address)`` downstream.
 

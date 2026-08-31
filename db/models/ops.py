@@ -111,8 +111,8 @@ class EtherscanCache(Base):
 class ContractMaterialization(Base):
     """Cross-job, cross-process materialization cache.
 
-    A row per ``(chain, bytecode_keccak)`` recording the static analysis
-    + tracking_plan bundle so two impl jobs in the same protocol — or a
+    A row per ``(chain, bytecode_keccak)`` recording static facts and the
+    observation plan so two impl jobs in the same protocol — or a
     same-protocol re-run on the next day — skip the expensive forge build
     + Slither pass. Read/written via ``db.contract_materializations`` with
     request-coalescing through ``pg_advisory_xact_lock``.
@@ -121,8 +121,7 @@ class ContractMaterialization(Base):
     (``builder_started_at`` records when); concurrent callers poll the
     row instead of duplicating the build. ``'ready'`` means the bundle
     is usable; ``'failed'`` is kept for ops triage but never returned to
-    readers. ``'pending'`` is the legacy default kept for compatibility
-    with pre-migration rows.
+    readers.
     """
 
     __tablename__ = "contract_materializations"
@@ -131,11 +130,11 @@ class ContractMaterialization(Base):
     bytecode_keccak: Mapped[str] = mapped_column(String(66), primary_key=True)
     address: Mapped[str] = mapped_column(String(42), nullable=False)
     contract_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    analysis: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
-    tracking_plan: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    static_facts: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    observation_plan: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     predicate_trees: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
-    analysis_blob_key: Mapped[str | None] = mapped_column(Text, nullable=True)
-    tracking_plan_blob_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    static_facts_blob_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    observation_plan_blob_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     predicate_trees_blob_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Content hash of the normalized verified-source file set (+ the compiler
     # inputs that determine the analysis). The ``(chain, bytecode_keccak)`` key
@@ -149,10 +148,10 @@ class ContractMaterialization(Base):
     source_content_hash: Mapped[str | None] = mapped_column(String(66), nullable=True)
     # Analyzer/pipeline schema version this bundle was built under. Read paths in
     # ``db.contract_materializations`` only serve rows matching the current
-    # ``ANALYSIS_SCHEMA_VERSION``; bumping that constant makes older rows miss and
+    # ``STATIC_FACTS_SCHEMA_VERSION``; bumping that constant makes older rows miss and
     # rebuild. ``server_default`` backfills pre-existing rows to the launch version.
-    analysis_schema_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
-    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending", server_default="pending")
+    static_facts_schema_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="building", server_default="building")
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     builder_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Who established this row and from what: ``{produced_by, source_job_id,
@@ -261,7 +260,7 @@ class EffectBehaviorCache(Base):
     ``effect_verdicts``, never here.
 
     ``transcript_ptr`` is an artifact-store key, never an inline JSONB blob.
-    ``analysis_schema_version`` invalidates the row on a pipeline bump,
+    ``static_facts_schema_version`` invalidates the row on a pipeline bump,
     mirroring ``ContractMaterialization``.
 
     Self-audit: the first time two functions share a behavioral hash, both
@@ -300,7 +299,7 @@ class EffectBehaviorCache(Base):
     # Small, code-plane structural witness (e.g. supply-delta sign, source-read
     # duration bound). NO concrete/state-plane values.
     details: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
-    analysis_schema_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+    static_facts_schema_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
     # Self-audit bookkeeping.
     audit_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
     audit_peer_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)

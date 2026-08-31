@@ -52,7 +52,6 @@ def _evidence(standard: str, selector: str, corroboration: str) -> MatchedEviden
 @claim_matcher(
     claim_id="ownership.transfer",
     sentence="transfers contract ownership to a new principal (per a recognized ownership standard)",
-    legacy_projection="ownership_transfer",
     consumer_family="control_plane",
     gate=_ownership_present,
 )
@@ -75,7 +74,6 @@ def ownership_transfer(ctx: ClaimContext, function: str) -> MatchedEvidence | No
 @claim_matcher(
     claim_id="ownership.renounce",
     sentence="renounces contract ownership, leaving the contract unowned (per a recognized ownership standard)",
-    legacy_projection="ownership_transfer",
     consumer_family="control_plane",
     gate=_ownership_present,
 )
@@ -95,7 +93,6 @@ def ownership_renounce(ctx: ClaimContext, function: str) -> MatchedEvidence | No
 @claim_matcher(
     claim_id="ownership.accept",
     sentence="accepts or requests a pending ownership transfer (per a recognized two-step ownership standard)",
-    legacy_projection="ownership_transfer",
     consumer_family="control_plane",
     gate=_ownership_present,
 )

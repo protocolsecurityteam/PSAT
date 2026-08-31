@@ -33,16 +33,11 @@ def test_dependencies_artifact(analyzed_weth, live_client: LiveClient):
 
 def test_retired_analysis_artifacts_are_not_emitted(analyzed_weth, live_client: LiveClient):
     for name in (
-        "contract_analysis",
-        "control_tracking_plan",
-        "control_snapshot",
-        "resolved_control_graph",
-        "effective_permissions",
+        "static_facts",
+        "observation_plan",
+        "observation_batch",
+        "resolution_graph",
+        "permission_index",
         "principal_labels",
     ):
         assert live_client.artifact(analyzed_weth["name"], name) is None
-
-
-def test_detail_projects_query_views(analyzed_weth, live_client: LiveClient):
-    detail = live_client.analysis_detail(analyzed_weth["name"])
-    assert isinstance(detail.get("effective_permissions"), dict)

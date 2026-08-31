@@ -18,7 +18,7 @@ def _base() -> Assessment:
         contract_name="Vault",
         code_hash=None,
         source_hash="0xsource",
-        analysis={"controller_tracking": []},
+        static_facts={"controller_tracking": []},
         effects={
             "schema_version": "semantic-2",
             "claims_schema_version": "claims/1",
@@ -29,7 +29,6 @@ def _base() -> Assessment:
                     "abi_signature": "pause()",
                     "state_changing": True,
                     "state_writes": [],
-                    "effect_targets": ["paused"],
                     "claims": [
                         {
                             "claim_id": "pause.set",

@@ -31,7 +31,7 @@ from services.resolution.adapters.solmate_roles import _ROLE_TOPICS, SolmateRole
 from services.resolution.capability_resolver import capability_to_dict
 from services.resolution.deferred_reconciler import DEFERRED_MARKER, _iter_deferred_authorities
 from services.resolution.predicate_evaluator import evaluate_tree_with_registry
-from services.static.contract_analysis_pipeline.predicate_types import PredicateTree
+from services.static.static_analysis.predicate_types import PredicateTree
 
 _FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "solmate" / "veda_teller_stack.json"
 _ZERO = "0x" + "0" * 40

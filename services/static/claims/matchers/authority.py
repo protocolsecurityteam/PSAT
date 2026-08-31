@@ -25,7 +25,6 @@ from . import _authcommon as ac
 @claim_matcher(
     claim_id="authority.replace",
     sentence="replaces the external authority contract consulted for permission checks",
-    legacy_projection="authority_update",
     consumer_family="control_plane",
 )
 def authority_replace(ctx: ClaimContext, function: str) -> MatchedEvidence | None:

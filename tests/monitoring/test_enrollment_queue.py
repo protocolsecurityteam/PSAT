@@ -38,7 +38,7 @@ from services.monitoring.reconciler import (
 from tests.conftest import DATABASE_URL, requires_postgres
 from tests.support.policy_builders import (
     _assessment,
-    _minimal_contract_analysis,
+    _minimal_static_facts,
 )
 
 pytestmark = requires_postgres
@@ -452,22 +452,16 @@ def test_policy_worker_marks_dirty(qsession, monkeypatch):
     qsession.commit()
 
     artifacts = {
-        "assessment": _assessment(analysis=_minimal_contract_analysis(address=job_address)),
+        "assessment": _assessment(static_facts=_minimal_static_facts(address=job_address)),
     }
     monkeypatch.setattr("workers.policy_worker.get_artifact", lambda _s, _j, name: artifacts.get(name))
     monkeypatch.setattr("workers.policy_worker.store_artifact", lambda *a, **kw: None)
-    monkeypatch.setattr("workers.policy_worker._load_nested_artifacts", lambda *a, **kw: {})
     monkeypatch.setattr(
-        "workers.policy_worker.build_effective_permissions",
+        "workers.policy_worker.build_permission_index",
         lambda *a, **kw: {"schema_version": "1", "functions": []},
     )
     monkeypatch.setattr("workers.policy_worker.resolve_control_graph", lambda **kw: ({}, {}))
-    monkeypatch.setattr("workers.policy_worker.build_principal_labels", lambda *a, **kw: {"principals": []})
-    monkeypatch.setattr(
-        PolicyWorker,
-        "_resolve_authority",
-        lambda self, *a, **kw: {"principal_resolution": {"status": "no_authority"}, "authority_snapshot": None},
-    )
+    monkeypatch.setattr("workers.policy_worker.build_principal_index", lambda *a, **kw: {"principals": []})
     monkeypatch.setattr(PolicyWorker, "_enrich_cross_contract", lambda self, *a, **kw: {})
     monkeypatch.setattr("services.monitoring.enrollment.rpc_request", lambda *a, **kw: "0x100")
     # Stub the DeFiLlama fetch so the initial-TVL block doesn't touch the network.

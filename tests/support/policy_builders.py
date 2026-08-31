@@ -33,7 +33,7 @@ def _job(**overrides: Any) -> SimpleNamespace:
 
 
 def _snapshot_value(**overrides: Any) -> dict:
-    """One ``ControlSnapshotValue`` entry; callers override any field."""
+    """One ``ControllerObservation`` entry; callers override any field."""
     entry: dict[str, Any] = {
         "source": "state_variable:test",
         "value": None,
@@ -47,7 +47,7 @@ def _snapshot_value(**overrides: Any) -> dict:
 
 
 def _minimal_snapshot(controller_values: dict | None = None, address: str = TARGET_ADDRESS) -> dict:
-    """A minimal ``control_snapshot`` document. Partial per-controller dicts
+    """A minimal ``observation_batch`` document. Partial per-controller dicts
     are completed with the schema defaults (a bare ``{"value": ...}`` entry
     becomes a complete value read)."""
     values: dict[str, Any] = {}
@@ -73,8 +73,8 @@ def _graph_with_nodes(nodes: list[dict], address: str = TARGET_ADDRESS) -> dict:
     }
 
 
-def _minimal_contract_analysis(address: str = TARGET_ADDRESS, name: str = "TestContract") -> dict:
-    """A ``ContractAnalysis`` document carrying no findings: every analysis
+def _minimal_static_facts(address: str = TARGET_ADDRESS, name: str = "TestContract") -> dict:
+    """A ``StaticFacts`` document carrying no findings: every analysis
     section reports its schema's nothing-determined shape."""
     return {
         "schema_version": "2",
@@ -84,7 +84,7 @@ def _minimal_contract_analysis(address: str = TARGET_ADDRESS, name: str = "TestC
             "compiler_version": "unknown",
             "source_verified": None,
         },
-        "analysis_status": {"static_analysis_completed": True, "errors": []},
+        "static_status": {"static_analysis_completed": True, "errors": []},
         "summary": {
             "control_model": "unknown",
             "is_upgradeable": False,
@@ -146,7 +146,7 @@ def _minimal_contract_analysis(address: str = TARGET_ADDRESS, name: str = "TestC
     }
 
 
-def _tracking_plan(address: str = TARGET_ADDRESS, name: str = "TestContract") -> dict:
+def _observation_plan(address: str = TARGET_ADDRESS, name: str = "TestContract") -> dict:
     return {
         "schema_version": "1",
         "contract_address": address,
@@ -158,7 +158,7 @@ def _tracking_plan(address: str = TARGET_ADDRESS, name: str = "TestContract") ->
 
 def _assessment(
     *,
-    analysis: dict | None = None,
+    static_facts: dict | None = None,
     snapshot: dict | None = None,
     graph: dict | None = None,
     chain_id: int = 1,
@@ -167,7 +167,7 @@ def _assessment(
 
     from services.assessment import add_observations, add_resolution, build_static_assessment
 
-    facts = analysis or _minimal_contract_analysis()
+    facts = static_facts or _minimal_static_facts()
     snapshot = snapshot or _minimal_snapshot()
     if snapshot.get("controller_values"):
         facts = {**facts, "controller_tracking": list(facts.get("controller_tracking") or [])}
@@ -197,7 +197,7 @@ def _assessment(
         contract_name=subject["name"],
         code_hash=None,
         source_hash="test-source",
-        analysis=facts,
+        static_facts=facts,
         effects={
             "schema_version": "semantic-3",
             "contract_name": subject["name"],
@@ -216,9 +216,9 @@ def _assessment(
 
 def _authority_bundle(snapshot: dict | None = None) -> dict:
     """A nested ``LoadedArtifacts`` bundle for the authority contract."""
-    analysis = _minimal_contract_analysis(address=AUTH_ADDRESS, name="Authority")
+    analysis = _minimal_static_facts(address=AUTH_ADDRESS, name="Authority")
     return {
         "analysis": analysis,
-        "tracking_plan": _tracking_plan(address=AUTH_ADDRESS, name="Authority"),
+        "observation_plan": _observation_plan(address=AUTH_ADDRESS, name="Authority"),
         "snapshot": snapshot or _minimal_snapshot({}, address=AUTH_ADDRESS),
     }

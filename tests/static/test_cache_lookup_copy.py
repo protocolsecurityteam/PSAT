@@ -80,7 +80,7 @@ def test_find_completed_static_cache_miss_no_analysis(db_session):
     assert find_completed_static_cache(db_session, ADDR_A) is None
 
 
-def test_find_completed_static_cache_hit_for_proxy_without_contract_analysis(db_session):
+def test_find_completed_static_cache_hit_for_proxy_without_static_facts(db_session):
     """Regression: proxies never produce an ``assessment`` on their
     own job — that artifact only shows up on the impl child. The cache
     lookup must still return the proxy's completed job so the next
@@ -88,7 +88,7 @@ def test_find_completed_static_cache_hit_for_proxy_without_contract_analysis(db_
     fetching source from Etherscan and re-running slither for every
     proxy it sees.
 
-    Before the fix, proxies required ``contract_analysis`` to be served
+    Before the fix, proxies required ``static_facts`` to be served
     from cache; none of them met that bar, so every re-discovery of a
     protocol did a full fresh fetch for every proxy row.
     """
@@ -165,11 +165,11 @@ def test_find_completed_static_cache_picks_most_recent(db_session):
     db_session.add(ContractSummary(contract_id=contract.id))
     db_session.commit()
     store_source_files(db_session, new_job.id, {"src/T.sol": "contract T {}"})
-    from tests.support.policy_builders import _assessment, _minimal_contract_analysis
+    from tests.support.policy_builders import _assessment, _minimal_static_facts
 
-    facts = _minimal_contract_analysis(address=ADDR_A, name="TestContract2")
+    facts = _minimal_static_facts(address=ADDR_A, name="TestContract2")
     store_artifact(db_session, new_job.id, "static_facts", data=facts)
-    store_artifact(db_session, new_job.id, "assessment", data=_assessment(analysis=facts))
+    store_artifact(db_session, new_job.id, "assessment", data=_assessment(static_facts=facts))
 
     future = datetime.now(timezone.utc) + timedelta(hours=1)
     db_session.execute(update(Job).where(Job.id == new_job.id).values(updated_at=future))
@@ -230,7 +230,7 @@ def test_copy_static_cache(db_session):
     assert get_artifact(db_session, target_job.id, "assessment") is not None
     assert get_artifact(db_session, target_job.id, "predicate_trees") == predicate_trees
     assert get_artifact(db_session, target_job.id, "effects") == effects
-    # slither_results / analysis_report were removed from the static-artifact
+    # slither_results / static_facts_report were removed from the static-artifact
     # cache copy set when the Slither CLI subprocess was excised — they no
     # longer participate in caching since they're no longer produced.
     assert get_artifact(db_session, target_job.id, "contract_flags") is None
