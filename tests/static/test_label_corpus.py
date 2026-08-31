@@ -39,7 +39,7 @@ def test_label_corpus_golden(tmp_path):
     expected = harness.load_golden()
     diff = harness.unified_diff(expected, actual, label="corpus")
     assert not diff, (
-        "effect-labels golden drift over the frozen corpus.\n"
+        "Assessment golden drift over the frozen corpus.\n"
         "If this change is intended, regenerate with "
         "tests/regenerate_label_golden.py and commit the reviewed golden diff.\n\n" + diff
     )

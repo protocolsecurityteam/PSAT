@@ -715,11 +715,8 @@ def build_golden(
     return {
         "schema_version": GOLDEN_SCHEMA_VERSION,
         "description": (
-            "Golden effect-labels, Plane-1 claim (claim_id, tier) tuples AND value-flow "
-            "facts for the frozen fixture corpus, pinned to CURRENT producer behavior. "
-            "Regenerate with tests/regenerate_label_golden.py only for reviewed, intended "
-            "changes — and justify each hunk of the diff, since a diff here is a change in "
-            "what the pipeline publishes about real contracts."
+            "Golden Assessment claims, evidence witnesses, value-flow facts, and predicate "
+            "summaries for the frozen fixture corpus."
         ),
         "contracts": contracts,
     }
