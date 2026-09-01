@@ -1,7 +1,7 @@
 """End-to-end tests for ``POST /api/contract/{address}/probe/membership``.
 
 Exercises the full route: address → most-recent completed Job →
-predicate_trees artifact → probe_membership. Uses the
+Assessment predicate evidence → probe_membership. Uses the
 ``api_client`` + ``db_session`` fixtures from conftest, which point
 the FastAPI app at the test database.
 

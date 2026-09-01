@@ -196,7 +196,6 @@ def find_analysis_job_for_address(
     session: Session,
     address: str,
     *,
-    required_artifact: str = "assessment",
     chain: str | None = None,
     completed_only: bool = True,
 ) -> AnalysisJobLookup | None:
@@ -210,7 +209,6 @@ def find_analysis_job_for_address(
         lookup = _analysis_lookup_for_runtime_job(
             session,
             runtime_job,
-            required_artifact=required_artifact,
             chain=chain,
             completed_only=completed_only,
         )
@@ -306,7 +304,6 @@ def resolve_contract_capabilities(
         lookup = find_analysis_job_for_address(
             session,
             addr,
-            required_artifact="assessment",
             chain=chain,
             completed_only=True,
         )
@@ -322,7 +319,6 @@ def resolve_contract_capabilities(
         lookup = _analysis_lookup_for_runtime_job(
             session,
             runtime_job,
-            required_artifact="assessment",
             chain=chain,
             completed_only=True,
         )
@@ -801,27 +797,19 @@ def _analysis_lookup_for_runtime_job(
     session: Session,
     runtime_job: Job,
     *,
-    required_artifact: str,
     chain: str | None,
     completed_only: bool,
 ) -> AnalysisJobLookup | None:
-    # A proxy's own predicate_trees artifact is present but *empty* — it has no
-    # logic of its own, so the analyzable functions live on the implementation
-    # child job. Treating that empty artifact as "present" (the old
-    # ``_job_has_artifact`` check) returns the proxy job and shadows the
-    # implementation's real trees, which strands cross-contract authority
-    # inlining with an empty tree set and drops the true controller (e.g. an
-    # upgrade gate delegating to RoleRegistry.onlyProtocolUpgrader never
-    # resolves its owner/timelock). Prefer whichever job carries a *substantive*
-    # artifact; only fall back to a present-but-empty one when neither does (a
-    # contract that genuinely has no gated functions).
-    runtime_artifact = get_artifact(session, runtime_job.id, required_artifact)
-    if _artifact_is_substantive(required_artifact, runtime_artifact):
+    # A proxy's Assessment can contain an empty predicate-tree input because its
+    # logic lives on the implementation child. Prefer whichever Assessment has
+    # substantive trees; fall back to an empty one only when neither does.
+    runtime_artifact = get_artifact(session, runtime_job.id, "assessment")
+    if _assessment_is_substantive(runtime_artifact):
         return AnalysisJobLookup(runtime_job=runtime_job, analysis_job=runtime_job)
 
     impl_job = _implementation_child_job(session, runtime_job, chain=chain, completed_only=completed_only)
-    impl_artifact = get_artifact(session, impl_job.id, required_artifact) if impl_job is not None else None
-    if impl_job is not None and _artifact_is_substantive(required_artifact, impl_artifact):
+    impl_artifact = get_artifact(session, impl_job.id, "assessment") if impl_job is not None else None
+    if impl_job is not None and _assessment_is_substantive(impl_artifact):
         return AnalysisJobLookup(runtime_job=runtime_job, analysis_job=impl_job)
 
     if isinstance(runtime_artifact, dict):
@@ -904,31 +892,22 @@ def _job_chain(job: Job) -> str | None:
     return chain if isinstance(chain, str) and chain else None
 
 
-def _artifact_is_substantive(artifact_name: str, artifact: Any) -> bool:
-    """Whether an artifact carries usable content — not merely that a row exists.
+def _assessment_is_substantive(artifact: Any) -> bool:
+    """Whether Assessment embeds at least one predicate or check tree."""
 
-    A proxy contract's ``predicate_trees`` artifact is present but empty (no
-    logic of its own), so ``predicate_trees`` counts as substantive only when it
-    carries at least one ``trees``/``check_trees`` entry. Other artifact kinds
-    count as substantive whenever the row is a dict.
-    """
     if not isinstance(artifact, dict):
         return False
-    if artifact_name == "assessment":
-        evidence = artifact.get("evidence")
-        if not isinstance(evidence, dict):
-            return False
-        for item in evidence.values():
-            if not isinstance(item, dict) or item.get("producer") != "static.facts":
-                continue
-            observation = item.get("observation")
-            inputs = observation.get("predicate_trees") if isinstance(observation, dict) else None
-            if isinstance(inputs, dict):
-                return bool(inputs.get("trees") or inputs.get("check_trees"))
+    evidence = artifact.get("evidence")
+    if not isinstance(evidence, dict):
         return False
-    if artifact_name == "predicate_trees":
-        return bool(artifact.get("trees") or artifact.get("check_trees"))
-    return True
+    for item in evidence.values():
+        if not isinstance(item, dict) or item.get("producer") != "static.facts":
+            continue
+        observation = item.get("observation")
+        inputs = observation.get("predicate_trees") if isinstance(observation, dict) else None
+        if isinstance(inputs, dict):
+            return bool(inputs.get("trees") or inputs.get("check_trees"))
+    return False
 
 
 def _load_state_var_values(

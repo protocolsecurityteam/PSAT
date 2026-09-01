@@ -591,7 +591,7 @@ def _maybe_inline_cross_contract_call(
         sender, OR
       * ``None`` if any precondition isn't met (no session, no
         state-var resolution, no Job for the registry, no
-        predicate_trees artifact, no matching function tree, or the
+        Assessment predicate evidence, no matching function tree, or the
         recursion guard fires) — caller falls through to the existing
         adapter path.
 
@@ -662,7 +662,6 @@ def _maybe_inline_cross_contract_call(
     lookup = find_analysis_job_for_address(
         session,
         registry_addr,
-        required_artifact="assessment",
         completed_only=False,
     )
     if lookup is None:

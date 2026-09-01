@@ -120,13 +120,13 @@ def test_capabilities_returns_404_for_unknown_address(api_client, db_session):
 
 
 @requires_postgres
-def test_capabilities_returns_404_when_predicate_tree_artifact_is_missing(api_client, db_session):
-    """A completed Job without a predicate_trees artifact returns 404."""
+def test_capabilities_returns_404_when_assessment_predicate_evidence_is_missing(api_client, db_session):
+    """A completed Job without Assessment predicate evidence returns 404."""
     address = "0x" + uuid.uuid4().hex[:8] + "b2" * 16
     _seed_completed_job_with_artifact(db_session, address=address, predicate_trees=None)
     resp = api_client.get(f"/api/contract/{address}/capabilities")
     assert resp.status_code == 404
-    assert "predicate-tree artifact is missing" in resp.json()["detail"]
+    assert "Assessment predicate evidence is missing" in resp.json()["detail"]
 
 
 @requires_postgres

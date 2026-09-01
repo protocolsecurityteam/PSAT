@@ -219,7 +219,7 @@ def probe_contract_membership(
     """Semantic predicate probe: is ``member`` allowed by leaf ``predicate_index``
     of ``function_signature`` on ``address``?'
 
-    Resolves the predicate_trees artifact server-side from the most
+    Resolves predicate trees from Assessment evidence for the most
     recent successful job for ``address``; the descriptor is NEVER
     client-supplied — clients only carry the leaf index they received
     from the semantic capability rendering.
@@ -411,7 +411,7 @@ def get_contract_capabilities(
     unguarded (publicly callable) per the resolver convention.
 
     Returns 404 if no completed analysis Job exists for the address, or
-    no predicate_trees artifact has been written for the latest analysis.
+    no Assessment with predicate-tree evidence exists for the latest analysis.
     """
     from services.resolution.capability_resolver import resolve_contract_capabilities
 
@@ -451,7 +451,7 @@ def get_contract_capabilities(
         ).scalar_one_or_none()
         no_capabilities_detail = (
             "No semantic capabilities for this address — either no completed "
-            "analysis exists or the predicate-tree artifact is missing. Fall "
+            "analysis exists or Assessment predicate evidence is missing. Fall "
             "back to /api/company/* or /api/jobs?address=..."
         )
         # No job on the requested chain: 404 directly rather than calling the
@@ -516,7 +516,7 @@ def company_semantic_capabilities(request: Request, company_name: str) -> dict[s
           "missing_semantic_count": <int>
         }
 
-    A contract with no predicate-tree artifact maps to ``null`` so consumers can
+    A contract with no Assessment predicate evidence maps to ``null`` so consumers can
     distinguish "not yet semantically analyzed" from "semantically analyzed and has no
     guarded functions" (the latter maps to ``{}``).
 

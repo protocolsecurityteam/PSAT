@@ -1621,7 +1621,7 @@ class StaticWorker(BaseWorker):
                 predicate_trees=(
                     semantic_predicate_trees
                     if isinstance(semantic_predicate_trees, dict)
-                    else {"schema_version": "missing", "error": "predicate_trees artifact missing"}
+                    else {"schema_version": "missing", "error": "predicate trees unavailable"}
                 ),
             )
         except Exception as exc:
@@ -1631,7 +1631,6 @@ class StaticWorker(BaseWorker):
                 context={"address": address, "contract_name": contract_name},
             )
             _log_phase_error(str(job.id), address, contract_name, "static_facts", str(exc))
-            store_artifact(session, job.id, "static_facts_error", data={"error": str(exc)})
             return None
 
         # ``predicate_trees`` and ``effects`` are the semantic artifacts

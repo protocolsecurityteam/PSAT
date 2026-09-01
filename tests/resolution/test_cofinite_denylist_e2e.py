@@ -4,7 +4,7 @@ Drives the REAL resolver (``resolve_contract_capabilities`` → AdapterRegistry 
 cross-contract inline → capability algebra → CapabilitySurface) against snapshots of the
 prod etherfi contracts (real ``predicate_trees`` + ``state_var_values`` pulled from the
 analysis artifacts by ``tests/fixtures/cofinite/generate.py``). Seeds Job +
-predicate_trees artifact + Contract/ControllerValue the production path reads, then
+Assessment predicate evidence + Contract/ControllerValue the production path reads, then
 asserts at the surface/status level — so a revert at any layer (negate, membership
 normalization, projection) is caught.
 
@@ -152,7 +152,7 @@ def _resolve(session, *, address: str, job_id):
     from services.resolution.capability_resolver import resolve_contract_capabilities
 
     out = resolve_contract_capabilities(session, address=address, chain_id=1, job_id=job_id)
-    assert out is not None, f"resolver returned None for {address} — predicate_trees artifact not found"
+    assert out is not None, f"resolver returned None for {address} — Assessment predicate evidence not found"
     return out
 
 

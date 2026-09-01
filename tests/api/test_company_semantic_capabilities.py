@@ -2,7 +2,7 @@
 
 Read-only, not admin-gated. Returns the per-contract semantic
 capability map for every analyzed contract in the company,
-distinguishing "no predicate-tree artifact" (``null``) from "semantically analyzed
+distinguishing "no Assessment predicate evidence" (``null``) from "semantically analyzed
 with no guarded functions" (``{}``).
 """
 
@@ -102,7 +102,7 @@ def test_company_semantic_capabilities_per_contract_map(api_client, db_session):
         addresses_with_artifacts=[
             (addr_guarded, _semantic_artifact_with_guard()),
             (addr_unguarded, _semantic_artifact_unguarded_only()),
-            (addr_legacy, None),  # no predicate_trees artifact
+            (addr_legacy, None),  # no Assessment predicate evidence
         ],
     )
 

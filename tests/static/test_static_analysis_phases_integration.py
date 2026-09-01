@@ -132,9 +132,9 @@ class TestAnalysisPhaseSuccess:
 
 class TestAnalysisPhaseFailure:
     """Mock ``collect_static_inputs()`` to raise;
-    verify error artifact and return value."""
+    verify failure recording does not mint a side artifact."""
 
-    def test_stores_static_facts_error_on_exception(self, monkeypatch, tmp_path):
+    def test_records_static_failure_without_a_side_artifact(self, monkeypatch, tmp_path):
         worker = StaticWorker()
         monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
         session = MagicMock()
@@ -149,11 +149,9 @@ class TestAnalysisPhaseFailure:
         result = worker._run_static_facts_phase(session, job, tmp_path, "TestContract", job.address)
 
         assert result is None
-        assert len(calls) == 1
-        assert calls[0]["name"] == "static_facts_error"
-        assert "LLM analysis timed out" in calls[0]["data"]["error"]
+        assert calls == []
 
-    def test_stores_static_facts_error_on_generic_exception(self, monkeypatch, tmp_path):
+    def test_records_generic_failure_without_a_side_artifact(self, monkeypatch, tmp_path):
         worker = StaticWorker()
         monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
         session = MagicMock()
@@ -168,5 +166,4 @@ class TestAnalysisPhaseFailure:
         result = worker._run_static_facts_phase(session, job, tmp_path, "TestContract", job.address)
 
         assert result is None
-        assert calls[0]["name"] == "static_facts_error"
-        assert "bad json from model" in calls[0]["data"]["error"]
+        assert calls == []

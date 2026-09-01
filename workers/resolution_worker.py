@@ -1018,7 +1018,6 @@ class ResolutionWorker(BaseWorker):
             satisfied_lookup = find_analysis_job_for_address(
                 session,
                 target_addr,
-                required_artifact="assessment",
                 chain=chain,
                 completed_only=False,
             )

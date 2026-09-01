@@ -87,7 +87,7 @@ def _load_contract_facts_uncached(session: Session, address: str) -> ContractFac
     from services.resolution.capability_resolver import find_analysis_job_for_address
 
     try:
-        lookup = find_analysis_job_for_address(session, address, required_artifact="assessment", completed_only=False)
+        lookup = find_analysis_job_for_address(session, address, completed_only=False)
     except Exception as exc:
         # Not "this contract has no facts": the lookup did not answer. Every
         # Tier-1 probe on this address degrades to ``unknown`` from here, so a
