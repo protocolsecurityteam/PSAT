@@ -5,7 +5,7 @@ from __future__ import annotations
 from pydantic import TypeAdapter
 
 from schemas.assessment import Assessment
-from services.assessment import build_static_assessment, effect_presence
+from services.assessment import build_static_assessment, effect_presence, static_inputs
 
 
 def _effect(signature: str, *, state_changing: bool, claims: list[dict] | None = None) -> dict:
@@ -124,6 +124,22 @@ def test_static_assessment_ids_are_deterministic() -> None:
         "predicate_trees": trees,
     }
     assert build_static_assessment(**kwargs) == build_static_assessment(**kwargs)
+
+
+def test_static_inputs_are_embedded_in_assessment_evidence() -> None:
+    static_facts, effects, predicate_trees = _pause_inputs()
+    assessment = build_static_assessment(
+        chain_id=1,
+        address="0x1111111111111111111111111111111111111111",
+        contract_name="Vault",
+        code_hash=None,
+        source_hash="0xsource",
+        static_facts=static_facts,
+        effects=effects,
+        predicate_trees=predicate_trees,
+    )
+
+    assert static_inputs(assessment) == (static_facts, predicate_trees, effects)
 
 
 def test_matcher_failure_is_an_analysis_diagnostic_not_a_claim() -> None:

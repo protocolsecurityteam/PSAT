@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import time
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
+from schemas.assessment import Assessment
+from services.assessment import static_inputs
 from tests.live.conftest import DEFAULT_COMPANY_TIMEOUT, DEFAULT_POLL_INTERVAL, LiveClient
 
 EXPECTED_LEAF_KINDS = {
@@ -103,17 +105,22 @@ def guarded_company_child(analyzed_company, live_client: LiveClient) -> dict[str
     diagnostics: list[str] = []
 
     for job in completed:
-        artifact = live_client.artifact(job["name"], "predicate_trees")
-        if not isinstance(artifact, dict):
-            diagnostics.append(f"{job.get('name')} {job.get('address')}: missing predicate_trees")
+        assessment = live_client.artifact(job["name"], "assessment")
+        if not isinstance(assessment, dict):
+            diagnostics.append(f"{job.get('name')} {job.get('address')}: missing assessment")
             continue
-        trees = artifact.get("trees")
+        try:
+            _static_facts, predicate_trees, _effects = static_inputs(cast(Assessment, assessment))
+        except ValueError as exc:
+            diagnostics.append(f"{job.get('name')} {job.get('address')}: {exc}")
+            continue
+        trees = predicate_trees.get("trees")
         if not isinstance(trees, dict) or not trees:
             diagnostics.append(f"{job.get('name')} {job.get('address')}: no guarded trees")
             continue
-        leaves = _leaves_from_artifact(artifact)
+        leaves = _leaves_from_artifact(predicate_trees)
         if any(leaf.get("authority_role") in AUTHORITY_LEAF_ROLES for leaf in leaves):
-            return {"job": job, "predicate_trees": artifact, "leaves": leaves}
+            return {"job": job, "assessment": assessment, "predicate_trees": predicate_trees, "leaves": leaves}
         diagnostics.append(f"{job.get('name')} {job.get('address')}: no authority leaves")
 
     pytest.fail(
@@ -122,7 +129,7 @@ def guarded_company_child(analyzed_company, live_client: LiveClient) -> dict[str
     )
 
 
-def test_predicate_trees_artifact_exists(guarded_company_child):
+def test_predicate_trees_are_embedded_in_assessment(guarded_company_child):
     artifact = guarded_company_child["predicate_trees"]
     trees = artifact.get("trees")
 
