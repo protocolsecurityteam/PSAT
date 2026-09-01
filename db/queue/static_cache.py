@@ -283,6 +283,17 @@ def find_completed_static_cache(
         if not contract_row:
             continue
 
+        # The exact-address path must obey the same analyzer-era gate as the
+        # source-hash fallback. An Assessment row merely proves some analysis
+        # existed; it does not prove the stored wire can be read by this code.
+        # Cache-hit jobs may carry NULL locally, so follow their donor chain to
+        # the witnessed era rather than checking only the immediate column.
+        if not contract_row.is_proxy:
+            from db.contract_materializations import STATIC_FACTS_SCHEMA_VERSION
+
+            if proven_static_facts_schema_version(session, candidate) != STATIC_FACTS_SCHEMA_VERSION:
+                continue
+
         # Static-stage-finished check. For non-proxy contracts the canonical
         # indicator is ``assessment`` (canonical static result).
         # Proxies never produce ``assessment`` on their own job —

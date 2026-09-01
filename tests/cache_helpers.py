@@ -302,6 +302,9 @@ def _create_completed_job_with_static_data(session, address=ADDR_A):
     job = create_job(session, {"address": address, "name": "TestContract"})
     job.status = JobStatus.completed
     job.stage = JobStage.done
+    from db.contract_materializations import STATIC_FACTS_SCHEMA_VERSION
+
+    job.static_facts_schema_version = STATIC_FACTS_SCHEMA_VERSION
     session.commit()
 
     # Contract row

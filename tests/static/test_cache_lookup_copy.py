@@ -41,6 +41,19 @@ def test_find_completed_static_cache_case_insensitive(db_session):
     assert found.id == completed.id
 
 
+def test_find_completed_static_cache_rejects_an_old_assessment_era(db_session):
+    """An exact-address hit is still a miss when its Assessment wire is stale."""
+
+    from db.contract_materializations import STATIC_FACTS_SCHEMA_VERSION
+    from db.queue import find_completed_static_cache
+
+    completed = _create_completed_job_with_static_data(db_session)
+    completed.static_facts_schema_version = STATIC_FACTS_SCHEMA_VERSION - 1
+    db_session.commit()
+
+    assert find_completed_static_cache(db_session, ADDR_A) is None
+
+
 def test_find_completed_static_cache_miss_no_job(db_session):
     """No prior jobs for this address returns None."""
     from db.queue import find_completed_static_cache
@@ -157,6 +170,9 @@ def test_find_completed_static_cache_picks_most_recent(db_session):
     new_job = create_job(db_session, {"address": ADDR_A, "name": "TestContract2"})
     new_job.status = JobStatus.completed
     new_job.stage = JobStage.done
+    from db.contract_materializations import STATIC_FACTS_SCHEMA_VERSION
+
+    new_job.static_facts_schema_version = STATIC_FACTS_SCHEMA_VERSION
     db_session.commit()
 
     contract = Contract(job_id=new_job.id, address=ADDR_A, chain="ethereum", contract_name="TestContract2")
