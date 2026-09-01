@@ -495,6 +495,7 @@ def _patch_static_worker_phases(monkeypatch, worker):
     monkeypatch.setattr(worker, "_scaffold_project", lambda *a, **kw: None)
     monkeypatch.setattr(worker, "_run_dependency_phase", lambda *a, **kw: phases_run.append("dependency"))
     monkeypatch.setattr(worker, "_run_static_facts_phase", lambda *a, **kw: phases_run.append("analysis") or True)
+    monkeypatch.setattr(worker, "_publish_materialization", lambda *a, **kw: phases_run.append("materialization"))
     monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
     return phases_run
 
@@ -505,5 +506,6 @@ def _patch_static_worker_non_dep_phases(monkeypatch, worker):
     monkeypatch.setattr(worker, "_resolve_proxy", lambda *a, **kw: phases_run.append("resolve_proxy"))
     monkeypatch.setattr(worker, "_scaffold_project", lambda *a, **kw: None)
     monkeypatch.setattr(worker, "_run_static_facts_phase", lambda *a, **kw: phases_run.append("analysis") or True)
+    monkeypatch.setattr(worker, "_publish_materialization", lambda *a, **kw: phases_run.append("materialization"))
     monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
     return phases_run
