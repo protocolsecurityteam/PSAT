@@ -98,10 +98,17 @@ def _make_donor(
     store_source_files(session, job.id, dict(_SOURCES))
     if with_analysis:
         facts = _analysis(address.lower())
-        store_artifact(session, job.id, "static_facts", data=facts)
-        store_artifact(session, job.id, "assessment", data=_assessment(static_facts=facts, chain_id=job.chain_id or 1))
-        store_artifact(session, job.id, "predicate_trees", data=dict(_PREDICATE_TREES))
-        store_artifact(session, job.id, "effects", data=dict(_EFFECTS))
+        store_artifact(
+            session,
+            job.id,
+            "assessment",
+            data=_assessment(
+                static_facts=facts,
+                predicate_trees=dict(_PREDICATE_TREES),
+                effects=dict(_EFFECTS),
+                chain_id=job.chain_id or 1,
+            ),
+        )
     else:
         # Proxy donor: contract_flags, no assessment.
         store_artifact(session, job.id, "contract_flags", data={"is_proxy": True, "proxy_type": "eip1967"})
@@ -150,17 +157,21 @@ def test_copy_restamps_address_scopes_artifacts_and_leaves_donor_untouched(db_se
     assert cid == target_contract.id
 
     # Address re-stamped on the copied code plane.
-    ca = get_artifact(db_session, target_job.id, "static_facts")
-    assert isinstance(ca, dict)
+    from db.queue.typed import load_assessment
+    from services.assessment import static_inputs
+
+    assessment = load_assessment(get_artifact, db_session, target_job.id)
+    assert assessment is not None
+    ca, predicate_trees, effects = static_inputs(assessment)
     assert ca["subject"]["address"] == ADDR_BASE.lower()
-    assessment = get_artifact(db_session, target_job.id, "assessment")
-    assert isinstance(assessment, dict)
     assert assessment["contract"]["address"] == ADDR_BASE.lower()
     assert assessment["contract"]["chain_id"] == 8453
 
     # Source-only artifacts reused byte-for-byte.
-    assert get_artifact(db_session, target_job.id, "predicate_trees") == _PREDICATE_TREES
-    assert get_artifact(db_session, target_job.id, "effects") == _EFFECTS
+    assert predicate_trees == _PREDICATE_TREES
+    assert effects == _EFFECTS
+    for retired in ("static_facts", "predicate_trees", "effects"):
+        assert get_artifact(db_session, target_job.id, retired) is None
 
     # Deployment/chain-specific artifacts NOT copied — re-derived per chain.
     assert get_artifact(db_session, target_job.id, "static_dependencies") is None
@@ -182,8 +193,9 @@ def test_copy_restamps_address_scopes_artifacts_and_leaves_donor_untouched(db_se
 
     # Donor untouched: its analysis still points at its own address, its contract
     # still belongs to the donor job (NOT reassigned like same-chain copy).
-    donor_ca = get_artifact(db_session, donor_job.id, "static_facts")
-    assert isinstance(donor_ca, dict)
+    donor_assessment = load_assessment(get_artifact, db_session, donor_job.id)
+    assert donor_assessment is not None
+    donor_ca, _donor_trees, _donor_effects = static_inputs(donor_assessment)
     assert donor_ca["subject"]["address"] == ADDR_MAINNET.lower()
     db_session.refresh(donor_contract)
     assert donor_contract.job_id == donor_job.id
@@ -197,15 +209,12 @@ def test_parity_fresh_vs_cross_chain_copy(db_session):
     copy_static_cache_cross_chain(db_session, donor_job.id, target_job.id, target_address=ADDR_BASE)
 
     # What a fresh static analysis of the identical source at ADDR_BASE emits.
-    expected = {
-        "static_facts": _analysis(ADDR_BASE.lower()),
-        "predicate_trees": _PREDICATE_TREES,
-        "effects": _EFFECTS,
-    }
-    for name, want in expected.items():
-        assert get_artifact(db_session, target_job.id, name) == want, name
-    assessment = get_artifact(db_session, target_job.id, "assessment")
-    assert isinstance(assessment, dict)
+    from db.queue.typed import load_assessment
+    from services.assessment import static_inputs
+
+    assessment = load_assessment(get_artifact, db_session, target_job.id)
+    assert assessment is not None
+    assert static_inputs(assessment) == (_analysis(ADDR_BASE.lower()), _PREDICATE_TREES, _EFFECTS)
     assert assessment["contract"]["chain_id"] == 8453
 
 
@@ -308,8 +317,12 @@ def test_discovery_reuses_cross_chain_donor(db_session, monkeypatch):
     assert target_job.source_content_hash == donor_hash
 
     # The reused analysis is re-stamped to the Base deployment.
-    ca = get_artifact(db_session, target_job.id, "static_facts")
-    assert isinstance(ca, dict)
+    from db.queue.typed import load_assessment
+    from services.assessment import static_inputs
+
+    target_assessment = load_assessment(get_artifact, db_session, target_job.id)
+    assert target_assessment is not None
+    ca, _trees, _effects = static_inputs(target_assessment)
     assert ca["subject"]["address"] == ADDR_BASE.lower()
     # The Base deployment got its own per-chain Contract row.
     base_contract = db_session.execute(select(Contract).where(Contract.job_id == target_job.id)).scalar_one()

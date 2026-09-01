@@ -221,10 +221,10 @@ def test_artifact_endpoint_serves_storage_backed_json(api_with, db_session, stor
 
     job = _completed_job(db_session, "json-test")
     payload = {"summary": {"control_model": "ownable"}, "tag": "v1"}
-    store_artifact(db_session, job.id, "static_facts", data=payload)
+    store_artifact(db_session, job.id, "sample_json", data=payload)
 
     client = TestClient(api_with.app)
-    resp = client.get("/api/analyses/json-test/artifact/static_facts.json", headers=_admin_headers())
+    resp = client.get("/api/analyses/json-test/artifact/sample_json.json", headers=_admin_headers())
     assert resp.status_code == 200
     assert resp.json() == payload
 
@@ -613,7 +613,6 @@ def test_end_to_end_stubbed_worker(api_with, db_session, storage_bucket):
     )
     store_artifact(db_session, job.id, "contract_flags", data={"is_proxy": False})
     facts = _minimal_static_facts(address=job.address or "0x" + "00" * 20, name="Main")
-    store_artifact(db_session, job.id, "static_facts", data=facts)
     store_artifact(db_session, job.id, "assessment", data=_assessment(static_facts=facts))
 
     client = TestClient(api_with.app)
@@ -911,7 +910,7 @@ def test_artifact_written_under_a_foreign_prefix_is_still_readable(db_session, s
 
     job = create_job(db_session, {"address": "0xab", "name": "prefix-artifacts"})
     payload = {"witness": "present", "n": 7}
-    store_artifact(db_session, job.id, "effects", data=payload)
+    store_artifact(db_session, job.id, "sample", data=payload)
 
     row = db_session.execute(select(Artifact).where(Artifact.job_id == job.id)).scalars().one()
     assert row.storage_key.startswith("pr-160/artifacts/")
@@ -920,8 +919,8 @@ def test_artifact_written_under_a_foreign_prefix_is_still_readable(db_session, s
     # Leave the preview environment. The row keeps its recorded key, which now
     # addresses nothing; only the stripped candidate can answer.
     os.environ.pop("ARTIFACT_STORAGE_PREFIX", None)
-    assert get_artifact(db_session, job.id, "effects") == payload
-    assert get_all_artifacts(db_session, job.id)["effects"] == payload
+    assert get_artifact(db_session, job.id, "sample") == payload
+    assert get_all_artifacts(db_session, job.id)["sample"] == payload
 
 
 def test_source_files_written_under_a_foreign_prefix_are_still_readable(db_session, storage_bucket, preview_prefix):
@@ -1063,32 +1062,32 @@ def test_a_bucket_outage_is_not_the_same_answer_as_a_job_with_no_artifacts(db_se
     from workers.retry_policy import classify
 
     job = create_job(db_session, {"address": "0xab", "name": "outage-vs-empty"})
-    store_artifact(db_session, job.id, "effects", data={"v": 1})
-    store_artifact(db_session, job.id, "static_facts", data={"v": 2})
+    store_artifact(db_session, job.id, "sample_a", data={"v": 1})
+    store_artifact(db_session, job.id, "sample_b", data={"v": 2})
     empty_job = create_job(db_session, {"address": "0xcd", "name": "outage-vs-empty-2"})
 
     # A — healthy.
-    assert set(get_all_artifacts(db_session, job.id)) == {"effects", "static_facts"}
+    assert set(get_all_artifacts(db_session, job.id)) == {"sample_a", "sample_b"}
 
     # B — bucket unreachable. Not determined, and it says so.
     with patch.object(StorageClient, "_get_one", side_effect=StorageUnavailable("bucket unreachable")):
         with pytest.raises(StorageContentNotDetermined) as excinfo:
             get_all_artifacts(db_session, job.id)
-    assert set(excinfo.value.not_determined) == {"effects", "static_facts"}
+    assert set(excinfo.value.not_determined) == {"sample_a", "sample_b"}
     assert excinfo.value.proven_absent == {}
     assert classify(excinfo.value) == "transient"
 
     # C — the bucket answered: the row asserts a key nothing is stored under.
     # A different class from B, because a retry cannot change this answer.
     gone = db_session.execute(
-        select(Artifact).where(Artifact.job_id == job.id, Artifact.name == "effects")
+        select(Artifact).where(Artifact.job_id == job.id, Artifact.name == "sample_a")
     ).scalar_one()
     storage_bucket.delete(gone.storage_key)
     with pytest.raises(StorageContentAbsent) as absent:
         get_all_artifacts(db_session, job.id)
-    assert set(absent.value.proven_absent) == {"effects"}
+    assert set(absent.value.proven_absent) == {"sample_a"}
     assert absent.value.not_determined == {}
-    assert set(absent.value.values) == {"static_facts"}
+    assert set(absent.value.values) == {"sample_b"}
     assert classify(absent.value) == "terminal"
     assert not isinstance(absent.value, StorageContentNotDetermined)
 
@@ -1181,7 +1180,7 @@ def test_collection_reads_publish_a_keyless_row_as_not_determined(db_session, st
     from workers.retry_policy import classify
 
     job = create_job(db_session, {"address": "0xab", "name": "keyless-collection"})
-    store_artifact(db_session, job.id, "effects", data={"v": 1})
+    store_artifact(db_session, job.id, "sample", data={"v": 1})
     # Exactly what ``store_artifact`` writes when the backend is unconfigured
     # and the stage passed no payload.
     db_session.add(Artifact(job_id=job.id, name="dependencies", data=None, text_data=None, storage_key=None))
@@ -1192,7 +1191,7 @@ def test_collection_reads_publish_a_keyless_row_as_not_determined(db_session, st
     assert set(arts.value.not_determined) == {"dependencies"}
     assert arts.value.proven_absent == {}
     # The readable row is still carried, so a page that may degrade renders it.
-    assert set(arts.value.values) == {"effects"}
+    assert set(arts.value.values) == {"sample"}
     assert classify(arts.value) == "transient"
 
     src_job = create_job(db_session, {"address": "0xcd", "name": "keyless-source"})

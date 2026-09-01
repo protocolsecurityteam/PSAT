@@ -43,7 +43,17 @@ def _seed_protocol_with_jobs(db_session, *, name: str, addresses_with_artifacts)
         db_session.add(job)
         db_session.flush()
         if artifact is not None:
-            store_artifact(db_session, job.id, "predicate_trees", data=artifact)
+            from tests.support.policy_builders import _assessment, _minimal_static_facts
+
+            store_artifact(
+                db_session,
+                job.id,
+                "assessment",
+                data=_assessment(
+                    static_facts=_minimal_static_facts(address=address, name="T"),
+                    predicate_trees=artifact,
+                ),
+            )
     db_session.commit()
     return proto
 
@@ -146,7 +156,18 @@ def test_company_semantic_capabilities_twin_keeps_both_chains(api_client, db_ses
         )
         db_session.add(job)
         db_session.flush()
-        store_artifact(db_session, job.id, "predicate_trees", data=_guard_tree(fn))
+        from tests.support.policy_builders import _assessment, _minimal_static_facts
+
+        store_artifact(
+            db_session,
+            job.id,
+            "assessment",
+            data=_assessment(
+                static_facts=_minimal_static_facts(address=addr, name="T"),
+                predicate_trees=_guard_tree(fn),
+                chain_id=chain_id,
+            ),
+        )
     db_session.commit()
 
     resp = api_client.get(f"/api/company/{name}/semantic_capabilities")

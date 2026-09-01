@@ -103,9 +103,9 @@ def session():
 @requires_postgres
 def test_resolver_threads_base_chain_into_eval_context(session, _erpc_base, monkeypatch):
     from db.models import Job, JobStage, JobStatus
-    from db.queue import store_artifact
     from services.resolution import capability_resolver
     from services.resolution.capabilities import CapabilityExpr, Condition
+    from tests.support.assessment_artifacts import store_test_assessment
 
     address = "0x" + "cc" * 20
     job = Job(
@@ -119,7 +119,13 @@ def test_resolver_threads_base_chain_into_eval_context(session, _erpc_base, monk
     )
     session.add(job)
     session.flush()
-    store_artifact(session, job.id, "predicate_trees", data={"trees": {"foo()": None}})
+    store_test_assessment(
+        session,
+        job.id,
+        address=address,
+        chain_id=_BASE_ID,
+        predicate_trees={"trees": {"foo()": None}},
+    )
     session.commit()
 
     captured: dict[str, object] = {}

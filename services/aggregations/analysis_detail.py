@@ -131,20 +131,16 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
         "dependencies",
         "dependency_graph_viz",
         "upgrade_history",
-        # Raw predicate trees per externally-callable function. Consumers
-        # can read this directly or fetch resolved semantic capabilities
-        # below.
-        "predicate_trees",
     ):
         if artifact_name in all_artifacts and isinstance(all_artifacts[artifact_name], dict):
             payload[artifact_name] = all_artifacts[artifact_name]
 
-    # Resolved semantic capabilities. Computed lazily — the raw
-    # predicate_trees lives on the artifact; resolving it to the typed
+    # Resolved semantic capabilities. Computed lazily from Assessment evidence;
+    # resolving predicate trees to the typed
     # CapabilityExpr requires the AdapterRegistry + repos. Defensive: a
     # capability-resolution failure MUST NOT fail the whole analysis_detail
     # response; the rest of the detail payload is still useful.
-    if "predicate_trees" in all_artifacts and job.address:
+    if "assessment" in all_artifacts and job.address:
         try:
             from services.resolution.capability_resolver import resolve_contract_capabilities
 

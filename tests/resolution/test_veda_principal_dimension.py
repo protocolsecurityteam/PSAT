@@ -125,7 +125,7 @@ def _no_network(monkeypatch):
 
 def _seed_job_with_trees(session, *, address: str, trees: dict | None):
     from db.models import Job, JobStage, JobStatus
-    from db.queue import store_artifact
+    from tests.support.assessment_artifacts import store_test_assessment
 
     job = Job(
         address=address,
@@ -138,7 +138,7 @@ def _seed_job_with_trees(session, *, address: str, trees: dict | None):
     session.add(job)
     session.flush()
     if trees is not None:
-        store_artifact(session, job.id, "predicate_trees", data=trees)
+        store_test_assessment(session, job.id, address=address, predicate_trees=trees)
     session.commit()
     return job
 

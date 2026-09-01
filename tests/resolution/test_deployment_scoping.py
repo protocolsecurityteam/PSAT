@@ -503,18 +503,19 @@ def test_end_to_end_heal_standalone_impl_resolves_after_backpatch(db_session, mo
     db_session.add(contract)
     db_session.commit()
     facts = _minimal_static_facts(address=impl, name="Core")
-    store_artifact(db_session, job.id, "static_facts", data=facts)
-    store_artifact(db_session, job.id, "assessment", data=_assessment(static_facts=facts))
     store_artifact(
         db_session,
         job.id,
-        "predicate_trees",
-        data={
-            "schema_version": "semantic",
-            "contract_name": "Core",
-            "trees": {_GATE_FN: _governor_gate_tree()},
-            "check_trees": {},
-        },
+        "assessment",
+        data=_assessment(
+            static_facts=facts,
+            predicate_trees={
+                "schema_version": "semantic",
+                "contract_name": "Core",
+                "trees": {_GATE_FN: _governor_gate_tree()},
+                "check_trees": {},
+            },
+        ),
     )
     db_session.commit()
 

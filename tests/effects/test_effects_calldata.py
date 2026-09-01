@@ -1630,17 +1630,20 @@ def test_load_contract_facts_indexes_the_canonical_selector(db_session):
     # the only source that recovers the real selector for it.
     full_name = "sweep(IERC20,uint256)"
     canonical = "sweep(address,uint256)"
+    from tests.support.policy_builders import _assessment, _minimal_static_facts
+
     store_artifact(
         db_session,
         job.id,
-        "effects",
-        data={"functions": {full_name: _effect_info(full_name, "0xdeadbeef")}},
-    )
-    store_artifact(
-        db_session,
-        job.id,
-        "predicate_trees",
-        data={"trees": {full_name: OWNER_GATE}, "canonical_signatures": {full_name: canonical}},
+        "assessment",
+        data=_assessment(
+            static_facts=_minimal_static_facts(address=address, name="T"),
+            effects={"functions": {full_name: _effect_info(full_name, "0xdeadbeef")}},
+            predicate_trees={
+                "trees": {full_name: OWNER_GATE},
+                "canonical_signatures": {full_name: canonical},
+            },
+        ),
     )
     cd._FACTS_CACHE.pop(db_session, None)
     facts = cd.load_contract_facts(db_session, address)

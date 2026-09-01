@@ -105,7 +105,7 @@ def _no_network(monkeypatch):
 
 def _seed_job_with_trees(session, *, address: str, artifact: dict):
     from db.models import Job, JobStage, JobStatus
-    from db.queue import store_artifact
+    from tests.support.assessment_artifacts import store_test_assessment
 
     job = Job(
         address=address,
@@ -118,11 +118,12 @@ def _seed_job_with_trees(session, *, address: str, artifact: dict):
     session.add(job)
     session.flush()
     # The resolver reads ``artifact["trees"]`` (+ canonical_signatures); store the dump verbatim.
-    store_artifact(
+    store_test_assessment(
         session,
         job.id,
-        "predicate_trees",
-        data={
+        address=address,
+        name="C",
+        predicate_trees={
             "trees": artifact["trees"],
             "canonical_signatures": artifact.get("canonical_signatures"),
             "contract": artifact.get("contract", address),

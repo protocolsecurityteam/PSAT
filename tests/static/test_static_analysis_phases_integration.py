@@ -74,13 +74,14 @@ class TestAnalysisPhaseSuccess:
 
         assert result == static_facts_data
         names = [call["name"] for call in calls]
-        assert names == ["static_facts", "assessment", "predicate_trees", "effects"]
-        assert calls[0]["data"] == static_facts_data
-        assert calls[1]["data"]["schema_version"] == "assessment/2"
-        assert calls[2]["data"] == predicate_trees
-        assert calls[3]["data"] == effects
+        assert names == ["assessment"]
+        assert calls[0]["data"]["schema_version"] == "assessment/3"
 
-    def test_stores_predicate_trees_and_effects_side_artifacts(self, monkeypatch, tmp_path):
+        from services.assessment import static_inputs
+
+        assert static_inputs(calls[0]["data"]) == (static_facts_data, predicate_trees, effects)
+
+    def test_embeds_semantic_inputs_only_in_assessment(self, monkeypatch, tmp_path):
         worker = StaticWorker()
         monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
         monkeypatch.setattr(worker, "_write_static_fact_indexes", lambda *a, **kw: None)
@@ -106,11 +107,11 @@ class TestAnalysisPhaseSuccess:
         result = worker._run_static_facts_phase(session, job, tmp_path, "TestContract", job.address)
 
         assert result == static_facts_data
-        assert [call["name"] for call in calls] == ["static_facts", "assessment", "predicate_trees", "effects"]
+        assert [call["name"] for call in calls] == ["assessment"]
 
     def test_skips_predicate_trees_for_vyper(self, monkeypatch, tmp_path):
         """Vyper projects return ``None`` for predicate_trees + effects;
-        only static facts and the assessment are stored."""
+        the failed semantic inputs are represented inside Assessment."""
         worker = StaticWorker()
         monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
         monkeypatch.setattr(worker, "_write_static_fact_indexes", lambda *a, **kw: None)
@@ -126,7 +127,7 @@ class TestAnalysisPhaseSuccess:
         result = worker._run_static_facts_phase(session, job, tmp_path, "TestContract", job.address)
 
         assert result == {"schema_version": "0.1"}
-        assert [call["name"] for call in calls] == ["static_facts", "assessment"]
+        assert [call["name"] for call in calls] == ["assessment"]
 
 
 class TestAnalysisPhaseFailure:

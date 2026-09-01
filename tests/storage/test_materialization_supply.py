@@ -40,7 +40,7 @@ from db.contract_materializations import (
 from db.models import ContractMaterialization, Job, JobStage, JobStatus
 from db.queue import proven_static_facts_schema_version
 from tests.conftest import requires_postgres
-from tests.support.policy_builders import _assessment, _minimal_static_facts
+from tests.support.policy_builders import _assessment
 
 ADDR = "0x" + "a1" * 20
 OTHER_ADDR = "0x" + "b2" * 20
@@ -51,7 +51,7 @@ ANALYSIS = {"subject": {"address": ADDR, "name": "C"}, "functions": []}
 PLAN = {"contract_address": ADDR, "tracked_controllers": []}
 TREES = {"schema_version": "semantic", "trees": {}}
 EFFECTS = {"schema_version": "semantic", "functions": {}}
-ASSESSMENT = _assessment(static_facts=_minimal_static_facts(address=ADDR, name="C"))
+ASSESSMENT = _assessment(static_facts=ANALYSIS, predicate_trees=TREES, effects=EFFECTS)
 
 
 @pytest.fixture()
@@ -411,11 +411,8 @@ def _stub_artifacts(monkeypatch, mapping: dict[str, Any]) -> None:
     monkeypatch.setattr("workers.static_worker.get_artifact", lambda _s, _j, name: mapping.get(name))
 
 
-def test_static_stage_publishes_the_artifacts_it_stored(monkeypatch, captured_publish):
-    _stub_artifacts(
-        monkeypatch,
-        {"static_facts": ANALYSIS, "assessment": ASSESSMENT, "predicate_trees": TREES, "effects": EFFECTS},
-    )
+def test_static_stage_publishes_inputs_from_assessment(monkeypatch, captured_publish):
+    _stub_artifacts(monkeypatch, {"assessment": ASSESSMENT})
     job = _fake_job()
     _FakeStaticWorker()._publish_materialization(None, job, ADDR, "C")
 
@@ -440,10 +437,7 @@ def test_static_stage_publishes_nothing_for_an_unproven_analyzer_era(monkeypatch
     """A row is stamped with the current version, so it may only be written for
     a bundle proven to be of that era. A same-address cache hit returns before
     discovery's stamp, leaving the column NULL — and NULL is not "current"."""
-    _stub_artifacts(
-        monkeypatch,
-        {"static_facts": ANALYSIS, "assessment": ASSESSMENT, "predicate_trees": TREES, "effects": EFFECTS},
-    )
+    _stub_artifacts(monkeypatch, {"assessment": ASSESSMENT})
     monkeypatch.setattr("db.queue.proven_static_facts_schema_version", lambda _s, _j: None)
     _FakeStaticWorker()._publish_materialization(None, _fake_job(version=None), ADDR, "C")
     assert captured_publish == []
@@ -456,10 +450,7 @@ def test_static_stage_publishes_nothing_for_an_unproven_analyzer_era(monkeypatch
 def test_static_stage_publishes_a_cache_hit_whose_donor_proves_the_era(monkeypatch, captured_publish):
     """The era is recoverable for a cache-hit job: copy_static_cache copied the
     donor's artifacts, so the donor's stamp IS this job's artifacts' era."""
-    _stub_artifacts(
-        monkeypatch,
-        {"static_facts": ANALYSIS, "assessment": ASSESSMENT, "predicate_trees": TREES, "effects": EFFECTS},
-    )
+    _stub_artifacts(monkeypatch, {"assessment": ASSESSMENT})
     monkeypatch.setattr("db.queue.proven_static_facts_schema_version", lambda _s, _j: STATIC_FACTS_SCHEMA_VERSION)
     job = _fake_job(version=None, request={"static_cached": True, "cache_source_job_id": str(uuid.uuid4())})
     _FakeStaticWorker()._publish_materialization(None, job, ADDR, "C")
@@ -472,10 +463,7 @@ def test_only_a_bundle_this_job_produced_may_refresh(monkeypatch, captured_publi
     them refresh and a fresh static_facts and a later cache hit reproducing its
     ancestor take turns overwriting each other, each flip moving where monitoring
     watches."""
-    _stub_artifacts(
-        monkeypatch,
-        {"static_facts": ANALYSIS, "assessment": ASSESSMENT, "predicate_trees": TREES, "effects": EFFECTS},
-    )
+    _stub_artifacts(monkeypatch, {"assessment": ASSESSMENT})
     _FakeStaticWorker()._publish_materialization(None, _fake_job(), ADDR, "C")
     assert captured_publish[0]["refresh_on_differ"] is True
 
@@ -499,17 +487,14 @@ def test_a_copied_bundle_does_not_overwrite_a_freshly_analyzed_row(cm_db):
 
 
 def test_static_stage_publishes_nothing_without_a_plan(monkeypatch, captured_publish):
-    _stub_artifacts(monkeypatch, {"static_facts": ANALYSIS})
+    _stub_artifacts(monkeypatch, {})
     _FakeStaticWorker()._publish_materialization(None, _fake_job(), ADDR, "C")
     assert captured_publish == []
 
 
 def test_static_stage_publishes_nothing_without_a_keccak(monkeypatch, captured_publish):
     """The row is keyed on bytecode; a key we could not read is not a key."""
-    _stub_artifacts(
-        monkeypatch,
-        {"static_facts": ANALYSIS, "assessment": ASSESSMENT, "predicate_trees": TREES, "effects": EFFECTS},
-    )
+    _stub_artifacts(monkeypatch, {"assessment": ASSESSMENT})
 
     def _boom(*_a, **_k):
         raise RuntimeError("rpc down")
@@ -522,10 +507,7 @@ def test_static_stage_publishes_nothing_without_a_keccak(monkeypatch, captured_p
 def test_static_stage_never_fails_the_job_on_a_publish_error(monkeypatch, captured_publish):
     """Supply is not the static_facts: a failed publish must not sink a job whose
     static_facts succeeded."""
-    _stub_artifacts(
-        monkeypatch,
-        {"static_facts": ANALYSIS, "assessment": ASSESSMENT, "predicate_trees": TREES, "effects": EFFECTS},
-    )
+    _stub_artifacts(monkeypatch, {"assessment": ASSESSMENT})
 
     def _boom(**_k):
         raise RuntimeError("bucket down")

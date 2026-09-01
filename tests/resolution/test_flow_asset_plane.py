@@ -585,13 +585,14 @@ def _stage_ctx(
     artifact_store: dict[str, Any] = {}
 
     def fake_get_artifact(_session: Any, _job_id: Any, name: str) -> Any:
-        return effects if name == "effects" else None
+        return None
 
     def fake_store_artifact(_session: Any, _job_id: Any, name: str, data: Any = None, text_data: Any = None) -> None:
         store_calls.append((name, data))
         artifact_store[name] = data
 
     monkeypatch.setattr(rw, "get_artifact", fake_get_artifact)
+    monkeypatch.setattr(rw, "load_assessment_inputs", lambda *_args, **_kwargs: ({}, {}, effects))
     monkeypatch.setattr(rw, "store_artifact", fake_store_artifact)
     monkeypatch.setattr(rw, "pin_probe_block", lambda *a, **k: probe_block)
     monkeypatch.setattr(fap, "eth_call_batch", lambda *a, **k: results)

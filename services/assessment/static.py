@@ -427,14 +427,9 @@ def build_static_assessment(
     )
     static_observation = _json(
         {
-            "subject": static_facts.get("subject") or {},
-            "summary": static_facts.get("summary") or {},
-            "role_definitions": (
-                (static_facts.get("semantic_control") or {}).get("role_definitions")
-                if isinstance(static_facts.get("semantic_control"), Mapping)
-                else []
-            )
-            or [],
+            "static_facts": static_facts,
+            "predicate_trees": predicate_trees,
+            "effects": effects,
         }
     )
     static_evidence_key = content_key(
@@ -509,7 +504,7 @@ def build_static_assessment(
     }
     analyses.insert(0, facts_receipt)
     assessment: Assessment = {
-        "schema_version": "assessment/2",
+        "schema_version": "assessment/3",
         "contract": contract,
         "functions": functions,
         "controllers": controllers,

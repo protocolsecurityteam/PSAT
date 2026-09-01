@@ -428,28 +428,6 @@ class PolicyWorker(BaseWorker):
         chain_name = _chain_name_for_job(job)
         durations_ms: dict[str, int] = {}
 
-        # ``predicate_trees`` and ``effects`` are the semantic inputs to
-        # ``build_permission_index``.
-        predicate_trees = get_artifact(session, job.id, "predicate_trees")
-        effects_artifact = get_artifact(session, job.id, "effects")
-        missing_semantic_inputs = [
-            name
-            for name, artifact in (("predicate_trees", predicate_trees), ("effects", effects_artifact))
-            if not isinstance(artifact, dict)
-        ]
-        if missing_semantic_inputs:
-            exc = RuntimeError("missing semantic input artifact(s): " + ", ".join(sorted(missing_semantic_inputs)))
-            record_degraded(
-                phase="permission_index_semantic_inputs",
-                exc=exc,
-                context={"job_id": str(job.id), "missing_artifacts": sorted(missing_semantic_inputs)},
-            )
-            logger.warning(
-                "Policy stage missing semantic inputs for job %s: %s",
-                job.id,
-                ", ".join(sorted(missing_semantic_inputs)),
-                extra={"missing_artifacts": sorted(missing_semantic_inputs)},
-            )
         # Optional: classify cache populated by the resolution stage. Lets the
         # refresh + labeling passes skip 6-10 RPCs per address.
         classify_cache_raw = get_artifact(session, job.id, "classified_addresses")
@@ -466,8 +444,15 @@ class PolicyWorker(BaseWorker):
         if assessment is None:
             raise RuntimeError("assessment artifact not found")
 
-        from services.assessment import contract_subject, control_graph, controller_observations, observation_plan
+        from services.assessment import (
+            contract_subject,
+            control_graph,
+            controller_observations,
+            observation_plan,
+            static_inputs,
+        )
 
+        _embedded_static_facts, predicate_trees, effects_artifact = static_inputs(assessment)
         static_facts = contract_subject(assessment)
         observation_batch = controller_observations(assessment)
         resolution_graph = control_graph(assessment)
@@ -1011,13 +996,14 @@ class PolicyWorker(BaseWorker):
         ) -> tuple[str, dict | None, dict | None]:
             sj_id, addr = target
             with SessionLocal() as s:
-                effects_payload = get_artifact(s, sj_id, "effects")
-                assessment_payload = get_artifact(s, sj_id, "assessment")
+                assessment_payload = load_assessment(get_artifact, s, sj_id)
             snapshot_payload = None
-            if isinstance(assessment_payload, dict):
-                from services.assessment import controller_observations
+            effects_payload = None
+            if assessment_payload is not None:
+                from services.assessment import controller_observations, static_inputs
 
-                snapshot_payload = controller_observations(cast(Any, assessment_payload))
+                _facts, _trees, effects_payload = static_inputs(assessment_payload)
+                snapshot_payload = controller_observations(assessment_payload)
             return (
                 addr,
                 effects_payload if isinstance(effects_payload, dict) else None,
@@ -1046,8 +1032,12 @@ class PolicyWorker(BaseWorker):
 
         callee_claim_map = build_callee_claim_map(sibling_effects)
         controller_values = observation_batch.get("controller_values", {})
-        target_effects = get_artifact(session, job.id, "effects")
-        target_effects = target_effects if isinstance(target_effects, dict) else None
+        target_assessment = load_assessment(get_artifact, session, job.id)
+        target_effects = None
+        if target_assessment is not None:
+            from services.assessment import static_inputs
+
+            _facts, _trees, target_effects = static_inputs(target_assessment)
         target_address = (job.address or "").lower()
 
         hook_links = sibling_transfer_hook_links(target_address, sibling_effects, sibling_snapshots)

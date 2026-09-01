@@ -40,7 +40,18 @@ def _seed_completed_job_with_artifact(
     db_session.add(job)
     db_session.flush()
     if predicate_trees is not None:
-        store_artifact(db_session, job.id, "predicate_trees", data=predicate_trees)
+        from tests.support.policy_builders import _assessment, _minimal_static_facts
+
+        store_artifact(
+            db_session,
+            job.id,
+            "assessment",
+            data=_assessment(
+                static_facts=_minimal_static_facts(address=address, name="T"),
+                predicate_trees=predicate_trees,
+                chain_id=chain_id,
+            ),
+        )
     db_session.commit()
     return job
 

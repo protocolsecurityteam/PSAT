@@ -22,7 +22,7 @@ from db.models import (
     derive_job_chain_id,
 )
 from db.queue import create_job, get_artifact, store_artifact
-from db.queue.typed import ArtifactSchemaError, load_assessment
+from db.queue.typed import ArtifactSchemaError, load_assessment, load_assessment_inputs
 from schemas.observations import ObservationBatch, ObservationPlan
 from services.clients.rpc import require_rpc_url
 from services.discovery.perimeter import queue_discovered_contracts
@@ -187,10 +187,6 @@ class ResolutionWorker(BaseWorker):
         rpc_url = _rpc_url_for_job(job)
         chain_id = _chain_id_for_job(job)
 
-        predicate_trees = get_artifact(session, job.id, "predicate_trees")
-        if not isinstance(predicate_trees, dict):
-            predicate_trees = None
-
         try:
             assessment = load_assessment(get_artifact, session, job.id)
         except ArtifactSchemaError as exc:
@@ -198,8 +194,9 @@ class ResolutionWorker(BaseWorker):
         if assessment is None:
             raise RuntimeError("assessment artifact not found")
 
-        from services.assessment import contract_subject, observation_plan
+        from services.assessment import contract_subject, observation_plan, static_inputs
 
+        _embedded_static_facts, predicate_trees, _embedded_effects = static_inputs(assessment)
         observation_plan = observation_plan(assessment)
         static_facts = contract_subject(assessment)
 
@@ -579,9 +576,10 @@ class ResolutionWorker(BaseWorker):
         """
         if not deployment_address:
             return 0
-        effects = get_artifact(session, job.id, "effects")
-        if not isinstance(effects, dict):
+        inputs = load_assessment_inputs(get_artifact, session, job.id)
+        if inputs is None:
             return 0
+        _static_facts, _predicate_trees, effects = inputs
         receivers = collect_asset_receivers(effects)
         if not receivers:
             return 0
@@ -909,9 +907,10 @@ class ResolutionWorker(BaseWorker):
 
         from db.models import JobDependency
 
-        predicate_trees = get_artifact(session, job.id, "predicate_trees")
-        if not isinstance(predicate_trees, dict):
+        inputs = load_assessment_inputs(get_artifact, session, job.id)
+        if inputs is None:
             return
+        _static_facts, predicate_trees, _effects = inputs
         tree_maps = [
             tree_map
             for tree_map in (predicate_trees.get("trees"), predicate_trees.get("check_trees"))

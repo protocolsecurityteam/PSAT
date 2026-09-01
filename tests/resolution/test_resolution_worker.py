@@ -657,33 +657,36 @@ def test_dependency_emission_walks_check_trees(db_session_for_resolution):
     store_artifact(
         session,
         depender_job.id,
-        "predicate_trees",
-        data={
-            "schema_version": "semantic",
-            "contract_name": "Depender",
-            "trees": {},
-            "check_trees": {
-                "canCall(address,address,bytes4)": {
-                    "op": "LEAF",
-                    "leaf": {
-                        "kind": "external_bool",
-                        "operator": "truthy",
-                        "authority_role": "delegated_authority",
-                        "operands": [{"source": "msg_sender"}],
-                        "set_descriptor": {
-                            "kind": "external_set",
-                            "authority_contract": {
-                                "address_source": {
-                                    "source": "state_variable",
-                                    "state_variable_name": "authority",
-                                }
+        "assessment",
+        data=_assessment(
+            static_facts=_minimal_static_facts(address=depender_addr, name="Depender"),
+            predicate_trees={
+                "schema_version": "semantic",
+                "contract_name": "Depender",
+                "trees": {},
+                "check_trees": {
+                    "canCall(address,address,bytes4)": {
+                        "op": "LEAF",
+                        "leaf": {
+                            "kind": "external_bool",
+                            "operator": "truthy",
+                            "authority_role": "delegated_authority",
+                            "operands": [{"source": "msg_sender"}],
+                            "set_descriptor": {
+                                "kind": "external_set",
+                                "authority_contract": {
+                                    "address_source": {
+                                        "source": "state_variable",
+                                        "state_variable_name": "authority",
+                                    }
+                                },
+                                "callee_signature": "canCall(address,address,bytes4)",
                             },
-                            "callee_signature": "canCall(address,address,bytes4)",
                         },
-                    },
-                }
+                    }
+                },
             },
-        },
+        ),
     )
 
     snapshot = {
@@ -734,13 +737,28 @@ def _authority_check_predicate_trees() -> dict:
     }
 
 
+def _store_assessment_with_trees(session, job, address: str, name: str) -> None:
+    from db.queue import store_artifact
+    from tests.support.policy_builders import _assessment, _minimal_static_facts
+
+    store_artifact(
+        session,
+        job.id,
+        "assessment",
+        data=_assessment(
+            static_facts=_minimal_static_facts(address=address, name=name),
+            predicate_trees=_authority_check_predicate_trees(),
+        ),
+    )
+
+
 def test_dependency_emission_records_pending_status_metrics(db_session_for_resolution):
     """A provider with no policy artifacts yet → a 'pending' edge; the emitter
     folds the per-status breakdown into the stage metrics."""
     from sqlalchemy import select
 
     from db.models import JobDependency, JobStage
-    from db.queue import create_job, store_artifact
+    from db.queue import create_job
     from utils.logging import stage_metrics_var
 
     session = db_session_for_resolution
@@ -752,7 +770,7 @@ def test_dependency_emission_records_pending_status_metrics(db_session_for_resol
         {"address": depender_addr, "chain": "ethereum", "name": "Depender"},
         initial_stage=JobStage.resolution,
     )
-    store_artifact(session, depender_job.id, "predicate_trees", data=_authority_check_predicate_trees())
+    _store_assessment_with_trees(session, depender_job, depender_addr, "Depender")
     snapshot = {"controller_values": {"external_contract:authority": {"value": provider_addr}}}
 
     metrics: dict = {}
@@ -780,7 +798,7 @@ def test_dependency_emission_warns_and_records_on_cycle(db_session_for_resolutio
     from sqlalchemy import select
 
     from db.models import JobDependency, JobStage
-    from db.queue import create_job, store_artifact
+    from db.queue import create_job
     from utils.logging import stage_metrics_var
 
     session = db_session_for_resolution
@@ -806,7 +824,7 @@ def test_dependency_emission_warns_and_records_on_cycle(db_session_for_resolutio
     )
     session.commit()
 
-    store_artifact(session, job_a.id, "predicate_trees", data=_authority_check_predicate_trees())
+    _store_assessment_with_trees(session, job_a, a_addr, "A")
     snapshot = {"controller_values": {"external_contract:authority": {"value": b_addr}}}
 
     metrics: dict = {}

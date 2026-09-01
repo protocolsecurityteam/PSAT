@@ -14,6 +14,7 @@ if TYPE_CHECKING:  # typing-only: the effects plane stays off static's runtime i
 from sqlalchemy.orm import Session
 
 from db.queue import get_artifact
+from db.queue.typed import load_assessment_inputs
 from services.policy.permission_index import _abi_signature
 from utils.logging import record_degraded
 
@@ -86,7 +87,7 @@ def _load_contract_facts_uncached(session: Session, address: str) -> ContractFac
     from services.resolution.capability_resolver import find_analysis_job_for_address
 
     try:
-        lookup = find_analysis_job_for_address(session, address, required_artifact="effects", completed_only=False)
+        lookup = find_analysis_job_for_address(session, address, required_artifact="assessment", completed_only=False)
     except Exception as exc:
         # Not "this contract has no facts": the lookup did not answer. Every
         # Tier-1 probe on this address degrades to ``unknown`` from here, so a
@@ -106,13 +107,14 @@ def _load_contract_facts_uncached(session: Session, address: str) -> ContractFac
         return None
     job_id = lookup.analysis_job.id
 
-    effects_art = get_artifact(session, job_id, "effects")
+    inputs = load_assessment_inputs(get_artifact, session, job_id)
+    if inputs is None:
+        return None
+    analysis, trees_art, effects_art = inputs
     functions = effects_art.get("functions") if isinstance(effects_art, dict) else None
     if not isinstance(functions, dict) or not functions:
         return None
 
-    trees_art = get_artifact(session, job_id, "predicate_trees")
-    trees_art = trees_art if isinstance(trees_art, dict) else {}
     raw_trees = trees_art.get("trees")
     trees: dict[str, Any] = raw_trees if isinstance(raw_trees, dict) else {}
     canonical = {
@@ -121,7 +123,6 @@ def _load_contract_facts_uncached(session: Session, address: str) -> ContractFac
         if isinstance(sig, str) and "(" in sig and sig.endswith(")")
     }
 
-    analysis = get_artifact(session, job_id, "static_facts")
     legacy_flows = _legacy_value_flow_map(analysis)
 
     raw_slots = effects_art.get("token_slots") if isinstance(effects_art, dict) else None

@@ -80,9 +80,9 @@ class TestProcessStoresAssessment:
 
 
 class TestProcessSemanticInputs:
-    """Missing semantic inputs are degraded instead of using a static-summary fallback."""
+    """Semantic inputs come from Assessment rather than side artifacts."""
 
-    def test_missing_predicate_trees_and_effects_records_degraded(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_embedded_predicate_trees_and_effects_reach_policy(self, monkeypatch: pytest.MonkeyPatch) -> None:
         worker = PolicyWorker()
         session = MagicMock()
         session.execute.return_value.scalar_one_or_none.return_value = None
@@ -104,9 +104,9 @@ class TestProcessSemanticInputs:
             degraded.append(kwargs)
 
         def fake_build_ep(*_args: Any, **kwargs: Any) -> dict:
-            assert kwargs["predicate_trees"] is None
+            assert kwargs["predicate_trees"] == {"schema_version": "semantic", "trees": {}}
             assert kwargs["capability_resolver_output"] is None
-            assert kwargs["effects"] is None
+            assert isinstance(kwargs["effects"], dict)
             return {
                 "schema_version": "0.1",
                 "contract_address": TARGET_ADDRESS,
@@ -134,9 +134,7 @@ class TestProcessSemanticInputs:
 
         worker.process(session, cast(Any, job))
 
-        semantic_errors = [entry for entry in degraded if entry["phase"] == "permission_index_semantic_inputs"]
-        assert len(semantic_errors) == 1
-        assert semantic_errors[0]["context"]["missing_artifacts"] == ["effects", "predicate_trees"]
+        assert not [entry for entry in degraded if entry["phase"] == "permission_index_semantic_inputs"]
 
 
 class TestGraphRefreshAfterPermissionIndex:

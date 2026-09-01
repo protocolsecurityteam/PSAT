@@ -159,6 +159,8 @@ def _observation_plan(address: str = TARGET_ADDRESS, name: str = "TestContract")
 def _assessment(
     *,
     static_facts: dict | None = None,
+    predicate_trees: dict | None = None,
+    effects: dict | None = None,
     snapshot: dict | None = None,
     graph: dict | None = None,
     chain_id: int = 1,
@@ -198,7 +200,8 @@ def _assessment(
         code_hash=None,
         source_hash="test-source",
         static_facts=facts,
-        effects={
+        effects=effects
+        or {
             "schema_version": "semantic-3",
             "contract_name": subject["name"],
             "functions": {},
@@ -206,7 +209,7 @@ def _assessment(
             "claim_analyses": {},
             "claim_diagnostics": [],
         },
-        predicate_trees={"schema_version": "semantic", "trees": {}},
+        predicate_trees=predicate_trees or {"schema_version": "semantic", "trees": {}},
     )
     result = add_observations(result, snapshot)
     if graph is not None:

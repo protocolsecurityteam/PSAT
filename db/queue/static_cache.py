@@ -37,14 +37,10 @@ logger = logging.getLogger("db.queue")
 # slither_results / static_facts_report were removed when vulnerability-detector
 # triage was split out of PSAT's pipeline; downstream stages don't depend on
 # them, and the only writer (StaticWorker._run_slither_phase) is gone.
-# predicate_trees / effects are emitted by semantic static analysis and are
-# required by resolution and policy, so cache hits must carry them forward.
+# Assessment embeds the semantic static inputs; no parallel analytical
+# artifacts are copied.
 _STATIC_ARTIFACT_NAMES = frozenset(
     {
-        "assessment",
-        "static_facts",
-        "predicate_trees",
-        "effects",
         "static_dependencies",
         "enrichment_cache",
     }
@@ -64,21 +60,30 @@ _SEED_ARTIFACT_NAMES = frozenset(
 _MUTABLE_CONTRACT_FIELDS = frozenset({"is_proxy", "proxy_type", "implementation", "beacon", "admin"})
 
 
-def _store_assessment_from_static_facts(
+def _store_assessment_from_source(
     session: Session,
     *,
+    source_job_id: Any,
     job: Job,
     contract: Contract,
     address: str,
     source_hash_fallback: str | None = None,
 ) -> None:
-    """Rebuild chain-qualified assessment identity after a cache copy."""
+    """Rebuild a target Assessment from a donor's embedded static inputs."""
 
-    copied_analysis = get_artifact(session, job.id, "static_facts")
-    copied_effects = get_artifact(session, job.id, "effects")
-    copied_trees = get_artifact(session, job.id, "predicate_trees")
-    if not (isinstance(copied_analysis, dict) and isinstance(copied_effects, dict) and isinstance(copied_trees, dict)):
+    from db.queue.typed import load_assessment
+    from services.assessment import static_inputs
+
+    source_assessment = load_assessment(get_artifact, session, source_job_id)
+    if source_assessment is None:
         return
+    copied_analysis, copied_trees, copied_effects = static_inputs(source_assessment)
+    subject = copied_analysis.get("subject")
+    if isinstance(subject, dict):
+        copied_analysis = {
+            **copied_analysis,
+            "subject": {**subject, "address": address.lower()},
+        }
 
     request = job.request if isinstance(job.request, dict) else {}
     chain_id = job.chain_id or derive_job_chain_id(request.get("chain"), job.address)
@@ -451,9 +456,8 @@ def copy_static_cache(session: Session, source_job_id: Any, target_job_id: Any) 
     - ``source_files`` rows
     - ``contract_summaries`` and ``role_definitions``
       rows (linked to the new contract row)
-    - Static artifacts (``assessment``, ``static_facts``,
-      ``predicate_trees``, ``effects``, ``static_dependencies``,
-      ``enrichment_cache``)
+    - Assessment rebuilt from the donor's embedded static inputs
+    - Non-analytical cache helpers (``static_dependencies``, ``enrichment_cache``)
 
     The source contract is looked up by (address, chain) rather than by
     ``job_id`` so that subsequent cache copies still work after a prior copy
@@ -567,8 +571,9 @@ def copy_static_cache(session: Session, source_job_id: Any, target_job_id: Any) 
 
     target_job = session.get(Job, target_job_id)
     if target_job is not None:
-        _store_assessment_from_static_facts(
+        _store_assessment_from_source(
             session,
+            source_job_id=source_job_id,
             job=target_job,
             contract=new_contract,
             address=target_job.address or src_contract.address,
@@ -577,17 +582,6 @@ def copy_static_cache(session: Session, source_job_id: Any, target_job_id: Any) 
 
     session.commit()
     return new_contract.id
-
-
-# Code-plane artifacts safe to reuse across a same-source deployment. Unlike the
-# same-chain ``copy_static_cache`` set, this EXCLUDES ``static_dependencies`` and
-# ``enrichment_cache`` (dependency addresses / Etherscan enrichment differ per
-# chain and are re-derived by the static/discovery stage) and every
-# ``_SEED_ARTIFACT_NAMES`` member (dynamic_dependencies / classifications /
-# upgrade_history are on-chain-derived and MERGED on re-run — cross-chain merge
-# would be wrong). ``static_facts`` carries the deployment-specific contract
-# address, which is re-stamped on copy.
-_CROSS_CHAIN_STATIC_ARTIFACTS = frozenset({"static_facts", "predicate_trees", "effects"})
 
 
 def copy_static_cache_cross_chain(
@@ -602,10 +596,9 @@ def copy_static_cache_cross_chain(
     Unlike :func:`copy_static_cache` (which reassigns the donor's Contract row —
     correct only same-chain), this leaves the donor untouched and copies onto the
     target's OWN Contract row (already created per-chain by discovery, with the
-    right address/chain/deployer/proxy state). It copies only source-derived
-    artifacts, re-stamping the contract address in ``static_facts`` so
-    resolution reads the target deployment's state,
-    and it copies the summary + role definitions (the static worker skips
+    right address/chain/deployer/proxy state). It rebuilds Assessment from the
+    donor's embedded source inputs under the target chain/address, and copies
+    the summary + role definitions (the static worker skips
     ``_write_static_fact_indexes`` on a cache hit). The STATE plane (proxy impl,
     controllers, balances, events, monitoring) is untouched and resolved per
     ``(chain, address)`` downstream.
@@ -666,22 +659,12 @@ def copy_static_cache_cross_chain(
         for rd in donor_roles:
             copy_row(session, rd, contract_id=target_contract.id)
 
-    # --- code-plane artifacts (re-stamp the deployment address) ---
-    for name in _CROSS_CHAIN_STATIC_ARTIFACTS:
-        payload = get_artifact(session, source_job_id, name)
-        if payload is None:
-            continue
-        if name == "static_facts" and isinstance(payload, dict) and isinstance(payload.get("subject"), dict):
-            payload = {**payload, "subject": {**payload["subject"], "address": target_addr_norm}}
-        store_artifact(session, target_job_id, name, data=payload)
-
-    # ``assessment`` contains chain-qualified identities and therefore cannot
-    # be copied byte-for-byte from the donor. Rebuild it from the copied code
-    # facts under the target deployment's account identity.
+    # Assessment contains chain-qualified identity, so rebuild rather than copy.
     target_job = session.get(Job, target_job_id)
     if target_job is not None:
-        _store_assessment_from_static_facts(
+        _store_assessment_from_source(
             session,
+            source_job_id=source_job_id,
             job=target_job,
             contract=target_contract,
             address=target_addr_norm,

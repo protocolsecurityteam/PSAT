@@ -1,6 +1,6 @@
 """Predicate capability + probe endpoints.
 
-Hosts the read path that consumes the semantic ``predicate_trees`` artifact:
+Hosts the read path that consumes predicate trees embedded in Assessment:
  - per-contract / per-company capability resolution
  - membership and signature probes against individual leaves
 """
@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, select
 
 from db.models import Job, JobStatus, Protocol
+from db.queue.typed import load_assessment_inputs
 from utils.chains import require_chain
 from utils.ratelimit import SlidingWindowRateLimiter, client_ip
 
@@ -253,15 +254,13 @@ def probe_contract_membership(
         if job is None:
             raise HTTPException(status_code=404, detail=f"No completed analysis job found for {addr}")
 
-        artifact = deps.get_artifact(session, job.id, "predicate_trees")
-        if artifact is None:
+        inputs = load_assessment_inputs(deps.get_artifact, session, job.id)
+        if inputs is None:
             raise HTTPException(
                 status_code=404,
-                detail=(
-                    "predicate_trees artifact missing for the latest analysis "
-                    "(semantic predicate-tree emit did not run or failed)"
-                ),
+                detail=("Assessment missing for the latest analysis"),
             )
+        _static_facts, artifact, _effects = inputs
 
         if not isinstance(artifact, dict) or "trees" not in artifact:
             # Either an error-path placeholder ({"error": "..."}) or a
@@ -341,12 +340,13 @@ def probe_contract_signature(
         job = session.execute(job_stmt).scalar_one_or_none()
         if job is None:
             raise HTTPException(status_code=404, detail=f"No completed analysis job found for {addr}")
-        artifact = deps.get_artifact(session, job.id, "predicate_trees")
-        if artifact is None:
+        inputs = load_assessment_inputs(deps.get_artifact, session, job.id)
+        if inputs is None:
             raise HTTPException(
                 status_code=404,
-                detail="predicate_trees artifact missing for the latest analysis",
+                detail="Assessment missing for the latest analysis",
             )
+        _static_facts, artifact, _effects = inputs
         if not isinstance(artifact, dict) or "trees" not in artifact:
             return {
                 "result": "unknown",

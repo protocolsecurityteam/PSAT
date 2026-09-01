@@ -122,11 +122,15 @@ def static_index_view(assessment: Assessment) -> dict[str, Any]:
         if evidence["producer"] != "static.facts" or not isinstance(evidence["observation"], Mapping):
             continue
         observation = cast(Mapping[str, Any], evidence["observation"])
-        subject_value = observation.get("subject")
-        summary_value = observation.get("summary")
+        static_facts = observation.get("static_facts")
+        if not isinstance(static_facts, Mapping):
+            continue
+        subject_value = static_facts.get("subject")
+        summary_value = static_facts.get("summary")
         subject = cast(Mapping[str, Any], subject_value) if isinstance(subject_value, Mapping) else {}
         summary = cast(Mapping[str, Any], summary_value) if isinstance(summary_value, Mapping) else {}
-        roles = observation.get("role_definitions")
+        semantic_control = static_facts.get("semantic_control")
+        roles = semantic_control.get("role_definitions") if isinstance(semantic_control, Mapping) else None
         return {
             "contract_name": subject.get("name"),
             "source_verified": subject.get("source_verified"),
@@ -142,6 +146,25 @@ def static_index_view(assessment: Assessment) -> dict[str, Any]:
     raise ValueError("Assessment has no static.facts evidence")
 
 
+def static_inputs(assessment: Assessment) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Project the transient semantic inputs embedded in static evidence."""
+
+    for evidence in assessment["evidence"].values():
+        observation = evidence["observation"]
+        if evidence["producer"] != "static.facts" or not isinstance(observation, Mapping):
+            continue
+        static_facts = observation.get("static_facts")
+        predicate_trees = observation.get("predicate_trees")
+        effects = observation.get("effects")
+        if all(isinstance(value, Mapping) for value in (static_facts, predicate_trees, effects)):
+            return (
+                dict(cast(Mapping[str, Any], static_facts)),
+                dict(cast(Mapping[str, Any], predicate_trees)),
+                dict(cast(Mapping[str, Any], effects)),
+            )
+    raise ValueError("Assessment has no complete static input evidence")
+
+
 __all__ = [
     "capability_claims",
     "effect_presence",
@@ -149,4 +172,5 @@ __all__ = [
     "effect_matches_by_function",
     "project_permission_index",
     "static_index_view",
+    "static_inputs",
 ]

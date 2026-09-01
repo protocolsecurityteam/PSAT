@@ -431,7 +431,6 @@ def test_static_cache_hit_still_resolves_secondary_impls(db_session, monkeypatch
     ``StaticWorker.process`` through the cache branch.
     """
     from db.models import Contract, Job, JobStage, JobStatus
-    from db.queue import store_artifact
     from workers.static_worker import StaticWorker
 
     def _a() -> str:
@@ -463,17 +462,13 @@ def test_static_cache_hit_still_resolves_secondary_impls(db_session, monkeypatch
         Contract(address=core, chain="ethereum", is_proxy=False, contract_name="LRTSquaredCore", job_id=impl_job.id)
     )
     db_session.commit()
-    # The cached static facts carry the detected pointer.
-    store_artifact(
-        db_session,
-        impl_job.id,
-        "static_facts",
-        data={
-            "schema_version": "0.1",
-            "subject": {"name": "LRTSquaredCore"},
-            "secondary_impl_pointers": [{"name": "adminImplPosition", "slot": slot, "offset": 0}],
-        },
-    )
+    # Assessment evidence carries the cached static pointer.
+    from tests.support.assessment_artifacts import store_test_assessment
+    from tests.support.policy_builders import _minimal_static_facts
+
+    facts = _minimal_static_facts(address=core, name="LRTSquaredCore")
+    facts["secondary_impl_pointers"] = [{"name": "adminImplPosition", "slot": slot, "offset": 0}]
+    store_test_assessment(db_session, impl_job.id, address=core, static_facts=facts)
     db_session.commit()
 
     def fake_rpc(rpc_url, method, params, retries=1, **_):

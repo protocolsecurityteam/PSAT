@@ -1,8 +1,7 @@
 """Pin semantic enrichment of ``GET /api/analyses/{run_name}``.
 
-The endpoint adds two keys when a predicate-tree artifact exists:
+The endpoint enriches a stored Assessment with:
 
-  - ``predicate_trees`` — raw trees-by-function dict
   - ``semantic_capabilities`` — resolved CapabilityExpr per function
 """
 
@@ -61,28 +60,39 @@ def _semantic_artifact() -> dict:
     }
 
 
+def _store_assessment(db_session, job, address: str, predicate_trees: dict) -> None:
+    from db.queue import store_artifact
+    from tests.support.policy_builders import _assessment, _minimal_static_facts
+
+    store_artifact(
+        db_session,
+        job.id,
+        "assessment",
+        data=_assessment(
+            static_facts=_minimal_static_facts(address=address, name="T"),
+            predicate_trees=predicate_trees,
+        ),
+    )
+
+
 @requires_postgres
 def test_endpoint_includes_semantic_keys_when_artifact_present(api_client, db_session):
-    from db.queue import store_artifact
-
     address = "0x" + uuid.uuid4().hex[:8] + "11" * 16
     job = _seed_completed_job(db_session, address=address)
-    store_artifact(db_session, job.id, "predicate_trees", data=_semantic_artifact())
+    _store_assessment(db_session, job, address, _semantic_artifact())
     db_session.commit()
 
     resp = api_client.get(f"/api/analyses/{address}")
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    # Both semantic enrichment keys present.
-    assert "predicate_trees" in body
-    assert body["predicate_trees"]["schema_version"] == "semantic"
+    assert "assessment" in body
     assert "semantic_capabilities" in body
     assert "f()" in body["semantic_capabilities"]
     cap = body["semantic_capabilities"]["f()"]
     assert "kind" in cap
     assert "confidence" in cap
     # available_artifacts surface lists the artifact name too.
-    assert "predicate_trees" in body["available_artifacts"]
+    assert "assessment" in body["available_artifacts"]
 
 
 @requires_postgres
@@ -106,11 +116,9 @@ def test_endpoint_includes_predicate_trees_even_when_resolver_fails(api_client, 
     """A semantic resolution failure must not break the endpoint. The
     raw ``predicate_trees`` artifact stays inlined; only the
     resolved ``semantic_capabilities`` is dropped."""
-    from db.queue import store_artifact
-
     address = "0x" + uuid.uuid4().hex[:8] + "33" * 16
     job = _seed_completed_job(db_session, address=address)
-    store_artifact(db_session, job.id, "predicate_trees", data=_semantic_artifact())
+    _store_assessment(db_session, job, address, _semantic_artifact())
     db_session.commit()
 
     # Force the resolver import to raise.
@@ -124,8 +132,7 @@ def test_endpoint_includes_predicate_trees_even_when_resolver_fails(api_client, 
     resp = api_client.get(f"/api/analyses/{address}")
     assert resp.status_code == 200
     body = resp.json()
-    # Raw trees still present.
-    assert "predicate_trees" in body
+    assert "assessment" in body
     # Resolved capabilities dropped because resolution exploded.
     assert "semantic_capabilities" not in body
 
@@ -135,22 +142,20 @@ def test_endpoint_handles_unguarded_only_contract_with_empty_caps(api_client, db
     """Contract with only public functions: predicate_trees has
     trees={}. semantic_capabilities resolves to {} — both keys present
     but empty, signaling 'analyzed, every function public'."""
-    from db.queue import store_artifact
-
     address = "0x" + uuid.uuid4().hex[:8] + "44" * 16
     job = _seed_completed_job(db_session, address=address)
-    store_artifact(
+    _store_assessment(
         db_session,
-        job.id,
-        "predicate_trees",
-        data={"schema_version": "semantic", "contract_name": "T", "trees": {}},
+        job,
+        address,
+        {"schema_version": "semantic", "contract_name": "T", "trees": {}},
     )
     db_session.commit()
 
     resp = api_client.get(f"/api/analyses/{address}")
     assert resp.status_code == 200
     body = resp.json()
-    assert body["predicate_trees"]["trees"] == {}
+    assert "assessment" in body
     assert body["semantic_capabilities"] == {}
 
 
@@ -173,7 +178,7 @@ def test_endpoint_names_artifacts_it_could_not_read_instead_of_omitting_them(api
     def _partial(_session, _job_id):
         raise StorageContentNotDetermined(
             "bucket unreachable",
-            values={"predicate_trees": _semantic_artifact()},
+            values={"dependencies": {"items": []}},
             not_determined={"assessment": "could not read artifacts/j/assessment"},
         )
 
@@ -183,7 +188,7 @@ def test_endpoint_names_artifacts_it_could_not_read_instead_of_omitting_them(api
     assert resp.status_code == 200, resp.text
     body = resp.json()
     # What did read is still rendered.
-    assert body["predicate_trees"]["schema_version"] == "semantic"
+    assert body["dependencies"] == {"items": []}
     # What did not is named, rather than reading as "the analysis has none".
     assert "assessment" in body["artifacts_not_determined"]
     assert "assessment" not in body["available_artifacts"]
@@ -209,7 +214,7 @@ def test_endpoint_keeps_a_lost_body_apart_from_one_it_could_not_ask_about(api_cl
     def _partial(_session, _job_id):
         raise StorageContentAbsent(
             "1/2 artifact bodies proven absent",
-            values={"predicate_trees": _semantic_artifact()},
+            values={"dependencies": {"items": []}},
             proven_absent={"assessment": "no object at any candidate for artifacts/j/eff"},
         )
 
@@ -218,7 +223,7 @@ def test_endpoint_keeps_a_lost_body_apart_from_one_it_could_not_ask_about(api_cl
     resp = api_client.get(f"/api/analyses/{address}")
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert body["predicate_trees"]["schema_version"] == "semantic"
+    assert body["dependencies"] == {"items": []}
     assert "assessment" in body["artifacts_body_absent"]
     assert "artifacts_not_determined" not in body
     assert "assessment" not in body["available_artifacts"]

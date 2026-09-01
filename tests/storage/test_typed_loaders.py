@@ -28,7 +28,7 @@ def test_absent_artifact_returns_none() -> None:
 
 def test_assessment_validates_as_the_canonical_wire() -> None:
     assessment = {
-        "schema_version": "assessment/2",
+        "schema_version": "assessment/3",
         "contract": {
             "chain_id": 1,
             "address": "0x1111111111111111111111111111111111111111",

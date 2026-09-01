@@ -68,9 +68,15 @@ def test_inline_returns_none_when_materialization_fails(monkeypatch):
     the Solmate adapter); post-fix it returns ``None`` so the adapter runs."""
     fake_job = SimpleNamespace(id=_JOB_ID, address=_ROLES_AUTH)
     fake_lookup = SimpleNamespace(analysis_job=fake_job, runtime_job=fake_job)
+    from tests.support.policy_builders import _assessment, _minimal_static_facts
+
+    assessment = _assessment(
+        static_facts=_minimal_static_facts(address=_ROLES_AUTH, name="RolesAuthority"),
+        predicate_trees=_callee_artifact_with_unmaterializable_cancall(),
+    )
 
     monkeypatch.setattr(CR, "find_analysis_job_for_address", lambda *a, **k: fake_lookup)
-    monkeypatch.setattr(DQ, "get_artifact", lambda *a, **k: _callee_artifact_with_unmaterializable_cancall())
+    monkeypatch.setattr(DQ, "get_artifact", lambda *a, **k: assessment)
     monkeypatch.setattr(CR, "_load_state_var_values", lambda *a, **k: {})
 
     # The trigger: generic materializer can't satisfy ``canCall``'s role-mapping

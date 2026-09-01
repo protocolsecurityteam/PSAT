@@ -2,9 +2,7 @@
 contract address, return semantic capabilities per externally-callable
 function.
 
-It loads the persisted ``predicate_trees``
-artifact (written by the static stage's
-``build_predicate_artifacts`` + ``store_artifact``), wires the
+It loads predicate trees from the persisted Assessment, wires the
 Postgres-backed generic event-log repo into an
 ``EvaluationContext``, evaluates each function's PredicateTree
 through ``evaluate_tree_with_registry`` to a ``CapabilityExpr``,
@@ -33,7 +31,7 @@ Usage:
     # }
 
 Returns ``None`` when the contract has no completed analysis or no
-predicate-tree artifact yet. Callers degrade explicitly instead of
+predicate-tree evidence yet. Callers degrade explicitly instead of
 using the old static summary as an authority source.
 """
 
@@ -51,6 +49,7 @@ from sqlalchemy.orm import Session
 from db.deployment import deployment_scope, normalize_deployment
 from db.models import Contract, ControllerValue, Job, JobStatus
 from db.queue import get_artifact
+from db.queue.typed import load_assessment_inputs
 from services.clients.rpc import ChainContext, chain_context, eth_call_batch, rpc_request
 from utils.chains import require_chain
 from utils.logging import record_degraded, record_stage_metric
@@ -197,14 +196,14 @@ def find_analysis_job_for_address(
     session: Session,
     address: str,
     *,
-    required_artifact: str = "predicate_trees",
+    required_artifact: str = "assessment",
     chain: str | None = None,
     completed_only: bool = True,
 ) -> AnalysisJobLookup | None:
     """Find the job whose artifacts should be used for a runtime address.
 
-    Proxies are runtime addresses, but their semantic artifacts usually live
-    on the implementation child job. Prefer a direct artifact when present;
+    Proxies are runtime addresses, but their Assessment usually lives on the
+    implementation child job. Prefer a direct artifact when present;
     otherwise follow the proxy Contract row to the implementation job.
     """
     for runtime_job in _jobs_for_address(session, address, chain=chain, completed_only=completed_only):
@@ -307,7 +306,7 @@ def resolve_contract_capabilities(
         lookup = find_analysis_job_for_address(
             session,
             addr,
-            required_artifact="predicate_trees",
+            required_artifact="assessment",
             chain=chain,
             completed_only=True,
         )
@@ -317,12 +316,13 @@ def resolve_contract_capabilities(
         analysis_job = lookup.analysis_job
         runtime_addr = (runtime_job.address or addr).lower()
 
-    artifact = get_artifact(session, analysis_job.id, "predicate_trees")
+    inputs = load_assessment_inputs(get_artifact, session, analysis_job.id)
+    artifact = inputs[1] if inputs is not None else None
     if not isinstance(artifact, dict) or "trees" not in artifact:
         lookup = _analysis_lookup_for_runtime_job(
             session,
             runtime_job,
-            required_artifact="predicate_trees",
+            required_artifact="assessment",
             chain=chain,
             completed_only=True,
         )
@@ -330,7 +330,8 @@ def resolve_contract_capabilities(
             return None
         runtime_job = lookup.runtime_job
         analysis_job = lookup.analysis_job
-        artifact = get_artifact(session, analysis_job.id, "predicate_trees")
+        inputs = load_assessment_inputs(get_artifact, session, analysis_job.id)
+        artifact = inputs[1] if inputs is not None else None
         if not isinstance(artifact, dict) or "trees" not in artifact:
             return None
 
@@ -912,6 +913,18 @@ def _artifact_is_substantive(artifact_name: str, artifact: Any) -> bool:
     count as substantive whenever the row is a dict.
     """
     if not isinstance(artifact, dict):
+        return False
+    if artifact_name == "assessment":
+        evidence = artifact.get("evidence")
+        if not isinstance(evidence, dict):
+            return False
+        for item in evidence.values():
+            if not isinstance(item, dict) or item.get("producer") != "static.facts":
+                continue
+            observation = item.get("observation")
+            inputs = observation.get("predicate_trees") if isinstance(observation, dict) else None
+            if isinstance(inputs, dict):
+                return bool(inputs.get("trees") or inputs.get("check_trees"))
         return False
     if artifact_name == "predicate_trees":
         return bool(artifact.get("trees") or artifact.get("check_trees"))

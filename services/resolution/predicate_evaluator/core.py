@@ -656,19 +656,21 @@ def _maybe_inline_cross_contract_call(
     # Look up the registry's semantic artifacts. If the registry address is
     # a proxy, predicate_trees live on its implementation child job.
     from db.queue import get_artifact
+    from db.queue.typed import load_assessment_inputs
     from services.resolution.capability_resolver import find_analysis_job_for_address
 
     lookup = find_analysis_job_for_address(
         session,
         registry_addr,
-        required_artifact="predicate_trees",
+        required_artifact="assessment",
         completed_only=False,
     )
     if lookup is None:
         return None
-    artifact = get_artifact(session, lookup.analysis_job.id, "predicate_trees")
-    if not isinstance(artifact, dict):
+    inputs = load_assessment_inputs(get_artifact, session, lookup.analysis_job.id)
+    if inputs is None:
         return None
+    _static_facts, artifact, _effects = inputs
     from services.resolution.adapters import CallFrame
 
     parent_frame = getattr(outer_ctx, "call_frame", None)

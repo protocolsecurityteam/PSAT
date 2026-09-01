@@ -1,8 +1,8 @@
 """Two-contract integration tests for the policy-stage cross-contract path.
 
 Drives ``PolicyWorker._enrich_cross_contract`` end to end against a real
-Postgres session: a sibling job whose stored ``effects``/``observation_batch``
-carry Plane-1 claims, a target job whose ``effects`` are stored, and target
+Postgres session: sibling and target Assessments whose embedded effects carry
+Plane-1 claims, plus target
 ``EffectiveFunction`` rows the derivation must update. The only wire stubbed is
 ``SessionLocal`` — repointed at the test engine so the parallel sibling fetch
 sees committed rows; the derivations, the registry, ``emit_claim``, precedence
@@ -23,7 +23,7 @@ from eth_utils.crypto import keccak
 from sqlalchemy.orm import sessionmaker
 
 from db.models import Contract, EffectiveFunction, Job, JobStage, JobStatus
-from db.queue import store_artifact
+from db.queue import get_artifact, store_artifact
 from services.static.claims import EffectMatch
 from tests.conftest import requires_postgres
 from tests.support.policy_builders import _assessment, _minimal_static_facts
@@ -70,11 +70,25 @@ def _make_job(session, *, address: str, company: str, request: dict | None = Non
 
 
 def _store_empty_assessment(session, job: Job, address: str) -> None:
+    if get_artifact(session, job.id, "assessment") is not None:
+        return
     store_artifact(
         session,
         job.id,
         "assessment",
         data=_assessment(static_facts=_minimal_static_facts(address=address, name="C")),
+    )
+
+
+def _store_effects(session, job: Job, address: str, effects: dict) -> None:
+    store_artifact(
+        session,
+        job.id,
+        "assessment",
+        data=_assessment(
+            static_facts=_minimal_static_facts(address=address, name="C"),
+            effects=effects,
+        ),
     )
 
 
@@ -115,22 +129,22 @@ def test_value_flow_claim_propagates_to_effective_function(db_session, _repoint_
     target_job = _make_job(db_session, address=TARGET, company=company)
     sibling_job = _make_job(db_session, address=TOKEN, company=company)
 
-    store_artifact(
+    _store_effects(
         db_session,
-        sibling_job.id,
-        "effects",
-        data={
+        sibling_job,
+        TOKEN,
+        {
             "schema_version": "semantic-2",
             "functions": {"transfer(address,uint256)": {"selector": TRANSFER_SELECTOR, "claims": [_std("flow.out")]}},
         },
     )
     _store_empty_assessment(db_session, sibling_job, TOKEN)
 
-    store_artifact(
+    _store_effects(
         db_session,
-        target_job.id,
-        "effects",
-        data={
+        target_job,
+        TARGET,
+        {
             "schema_version": "semantic-2",
             "functions": {
                 "sweep(address)": {
@@ -181,22 +195,22 @@ def test_no_claims_without_matching_evidence(db_session, _repoint_session_local)
     company = f"co-{uuid.uuid4()}"
     target_job = _make_job(db_session, address=TARGET, company=company)
     sibling_job = _make_job(db_session, address=TOKEN, company=company)
-    store_artifact(
+    _store_effects(
         db_session,
-        sibling_job.id,
-        "effects",
-        data={
+        sibling_job,
+        TOKEN,
+        {
             "schema_version": "semantic-2",
             "functions": {"transfer(address,uint256)": {"selector": TRANSFER_SELECTOR, "claims": [_std("flow.out")]}},
         },
     )
     _store_empty_assessment(db_session, sibling_job, TOKEN)
     # Target calls a DIFFERENT (unresolved) contract var.
-    store_artifact(
+    _store_effects(
         db_session,
-        target_job.id,
-        "effects",
-        data={
+        target_job,
+        TARGET,
+        {
             "schema_version": "semantic-2",
             "functions": {
                 "sweep(address)": {
@@ -349,21 +363,21 @@ def test_struct_param_function_still_matches_its_row(db_session, _repoint_sessio
     canonical = "sweepWithPermit(address,(uint256,uint8,bytes32))"
     selector = _selector(canonical)
 
-    store_artifact(
+    _store_effects(
         db_session,
-        sibling_job.id,
-        "effects",
-        data={
+        sibling_job,
+        TOKEN,
+        {
             "schema_version": "semantic-2",
             "functions": {"transfer(address,uint256)": {"selector": TRANSFER_SELECTOR, "claims": [_std("flow.out")]}},
         },
     )
     _store_empty_assessment(db_session, sibling_job, TOKEN)
-    store_artifact(
+    _store_effects(
         db_session,
-        target_job.id,
-        "effects",
-        data={
+        target_job,
+        TARGET,
+        {
             "schema_version": "semantic-2",
             "functions": {
                 full_name: {
@@ -436,21 +450,21 @@ def test_enrichment_lands_only_on_this_job_s_deployment(db_session, _repoint_ses
     target_job = _make_job(db_session, address=TARGET, company=company, request={"proxy_address": D1})
     sibling_job = _make_job(db_session, address=TOKEN, company=company)
 
-    store_artifact(
+    _store_effects(
         db_session,
-        sibling_job.id,
-        "effects",
-        data={
+        sibling_job,
+        TOKEN,
+        {
             "schema_version": "semantic-2",
             "functions": {"transfer(address,uint256)": {"selector": TRANSFER_SELECTOR, "claims": [_std("flow.out")]}},
         },
     )
     _store_empty_assessment(db_session, sibling_job, TOKEN)
-    store_artifact(
+    _store_effects(
         db_session,
-        target_job.id,
-        "effects",
-        data={
+        target_job,
+        TARGET,
+        {
             "schema_version": "semantic-2",
             "functions": {
                 "sweep(address)": {
@@ -517,21 +531,21 @@ def test_ambiguous_row_match_is_skipped_not_raised(db_session, _repoint_session_
     target_job = _make_job(db_session, address=TARGET, company=company, request={"proxy_address": D1})
     sibling_job = _make_job(db_session, address=TOKEN, company=company)
 
-    store_artifact(
+    _store_effects(
         db_session,
-        sibling_job.id,
-        "effects",
-        data={
+        sibling_job,
+        TOKEN,
+        {
             "schema_version": "semantic-2",
             "functions": {"transfer(address,uint256)": {"selector": TRANSFER_SELECTOR, "claims": [_std("flow.out")]}},
         },
     )
     _store_empty_assessment(db_session, sibling_job, TOKEN)
-    store_artifact(
+    _store_effects(
         db_session,
-        target_job.id,
-        "effects",
-        data={
+        target_job,
+        TARGET,
+        {
             "schema_version": "semantic-2",
             "functions": {
                 "sweep(address)": {

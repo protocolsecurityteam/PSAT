@@ -36,6 +36,7 @@ from db.models import (
     exactness_eligible_cursor_clause,
 )
 from db.queue import HEARTBEAT_EVENT_INDEXER, get_artifact, record_heartbeat
+from db.queue.typed import load_assessment_inputs
 from services.clients.etherscan import get_contract_creation_block
 from services.clients.rpc import require_rpc_url, rpc_request
 from services.resolution.caller_sources import CALLER_SOURCES as _CALLER_SOURCES
@@ -940,9 +941,10 @@ def enroll_from_completed_jobs(session: Session, *, limit: int = 500) -> int:
     witness_cache: dict[tuple[int, str], tuple[int | None, str]] = {}
     role_store_topic_cache: dict[tuple[int, str], list[str]] = {}
     for job in jobs:
-        artifact = get_artifact(session, job.id, "predicate_trees")
-        if not isinstance(artifact, dict):
+        inputs = load_assessment_inputs(get_artifact, session, job.id)
+        if inputs is None:
             continue
+        _static_facts, artifact, _effects = inputs
         # Stamp each cursor with the job's own chain — the first-class
         # ``Job.chain_id`` (backfilled for all address-scoped rows in Phase 0).
         # For a not-yet-migrated NULL, derive from the job's own ``request["chain"]``

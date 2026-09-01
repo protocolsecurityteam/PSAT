@@ -168,7 +168,6 @@ def test_find_completed_static_cache_picks_most_recent(db_session):
     from tests.support.policy_builders import _assessment, _minimal_static_facts
 
     facts = _minimal_static_facts(address=ADDR_A, name="TestContract2")
-    store_artifact(db_session, new_job.id, "static_facts", data=facts)
     store_artifact(db_session, new_job.id, "assessment", data=_assessment(static_facts=facts))
 
     future = datetime.now(timezone.utc) + timedelta(hours=1)
@@ -195,8 +194,19 @@ def test_copy_static_cache(db_session):
     source_job = _create_completed_job_with_static_data(db_session)
     predicate_trees = {"schema_version": "semantic", "trees": {"pause()": {"node_type": "caller"}}}
     effects = {"schema_version": "semantic", "effects": {"pause()": [{"kind": "external_call"}]}}
-    store_artifact(db_session, source_job.id, "predicate_trees", data=predicate_trees)
-    store_artifact(db_session, source_job.id, "effects", data=effects)
+    from db.queue.typed import load_assessment
+    from services.assessment import static_inputs
+    from tests.support.policy_builders import _assessment
+
+    source_assessment = load_assessment(get_artifact, db_session, source_job.id)
+    assert source_assessment is not None
+    facts, _old_trees, _old_effects = static_inputs(source_assessment)
+    store_artifact(
+        db_session,
+        source_job.id,
+        "assessment",
+        data=_assessment(static_facts=facts, predicate_trees=predicate_trees, effects=effects),
+    )
     target_job = create_job(db_session, {"address": ADDR_A})
 
     new_contract_id = copy_static_cache(db_session, source_job.id, target_job.id)
@@ -226,10 +236,12 @@ def test_copy_static_cache(db_session):
     assert len(rds) == 1
     assert rds[0].role_name == "ADMIN_ROLE"
 
-    assert get_artifact(db_session, target_job.id, "static_facts") is not None
-    assert get_artifact(db_session, target_job.id, "assessment") is not None
-    assert get_artifact(db_session, target_job.id, "predicate_trees") == predicate_trees
-    assert get_artifact(db_session, target_job.id, "effects") == effects
+    target_assessment = load_assessment(get_artifact, db_session, target_job.id)
+    assert target_assessment is not None
+    restamped_facts = {**facts, "subject": {**facts["subject"], "address": ADDR_A.lower()}}
+    assert static_inputs(target_assessment) == (restamped_facts, predicate_trees, effects)
+    for retired in ("static_facts", "predicate_trees", "effects"):
+        assert get_artifact(db_session, target_job.id, retired) is None
     # slither_results / static_facts_report were removed from the static-artifact
     # cache copy set when the Slither CLI subprocess was excised — they no
     # longer participate in caching since they're no longer produced.
@@ -347,9 +359,9 @@ def test_no_duplicate_rows_after_two_runs(db_session, monkeypatch):
     ).scalar()
     assert src_count == 2, f"Expected 2 source files, got {src_count}"
 
-    for artifact_name in ["static_facts", "assessment"]:
-        art = get_artifact(db_session, new_job.id, artifact_name)
-        assert isinstance(art, dict), f"Missing artifact {artifact_name}"
+    assert isinstance(get_artifact(db_session, new_job.id, "assessment"), dict)
+    for retired in ("static_facts", "predicate_trees", "effects"):
+        assert get_artifact(db_session, new_job.id, retired) is None
 
 
 # ---------------------------------------------------------------------------

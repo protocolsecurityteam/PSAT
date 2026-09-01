@@ -1,6 +1,6 @@
 """Integration tests for ``resolve_contract_capabilities``.
 
-End-to-end: seeds a Job + predicate_trees artifact + (optionally)
+End-to-end: seeds a Job + Assessment predicate evidence + (optionally)
 generic indexed event rows, then calls the resolver and asserts the
 serialized CapabilityExpr per function.
 """
@@ -68,7 +68,17 @@ def _seed_job_with_artifact(session, *, address: str, predicate_trees: dict | No
     session.add(job)
     session.flush()
     if predicate_trees is not None:
-        store_artifact(session, job.id, "predicate_trees", data=predicate_trees)
+        from tests.support.policy_builders import _assessment, _minimal_static_facts
+
+        store_artifact(
+            session,
+            job.id,
+            "assessment",
+            data=_assessment(
+                static_facts=_minimal_static_facts(address=address, name="T"),
+                predicate_trees=predicate_trees,
+            ),
+        )
     session.commit()
     return job
 

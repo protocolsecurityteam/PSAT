@@ -127,6 +127,7 @@ def seeded(db_session, storage_bucket):
 
     jobs: list[Job] = []
     contracts: list[Contract] = []
+    from tests.support.assessment_artifacts import store_test_assessment
 
     for i in range(N_CONTRACTS):
         addr = _addr(i + 1)
@@ -285,17 +286,14 @@ def seeded(db_session, storage_bucket):
                 )
             )
 
-        # static_facts / contract_flags / dependencies via store_artifact
+        # Assessment / contract_flags / dependencies via artifact storage
         # so each body lands in object storage (storage_key set, data NULL),
         # matching the prod layout that exposes the per-row GET hotspot.
-        store_artifact(
+        store_test_assessment(
             db_session,
             job.id,
-            "static_facts",
-            data={
-                "subject": {"name": f"PerfContract_{i:03d}"},
-                "summary": "perf summary",
-            },
+            address=addr,
+            name=f"PerfContract_{i:03d}",
         )
         store_artifact(db_session, job.id, "contract_flags", data={"is_proxy": False})
         store_artifact(db_session, job.id, "dependencies", data={"deps": []})

@@ -27,7 +27,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from schemas.assessment import Assessment, assessment_problems
 
-__all__ = ["ArtifactSchemaError", "load_assessment"]
+__all__ = ["ArtifactSchemaError", "load_assessment", "load_assessment_inputs"]
 
 
 class ArtifactSchemaError(RuntimeError):
@@ -74,3 +74,16 @@ def load_assessment(read: Any, session: Any, job_id: Any) -> Assessment | None:
     if problems:
         raise ArtifactSchemaError("assessment", problems)
     return assessment
+
+
+def load_assessment_inputs(
+    read: Any, session: Any, job_id: Any
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None:
+    """Load static facts, predicate trees, and effects from Assessment evidence."""
+
+    assessment = load_assessment(read, session, job_id)
+    if assessment is None:
+        return None
+    from services.assessment import static_inputs
+
+    return static_inputs(assessment)

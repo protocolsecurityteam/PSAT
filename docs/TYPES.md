@@ -4,6 +4,9 @@ PSAT has one durable analytical document: `Assessment`. Static IR and chain
 reads are inputs; database rows and API shapes are projections, not competing
 claim ledgers.
 
+Static facts, predicate trees, and effects are embedded in the static Evidence
+record. They are never emitted as parallel job artifacts.
+
 ## Twelve records
 
 ```text

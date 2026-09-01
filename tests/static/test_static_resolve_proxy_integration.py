@@ -651,7 +651,7 @@ def session():
 
 def _seed_job_with_artifact(session, *, address: str, predicate_trees: dict | None):
     from db.models import Job, JobStage, JobStatus
-    from db.queue import store_artifact
+    from tests.support.assessment_artifacts import store_test_assessment
 
     job = Job(
         address=address,
@@ -664,7 +664,7 @@ def _seed_job_with_artifact(session, *, address: str, predicate_trees: dict | No
     session.add(job)
     session.flush()
     if predicate_trees is not None:
-        store_artifact(session, job.id, "predicate_trees", data=predicate_trees)
+        store_test_assessment(session, job.id, address=address, predicate_trees=predicate_trees)
     session.commit()
     return job
 
@@ -672,7 +672,6 @@ def _seed_job_with_artifact(session, *, address: str, predicate_trees: dict | No
 @requires_postgres
 def test_dependency_provider_lookup_returns_impl_child_for_proxy(session):
     from db.models import Contract, Protocol
-    from db.queue import store_artifact
     from services.resolution.capability_resolver import find_dependency_provider_job_for_address
 
     proxy_addr = "0x" + uuid.uuid4().hex[:8] + "d4" * 16
@@ -703,7 +702,6 @@ def test_dependency_provider_lookup_returns_impl_child_for_proxy(session):
         "parent_job_id": str(proxy_job.id),
         "proxy_address": proxy_addr,
     }
-    store_artifact(session, impl_job.id, "permission_index", data={"functions": []})
     session.commit()
 
     lookup = find_dependency_provider_job_for_address(session, proxy_addr, chain="ethereum")

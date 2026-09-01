@@ -365,8 +365,8 @@ def _seed_two_hop(
     before the resolve — the adapter-live variants use it to make the registry a
     recognized role store (impl markers + indexed events + warm cursor)."""
     from db.models import Contract, ControllerValue, Job, JobStage, JobStatus, Protocol
-    from db.queue import store_artifact
     from services.resolution.capability_resolver import resolve_contract_capabilities
+    from tests.support.assessment_artifacts import store_test_assessment
 
     proto = Protocol(name=f"rolegate_guard_{uuid.uuid4().hex[:8]}")
     session.add(proto)
@@ -386,7 +386,12 @@ def _seed_two_hop(
         )
         session.add(job)
         session.flush()
-        store_artifact(session, job.id, "predicate_trees", data={"schema_version": "semantic", "trees": trees})
+        store_test_assessment(
+            session,
+            job.id,
+            address=addr,
+            predicate_trees={"schema_version": "semantic", "trees": trees},
+        )
         contract = Contract(address=addr, chain="ethereum", protocol_id=proto.id, job_id=job.id)
         session.add(contract)
         session.flush()

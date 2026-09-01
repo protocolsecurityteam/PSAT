@@ -9,7 +9,7 @@ import shutil
 import tempfile
 import textwrap
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from sqlalchemy import select
 
@@ -774,11 +774,14 @@ class StaticWorker(BaseWorker):
                     contract_name,
                 )
                 self.update_detail(session, job, "Static static_facts complete (cached)")
-                # The cached static facts still carry secondary_impl_pointers
-                # (copy_static_cache copies it), so secondaries get resolved on the
-                # cache path too — not only on a fresh (Slither) static_facts.
-                cached_analysis = get_artifact(session, job.id, "static_facts")
-                secondary_analysis = cached_analysis if isinstance(cached_analysis, dict) else None
+                # Assessment evidence carries the cached static inputs, so
+                # secondaries resolve without a parallel static_facts artifact.
+                from db.queue.typed import load_assessment
+                from services.assessment import static_inputs
+
+                cached_assessment = load_assessment(get_artifact, session, job.id)
+                if cached_assessment is not None:
+                    secondary_analysis, _cached_trees, _cached_effects = static_inputs(cached_assessment)
             else:
                 # Phase 1: Contract static_facts (uses Slither's Python IR — the
                 # CLI subprocess that produced detector findings was removed;
@@ -1645,34 +1648,7 @@ class StaticWorker(BaseWorker):
         if semantic_effects is not None:
             (project_dir / "effects.json").write_text(json.dumps(semantic_effects, indent=2, default=str) + "\n")
 
-        store_artifact(session, job.id, "static_facts", data=static_facts_data)
         store_artifact(session, job.id, "assessment", data=assessment)
-        if semantic_predicate_trees is not None:
-            try:
-                store_artifact(session, job.id, "predicate_trees", data=semantic_predicate_trees)
-            except Exception as exc:
-                record_degraded(
-                    phase="predicate_trees_artifact_store",
-                    exc=exc,
-                    context={"address": address, "contract_name": contract_name, "job_id": str(job.id)},
-                )
-                logger.exception(
-                    "Static stage: predicate_trees artifact store failed for job %s",
-                    job.id,
-                )
-        if semantic_effects is not None:
-            try:
-                store_artifact(session, job.id, "effects", data=semantic_effects)
-            except Exception as exc:
-                record_degraded(
-                    phase="effects_artifact_store",
-                    exc=exc,
-                    context={"address": address, "contract_name": contract_name, "job_id": str(job.id)},
-                )
-                logger.exception(
-                    "Static stage: effects artifact store failed for job %s",
-                    job.id,
-                )
         self._write_static_fact_indexes(session, job, assessment)
         logger.info(
             "Static stage contract static_facts complete for job %s address=%s contract=%s",
@@ -1751,10 +1727,9 @@ class StaticWorker(BaseWorker):
         a substantive plan). Publishing here makes coverage follow from static_facts
         having run — invariant 8.
 
-        Reads back the three artifacts this stage just stored rather than taking
-        them as arguments: the artifacts are what the job actually left behind,
-        they are identical on the fresh and the static-cache paths, and a bundle
-        that failed to store is one this row must not claim to hold.
+        Reads the validated Assessment this stage stored and projects its embedded
+        static inputs. Assessment is the only durable analytical artifact on both
+        fresh and cache-hit paths.
 
         A row is stamped ``STATIC_FACTS_SCHEMA_VERSION``, so it may only be written
         for a bundle PROVEN to be of that era. The stamp lives on the job, but
@@ -1800,10 +1775,13 @@ class StaticWorker(BaseWorker):
             return
 
         try:
-            static_facts = get_artifact(session, job.id, "static_facts")
-            assessment = get_artifact(session, job.id, "assessment")
-            predicate_trees = get_artifact(session, job.id, "predicate_trees")
-            effects = get_artifact(session, job.id, "effects")
+            from db.queue.typed import load_assessment
+            from services.assessment import static_inputs
+
+            assessment = load_assessment(get_artifact, session, job.id)
+            if assessment is None:
+                raise ValueError("assessment artifact absent")
+            static_facts, predicate_trees, effects = static_inputs(assessment)
         except Exception as exc:
             record_degraded(phase="materialization_publish", exc=exc, context={"address": address})
             logger.warning(
@@ -1813,15 +1791,9 @@ class StaticWorker(BaseWorker):
                 extra={"exc_type": type(exc).__name__},
             )
             return
-        if not isinstance(static_facts, dict) or not isinstance(assessment, dict):
-            logger.info(
-                "Static stage: no materialization published for %s — facts or assessment absent",
-                address,
-            )
-            return
         from services.assessment import observation_plan
 
-        observation_plan = observation_plan(cast(Assessment, assessment))
+        observation_plan = observation_plan(assessment)
 
         chain = _parent_chain_name(job)
         request = job.request if isinstance(job.request, dict) else {}

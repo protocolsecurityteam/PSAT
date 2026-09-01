@@ -13,7 +13,7 @@ from typing import Literal
 from pydantic import JsonValue
 from typing_extensions import NotRequired, TypedDict
 
-AssessmentVersion = Literal["assessment/2"]
+AssessmentVersion = Literal["assessment/3"]
 EntityKind = Literal["account", "contract"]
 EffectKind = Literal[
     "authority.grant",

@@ -173,7 +173,7 @@ def session():
 
 def _completed_job_with_gate(session, descriptor: dict[str, Any]):
     from db.models import Job, JobStage, JobStatus
-    from db.queue import store_artifact
+    from tests.support.assessment_artifacts import store_test_assessment
 
     job = Job(
         address=_PROTECTED,
@@ -185,11 +185,11 @@ def _completed_job_with_gate(session, descriptor: dict[str, Any]):
     )
     session.add(job)
     session.flush()
-    store_artifact(
+    store_test_assessment(
         session,
         job.id,
-        "predicate_trees",
-        data={"trees": {"doThing()": {"op": "LEAF", "leaf": {"set_descriptor": descriptor}}}},
+        address=_PROTECTED,
+        predicate_trees={"trees": {"doThing()": {"op": "LEAF", "leaf": {"set_descriptor": descriptor}}}},
     )
     session.commit()
     return job
@@ -344,7 +344,7 @@ def test_enrolls_via_state_variable_controllervalue(session, monkeypatch):
 
 def _completed_job_with_two_gates(session, descriptors: list[dict[str, Any]]):
     from db.models import Job, JobStage, JobStatus
-    from db.queue import store_artifact
+    from tests.support.assessment_artifacts import store_test_assessment
 
     job = Job(
         address=_PROTECTED,
@@ -357,7 +357,7 @@ def _completed_job_with_two_gates(session, descriptors: list[dict[str, Any]]):
     session.add(job)
     session.flush()
     trees = {f"fn{i}()": {"op": "LEAF", "leaf": {"set_descriptor": d}} for i, d in enumerate(descriptors)}
-    store_artifact(session, job.id, "predicate_trees", data={"trees": trees})
+    store_test_assessment(session, job.id, address=_PROTECTED, predicate_trees={"trees": trees})
     session.commit()
     return job
 

@@ -15,6 +15,7 @@ from .views import (
     function_effect_claims,
     project_permission_index,
     static_index_view,
+    static_inputs,
 )
 
 __all__ = [
@@ -35,4 +36,5 @@ __all__ = [
     "effect_matches_by_function",
     "project_permission_index",
     "static_index_view",
+    "static_inputs",
 ]
