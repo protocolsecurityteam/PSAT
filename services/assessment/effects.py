@@ -16,14 +16,14 @@ from schemas.assessment import (
     EffectFamily,
     EffectKind,
     Evidence,
-    FunctionEffect,
-    Omission,
+    Proposition,
 )
 from services.effects.claims_bridge import verdict_to_claim
 from services.effects.config import VERDICT_PROVEN
 from services.static.claims.registry import entry_for
 
-from .ids import stable_id
+from .keys import content_key
+from .slices import remove_analysis_slice
 from .validation import checked
 
 
@@ -31,19 +31,15 @@ def _json(value: Any) -> JsonValue:
     return cast(JsonValue, json.loads(json.dumps(value, sort_keys=True, default=str)))
 
 
-def _function_ids(assessment: Assessment) -> dict[str, str]:
-    return {function["signature"]: function_id for function_id, function in assessment["functions"].items()}
-
-
-def _existing_effect_claim(assessment: Assessment, function_id: str, kind: str) -> tuple[str, Any] | None:
-    for claim_id, claim in assessment["claims"].items():
+def _existing_effect_claim(assessment: Assessment, function: str, kind: str) -> tuple[str, Any] | None:
+    for claim_key, claim in assessment["claims"].items():
         proposition = claim["proposition"]
         if (
             proposition["kind"] == "function_effect"
-            and proposition["function_id"] == function_id
-            and proposition["effect"]["kind"] == kind
+            and proposition.get("function") == function
+            and proposition.get("effect", {}).get("kind") == kind
         ):
-            return claim_id, claim
+            return claim_key, claim
     return None
 
 
@@ -56,22 +52,39 @@ def add_effects(
     """Add proven execution evidence; unknown verdicts become omissions."""
 
     result = cast(Assessment, copy.deepcopy(assessment))
-    ids_by_signature = _function_ids(result)
+    remove_analysis_slice(result, "effects.execution")
+    tier_rank = {"behavioral_observed": 4, "standard_exact": 3, "idiom_structural": 2, "policy_derived": 1}
+    for claim in result["claims"].values():
+        current_proposition = claim["proposition"]
+        if current_proposition["kind"] != "function_effect":
+            continue
+        tiers: list[str] = []
+        for evidence_key in claim["evidence"]:
+            current_evidence = result["evidence"].get(evidence_key)
+            locator = current_evidence["locator"] if current_evidence is not None else None
+            tier = locator.get("tier") if isinstance(locator, Mapping) else None
+            if isinstance(tier, str) and tier in tier_rank:
+                tiers.append(tier)
+        if tiers:
+            strongest = max(tiers, key=lambda tier: tier_rank[tier])
+            current_effect = current_proposition.get("effect")
+            if current_effect is not None:
+                claim["rule"] = f"{current_effect['kind']}/{strongest}"
     verdict_items = list(verdicts)
-    omissions: list[Omission] = []
-    claim_ids: list[str] = []
-    evidence_ids: list[str] = []
+    omissions: list[dict[str, str]] = []
+    claim_keys: list[str] = []
+    evidence_keys: list[str] = []
     completed = 0
 
     for verdict in verdict_items:
         row_id = getattr(verdict, "function_id", None)
         signature = signatures_by_function_row.get(row_id) if isinstance(row_id, int) else None
-        function_id = ids_by_signature.get(signature) if signature is not None else None
-        if function_id is None:
+        function = signature if signature in result["functions"] else None
+        if function is None:
             omissions.append(
                 {
                     "target_kind": "contract",
-                    "target_id": result["contract"]["id"],
+                    "target": result["contract"]["address"],
                     "reason": f"effect_verdict_function_not_in_contract:{row_id}",
                 }
             )
@@ -84,7 +97,7 @@ def add_effects(
             omissions.append(
                 {
                     "target_kind": "function",
-                    "target_id": function_id,
+                    "target": function,
                     "reason": str(reason or getattr(verdict, "verdict", None) or "effect_not_proven"),
                 }
             )
@@ -105,43 +118,40 @@ def add_effects(
                 "transcript_ptr": getattr(verdict, "transcript_ptr", None),
             }
         )
-        evidence_id = stable_id(
+        evidence_key = content_key(
             "evidence",
             {
-                "scope": result["scope"],
+                "contract": result["contract"],
                 "method": "execution",
-                "function_id": function_id,
+                "function": function,
                 "effect_verdict_id": getattr(verdict, "id", None),
                 "observation": observation,
             },
         )
         evidence: Evidence = {
-            "id": evidence_id,
             "method": "execution",
-            "subject": {"kind": "function", "id": function_id},
+            "subject_kind": "function",
+            "subject": function,
             "observation": observation,
-            "source": {
-                "producer": "effects.execution",
-                "version": "effects/1",
-                "locator": _json(
-                    {
-                        "effect_verdict_id": getattr(verdict, "id", None),
-                        "transcript_ptr": getattr(verdict, "transcript_ptr", None),
-                    }
-                ),
-            },
-            "scope": result["scope"],
+            "producer": "effects.execution",
+            "version": "effects/1",
+            "locator": _json(
+                {
+                    "effect_verdict_id": getattr(verdict, "id", None),
+                    "transcript_ptr": getattr(verdict, "transcript_ptr", None),
+                }
+            ),
         }
-        result["evidence"][evidence_id] = evidence
-        evidence_ids.append(evidence_id)
+        result["evidence"][evidence_key] = evidence
+        evidence_keys.append(evidence_key)
 
-        existing = _existing_effect_claim(result, function_id, kind)
+        existing = _existing_effect_claim(result, function, kind)
         if existing is not None:
-            claim_id, claim = existing
-            if evidence_id not in claim["basis"]["evidence_ids"]:
-                claim["basis"]["evidence_ids"].append(evidence_id)
-            claim["basis"]["rule"] = f"{kind}/behavioral_observed"
-            claim_ids.append(claim_id)
+            claim_key, claim = existing
+            if evidence_key not in claim["evidence"]:
+                claim["evidence"].append(evidence_key)
+            claim["rule"] = f"{kind}/behavioral_observed"
+            claim_keys.append(claim_key)
             continue
 
         entry = entry_for(kind)
@@ -151,39 +161,32 @@ def add_effects(
             "targets": [],
             "affected_functions": [],
         }
-        proposition: FunctionEffect = {
+        proposition: Proposition = {
             "kind": "function_effect",
-            "function_id": function_id,
+            "function": function,
             "effect": effect,
         }
-        claim_id = stable_id("claim", {"scope": result["scope"], "proposition": proposition})
-        result["claims"][claim_id] = {
-            "id": claim_id,
+        claim_key = content_key("claim", {"contract": result["contract"], "proposition": proposition})
+        result["claims"][claim_key] = {
             "proposition": proposition,
-            "basis": {
-                "rule": f"{kind}/behavioral_observed",
-                "evidence_ids": [evidence_id],
-                "claim_ids": [],
-            },
-            "scope": result["scope"],
+            "rule": f"{kind}/behavioral_observed",
+            "evidence": [evidence_key],
+            "claims": [],
         }
-        claim_ids.append(claim_id)
+        claim_keys.append(claim_key)
 
     status = "completed" if not omissions else ("partial" if completed else "failed")
     receipt: Analysis = {
         "detector": "effects.execution",
         "version": "effects/1",
         "status": status,
-        "coverage": {
-            "targets_total": len(verdict_items),
-            "targets_completed": completed,
-            "omissions": omissions,
-        },
+        "targets_total": len(verdict_items),
+        "targets_completed": completed,
+        "omissions": omissions,
         "diagnostics": [],
-        "claim_ids": sorted(set(claim_ids)),
-        "evidence_ids": sorted(set(evidence_ids)),
+        "claims": sorted(set(claim_keys)),
+        "evidence": sorted(set(evidence_keys)),
     }
-    result["analyses"] = [item for item in result["analyses"] if item["detector"] != "effects.execution"]
     result["analyses"].append(receipt)
     return checked(result)
 

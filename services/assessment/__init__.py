@@ -2,7 +2,6 @@
 
 from .diagnostics import add_stage_errors
 from .effects import add_effects
-from .ids import stable_id
 from .observations import add_observations
 from .policy import add_policy
 from .resolution import add_resolution
@@ -15,6 +14,7 @@ from .views import (
     effect_presence,
     function_effect_claims,
     project_permission_index,
+    static_index_view,
 )
 
 __all__ = [
@@ -34,5 +34,5 @@ __all__ = [
     "function_effect_claims",
     "effect_matches_by_function",
     "project_permission_index",
-    "stable_id",
+    "static_index_view",
 ]

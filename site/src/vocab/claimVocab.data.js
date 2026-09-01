@@ -122,6 +122,13 @@ export const CLAIM_VOCAB = {
     sentence: "changes authority",
     priority: 3,
   },
+  "transfer_policy.configure": {
+    family: "control_plane",
+    lane: "top",
+    tone: "#7a8098",
+    sentence: "configures transfer policy",
+    priority: 3,
+  },
   "authorized_caller.rotate": {
     family: "control_plane",
     lane: "top",

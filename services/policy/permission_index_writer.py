@@ -39,7 +39,6 @@ from sqlalchemy.orm import Session
 
 from db.deployment import deployment_scope
 from db.models import EffectiveFunction, EffectVerdict, FunctionPrincipal
-from services.effects import claims_bridge
 from services.policy.capability_surface import (
     capability_role_grants,
     capability_surface_openness,
@@ -158,39 +157,17 @@ def _selector_key(selector: str | None, function_name: str | None = None) -> tup
     return ((selector or "").lower(), (function_name or "").lower())
 
 
-def _capture_observed_before(
+def _capture_verdicts_before(
     session: Session,
     contract_id: int,
     deployment_address: str | None,
-) -> dict[tuple[str, str], tuple[list[Any], list[Any]]]:
-    """Observed-effect carry, capture phase. Read this deployment's *outgoing*
-    observed-effect state BEFORE the wholesale row replace deletes it, keyed by
-    selector, so the re-created rows can carry it forward.
-
-    Two sources:
-
-    - ``behavioral_observed``-tier claims already on the outgoing rows (minted by
-      the effects stage). These are the durable carrier: without carrying the
-      claims themselves, any policy-only re-run (one that does not re-run
-      effects) would blank the observed labels, which is exactly the regression
-      this carry exists to kill.
-    - Proven ``effect_verdicts`` for those rows, re-merged as the authoritative
-      source. The verdict rows survive the replace (FK is ``ON DELETE SET
-      NULL``) but come out unlinked; the carry phase relinks them to the
-      re-created rows so claim witnesses keep resolving.
-
-    Returns ``{(selector, function_name): (carried_observed_claims, proven_verdicts)}``.
-    """
-    # Older/stripped test metadata swaps in an EffectiveFunction model without the
-    # claims plane; nothing observed can exist there, so there is nothing to carry.
-    if not hasattr(EffectiveFunction, "claims"):
-        return {}
+) -> dict[tuple[str, str], list[Any]]:
+    """Capture proven verdict rows solely so the replace can relink their FK."""
     rows = (
         session.query(
             EffectiveFunction.id,
             EffectiveFunction.selector,
             EffectiveFunction.function_name,
-            EffectiveFunction.claims,
         )
         .filter(
             EffectiveFunction.contract_id == contract_id,
@@ -200,14 +177,10 @@ def _capture_observed_before(
     )
     if not rows:
         return {}
-    observed_by_selector: dict[tuple[str, str], list[Any]] = {}
     id_to_selector: dict[int, tuple[str, str]] = {}
-    for row_id, selector, function_name, claims in rows:
+    for row_id, selector, function_name in rows:
         key = _selector_key(selector, function_name)
         id_to_selector[row_id] = key
-        for claim in claims or []:
-            if isinstance(claim, dict) and claim.get("tier") == claims_bridge.OBSERVED_TIER:
-                observed_by_selector.setdefault(key, []).append(claim)
 
     verdicts_by_selector: dict[tuple[str, str], list[Any]] = {}
     verdicts = (
@@ -225,10 +198,7 @@ def _capture_observed_before(
         if key is not None:
             verdicts_by_selector.setdefault(key, []).append(verdict)
 
-    return {
-        key: (observed_by_selector.get(key, []), verdicts_by_selector.get(key, []))
-        for key in set(observed_by_selector) | set(verdicts_by_selector)
-    }
+    return verdicts_by_selector
 
 
 def write_permission_rows(
@@ -271,9 +241,7 @@ def write_permission_rows(
     """
     capability_by_function = capability_by_function or {}
 
-    # Snapshot the outgoing rows' observed-effect state before
-    # the replace destroys it, so the re-created rows carry it forward.
-    observed_before = _capture_observed_before(session, contract_id, deployment_address)
+    verdicts_before = _capture_verdicts_before(session, contract_id, deployment_address)
 
     # Replace this deployment's effective_functions wholesale, sweeping any
     # legacy untagged (NULL) rows. FunctionPrincipal rows are removed by the
@@ -397,19 +365,10 @@ def write_permission_rows(
         session.add(ef)
         session.flush()
 
-        # Observed-effect carry phase: fold the outgoing row's observed claims
-        # (and any surviving proven verdicts) back onto this re-created row so a
-        # policy-only rewrite never blanks observed labels. Only touches rows that
-        # had observed state — claim-free functions stay byte-identical.
-        carried = observed_before.get(_selector_key(ef.selector, ef.function_name))
-        if carried:
-            carried_claims, proven_verdicts = carried
-            merged_claims = claims_bridge.merge_observed_claims([*(ef.claims or []), *carried_claims], proven_verdicts)
-            ef.claims = merged_claims
-            # The replace SET-NULLed the surviving verdicts' function_id; point
-            # them at the re-created row so the convenience join stays live.
-            for verdict in proven_verdicts:
-                verdict.function_id = ef.id
+        # Relink surviving verdict facts without carrying the outgoing row's
+        # claims. Claims come only from the validated Assessment projection.
+        for verdict in verdicts_before.get(_selector_key(ef.selector, ef.function_name), []):
+            verdict.function_id = ef.id
 
         # Semantic caller-shaped principals. ``ON CONFLICT DO NOTHING`` is
         # implemented at the (function_id, address, origin, principal_type)

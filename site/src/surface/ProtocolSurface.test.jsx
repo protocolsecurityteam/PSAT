@@ -256,6 +256,19 @@ describe("ProtocolSurface — empty / loading states", () => {
     });
     expectNoCrash();
   });
+
+  it("renders function-analysis failure instead of an empty surface", async () => {
+    setFetchHandler(
+      (url) => /^\/api\/company\/etherfi$/.test(url.pathname),
+      () => ETHERFI_COMPANY_RICH,
+    );
+    setFetchHandler(
+      (url) => /\/functions$/.test(url.pathname),
+      () => new Response("unavailable", { status: 503 }),
+    );
+    render(<ProtocolSurface companyName="etherfi" />);
+    expect(await screen.findByText(/Failed: Failed to load function analysis/i)).toBeInTheDocument();
+  });
 });
 
 // A minimal two-chain protocol: 2 ethereum contracts + 1 base contract. Only

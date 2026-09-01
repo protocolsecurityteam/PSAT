@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import copy
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, cast
 
 from schemas.assessment import Assessment, Claim
 
@@ -15,7 +15,8 @@ def function_effect_claims(assessment: Assessment, effect_kind: str | None = Non
         proposition = claim["proposition"]
         if proposition["kind"] != "function_effect":
             continue
-        if effect_kind is not None and proposition["effect"]["kind"] != effect_kind:
+        effect = proposition.get("effect")
+        if effect is None or (effect_kind is not None and effect["kind"] != effect_kind):
             continue
         claims.append(claim)
     return claims
@@ -27,7 +28,8 @@ def capability_claims(assessment: Assessment, effect_kind: str | None = None) ->
         proposition = claim["proposition"]
         if proposition["kind"] != "authority_capability":
             continue
-        if effect_kind is not None and proposition["effect"]["kind"] != effect_kind:
+        effect = proposition.get("effect")
+        if effect is None or (effect_kind is not None and effect["kind"] != effect_kind):
             continue
         claims.append(claim)
     return claims
@@ -43,11 +45,10 @@ def effect_presence(assessment: Assessment, effect_kind: str, *, detector: str |
     if not receipts:
         return None
     receipt = receipts[-1]
-    coverage = receipt["coverage"]
     if (
         receipt["status"] == "completed"
-        and coverage["targets_completed"] == coverage["targets_total"]
-        and not coverage["omissions"]
+        and receipt["targets_completed"] == receipt["targets_total"]
+        and not receipt["omissions"]
     ):
         return False
     return None
@@ -56,22 +57,22 @@ def effect_presence(assessment: Assessment, effect_kind: str, *, detector: str |
 def effect_matches_by_function(assessment: Assessment) -> dict[str, list[dict[str, Any]]]:
     """Build the compact effect matches used by relational index writers."""
 
-    signatures = {function_id: function["signature"] for function_id, function in assessment["functions"].items()}
     out: dict[str, list[dict[str, Any]]] = {}
     for claim in function_effect_claims(assessment):
         proposition = claim["proposition"]
         if proposition["kind"] != "function_effect":
             continue
-        signature = signatures.get(proposition["function_id"])
-        if signature is None:
+        signature = proposition.get("function")
+        effect = proposition.get("effect")
+        if signature is None or effect is None:
             continue
-        rule = claim["basis"]["rule"]
+        rule = claim["rule"]
         tier = rule.rsplit("/", 1)[-1]
         if tier not in ("behavioral_observed", "standard_exact", "idiom_structural", "policy_derived"):
             tier = "policy_derived"
         witness: dict[str, Any] = {}
-        for evidence_id in claim["basis"]["evidence_ids"]:
-            evidence = assessment["evidence"].get(evidence_id)
+        for evidence_key in claim["evidence"]:
+            evidence = assessment["evidence"].get(evidence_key)
             if evidence is None or not isinstance(evidence["observation"], dict):
                 continue
             # Structural detail is what index writers inspect. Execution
@@ -83,10 +84,10 @@ def effect_matches_by_function(assessment: Assessment) -> dict[str, list[dict[st
                 claim_witness = evidence["observation"].get("claim_witness")
                 if isinstance(claim_witness, dict):
                     witness.update(claim_witness)
-        witness["evidence_ids"] = list(claim["basis"]["evidence_ids"])
+        witness["evidence_ids"] = list(claim["evidence"])
         out.setdefault(signature, []).append(
             {
-                "claim_id": proposition["effect"]["kind"],
+                "claim_id": effect["kind"],
                 "tier": tier,
                 "witness": witness,
             }
@@ -101,7 +102,7 @@ def project_permission_index(assessment: Assessment, permissions: Mapping[str, A
 
     projected = copy.deepcopy(dict(permissions))
     claims = effect_matches_by_function(assessment)
-    known_signatures = {function["signature"] for function in assessment["functions"].values()}
+    known_signatures = set(assessment["functions"])
     functions = projected.get("functions")
     if not isinstance(functions, list):
         return projected
@@ -114,10 +115,38 @@ def project_permission_index(assessment: Assessment, permissions: Mapping[str, A
     return projected
 
 
+def static_index_view(assessment: Assessment) -> dict[str, Any]:
+    """Project static relational indexes from validated Assessment evidence."""
+
+    for evidence in assessment["evidence"].values():
+        if evidence["producer"] != "static.facts" or not isinstance(evidence["observation"], Mapping):
+            continue
+        observation = cast(Mapping[str, Any], evidence["observation"])
+        subject_value = observation.get("subject")
+        summary_value = observation.get("summary")
+        subject = cast(Mapping[str, Any], subject_value) if isinstance(subject_value, Mapping) else {}
+        summary = cast(Mapping[str, Any], summary_value) if isinstance(summary_value, Mapping) else {}
+        roles = observation.get("role_definitions")
+        return {
+            "contract_name": subject.get("name"),
+            "source_verified": subject.get("source_verified"),
+            "control_model": summary.get("control_model"),
+            "is_upgradeable": summary.get("is_upgradeable"),
+            "is_pausable": effect_presence(assessment, "pause.set"),
+            "has_timelock": summary.get("has_timelock"),
+            "is_factory": summary.get("is_factory"),
+            "is_nft": summary.get("is_nft"),
+            "standards": list(summary.get("standards") or []),
+            "role_definitions": list(roles) if isinstance(roles, list) else [],
+        }
+    raise ValueError("Assessment has no static.facts evidence")
+
+
 __all__ = [
     "capability_claims",
     "effect_presence",
     "function_effect_claims",
     "effect_matches_by_function",
     "project_permission_index",
+    "static_index_view",
 ]

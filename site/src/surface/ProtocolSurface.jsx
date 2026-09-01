@@ -35,6 +35,7 @@ function ProtocolSurface({
   initialData = null,
   initialCoverage = null,
   initialFunctions = null,
+  initialFunctionsError = null,
   embedded = false,
 }, ref) {
   const isAdmin = useIsAdmin();
@@ -139,6 +140,13 @@ function ProtocolSurface({
     const haveFunctions = Boolean(initialFunctions);
 
     if (haveCompanyData) setCompanyData(initialData);
+    if (initialFunctionsError) {
+      setFunctionsLoading(false);
+      setError(initialFunctionsError);
+      return () => {
+        cancelled = true;
+      };
+    }
 
     // Fire both fetches in parallel — /api/company and /functions are
     // independent. /functions is the heavy one (was 120-290 ms + 2.13 MB
@@ -171,22 +179,28 @@ function ProtocolSurface({
     } else {
       setFunctionsLoading(true);
       fetch(`/api/company/${encodeURIComponent(companyName)}/functions`)
-        .then((r) => (r.ok ? r.json() : null))
+        .then((r) => {
+          if (!r.ok) throw new Error("Failed to load function analysis");
+          return r.json();
+        })
         .then((d) => {
           if (cancelled) return;
           const incoming = d && typeof d === "object" && d.functions;
-          if (incoming && Object.keys(incoming).length > 0) {
-            setLocallyFetched(incoming);
-          }
+          if (!incoming || typeof incoming !== "object") throw new Error("Invalid function analysis response");
+          setLocallyFetched(incoming);
           setFunctionsLoading(false);
         })
-        .catch(() => { if (!cancelled) setFunctionsLoading(false); });
+        .catch((err) => {
+          if (cancelled) return;
+          setFunctionsLoading(false);
+          setError(err.message || "Failed to load function analysis");
+        });
     }
 
     return () => {
       cancelled = true;
     };
-  }, [companyName, initialData, initialFunctions]);
+  }, [companyName, initialData, initialFunctions, initialFunctionsError]);
 
   const {
     scopedCompanyData,

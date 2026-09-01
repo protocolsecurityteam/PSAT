@@ -229,12 +229,12 @@ def test_materialize_contract_artifacts_threads_chain(monkeypatch):
 
     def _fake_cache(*, effective_address, bytecode_keccak, workspace_prefix, chain=None):
         captured["chain"] = chain
-        return ("Name", {"subject": {}}, {"contract_address": effective_address}, None)
+        return ("Name", {"subject": {}}, {"contract_address": effective_address}, None, None)
 
     monkeypatch.setattr(recursive, "_materialize_with_cross_process_cache", _fake_cache)
     monkeypatch.setattr("services.discovery.classifier.classify_single", lambda address, rpc_url, **_kw: None)
     monkeypatch.setattr(recursive, "observe_controllers", lambda _plan, _rpc, **_kw: {"controller_values": {}})
-    monkeypatch.setattr(recursive, "_build_permission_index", lambda _a, _s: {"functions": []})
+    monkeypatch.setattr(recursive, "_build_permission_index", lambda _a, _s, _e, _t: {"functions": []})
 
     recursive._materialize_contract_artifacts(
         "0x" + "22" * 20, "http://127.0.0.1:8545", workspace_prefix="t", chain="base"

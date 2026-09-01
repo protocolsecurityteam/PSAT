@@ -76,7 +76,7 @@ class TestAnalysisPhaseSuccess:
         names = [call["name"] for call in calls]
         assert names == ["static_facts", "assessment", "predicate_trees", "effects"]
         assert calls[0]["data"] == static_facts_data
-        assert calls[1]["data"]["schema_version"] == "assessment/1"
+        assert calls[1]["data"]["schema_version"] == "assessment/2"
         assert calls[2]["data"] == predicate_trees
         assert calls[3]["data"] == effects
 

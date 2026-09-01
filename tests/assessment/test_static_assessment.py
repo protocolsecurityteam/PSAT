@@ -101,10 +101,12 @@ def test_pause_claim_has_first_class_evidence_and_state_changing_victim() -> Non
     claim = next(iter(assessment["claims"].values()))
     proposition = claim["proposition"]
     assert proposition["kind"] == "function_effect"
-    effect = proposition["effect"]
+    effect = proposition.get("effect")
+    assert effect is not None
     assert effect["kind"] == "pause.set"
-    assert [assessment["functions"][fid]["signature"] for fid in effect["affected_functions"]] == ["withdraw()"]
-    assert claim["basis"]["evidence_ids"] == list(assessment["evidence"])
+    assert effect["affected_functions"] == ["withdraw()"]
+    assert len(claim["evidence"]) == 1
+    assert claim["evidence"][0] in assessment["evidence"]
     assert next(item for item in assessment["analyses"] if item["detector"] == "pause.set")["status"] == "completed"
     assert effect_presence(assessment, "pause.set") is True
 

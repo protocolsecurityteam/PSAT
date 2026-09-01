@@ -68,6 +68,7 @@ def _bundle(name: str = "C") -> dict[str, Any]:
         "contract_name": name,
         "static_facts": {"subject": {"address": "0xwhatever", "name": name}, "functions": []},
         "observation_plan": {"contract_address": "0xwhatever", "controllers": []},
+        "effects": {"schema_version": "semantic", "functions": {}},
         "predicate_trees": {"schema_version": "semantic", "trees": {"pause()": {"node_type": "caller"}}},
     }
 

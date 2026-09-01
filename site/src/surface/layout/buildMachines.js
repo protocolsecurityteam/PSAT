@@ -17,6 +17,7 @@ import {
   collectIndirectCallers,
 } from "./controlGraph.js";
 import { guardSummary } from "./guardSummary.js";
+import { hasClaims } from "../../vocab/claimProjection.js";
 
 export function buildMachines(companyData, functionData, { functionsLoading = false, activeChain = null } = {}) {
   // Node-type index over every contract's control_graph; used to flag
@@ -26,7 +27,7 @@ export function buildMachines(companyData, functionData, { functionsLoading = fa
   return companyData.contracts
     .map((contract) => {
       const rawFunctions = (functionData[entityKey(contract.chain, contract.address)] || [])
-        .filter((fn) => !isRoleConstant(functionName(fn.function)));
+        .filter((fn) => !isRoleConstant(functionName(fn.function)) && hasClaims(fn));
       const lanes = { top: [], left: [], right: [], ops: [] };
 
       for (const fn of rawFunctions) {

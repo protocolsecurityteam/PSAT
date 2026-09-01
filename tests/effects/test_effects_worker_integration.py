@@ -130,11 +130,11 @@ def test_flag_on_end_to_end_persists_verdicts_and_transcripts(clean_effects, mon
     assert verdict.verdict == VERDICT_PROVEN
     assert verdict.behavior_hash == "kernel_hash_A"
 
-    # The proven verdict is minted onto the function row as an observable claim.
+    # This fixture has no Assessment-owning contract job, so the verdict remains
+    # a fact and does not mint an independently writable relational claim.
     ef_row = session.query(EffectiveFunction).filter(EffectiveFunction.id == fns[CONTRACT_A]).one()
     observed = [c for c in (ef_row.claims or []) if c["tier"] == "behavioral_observed"]
-    assert [c["claim_id"] for c in observed] == ["supply.mint"]
-    assert observed[0]["witness"]["effect_verdict_id"] == verdict.id
+    assert observed == []
 
     # Transcript artifact actually persisted and resolvable.
     _job_id, _, name = cache.transcript_ptr.partition("::")

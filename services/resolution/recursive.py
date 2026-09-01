@@ -133,6 +133,7 @@ class LoadedArtifacts(TypedDict):
     observation_plan: Mapping[str, Any]
     snapshot: Mapping[str, Any]
     predicate_trees: NotRequired[dict[str, Any] | None]
+    effects: NotRequired[dict[str, Any] | None]
     permission_index: NotRequired[Mapping[str, Any] | None]
 
 
@@ -188,6 +189,8 @@ def _contract_name_for_address(address: str, chain_id: int) -> str | None:
 def _build_permission_index(
     static_facts: Mapping[str, Any],
     snapshot: ObservationBatch,
+    effects: Mapping[str, Any] | None,
+    predicate_trees: Mapping[str, Any] | None,
 ) -> dict[str, Any] | None:
     """Compute the effective-permissions payload for nested resolution."""
     # Function-scope import: the module-level form is the back-edge of the
@@ -205,6 +208,8 @@ def _build_permission_index(
                 static_facts,
                 target_snapshot=cast(dict, snapshot),
                 principal_resolution={"status": "no_authority", "reason": "No non-zero authority found"},
+                effects=effects,
+                predicate_trees=predicate_trees,
             ),
         )
     except Exception as exc:
@@ -234,16 +239,11 @@ def _build_static_artifacts(
     workspace_prefix: str,
     *,
     chain_id: int,
-) -> tuple[str, StaticFacts, ObservationPlan, dict[str, Any] | None]:
+) -> tuple[str, StaticFacts, ObservationPlan, dict[str, Any] | None, dict[str, Any] | None]:
     """Run the expensive forge+Slither+predicate pipeline for *effective_address*.
 
-    Returns ``(contract_name, static_facts, observation_plan, predicate_trees)``.
-    ``effects`` is also produced by the predicate pipeline but is not
-    plumbed back here: the recursive resolver doesn't consume it, and
-    the policy stage reads the per-job ``effects`` artifact written by
-    the static worker (propagated across same-bytecode jobs by
-    ``copy_static_cache``), so the materialization cache has no
-    consumer for it.
+    Returns ``(contract_name, static_facts, observation_plan, predicate_trees,
+    effects)``. Nested permission construction consumes both semantic inputs.
 
     Pulled out of ``_materialize_contract_artifacts`` so the cross-process
     cache can call this exact closure when it needs to populate the
@@ -256,10 +256,10 @@ def _build_static_artifacts(
     with tempfile.TemporaryDirectory(prefix=f"psat_{workspace_prefix}_") as tmp:
         project_dir = Path(tmp) / project_name
         scaffold(effective_address, result, project_dir)
-        static_facts, predicate_trees, _effects = collect_static_inputs(project_dir)
+        static_facts, predicate_trees, effects = collect_static_inputs(project_dir)
 
     plan = build_observation_plan(static_facts)
-    return contract_name, static_facts, plan, predicate_trees
+    return contract_name, static_facts, plan, predicate_trees, dict(effects) if effects is not None else None
 
 
 def _chain_name_for_materialization(chain_id: int) -> str:
@@ -274,16 +274,16 @@ def _chain_name_for_materialization(chain_id: int) -> str:
 
 
 def _widen_built(
-    built: tuple[str, StaticFacts, ObservationPlan, dict[str, Any] | None],
-) -> tuple[str, dict[str, Any], dict[str, Any], dict[str, Any] | None]:
+    built: tuple[str, StaticFacts, ObservationPlan, dict[str, Any] | None, dict[str, Any] | None],
+) -> tuple[str, dict[str, Any], dict[str, Any], dict[str, Any] | None, dict[str, Any] | None]:
     """Widen a fresh build to the mixed-provenance materialize shape.
 
     The cross-process cache serves both fresh builds (typed at the producer)
     and persisted JSONB rows (shape unverified), so its tuple stays wide; the
     fresh arm is only ever widened, never the reverse.
     """
-    name, static_facts, plan, predicate_trees = built
-    return name, cast("dict[str, Any]", static_facts), cast("dict[str, Any]", plan), predicate_trees
+    name, static_facts, plan, predicate_trees, effects = built
+    return name, cast("dict[str, Any]", static_facts), cast("dict[str, Any]", plan), predicate_trees, effects
 
 
 def _materialize_with_cross_process_cache(
@@ -292,10 +292,10 @@ def _materialize_with_cross_process_cache(
     bytecode_keccak: str | None,
     workspace_prefix: str,
     chain: str | None = None,
-) -> tuple[str, dict[str, Any], dict[str, Any], dict[str, Any] | None]:
+) -> tuple[str, dict[str, Any], dict[str, Any], dict[str, Any] | None, dict[str, Any] | None]:
     """Consult the persistent contract_materializations table; build on miss.
 
-    Returns ``(contract_name, static_facts, observation_plan, predicate_trees)``.
+    Returns ``(contract_name, static_facts, observation_plan, predicate_trees, effects)``.
     ``predicate_trees`` round-trips through the cache so mapping-writer
     enumeration stays functional on cache hits (pre-c1d2e3f4a5b6 the
     builder dropped it and downstream silently disabled enumeration).
@@ -336,7 +336,7 @@ def _materialize_with_cross_process_cache(
     def _builder() -> Mapping[str, Any]:
         built["ran"] = True
         _bump_materialize_metric("materialize_builds")
-        name, static_facts, plan, predicate_trees = _build_static_artifacts(
+        name, static_facts, plan, predicate_trees, effects = _build_static_artifacts(
             effective_address, workspace_prefix, chain_id=build_chain_id
         )
         return {
@@ -344,6 +344,7 @@ def _materialize_with_cross_process_cache(
             "static_facts": static_facts,
             "observation_plan": plan,
             "predicate_trees": predicate_trees,
+            "effects": effects,
         }
 
     def _source_hash_fn() -> str | None:
@@ -414,8 +415,10 @@ def _materialize_with_cross_process_cache(
     # ``_mapping_writer_specs_from_predicate_trees`` short-circuits.
     predicate_trees_cached = cm.hydrate_predicate_trees(row)
     predicate_trees = copy.deepcopy(predicate_trees_cached) if predicate_trees_cached else None
+    effects_cached = cm.hydrate_effects(row)
+    effects = copy.deepcopy(effects_cached) if effects_cached else None
     contract_name = row.contract_name or "Contract"
-    return contract_name, static_facts, plan, predicate_trees
+    return contract_name, static_facts, plan, predicate_trees, effects
 
 
 def _is_builder_exception(exc: BaseException) -> bool:
@@ -510,7 +513,7 @@ def _materialize_contract_artifacts(
     # ``materialize_or_wait`` ensures concurrent same-bytecode requests
     # across processes only run the builder once; the loser blocks on the
     # lock and reads the result.
-    contract_name, static_facts, plan, predicate_trees = _materialize_with_cross_process_cache(
+    contract_name, static_facts, plan, predicate_trees, effects = _materialize_with_cross_process_cache(
         effective_address=effective_address,
         bytecode_keccak=bytecode_keccak,
         workspace_prefix=workspace_prefix,
@@ -527,13 +530,14 @@ def _materialize_contract_artifacts(
         plan = {**plan, "contract_address": snapshot_address}
 
     snapshot = observe_controllers(cast(ObservationPlan, plan), rpc_url, chain_id=chain_id)
-    permission_index = _build_permission_index(static_facts, snapshot)
+    permission_index = _build_permission_index(static_facts, snapshot, effects, predicate_trees)
 
     return {
         "static_facts": static_facts,
         "observation_plan": plan,
         "snapshot": snapshot,
         "predicate_trees": predicate_trees,
+        "effects": effects,
         "permission_index": permission_index,
     }
 

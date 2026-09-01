@@ -1,7 +1,7 @@
 """Positive matcher results and detector receipts for static effects.
 
 The registry's successful matcher result is a compact internal effect match,
-then converted into canonical assessment Evidence/Basis/Claim records. ``tier``
+then converted into canonical assessment Evidence and Claim records. ``tier``
 has no heuristic/guess value:
 introducing one requires editing the Literal, registry contract, and CI gate.
 """

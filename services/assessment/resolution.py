@@ -1,4 +1,4 @@
-"""Merge resolved entities and authority relationships into an Assessment."""
+"""Merge resolved entities and relationships into an Assessment."""
 
 from __future__ import annotations
 
@@ -9,23 +9,10 @@ from typing import Any, cast
 
 from pydantic import JsonValue
 
-from schemas.assessment import (
-    Account,
-    Analysis,
-    Assessment,
-    AuthorityEdge,
-    AuthorityRelationship,
-    Basis,
-    Claim,
-    DependencyEdge,
-    Entity,
-    EntityClassification,
-    Evidence,
-    Omission,
-    Scope,
-)
+from schemas.assessment import Analysis, Assessment, Claim, Entity, Evidence, Proposition
 
-from .ids import stable_id
+from .keys import content_key, entity_key
+from .slices import prune_unreferenced_entities, remove_analysis_slice
 from .validation import checked
 
 AUTHORITY_RELATIONS = frozenset(
@@ -46,26 +33,21 @@ def _json(value: Any) -> JsonValue:
     return cast(JsonValue, json.loads(json.dumps(value, sort_keys=True, default=str)))
 
 
-def _account(chain_id: int, address: str) -> Account:
+def _entity(chain_id: int, address: str, node: Mapping[str, Any]) -> tuple[str, Entity]:
     normalized = address.lower()
-    account_id = stable_id("account", {"chain_id": chain_id, "address": normalized})
-    return {"id": account_id, "chain_id": chain_id, "address": normalized}
-
-
-def _entity(account: Account, node: Mapping[str, Any]) -> Entity:
     resolved_type = str(node.get("resolved_type") or "unknown")
     contract_types = {"safe", "timelock", "proxy_admin", "contract", "cross_chain_authority"}
     tags = [] if resolved_type in ("eoa", "contract", "unknown") else [resolved_type]
-    entity_id = stable_id("entity", {"account_id": account["id"]})
-    return {
-        "id": entity_id,
-        "account_id": account["id"],
+    key = entity_key(chain_id, normalized)
+    return key, {
+        "chain_id": chain_id,
+        "address": normalized,
         "kind": "contract" if resolved_type in contract_types else "account",
         "tags": tags,
     }
 
 
-def _node_evidence(scope: Scope, entity: Entity, node: Mapping[str, Any]) -> Evidence:
+def _node_evidence(contract: Mapping[str, Any], key: str, node: Mapping[str, Any]) -> tuple[str, Evidence]:
     observation = _json(
         {
             "resolved_type": node.get("resolved_type"),
@@ -78,45 +60,38 @@ def _node_evidence(scope: Scope, entity: Entity, node: Mapping[str, Any]) -> Evi
             "artifacts": node.get("artifacts") or {},
         }
     )
-    evidence_id = stable_id(
+    evidence_key = content_key(
         "evidence",
-        {"scope": scope, "method": "graph_resolution", "entity_id": entity["id"], "observation": observation},
+        {"contract": contract, "method": "graph_resolution", "entity": key, "observation": observation},
     )
-    return {
-        "id": evidence_id,
+    return evidence_key, {
         "method": "graph_resolution",
-        "subject": {"kind": "entity", "id": entity["id"]},
+        "subject_kind": "entity",
+        "subject": key,
         "observation": observation,
-        "source": {
-            "producer": "resolution.graph",
-            "version": "resolution/1",
-            "locator": _json({"node_id": node.get("id")}),
-        },
-        "scope": scope,
+        "producer": "resolution.graph",
+        "version": "resolution/1",
+        "locator": _json({"node_id": node.get("id")}),
     }
 
 
 def add_resolution(assessment: Assessment, graph: Mapping[str, Any], *, chain_id: int) -> Assessment:
-    """Return ``assessment`` enriched with resolved graph facts and claims."""
+    """Replace the resolution-owned evidence and claims."""
 
     result = cast(Assessment, copy.deepcopy(assessment))
+    remove_analysis_slice(result, "resolution.graph")
     root_address = graph.get("root_contract_address")
     if isinstance(root_address, str) and root_address:
-        deployment_account = _account(chain_id, root_address)
-        result["accounts"][deployment_account["id"]] = deployment_account
-        # Replace, do not mutate: static claims intentionally retain the code
-        # account scope their stable ids were minted from, while live claims use
-        # the deployment account (a proxy for implementation-context jobs).
-        result["scope"] = {**result["scope"], "account_id": deployment_account["id"]}
-    scope = result["scope"]
+        result["contract"]["deployment_address"] = root_address.lower()
+
     nodes = graph.get("nodes")
     edges = graph.get("edges")
     node_items = nodes if isinstance(nodes, list) else []
     edge_items = edges if isinstance(edges, list) else []
     node_entities: dict[str, str] = {}
-    omissions: list[Omission] = []
-    evidence_ids: list[str] = []
-    claim_ids: list[str] = []
+    omissions: list[dict[str, str]] = []
+    evidence_keys: list[str] = []
+    claim_keys: list[str] = []
 
     for node in node_items:
         if not isinstance(node, Mapping):
@@ -125,49 +100,34 @@ def add_resolution(assessment: Assessment, graph: Mapping[str, Any], *, chain_id
         address = node.get("address")
         if not isinstance(node_id, str) or not isinstance(address, str) or not address:
             continue
-        account = _account(chain_id, address)
-        entity = _entity(account, node)
-        result["accounts"][account["id"]] = account
-        result["entities"][entity["id"]] = entity
-        node_entities[node_id] = entity["id"]
-        evidence = _node_evidence(scope, entity, node)
-        result["evidence"][evidence["id"]] = evidence
-        evidence_ids.append(evidence["id"])
+        key, entity = _entity(chain_id, address, node)
+        result["entities"][key] = entity
+        node_entities[node_id] = key
+        evidence_key, evidence = _node_evidence(result["contract"], key, node)
+        result["evidence"][evidence_key] = evidence
+        evidence_keys.append(evidence_key)
 
         resolved_type = node.get("resolved_type")
         if isinstance(resolved_type, str) and resolved_type != "unknown":
-            classification_proposition: EntityClassification = {
+            proposition: Proposition = {
                 "kind": "entity_classification",
-                "entity_id": entity["id"],
+                "entity": key,
                 "entity_kind": entity["kind"],
                 "tags": entity["tags"],
             }
-            claim_id = stable_id("claim", {"scope": scope, "proposition": classification_proposition})
-            basis: Basis = {
+            claim_key = content_key("claim", {"contract": result["contract"], "proposition": proposition})
+            result["claims"][claim_key] = {
+                "proposition": proposition,
                 "rule": "resolution.entity_classification/v1",
-                "evidence_ids": [evidence["id"]],
-                "claim_ids": [],
+                "evidence": [evidence_key],
+                "claims": [],
             }
-            result["claims"][claim_id] = {
-                "id": claim_id,
-                "proposition": classification_proposition,
-                "basis": basis,
-                "scope": scope,
-            }
-            claim_ids.append(claim_id)
+            claim_keys.append(claim_key)
 
         analysis_state = node.get("analysis_state")
         if analysis_state in ("attempt_failed", "beyond_depth_horizon"):
-            omissions.append(
-                {
-                    "target_kind": "entity",
-                    "target_id": entity["id"],
-                    "reason": str(analysis_state),
-                }
-            )
+            omissions.append({"target_kind": "entity", "target": key, "reason": str(analysis_state)})
 
-    authority_edges: list[AuthorityEdge] = []
-    dependency_edges: list[DependencyEdge] = []
     for index, edge in enumerate(edge_items):
         if not isinstance(edge, Mapping):
             continue
@@ -178,7 +138,7 @@ def add_resolution(assessment: Assessment, graph: Mapping[str, Any], *, chain_id
             omissions.append(
                 {
                     "target_kind": "contract",
-                    "target_id": result["contract"]["id"],
+                    "target": result["contract"]["deployment_address"],
                     "reason": f"unresolved_graph_edge:{index}",
                 }
             )
@@ -193,91 +153,56 @@ def add_resolution(assessment: Assessment, graph: Mapping[str, Any], *, chain_id
                 "notes": edge.get("notes") or [],
             }
         )
-        evidence_id = stable_id(
+        evidence_key = content_key(
             "evidence",
-            {"scope": scope, "method": "graph_resolution", "edge": observation},
+            {"contract": result["contract"], "method": "graph_resolution", "edge": observation},
         )
         edge_evidence: Evidence = {
-            "id": evidence_id,
             "method": "graph_resolution",
-            "subject": {"kind": "entity", "id": from_entity},
+            "subject_kind": "entity",
+            "subject": from_entity,
             "observation": observation,
-            "source": {
-                "producer": "resolution.graph",
-                "version": str(graph.get("schema_version") or "resolution/legacy"),
-                "locator": _json({"edge_index": index}),
-            },
-            "scope": scope,
+            "producer": "resolution.graph",
+            "version": str(graph.get("schema_version") or "resolution/1"),
+            "locator": _json({"edge_index": index}),
         }
-        result["evidence"][evidence_id] = edge_evidence
-        evidence_ids.append(evidence_id)
+        result["evidence"][evidence_key] = edge_evidence
+        evidence_keys.append(evidence_key)
 
         if relation in AUTHORITY_RELATIONS:
-            # Stored graph direction is controlled -> authority. The canonical
-            # proposition names that semantic direction explicitly.
-            proposition: AuthorityRelationship = {
+            proposition = {
                 "kind": "authority_relationship",
-                "authority": {"kind": "entity", "entity_id": to_entity},
-                "target_id": from_entity,
+                "authority": {"kind": "entity", "entity": to_entity},
+                "target": from_entity,
                 "relationship": relation,
             }
-            claim_id = stable_id("claim", {"scope": scope, "proposition": proposition})
+            claim_key = content_key("claim", {"contract": result["contract"], "proposition": proposition})
             claim: Claim = {
-                "id": claim_id,
-                "proposition": proposition,
-                "basis": {
-                    "rule": f"resolution.{relation}/v1",
-                    "evidence_ids": [evidence_id],
-                    "claim_ids": [],
-                },
-                "scope": scope,
+                "proposition": cast(Proposition, proposition),
+                "rule": f"resolution.{relation}/v1",
+                "evidence": [evidence_key],
+                "claims": [],
             }
-            result["claims"][claim_id] = claim
-            claim_ids.append(claim_id)
-            authority_edges.append(
-                {
-                    "authority_id": to_entity,
-                    "target_id": from_entity,
-                    "relationship": relation,
-                    "claim_id": claim_id,
-                }
-            )
-        elif relation in DEPENDENCY_RELATIONS:
-            dependency_edges.append(
-                {
-                    "source_id": from_entity,
-                    "target_id": to_entity,
-                    "relationship": relation,
-                    "evidence_ids": [evidence_id],
-                }
-            )
-        else:
+            result["claims"][claim_key] = claim
+            claim_keys.append(claim_key)
+        elif relation not in DEPENDENCY_RELATIONS:
             omissions.append(
-                {
-                    "target_kind": "entity",
-                    "target_id": from_entity,
-                    "reason": f"unattributed_graph_relation:{relation}",
-                }
+                {"target_kind": "entity", "target": from_entity, "reason": f"unattributed_graph_relation:{relation}"}
             )
 
-    result["authority_edges"] = authority_edges
-    result["dependency_edges"] = dependency_edges
-    status = "completed" if not omissions else "partial"
     receipt: Analysis = {
         "detector": "resolution.graph",
-        "version": str(graph.get("schema_version") or "resolution/legacy"),
-        "status": status,
-        "coverage": {
-            "targets_total": len(node_items) + len(edge_items),
-            "targets_completed": len(node_items) + len(edge_items) - len(omissions),
-            "omissions": omissions,
-        },
+        "version": str(graph.get("schema_version") or "resolution/1"),
+        "status": "completed" if not omissions else "partial",
+        "targets_total": len(node_items) + len(edge_items),
+        "targets_completed": len(node_items) + len(edge_items) - len(omissions),
+        "omissions": omissions,
         "diagnostics": [],
-        "claim_ids": sorted(set(claim_ids)),
-        "evidence_ids": sorted(set(evidence_ids)),
+        "claims": sorted(set(claim_keys)),
+        "evidence": sorted(set(evidence_keys)),
     }
-    result["analyses"] = [item for item in result["analyses"] if item["detector"] != "resolution.graph"]
     result["analyses"].append(receipt)
+    prune_unreferenced_entities(result)
     return checked(result)
 
 

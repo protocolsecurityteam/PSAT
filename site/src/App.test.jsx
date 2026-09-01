@@ -48,6 +48,10 @@ function installDefaultApiMocks() {
     (url) => url.pathname === "/api/company/etherfi",
     () => ETHERFI_COMPANY,
   );
+  setFetchHandler(
+    (url) => /^\/api\/company\/[^/]+\/functions$/.test(url.pathname),
+    () => ({ functions: {} }),
+  );
   setFetchHandler(/^\/api\/monitored-contracts/, () => ({ items: [] }));
   setFetchHandler(/^\/api\/address_labels$/, () => ({ labels: {} }));
   setFetchHandler(

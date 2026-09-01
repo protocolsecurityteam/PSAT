@@ -16,10 +16,8 @@ from typing import Any, cast
 from pydantic import JsonValue
 
 from schemas.assessment import (
-    Account,
     Analysis,
     Assessment,
-    Basis,
     Claim,
     Contract,
     Controller,
@@ -27,45 +25,22 @@ from schemas.assessment import (
     Effect,
     EffectFamily,
     EffectKind,
-    EffectTarget,
     Evidence,
     EvidenceMethod,
     Function,
-    FunctionEffect,
-    Omission,
-    Scope,
+    Proposition,
 )
 from services.static.claims.matchers import discover
 from services.static.claims.registry import entry_for, is_registered
 
-from .ids import stable_id
+from .keys import content_key, entity_key
 from .validation import checked
 
 
 def _json(value: Any) -> JsonValue:
-    """Normalize legacy analyzer values to the JSON domain once, at ingress."""
+    """Normalize analyzer values to the JSON domain once, at ingress."""
 
     return cast(JsonValue, json.loads(json.dumps(value, sort_keys=True, default=str)))
-
-
-def _account_id(chain_id: int, address: str) -> str:
-    return stable_id("account", {"chain_id": chain_id, "address": address.lower()})
-
-
-def _contract_id(chain_id: int, address: str, code_hash: str | None, source_hash: str | None) -> str:
-    return stable_id(
-        "contract",
-        {
-            "chain_id": chain_id,
-            "address": address.lower(),
-            "code_hash": code_hash,
-            "source_hash": source_hash,
-        },
-    )
-
-
-def _function_id(contract_id: str, signature: str, selector: str | None) -> str:
-    return stable_id("function", {"contract_id": contract_id, "signature": signature, "selector": selector})
 
 
 def _selector(info: Mapping[str, Any]) -> str | None:
@@ -73,30 +48,24 @@ def _selector(info: Mapping[str, Any]) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def _functions(contract_id: str, effects: Mapping[str, Any]) -> tuple[dict[str, Function], dict[str, str]]:
+def _functions(effects: Mapping[str, Any]) -> dict[str, Function]:
     raw_functions = effects.get("functions")
     if not isinstance(raw_functions, Mapping):
-        return {}, {}
+        return {}
     functions: dict[str, Function] = {}
-    ids_by_signature: dict[str, str] = {}
     for signature, raw in sorted(raw_functions.items(), key=lambda item: str(item[0])):
         if not isinstance(signature, str) or not isinstance(raw, Mapping):
             continue
         selector = _selector(raw)
-        function_id = _function_id(contract_id, signature, selector)
         state_changing = raw.get("state_changing")
-        functions[function_id] = {
-            "id": function_id,
-            "contract_id": contract_id,
-            "signature": signature,
+        functions[signature] = {
             "selector": selector,
             "state_changing": state_changing if isinstance(state_changing, bool) else None,
         }
-        ids_by_signature[signature] = function_id
-    return functions, ids_by_signature
+    return functions
 
 
-def _controllers(contract_id: str, static_facts: Mapping[str, Any]) -> dict[str, Controller]:
+def _controllers(static_facts: Mapping[str, Any]) -> dict[str, Controller]:
     raw_controllers = static_facts.get("controller_tracking")
     if not isinstance(raw_controllers, list):
         return {}
@@ -107,11 +76,7 @@ def _controllers(contract_id: str, static_facts: Mapping[str, Any]) -> dict[str,
         local_id = raw.get("controller_id")
         if not isinstance(local_id, str) or not local_id:
             continue
-        controller_id = stable_id("controller", {"contract_id": contract_id, "controller_id": local_id})
-        controllers[controller_id] = {
-            "id": controller_id,
-            "contract_id": contract_id,
-            "key": local_id,
+        controllers[local_id] = {
             "label": str(raw.get("label") or local_id),
             "kind": str(raw.get("kind") or "unknown"),
             "source": _json(raw.get("source")),
@@ -198,17 +163,16 @@ def _pause_victims(
     witness: Mapping[str, Any],
     reads_by_signature: Mapping[str, set[tuple[str, str | None]]],
     functions: Mapping[str, Function],
-    ids_by_signature: Mapping[str, str],
 ) -> list[str]:
     recorded = witness.get("affected_functions")
     if isinstance(recorded, list):
         return sorted(
             {
-                function_id
+                signature
                 for signature in recorded
                 if isinstance(signature, str)
-                and (function_id := ids_by_signature.get(signature)) is not None
-                and functions[function_id]["state_changing"] is True
+                and signature in functions
+                and functions[signature]["state_changing"] is True
             }
         )
     flags = _pause_flags(witness)
@@ -216,21 +180,20 @@ def _pause_victims(
         return []
     victims: list[str] = []
     for signature, reads in reads_by_signature.items():
-        function_id = ids_by_signature.get(signature)
-        function = functions.get(function_id) if function_id is not None else None
+        function = functions.get(signature)
         if function is None or function["state_changing"] is not True:
             continue
         if any(_pair_matches(flag, read) for flag in flags for read in reads):
-            victims.append(function["id"])
+            victims.append(signature)
     return sorted(set(victims))
 
 
-def _effect_targets(info: Mapping[str, Any], witness: Mapping[str, Any]) -> list[EffectTarget]:
+def _effect_targets(info: Mapping[str, Any], witness: Mapping[str, Any]) -> list[dict[str, str]]:
     flags = _pause_flags(witness)
     if flags:
-        flag_targets: list[EffectTarget] = []
+        flag_targets: list[dict[str, str]] = []
         for variable, member in sorted(flags, key=lambda pair: (pair[0], pair[1] or "")):
-            target: EffectTarget = {
+            target = {
                 "kind": "state",
                 "value": variable,
             }
@@ -243,7 +206,7 @@ def _effect_targets(info: Mapping[str, Any], witness: Mapping[str, Any]) -> list
     state_names: set[str] = set()
     if isinstance(writes, list):
         state_names = {str(write.get("var")) for write in writes if isinstance(write, Mapping) and write.get("var")}
-    targets: list[EffectTarget] = []
+    targets: list[dict[str, str]] = []
     for name in sorted(state_names):
         targets.append({"kind": "state", "value": name})
     sinks = info.get("sinks")
@@ -272,11 +235,10 @@ def _evidence_method(tier: object) -> EvidenceMethod:
 
 def _claims_and_evidence(
     *,
-    scope: Scope,
+    contract: Contract,
     effects: Mapping[str, Any],
     predicate_trees: Mapping[str, Any],
     functions: Mapping[str, Function],
-    ids_by_signature: Mapping[str, str],
 ) -> tuple[dict[str, Claim], dict[str, Evidence], dict[str, list[str]]]:
     raw_functions = effects.get("functions")
     if not isinstance(raw_functions, Mapping):
@@ -284,13 +246,12 @@ def _claims_and_evidence(
     reads = _reads_by_function(predicate_trees)
     claims: dict[str, Claim] = {}
     evidence: dict[str, Evidence] = {}
-    claim_ids_by_kind: dict[str, list[str]] = {}
+    claim_keys_by_kind: dict[str, list[str]] = {}
 
     for signature, info in sorted(raw_functions.items(), key=lambda item: str(item[0])):
         if not isinstance(signature, str) or not isinstance(info, Mapping):
             continue
-        function_id = ids_by_signature.get(signature)
-        if function_id is None:
+        if signature not in functions:
             continue
         raw_claims = info.get("claims")
         if not isinstance(raw_claims, list):
@@ -306,66 +267,54 @@ def _claims_and_evidence(
             registry_entry = entry_for(kind)
             method = _evidence_method(tier)
             observation = _json(witness)
-            evidence_id = stable_id(
+            evidence_key = content_key(
                 "evidence",
                 {
-                    "scope": scope,
+                    "contract": contract,
                     "method": method,
-                    "function_id": function_id,
+                    "function": signature,
                     "claim": kind,
                     "observation": observation,
                 },
             )
-            evidence[evidence_id] = {
-                "id": evidence_id,
+            evidence[evidence_key] = {
                 "method": method,
-                "subject": {"kind": "function", "id": function_id},
+                "subject_kind": "function",
+                "subject": signature,
                 "observation": observation,
-                "source": {
-                    "producer": f"static.claims.{kind}",
-                    "version": str(effects.get("claims_schema_version") or "claims/legacy"),
-                    "locator": _json({"function": signature, "tier": tier}),
-                },
-                "scope": scope,
+                "producer": f"static.claims.{kind}",
+                "version": str(effects.get("claims_schema_version") or "claims/1"),
+                "locator": _json({"function": signature, "tier": tier}),
             }
-            affected = (
-                _pause_victims(witness, reads, functions, ids_by_signature)
-                if kind in ("pause.set", "pause.unset")
-                else []
-            )
+            affected = _pause_victims(witness, reads, functions) if kind in ("pause.set", "pause.unset") else []
             effect: Effect = {
                 "kind": cast(EffectKind, kind),
                 "family": cast(EffectFamily, registry_entry.consumer_family),
                 "targets": _effect_targets(info, witness),
                 "affected_functions": affected,
             }
-            proposition: FunctionEffect = {
+            proposition: Proposition = {
                 "kind": "function_effect",
-                "function_id": function_id,
+                "function": signature,
                 "effect": effect,
             }
-            basis: Basis = {
-                "rule": f"{kind}/{tier}",
-                "evidence_ids": [evidence_id],
-                "claim_ids": [],
-            }
-            claim_id = stable_id("claim", {"scope": scope, "proposition": proposition})
-            claims[claim_id] = {
-                "id": claim_id,
+            claim_key = content_key("claim", {"contract": contract, "proposition": proposition})
+            claims[claim_key] = {
                 "proposition": proposition,
-                "basis": basis,
-                "scope": scope,
+                "rule": f"{kind}/{tier}",
+                "evidence": [evidence_key],
+                "claims": [],
             }
-            claim_ids_by_kind.setdefault(kind, []).append(claim_id)
+            claim_keys_by_kind.setdefault(kind, []).append(claim_key)
 
-    return claims, evidence, claim_ids_by_kind
+    return claims, evidence, claim_keys_by_kind
 
 
 def _claim_analyses(
     *,
     effects: Mapping[str, Any],
-    ids_by_signature: Mapping[str, str],
-    claim_ids_by_kind: Mapping[str, list[str]],
+    functions: Mapping[str, Function],
+    claim_keys_by_kind: Mapping[str, list[str]],
     evidence: Mapping[str, Evidence],
     predicate_trees_ok: bool,
 ) -> list[Analysis]:
@@ -385,34 +334,34 @@ def _claim_analyses(
                 "code": str(raw.get("exc_type") or "ClaimMatcherError"),
                 "message": str(raw.get("message") or "claim matcher failed"),
             }
-            if isinstance(signature, str) and signature in ids_by_signature:
+            if isinstance(signature, str) and signature in functions:
                 diagnostic["target_kind"] = "function"
-                diagnostic["target_id"] = ids_by_signature[signature]
+                diagnostic["target"] = signature
             diagnostics_by_kind.setdefault(kind, []).append(diagnostic)
 
     evidence_by_claim_kind: dict[str, list[str]] = {}
-    for evidence_id, item in evidence.items():
-        producer = item["source"]["producer"]
+    for evidence_key, item in evidence.items():
+        producer = item["producer"]
         if producer.startswith("static.claims."):
-            evidence_by_claim_kind.setdefault(producer.removeprefix("static.claims."), []).append(evidence_id)
+            evidence_by_claim_kind.setdefault(producer.removeprefix("static.claims."), []).append(evidence_key)
 
     analyses: list[Analysis] = []
     if isinstance(raw_analyses, Mapping):
         for kind, raw in sorted(raw_analyses.items(), key=lambda item: str(item[0])):
             if not isinstance(kind, str) or not isinstance(raw, Mapping):
                 continue
-            omissions: list[Omission] = []
+            omissions: list[dict[str, str]] = []
             raw_omissions = raw.get("omissions")
             if isinstance(raw_omissions, list):
                 for omission in raw_omissions:
                     if not isinstance(omission, Mapping):
                         continue
                     signature = omission.get("function")
-                    if isinstance(signature, str) and signature in ids_by_signature:
+                    if isinstance(signature, str) and signature in functions:
                         omissions.append(
                             {
                                 "target_kind": "function",
-                                "target_id": ids_by_signature[signature],
+                                "target": signature,
                                 "reason": str(omission.get("reason") or "claim_matcher_omitted"),
                             }
                         )
@@ -422,25 +371,23 @@ def _claim_analyses(
             completed = raw.get("targets_completed")
             if kind in ("pause.set", "pause.unset") and not predicate_trees_ok:
                 status = "failed"
-                total = len(ids_by_signature)
+                total = len(functions)
                 completed = 0
                 omissions = [
-                    {"target_kind": "function", "target_id": function_id, "reason": "predicate_trees_unavailable"}
-                    for function_id in ids_by_signature.values()
+                    {"target_kind": "function", "target": signature, "reason": "predicate_trees_unavailable"}
+                    for signature in functions
                 ]
             analyses.append(
                 {
                     "detector": kind,
-                    "version": str(effects.get("claims_schema_version") or "claims/legacy"),
+                    "version": str(effects.get("claims_schema_version") or "claims/1"),
                     "status": status if status in ("completed", "partial", "failed") else "partial",
-                    "coverage": {
-                        "targets_total": total if isinstance(total, int) else len(ids_by_signature),
-                        "targets_completed": completed if isinstance(completed, int) else 0,
-                        "omissions": omissions,
-                    },
+                    "targets_total": total if isinstance(total, int) else len(functions),
+                    "targets_completed": completed if isinstance(completed, int) else 0,
+                    "omissions": omissions,
                     "diagnostics": diagnostics_by_kind.get(kind, []),
-                    "claim_ids": sorted(claim_ids_by_kind.get(kind, [])),
-                    "evidence_ids": sorted(evidence_by_claim_kind.get(kind, [])),
+                    "claims": sorted(claim_keys_by_kind.get(kind, [])),
+                    "evidence": sorted(evidence_by_claim_kind.get(kind, [])),
                 }
             )
     return analyses
@@ -461,48 +408,64 @@ def build_static_assessment(
 
     discover()
     normalized_address = address.lower()
-    account_id = _account_id(chain_id, normalized_address)
-    contract_id = _contract_id(chain_id, normalized_address, code_hash, source_hash)
-    account: Account = {"id": account_id, "chain_id": chain_id, "address": normalized_address}
     contract: Contract = {
-        "id": contract_id,
-        "account_id": account_id,
+        "chain_id": chain_id,
+        "address": normalized_address,
+        "deployment_address": normalized_address,
         "name": contract_name,
         "code_hash": code_hash,
         "source_hash": source_hash,
     }
-    scope: Scope = {
-        "contract_id": contract_id,
-        "account_id": account_id,
-        "code_hash": code_hash,
-        "source_hash": source_hash,
-    }
-    functions, ids_by_signature = _functions(contract_id, effects)
-    controllers = _controllers(contract_id, static_facts)
-    root_entity_id = stable_id("entity", {"account_id": account_id})
-    claims, evidence, claim_ids_by_kind = _claims_and_evidence(
-        scope=scope,
+    functions = _functions(effects)
+    controllers = _controllers(static_facts)
+    root_entity_key = entity_key(chain_id, normalized_address)
+    claims, evidence, claim_keys_by_kind = _claims_and_evidence(
+        contract=contract,
         effects=effects,
         predicate_trees=predicate_trees,
         functions=functions,
-        ids_by_signature=ids_by_signature,
     )
+    static_observation = _json(
+        {
+            "subject": static_facts.get("subject") or {},
+            "summary": static_facts.get("summary") or {},
+            "role_definitions": (
+                (static_facts.get("semantic_control") or {}).get("role_definitions")
+                if isinstance(static_facts.get("semantic_control"), Mapping)
+                else []
+            )
+            or [],
+        }
+    )
+    static_evidence_key = content_key(
+        "evidence",
+        {"contract": contract, "method": "static_ir", "producer": "static.facts", "observation": static_observation},
+    )
+    evidence[static_evidence_key] = {
+        "method": "static_ir",
+        "subject_kind": "contract",
+        "subject": normalized_address,
+        "observation": static_observation,
+        "producer": "static.facts",
+        "version": str(static_facts.get("schema_version") or "static/1"),
+        "locator": _json({"section": "summary"}),
+    }
     predicate_trees_ok = "error" not in predicate_trees and isinstance(predicate_trees.get("trees"), Mapping)
     analyses = _claim_analyses(
         effects=effects,
-        ids_by_signature=ids_by_signature,
-        claim_ids_by_kind=claim_ids_by_kind,
+        functions=functions,
+        claim_keys_by_kind=claim_keys_by_kind,
         evidence=evidence,
         predicate_trees_ok=predicate_trees_ok,
     )
     effects_ok = "error" not in effects and isinstance(effects.get("functions"), Mapping)
-    facts_omissions: list[Omission] = []
+    facts_omissions: list[dict[str, str]] = []
     facts_diagnostics: list[Diagnostic] = []
     if not predicate_trees_ok:
         facts_omissions.append(
             {
                 "target_kind": "contract",
-                "target_id": contract_id,
+                "target": normalized_address,
                 "reason": "predicate_trees_unavailable",
             }
         )
@@ -512,14 +475,14 @@ def build_static_assessment(
                 "code": "PredicateTreesUnavailable",
                 "message": str(predicate_trees.get("error") or "predicate tree artifact is absent or invalid"),
                 "target_kind": "contract",
-                "target_id": contract_id,
+                "target": normalized_address,
             }
         )
     if not effects_ok:
         facts_omissions.append(
             {
                 "target_kind": "contract",
-                "target_id": contract_id,
+                "target": normalized_address,
                 "reason": "effects_unavailable",
             }
         )
@@ -529,41 +492,35 @@ def build_static_assessment(
                 "code": "EffectsUnavailable",
                 "message": str(effects.get("error") or "effects artifact is absent or invalid"),
                 "target_kind": "contract",
-                "target_id": contract_id,
+                "target": normalized_address,
             }
         )
     facts_status = "completed" if not facts_omissions else ("partial" if predicate_trees_ok or effects_ok else "failed")
     facts_receipt: Analysis = {
         "detector": "static.facts",
-        "version": str(effects.get("schema_version") or predicate_trees.get("schema_version") or "static/legacy"),
+        "version": str(effects.get("schema_version") or predicate_trees.get("schema_version") or "static/1"),
         "status": facts_status,
-        "coverage": {
-            "targets_total": 2,
-            "targets_completed": int(predicate_trees_ok) + int(effects_ok),
-            "omissions": facts_omissions,
-        },
+        "targets_total": 2,
+        "targets_completed": int(predicate_trees_ok) + int(effects_ok),
+        "omissions": facts_omissions,
         "diagnostics": facts_diagnostics,
-        "claim_ids": [],
-        "evidence_ids": [],
+        "claims": [],
+        "evidence": [static_evidence_key],
     }
     analyses.insert(0, facts_receipt)
     assessment: Assessment = {
-        "schema_version": "assessment/1",
-        "scope": scope,
-        "accounts": {account_id: account},
+        "schema_version": "assessment/2",
         "contract": contract,
         "functions": functions,
         "controllers": controllers,
         "entities": {
-            root_entity_id: {
-                "id": root_entity_id,
-                "account_id": account_id,
+            root_entity_key: {
+                "chain_id": chain_id,
+                "address": normalized_address,
                 "kind": "contract",
                 "tags": [],
             }
         },
-        "authority_edges": [],
-        "dependency_edges": [],
         "claims": claims,
         "evidence": evidence,
         "analyses": analyses,

@@ -120,4 +120,21 @@ def include_object(obj, name, type_, reflected, compare_to) -> bool:
     """
     if type_ == "table" and (obj.info or {}).get("is_view"):
         return False
+    retired_columns = {
+        ("jobs", "analysis_schema_version"),
+        ("contract_materializations", "analysis_schema_version"),
+        ("contract_materializations", "analysis"),
+        ("contract_materializations", "tracking_plan"),
+        ("contract_materializations", "analysis_blob_key"),
+        ("contract_materializations", "tracking_plan_blob_key"),
+        ("effect_behavior_cache", "analysis_schema_version"),
+        ("effective_functions", "effect_labels"),
+        ("effective_functions", "effect_targets"),
+        ("effective_functions", "action_summary"),
+        ("control_graph_nodes", "analyzed"),
+    }
+    if type_ == "column" and reflected and compare_to is None:
+        table = getattr(getattr(obj, "table", None), "name", None)
+        if (table, name) in retired_columns:
+            return False
     return True

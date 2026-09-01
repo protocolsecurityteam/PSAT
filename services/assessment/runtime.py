@@ -18,10 +18,9 @@ def _list(value: object) -> list[Any]:
 
 
 def contract_subject(assessment: Assessment) -> dict[str, Any]:
-    account = assessment["accounts"][assessment["scope"]["account_id"]]
     return {
         "subject": {
-            "address": account["address"],
+            "address": assessment["contract"]["deployment_address"],
             "name": assessment["contract"]["name"],
         }
     }
@@ -30,9 +29,8 @@ def contract_subject(assessment: Assessment) -> dict[str, Any]:
 def observation_plan(assessment: Assessment) -> dict[str, Any]:
     """Compile controller read/watch instructions without another wire type."""
 
-    account = assessment["accounts"][assessment["scope"]["account_id"]]
     tracked: list[dict[str, Any]] = []
-    for controller in assessment["controllers"].values():
+    for controller_key, controller in assessment["controllers"].items():
         tracking = controller["tracking"] if isinstance(controller["tracking"], Mapping) else {}
         events = _list(tracking.get("associated_events"))
         writers = [
@@ -47,7 +45,7 @@ def observation_plan(assessment: Assessment) -> dict[str, Any]:
         elif mode == "manual_review":
             cadence = "periodic_reconciliation"
         item: dict[str, Any] = {
-            "controller_id": controller["key"],
+            "controller_id": controller_key,
             "label": controller["label"],
             "source": controller["source"],
             "kind": controller["kind"],
@@ -56,7 +54,7 @@ def observation_plan(assessment: Assessment) -> dict[str, Any]:
             "event_watch": (
                 {
                     "transport": "wss_logs",
-                    "contract_address": account["address"],
+                    "contract_address": assessment["contract"]["deployment_address"],
                     "events": events,
                     "writer_functions": writers,
                 }
@@ -64,7 +62,7 @@ def observation_plan(assessment: Assessment) -> dict[str, Any]:
                 else None
             ),
             "polling_fallback": {
-                "contract_address": account["address"],
+                "contract_address": assessment["contract"]["deployment_address"],
                 "polling_sources": _list(tracking.get("polling_sources")),
                 "cadence": cadence,
                 "notes": _list(tracking.get("notes")),
@@ -77,7 +75,7 @@ def observation_plan(assessment: Assessment) -> dict[str, Any]:
         tracked.append(item)
     return {
         "schema_version": assessment["schema_version"],
-        "contract_address": account["address"],
+        "contract_address": assessment["contract"]["deployment_address"],
         "contract_name": assessment["contract"]["name"],
         "tracking_strategy": "event_first_with_polling_fallback",
         "tracked_controllers": sorted(tracked, key=lambda item: str(item["label"])),
@@ -87,22 +85,20 @@ def observation_plan(assessment: Assessment) -> dict[str, Any]:
 def controller_observations(assessment: Assessment) -> dict[str, Any]:
     """Project successful observation evidence for runtime policy evaluation."""
 
-    account = assessment["accounts"][assessment["scope"]["account_id"]]
     controllers = assessment["controllers"]
     values: dict[str, dict[str, Any]] = {}
     block_number = 0
     for evidence in assessment["evidence"].values():
-        subject = evidence["subject"]
-        if subject["kind"] != "controller" or evidence["source"]["producer"] != "resolution.observation":
+        if evidence["subject_kind"] != "controller" or evidence["producer"] != "resolution.observation":
             continue
-        controller = controllers.get(subject["id"])
+        controller = controllers.get(evidence["subject"])
         observation = evidence["observation"]
         if controller is None or not isinstance(observation, Mapping):
             continue
         observed_block = observation.get("block_number")
         if isinstance(observed_block, int):
             block_number = max(block_number, observed_block)
-        values[controller["key"]] = {
+        values[evidence["subject"]] = {
             "source": controller["source"],
             "value": observation.get("value"),
             "block_number": observed_block,
@@ -117,7 +113,7 @@ def controller_observations(assessment: Assessment) -> dict[str, Any]:
         }
     return {
         "schema_version": assessment["schema_version"],
-        "contract_address": account["address"],
+        "contract_address": assessment["contract"]["deployment_address"],
         "contract_name": assessment["contract"]["name"],
         "block_number": block_number,
         "controller_values": values,
@@ -129,23 +125,21 @@ def control_graph(assessment: Assessment) -> dict[str, Any]:
 
     entity_nodes: dict[str, dict[str, Any]] = {}
     for evidence in assessment["evidence"].values():
-        subject = evidence["subject"]
-        if subject["kind"] != "entity" or evidence["source"]["producer"] != "resolution.graph":
+        if evidence["subject_kind"] != "entity" or evidence["producer"] != "resolution.graph":
             continue
         observation = evidence["observation"]
-        locator = evidence["source"]["locator"]
+        locator = evidence["locator"]
         if not isinstance(observation, Mapping) or not isinstance(locator, Mapping) or "node_id" not in locator:
             continue
-        entity = assessment["entities"].get(subject["id"])
+        entity = assessment["entities"].get(evidence["subject"])
         if entity is None:
             continue
-        account = assessment["accounts"][entity["account_id"]]
-        entity_nodes[entity["id"]] = {
+        entity_nodes[evidence["subject"]] = {
             "id": str(locator["node_id"]),
-            "address": account["address"],
+            "address": entity["address"],
             "node_type": observation.get("node_type") or entity["kind"],
             "resolved_type": observation.get("resolved_type") or "unknown",
-            "label": observation.get("label") or account["address"],
+            "label": observation.get("label") or entity["address"],
             "contract_name": observation.get("contract_name"),
             "depth": observation.get("depth") or 0,
             "analysis_state": observation.get("analysis_state"),
@@ -155,7 +149,7 @@ def control_graph(assessment: Assessment) -> dict[str, Any]:
 
     edges: list[dict[str, Any]] = []
     for evidence in assessment["evidence"].values():
-        if evidence["source"]["producer"] != "resolution.graph":
+        if evidence["producer"] != "resolution.graph":
             continue
         observation = evidence["observation"]
         if not isinstance(observation, Mapping) or "from_entity" not in observation:
@@ -175,10 +169,9 @@ def control_graph(assessment: Assessment) -> dict[str, Any]:
             }
         )
 
-    root_account = assessment["accounts"][assessment["scope"]["account_id"]]
     return {
         "schema_version": assessment["schema_version"],
-        "root_contract_address": root_account["address"],
+        "root_contract_address": assessment["contract"]["deployment_address"],
         "max_depth": max((int(node["depth"]) for node in entity_nodes.values()), default=0),
         "nodes": list(entity_nodes.values()),
         "edges": edges,

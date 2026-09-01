@@ -50,6 +50,7 @@ OTHER_KECCAK = "0x" + "22" * 32
 ANALYSIS = {"subject": {"address": ADDR, "name": "C"}, "functions": []}
 PLAN = {"contract_address": ADDR, "tracked_controllers": []}
 TREES = {"schema_version": "semantic", "trees": {}}
+EFFECTS = {"schema_version": "semantic", "functions": {}}
 ASSESSMENT = _assessment(static_facts=_minimal_static_facts(address=ADDR, name="C"))
 
 
@@ -82,6 +83,7 @@ def _publish(**overrides: Any) -> str:
         "static_facts": ANALYSIS,
         "observation_plan": PLAN,
         "predicate_trees": TREES,
+        "effects": EFFECTS,
         "source_content_hash": "0x" + "de" * 32,
         "provenance": build_provenance(PRODUCED_BY_PIPELINE, source_job_id="job-1"),
     }
@@ -120,6 +122,7 @@ def test_publish_writes_a_current_row_with_provenance(cm_db):
     assert row.static_facts_schema_version == STATIC_FACTS_SCHEMA_VERSION
     assert row.observation_plan == PLAN
     assert row.static_facts == ANALYSIS
+    assert row.effects == EFFECTS
     assert _provenance(row) == {
         "produced_by": PRODUCED_BY_PIPELINE,
         "source_job_id": "job-1",
@@ -158,6 +161,7 @@ def test_publish_refuses_a_bundle_without_an_analysis(cm_db):
     as *this contract has no static_facts* — a claim a missing artifact never made."""
     assert _publish(static_facts=None) == PUBLISH_INCOMPLETE_BUNDLE
     assert _publish(observation_plan=None) == PUBLISH_INCOMPLETE_BUNDLE
+    assert _publish(effects=None) == PUBLISH_INCOMPLETE_BUNDLE
     assert _row(cm_db) is None
 
 
@@ -212,7 +216,12 @@ def test_recursion_written_rows_name_their_producer(cm_db):
         chain="ethereum",
         address=ADDR,
         bytecode_keccak=KECCAK,
-        builder=lambda: {"contract_name": "C", "static_facts": ANALYSIS, "observation_plan": PLAN},
+        builder=lambda: {
+            "contract_name": "C",
+            "static_facts": ANALYSIS,
+            "observation_plan": PLAN,
+            "effects": EFFECTS,
+        },
     )
     cm_db.expire_all()
     row = _row(cm_db)
@@ -405,7 +414,7 @@ def _stub_artifacts(monkeypatch, mapping: dict[str, Any]) -> None:
 def test_static_stage_publishes_the_artifacts_it_stored(monkeypatch, captured_publish):
     _stub_artifacts(
         monkeypatch,
-        {"static_facts": ANALYSIS, "assessment": ASSESSMENT, "predicate_trees": TREES},
+        {"static_facts": ANALYSIS, "assessment": ASSESSMENT, "predicate_trees": TREES, "effects": EFFECTS},
     )
     job = _fake_job()
     _FakeStaticWorker()._publish_materialization(None, job, ADDR, "C")
@@ -418,6 +427,7 @@ def test_static_stage_publishes_the_artifacts_it_stored(monkeypatch, captured_pu
     assert call["observation_plan"]["tracked_controllers"] == []
     assert call["static_facts"] == ANALYSIS
     assert call["predicate_trees"] == TREES
+    assert call["effects"] == EFFECTS
     assert call["source_content_hash"] == job.source_content_hash
     assert call["provenance"] == {
         "produced_by": PRODUCED_BY_PIPELINE,
@@ -432,7 +442,7 @@ def test_static_stage_publishes_nothing_for_an_unproven_analyzer_era(monkeypatch
     discovery's stamp, leaving the column NULL — and NULL is not "current"."""
     _stub_artifacts(
         monkeypatch,
-        {"static_facts": ANALYSIS, "assessment": ASSESSMENT, "predicate_trees": TREES},
+        {"static_facts": ANALYSIS, "assessment": ASSESSMENT, "predicate_trees": TREES, "effects": EFFECTS},
     )
     monkeypatch.setattr("db.queue.proven_static_facts_schema_version", lambda _s, _j: None)
     _FakeStaticWorker()._publish_materialization(None, _fake_job(version=None), ADDR, "C")
@@ -448,7 +458,7 @@ def test_static_stage_publishes_a_cache_hit_whose_donor_proves_the_era(monkeypat
     donor's artifacts, so the donor's stamp IS this job's artifacts' era."""
     _stub_artifacts(
         monkeypatch,
-        {"static_facts": ANALYSIS, "assessment": ASSESSMENT, "predicate_trees": TREES},
+        {"static_facts": ANALYSIS, "assessment": ASSESSMENT, "predicate_trees": TREES, "effects": EFFECTS},
     )
     monkeypatch.setattr("db.queue.proven_static_facts_schema_version", lambda _s, _j: STATIC_FACTS_SCHEMA_VERSION)
     job = _fake_job(version=None, request={"static_cached": True, "cache_source_job_id": str(uuid.uuid4())})
@@ -464,7 +474,7 @@ def test_only_a_bundle_this_job_produced_may_refresh(monkeypatch, captured_publi
     watches."""
     _stub_artifacts(
         monkeypatch,
-        {"static_facts": ANALYSIS, "assessment": ASSESSMENT, "predicate_trees": TREES},
+        {"static_facts": ANALYSIS, "assessment": ASSESSMENT, "predicate_trees": TREES, "effects": EFFECTS},
     )
     _FakeStaticWorker()._publish_materialization(None, _fake_job(), ADDR, "C")
     assert captured_publish[0]["refresh_on_differ"] is True
@@ -498,7 +508,7 @@ def test_static_stage_publishes_nothing_without_a_keccak(monkeypatch, captured_p
     """The row is keyed on bytecode; a key we could not read is not a key."""
     _stub_artifacts(
         monkeypatch,
-        {"static_facts": ANALYSIS, "assessment": ASSESSMENT, "predicate_trees": TREES},
+        {"static_facts": ANALYSIS, "assessment": ASSESSMENT, "predicate_trees": TREES, "effects": EFFECTS},
     )
 
     def _boom(*_a, **_k):
@@ -514,7 +524,7 @@ def test_static_stage_never_fails_the_job_on_a_publish_error(monkeypatch, captur
     static_facts succeeded."""
     _stub_artifacts(
         monkeypatch,
-        {"static_facts": ANALYSIS, "assessment": ASSESSMENT, "predicate_trees": TREES},
+        {"static_facts": ANALYSIS, "assessment": ASSESSMENT, "predicate_trees": TREES, "effects": EFFECTS},
     )
 
     def _boom(**_k):

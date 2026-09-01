@@ -481,9 +481,8 @@ def _fn_record() -> dict[str, Any]:
 
 
 @requires_postgres
-def test_policy_rewrite_preserves_observed_claims_from_verdicts(db_session):
-    """Call site 2, verdict path: proven effect_verdicts survive the capture and
-    re-merge onto the re-created row."""
+def test_policy_rewrite_relinks_verdict_without_recreating_claims(db_session):
+    """Verdict facts survive, but claims come only from the Assessment projection."""
     contract_id = _seed_contract_with_observed_function(db_session, with_verdict=True)
     write_permission_rows(
         db_session,
@@ -494,16 +493,13 @@ def test_policy_rewrite_preserves_observed_claims_from_verdicts(db_session):
     )
     db_session.commit()
     ef = db_session.query(EffectiveFunction).filter(EffectiveFunction.contract_id == contract_id).one()
-    ids = [c["claim_id"] for c in (ef.claims or [])]
-    assert "supply.mint" in ids
-    assert any(c["tier"] == "behavioral_observed" for c in ef.claims)
+    assert (ef.claims or []) == []
+    verdict = db_session.query(EffectVerdict).filter(EffectVerdict.function_id == ef.id).one()
+    assert verdict.effect_class == EFFECT_CLASS_SUPPLY
 
 
 @requires_postgres
-def test_policy_rewrite_preserves_observed_claims_without_surviving_verdict(db_session):
-    """Call site 2, durable path: even when the proven verdict was already cascade-
-    deleted by an earlier replace, the observed claims on the outgoing rows are
-    carried forward across repeated policy-only re-runs."""
+def test_policy_rewrite_retracts_outgoing_claims_not_in_assessment_projection(db_session):
     contract_id = _seed_contract_with_observed_function(db_session, with_verdict=False)
     write_permission_rows(
         db_session,
@@ -514,8 +510,7 @@ def test_policy_rewrite_preserves_observed_claims_without_surviving_verdict(db_s
     )
     db_session.commit()
     ef = db_session.query(EffectiveFunction).filter(EffectiveFunction.contract_id == contract_id).one()
-    ids = [c["claim_id"] for c in (ef.claims or [])]
-    assert "supply.mint" in ids
+    assert (ef.claims or []) == []
 
 
 @requires_postgres
@@ -597,8 +592,7 @@ def _purge_verdicts(session):
 @requires_postgres
 def test_policy_rewrite_keeps_verdict_row_and_relinks(db_session):
     """The row replace must not delete the deployment's verdicts; the surviving
-    row relinks to the re-created function row and no carried observed claim's
-    witness may point at a dead verdict."""
+    row relinks to the re-created function row without minting relational claims."""
     contract_id, verdict_id = _seed_with_real_verdict(db_session)
     write_permission_rows(
         db_session,
@@ -613,11 +607,7 @@ def test_policy_rewrite_keeps_verdict_row_and_relinks(db_session):
     assert verdict is not None
     ef = db_session.query(EffectiveFunction).filter(EffectiveFunction.contract_id == contract_id).one()
     assert verdict.function_id == ef.id
-    for claim in ef.claims or []:
-        if claim.get("tier") == "behavioral_observed":
-            vid = (claim.get("witness") or {}).get("effect_verdict_id")
-            assert vid is not None
-            assert db_session.query(EffectVerdict).filter(EffectVerdict.id == vid).count() == 1
+    assert (ef.claims or []) == []
     _purge_verdicts(db_session)
 
 
@@ -844,9 +834,8 @@ def test_no_static_donor_stamps_no_provenance():
 def test_destination_shape_survives_the_writer_onto_the_function_row(db_session):
     """End of the forwarding chain. ``destination_shape`` / ``shape_proved_by`` are
     the fork's answer to "where can this outflow go", and the scorer reads them off
-    ``EffectiveFunction.claims`` — so the projection reaching ``verdict_to_claim``
-    is only half the trip. This pins the other half: the policy rewrite re-merges
-    the proven verdict and both fields land on the persisted row, for the adverse
+    ``EffectiveFunction.claims`` — so the Assessment projection reaching the
+    row writer must retain both fields, for the adverse
     answer and for the ``('unknown', 'none')`` non-observation alike (they are
     different facts and the consumer must keep telling them apart)."""
     for shape, proved_by, address in (
@@ -897,7 +886,13 @@ def test_destination_shape_survives_the_writer_onto_the_function_row(db_session)
                     "selector": "0xf6e715d0",
                     "authority_public": False,
                     "authority_roles": [],
-                    "claims": [],
+                    "claims": [
+                        {
+                            "claim_id": "flow.out",
+                            "tier": "behavioral_observed",
+                            "witness": {"observed": {"destination_shape": shape, "shape_proved_by": proved_by}},
+                        }
+                    ],
                 }
             ],
             capability_by_function=None,

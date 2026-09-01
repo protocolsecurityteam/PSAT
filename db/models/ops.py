@@ -133,6 +133,7 @@ class ContractMaterialization(Base):
     static_facts: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     observation_plan: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     predicate_trees: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    effects: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     static_facts_blob_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     observation_plan_blob_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     predicate_trees_blob_key: Mapped[str | None] = mapped_column(Text, nullable=True)

@@ -15,6 +15,21 @@ const VAULT = "0x1111111111111111111111111111111111111111";
 const GOV_SAFE = "0x2222222222222222222222222222222222222222"; // primary owner of VAULT
 const GUARDIAN = "0x3333333333333333333333333333333333333333"; // pause-only co-controller
 
+const VAULT_FUNCTIONS = [
+  {
+    function: "pauseContract()",
+    selector: "0x11111111",
+    claims: [{ claim_id: "pause.set", tier: "standard_exact", witness: {} }],
+    direct_owner: {
+      address: GUARDIAN,
+      resolved_type: "safe",
+      details: { threshold: 4, owners: ["0x0a", "0x0b", "0x0c", "0x0d"] },
+    },
+    authority_roles: [],
+    controllers: [],
+  },
+];
+
 const FIXTURE = {
   contracts: [
     {
@@ -22,20 +37,6 @@ const FIXTURE = {
       name: "Vault",
       display_name: "Vault",
       role: "governance",
-      functions: [
-        {
-          function: "pauseContract()",
-          selector: "0x11111111",
-          claims: [{ claim_id: "pause.set", tier: "standard_exact", witness: {} }],
-          direct_owner: {
-            address: GUARDIAN,
-            resolved_type: "safe",
-            details: { threshold: 4, owners: ["0x0a", "0x0b", "0x0c", "0x0d"] },
-          },
-          authority_roles: [],
-          controllers: [],
-        },
-      ],
       // Permissionless / lower-privilege callers (server-computed): neither the
       // primary owner nor a co-controller. Rendered in aggregate as "+N
       // callers", each carrying the functions / capabilities it can call.
@@ -85,13 +86,17 @@ const FIXTURE = {
 
 const FUNCTIONS_FIXTURE = {
   functions: {
-    [`ethereum::${VAULT}`]: FIXTURE.contracts[0].functions,
+    [`ethereum::${VAULT}`]: VAULT_FUNCTIONS,
   },
 };
 
 async function goToSurface(page) {
+  let functionsRequested = false;
   await page.route("**/api/company/cctest/functions", (route) =>
-    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(FUNCTIONS_FIXTURE) })
+    {
+      functionsRequested = true;
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(FUNCTIONS_FIXTURE) });
+    }
   );
   await page.route("**/api/company/cctest", (route) =>
     route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(FIXTURE) })
@@ -99,6 +104,7 @@ async function goToSurface(page) {
   await page.goto("/company/cctest/surface");
   await page.waitForSelector(".ps-surface", { timeout: 10000 });
   await page.waitForSelector(".react-flow__node", { timeout: 15000 });
+  expect(functionsRequested).toBe(true);
 }
 
 test.describe("Surface co-controllers", () => {

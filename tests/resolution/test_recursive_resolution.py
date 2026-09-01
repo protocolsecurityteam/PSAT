@@ -645,7 +645,21 @@ def test_materialize_contract_artifacts_builds_permission_index(monkeypatch):
                 "semantic_control": {"semantic_functions": []},
             },
             {"schema_version": "semantic", "trees": {}},
-            {"schema_version": "semantic", "functions": {}},
+            {
+                "schema_version": "semantic",
+                "functions": {
+                    "pause()": {
+                        "function": "pause()",
+                        "selector": "0x8456cb59",
+                        "abi_signature": "pause()",
+                        "state_changing": True,
+                        "state_writes": [{"var": "paused", "origin": "body"}],
+                        "sinks": [{"kind": "state_write", "target": "paused", "origin": "body"}],
+                        "writer_selectors": ["0x8456cb59"],
+                        "claims": [{"claim_id": "pause.set", "tier": "idiom_structural", "witness": {}}],
+                    }
+                },
+            },
         ),
     )
     monkeypatch.setattr(
@@ -668,12 +682,6 @@ def test_materialize_contract_artifacts_builds_permission_index(monkeypatch):
             "controller_values": {},
         },
     )
-    marker = {"schema_version": "0.1", "functions": []}
-    monkeypatch.setattr(
-        "services.resolution.recursive._build_permission_index",
-        lambda _analysis, _snapshot: marker,
-    )
-
     loaded = _materialize_contract_artifacts(
         address,
         "http://rpc.example",
@@ -681,7 +689,12 @@ def test_materialize_contract_artifacts_builds_permission_index(monkeypatch):
         chain="ethereum",
     )
 
-    assert loaded.get("permission_index") is marker
+    permission_index = loaded.get("permission_index")
+    effects = loaded.get("effects")
+    assert permission_index is not None
+    assert effects is not None
+    assert [row["function"] for row in permission_index["functions"]] == ["pause()"]
+    assert effects["functions"]["pause()"]["claims"][0]["claim_id"] == "pause.set"
 
 
 # ---------------------------------------------------------------------------
@@ -744,11 +757,11 @@ def test_materialize_contract_artifacts_resolved_proxy_retargets_to_impl(monkeyp
         captured["effective_address"] = effective_address
         analysis = {"subject": {"address": effective_address, "name": "Impl"}}
         plan = {"contract_address": effective_address, "controllers": []}
-        return "Impl", analysis, plan, None
+        return "Impl", analysis, plan, None, None
 
     monkeypatch.setattr(recursive, "_materialize_with_cross_process_cache", fake_cache)
     monkeypatch.setattr(recursive, "observe_controllers", lambda _plan, _rpc, **_kw: {"controllers": []})
-    monkeypatch.setattr(recursive, "_build_permission_index", lambda _a, _s: {"functions": []})
+    monkeypatch.setattr(recursive, "_build_permission_index", lambda _a, _s, _e, _t: {"functions": []})
 
     loaded = _materialize_contract_artifacts(proxy, "http://rpc.example", workspace_prefix="t")
 
@@ -773,11 +786,11 @@ def test_materialize_contract_artifacts_swallows_generic_classify_error(monkeypa
         captured["effective_address"] = effective_address
         analysis = {"subject": {"address": effective_address, "name": "AsIs"}}
         plan = {"contract_address": effective_address, "controllers": []}
-        return "AsIs", analysis, plan, None
+        return "AsIs", analysis, plan, None, None
 
     monkeypatch.setattr(recursive, "_materialize_with_cross_process_cache", fake_cache)
     monkeypatch.setattr(recursive, "observe_controllers", lambda _plan, _rpc, **_kw: {"controllers": []})
-    monkeypatch.setattr(recursive, "_build_permission_index", lambda _a, _s: None)
+    monkeypatch.setattr(recursive, "_build_permission_index", lambda _a, _s, _e, _t: None)
 
     loaded = _materialize_contract_artifacts(addr, "http://rpc.example", workspace_prefix="t")
 

@@ -154,7 +154,7 @@ logger = logging.getLogger(__name__)
 # safety prep (index-based operand exclusion, element-aware operand ordering)
 # so the shape change and its invalidation land together rather than thrashing
 # through ``_bundle_differs``, which compares the whole serialized tree.
-STATIC_FACTS_SCHEMA_VERSION = 6
+STATIC_FACTS_SCHEMA_VERSION = 7
 
 
 # ── Provenance ─────────────────────────────────────────────────────────────
@@ -425,6 +425,12 @@ def hydrate_predicate_trees(row: ContractMaterialization) -> dict | None:
     return _hydrate(row, blob_key_attr="predicate_trees_blob_key", inline_attr="predicate_trees")
 
 
+def hydrate_effects(row: ContractMaterialization) -> dict | None:
+    """Load the low-level effects input required to rebuild nested permissions."""
+
+    return row.effects if isinstance(row.effects, dict) else None
+
+
 def _advisory_lock(session: Session, chain_norm: str, keccak_norm: str) -> None:
     """Take ``pg_advisory_xact_lock`` for the dedup key.
 
@@ -502,6 +508,7 @@ def _copy_bundle_row(
         static_facts=donor.static_facts,
         observation_plan=donor.observation_plan,
         predicate_trees=donor.predicate_trees,
+        effects=donor.effects,
         static_facts_blob_key=donor.static_facts_blob_key,
         observation_plan_blob_key=donor.observation_plan_blob_key,
         predicate_trees_blob_key=donor.predicate_trees_blob_key,
@@ -527,6 +534,7 @@ def _copy_bundle_row(
             "static_facts": stmt.excluded.static_facts,
             "observation_plan": stmt.excluded.observation_plan,
             "predicate_trees": stmt.excluded.predicate_trees,
+            "effects": stmt.excluded.effects,
             "static_facts_blob_key": stmt.excluded.static_facts_blob_key,
             "observation_plan_blob_key": stmt.excluded.observation_plan_blob_key,
             "predicate_trees_blob_key": stmt.excluded.predicate_trees_blob_key,
@@ -588,7 +596,7 @@ def materialize_or_wait(
              release lock, proceed to phase 2.
       2. **Build** — call ``builder()`` with no DB session held. The
          bundle has ``contract_name``, ``static_facts``, ``observation_plan``,
-         and optionally ``predicate_trees``. Blob uploads (if storage
+         and optionally ``predicate_trees`` and ``effects``. Blob uploads (if storage
          is configured) happen here too.
       3. **Write** — open a fresh session, take the advisory lock, recheck
          (a concurrent fresh-takeover may have written ``status='ready'``
@@ -734,6 +742,8 @@ def materialize_or_wait(
     # ── Phase 2: builder + blob uploads, no DB connection held ─────
     try:
         bundle = builder()
+        if not all(isinstance(bundle.get(name), dict) for name in ("static_facts", "observation_plan", "effects")):
+            raise ValueError("materialization builder returned an incomplete semantic bundle")
     except Exception as exc:
         err = f"{type(exc).__name__}: {exc}"[:4000]
         with SessionLocal() as session:
@@ -766,6 +776,7 @@ def materialize_or_wait(
     analysis_payload = bundle.get("static_facts")
     observation_plan_payload = bundle.get("observation_plan")
     predicate_trees_payload = bundle.get("predicate_trees")
+    effects_payload = bundle.get("effects")
     static_facts_blob_key: str | None = None
     observation_plan_blob_key: str | None = None
     predicate_trees_blob_key: str | None = None
@@ -774,6 +785,7 @@ def materialize_or_wait(
         observation_plan_payload if isinstance(observation_plan_payload, dict) else None
     )
     predicate_trees_inline: dict | None = predicate_trees_payload if isinstance(predicate_trees_payload, dict) else None
+    effects_inline: dict | None = effects_payload if isinstance(effects_payload, dict) else None
 
     client = get_storage_client()
     if client is not None:
@@ -824,6 +836,7 @@ def materialize_or_wait(
             static_facts=analysis_inline,
             observation_plan=observation_plan_inline,
             predicate_trees=predicate_trees_inline,
+            effects=effects_inline,
             static_facts_blob_key=static_facts_blob_key,
             observation_plan_blob_key=observation_plan_blob_key,
             predicate_trees_blob_key=predicate_trees_blob_key,
@@ -845,6 +858,7 @@ def materialize_or_wait(
                 "static_facts": stmt.excluded.static_facts,
                 "observation_plan": stmt.excluded.observation_plan,
                 "predicate_trees": stmt.excluded.predicate_trees,
+                "effects": stmt.excluded.effects,
                 "static_facts_blob_key": stmt.excluded.static_facts_blob_key,
                 "observation_plan_blob_key": stmt.excluded.observation_plan_blob_key,
                 "predicate_trees_blob_key": stmt.excluded.predicate_trees_blob_key,
@@ -913,6 +927,7 @@ def publish_materialization(
     static_facts: dict | None,
     observation_plan: dict | None,
     predicate_trees: dict | None = None,
+    effects: dict | None = None,
     source_content_hash: str | None = None,
     provenance: dict[str, Any],
     refresh_on_differ: bool = False,
@@ -972,7 +987,7 @@ def publish_materialization(
         is current at that address is not something this writer witnessed, so
         it does not overwrite the other row's claim.
     """
-    if not isinstance(static_facts, dict) or not isinstance(observation_plan, dict):
+    if not isinstance(static_facts, dict) or not isinstance(observation_plan, dict) or not isinstance(effects, dict):
         return PUBLISH_INCOMPLETE_BUNDLE
 
     chain_norm, addr_norm, keccak_norm = _normalize(chain, address, bytecode_keccak)
@@ -995,7 +1010,9 @@ def publish_materialization(
         ).scalar_one_or_none()
         outcome = _publish_precheck(existing, addr_norm)
         if outcome == PUBLISH_ALREADY_CURRENT:
-            if not refresh_on_differ or not _bundle_differs(existing, static_facts, observation_plan, predicate_trees):
+            if not refresh_on_differ or not _bundle_differs(
+                existing, static_facts, observation_plan, predicate_trees, effects
+            ):
                 session.commit()
                 return PUBLISH_ALREADY_CURRENT
             written = PUBLISH_REFRESHED
@@ -1041,6 +1058,7 @@ def publish_materialization(
             static_facts=analysis_inline,
             observation_plan=plan_inline,
             predicate_trees=trees_inline,
+            effects=effects,
             static_facts_blob_key=analysis_key,
             observation_plan_blob_key=plan_key,
             predicate_trees_blob_key=trees_key,
@@ -1059,6 +1077,7 @@ def publish_materialization(
                 "static_facts": stmt.excluded.static_facts,
                 "observation_plan": stmt.excluded.observation_plan,
                 "predicate_trees": stmt.excluded.predicate_trees,
+                "effects": stmt.excluded.effects,
                 "static_facts_blob_key": stmt.excluded.static_facts_blob_key,
                 "observation_plan_blob_key": stmt.excluded.observation_plan_blob_key,
                 "predicate_trees_blob_key": stmt.excluded.predicate_trees_blob_key,
@@ -1082,6 +1101,7 @@ def _bundle_differs(
     static_facts: dict,
     observation_plan: dict,
     predicate_trees: dict | None,
+    effects: dict | None,
 ) -> bool:
     """Does the stored bundle say something other than the caller's?
 
@@ -1097,6 +1117,7 @@ def _bundle_differs(
             hydrate_static_facts(existing),
             hydrate_observation_plan(existing),
             hydrate_predicate_trees(existing),
+            hydrate_effects(existing),
         )
     except Exception as exc:
         logger.info(
@@ -1106,7 +1127,9 @@ def _bundle_differs(
             exc,
         )
         return True
-    return [_canonical(p) for p in stored] != [_canonical(p) for p in (static_facts, observation_plan, predicate_trees)]
+    return [_canonical(p) for p in stored] != [
+        _canonical(p) for p in (static_facts, observation_plan, predicate_trees, effects)
+    ]
 
 
 def _canonical(payload: dict | None) -> str | None:

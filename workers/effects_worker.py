@@ -8,13 +8,11 @@ The policy->effects transition is feature-flagged (``PSAT_EFFECTS_STAGE``,
 default-off, read in ``PolicyWorker.next_stage``); with the flag off no job ever
 enters this stage and the worker simply idles.
 
-**Consumption boundary: labels-observable, scoring-deferred.** Verdicts persist
+**Consumption boundary: Assessment-projected, scoring-deferred.** Verdicts persist
 to ``effect_behavior_cache`` / ``effect_verdicts`` and static-vs-witness
 discrepancies to the warning channel (``record_degraded``). Beyond that,
-*proven* verdicts are minted into registry claims on the matching
-``effective_functions`` rows through ``services.effects.claims_bridge`` (after
-``verdict_write``), so the frontend renders them as labels through the one
-shared claims vocabulary. The **score** still does not consume verdicts — that
+*proven* verdicts update Assessment, and relational function claims are then
+replaced from that validated document. The **score** still does not consume verdicts — that
 integration is deliberately unwired; the frontend score path neutralises the
 ``behavioral_observed`` tier so it stays byte-identical.
 
@@ -61,7 +59,6 @@ from db.effect_cache import (
 from db.models import Contract, EffectBehaviorCache, EffectiveFunction, EffectVerdict, Job, JobStage
 from db.queue import advance_job, get_artifact, store_artifact
 from db.queue.typed import ArtifactSchemaError, load_assessment
-from services.effects import claims_bridge
 from services.effects.config import (
     EFFECT_CLASS_VALUE_OUT,
     SCOPE_KERNEL,
@@ -702,13 +699,10 @@ class EffectsWorker(BaseWorker):
         self._run_probes(items, durations_ms, counters, seams)
 
         # verdict_write → cache + state-plane persistence + discrepancy routing,
-        # then mint proven verdicts into registry claims on the matching
-        # effective_functions rows — same job, same rows, same phase span so the
-        # /monitor timeline gains no new stage.
+        # then update Assessment and replace its relational projection.
         with log_timed_phase(logger, "verdict_write", durations_ms=durations_ms) as ph:
             self._write_verdicts(session, job, items, seams, counters)
             ph["verdicts_written"] = counters.verdicts_written
-            ph["labeled"] = self._bridge_claims(session, items)
             ph["assessments_updated"] = self._update_assessments(session, items)
 
         # Layer-1 distillation, after the bridge so it reads the
@@ -1213,37 +1207,6 @@ class EffectsWorker(BaseWorker):
             counters.verdicts_written += 1
             self._route_section9(it, verdict, tier, transcript_ptr, discrepancy, counters)
 
-    def _bridge_claims(self, session: Session, items: list[_Item]) -> int:
-        """Fold this job's *proven* verdicts into registry claims
-        on the matching ``effective_functions`` rows. Reads the verdicts back from
-        the DB (authoritative — includes cache-hit proven verdicts, not only fresh
-        probes) and merges through the pure bridge. Fail-closed is the bridge's
-        job; this only touches rows that actually mint. Returns the row count
-        labeled."""
-        fn_ids = {it.candidate.function_id for it in items if it.candidate.function_id is not None}
-        if not fn_ids:
-            return 0
-        verdicts = (
-            session.query(EffectVerdict)
-            .filter(EffectVerdict.function_id.in_(fn_ids), EffectVerdict.verdict == VERDICT_PROVEN)
-            .all()
-        )
-        by_fn: dict[int, list[EffectVerdict]] = {}
-        for verdict in verdicts:
-            if verdict.function_id is not None:
-                by_fn.setdefault(verdict.function_id, []).append(verdict)
-        if not by_fn:
-            return 0
-        rows = session.query(EffectiveFunction).filter(EffectiveFunction.id.in_(by_fn)).all()
-        labeled = 0
-        for ef in rows:
-            merged = claims_bridge.merge_into_function(ef.claims, by_fn.get(ef.id, ()))
-            if merged is None:
-                continue
-            ef.claims = merged
-            labeled += 1
-        return labeled
-
     def _update_assessments(self, session: Session, items: list[_Item]) -> int:
         """Attach verdict evidence to each affected contract's assessment.
 
@@ -1279,10 +1242,12 @@ class EffectsWorker(BaseWorker):
         for contract_id, contract_verdicts in verdicts_by_contract.items():
             contract = contract_by_id.get(contract_id)
             if contract is None or contract.job_id is None:
-                # Historical/adopted contracts can legitimately outlive the job
-                # that produced their static rows. There is no artifact owner to
-                # update; the relational projection remains their compatibility
-                # surface and this does not degrade the behavioral verdict.
+                # No canonical Assessment owns a claim projection here. Keep the
+                # function identity so verdict facts remain linked, but retract
+                # any independently carried relational claims.
+                for row in rows:
+                    if row.contract_id == contract_id:
+                        row.claims = None
                 ownerless += 1
                 continue
             try:
@@ -1339,7 +1304,7 @@ class EffectsWorker(BaseWorker):
         nothing.
 
         The whole pass runs in the job's transaction rather than committing:
-        the ``_bridge_claims`` writes above are uncommitted at this point, and a
+        Assessment projection writes above are uncommitted at this point, and a
         DB error outside a savepoint would abort the transaction carrying them —
         an abort the stage would not notice until its own commit silently became
         a rollback and the job advanced as a success with its verdicts gone.

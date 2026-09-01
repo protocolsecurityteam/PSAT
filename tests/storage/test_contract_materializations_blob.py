@@ -222,6 +222,7 @@ def test_materialize_writes_to_blob_when_storage_configured(_route_to_test_db, _
             "contract_name": "TestContract",
             "static_facts": {"controllers": ["a"]},
             "observation_plan": {"slots": [{"name": "x", "type": "uint256"}]},
+            "effects": {"schema_version": "semantic", "functions": {}},
         }
 
     with patch("db.contract_materializations.get_storage_client", return_value=storage):
@@ -257,6 +258,7 @@ def test_materialize_falls_back_to_inline_when_storage_unconfigured(_route_to_te
             "contract_name": "InlineContract",
             "static_facts": {"controllers": ["b"]},
             "observation_plan": {"slots": []},
+            "effects": {"schema_version": "semantic", "functions": {}},
         }
 
     with patch("db.contract_materializations.get_storage_client", return_value=None):
@@ -292,6 +294,7 @@ def test_materialize_rolls_back_when_blob_upload_fails(_route_to_test_db, _clean
             "contract_name": "FailContract",
             "static_facts": {"controllers": ["c"]},
             "observation_plan": {"slots": [42]},
+            "effects": {"schema_version": "semantic", "functions": {}},
         }
 
     with patch("db.contract_materializations.get_storage_client", return_value=storage):
@@ -322,6 +325,7 @@ def test_materialize_blob_path_loser_serves_blob_key(_route_to_test_db, _clean_c
             "contract_name": "Winner",
             "static_facts": {"k": "v"},
             "observation_plan": {"k": "v"},
+            "effects": {"schema_version": "semantic", "functions": {}},
         }
 
     with patch("db.contract_materializations.get_storage_client", return_value=storage):

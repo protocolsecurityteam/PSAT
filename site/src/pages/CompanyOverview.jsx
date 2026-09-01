@@ -36,6 +36,7 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
   const [error, setError] = useState(null);
   const [auditCoverage, setAuditCoverage] = useState(null);
   const [functionData, setFunctionData] = useState(null);
+  const [functionError, setFunctionError] = useState(null);
   const [addressesModalOpen, setAddressesModalOpen] = useState(false);
   const [auditsAdminOpen, setAuditsAdminOpen] = useState(false);
   const [score, setScore] = useState(null);
@@ -115,6 +116,8 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
     let cancelled = false;
     setScore(null);
     setScoreError(null);
+    setFunctionData(null);
+    setFunctionError(null);
     api(`/api/company/${encodeURIComponent(companyName)}`)
       .then((d) => { if (!cancelled) setData(d); })
       .catch((e) => { if (!cancelled) setError(e.message); });
@@ -131,7 +134,7 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
     // surface doesn't have to re-fetch.
     api(`/api/company/${encodeURIComponent(companyName)}/functions`)
       .then((d) => { if (!cancelled) setFunctionData(d?.functions || {}); })
-      .catch(() => { /* function inspector falls back to empty data */ });
+      .catch((e) => { if (!cancelled) setFunctionError(e.message || "Failed to load function analysis"); });
     // Fetched here rather than inside ScoreBand so it travels in parallel with
     // the company payload: mounting the band only after /api/company answered
     // would serialise the two.
@@ -311,6 +314,7 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
               initialData={data}
               initialCoverage={auditCoverage}
               initialFunctions={functionData}
+              initialFunctionsError={functionError}
               embedded
             />
           </Suspense>

@@ -124,6 +124,7 @@ def test_concurrent_materialize_runs_builder_exactly_once(_route_to_test_db, _cl
             "contract_name": "ConcurrentDedup",
             "static_facts": {"controllers": []},
             "observation_plan": {"slots": []},
+            "effects": {"schema_version": "semantic", "functions": {}},
             "predicate_trees": {"schema_version": "semantic", "trees": {}},
         }
 
@@ -197,6 +198,7 @@ def test_stale_building_row_is_taken_over(_route_to_test_db, _clean_cm, monkeypa
             "contract_name": "TakeoverSuccess",
             "static_facts": {"controllers": []},
             "observation_plan": {"slots": []},
+            "effects": {"schema_version": "semantic", "functions": {}},
         }
 
     with patch("db.contract_materializations.get_storage_client", return_value=None):
@@ -264,6 +266,7 @@ def test_predicate_trees_cached_inline(_route_to_test_db, _clean_cm):
             "contract_name": "MapEnumProbe",
             "static_facts": {"controllers": []},
             "observation_plan": {"slots": []},
+            "effects": {"schema_version": "semantic", "functions": {}},
             "predicate_trees": predicate_payload,
         }
 
@@ -328,6 +331,7 @@ def test_predicate_trees_cached_via_blob(_route_to_test_db, _clean_cm):
             "contract_name": "BlobSemanticProbe",
             "static_facts": {"controllers": []},
             "observation_plan": {"slots": []},
+            "effects": {"schema_version": "semantic", "functions": {}},
             "predicate_trees": predicate_payload,
         }
 
@@ -489,6 +493,7 @@ def test_materialize_rebuilds_old_schema_version_row(_route_to_test_db, _clean_c
             "contract_name": "FreshAnalyzer",
             "static_facts": {"controllers": []},
             "observation_plan": {"slots": []},
+            "effects": {"schema_version": "semantic", "functions": {}},
         }
 
     with patch("db.contract_materializations.get_storage_client", return_value=None):

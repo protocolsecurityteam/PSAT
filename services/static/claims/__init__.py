@@ -3,7 +3,7 @@
 Facts (``effects.py``, Plane 0) are the substrate; this package runs the matcher
 registry emits positive ``EffectMatch`` records. The assessment builder turns
 each successful match into first-class Evidence,
-Basis, and Claim records; matcher failures ride analysis receipts instead.
+and Claim records; matcher failures ride analysis receipts instead.
 
 - ``build_claims`` / ``attach_claims_to_effects`` — produce the claims artifact
   and ride it through the effects transport (called from the static pipeline).

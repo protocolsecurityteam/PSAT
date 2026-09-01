@@ -25,23 +25,26 @@ const BETA = "0x" + "22".repeat(20); // owned by SAFE_B
 const GAMMA = "0x" + "33".repeat(20); // owned by SAFE_C, calls into SAFE_D's group
 const DELTA = "0x" + "44".repeat(20); // owned by SAFE_D
 
-function contract(address, name, ownerSafe, ownerThreshold) {
+function contract(address, name) {
   return {
     address,
     name,
     display_name: name,
     role: "value_handler",
-    functions: [
-      {
-        function: "poke()",
-        selector: "0x12345678",
-        claims: [{ claim_id: "pause.set", tier: "standard_exact", witness: {} }],
-        direct_owner: { address: ownerSafe, resolved_type: "safe", details: { threshold: ownerThreshold, owners: ["0x01", "0x02", "0x03"] } },
-        authority_roles: [],
-        controllers: [],
-      },
-    ],
   };
+}
+
+function functions(ownerSafe, ownerThreshold) {
+  return [
+    {
+      function: "poke()",
+      selector: "0x12345678",
+      claims: [{ claim_id: "pause.set", tier: "standard_exact", witness: {} }],
+      direct_owner: { address: ownerSafe, resolved_type: "safe", details: { threshold: ownerThreshold, owners: ["0x01", "0x02", "0x03"] } },
+      authority_roles: [],
+      controllers: [],
+    },
+  ];
 }
 
 function safe(address, label, threshold, owned) {
@@ -59,10 +62,10 @@ function safe(address, label, threshold, owned) {
 
 const FIXTURE = {
   contracts: [
-    contract(ALPHA, "Alpha", SAFE_A, 2),
-    contract(BETA, "Beta", SAFE_B, 3),
-    contract(GAMMA, "Gamma", SAFE_C, 2),
-    contract(DELTA, "Delta", SAFE_D, 2),
+    contract(ALPHA, "Alpha"),
+    contract(BETA, "Beta"),
+    contract(GAMMA, "Gamma"),
+    contract(DELTA, "Delta"),
   ],
   principals: [
     safe(SAFE_A, "SafeA", 2, ALPHA),
@@ -79,17 +82,21 @@ const FIXTURE = {
 };
 
 const FUNCTIONS_FIXTURE = {
-  functions: Object.fromEntries(
-    FIXTURE.contracts.map((entry) => [
-      `ethereum::${entry.address.toLowerCase()}`,
-      entry.functions || [],
-    ]),
-  ),
+  functions: {
+    [`ethereum::${ALPHA}`]: functions(SAFE_A, 2),
+    [`ethereum::${BETA}`]: functions(SAFE_B, 3),
+    [`ethereum::${GAMMA}`]: functions(SAFE_C, 2),
+    [`ethereum::${DELTA}`]: functions(SAFE_D, 2),
+  },
 };
 
 async function goToSurface(page) {
+  let functionsRequested = false;
   await page.route("**/api/company/xgtest/functions", (route) =>
-    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(FUNCTIONS_FIXTURE) })
+    {
+      functionsRequested = true;
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(FUNCTIONS_FIXTURE) });
+    }
   );
   await page.route("**/api/company/xgtest", (route) =>
     route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(FIXTURE) })
@@ -97,6 +104,7 @@ async function goToSurface(page) {
   await page.goto("/company/xgtest/surface");
   await page.waitForSelector(".ps-surface", { timeout: 10000 });
   await page.waitForSelector(".react-flow__node-group", { timeout: 15000 });
+  expect(functionsRequested).toBe(true);
   // This 4-group fixture packs into the top-left, where the floating filter
   // panel legitimately sits. This spec tests stub geometry/highlighting, not the
   // panel, so make the panel click-transparent rather than pan around it (a real

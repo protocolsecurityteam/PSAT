@@ -10,27 +10,22 @@ from typing import Any, cast
 from pydantic import JsonValue
 
 from schemas.assessment import (
-    Account,
     Analysis,
     Assessment,
-    AtomicAuthority,
     Authority,
-    AuthorityCapability,
-    Basis,
     Claim,
     Effect,
     EffectFamily,
     EffectKind,
-    EffectTarget,
     Entity,
     Evidence,
-    FunctionEffect,
-    Omission,
+    Proposition,
 )
 from services.static.claims.matchers import discover
 from services.static.claims.registry import entry_for, is_registered
 
-from .ids import stable_id
+from .keys import content_key, entity_key
+from .slices import prune_unreferenced_entities, remove_analysis_slice
 from .validation import checked
 
 
@@ -38,44 +33,53 @@ def _json(value: Any) -> JsonValue:
     return cast(JsonValue, json.loads(json.dumps(value, sort_keys=True, default=str)))
 
 
-def _account(chain_id: int, address: str) -> Account:
-    normalized = address.lower()
-    account_id = stable_id("account", {"chain_id": chain_id, "address": normalized})
-    return {"id": account_id, "chain_id": chain_id, "address": normalized}
-
-
-def _entity(result: Assessment, chain_id: int, principal: Mapping[str, Any]) -> Entity | None:
+def _entity(result: Assessment, chain_id: int, principal: Mapping[str, Any]) -> tuple[str, Entity] | None:
     address = principal.get("address")
     if not isinstance(address, str) or not address:
         return None
-    account = _account(chain_id, address)
-    result["accounts"][account["id"]] = account
+    normalized = address.lower()
     resolved_type = str(principal.get("resolved_type") or "unknown")
     contract_types = {"safe", "timelock", "proxy_admin", "contract", "cross_chain_authority"}
-    entity_id = stable_id("entity", {"account_id": account["id"]})
+    key = entity_key(chain_id, normalized)
     entity: Entity = {
-        "id": entity_id,
-        "account_id": account["id"],
+        "chain_id": chain_id,
+        "address": normalized,
         "kind": "contract" if resolved_type in contract_types else "account",
         "tags": [] if resolved_type in ("eoa", "contract", "unknown") else [resolved_type],
     }
-    result["entities"][entity_id] = entity
-    return entity
+    result["entities"][key] = entity
+    return key, entity
 
 
 def _authorities(
     result: Assessment, chain_id: int, permission: Mapping[str, Any]
 ) -> tuple[Authority | None, str | None]:
+    capability_expr = permission.get("capability_expr")
+    if isinstance(capability_expr, Mapping):
+        capability_kind = capability_expr.get("kind")
+        if permission.get("status") == "unsupported" or capability_kind == "unsupported":
+            reason = capability_expr.get("unsupported_reason")
+            return None, str(reason or "unsupported_authority_expression")
+        raw_conditions = permission.get("conditions")
+        if not isinstance(raw_conditions, list):
+            raw_conditions = capability_expr.get("conditions")
+        conditions = raw_conditions if isinstance(raw_conditions, list) else []
+        return {
+            "kind": "expression",
+            "expression": _json(capability_expr),
+            "conditions": [_json(condition) for condition in conditions],
+        }, None
+
     openness = permission.get("authority_openness")
     if openness == "open" or permission.get("authority_public") is True:
         return {"kind": "public"}, None
 
-    authorities: list[AtomicAuthority] = []
+    authorities: list[Authority] = []
     direct = permission.get("direct_owner")
     if isinstance(direct, Mapping):
         entity = _entity(result, chain_id, direct)
         if entity is not None:
-            authorities.append({"kind": "entity", "entity_id": entity["id"]})
+            authorities.append({"kind": "entity", "entity": entity[0]})
 
     roles = permission.get("authority_roles")
     role_unresolved = roles is None
@@ -88,13 +92,13 @@ def _authorities(
             if isinstance(principals, list):
                 for principal in principals:
                     if isinstance(principal, Mapping) and (entity := _entity(result, chain_id, principal)) is not None:
-                        entity_ids.append(entity["id"])
+                        entity_ids.append(entity[0])
             if entity_ids:
                 authorities.append(
                     {
                         "kind": "role",
                         "role": str(grant.get("role")),
-                        "entity_ids": sorted(set(entity_ids)),
+                        "entities": sorted(set(entity_ids)),
                     }
                 )
 
@@ -108,15 +112,15 @@ def _authorities(
                 continue
             for principal in principals:
                 if isinstance(principal, Mapping) and (entity := _entity(result, chain_id, principal)) is not None:
-                    authorities.append({"kind": "entity", "entity_id": entity["id"]})
+                    authorities.append({"kind": "entity", "entity": entity[0]})
 
     witnesses = permission.get("signature_witnesses")
     if isinstance(witnesses, list):
         for principal in witnesses:
             if isinstance(principal, Mapping) and (entity := _entity(result, chain_id, principal)) is not None:
-                authorities.append({"kind": "entity", "entity_id": entity["id"]})
+                authorities.append({"kind": "entity", "entity": entity[0]})
 
-    unique: list[AtomicAuthority] = []
+    unique: list[Authority] = []
     seen: set[str] = set()
     for authority in authorities:
         key = json.dumps(authority, sort_keys=True)
@@ -134,20 +138,20 @@ def _authorities(
     return None, "authority_not_determined"
 
 
-def _targets(permission: Mapping[str, Any], witness: Mapping[str, Any]) -> list[EffectTarget]:
+def _targets(permission: Mapping[str, Any], witness: Mapping[str, Any]) -> list[dict[str, str]]:
     flags = witness.get("flags")
     if isinstance(flags, list):
-        targets: list[EffectTarget] = []
+        targets: list[dict[str, str]] = []
         for flag in flags:
             if not isinstance(flag, Mapping) or not isinstance(flag.get("var"), str):
                 continue
-            target: EffectTarget = {"kind": "state", "value": str(flag["var"])}
+            target = {"kind": "state", "value": str(flag["var"])}
             if isinstance(flag.get("member"), str) and flag.get("member"):
                 target["member"] = str(flag["member"])
             targets.append(target)
         if targets:
             return targets
-    targets: list[EffectTarget] = []
+    targets: list[dict[str, str]] = []
     state_names: set[str] = set()
     writes = permission.get("state_writes")
     if isinstance(writes, list):
@@ -167,35 +171,29 @@ def _targets(permission: Mapping[str, Any], witness: Mapping[str, Any]) -> list[
     return targets
 
 
-def _function_ids(assessment: Assessment) -> dict[str, str]:
-    out: dict[str, str] = {}
-    for function_id, function in assessment["functions"].items():
-        out[function["signature"]] = function_id
-    return out
-
-
-def _effect_claims(assessment: Assessment, function_id: str) -> list[Claim]:
-    out: list[Claim] = []
-    for claim in assessment["claims"].values():
+def _effect_claims(assessment: Assessment, function: str) -> list[tuple[str, Claim]]:
+    out: list[tuple[str, Claim]] = []
+    for claim_key, claim in assessment["claims"].items():
         proposition = claim["proposition"]
-        if proposition["kind"] == "function_effect" and proposition["function_id"] == function_id:
-            out.append(claim)
+        if proposition["kind"] == "function_effect" and proposition.get("function") == function:
+            out.append((claim_key, claim))
     return out
 
 
 def _ensure_embedded_effect_claims(
     result: Assessment,
     permission: Mapping[str, Any],
-    function_id: str,
-    ids_by_signature: Mapping[str, str],
-) -> None:
+    function: str,
+) -> tuple[list[str], list[str]]:
     raw_claims = permission.get("claims")
     if not isinstance(raw_claims, list):
-        return
+        return [], []
+    claim_keys: list[str] = []
+    evidence_keys: list[str] = []
     existing_kinds = {
-        claim["proposition"]["effect"]["kind"]
-        for claim in _effect_claims(result, function_id)
-        if claim["proposition"]["kind"] == "function_effect"
+        existing_effect["kind"]
+        for _, claim in _effect_claims(result, function)
+        if (existing_effect := claim["proposition"].get("effect")) is not None
     }
     for raw in raw_claims:
         if not isinstance(raw, Mapping):
@@ -212,33 +210,31 @@ def _ensure_embedded_effect_claims(
             continue
         entry = entry_for(kind)
         observation = _json(witness)
-        evidence_id = stable_id(
+        evidence_key = content_key(
             "evidence",
             {
-                "scope": result["scope"],
+                "contract": result["contract"],
                 "method": "policy_derivation",
-                "function_id": function_id,
+                "function": function,
                 "claim": kind,
                 "observation": observation,
             },
         )
         evidence: Evidence = {
-            "id": evidence_id,
             "method": "policy_derivation",
-            "subject": {"kind": "function", "id": function_id},
+            "subject_kind": "function",
+            "subject": function,
             "observation": observation,
-            "source": {
-                "producer": f"policy.claims.{kind}",
-                "version": "policy/1",
-                "locator": _json({"tier": tier}),
-            },
-            "scope": result["scope"],
+            "producer": f"policy.claims.{kind}",
+            "version": "policy/1",
+            "locator": _json({"tier": tier}),
         }
-        result["evidence"][evidence_id] = evidence
+        result["evidence"][evidence_key] = evidence
+        evidence_keys.append(evidence_key)
         affected = [
-            ids_by_signature[signature]
+            signature
             for signature in witness.get("affected_functions") or []
-            if isinstance(signature, str) and signature in ids_by_signature
+            if isinstance(signature, str) and signature in result["functions"]
         ]
         effect: Effect = {
             "kind": cast(EffectKind, kind),
@@ -246,22 +242,20 @@ def _ensure_embedded_effect_claims(
             "targets": _targets(permission, witness),
             "affected_functions": sorted(set(affected)),
         }
-        proposition: FunctionEffect = {
+        proposition: Proposition = {
             "kind": "function_effect",
-            "function_id": function_id,
+            "function": function,
             "effect": effect,
         }
-        claim_id = stable_id("claim", {"scope": result["scope"], "proposition": proposition})
-        result["claims"][claim_id] = {
-            "id": claim_id,
+        claim_key = content_key("claim", {"contract": result["contract"], "proposition": proposition})
+        result["claims"][claim_key] = {
             "proposition": proposition,
-            "basis": {
-                "rule": f"{kind}/{tier}",
-                "evidence_ids": [evidence_id],
-                "claim_ids": [],
-            },
-            "scope": result["scope"],
+            "rule": f"{kind}/{tier}",
+            "evidence": [evidence_key],
+            "claims": [],
         }
+        claim_keys.append(claim_key)
+    return claim_keys, evidence_keys
 
 
 def add_policy(assessment: Assessment, permissions: Mapping[str, Any], *, chain_id: int) -> Assessment:
@@ -269,37 +263,39 @@ def add_policy(assessment: Assessment, permissions: Mapping[str, Any], *, chain_
 
     discover()
     result = cast(Assessment, copy.deepcopy(assessment))
-    ids_by_signature = _function_ids(result)
+    remove_analysis_slice(result, "policy.capabilities")
     raw_functions = permissions.get("functions")
     permission_items = raw_functions if isinstance(raw_functions, list) else []
-    omissions: list[Omission] = []
-    claim_ids: list[str] = []
-    evidence_ids: list[str] = []
+    omissions: list[dict[str, str]] = []
+    claim_keys: list[str] = []
+    evidence_keys: list[str] = []
     completed = 0
 
     for permission in permission_items:
         if not isinstance(permission, Mapping):
             continue
         signature = permission.get("abi_signature") or permission.get("function")
-        function_id = ids_by_signature.get(signature) if isinstance(signature, str) else None
-        if function_id is None:
+        function = signature if isinstance(signature, str) and signature in result["functions"] else None
+        if function is None:
             omissions.append(
                 {
                     "target_kind": "contract",
-                    "target_id": result["contract"]["id"],
+                    "target": result["contract"]["deployment_address"],
                     "reason": f"policy_function_not_in_contract:{signature}",
                 }
             )
             continue
 
-        _ensure_embedded_effect_claims(result, permission, function_id, ids_by_signature)
-        effects = _effect_claims(result, function_id)
+        embedded_claim_keys, embedded_evidence_keys = _ensure_embedded_effect_claims(result, permission, function)
+        claim_keys.extend(embedded_claim_keys)
+        evidence_keys.extend(embedded_evidence_keys)
+        effects = _effect_claims(result, function)
         authority, unresolved_reason = _authorities(result, chain_id, permission)
         if unresolved_reason is not None:
             omissions.append(
                 {
                     "target_kind": "function",
-                    "target_id": function_id,
+                    "target": function,
                     "reason": unresolved_reason,
                 }
             )
@@ -320,70 +316,61 @@ def add_policy(assessment: Assessment, permissions: Mapping[str, Any], *, chain_
                 "signature_witnesses": permission.get("signature_witnesses") or [],
             }
         )
-        evidence_id = stable_id(
+        evidence_key = content_key(
             "evidence",
             {
-                "scope": result["scope"],
+                "contract": result["contract"],
                 "method": "policy_derivation",
-                "function_id": function_id,
+                "function": function,
                 "observation": observation,
             },
         )
         evidence: Evidence = {
-            "id": evidence_id,
             "method": "policy_derivation",
-            "subject": {"kind": "function", "id": function_id},
+            "subject_kind": "function",
+            "subject": function,
             "observation": observation,
-            "source": {
-                "producer": "policy.capability",
-                "version": str(permissions.get("schema_version") or "policy/legacy"),
-                "locator": _json({"function": signature}),
-            },
-            "scope": result["scope"],
+            "producer": "policy.capability",
+            "version": str(permissions.get("schema_version") or "policy/1"),
+            "locator": _json({"function": signature}),
         }
-        result["evidence"][evidence_id] = evidence
-        evidence_ids.append(evidence_id)
+        result["evidence"][evidence_key] = evidence
+        evidence_keys.append(evidence_key)
 
-        for effect_claim in effects:
+        for effect_claim_key, effect_claim in effects:
             effect_proposition = effect_claim["proposition"]
-            if effect_proposition["kind"] != "function_effect":
+            effect = effect_proposition.get("effect")
+            if effect_proposition["kind"] != "function_effect" or effect is None:
                 continue
-            proposition: AuthorityCapability = {
+            proposition: Proposition = {
                 "kind": "authority_capability",
                 "authority": authority,
-                "function_id": function_id,
-                "effect": effect_proposition["effect"],
+                "function": function,
+                "effect": effect,
             }
-            claim_id = stable_id("claim", {"scope": result["scope"], "proposition": proposition})
-            basis: Basis = {
-                "rule": "policy.authority_capability/v1",
-                "evidence_ids": [evidence_id],
-                "claim_ids": [effect_claim["id"]],
-            }
-            result["claims"][claim_id] = {
-                "id": claim_id,
+            claim_key = content_key("claim", {"contract": result["contract"], "proposition": proposition})
+            result["claims"][claim_key] = {
                 "proposition": proposition,
-                "basis": basis,
-                "scope": result["scope"],
+                "rule": "policy.authority_capability/v1",
+                "evidence": [evidence_key],
+                "claims": [effect_claim_key],
             }
-            claim_ids.append(claim_id)
+            claim_keys.append(claim_key)
 
     status = "completed" if not omissions else ("partial" if completed else "failed")
     receipt: Analysis = {
         "detector": "policy.capabilities",
-        "version": str(permissions.get("schema_version") or "policy/legacy"),
+        "version": str(permissions.get("schema_version") or "policy/1"),
         "status": status,
-        "coverage": {
-            "targets_total": len(permission_items),
-            "targets_completed": completed,
-            "omissions": omissions,
-        },
+        "targets_total": len(permission_items),
+        "targets_completed": completed,
+        "omissions": omissions,
         "diagnostics": [],
-        "claim_ids": sorted(set(claim_ids)),
-        "evidence_ids": sorted(set(evidence_ids)),
+        "claims": sorted(set(claim_keys)),
+        "evidence": sorted(set(evidence_keys)),
     }
-    result["analyses"] = [item for item in result["analyses"] if item["detector"] != "policy.capabilities"]
     result["analyses"].append(receipt)
+    prune_unreferenced_entities(result)
     return checked(result)
 
 

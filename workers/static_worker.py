@@ -1673,7 +1673,7 @@ class StaticWorker(BaseWorker):
                     "Static stage: effects artifact store failed for job %s",
                     job.id,
                 )
-        self._write_static_fact_indexes(session, job, static_facts_data, assessment)
+        self._write_static_fact_indexes(session, job, assessment)
         logger.info(
             "Static stage contract static_facts complete for job %s address=%s contract=%s",
             job.id,
@@ -1686,10 +1686,9 @@ class StaticWorker(BaseWorker):
         self,
         session,
         job: Job,
-        static_facts: StaticFacts | dict,
         assessment: Assessment,
     ) -> None:
-        """Extract structured data from static_facts JSON into relational tables."""
+        """Replace relational indexes from validated Assessment evidence."""
         from sqlalchemy import select as sa_select
 
         contract_row = session.execute(
@@ -1698,12 +1697,12 @@ class StaticWorker(BaseWorker):
         if not contract_row:
             return
 
-        summary = static_facts.get("summary", {})
-        subject = static_facts.get("subject", {})
+        from services.assessment import static_index_view
 
-        # Update contract name from static_facts if available
-        if subject.get("name"):
-            contract_row.contract_name = subject["name"]
+        projection = static_index_view(assessment)
+
+        if projection.get("contract_name"):
+            contract_row.contract_name = projection["contract_name"]
 
         # Write contract_summary
         existing_summary = session.execute(
@@ -1713,28 +1712,23 @@ class StaticWorker(BaseWorker):
             session.delete(existing_summary)
             session.flush()
 
-        from services.assessment import effect_presence
-
         session.add(
             ContractSummary(
                 contract_id=contract_row.id,
-                control_model=summary.get("control_model"),
-                is_upgradeable=summary.get("is_upgradeable"),
-                # Compatibility projection from canonical claims + coverage.
-                is_pausable=effect_presence(assessment, "pause.set"),
-                has_timelock=summary.get("has_timelock"),
-                is_factory=summary.get("is_factory"),
-                is_nft=summary.get("is_nft"),
-                standards=summary.get("standards", []),
-                source_verified=subject.get("source_verified"),
+                control_model=projection.get("control_model"),
+                is_upgradeable=projection.get("is_upgradeable"),
+                is_pausable=projection.get("is_pausable"),
+                has_timelock=projection.get("has_timelock"),
+                is_factory=projection.get("is_factory"),
+                is_nft=projection.get("is_nft"),
+                standards=projection.get("standards", []),
+                source_verified=projection.get("source_verified"),
             )
         )
 
-        semantic_section = static_facts.get("semantic_control", {})
-
         # Write role_definitions
         session.query(RoleDefinition).filter(RoleDefinition.contract_id == contract_row.id).delete()
-        for rd in semantic_section.get("role_definitions", []):
+        for rd in projection.get("role_definitions", []):
             session.add(
                 RoleDefinition(
                     contract_id=contract_row.id,
@@ -1809,6 +1803,7 @@ class StaticWorker(BaseWorker):
             static_facts = get_artifact(session, job.id, "static_facts")
             assessment = get_artifact(session, job.id, "assessment")
             predicate_trees = get_artifact(session, job.id, "predicate_trees")
+            effects = get_artifact(session, job.id, "effects")
         except Exception as exc:
             record_degraded(phase="materialization_publish", exc=exc, context={"address": address})
             logger.warning(
@@ -1859,6 +1854,7 @@ class StaticWorker(BaseWorker):
                 static_facts=static_facts,
                 observation_plan=observation_plan,
                 predicate_trees=predicate_trees if isinstance(predicate_trees, dict) else None,
+                effects=effects if isinstance(effects, dict) else None,
                 source_content_hash=job.source_content_hash,
                 provenance=build_provenance(PRODUCED_BY_PIPELINE, source_job_id=job.id),
                 # Only a bundle THIS job produced may overwrite a current row.

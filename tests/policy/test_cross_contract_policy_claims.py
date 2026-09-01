@@ -304,7 +304,18 @@ def test_the_row_replace_drops_last_run_s_policy_derived_claims(db_session):
         db_session,
         contract_id=contract.id,
         function_records=[
-            {"function": "sweep(address)", "abi_signature": "sweep(address)", "selector": _selector("sweep(address)")}
+            {
+                "function": "sweep(address)",
+                "abi_signature": "sweep(address)",
+                "selector": _selector("sweep(address)"),
+                "claims": [
+                    {
+                        "claim_id": "upgrade.implementation",
+                        "tier": "behavioral_observed",
+                        "witness": {"effect_verdict_id": 7},
+                    }
+                ],
+            }
         ],
         capability_by_function=None,
     )
@@ -312,7 +323,7 @@ def test_the_row_replace_drops_last_run_s_policy_derived_claims(db_session):
 
     tiers = {c["tier"] for c in _ef(db_session, contract, "sweep(address)").claims or []}
     assert "policy_derived" not in tiers
-    # ...while the observed claim is the thing the carry exists to preserve.
+    # The observed claim remains only because the current Assessment projection supplied it.
     assert "behavioral_observed" in tiers
 
 

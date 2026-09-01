@@ -94,7 +94,14 @@ def _patch_pipeline(monkeypatch, *, scaffold_calls, collect_calls, snapshot_call
             "functions": [],
             "state_vars": [],
         }
-        return analysis, None, None
+        return (
+            analysis,
+            {"schema_version": "semantic", "trees": {}},
+            {
+                "schema_version": "semantic",
+                "functions": {},
+            },
+        )
 
     def _build_plan(_analysis):
         return {"contract_address": "0xabc", "controllers": []}
@@ -103,7 +110,7 @@ def _patch_pipeline(monkeypatch, *, scaffold_calls, collect_calls, snapshot_call
         snapshot_calls.append(_plan)
         return {"controllers": []}
 
-    def _build_perms(_analysis, _snapshot):
+    def _build_perms(_analysis, _snapshot, _effects, _trees):
         return None
 
     monkeypatch.setattr("services.discovery.classifier.classify_single", _classify)

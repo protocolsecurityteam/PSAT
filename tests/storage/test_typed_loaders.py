@@ -27,27 +27,12 @@ def test_absent_artifact_returns_none() -> None:
 
 
 def test_assessment_validates_as_the_canonical_wire() -> None:
-    account_id = "account:1"
-    contract_id = "contract:1"
-    scope = {
-        "contract_id": contract_id,
-        "account_id": account_id,
-        "code_hash": None,
-        "source_hash": "0xsource",
-    }
     assessment = {
-        "schema_version": "assessment/1",
-        "scope": scope,
-        "accounts": {
-            account_id: {
-                "id": account_id,
-                "chain_id": 1,
-                "address": "0x1111111111111111111111111111111111111111",
-            }
-        },
+        "schema_version": "assessment/2",
         "contract": {
-            "id": contract_id,
-            "account_id": account_id,
+            "chain_id": 1,
+            "address": "0x1111111111111111111111111111111111111111",
+            "deployment_address": "0x1111111111111111111111111111111111111111",
             "name": "Vault",
             "code_hash": None,
             "source_hash": "0xsource",
@@ -55,8 +40,6 @@ def test_assessment_validates_as_the_canonical_wire() -> None:
         "functions": {},
         "controllers": {},
         "entities": {},
-        "authority_edges": [],
-        "dependency_edges": [],
         "claims": {},
         "evidence": {},
         "analyses": [],
@@ -74,10 +57,12 @@ def test_assessment_validates_as_the_canonical_wire() -> None:
                 "detector": "static.facts",
                 "version": "1",
                 "status": "completed",
-                "coverage": {"targets_total": 0, "targets_completed": 0, "omissions": []},
+                "targets_total": 0,
+                "targets_completed": 0,
+                "omissions": [],
                 "diagnostics": [],
-                "claim_ids": [],
-                "evidence_ids": ["evidence:missing"],
+                "claims": [],
+                "evidence": ["evidence:missing"],
             }
         ],
     }

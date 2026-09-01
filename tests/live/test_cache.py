@@ -19,7 +19,7 @@ def test_first_run_completes(analyzed_weth):
 def test_first_run_has_artifacts(analyzed_weth, live_client: LiveClient):
     analysis = live_client.artifact(analyzed_weth["name"], "assessment")
     assert isinstance(analysis, dict)
-    assert analysis.get("schema_version") == "assessment/1"
+    assert analysis.get("schema_version") == "assessment/2"
 
 
 def test_second_run_uses_cache(analyzed_weth, cached_weth, live_client: LiveClient):

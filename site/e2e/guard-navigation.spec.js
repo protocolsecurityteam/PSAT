@@ -255,3 +255,14 @@ test.describe("URL selection parameter", () => {
     await expect(page).toHaveURL(new RegExp(`sel=${SAFE_ADDR}`));
   });
 });
+
+test("a failed functions response is explicit, never an empty graph", async ({ page }) => {
+  await page.route("**/api/company/testco/functions", (route) =>
+    route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ detail: "unavailable" }) })
+  );
+  await page.route("**/api/company/testco", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(COMPANY_FIXTURE) })
+  );
+  await page.goto("/company/testco/surface");
+  await expect(page.getByText("Failed: Failed to load function analysis")).toBeVisible();
+});

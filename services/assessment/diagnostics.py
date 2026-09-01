@@ -37,7 +37,7 @@ def add_stage_errors(assessment: Assessment, errors: Iterable[Any]) -> Assessmen
                 "code": str(_field(error, "exc_type", "PipelineError")),
                 "message": str(_field(error, "message", "pipeline analysis failed")),
                 "target_kind": "contract",
-                "target_id": result["contract"]["id"],
+                "target": result["contract"]["deployment_address"],
             }
             if diagnostic not in diagnostics:
                 diagnostics.append(diagnostic)
@@ -46,20 +46,18 @@ def add_stage_errors(assessment: Assessment, errors: Iterable[Any]) -> Assessmen
             "detector": detector,
             "version": "pipeline/1",
             "status": status,
-            "coverage": {
-                "targets_total": 1,
-                "targets_completed": 0,
-                "omissions": [
-                    {
-                        "target_kind": "contract",
-                        "target_id": result["contract"]["id"],
-                        "reason": f"{stage}_stage_degraded",
-                    }
-                ],
-            },
+            "targets_total": 1,
+            "targets_completed": 0,
+            "omissions": [
+                {
+                    "target_kind": "contract",
+                    "target": result["contract"]["deployment_address"],
+                    "reason": f"{stage}_stage_degraded",
+                }
+            ],
             "diagnostics": diagnostics,
-            "claim_ids": [],
-            "evidence_ids": [],
+            "claims": [],
+            "evidence": [],
         }
         result["analyses"] = [item for item in result["analyses"] if item["detector"] != detector]
         result["analyses"].append(receipt)

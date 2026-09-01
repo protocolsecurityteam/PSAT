@@ -155,9 +155,8 @@ def test_copy_restamps_address_scopes_artifacts_and_leaves_donor_untouched(db_se
     assert ca["subject"]["address"] == ADDR_BASE.lower()
     assessment = get_artifact(db_session, target_job.id, "assessment")
     assert isinstance(assessment, dict)
-    account = assessment["accounts"][assessment["scope"]["account_id"]]
-    assert account["address"] == ADDR_BASE.lower()
-    assert account["chain_id"] == 8453
+    assert assessment["contract"]["address"] == ADDR_BASE.lower()
+    assert assessment["contract"]["chain_id"] == 8453
 
     # Source-only artifacts reused byte-for-byte.
     assert get_artifact(db_session, target_job.id, "predicate_trees") == _PREDICATE_TREES
@@ -207,7 +206,7 @@ def test_parity_fresh_vs_cross_chain_copy(db_session):
         assert get_artifact(db_session, target_job.id, name) == want, name
     assessment = get_artifact(db_session, target_job.id, "assessment")
     assert isinstance(assessment, dict)
-    assert assessment["accounts"][assessment["scope"]["account_id"]]["chain_id"] == 8453
+    assert assessment["contract"]["chain_id"] == 8453
 
 
 def test_copy_returns_none_without_target_contract(db_session):
