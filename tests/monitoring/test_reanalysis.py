@@ -557,6 +557,9 @@ class TestMaybeQueueReanalysis:
             stage=JobStage.done,
             request={"address": addr.lower(), "chain": "ethereum"},
         )
+        from db.contract_materializations import STATIC_FACTS_SCHEMA_VERSION
+
+        old_job.static_facts_schema_version = STATIC_FACTS_SCHEMA_VERSION
         db_session.add(old_job)
         db_session.commit()
         db_session.refresh(old_job)
