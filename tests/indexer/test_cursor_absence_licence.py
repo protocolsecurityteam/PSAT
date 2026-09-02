@@ -291,7 +291,12 @@ def _monitored(
     chain: str = "ethereum",
     active: bool = True,
     address: str = _ADDR,
+    witness_tier: str | None = "self_describing",
 ) -> None:
+    tracked_topics = [{"topic0": topic, "signature": "X(address)"} for topic in topics]
+    if witness_tier is not None:
+        for topic in tracked_topics:
+            topic["witness_tier"] = witness_tier
     protocol = Protocol(name=f"d4-{chain}-{int(active)}-{address[-6:]}")
     db_session.add(protocol)
     db_session.flush()
@@ -301,7 +306,7 @@ def _monitored(
             chain=chain,
             protocol_id=protocol.id,
             is_active=active,
-            monitoring_config={"tracked_topics": [{"topic0": t, "signature": "X(address)"} for t in topics]},
+            monitoring_config={"tracked_topics": tracked_topics},
         )
     )
     db_session.commit()
@@ -342,6 +347,74 @@ def test_tracked_topics_enrol_the_writers_no_hint_ever_reached(db_session, stub_
     )
     assert enrolled == {t.lower() for t in _DENYLIST_SURFACE}
     assert _row(db_session).enrollment_basis == ENROLLMENT_BASIS_TRACKED_TOPICS
+
+
+@requires_postgres
+@pytest.mark.parametrize(
+    ("witness_tier", "expected"),
+    [("self_describing", 1), ("hint", 1), ("activity", 0), (None, 0)],
+)
+def test_historical_enrollment_requires_a_resolution_capable_witness(
+    db_session,
+    stub_rpc,
+    witness_tier: str | None,
+    expected: int,
+):
+    stub_rpc()
+    _monitored(db_session, [_TOPIC_DENY_TO], witness_tier=witness_tier)
+
+    assert enroll_from_tracked_topics(db_session) == expected
+    assert db_session.execute(select(func.count()).select_from(IndexedEventCursor)).scalar_one() == expected
+
+
+@requires_postgres
+def test_activity_reconciliation_removes_only_tracked_topic_cursors(db_session):
+    address = "0x" + "ac" * 20
+    _monitored(db_session, [_TOPIC_DENY_TO], address=address, witness_tier="activity")
+    inserted = enroll_event_cursor(
+        db_session,
+        chain_id=1,
+        event_address=address,
+        topic0=_TOPIC_DENY_TO,
+        enrollment_basis=ENROLLMENT_BASIS_TRACKED_TOPICS,
+    )
+    db_session.commit()
+    assert inserted is True
+    assert (
+        _row(db_session, address=address, topic0=_TOPIC_DENY_TO).enrollment_basis
+        == ENROLLMENT_BASIS_TRACKED_TOPICS
+    )
+
+    assert enroll_from_tracked_topics(db_session) == 0
+    assert (
+        db_session.execute(select(IndexedEventCursor).where(IndexedEventCursor.event_address == address)).first()
+        is None
+    )
+
+
+@requires_postgres
+def test_activity_reconciliation_preserves_predicate_hint_cursors(db_session):
+    address = "0x" + "ad" * 20
+    _monitored(db_session, [_TOPIC_DENY_TO], address=address, witness_tier="activity")
+    inserted = enroll_event_cursor(
+        db_session,
+        chain_id=1,
+        event_address=address,
+        topic0=_TOPIC_DENY_TO,
+        enrollment_basis=ENROLLMENT_BASIS_PREDICATE_HINT,
+    )
+    db_session.commit()
+    assert inserted is True
+    assert (
+        _row(db_session, address=address, topic0=_TOPIC_DENY_TO).enrollment_basis
+        == ENROLLMENT_BASIS_PREDICATE_HINT
+    )
+
+    assert enroll_from_tracked_topics(db_session) == 0
+    assert (
+        _row(db_session, address=address, topic0=_TOPIC_DENY_TO).enrollment_basis
+        == ENROLLMENT_BASIS_PREDICATE_HINT
+    )
 
 
 @requires_postgres
