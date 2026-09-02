@@ -1087,9 +1087,7 @@ def enroll_from_tracked_topics(session: Session, *, limit: int = 500) -> int:
 
     removed = 0
     tracked_cursors = session.execute(
-        select(IndexedEventCursor).where(
-            IndexedEventCursor.enrollment_basis == ENROLLMENT_BASIS_TRACKED_TOPICS
-        )
+        select(IndexedEventCursor).where(IndexedEventCursor.enrollment_basis == ENROLLMENT_BASIS_TRACKED_TOPICS)
     ).scalars()
     for cursor in tracked_cursors:
         key = (cursor.chain_id, cursor.event_address.lower(), cursor.topic0.lower())

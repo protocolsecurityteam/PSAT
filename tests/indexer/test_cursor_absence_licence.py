@@ -380,10 +380,7 @@ def test_activity_reconciliation_removes_only_tracked_topic_cursors(db_session):
     )
     db_session.commit()
     assert inserted is True
-    assert (
-        _row(db_session, address=address, topic0=_TOPIC_DENY_TO).enrollment_basis
-        == ENROLLMENT_BASIS_TRACKED_TOPICS
-    )
+    assert _row(db_session, address=address, topic0=_TOPIC_DENY_TO).enrollment_basis == ENROLLMENT_BASIS_TRACKED_TOPICS
 
     assert enroll_from_tracked_topics(db_session) == 0
     assert (
@@ -405,16 +402,10 @@ def test_activity_reconciliation_preserves_predicate_hint_cursors(db_session):
     )
     db_session.commit()
     assert inserted is True
-    assert (
-        _row(db_session, address=address, topic0=_TOPIC_DENY_TO).enrollment_basis
-        == ENROLLMENT_BASIS_PREDICATE_HINT
-    )
+    assert _row(db_session, address=address, topic0=_TOPIC_DENY_TO).enrollment_basis == ENROLLMENT_BASIS_PREDICATE_HINT
 
     assert enroll_from_tracked_topics(db_session) == 0
-    assert (
-        _row(db_session, address=address, topic0=_TOPIC_DENY_TO).enrollment_basis
-        == ENROLLMENT_BASIS_PREDICATE_HINT
-    )
+    assert _row(db_session, address=address, topic0=_TOPIC_DENY_TO).enrollment_basis == ENROLLMENT_BASIS_PREDICATE_HINT
 
 
 @requires_postgres
