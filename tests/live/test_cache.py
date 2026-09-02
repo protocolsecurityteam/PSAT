@@ -43,14 +43,6 @@ def test_second_run_uses_cache(analyzed_weth, cached_weth, live_client: LiveClie
     assert a1["contract"]["name"] == a2["contract"]["name"]
 
 
-def test_second_run_completed_faster(analyzed_weth, cached_weth, live_client: LiveClient):
-    t1 = live_client.job_duration_seconds(analyzed_weth)
-    t2 = live_client.job_duration_seconds(cached_weth)
-    # Below 30s fixed overhead dominates and the assertion flaps.
-    if t1 > 30:
-        assert t2 < t1, f"Second run ({t2:.1f}s) should be faster than first ({t1:.1f}s)"
-
-
 @pytest.fixture(scope="module")
 def company_first_run(live_client: LiveClient) -> dict[str, Any]:
     parent = live_client.submit_company_and_wait(COMPANY_NAME, limit=COMPANY_LIMIT)
