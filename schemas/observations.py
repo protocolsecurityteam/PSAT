@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Literal, TypedDict, cast, get_args
+from typing import Any, Literal, cast, get_args
 
-from typing_extensions import NotRequired
+from typing_extensions import NotRequired, TypedDict
 
 from .static_facts import (
     AssociatedEvent,
@@ -47,6 +47,40 @@ def coerce_resolved_controller_type(value: object) -> ResolvedControllerType:
 # such rows cannot 422 and the DB CHECK admits the test-planted states.
 MonitoredContractType = Literal["regular", "proxy", "safe", "timelock", "pausable", "role_control", "contract"]
 MONITORED_CONTRACT_TYPES: frozenset[str] = frozenset(get_args(MonitoredContractType))
+
+MonitoringWitnessTier = Literal["self_describing", "hint", "activity"]
+MonitoringWriterOpenness = Literal["open", "restricted", "not_determined"]
+
+
+class TrackedTopic(TypedDict):
+    topic0: str
+    signature: NotRequired[str | None]
+    event_type: NotRequired[str]
+    controller_id: NotRequired[str | None]
+    inputs: NotRequired[list[dict[str, Any]]]
+    effect_tags: NotRequired[dict[str, Any]]
+    witness_tier: NotRequired[MonitoringWitnessTier]
+    writer_openness: NotRequired[MonitoringWriterOpenness]
+    member_witness: NotRequired[dict[str, Any]]
+
+
+class MonitoringConfig(TypedDict, total=False):
+    """Analyzer and operator configuration persisted for one monitored contract."""
+
+    tracked_topics: list[TrackedTopic]
+    polling_plan: list[dict[str, Any]]
+    observation_plan_not_determined: str
+    tracked_topics_stale_since: str
+    polling_plan_stale_since: str
+    scan_gaps: list[dict[str, Any]]
+    watch_upgrades: bool
+    watch_ownership: bool
+    watch_pause: bool
+    watch_roles: bool
+    watch_safe_signers: bool
+    watch_safe_modules: bool
+    watch_timelock: bool
+    watch_authority: bool
 
 
 class EventWatch(TypedDict):

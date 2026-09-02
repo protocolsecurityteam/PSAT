@@ -39,6 +39,7 @@ from db.queue import HEARTBEAT_EVENT_INDEXER, get_artifact, record_heartbeat
 from db.queue.typed import load_assessment_inputs
 from services.clients.etherscan import get_contract_creation_block
 from services.clients.rpc import require_rpc_url, rpc_request
+from services.monitoring.config import load_monitoring_config
 from services.resolution.caller_sources import CALLER_SOURCES as _CALLER_SOURCES
 from services.resolution.deferred_reconciler import reconcile_deferred_resolutions, reconcile_role_set_drift
 from services.resolution.repos.event_logs_rpc import FetchedEventLog, FetchWindowStat
@@ -1066,7 +1067,7 @@ def enroll_from_tracked_topics(
     worked = 0
     seed_cache: dict[tuple[int, str], int | None] = {}
     witness_cache: dict[tuple[int, str], tuple[int | None, str]] = {}
-    for address, chain, config in rows:
+    for address, chain, raw_config in rows:
         # ``limit`` bounds the addresses that still NEED a cursor, not the rows
         # inspected. Bounding the rows would re-inspect the same head of the
         # ordering every pass and never reach the tail — the surface would look
@@ -1085,9 +1086,8 @@ def enroll_from_tracked_topics(
             continue
         if chain_id not in supported_chain_ids():
             continue
-        specs = (config or {}).get("tracked_topics") if isinstance(config, dict) else None
-        if not isinstance(specs, list):
-            continue
+        config = load_monitoring_config(raw_config)
+        specs = config.get("tracked_topics", [])
         seen: set[str] = set()
         wanted: list[str] = []
         for spec in specs:
