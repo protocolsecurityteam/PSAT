@@ -38,6 +38,8 @@ def test_load_monitoring_config_normalizes_absent_config() -> None:
         {"tracked_topics": "not-a-list"},
         {"tracked_topics": ["not-an-object"]},
         {"tracked_topics": [{"signature": "MissingTopic(address)"}]},
+        {"tracked_topics": [{"topic0": "0x1234"}]},
+        {"tracked_topics": [{"topic0": "0x" + "zz" * 32}]},
         {"tracked_topics": [{"topic0": "0x" + "ab" * 32, "witness_tier": "guess"}]},
     ],
 )

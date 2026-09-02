@@ -1091,12 +1091,10 @@ def enroll_from_tracked_topics(
         seen: set[str] = set()
         wanted: list[str] = []
         for spec in specs:
-            topic0 = spec.get("topic0") if isinstance(spec, dict) else None
-            if not isinstance(topic0, str) or not topic0.lower().startswith("0x") or len(topic0) != 66:
+            topic0 = spec["topic0"].lower()
+            if topic0 in seen:
                 continue
-            if topic0.lower() in seen:
-                continue
-            seen.add(topic0.lower())
+            seen.add(topic0)
             wanted.append(topic0)
         # An address whose every tracked topic already has a cursor is skipped
         # without spending the budget or a single RPC read, so successive passes

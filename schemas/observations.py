@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal, cast, get_args
+from typing import Annotated, Any, Literal, cast, get_args
 
+from pydantic import StringConstraints
 from typing_extensions import NotRequired, TypedDict
 
 from .static_facts import (
@@ -50,10 +51,11 @@ MONITORED_CONTRACT_TYPES: frozenset[str] = frozenset(get_args(MonitoredContractT
 
 MonitoringWitnessTier = Literal["self_describing", "hint", "activity"]
 MonitoringWriterOpenness = Literal["open", "restricted", "not_determined"]
+Topic0 = Annotated[str, StringConstraints(pattern=r"^0x[0-9a-fA-F]{64}$")]
 
 
 class TrackedTopic(TypedDict):
-    topic0: str
+    topic0: Topic0
     signature: NotRequired[str | None]
     event_type: NotRequired[str]
     controller_id: NotRequired[str | None]
