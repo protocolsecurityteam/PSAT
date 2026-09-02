@@ -14,6 +14,7 @@ from schemas.api_requests import UpdateMonitoredContractRequest, UpsertMonitored
 from schemas.api_responses import MonitoredContractItem, MonitoredEventItem
 from services.clients.rpc import rpc_request
 from services.monitoring.chain_rpc import chain_id_for, rpc_for_chain
+from services.monitoring.config import load_monitoring_config
 from services.monitoring.observation_plan_state import CONFIG_SUPPLIED_BY_CALLER, preserve_scan_plane_facts
 from utils.chains import UnsupportedChainError, require_supported_chain
 
@@ -95,9 +96,9 @@ def _stamp_caller_supplied(
     row's scanner never covered, and no caller authored it. Dropping it would
     let the row present continuous coverage over an interval nothing read.
     """
-    stamped = dict(monitoring_config or {})
+    stamped = dict(load_monitoring_config(monitoring_config))
     stamped["observation_plan_not_determined"] = CALLER_SUPPLIED_TRACKING_PLAN
-    return preserve_scan_plane_facts(stamped, existing_config)
+    return dict(preserve_scan_plane_facts(stamped, existing_config))
 
 
 def monitored_contract_payload(c: MonitoredContract) -> MonitoredContractItem:
@@ -108,7 +109,7 @@ def monitored_contract_payload(c: MonitoredContract) -> MonitoredContractItem:
         "protocol_id": c.protocol_id,
         "contract_id": c.contract_id,
         "contract_type": c.contract_type,
-        "monitoring_config": c.monitoring_config,
+        "monitoring_config": dict(load_monitoring_config(c.monitoring_config)),
         "last_known_state": c.last_known_state,
         "last_poll_status": c.last_poll_status,
         "last_scanned_block": c.last_scanned_block,

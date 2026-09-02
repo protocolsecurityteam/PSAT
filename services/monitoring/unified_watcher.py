@@ -50,6 +50,7 @@ from services.monitoring import (
     emit_monitor_cycle,
 )
 from services.monitoring.chain_rpc import chain_id_for, rpc_for_chain
+from services.monitoring.config import load_monitoring_config
 from services.monitoring.enrichment import enrich_events
 from services.monitoring.enrollment import mark_enrollment_dirty
 from services.monitoring.event_state import (
@@ -258,12 +259,12 @@ def _poll_entry_for_controller(mc: MonitoredContract, controller_id: str | None)
     advanced, and the rotation poller — which does poll the vendored entry —
     remains the backstop that catches the change within one poll interval.
     """
-    plan = (mc.monitoring_config or {}).get("polling_plan")
-    if not isinstance(plan, list) or not controller_id:
+    plan = load_monitoring_config(mc.monitoring_config).get("polling_plan", [])
+    if not controller_id:
         return None
     wanted_source = f"analyzer:{controller_id}"
     for entry in plan:
-        if isinstance(entry, dict) and entry.get("source") == wanted_source:
+        if entry.get("source") == wanted_source:
             return entry
     return None
 
@@ -395,14 +396,15 @@ def _process_window(
 
     # Per-emitter topic0 → tracked-topic spec, built from the hydrated rows'
     # monitoring_config (the analysis observation_plan persisted at enrollment).
+    configs_by_emitter = {}
     tracked_specs_by_emitter: dict[str, dict[str, dict]] = {}
     for addr, mc in mc_by_addr.items():
-        topics_list = (mc.monitoring_config or {}).get("tracked_topics") or []
+        config = load_monitoring_config(mc.monitoring_config)
+        configs_by_emitter[addr] = config
+        topics_list = config.get("tracked_topics", [])
         spec_map: dict[str, dict] = {}
         for topic_spec in topics_list:
-            t0 = (topic_spec.get("topic0") or "").lower()
-            if t0:
-                spec_map[t0] = topic_spec
+            spec_map[topic_spec["topic0"].lower()] = dict(topic_spec)
         if spec_map:
             tracked_specs_by_emitter[addr] = spec_map
 
@@ -448,7 +450,8 @@ def _process_window(
 
         event_type = parsed["event_type"]
 
-        if mc.monitoring_config and not _should_watch(mc, parsed):
+        config = configs_by_emitter[emitter]
+        if not _should_watch(mc, parsed, config=config):
             continue
 
         # Pre-enrollment floor: an event below the contract's enrollment_block
@@ -515,7 +518,7 @@ def _process_window(
             # rather than reading fresh-equivalent. Read-verified events do not
             # carry it: their claim rests on the read, which is current
             # regardless of when the plan was last refreshed.
-            stale_since = (mc.monitoring_config or {}).get(TRACKED_TOPICS_STALE_SINCE_KEY)
+            stale_since = config.get(TRACKED_TOPICS_STALE_SINCE_KEY)
             if stale_since:
                 event_data["plan_stale_since"] = stale_since
 
@@ -1935,18 +1938,14 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
         current: list[tuple[MonitoredContract, list[tuple[dict, tuple[str, list]]]]] = []
         current_calls = 0
         for mc in chain_contracts:
-            plan = (mc.monitoring_config or {}).get("polling_plan") or []
+            plan = load_monitoring_config(mc.monitoring_config).get("polling_plan", [])
             entries: list[tuple[dict, tuple[str, list]]] = []
-            if isinstance(plan, list):
-                for entry in plan:
-                    if not isinstance(entry, dict):
-                        entries_unrecognized += 1
-                        continue
-                    call = _rpc_call_for_entry(mc.address, entry)
-                    if call is None:
-                        entries_unrecognized += 1
-                        continue
-                    entries.append((entry, call))
+            for entry in plan:
+                call = _rpc_call_for_entry(mc.address, entry)
+                if call is None:
+                    entries_unrecognized += 1
+                    continue
+                entries.append((entry, call))
             if current and current_calls + len(entries) > MAX_BATCH_SIZE:
                 chunks.append((chunk_chain, current))
                 current = []

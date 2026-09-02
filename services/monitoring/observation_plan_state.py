@@ -37,13 +37,15 @@ is a not-determined fact about our own record, not about the contract.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Mapping
+from typing import Any
 
 from sqlalchemy import cast, func, literal, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
 from db.models import ContractMaterialization, MonitoredContract, MonitoringEnrollmentQueue
+from schemas.observations import MonitoringConfig
+from services.monitoring.config import load_monitoring_config
 from utils.chains import chain_cache_token
 
 # --- config keys -----------------------------------------------------------
@@ -117,11 +119,11 @@ def _utcnow() -> datetime:
 
 
 def merge_stale_observation_plan(
-    new_config: dict[str, Any],
-    existing_config: Mapping[str, Any] | None,
+    new_config: object,
+    existing_config: object,
     *,
     now: datetime | None = None,
-) -> dict[str, Any]:
+) -> MonitoringConfig:
     """Re-enrollment's config, with last-known-good watching preserved.
 
     Enrollment rebuilds ``monitoring_config`` wholesale, so a plan read that
@@ -145,48 +147,48 @@ def merge_stale_observation_plan(
     prune the observed ``last_known_state`` keys it names, which is the same
     manufactured ignorance one layer down.
     """
-    token = new_config.get(NOT_DETERMINED_KEY)
+    new = load_monitoring_config(new_config)
+    existing = load_monitoring_config(existing_config)
+    token = new.get(NOT_DETERMINED_KEY)
     if token not in STALENESS_MERGE_TOKENS:
-        return new_config
-    if not isinstance(existing_config, Mapping):
-        return new_config
-    if existing_config.get(NOT_DETERMINED_KEY) == CONFIG_SUPPLIED_BY_CALLER:
-        return new_config
+        return new
+    if existing.get(NOT_DETERMINED_KEY) == CONFIG_SUPPLIED_BY_CALLER:
+        return new
 
-    last_good = existing_config.get(TRACKED_TOPICS_KEY)
-    if not isinstance(last_good, list) or not last_good:
-        return new_config
+    last_good = existing.get(TRACKED_TOPICS_KEY, [])
+    if not last_good:
+        return new
 
-    stale_since = existing_config.get(TRACKED_TOPICS_STALE_SINCE_KEY)
-    if not isinstance(stale_since, str) or not stale_since:
+    stale_since = existing.get(TRACKED_TOPICS_STALE_SINCE_KEY)
+    if not stale_since:
         # First failure to re-read: from here the topics are dated. A later
         # failure keeps this instant — re-enrolling does not refresh them.
         stale_since = (now or _utcnow()).isoformat()
 
-    merged = dict(new_config)
+    merged = dict(new)
     merged[TRACKED_TOPICS_KEY] = list(last_good)
     merged[TRACKED_TOPICS_STALE_SINCE_KEY] = stale_since
     # Re-derived from the carried topics rather than copied: the flag is a
     # function of what is being watched, and the watch list is what moved.
-    if any(isinstance(t, Mapping) and t.get("event_type") == "authority_updated" for t in last_good):
+    if any(topic.get("event_type") == "authority_updated" for topic in last_good):
         merged["watch_authority"] = True
 
-    merged_plan = _merge_polling_plan(new_config.get(POLLING_PLAN_KEY), existing_config.get(POLLING_PLAN_KEY))
+    merged_plan = _merge_polling_plan(new.get(POLLING_PLAN_KEY), existing.get(POLLING_PLAN_KEY))
     if merged_plan is not None:
         # Non-None means entries WERE carried (``_merge_polling_plan`` returns
         # None otherwise), so the stamp is unconditional here — comparing
         # lengths against the raw new plan would miss a carry whenever that plan
         # held a malformed entry the merge dropped.
         merged[POLLING_PLAN_KEY] = merged_plan
-        merged[POLLING_PLAN_STALE_SINCE_KEY] = existing_config.get(POLLING_PLAN_STALE_SINCE_KEY) or stale_since
+        merged[POLLING_PLAN_STALE_SINCE_KEY] = existing.get(POLLING_PLAN_STALE_SINCE_KEY) or stale_since
 
-    return merged
+    return load_monitoring_config(merged)
 
 
 def preserve_scan_plane_facts(
-    new_config: dict[str, Any],
-    existing_config: Mapping[str, Any] | None,
-) -> dict[str, Any]:
+    new_config: object,
+    existing_config: object,
+) -> MonitoringConfig:
     """Carry the row's scan-plane record onto a rebuilt config, always.
 
     Every writer of ``monitoring_config`` — enrollment and the caller-facing
@@ -197,15 +199,19 @@ def preserve_scan_plane_facts(
     staleness merge: the gaps are true whether or not the plan could be read,
     and true whether the new config came from the analyzer or from a caller.
     """
-    gaps = (existing_config or {}).get(SCAN_GAPS_KEY)
-    if not isinstance(gaps, list) or not gaps:
-        return new_config
-    if new_config.get(SCAN_GAPS_KEY) == gaps:
-        return new_config
-    return {**new_config, SCAN_GAPS_KEY: gaps}
+    new = load_monitoring_config(new_config)
+    existing = load_monitoring_config(existing_config)
+    gaps = existing.get(SCAN_GAPS_KEY, [])
+    if not gaps:
+        return new
+    if new.get(SCAN_GAPS_KEY) == gaps:
+        return new
+    return load_monitoring_config({**new, SCAN_GAPS_KEY: gaps})
 
 
-def _merge_polling_plan(new_plan: Any, existing_plan: Any) -> list[dict] | None:
+def _merge_polling_plan(
+    new_plan: list[dict[str, Any]] | None, existing_plan: list[dict[str, Any]] | None
+) -> list[dict[str, Any]] | None:
     """Freshly-derived entries, plus last-good entries for the fields the fresh
     plan cannot name. Returns ``None`` when there is nothing to carry.
 
@@ -213,13 +219,11 @@ def _merge_polling_plan(new_plan: Any, existing_plan: Any) -> list[dict] | None:
     contract type this pass. The carried ones are the analyzer-derived slots
     that only a readable plan can produce.
     """
-    if not isinstance(existing_plan, list) or not existing_plan:
+    if not existing_plan:
         return None
-    fresh = [e for e in (new_plan or []) if isinstance(e, dict)]
+    fresh = list(new_plan or [])
     fresh_fields = {e.get("field") for e in fresh}
-    carried = [
-        e for e in existing_plan if isinstance(e, dict) and e.get("field") and e.get("field") not in fresh_fields
-    ]
+    carried = [e for e in existing_plan if e.get("field") and e.get("field") not in fresh_fields]
     if not carried:
         return None
     return fresh + carried
@@ -244,16 +248,16 @@ def _state_from_parts(token: Any, has_topics_key: bool, topics_present: bool, ha
     return READY_FRESH_WITH_TOPICS if topics_present else READY_FRESH_PROVEN_EMPTY
 
 
-def classify_plan_state(config: Mapping[str, Any] | None) -> str:
+def classify_plan_state(config: object) -> str:
     """The plan state of one ``monitoring_config``.
 
     Returns a not-determined token verbatim when that is the state, so an
     unrecognized token is reported as itself rather than folded into a known
     one.
     """
-    cfg = config if isinstance(config, Mapping) else {}
-    topics = cfg.get(TRACKED_TOPICS_KEY)
-    has_topics_key = isinstance(topics, list)
+    cfg = load_monitoring_config(config)
+    topics = cfg.get(TRACKED_TOPICS_KEY, [])
+    has_topics_key = TRACKED_TOPICS_KEY in cfg
     return _state_from_parts(
         cfg.get(NOT_DETERMINED_KEY),
         has_topics_key,

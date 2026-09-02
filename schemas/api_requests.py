@@ -204,12 +204,14 @@ def _reject_analyzer_owned_config_keys(value: dict | None) -> dict | None:
     but it fails the same test: it is a claim about what was observed, a caller
     has no witness for it, and it now survives every config rebuild.
     """
-    if not isinstance(value, dict):
-        return value
+    if value is None:
+        return None
     for key, message in {**_ANALYZER_OWNED_CONFIG_KEYS, **_SCANNER_OWNED_CONFIG_KEYS}.items():
         if key in value:
             raise ValueError(message)
-    return value
+    from services.monitoring.config import load_monitoring_config
+
+    return dict(load_monitoring_config(value))
 
 
 class UpsertMonitoredContractRequest(BaseModel):

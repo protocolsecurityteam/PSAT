@@ -124,6 +124,13 @@ def test_null_monitoring_config_is_stamped_too(api_client, protocol_id, admin_he
     assert resp.json()["monitoring_config"] == {"observation_plan_not_determined": CALLER_SUPPLIED_TRACKING_PLAN}
 
 
+def test_caller_monitoring_config_uses_the_same_strict_schema(api_client, protocol_id, admin_headers):
+    resp = _post(api_client, protocol_id, admin_headers, {"watch_pause": "yes"})
+
+    assert resp.status_code == 422
+    assert "watch_pause" in resp.text
+
+
 def test_a_forged_reason_token_cannot_survive_the_route(api_client, protocol_id, admin_headers):
     """A caller naming an analyzer reason gets the route's own token instead —
     the route owns this key. Overwrite rather than reject so that reading a

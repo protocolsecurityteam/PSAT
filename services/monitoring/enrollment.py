@@ -28,6 +28,7 @@ from schemas.observations import MonitoredContractType
 from services.clients.rpc import rpc_request
 from services.governance.control_graph_types import reconcile_control_graph_types
 from services.monitoring.chain_rpc import chain_id_for, rpc_for_chain
+from services.monitoring.config import load_monitoring_config
 from services.monitoring.event_topics import extract_governance_topics
 from services.monitoring.observation_plan_state import (
     CONTRACT_NOT_ANALYZED,
@@ -385,12 +386,13 @@ def enroll_protocol_contracts(
             # and an empty watch list. Merge first — everything below derives
             # from the config, so the merged plan is what seeds the state and
             # decides whether this row still polls.
-            monitoring_config = merge_stale_observation_plan(monitoring_config, existing.monitoring_config)
+            existing_config = load_monitoring_config(existing.monitoring_config)
+            monitoring_config = merge_stale_observation_plan(monitoring_config, existing_config)
             # Independent of the plan state: what this row's scanner never
             # covered stays recorded across every rebuild of the config.
-            monitoring_config = preserve_scan_plane_facts(monitoring_config, existing.monitoring_config)
+            monitoring_config = preserve_scan_plane_facts(monitoring_config, existing_config)
             carried_plan = monitoring_config.get(POLLING_PLAN_KEY)
-            if isinstance(carried_plan, list):
+            if carried_plan is not None:
                 polling_plan = carried_plan
 
         initial_state = _build_initial_state(contract, cv_rows, polling_plan)
@@ -400,7 +402,7 @@ def enroll_protocol_contracts(
             existing.protocol_id = protocol_id
             existing.contract_id = contract.id
             existing.contract_type = contract_type
-            existing.monitoring_config = monitoring_config
+            existing.monitoring_config = dict(monitoring_config)
             # Merge, not replace: an observed value is the live truth and wins,
             # so re-enrollment only fills keys the observation is missing. Two
             # hygiene rules keep the merge from carrying junk forever, since the
@@ -797,7 +799,7 @@ def _build_monitoring_config(
     if polling_plan:
         config["polling_plan"] = polling_plan
 
-    return config
+    return dict(load_monitoring_config(config))
 
 
 # Canonical owner/admin controller_id whitelists. Same shape as

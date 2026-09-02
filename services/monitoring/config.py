@@ -32,7 +32,7 @@ def load_monitoring_config(value: object) -> MonitoringConfig:
     if value is None:
         return {}
     try:
-        _ADAPTER.validate_python(value)
+        _ADAPTER.validate_python(value, strict=True)
     except ValidationError as exc:
         problems = [
             f"{'.'.join(str(part) for part in error['loc']) or '<root>'}: {error['msg']}" for error in exc.errors()

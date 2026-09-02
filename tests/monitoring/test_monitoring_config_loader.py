@@ -41,6 +41,7 @@ def test_load_monitoring_config_normalizes_absent_config() -> None:
         {"tracked_topics": [{"topic0": "0x1234"}]},
         {"tracked_topics": [{"topic0": "0x" + "zz" * 32}]},
         {"tracked_topics": [{"topic0": "0x" + "ab" * 32, "witness_tier": "guess"}]},
+        {"watch_roles": "true"},
     ],
 )
 def test_load_monitoring_config_rejects_malformed_stored_json(raw: object) -> None:
