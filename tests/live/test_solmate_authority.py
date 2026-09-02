@@ -30,11 +30,11 @@ import json
 
 import pytest
 
-from tests.live.conftest import LiveClient
+from tests.live.conftest import VEDA_TELLER_ADDRESS, LiveClient
 
 # TellerWithMultiAssetSupport — Solmate ``Auth``; ``canCall`` delegates to
 # RolesAuthority 0x3994741a…; governing 4/6 Safe (ground-truthed on-chain).
-VEDA_TELLER = "0xe2acf9f80a2756e51d1e53f9f41583c84279fb1f"
+VEDA_TELLER = VEDA_TELLER_ADDRESS
 GOVERNING_SAFE = "0xcea8039076e35a825854c5c2f85659430b06ec96"
 _CANCALL_SELECTOR = "0xb7009613"  # keccak("canCall(address,address,bytes4)")[:4]
 
@@ -52,23 +52,6 @@ _CANCALL_MARKERS = (
     "solmate_roles_authority",
     "delegated_check_not_materialized",
 )
-
-
-@pytest.fixture(scope="session")
-def analyzed_veda_teller(live_client: LiveClient) -> dict:
-    """Analyze the Veda Teller once per session.
-
-    SKIPs (not fails) on timeout / non-completion: the live suite is
-    throughput-bound on contended previews, and this smoke check must not add hard
-    failures under load. A genuine submission error (HTTP 4xx/5xx) still propagates.
-    """
-    try:
-        job = live_client.submit_and_wait(VEDA_TELLER)
-    except TimeoutError as exc:
-        pytest.skip(f"Veda Teller analysis did not finish in time on {live_client.base_url}: {exc}")
-    if job["status"] != "completed":
-        pytest.skip(f"Veda Teller analysis did not complete (status={job['status']})")
-    return job
 
 
 def _cancall_functions(ep: dict) -> list[dict]:
