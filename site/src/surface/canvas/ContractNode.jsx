@@ -70,6 +70,14 @@ export function ContractNode({ data }) {
         <div className="ps-node-standards">{m.standards.join(" · ")}</div>
       )}
       <div className="ps-node-addr">{shortAddr(m.address)}</div>
+      {m.membershipKind === "heuristic" && (
+        <div
+          className="ps-node-membership"
+          title="Likely protocol member based only on the deployer's observed protocol affinity"
+        >
+          Likely member · deployer signal
+        </div>
+      )}
       {/* Timelock marker. A timelock contract is owned by a Safe (passthrough),
           so by default it renders as whatever functional role the classifier
           gave it ("Value Handler") with nothing flagging the delay-gated

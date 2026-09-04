@@ -19,6 +19,14 @@ import {
 import { guardSummary } from "./guardSummary.js";
 import { hasClaims } from "../../vocab/claimProjection.js";
 
+export function membershipKind(contract) {
+  const witnesses = Array.isArray(contract?.membership_witnesses)
+    ? contract.membership_witnesses
+    : [];
+  if (contract?.membership_state !== "member" || witnesses.length === 0) return "not-stated";
+  return witnesses.every((witness) => witness?.heuristic === true) ? "heuristic" : "supported";
+}
+
 export function buildMachines(companyData, functionData, { functionsLoading = false, activeChain = null } = {}) {
   // Node-type index over every contract's control_graph; used to flag
   // passthrough timelock contracts (their own node is typed "timelock").
@@ -69,6 +77,7 @@ export function buildMachines(companyData, functionData, { functionsLoading = fa
       const isTimelock = tlNode?.type === "timelock";
       return {
         ...contract,
+        membershipKind: membershipKind(contract),
         totalFunctions,
         lanes,
         // Passthrough timelock contracts: typed "timelock" in the control

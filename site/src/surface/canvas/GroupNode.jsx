@@ -139,6 +139,7 @@ export function GroupNode({ data }) {
               <span className="ps-group-addr">{shortAddr(p.address)}</span>
               <span className="ps-group-count">
                 {data.childCount} contract{data.childCount === 1 ? "" : "s"}
+                {data.heuristicCount ? ` · ${data.heuristicCount} likely` : ""}
                 {tvl ? ` · ${tvl}` : ""}
               </span>
             </div>

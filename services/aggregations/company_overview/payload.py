@@ -187,6 +187,29 @@ def _membership_fields(session: Session, rows: list[Contract]) -> dict[int, dict
     return out
 
 
+def _attach_surface_membership(
+    session: Session,
+    governance: GovernanceView,
+    contracts_by_job_id: dict[Any, Contract],
+) -> None:
+    """Carry existing membership evidence onto the Surface contract cards."""
+
+    rows = list({contract.id: contract for contract in contracts_by_job_id.values()}.values())
+    membership = _membership_fields(session, rows)
+    by_entity = {
+        _entity_key(contract.chain, contract.address): membership[contract.id]
+        for contract in rows
+        if contract.address and contract.id in membership
+    }
+    for entry in governance.contracts:
+        address = entry.get("address")
+        if not isinstance(address, str):
+            continue
+        fields = by_entity.get(_entity_key(entry.get("chain"), address))
+        if fields is not None:
+            entry.update(fields)
+
+
 def all_addresses_for_protocol(
     session: Session, protocol_row: Protocol | None, jobs: list[Job]
 ) -> list[dict[str, Any]]:
@@ -319,6 +342,7 @@ def build_company_overview(session: Session, name: str) -> CompanyOverviewRespon
         impl_job_by_entity, contracts_by_job_id = resolve_implementation_contracts(session, jobs, contracts_by_job_id)
     with _time_phase(timings_ms, "build_governance_view"):
         governance = build_governance_view(session, jobs, contracts_by_job_id, impl_job_by_entity)
+        _attach_surface_membership(session, governance, contracts_by_job_id)
     with _time_phase(timings_ms, "compute_reach"):
         reach = _company_reach(session, contracts_by_job_id)
     with _time_phase(timings_ms, "assemble_payload"):

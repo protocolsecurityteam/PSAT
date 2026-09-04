@@ -91,6 +91,28 @@ describe("ContractNode — timelock marker", () => {
   });
 });
 
+describe("ContractNode — membership evidence", () => {
+  it("labels a heuristic-only protocol member", () => {
+    const c = renderNode({
+      address: "0x7",
+      name: "Manager",
+      role: "utility",
+      membershipKind: "heuristic",
+    });
+    expect(c.querySelector(".ps-node-membership").textContent).toMatch(/Likely member/);
+  });
+
+  it("does not add a warning to supported membership", () => {
+    const c = renderNode({
+      address: "0x8",
+      name: "Manager",
+      role: "utility",
+      membershipKind: "supported",
+    });
+    expect(c.querySelector(".ps-node-membership")).toBeNull();
+  });
+});
+
 describe("ContractNode — reach chip", () => {
   function renderWith(data) {
     const { container } = render(

@@ -114,6 +114,8 @@ def test_overview_entry_address_is_canonical_lowercase(db_session):
     overview = build_company_overview(db_session, p.name)
     entry = next(c for c in overview["contracts"] if (c["address"] or "").lower() == lower)
     assert entry["address"] == lower
+    assert entry["membership_state"] == "member"
+    assert entry["membership_witnesses"] == []
 
 
 def test_resolve_company_jobs_excludes_orphan_contracts(db_session):

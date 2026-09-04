@@ -219,8 +219,12 @@ export function buildGraphLayout(machines, fundFlows, principals, bandHeights = 
   }
 
   const nameByAddr = new Map();
+  const machineByAddr = new Map();
   for (const m of sorted) {
-    if (m.address) nameByAddr.set(m.address.toLowerCase(), m.name || m.address);
+    if (m.address) {
+      nameByAddr.set(m.address.toLowerCase(), m.name || m.address);
+      machineByAddr.set(m.address.toLowerCase(), m);
+    }
   }
 
   // Build group container nodes first — React Flow needs the parent
@@ -249,6 +253,7 @@ export function buildGraphLayout(machines, fundFlows, principals, bandHeights = 
       data: {
         principal: p,
         childCount: kids.length,
+        heuristicCount: kids.filter((address) => machineByAddr.get(address)?.membershipKind === "heuristic").length,
         totalUsd: groupTotalUsd.get(principalAddr) || 0,
         controllers,
         headerHeight,

@@ -9,7 +9,7 @@ import {
   ETHERFI_COMPANY_RICH,
   RICH_ADDRESSES,
 } from "../../test/fixtures.js";
-import { buildMachines } from "./buildMachines.js";
+import { buildMachines, membershipKind } from "./buildMachines.js";
 import {
   buildIndirectCallerContext,
   collectDirectCallers,
@@ -31,6 +31,22 @@ const functionData = Object.fromEntries(
 );
 
 describe("buildMachines", () => {
+  it("keeps heuristic membership explicit on the machine", () => {
+    expect(membershipKind({
+      membership_state: "member",
+      membership_witnesses: [
+        { rule: "w4h_deployer_affinity", heuristic: true },
+      ],
+    })).toBe("heuristic");
+    expect(membershipKind({
+      membership_state: "member",
+      membership_witnesses: [
+        { rule: "w4h_deployer_affinity", heuristic: true },
+        { rule: "w3_control", heuristic: false },
+      ],
+    })).toBe("supported");
+  });
+
   it("groups each fixture function into a lane and skips role constants", () => {
     const machines = buildMachines(ETHERFI_COMPANY_RICH, functionData);
     expect(machines).toHaveLength(2);
