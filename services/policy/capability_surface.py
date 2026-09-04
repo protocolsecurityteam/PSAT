@@ -299,19 +299,24 @@ def capability_role_grants(cap_dict: dict[str, Any]) -> list[dict[str, Any]] | N
                 # A public Solmate capability (no role carries it) is not a role
                 # gate — nothing witnessed, nothing undetermined.
                 continue
-            members = node.get("members")
-            if node.get("kind") != "finite_set" or not isinstance(members, list) or not members:
+            role_members = step.get("role_members")
+            if not isinstance(role_members, dict):
+                # A flattened finite-set can contain a direct owner alongside
+                # role holders. Without the adapter's per-role join result,
+                # assigning every set member to every named role overclaims.
                 not_determined = True
                 continue
-            if len(roles) > 1:
-                not_determined = True
-                continue
-            grants.setdefault(roles[0], [])
-            for member in members:
-                if isinstance(member, str) and member.startswith("0x") and len(member) == 42:
-                    lowered = member.lower()
-                    if lowered not in grants[roles[0]]:
-                        grants[roles[0]].append(lowered)
+            for role in roles:
+                members = role_members.get(str(role))
+                if not isinstance(members, list):
+                    not_determined = True
+                    continue
+                grants.setdefault(role, [])
+                for member in members:
+                    if isinstance(member, str) and member.startswith("0x") and len(member) == 42:
+                        lowered = member.lower()
+                        if lowered not in grants[role]:
+                            grants[role].append(lowered)
         for child in _child_dicts(node):
             visit(child)
         signer = node.get("signer")

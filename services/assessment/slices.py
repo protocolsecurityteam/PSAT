@@ -65,7 +65,7 @@ def prune_unreferenced_entities(assessment: Assessment) -> None:
             if isinstance(target, str):
                 referenced.add(target)
             add_authority(proposition.get("authority"))
-        elif kind == "authority_capability":
+        elif kind in ("function_authority", "authority_capability"):
             add_authority(proposition.get("authority"))
     for evidence in assessment["evidence"].values():
         if evidence["subject_kind"] == "entity":

@@ -75,7 +75,7 @@ class TestAnalysisPhaseSuccess:
         assert result == static_facts_data
         names = [call["name"] for call in calls]
         assert names == ["assessment"]
-        assert calls[0]["data"]["schema_version"] == "assessment/3"
+        assert calls[0]["data"]["schema_version"] == "assessment/4"
 
         from services.assessment import static_inputs
 

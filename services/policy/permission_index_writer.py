@@ -274,8 +274,13 @@ def write_permission_rows(
         if not isinstance(record_cap, dict):
             record_cap = None
 
+        # The record capability is the Assessment projection on the canonical
+        # worker path. ``capability_by_function`` remains an input for pure
+        # writer tests and callers that have not crossed that boundary.
+        principal_cap = cap_dict if cap_dict is not None else record_cap
+
         # Column values: prefer resolved capability columns; otherwise use
-        # explicit per-function compatibility fields.
+        # the Assessment-projected per-function fields.
         if cap_dict is not None:
             cap_columns = _column_values_for_capability(cap_dict)
         else:
@@ -340,9 +345,7 @@ def write_permission_rows(
             # shapes), so the proven-absent ``[]`` is reachable on the
             # production path and NULL keeps meaning "no capability at all".
             "authority_roles": (
-                fn.get("authority_roles")
-                if fn.get("authority_roles")
-                else _authority_roles_for(cap_dict if cap_dict is not None else record_cap)
+                fn.get("authority_roles") if fn.get("authority_roles") else _authority_roles_for(principal_cap)
             ),
         }
         # Optional columns may be absent in older test metadata.
@@ -376,9 +379,9 @@ def write_permission_rows(
         # constraint so we can't lean on Postgres for it.
         seen: set[tuple[int, str, str, str]] = set()
 
-        if cap_dict is not None:
+        if principal_cap is not None:
             semantic_rows = _principal_rows_for_capability(
-                cap_dict,
+                principal_cap,
                 safe_address_lookup=safe_address_lookup,
                 function_signature=fn_signature,
             )

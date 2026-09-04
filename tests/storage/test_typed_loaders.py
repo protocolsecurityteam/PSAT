@@ -28,7 +28,7 @@ def test_absent_artifact_returns_none() -> None:
 
 def test_assessment_validates_as_the_canonical_wire() -> None:
     assessment = {
-        "schema_version": "assessment/3",
+        "schema_version": "assessment/4",
         "contract": {
             "chain_id": 1,
             "address": "0x1111111111111111111111111111111111111111",
@@ -68,3 +68,7 @@ def test_assessment_validates_as_the_canonical_wire() -> None:
     }
     with pytest.raises(ArtifactSchemaError, match="evidence:missing is missing"):
         load_assessment(_reader({"assessment": dangling}), None, "job")
+
+    stale = {**assessment, "schema_version": "assessment/3"}
+    with pytest.raises(ArtifactSchemaError, match="schema_version"):
+        load_assessment(_reader({"assessment": stale}), None, "job")

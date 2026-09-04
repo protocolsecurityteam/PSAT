@@ -557,7 +557,7 @@ class PolicyWorker(BaseWorker):
                     session,
                     contract_id=contract_row.id,
                     function_records=ep_data.get("functions", []),
-                    capability_by_function=capability_resolver_output,
+                    capability_by_function=None,
                     safe_address_lookup=safe_lookup or None,
                     resolve_principal_type=_make_principal_type_resolver(
                         classify_cache, rpc_url, cross_chain_recognizer, chain_id=_chain_id_for_job(job)

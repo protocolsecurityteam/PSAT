@@ -13,7 +13,7 @@ from typing import Literal
 from pydantic import JsonValue
 from typing_extensions import NotRequired, TypedDict
 
-AssessmentVersion = Literal["assessment/3"]
+AssessmentVersion = Literal["assessment/4"]
 EntityKind = Literal["account", "contract"]
 EffectKind = Literal[
     "authority.grant",
@@ -74,6 +74,7 @@ EvidenceMethod = Literal[
 AuthorityKind = Literal["public", "entity", "controller", "role", "any", "all", "expression"]
 PropositionKind = Literal[
     "function_effect",
+    "function_authority",
     "authority_capability",
     "authority_relationship",
     "entity_classification",
@@ -94,6 +95,7 @@ class Contract(TypedDict):
 
 
 class Function(TypedDict):
+    abi_signature: str | None
     selector: str | None
     state_changing: bool | None
 
@@ -257,18 +259,19 @@ def assessment_problems(assessment: Assessment) -> list[str]:
 
         proposition = claim["proposition"]
         kind = proposition["kind"]
-        if kind in ("function_effect", "authority_capability"):
+        if kind in ("function_effect", "function_authority", "authority_capability"):
             function = proposition.get("function")
-            effect = proposition.get("effect")
             if function not in assessment["functions"]:
                 problems.append(f"claims.{key}.proposition.function: function is missing")
-            if effect is None:
-                problems.append(f"claims.{key}.proposition.effect: effect is missing")
-            else:
-                for affected in effect["affected_functions"]:
-                    if affected not in assessment["functions"]:
-                        problems.append(f"claims.{key}.effect.affected_functions: {affected} is missing")
-            if kind == "authority_capability":
+            if kind in ("function_effect", "authority_capability"):
+                effect = proposition.get("effect")
+                if effect is None:
+                    problems.append(f"claims.{key}.proposition.effect: effect is missing")
+                else:
+                    for affected in effect["affected_functions"]:
+                        if affected not in assessment["functions"]:
+                            problems.append(f"claims.{key}.effect.affected_functions: {affected} is missing")
+            if kind in ("function_authority", "authority_capability"):
                 authority = proposition.get("authority")
                 if authority is None:
                     problems.append(f"claims.{key}.proposition.authority: authority is missing")

@@ -148,7 +148,9 @@ def test_openness_is_total_and_three_valued():
 # ---------------------------------------------------------------------------
 
 
-def _solmate_cap(roles, members):
+def _solmate_cap(roles, members, *, role_members=None):
+    if role_members is None:
+        role_members = {str(role): list(members) for role in roles}
     return {
         "kind": "finite_set",
         "members": list(members),
@@ -158,6 +160,7 @@ def _solmate_cap(roles, members):
             {
                 "step": "solmate_roles_authority",
                 "roles": list(roles),
+                "role_members": role_members,
                 "authority": "0x" + "1" * 40,
                 "target": "0x" + "2" * 40,
                 "selector": "0xdeadbeef",
@@ -181,12 +184,36 @@ def test_role_grants_witnessed_for_single_role_capability():
     ]
 
 
-def test_role_grants_not_determined_for_multi_role_capability():
-    """Two roles carry the capability, so WHICH role each member holds is not
-    recoverable — attributing every member to every role is the over-claim."""
+def test_role_grants_preserve_members_per_role_for_multi_role_capability():
     from services.policy.capability_surface import capability_role_grants
 
-    assert capability_role_grants(_solmate_cap([1, 2], [ADDR_A])) is None
+    cap = _solmate_cap(
+        [1, 2],
+        [ADDR_A, ADDR_B],
+        role_members={"1": [ADDR_A], "2": [ADDR_B]},
+    )
+    assert capability_role_grants(cap) == [
+        {
+            "role": 1,
+            "principals": [
+                {"address": ADDR_A, "resolved_type": None, "details": {"source": "semantic_capability:role_grant"}}
+            ],
+        },
+        {
+            "role": 2,
+            "principals": [
+                {"address": ADDR_B, "resolved_type": None, "details": {"source": "semantic_capability:role_grant"}}
+            ],
+        },
+    ]
+
+
+def test_role_grants_refuse_flattened_members_without_per_role_provenance():
+    from services.policy.capability_surface import capability_role_grants
+
+    cap = _solmate_cap([1], [ADDR_A, ADDR_B], role_members={})
+    del cap["trace"][0]["role_members"]
+    assert capability_role_grants(cap) is None
 
 
 def test_role_grants_not_determined_when_role_identity_is_dissolved():

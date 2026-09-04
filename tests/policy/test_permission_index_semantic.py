@@ -878,7 +878,14 @@ def test_authority_roles_persists_witnessed_role_grant(db_session) -> None:
         "members": ["0x" + "a" * 40],
         "membership_quality": "exact",
         "confidence": "enumerable",
-        "trace": [{"step": "solmate_roles_authority", "roles": [8], "authority": "0x" + "1" * 40}],
+        "trace": [
+            {
+                "step": "solmate_roles_authority",
+                "roles": [8],
+                "role_members": {"8": ["0x" + "a" * 40]},
+                "authority": "0x" + "1" * 40,
+            }
+        ],
     }
     write_permission_rows(
         db_session,
@@ -890,6 +897,23 @@ def test_authority_roles_persists_witnessed_role_grant(db_session) -> None:
     assert row.authority_roles is not None
     assert [g["role"] for g in row.authority_roles] == [8]
     assert [p["address"] for g in row.authority_roles for p in g["principals"]] == ["0x" + "a" * 40]
+
+
+def test_assessment_projected_capability_writes_principal_rows(db_session) -> None:
+    cap = {
+        "kind": "finite_set",
+        "members": ["0x" + "a" * 40],
+        "membership_quality": "exact",
+        "confidence": "enumerable",
+    }
+    write_permission_rows(
+        db_session,
+        contract_id=1,
+        function_records=[_fn_record("f()", capability_expr=cap)],
+        capability_by_function=None,
+    )
+
+    assert db_session.query(_TFunctionPrincipal).one().address == "0x" + "a" * 40
 
 
 def test_authority_roles_null_when_role_identity_dissolved(db_session) -> None:

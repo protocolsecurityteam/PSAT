@@ -24,6 +24,7 @@ from schemas.assessment import (
 from services.static.claims.matchers import discover
 from services.static.claims.registry import entry_for, is_registered
 
+from .functions import resolve_function
 from .keys import content_key, entity_key
 from .slices import prune_unreferenced_entities, remove_analysis_slice
 from .validation import checked
@@ -51,6 +52,128 @@ def _entity(result: Assessment, chain_id: int, principal: Mapping[str, Any]) -> 
     return key, entity
 
 
+def _principal_lookup(permission: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
+    """Known principal detail keyed by normalized address."""
+
+    out: dict[str, Mapping[str, Any]] = {}
+
+    def add(value: object) -> None:
+        if not isinstance(value, Mapping):
+            return
+        address = value.get("address")
+        if isinstance(address, str) and address:
+            out[address.lower()] = value
+
+    add(permission.get("direct_owner"))
+    for grant in permission.get("authority_roles") or []:
+        if isinstance(grant, Mapping):
+            for principal in grant.get("principals") or []:
+                add(principal)
+    for controller in permission.get("controllers") or []:
+        if isinstance(controller, Mapping):
+            for principal in controller.get("principals") or []:
+                add(principal)
+    for principal in permission.get("signature_witnesses") or []:
+        add(principal)
+    return out
+
+
+def _entity_for_address(
+    result: Assessment,
+    chain_id: int,
+    address: object,
+    principals: Mapping[str, Mapping[str, Any]],
+) -> str | None:
+    if not isinstance(address, str) or not address.startswith("0x") or len(address) != 42:
+        return None
+    normalized = address.lower()
+    key = entity_key(chain_id, normalized)
+    if key in result["entities"]:
+        return key
+    principal = principals.get(normalized, {"address": normalized, "resolved_type": "unknown"})
+    entity = _entity(result, chain_id, principal)
+    return entity[0] if entity is not None else None
+
+
+def _conditions(value: Mapping[str, Any]) -> list[JsonValue]:
+    raw = value.get("conditions")
+    return [_json(condition) for condition in raw] if isinstance(raw, list) else []
+
+
+def _with_conditions(authority: Authority, conditions: list[JsonValue]) -> Authority:
+    if conditions:
+        authority["conditions"] = conditions
+    return authority
+
+
+def _authority_from_capability(
+    result: Assessment,
+    chain_id: int,
+    capability: Mapping[str, Any],
+    principals: Mapping[str, Mapping[str, Any]],
+) -> Authority | None:
+    """Lower resolved capability algebra into the public Authority vocabulary."""
+
+    kind = capability.get("kind")
+    conditions = _conditions(capability)
+    if kind == "conditional_universal":
+        return _with_conditions({"kind": "public"}, conditions)
+    if kind in ("OR", "AND"):
+        children = capability.get("children")
+        lowered = [
+            authority
+            for child in (children if isinstance(children, list) else [])
+            if isinstance(child, Mapping)
+            and (authority := _authority_from_capability(result, chain_id, child, principals)) is not None
+        ]
+        if not lowered:
+            return None
+        authority = lowered[0] if len(lowered) == 1 else {"kind": "any" if kind == "OR" else "all", "children": lowered}
+        return _with_conditions(cast(Authority, authority), conditions)
+    if kind == "finite_set" and capability.get("membership_quality", "exact") == "exact":
+        authorities: list[Authority] = []
+        role_members: set[str] = set()
+        for step in capability.get("trace") or []:
+            if not isinstance(step, Mapping) or step.get("step") != "solmate_roles_authority":
+                continue
+            members_by_role = step.get("role_members")
+            if not isinstance(members_by_role, Mapping):
+                continue
+            for role in step.get("roles") or []:
+                members = members_by_role.get(str(role))
+                if not isinstance(role, int) or not isinstance(members, list):
+                    continue
+                entities = sorted(
+                    {
+                        entity
+                        for member in members
+                        if (entity := _entity_for_address(result, chain_id, member, principals)) is not None
+                    }
+                )
+                role_members.update(str(member).lower() for member in members if isinstance(member, str))
+                if entities:
+                    authorities.append({"kind": "role", "role": str(role), "entities": entities})
+        members = capability.get("members")
+        if isinstance(members, list):
+            for member in members:
+                if not isinstance(member, str) or member.lower() in role_members:
+                    continue
+                entity = _entity_for_address(result, chain_id, member, principals)
+                if entity is not None:
+                    authorities.append({"kind": "entity", "entity": entity})
+        unique = {json.dumps(authority, sort_keys=True): authority for authority in authorities}
+        ordered = [unique[key] for key in sorted(unique)]
+        if ordered:
+            authority = ordered[0] if len(ordered) == 1 else {"kind": "any", "children": ordered}
+            return _with_conditions(cast(Authority, authority), conditions)
+        return None
+    return {
+        "kind": "expression",
+        "expression": _json(capability),
+        "conditions": conditions,
+    }
+
+
 def _authorities(
     result: Assessment, chain_id: int, permission: Mapping[str, Any]
 ) -> tuple[Authority | None, str | None]:
@@ -60,15 +183,12 @@ def _authorities(
         if permission.get("status") == "unsupported" or capability_kind == "unsupported":
             reason = capability_expr.get("unsupported_reason")
             return None, str(reason or "unsupported_authority_expression")
-        raw_conditions = permission.get("conditions")
-        if not isinstance(raw_conditions, list):
-            raw_conditions = capability_expr.get("conditions")
-        conditions = raw_conditions if isinstance(raw_conditions, list) else []
-        return {
-            "kind": "expression",
-            "expression": _json(capability_expr),
-            "conditions": [_json(condition) for condition in conditions],
-        }, None
+        if permission.get("status") == "resolved_empty":
+            return None, None
+        authority = _authority_from_capability(result, chain_id, capability_expr, _principal_lookup(permission))
+        if authority is not None:
+            return authority, None
+        return None, "authority_not_determined"
 
     openness = permission.get("authority_openness")
     if openness == "open" or permission.get("authority_public") is True:
@@ -274,14 +394,13 @@ def add_policy(assessment: Assessment, permissions: Mapping[str, Any], *, chain_
     for permission in permission_items:
         if not isinstance(permission, Mapping):
             continue
-        signature = permission.get("abi_signature") or permission.get("function")
-        function = signature if isinstance(signature, str) and signature in result["functions"] else None
+        function, function_problem = resolve_function(result, permission)
         if function is None:
             omissions.append(
                 {
                     "target_kind": "contract",
                     "target": result["contract"]["deployment_address"],
-                    "reason": f"policy_function_not_in_contract:{signature}",
+                    "reason": f"policy_function_not_in_contract:{function_problem}",
                 }
             )
             continue
@@ -301,21 +420,20 @@ def add_policy(assessment: Assessment, permissions: Mapping[str, Any], *, chain_
             )
             continue
         completed += 1
-        if authority is None:
-            # A resolved-empty authority set is a completed negative result, not
-            # a failure and not a capability claim.
-            continue
 
-        observation = _json(
-            {
-                "authority_openness": permission.get("authority_openness"),
-                "authority_public": permission.get("authority_public"),
-                "direct_owner": permission.get("direct_owner"),
-                "authority_roles": permission.get("authority_roles"),
-                "controllers": permission.get("controllers") or [],
-                "signature_witnesses": permission.get("signature_witnesses") or [],
-            }
-        )
+        observation_source: dict[str, Any] = {
+            "authority_openness": permission.get("authority_openness"),
+            "authority_public": permission.get("authority_public"),
+            "direct_owner": permission.get("direct_owner"),
+            "authority_roles": permission.get("authority_roles"),
+            "controllers": permission.get("controllers") or [],
+            "signature_witnesses": permission.get("signature_witnesses") or [],
+            "notes": permission.get("notes") or [],
+        }
+        for optional_field in ("capability_expr", "conditions", "status"):
+            if optional_field in permission:
+                observation_source[optional_field] = permission[optional_field]
+        observation = _json(observation_source)
         evidence_key = content_key(
             "evidence",
             {
@@ -332,10 +450,39 @@ def add_policy(assessment: Assessment, permissions: Mapping[str, Any], *, chain_
             "observation": observation,
             "producer": "policy.capability",
             "version": str(permissions.get("schema_version") or "policy/1"),
-            "locator": _json({"function": signature}),
+            "locator": _json(
+                {
+                    "function": function,
+                    "abi_signature": permission.get("abi_signature"),
+                    "selector": permission.get("selector"),
+                }
+            ),
         }
         result["evidence"][evidence_key] = evidence
         evidence_keys.append(evidence_key)
+
+        if authority is None:
+            # A resolved-empty authority set is a completed negative result, not
+            # a failure and not a capability claim. Its observation remains
+            # evidence so relational projections can reproduce the empty row.
+            continue
+
+        authority_proposition: Proposition = {
+            "kind": "function_authority",
+            "authority": authority,
+            "function": function,
+        }
+        authority_claim_key = content_key(
+            "claim",
+            {"contract": result["contract"], "proposition": authority_proposition},
+        )
+        result["claims"][authority_claim_key] = {
+            "proposition": authority_proposition,
+            "rule": "policy.function_authority/v1",
+            "evidence": [evidence_key],
+            "claims": [],
+        }
+        claim_keys.append(authority_claim_key)
 
         for effect_claim_key, effect_claim in effects:
             effect_proposition = effect_claim["proposition"]
@@ -353,7 +500,7 @@ def add_policy(assessment: Assessment, permissions: Mapping[str, Any], *, chain_
                 "proposition": proposition,
                 "rule": "policy.authority_capability/v1",
                 "evidence": [evidence_key],
-                "claims": [effect_claim_key],
+                "claims": [authority_claim_key, effect_claim_key],
             }
             claim_keys.append(claim_key)
 

@@ -7,7 +7,12 @@ from typing import Any
 from pydantic import TypeAdapter
 
 from schemas.assessment import Assessment
-from services.assessment import add_policy, build_static_assessment, project_permission_index
+from services.assessment import (
+    add_policy,
+    build_static_assessment,
+    function_authority_claims,
+    project_permission_index,
+)
 
 
 def _base() -> Assessment:
@@ -112,7 +117,105 @@ def test_public_authority_produces_a_capability_claim() -> None:
     assert proposition["kind"] == "authority_capability"
     assert proposition.get("authority") == {"kind": "public"}
     assert proposition.get("effect", {}).get("kind") == "pause.set"
-    assert len(capabilities[0]["claims"]) == 1
+    inputs = [assessment["claims"][key]["proposition"]["kind"] for key in capabilities[0]["claims"]]
+    assert inputs == ["function_authority", "function_effect"]
+
+
+def test_policy_records_call_authority_without_a_classified_effect() -> None:
+    assessment = add_policy(
+        _base(),
+        _permission(
+            function="withdraw()",
+            abi_signature="withdraw()",
+            selector="0x3ccfd60b",
+            authority_public=True,
+            authority_openness="open",
+        ),
+        chain_id=1,
+    )
+
+    authority_claims = [
+        claim for claim in assessment["claims"].values() if claim["proposition"]["kind"] == "function_authority"
+    ]
+    assert len(authority_claims) == 1
+    assert authority_claims[0]["proposition"].get("function") == "withdraw()"
+    assert authority_claims[0]["proposition"].get("authority") == {"kind": "public"}
+    assert not any(
+        claim["proposition"]["kind"] == "authority_capability" and claim["proposition"].get("function") == "withdraw()"
+        for claim in assessment["claims"].values()
+    )
+
+
+def test_policy_uses_source_signature_when_abi_signature_differs() -> None:
+    assessment = _base()
+    assessment["functions"]["pause(Authority)"] = assessment["functions"].pop("pause()")
+    for evidence in assessment["evidence"].values():
+        if evidence["subject_kind"] == "function" and evidence["subject"] == "pause()":
+            evidence["subject"] = "pause(Authority)"
+    for claim in assessment["claims"].values():
+        if claim["proposition"].get("function") == "pause()":
+            claim["proposition"]["function"] = "pause(Authority)"
+
+    enriched = add_policy(
+        assessment,
+        _permission(
+            function="pause(Authority)",
+            abi_signature="pause(address)",
+            selector="0x8456cb59",
+            authority_public=True,
+            authority_openness="open",
+        ),
+        chain_id=1,
+    )
+
+    receipt = next(item for item in enriched["analyses"] if item["detector"] == "policy.capabilities")
+    assert receipt["status"] == "completed"
+    assert receipt["omissions"] == []
+    assert any(
+        claim["proposition"]["kind"] == "function_authority"
+        and claim["proposition"].get("function") == "pause(Authority)"
+        for claim in enriched["claims"].values()
+    )
+
+
+def test_policy_falls_back_to_a_unique_selector_and_refuses_a_collision() -> None:
+    base = _base()
+    unique = add_policy(
+        base,
+        _permission(
+            function="pause(address)",
+            abi_signature="pause(address)",
+            selector="0x8456cb59",
+            authority_public=True,
+            authority_openness="open",
+        ),
+        chain_id=1,
+    )
+    assert any(
+        claim["proposition"]["kind"] == "function_authority" and claim["proposition"].get("function") == "pause()"
+        for claim in unique["claims"].values()
+    )
+
+    collision = _base()
+    collision["functions"]["otherPause()"] = {
+        "abi_signature": "otherPause()",
+        "selector": "0x8456cb59",
+        "state_changing": True,
+    }
+    refused = add_policy(
+        collision,
+        _permission(
+            function="pause(address)",
+            abi_signature="pause(address)",
+            selector="0x8456cb59",
+            authority_public=True,
+            authority_openness="open",
+        ),
+        chain_id=1,
+    )
+    receipt = next(item for item in refused["analyses"] if item["detector"] == "policy.capabilities")
+    assert receipt["status"] == "failed"
+    assert receipt["omissions"][0]["reason"] == "policy_function_not_in_contract:ambiguous_selector:0x8456cb59"
 
 
 def test_unresolved_authority_is_an_omission_not_a_claim() -> None:
@@ -137,6 +240,36 @@ def test_permission_claims_are_projected_from_the_assessment() -> None:
     assert claims[0]["witness"]["evidence_ids"]
 
 
+def test_permission_authority_is_projected_from_assessment_evidence() -> None:
+    assessment = add_policy(
+        _base(),
+        _permission(authority_public=True, authority_openness="open"),
+        chain_id=1,
+    )
+    stale = _permission(authority_public=False, authority_openness="restricted", status="unsupported")
+    projected = project_permission_index(assessment, stale)
+    function = projected["functions"][0]
+
+    assert function["authority_public"] is True
+    assert function["authority_openness"] == "open"
+    assert function.get("status") is None
+
+
+def test_resolved_empty_permission_keeps_projection_evidence_without_a_claim() -> None:
+    assessment = add_policy(
+        _base(),
+        _permission(status="resolved_empty", authority_roles=[]),
+        chain_id=1,
+    )
+
+    assert not function_authority_claims(assessment)
+    evidence = [item for item in assessment["evidence"].values() if item["producer"] == "policy.capability"]
+    assert len(evidence) == 1
+    projected = project_permission_index(assessment, _permission(authority_public=True, authority_openness="open"))
+    assert projected["functions"][0]["status"] == "resolved_empty"
+    assert projected["functions"][0]["authority_public"] is False
+
+
 def test_policy_refresh_retracts_a_superseded_public_capability() -> None:
     public = add_policy(
         _base(),
@@ -150,7 +283,12 @@ def test_policy_refresh_retracts_a_superseded_public_capability() -> None:
     )
 
     assert not any(claim["proposition"]["kind"] == "authority_capability" for claim in refreshed["claims"].values())
-    assert not any(evidence["producer"] == "policy.capability" for evidence in refreshed["evidence"].values())
+    assert not any(claim["proposition"]["kind"] == "function_authority" for claim in refreshed["claims"].values())
+    evidence = [item for item in refreshed["evidence"].values() if item["producer"] == "policy.capability"]
+    assert len(evidence) == 1
+    observation = evidence[0]["observation"]
+    assert isinstance(observation, dict)
+    assert observation["status"] == "resolved_empty"
 
 
 def _capability_authority(permission: dict) -> Any:
@@ -179,11 +317,7 @@ def test_conditional_public_authority_keeps_its_condition() -> None:
         )
     )
 
-    assert authority == {
-        "kind": "expression",
-        "expression": expression,
-        "conditions": expression["conditions"],
-    }
+    assert authority == {"kind": "public", "conditions": expression["conditions"]}
 
 
 def test_threshold_authority_keeps_threshold_semantics() -> None:
@@ -214,4 +348,12 @@ def test_irreducible_all_authority_keeps_composite_semantics() -> None:
         ],
     }
     authority = _capability_authority(_permission(capability_expr=expression))
-    assert authority == {"kind": "expression", "expression": expression, "conditions": []}
+    assert authority["kind"] == "all"
+    children = authority.get("children")
+    assert children is not None
+    assert children[0] == {"kind": "entity", "entity": "1:0x2222222222222222222222222222222222222222"}
+    assert children[1] == {
+        "kind": "expression",
+        "expression": expression["children"][1],
+        "conditions": [],
+    }

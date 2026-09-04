@@ -8,6 +8,8 @@ from typing import Any, cast
 
 from schemas.assessment import Assessment, Claim
 
+from .functions import resolve_function
+
 
 def function_effect_claims(assessment: Assessment, effect_kind: str | None = None) -> list[Claim]:
     claims: list[Claim] = []
@@ -33,6 +35,12 @@ def capability_claims(assessment: Assessment, effect_kind: str | None = None) ->
             continue
         claims.append(claim)
     return claims
+
+
+def function_authority_claims(assessment: Assessment) -> list[Claim]:
+    """Supported answers to who may call a function, independent of its effect."""
+
+    return [claim for claim in assessment["claims"].values() if claim["proposition"]["kind"] == "function_authority"]
 
 
 def effect_presence(assessment: Assessment, effect_kind: str, *, detector: str | None = None) -> bool | None:
@@ -98,20 +106,44 @@ def effect_matches_by_function(assessment: Assessment) -> dict[str, list[dict[st
 
 
 def project_permission_index(assessment: Assessment, permissions: Mapping[str, Any]) -> dict[str, Any]:
-    """Attach canonical effect matches to the transient permission rows."""
+    """Project canonical claims and policy observations onto permission rows."""
 
     projected = copy.deepcopy(dict(permissions))
     claims = effect_matches_by_function(assessment)
-    known_signatures = set(assessment["functions"])
+    policy_observations = {
+        evidence["subject"]: evidence["observation"]
+        for evidence in assessment["evidence"].values()
+        if evidence["producer"] == "policy.capability"
+        and evidence["subject_kind"] == "function"
+        and isinstance(evidence["observation"], Mapping)
+    }
     functions = projected.get("functions")
     if not isinstance(functions, list):
         return projected
     for function in functions:
         if not isinstance(function, dict):
             continue
-        signature = function.get("abi_signature") or function.get("function")
-        if isinstance(signature, str) and signature in known_signatures:
+        signature, _problem = resolve_function(assessment, function)
+        if signature is not None:
             function["claims"] = list(claims.get(signature, []))
+            observation = policy_observations.get(signature)
+            if isinstance(observation, Mapping):
+                for field in (
+                    "authority_public",
+                    "authority_openness",
+                    "direct_owner",
+                    "authority_roles",
+                    "controllers",
+                    "signature_witnesses",
+                    "capability_expr",
+                    "conditions",
+                    "status",
+                    "notes",
+                ):
+                    if field in observation:
+                        function[field] = copy.deepcopy(observation[field])
+                    else:
+                        function.pop(field, None)
     return projected
 
 
@@ -169,6 +201,7 @@ __all__ = [
     "capability_claims",
     "effect_presence",
     "function_effect_claims",
+    "function_authority_claims",
     "effect_matches_by_function",
     "project_permission_index",
     "static_index_view",

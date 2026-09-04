@@ -40,6 +40,25 @@ claim keys. A failed detector, rejected candidate, missing RPC response, or
 unsupported code shape is never a claim; it belongs to `Analysis` as an
 omission or `Diagnostic`.
 
+Function identity stays source-readable without confusing source types with
+ABI types. The function map key is the analyzer's source signature; each
+`Function` also carries its canonical ABI signature when known and its selector.
+Policy joins by source signature first, then exact ABI identity, then a unique
+selector. A selector collision is an omission, never an arbitrary match.
+
+Calling authority and effects are separate propositions:
+
+```text
+function_authority:  role 8 may call setAuthority(Authority)
+function_effect:     setAuthority(Authority) replaces authority
+authority_capability cites both claims
+```
+
+This separation lets Assessment represent a proven caller even when the
+function's effect is not classified. Relational `FunctionPrincipal` rows are
+projected from the policy evidence owned by these claims rather than from a
+second resolver output.
+
 ```text
 pause.set claim exists                     -> true
 no claim + detector completed full scope   -> false

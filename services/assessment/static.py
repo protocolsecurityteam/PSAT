@@ -57,8 +57,10 @@ def _functions(effects: Mapping[str, Any]) -> dict[str, Function]:
         if not isinstance(signature, str) or not isinstance(raw, Mapping):
             continue
         selector = _selector(raw)
+        abi_signature = raw.get("abi_signature")
         state_changing = raw.get("state_changing")
         functions[signature] = {
+            "abi_signature": abi_signature if isinstance(abi_signature, str) and abi_signature else None,
             "selector": selector,
             "state_changing": state_changing if isinstance(state_changing, bool) else None,
         }
@@ -504,7 +506,7 @@ def build_static_assessment(
     }
     analyses.insert(0, facts_receipt)
     assessment: Assessment = {
-        "schema_version": "assessment/3",
+        "schema_version": "assessment/4",
         "contract": contract,
         "functions": functions,
         "controllers": controllers,
