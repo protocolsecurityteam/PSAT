@@ -36,7 +36,7 @@ from typing import Any
 
 import pytest
 
-from services.static import collect_static_facts
+from services.static import collect_static_inputs
 
 # Three minimal projects, one subject contract each.
 OZ_SOURCE = """
@@ -127,7 +127,7 @@ def _semantic_signatures(analysis: Any) -> set[str]:
 
 def test_oz_style_grant_role_admits(tmp_path: Path):
     project = _write_project(tmp_path, "OZStyle", OZ_SOURCE)
-    analysis = collect_static_facts(project)
+    analysis = collect_static_inputs(project)[0]
     assert "grantRole(bytes32,address)" in _semantic_signatures(analysis)
 
 
@@ -139,7 +139,7 @@ def test_renamed_helpers_dispense_role_admits(tmp_path: Path):
     ``_bouncer``'s body. So this passes today — admission isn't the
     broken stage."""
     project = _write_project(tmp_path, "Renamed", RENAMED_SOURCE)
-    analysis = collect_static_facts(project)
+    analysis = collect_static_inputs(project)[0]
     assert "dispenseRole(bytes32,address)" in _semantic_signatures(analysis)
 
 
@@ -216,7 +216,7 @@ def test_renamed_dispense_role_emits_resolvable_principal_signal(tmp_path: Path)
          can say 'role admin' instead of 'unresolved'.
     """
     project = _write_project(tmp_path, "Renamed", RENAMED_SOURCE)
-    analysis = collect_static_facts(project)
+    analysis = collect_static_inputs(project)[0]
     entry = _function_entry(analysis, "dispenseRole(bytes32,address)")
     assert entry is not None, "admission already verified above; this should never trip"
 

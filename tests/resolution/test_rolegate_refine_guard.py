@@ -63,18 +63,8 @@ from services.static.static_analysis.writer_gate import apply_writer_gate_pass  
 from tests.conftest import DATABASE_URL as _DB_URL  # noqa: E402
 from tests.conftest import _can_connect  # noqa: E402
 
-
 # The guard runs UNCONDITIONALLY (not behind earned_public_enabled()); every
 # behavioral test therefore runs under both flag states (ROLEGATE_FIX_SPEC §6.9).
-@pytest.fixture(params=["1", "0"], ids=["earned_on", "earned_off"])
-def both_flags(request, monkeypatch):
-    monkeypatch.setenv("PSAT_AUTHORITY_EARNED_PUBLIC", request.param)
-    return request.param
-
-
-@pytest.fixture
-def earned_public(monkeypatch):
-    monkeypatch.setenv("PSAT_AUTHORITY_EARNED_PUBLIC", "1")
 
 
 @pytest.fixture
@@ -478,7 +468,7 @@ def test_denylist_discriminator_requires_timestamp_and_caller():
 # ---------------------------------------------------------------------------
 
 
-def test_denylist_leaf_emits_root_cofinite(tmp_path, both_flags):
+def test_denylist_leaf_emits_root_cofinite(tmp_path):
     """A bound, caller-tainted time denylist emits a root-subject
     ``cofinite_blacklist`` (deny-by-exception), not ``conditional_universal``."""
     reg = _compile(tmp_path, _CALLEE_DENYLIST, "Registry")
@@ -497,7 +487,7 @@ def test_denylist_leaf_emits_root_cofinite(tmp_path, both_flags):
 # ---------------------------------------------------------------------------
 
 
-def test_fixture1_real_opaque_shape_gates_via_guard(session, both_flags):
+def test_fixture1_real_opaque_shape_gates_via_guard(session):
     """THE acceptance shape (ROLEGATE_FIX_SPEC §6.1): the faithful real
     registry ``onlyOperatingMultisig`` leaf (opaque ``view_call``, non-return
     expression) reaches :1976. Inline projects public -> guard fires ->
@@ -519,7 +509,7 @@ def test_fixture1_real_opaque_shape_gates_via_guard(session, both_flags):
 # ---------------------------------------------------------------------------
 
 
-def test_guard_fire_emits_metric_and_warning(session, both_flags, caplog):
+def test_guard_fire_emits_metric_and_warning(session, caplog):
     import logging as _logging
 
     import services.resolution.predicate_evaluator as _pe
@@ -542,7 +532,7 @@ def test_guard_fire_emits_metric_and_warning(session, both_flags, caplog):
     assert any("refine-only guard closed" in r.getMessage() for r in caplog.records)
 
 
-def test_delegated_gate_unresolved_emitted_on_settled_gate(earned_public):
+def test_delegated_gate_unresolved_emitted_on_settled_gate():
     # A caller gate that SETTLES external_check_only without a pending-index
     # deferral trips the durability metric, keyed on the callee signature.
     import services.resolution.predicate_evaluator as _pe
@@ -568,7 +558,7 @@ def test_delegated_gate_unresolved_emitted_on_settled_gate(earned_public):
     assert metrics.get("delegated_gate_unresolved::onlyOperatingMultisig(address)") == 1
 
 
-def test_delegated_gate_unresolved_skipped_when_deferred(earned_public):
+def test_delegated_gate_unresolved_skipped_when_deferred():
     # A cold-index deferral is transient (the reconciler self-heals it) — it must
     # NOT trip the tripwire, or every cold first pass would false-alarm.
     import services.resolution.predicate_evaluator as _pe
@@ -726,7 +716,7 @@ def _install_adapter_live_wire(monkeypatch, callee_sig: str, members: set[str]) 
     monkeypatch.setattr(_ers, "rpc_request", _stub)
 
 
-def test_fixture1_adapter_live_flips_to_finite_set(session, both_flags, monkeypatch):
+def test_fixture1_adapter_live_flips_to_finite_set(session, monkeypatch):
     """FIXTURE 1 ADAPTER-LIVE (ROLEGATE_FIX_SPEC §6.12 / CONTROLLER_RESOLUTION_SPEC
     §6 Stage 2): the SAME faithful opaque ``onlyOperatingMultisig`` shape as the
     guard fixture, but the registry is now a recognized Solady role store with
@@ -748,7 +738,7 @@ def test_fixture1_adapter_live_flips_to_finite_set(session, both_flags, monkeypa
     assert "inline_refine_only_guard" not in _basis(cap)
 
 
-def test_fixture3_computed_variant_gates(session, both_flags):
+def test_fixture3_computed_variant_gates(session):
     """Compilation-variant coverage (fixture h): the minimal Solady assembly
     folds to a ``computed``/return leaf that routes through the
     materialization fallback — still gated (external_check_only)."""
@@ -759,7 +749,7 @@ def test_fixture3_computed_variant_gates(session, both_flags):
     assert not _is_public(cap)
 
 
-def test_fixture2_or_mix_gates(session, both_flags):
+def test_fixture2_or_mix_gates(session):
     """OR-mix d2 — partial taint loss on one disjunct. Every antecedent-level
     "no caller taint after binding" rule misses this (the transparent arm
     keeps taint); the surface-level guard still gates it."""
@@ -778,7 +768,7 @@ def test_fixture2_or_mix_gates(session, both_flags):
     "or the Stage-2 enumeration adapter.",
     strict=False,
 )
-def test_and_mix_denylist_absorbs_opaque_authority_should_gate(session, both_flags):
+def test_and_mix_denylist_absorbs_opaque_authority_should_gate(session):
     """A single callee ``AND(time-denylist(caller), opaque-hasRole(caller))``: the real
     hasRole gate is a genuine authority, so this SHOULD gate — but the AND folds into a
     root cofinite the counterfactual spares, so it currently fails open. Pins the gap."""
@@ -789,7 +779,7 @@ def test_and_mix_denylist_absorbs_opaque_authority_should_gate(session, both_fla
     assert not _is_public(cap), f"denylist-AND-opaque-authority must gate, got public {cap['kind']}"
 
 
-def test_fixture4_transparent_used_arg_gates_without_guard(session, both_flags):
+def test_fixture4_transparent_used_arg_gates_without_guard(session):
     """A transparent used-arg allowlist (``checkAllowed``): binding succeeds,
     the callee threads taint and gates on its own — external_check_only
     WITHOUT the guard firing (the tag is absent)."""
@@ -800,7 +790,7 @@ def test_fixture4_transparent_used_arg_gates_without_guard(session, both_flags):
     assert "inline_refine_only_guard" not in _basis(cap)
 
 
-def test_fixture7_no_arg_paused_stays_public(session, both_flags):
+def test_fixture7_no_arg_paused_stays_public(session):
     """A no-arg delegated paused check (``registry.checkNotPaused()``): the
     outer leaf never receives the caller's identity, so the guard antecedent
     is false and the pause side-condition stays public."""
@@ -811,7 +801,7 @@ def test_fixture7_no_arg_paused_stays_public(session, both_flags):
     assert "inline_refine_only_guard" not in _basis(cap)
 
 
-def test_fixture8_unused_arg_paused_now_gates(session, both_flags):
+def test_fixture8_unused_arg_paused_now_gates(session):
     """Documented sacrifice (ROLEGATE_FIX_SPEC §6.8): a delegated pause that
     pointlessly takes the caller address (``checkNotPaused(msg.sender)``, arg
     unused) now gates. The inline resolves conditional_universal(pause) — NOT
@@ -825,7 +815,7 @@ def test_fixture8_unused_arg_paused_now_gates(session, both_flags):
     assert "inline_refine_only_guard" in _basis(cap)
 
 
-def test_fixture11_transparent_denylist_public_cofinite(session, both_flags):
+def test_fixture11_transparent_denylist_public_cofinite(session):
     """AMENDED regression anchor (ROLEGATE_FIX_SPEC §6.11): a transparent
     delegated denylist inline threads taint and emits a root cofinite. The
     guard's counterfactual (root cofinites removed) is NOT public, so the
@@ -863,7 +853,7 @@ contract C {
 """
 
 
-def test_fixture5_transparent_role_store_gates(tmp_path, both_flags):
+def test_fixture5_transparent_role_store_gates(tmp_path):
     """The transparent role-store variants keep gating exactly as today: taint
     survives the helper boundary, so the external ACL leaf gates."""
     contract = _compile(tmp_path, _TRANSPARENT_ROLE_STORE, "C")
@@ -887,7 +877,7 @@ contract C {
 """
 
 
-def test_fixture6_effectful_permissionless_stays_open(tmp_path, earned_public):
+def test_fixture6_effectful_permissionless_stays_open(tmp_path):
     """The value-movement class the guard's non-permissionless conjunct must
     never gate, protecting the 11 legitimate permissionless rows. Since the
     static classifier applies the gate-shape discriminator (Wave 5 B2), an
@@ -1037,7 +1027,7 @@ contract C {
     ],
     ids=["external_roleregistry", "external_msgSender_helper", "modifier_onlyRole_local", "erc2771"],
 )
-def test_transparent_role_store_variants_gate(tmp_path, both_flags, source, expected_kind):
+def test_transparent_role_store_variants_gate(tmp_path, source, expected_kind):
     """Every transparent variant gates (never ``conditional_universal``/public): the
     account binding survives the helper/modifier boundary, so the ACL leaf stays
     caller-tainted and resolves to a non-public shape under both flags."""
@@ -1085,7 +1075,7 @@ _CALLEE_EFFECTFUL = {
 }
 
 
-def test_two_hop_effectful_permissionless_guard_spares(session, both_flags):
+def test_two_hop_effectful_permissionless_guard_spares(session):
     """A caller whose gate is an EFFECTFUL delegated ``registry.pull(msg.sender, x)``
     (value movement) is the ``is_permissionless_caller_shape`` class: the guard's
     ¬permissionless conjunct means it never appends ``inline_refine_only_guard``.
@@ -1094,8 +1084,7 @@ def test_two_hop_effectful_permissionless_guard_spares(session, both_flags):
     caller = _build_pipeline(_compile(_tmp(), _CALLER_EFFECTFUL, "CallerLike"))
     cap = _seed_two_hop(session, caller_trees=caller, callee_trees=_CALLEE_EFFECTFUL)
     assert "inline_refine_only_guard" not in _basis(cap), "permissionless value movement must not hit the guard"
-    if both_flags == "1":
-        assert _is_public(cap), f"value movement must stay open under earned-public, got {cap['kind']}"
+    assert _is_public(cap), f"value movement must stay open under earned-public, got {cap['kind']}"
 
 
 # A fresh scratch dir so the many single-file compiles in the two-hop tests

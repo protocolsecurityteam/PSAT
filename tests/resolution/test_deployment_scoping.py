@@ -21,6 +21,7 @@ import uuid
 from datetime import datetime, timezone
 
 from tests.conftest import requires_postgres
+from tests.support.policy_builders import resolved_records
 
 
 def _addr() -> str:
@@ -211,7 +212,6 @@ def test_writer_isolates_deployments(db_session):
             db_session,
             contract_id=c.id,
             function_records=[_fn_record()],
-            capability_by_function={},
             deployment_address=dep,
         )
         db_session.commit()
@@ -246,7 +246,6 @@ def test_writer_sweeps_legacy_null_rows(db_session):
         db_session,
         contract_id=c.id,
         function_records=[_fn_record()],
-        capability_by_function={},
         deployment_address=None,
     )
     db_session.commit()
@@ -255,7 +254,6 @@ def test_writer_sweeps_legacy_null_rows(db_session):
         db_session,
         contract_id=c.id,
         function_records=[_fn_record()],
-        capability_by_function={},
         deployment_address=proxy,
     )
     db_session.commit()
@@ -457,8 +455,7 @@ def _gate_status_and_principal(db_session, job, contract, deployment):
     write_permission_rows(
         db_session,
         contract_id=contract.id,
-        function_records=[_gate_fn_record()],
-        capability_by_function=caps,
+        function_records=resolved_records([_gate_fn_record()], caps),
         deployment_address=deployment,
     )
     db_session.commit()

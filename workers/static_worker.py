@@ -13,7 +13,7 @@ from typing import Any
 
 from sqlalchemy import select
 
-from db.models import Contract, ContractSummary, Job, JobDependency, JobStage, RoleDefinition, derive_job_chain_id
+from db.models import Contract, ContractSummary, Job, JobDependency, JobStage, RoleDefinition
 from db.queue import (
     _MUTABLE_CONTRACT_FIELDS,
     create_job,
@@ -22,6 +22,7 @@ from db.queue import (
     reconcile_impl_job_for_proxy,
     store_artifact,
 )
+from db.queue._chains import job_chain_id
 from schemas.assessment import Assessment
 from schemas.static_facts import StaticFacts
 from services.clients.rpc import default_rpc_url, normalize_hex  # used for address comparison
@@ -99,24 +100,12 @@ def _request_rpc_url(job: Job) -> str | None:
     )
 
 
-def _parent_chain_id(job: Job) -> int:
-    """The parent job's first-class ``chain_id`` (inv. 6): the populated
-    ``jobs.chain_id`` column, else derived from ``request["chain"]`` via the
-    registry, else mainnet. Threaded into RPC reads so the inv-7 URL↔chain_id
-    guard is armed."""
-    chain_id = getattr(job, "chain_id", None)
-    if isinstance(chain_id, int):
-        return chain_id
-    request = job.request if isinstance(job.request, dict) else {}
-    return derive_job_chain_id(request.get("chain"), job.address) or 1
-
-
 def _parent_chain_name(job: Job) -> str:
     """Canonical chain name of the parent job, for stamping onto a spawned impl
     child so chain never cascades as ``None`` (inv. 6). Uses the first-class
     ``jobs.chain_id`` column, else derives from ``request["chain"]`` via the
     registry; mainnet resolves to ``"ethereum"`` so mainnet spawns are unchanged."""
-    chain_id = _parent_chain_id(job)
+    chain_id = job_chain_id(job)
     try:
         return chain_by_id(chain_id).name
     except UnknownChainError as exc:
@@ -598,7 +587,7 @@ def _check_proxy_cache(session, job, contract_row) -> dict | None:
     # (slot reads, getter calls, fallback discovery).
     try:
         current_impl = resolve_current_implementation(
-            contract_row.address, rpc_url, proxy_type=proxy_type, chain_id=_parent_chain_id(job)
+            contract_row.address, rpc_url, proxy_type=proxy_type, chain_id=job_chain_id(job)
         )
         if not current_impl:
             return None
@@ -837,7 +826,7 @@ class StaticWorker(BaseWorker):
             return None
 
         try:
-            classification = classify_single(address, rpc_url, chain_id=_parent_chain_id(job))
+            classification = classify_single(address, rpc_url, chain_id=job_chain_id(job))
         except ClassificationIncompleteError as exc:
             # #121: the proxy-detection slots could not be read (transient RPC).
             # Storing is_proxy=False here and analyzing the address as-is would
@@ -1141,7 +1130,7 @@ class StaticWorker(BaseWorker):
                 proxy_address,
                 pointers,
                 implementation=proxy_contract.implementation,
-                chain_id=_parent_chain_id(job),
+                chain_id=job_chain_id(job),
             )
             if not secondary_addrs:
                 return
@@ -1268,7 +1257,7 @@ class StaticWorker(BaseWorker):
         def run_static() -> dict:
             if cached_static_deps is not None:
                 return cached_static_deps
-            return find_dependencies(address, deps_rpc, code_cache={}, chain_id=_parent_chain_id(job))
+            return find_dependencies(address, deps_rpc, code_cache={}, chain_id=job_chain_id(job))
 
         def run_dynamic() -> dict:
             return find_dynamic_dependencies(
@@ -1423,7 +1412,7 @@ class StaticWorker(BaseWorker):
                 prev_cls = get_artifact(session, job.id, "classifications")
                 if isinstance(prev_cls, dict):
                     validated_cls = _validate_cached_dep_classifications(
-                        prev_cls, resolved_rpc, chain_id=_parent_chain_id(job)
+                        prev_cls, resolved_rpc, chain_id=job_chain_id(job)
                     )
                     for cls_addr, cls_info in validated_cls.items():
                         if cls_addr not in pre_classified:
@@ -1436,7 +1425,7 @@ class StaticWorker(BaseWorker):
                         resolved_rpc,
                         dynamic_edges=(dyn_output or {}).get("dependency_graph"),
                         code_cache=None,
-                        chain_id=_parent_chain_id(job),
+                        chain_id=job_chain_id(job),
                         pre_classified=pre_classified or None,
                     )
                     # Store classifications artifact for future cache hits
@@ -1607,7 +1596,7 @@ class StaticWorker(BaseWorker):
             from services.assessment import build_static_assessment
 
             assessment = build_static_assessment(
-                chain_id=_parent_chain_id(job),
+                chain_id=job_chain_id(job),
                 address=address,
                 contract_name=contract_name,
                 code_hash=None,
@@ -1803,7 +1792,7 @@ class StaticWorker(BaseWorker):
         try:
             from services.clients.rpc import get_code_with_keccak
 
-            _code, keccak = get_code_with_keccak(_request_rpc_url(job) or "", address, chain_id=_parent_chain_id(job))
+            _code, keccak = get_code_with_keccak(_request_rpc_url(job) or "", address, chain_id=job_chain_id(job))
         except Exception as exc:
             # The row is keyed on bytecode. Without the keccak there is no key,
             # and inventing one would key the bundle to code nobody read.
@@ -1823,7 +1812,7 @@ class StaticWorker(BaseWorker):
                 bytecode_keccak=keccak,
                 contract_name=contract_name,
                 static_facts=static_facts,
-                observation_plan=observation_plan,
+                observation_plan=dict(observation_plan),
                 predicate_trees=predicate_trees if isinstance(predicate_trees, dict) else None,
                 effects=effects if isinstance(effects, dict) else None,
                 source_content_hash=job.source_content_hash,

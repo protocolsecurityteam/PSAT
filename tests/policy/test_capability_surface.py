@@ -437,47 +437,6 @@ def test_cofinite_denylist_quality_is_stated_never_inferred_from_absence():
     assert "completeness not recorded" in project_capability_surface(legacy).public_paths[0][-1]["description"]
 
 
-def test_capability_currency_three_states():
-    """``last_indexed_block`` was present on 240 rows and read by nothing.
-    Deciding whether a persisted verdict still holds needs exactly
-    "is this statement current?"."""
-    from services.policy.capability_surface import CAPABILITY_INDEX_STALE_BLOCKS, capability_currency
-
-    fresh = {"kind": "finite_set", "members": [ADDR_A], "last_indexed_block": 25_619_235}
-    assert capability_currency(fresh, index_head=25_619_300)["verdict"] == "current"
-    assert capability_currency(fresh, index_head=25_619_300)["lag_blocks"] == 65
-
-    stale = capability_currency(fresh, index_head=25_619_235 + CAPABILITY_INDEX_STALE_BLOCKS)
-    assert stale["verdict"] == "stale"
-
-    # ABSENT fact -> not_determined, and lag is None (never 0: a zero lag is the
-    # strongest currency claim available and has to be earned).
-    absent = capability_currency({"kind": "finite_set", "members": [ADDR_A]}, index_head=25_619_300)
-    assert absent == {
-        "verdict": "not_determined",
-        "last_indexed_block": None,
-        "index_head": 25_619_300,
-        "lag_blocks": None,
-    }
-    # No frontier to compare against is equally not-determined.
-    assert capability_currency(fresh, index_head=None)["verdict"] == "not_determined"
-
-
-def test_capability_currency_composite_takes_the_least_current_conjunct():
-    from services.policy.capability_surface import capability_currency
-
-    composite = {
-        "kind": "AND",
-        "children": [
-            {"kind": "finite_set", "members": [ADDR_A], "last_indexed_block": 25_619_235},
-            {"kind": "finite_set", "members": [ADDR_B], "last_indexed_block": 25_000_000},
-        ],
-    }
-    verdict = capability_currency(composite, index_head=25_619_300)
-    assert verdict["last_indexed_block"] == 25_000_000
-    assert verdict["verdict"] == "stale"
-
-
 def test_resolver_path_is_recorded_on_every_principal_row_shape():
     """``function_principals.origin`` / ``principal_type`` are
     single constants (``semantic_capability:finite_set`` / ``controller`` on

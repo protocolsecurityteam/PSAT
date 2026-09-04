@@ -3,21 +3,15 @@
 from __future__ import annotations
 
 import copy
-import json
 from collections.abc import Mapping
 from typing import Any, cast
-
-from pydantic import JsonValue
 
 from schemas.assessment import Analysis, Assessment, Diagnostic, Evidence, EvidenceMethod
 
 from .keys import content_key
+from .keys import json_value as _json
 from .slices import remove_analysis_slice
 from .validation import checked
-
-
-def _json(value: Any) -> JsonValue:
-    return cast(JsonValue, json.loads(json.dumps(value, sort_keys=True, default=str)))
 
 
 def _method(observed_via: object) -> EvidenceMethod:

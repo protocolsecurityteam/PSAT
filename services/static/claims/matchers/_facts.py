@@ -58,11 +58,6 @@ def tree_has_role(tree: Any, roles: tuple[str, ...]) -> bool:
     return any(leaf.get("authority_role") in roles for leaf in _iter_leaves(tree))
 
 
-def tree_is_authority_gated(tree: Any) -> bool:
-    """The function's guard depends on the caller's identity/authority."""
-    return tree_has_role(tree, ("caller_authority", "delegated_authority"))
-
-
 def tree_is_one_shot(tree: Any) -> bool:
     """An initializer latch (``initializer``/``reinitializer``) — writes here
     are a one-time set, never a recurring toggle."""

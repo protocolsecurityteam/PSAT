@@ -77,7 +77,7 @@ from typing import Any
 
 import pytest
 
-from services.static import collect_static_facts
+from services.static import collect_static_inputs
 from tests.support.foundry_project import write_foundry_project
 
 pytestmark = pytest.mark.compile
@@ -718,7 +718,7 @@ def _extract_function_signatures(source: str) -> set[str]:
 )
 def test_fuzz_fixtures_are_valid(shape_name: str, variant: int, tmp_path: Path):
     """Every generated source must:
-      • compile cleanly (collect_static_facts runs without exception)
+      • compile cleanly (collect_static_inputs runs without exception)
       • pass the banned-substring hygiene check (modulo standard-ABI exceptions)
       • generator-returned ``sig_u`` is a real function declared in the
         unguarded source (anti-vacuity check on the negative control)
@@ -754,7 +754,7 @@ def test_fuzz_fixtures_are_valid(shape_name: str, variant: int, tmp_path: Path):
 
     # 3. Compilation: analysis pipeline must not throw on either source.
     project_g = write_foundry_project(tmp_path / "g", "C", guarded_src)
-    collect_static_facts(project_g)  # exception → fixture broken
+    collect_static_inputs(project_g)[0]  # exception → fixture broken
 
     # 3. Negative control: unguarded twin must NOT carry a caller-authority
     # leaf in its predicate tree.
@@ -765,8 +765,6 @@ def test_fuzz_fixtures_are_valid(shape_name: str, variant: int, tmp_path: Path):
     # negative control is "no caller_authority / delegated_authority leaf
     # in the predicate tree", not "absent from semantic_functions".
     project_u = write_foundry_project(tmp_path / "u", "C", unguarded_src)
-    from services.static.static_analysis import collect_static_inputs
-
     _analysis_u, predicate_trees_u, _effects_u = collect_static_inputs(project_u)
     semantic_trees = ((predicate_trees_u or {}).get("trees")) or {}
     tree_u = semantic_trees.get(sig_u)
@@ -824,7 +822,7 @@ def test_parametric_guard_emits_predicate_signal(shape_name: str, variant: int, 
     gen = _gen_for_shape(shape_name, rng)
     guarded_src, sig_g = gen[0], gen[2]
     project = write_foundry_project(tmp_path, "C", guarded_src)
-    analysis = collect_static_facts(project)
+    analysis = collect_static_inputs(project)[0]
     entry = _semantic_entry(analysis, sig_g)
 
     diagnostic = (

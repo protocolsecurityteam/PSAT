@@ -7,16 +7,9 @@ do not exist when the tracking plan is built, so this module proves the same
 thing from the artifact the static stage already has: the lowered predicate
 trees.
 
-The earned-public shape test is applied unconditionally here, while the
-resolution plane gates the same test behind ``PSAT_AUTHORITY_EARNED_PUBLIC``.
-That is deliberate and it is the one place the two planes are meant to
-disagree: there the test OPENS a capability, so a kill switch that disables it
-narrows what gets published; here it only WITHHOLDS a promotion, so honouring
-the switch would turn it into a promoter — with the flag off, a cofinite
-denylist gate would read as a proof of restriction and every ERC-20 ``Transfer``
-on a denylisted token would qualify as a witnessed member change. A kill switch
-that widens published claims is not a kill switch, so this one does not reach
-here (pinned by ``test_the_kill_switch_cannot_promote``).
+Static tracking and runtime resolution share the caller-taint shape rules.
+A permissionless denylist cannot prove that a writer is restricted, so its
+Transfer events never qualify as witnessed membership changes on that basis.
 
 Only ``restricted`` is ever minted. Proving ``open`` needs the resolution
 plane's earned-public projection over a resolved capability; the static tree

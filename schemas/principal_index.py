@@ -26,12 +26,3 @@ class PrincipalProfile(TypedDict):
     confidence: LabelConfidence
     details: dict[str, object]
     graph_context: list[str]
-    controller_context: list[str]
-    permissions: list[PrincipalPermission]
-
-
-class PrincipalIndex(TypedDict):
-    schema_version: str
-    contract_address: str
-    contract_name: str
-    principals: list[PrincipalProfile]

@@ -27,6 +27,7 @@ from schemas.observations import (
     ResolvedControllerType,
     coerce_resolved_controller_type,
 )
+from schemas.permission_index import role_number
 from schemas.resolution_graph import (
     ResolutionEdge,
     ResolutionGraph,
@@ -207,7 +208,6 @@ def _build_permission_index(
             build_permission_index(
                 static_facts,
                 target_snapshot=cast(dict, snapshot),
-                principal_resolution={"status": "no_authority", "reason": "No non-zero authority found"},
                 effects=effects,
                 predicate_trees=predicate_trees,
             ),
@@ -426,7 +426,7 @@ def _is_builder_exception(exc: BaseException) -> bool:
     rather than the DB cache layer?
 
     Builder exceptions are anything raised by ``fetch`` / ``scaffold`` /
-    ``collect_static_facts`` — broadly Etherscan / Slither errors.
+    ``collect_static_inputs`` — Etherscan / Slither errors.
     DB-layer errors are SQLAlchemy / psycopg2 exceptions. We can't
     cleanly distinguish without a type sniff; treat anything from the
     sqlalchemy module as a DB-layer error and let other exceptions
@@ -748,19 +748,6 @@ def _maybe_probe_backlink(
         return None
 
 
-def _safe_role_int(role: Any) -> int | None:
-    """Coerce a role identifier to int, returning None for non-int shapes.
-
-    Role-name strings and Condition-mapping shapes cannot be represented
-    in the recursive resolver's ``set[int]`` accumulator; callers must skip
-    those grants entirely.
-    """
-    try:
-        return int(role)
-    except (TypeError, ValueError):
-        return None
-
-
 def _role_principals_from_permission_index(permission_index: Mapping[str, Any]) -> list[RolePrincipal]:
     principals: dict[str, RolePrincipalAccumulator] = {}
     for function in permission_index.get("functions", []):
@@ -775,7 +762,7 @@ def _role_principals_from_permission_index(permission_index: Mapping[str, Any]) 
         for role_grant in function.get("authority_roles") or []:
             if not isinstance(role_grant, dict):
                 continue
-            role = _safe_role_int(role_grant.get("role"))
+            role = role_number(role_grant.get("role"))
             if role is None:
                 logger.debug(
                     "recursive: skipping non-int role %r on %s",

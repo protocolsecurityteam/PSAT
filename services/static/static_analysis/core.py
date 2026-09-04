@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
@@ -157,35 +156,6 @@ def _slither_target(project_dir: Path, meta: dict) -> str:
             if path.stem == contract_name:
                 return str(path)
     return str(candidates[0])
-
-
-def analyze_contract(project_dir: Path) -> Path:
-    """Generate static_facts.json + predicate_trees.json + effects.json
-    for a scaffolded project. ``predicate_trees`` + ``effects`` are the
-    semantic source of truth."""
-    analysis, predicate_trees, effects = collect_static_inputs(project_dir)
-    output_path = project_dir / "static_facts.json"
-    output_path.write_text(json.dumps(analysis, indent=2) + "\n")
-
-    if predicate_trees is not None:
-        (project_dir / "predicate_trees.json").write_text(json.dumps(predicate_trees, indent=2) + "\n")
-    if effects is not None:
-        (project_dir / "effects.json").write_text(json.dumps(effects, indent=2) + "\n")
-
-    return output_path
-
-
-def collect_static_facts(project_dir: Path) -> StaticFacts:
-    """Backwards-compatible accessor for the analysis dict only.
-
-    Most callers (tests, resolution.recursive) only need the analysis
-    dict. The static worker uses
-    :func:`collect_static_inputs` to also receive
-    the semantic ``predicate_trees`` and ``effects`` artifacts so it can
-    persist them off a single Slither parse.
-    """
-    analysis, _trees, _effects = collect_static_inputs(project_dir)
-    return analysis
 
 
 def collect_static_inputs(

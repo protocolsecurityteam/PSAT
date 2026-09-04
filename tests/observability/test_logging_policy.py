@@ -106,7 +106,7 @@ def _drive_process_with_missing_contract_row(monkeypatch: pytest.MonkeyPatch) ->
     )
     monkeypatch.setattr(
         "workers.policy_worker.build_principal_index",
-        lambda *a, **kw: {"principals": []},
+        lambda *a, **kw: [],
     )
     monkeypatch.setattr(
         PolicyWorker,

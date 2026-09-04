@@ -44,7 +44,12 @@ from services.monitoring.event_topics import WITNESS_TIER_HINT, WITNESS_TIER_SEL
 from services.resolution.caller_sources import CALLER_SOURCES as _CALLER_SOURCES
 from services.resolution.deferred_reconciler import reconcile_deferred_resolutions, reconcile_role_set_drift
 from services.resolution.repos.event_logs_rpc import FetchedEventLog, FetchWindowStat
-from services.resolution.role_store_standards import all_topic0s, detect_standards, resolve_probe_code
+from services.resolution.role_store_standards import (
+    all_topic0s,
+    detect_standards,
+    is_single_address_param_signature,
+    resolve_probe_code,
+)
 from utils.chains import (
     ChainInfo,
     UnknownChainError,
@@ -146,16 +151,6 @@ def _is_solmate_cancall_descriptor(descriptor: dict[str, Any]) -> bool:
     )
 
 
-def _is_single_address_param_signature(signature: Any) -> bool:
-    """True for ``name(address)`` — exactly one parameter, of type ``address``.
-    The shape of a delegated role gate's callee (``onlyOperatingMultisig(address)``
-    and siblings), as opposed to Solmate's 3-arg canCall or a multi-arg canCall."""
-    if not isinstance(signature, str) or "(" not in signature or not signature.rstrip().endswith(")"):
-        return False
-    params = signature[signature.index("(") + 1 : signature.rindex(")")]
-    return [p.strip() for p in params.split(",") if p.strip()] == ["address"]
-
-
 def _is_delegated_role_gate_descriptor(descriptor: dict[str, Any]) -> bool:
     """A caller-keyed external bool check against a single-address-param callee on
     a delegated authority — ``roleRegistry.onlyX(msg.sender)`` — that is NOT the
@@ -166,7 +161,7 @@ def _is_delegated_role_gate_descriptor(descriptor: dict[str, Any]) -> bool:
         return False
     if _is_solmate_cancall_descriptor(descriptor):
         return False
-    if not _is_single_address_param_signature(descriptor.get("callee_signature")):
+    if not is_single_address_param_signature(descriptor.get("callee_signature")):
         return False
     keys = descriptor.get("key_sources") or []
     return any(isinstance(k, dict) and k.get("source") in _CALLER_SOURCES for k in keys)

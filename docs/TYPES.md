@@ -43,7 +43,7 @@ omission or `Diagnostic`.
 Function identity stays source-readable without confusing source types with
 ABI types. The function map key is the analyzer's source signature; each
 `Function` also carries its canonical ABI signature when known and its selector.
-Policy joins by source signature first, then exact ABI identity, then a unique
+Policy and execution joins use the same resolver: source signature first, exact ABI identity, then a unique
 selector. A selector collision is an omission, never an arbitrary match.
 
 Calling authority and effects are separate propositions:
@@ -57,7 +57,14 @@ authority_capability cites both claims
 This separation lets Assessment represent a proven caller even when the
 function's effect is not classified. Relational `FunctionPrincipal` rows are
 projected from the policy evidence owned by these claims rather than from a
-second resolver output.
+second resolver output. The permission projection takes only Assessment; it
+cannot retain a rejected function from a second input. Unresolved attempts
+remain observations and omissions, with no positive caller claim.
+
+Controller read and tracking fields reuse the structured analyzer types. Root
+and recursive analysis use one monitoring-plan compiler. Validation is strict
+at the read and write boundary, retaining extension fields without coercing
+incorrect values into the declared types.
 
 ```text
 pause.set claim exists                     -> true
@@ -85,5 +92,20 @@ static facts and effect IR
 ```
 
 Each stage atomically replaces the claims and evidence named by its previous
-Analysis receipt. Unknown fields survive validation, but malformed references
-fail at the artifact boundary.
+Analysis receipt. Withdrawing a prerequisite retracts dependent claims and
+marks their analysis incomplete. Execution refreshes include all stored
+verdicts for the affected contract, including functions outside the current
+scheduling batch. Unknown fields survive validation, but malformed references
+and incorrectly typed values fail at the artifact boundary.
+
+## Cutover
+
+The wire is `assessment/5`; static materializations use schema version 10.
+Older analytical documents must be regenerated.
+
+Migration `d58b239c7e10` removes the retired physical columns and normalizes
+retired monitored-contract categories to `regular`. It has no data-restoring
+downgrade. For an existing deployment, back up the database, stop old API,
+worker, browser, and monitor processes, run migrations, and start the new
+application. Use a fresh preview database or reanalyze its contracts before
+assessing the new results. This cutover must not run alongside old processes.

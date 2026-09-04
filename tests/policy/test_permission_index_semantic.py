@@ -1,56 +1,14 @@
-"""Per-kind row representation tests for the semantic
-``build_permission_index`` + ``write_permission_rows``
-pipeline.
-
-Each test fabricates a ``CapabilityExpr`` directly and asserts the
-resulting ``EffectiveFunction`` columns and ``FunctionPrincipal`` row
-counts match the table below:
-
-| kind                          | EF columns                       | FP rows |
-|-------------------------------|----------------------------------|---------|
-| finite_set                    | capability_expr only             | N       |
-| threshold_group               | capability_expr only             | 1       |
-| signature_witness(finite)     | capability_expr only             | N       |
-| signature_witness(non-finite) | capability_expr only             | 0       |
-| finite_set(empty exact)       | + status='resolved_empty'        | 0       |
-| cofinite_blacklist            | + conditions, status='public',   | 0       |
-|                               |   authority_public=True          |         |
-| external_check_only           | capability_expr only             | 0       |
-| conditional_universal         | + conditions, status='public',   | 0       |
-|                               |   authority_public=True          |         |
-| unsupported                   | + status='unsupported'           | 0       |
-| resolvable composite paths    | full tree + projected path cols  | path N  |
-| irreducible composite         | full tree in capability_expr     | 0       |
-| OR pure-finite                | resolver simplifies to union     | union   |
-
-Tests don't go through Slither; they instantiate ``CapabilityExpr``
-shapes directly and feed them to the writer through a SQLAlchemy
-in-memory session backed by an SQLite store.
-
-The Postgres-only column types (JSONB, ARRAY, GIN index) are swapped
-to their SQLite equivalents inside ``_in_memory_session`` so the test
-suite runs offline.
-"""
+"""Capability projections written to the actual migrated PostgreSQL schema."""
 
 from __future__ import annotations
 
 from typing import Any
 
 import pytest
-from sqlalchemy import (
-    Boolean,
-    Column,
-    ForeignKey,
-    Integer,
-    String,
-    Text,
-    create_engine,
-)
-from sqlalchemy.orm import declarative_base, relationship, sessionmaker
-from sqlalchemy.types import JSON
 
+from db.models import Contract, EffectiveFunction, FunctionPrincipal
+from services.policy.permission_index import _column_values_for_capability
 from services.policy.permission_index_writer import (
-    _column_values_for_capability,
     _principal_rows_for_capability,
     write_permission_rows,
 )
@@ -60,79 +18,18 @@ from services.resolution.capabilities import (
     ExternalCheck,
 )
 from services.resolution.capability_resolver import capability_to_dict
+from tests.conftest import requires_postgres
+from tests.support.policy_builders import resolved_records
 
-# ---------------------------------------------------------------------------
-# In-memory SQLite mirror of the columns the writer touches.
-# Lets us assert row writes without spinning up Postgres.
-# ---------------------------------------------------------------------------
-
-
-_TestBase = declarative_base()
-
-
-class _TContract(_TestBase):
-    __tablename__ = "contracts"
-    id = Column(Integer, primary_key=True)
-    address = Column(String(42))
-
-
-class _TEffectiveFunction(_TestBase):
-    __tablename__ = "effective_functions"
-    id = Column(Integer, primary_key=True)
-    contract_id = Column(Integer, ForeignKey("contracts.id"))
-    deployment_address = Column(String(42))
-    function_name = Column(String(255))
-    selector = Column(String(10))
-    abi_signature = Column(Text)
-    authority_public = Column(Boolean, default=False)
-    authority_openness = Column(String(20))
-    authority_roles = Column(JSON)
-    capability_expr = Column(JSON)
-    conditions = Column(JSON)
-    status = Column(String(50))
-    claims = Column(JSON)
-    principals = relationship(
-        "_TFunctionPrincipal",
-        backref="function",
-        cascade="all, delete-orphan",
-    )
-
-
-class _TFunctionPrincipal(_TestBase):
-    __tablename__ = "function_principals"
-    id = Column(Integer, primary_key=True)
-    function_id = Column(Integer, ForeignKey("effective_functions.id"))
-    address = Column(String(42))
-    resolved_type = Column(String(50))
-    origin = Column(String(255))
-    principal_type = Column(String(50))
-    details = Column(JSON)
+pytestmark = requires_postgres
 
 
 @pytest.fixture
-def db_session(monkeypatch: pytest.MonkeyPatch):
-    """In-memory SQLite session with the writer's models swapped for
-    JSON-friendly equivalents."""
-    engine = create_engine("sqlite:///:memory:")
-    _TestBase.metadata.create_all(engine)
-    Session = sessionmaker(bind=engine)
-    session = Session()
-
-    monkeypatch.setattr(
-        "services.policy.permission_index_writer.EffectiveFunction",
-        _TEffectiveFunction,
-    )
-    monkeypatch.setattr(
-        "services.policy.permission_index_writer.FunctionPrincipal",
-        _TFunctionPrincipal,
-    )
-
-    contract = _TContract(id=1, address="0x" + "1" * 40)
-    session.add(contract)
-    session.commit()
-    yield session
-    session.close()
-    engine.dispose()
+def db_session(db_session):
+    """Exercise the actual migrated PostgreSQL tables used by the worker."""
+    db_session.add(Contract(id=1, address="0x" + "1" * 40, chain="ethereum"))
+    db_session.commit()
+    return db_session
 
 
 # ---------------------------------------------------------------------------
@@ -146,7 +43,7 @@ def _fn_record(signature: str, **overrides: Any) -> dict[str, Any]:
         "abi_signature": signature,
         "selector": "0xdeadbeef",
         "authority_public": False,
-        "authority_roles": [],
+        "authority_roles": None,
         "controllers": [],
         "direct_owner": None,
     }
@@ -155,11 +52,11 @@ def _fn_record(signature: str, **overrides: Any) -> dict[str, Any]:
 
 
 def _ef_row(session) -> Any:
-    return session.query(_TEffectiveFunction).first()
+    return session.query(EffectiveFunction).first()
 
 
 def _principals(session) -> list[Any]:
-    return list(session.query(_TFunctionPrincipal).order_by(_TFunctionPrincipal.address).all())
+    return list(session.query(FunctionPrincipal).order_by(FunctionPrincipal.address).all())
 
 
 # ---------------------------------------------------------------------------
@@ -178,8 +75,7 @@ def test_finite_set_emits_n_principal_rows(db_session) -> None:
     write_permission_rows(
         db_session,
         contract_id=1,
-        function_records=[_fn_record("doThing()")],
-        capability_by_function={"doThing()": cap},
+        function_records=resolved_records([_fn_record("doThing()")], {"doThing()": cap}),
     )
     db_session.commit()
 
@@ -204,8 +100,9 @@ def test_finite_set_with_conditions_writes_rows_and_preserves_conditions(db_sess
     write_permission_rows(
         db_session,
         contract_id=1,
-        function_records=[_fn_record("recoverToken(address,address,uint256)")],
-        capability_by_function={"recoverToken(address,address,uint256)": cap},
+        function_records=resolved_records(
+            [_fn_record("recoverToken(address,address,uint256)")], {"recoverToken(address,address,uint256)": cap}
+        ),
     )
     db_session.commit()
 
@@ -226,8 +123,7 @@ def test_exact_empty_finite_set_marks_resolved_empty(db_session) -> None:
     write_permission_rows(
         db_session,
         contract_id=1,
-        function_records=[_fn_record("renounceOnly()")],
-        capability_by_function={"renounceOnly()": cap},
+        function_records=resolved_records([_fn_record("renounceOnly()")], {"renounceOnly()": cap}),
     )
     db_session.commit()
 
@@ -246,8 +142,9 @@ def test_lower_bound_empty_finite_set_stays_unresolved_gap(db_session) -> None:
     write_permission_rows(
         db_session,
         contract_id=1,
-        function_records=[_fn_record("guardedButNotEnumerated()")],
-        capability_by_function={"guardedButNotEnumerated()": cap},
+        function_records=resolved_records(
+            [_fn_record("guardedButNotEnumerated()")], {"guardedButNotEnumerated()": cap}
+        ),
     )
     db_session.commit()
 
@@ -270,8 +167,7 @@ def test_threshold_group_emits_one_safe_row(db_session) -> None:
     write_permission_rows(
         db_session,
         contract_id=1,
-        function_records=[_fn_record("manage()")],
-        capability_by_function={"manage()": cap},
+        function_records=resolved_records([_fn_record("manage()")], {"manage()": cap}),
         safe_address_lookup={"default": safe_addr},
     )
     db_session.commit()
@@ -304,8 +200,7 @@ def test_signature_witness_finite_emits_signer_rows(db_session) -> None:
     write_permission_rows(
         db_session,
         contract_id=1,
-        function_records=[_fn_record("permit()")],
-        capability_by_function={"permit()": cap},
+        function_records=resolved_records([_fn_record("permit()")], {"permit()": cap}),
     )
     db_session.commit()
 
@@ -328,8 +223,7 @@ def test_signature_witness_external_emits_zero_rows(db_session) -> None:
     write_permission_rows(
         db_session,
         contract_id=1,
-        function_records=[_fn_record("permit()")],
-        capability_by_function={"permit()": cap},
+        function_records=resolved_records([_fn_record("permit()")], {"permit()": cap}),
     )
     db_session.commit()
 
@@ -355,8 +249,7 @@ def test_cofinite_blacklist_is_public_with_no_rows(db_session) -> None:
     write_permission_rows(
         db_session,
         contract_id=1,
-        function_records=[_fn_record("openCall()")],
-        capability_by_function={"openCall()": cap},
+        function_records=resolved_records([_fn_record("openCall()")], {"openCall()": cap}),
     )
     db_session.commit()
 
@@ -383,8 +276,7 @@ def test_external_check_only_emits_zero_rows(db_session) -> None:
     write_permission_rows(
         db_session,
         contract_id=1,
-        function_records=[_fn_record("validate()")],
-        capability_by_function={"validate()": cap},
+        function_records=resolved_records([_fn_record("validate()")], {"validate()": cap}),
     )
     db_session.commit()
 
@@ -408,8 +300,7 @@ def test_conditional_universal_emits_zero_rows_authority_public_true(db_session)
     write_permission_rows(
         db_session,
         contract_id=1,
-        function_records=[_fn_record("settle()")],
-        capability_by_function={"settle()": cap},
+        function_records=resolved_records([_fn_record("settle()")], {"settle()": cap}),
     )
     db_session.commit()
 
@@ -428,8 +319,7 @@ def test_unsupported_emits_zero_rows_status_unsupported(db_session) -> None:
     write_permission_rows(
         db_session,
         contract_id=1,
-        function_records=[_fn_record("opaque()")],
-        capability_by_function={"opaque()": cap},
+        function_records=resolved_records([_fn_record("opaque()")], {"opaque()": cap}),
     )
     db_session.commit()
 
@@ -458,8 +348,7 @@ def test_irreducible_and_emits_zero_rows_with_tree(db_session) -> None:
     write_permission_rows(
         db_session,
         contract_id=1,
-        function_records=[_fn_record("dangerous()")],
-        capability_by_function={"dangerous()": cap},
+        function_records=resolved_records([_fn_record("dangerous()")], {"dangerous()": cap}),
     )
     db_session.commit()
 
@@ -485,8 +374,7 @@ def test_or_pure_set_emits_union(db_session) -> None:
     write_permission_rows(
         db_session,
         contract_id=1,
-        function_records=[_fn_record("anyOf()")],
-        capability_by_function={"anyOf()": merged},
+        function_records=resolved_records([_fn_record("anyOf()")], {"anyOf()": merged}),
     )
     db_session.commit()
 
@@ -509,8 +397,10 @@ def test_mixed_or_public_and_finite_writes_public_and_principal(db_session) -> N
     write_permission_rows(
         db_session,
         contract_id=1,
-        function_records=[_fn_record("send((uint32,bytes32,bytes,bytes,bytes),address)")],
-        capability_by_function={"send((uint32,bytes32,bytes,bytes,bytes),address)": cap},
+        function_records=resolved_records(
+            [_fn_record("send((uint32,bytes32,bytes,bytes,bytes),address)")],
+            {"send((uint32,bytes32,bytes,bytes,bytes),address)": cap},
+        ),
     )
     db_session.commit()
 
@@ -534,8 +424,10 @@ def test_and_of_mixed_or_and_side_condition_preserves_both_paths(db_session) -> 
     write_permission_rows(
         db_session,
         contract_id=1,
-        function_records=[_fn_record("verify((uint32,bytes32,uint64),address,bytes32)")],
-        capability_by_function={"verify((uint32,bytes32,uint64),address,bytes32)": cap},
+        function_records=resolved_records(
+            [_fn_record("verify((uint32,bytes32,uint64),address,bytes32)")],
+            {"verify((uint32,bytes32,uint64),address,bytes32)": cap},
+        ),
     )
     db_session.commit()
 
@@ -642,8 +534,7 @@ def test_finite_set_rows_typed_via_resolver(db_session) -> None:
     write_permission_rows(
         db_session,
         contract_id=1,
-        function_records=[_fn_record("doThing()")],
-        capability_by_function={"doThing()": cap},
+        function_records=resolved_records([_fn_record("doThing()")], {"doThing()": cap}),
         resolve_principal_type=_resolver,
     )
     db_session.commit()
@@ -663,8 +554,9 @@ def test_finite_set_rows_untyped_without_resolver(db_session) -> None:
     write_permission_rows(
         db_session,
         contract_id=1,
-        function_records=[_fn_record("doThing()")],
-        capability_by_function={"doThing()": CapabilityExpr.finite_set([member])},
+        function_records=resolved_records(
+            [_fn_record("doThing()")], {"doThing()": CapabilityExpr.finite_set([member])}
+        ),
     )
     db_session.commit()
     rows = _principals(db_session)
@@ -685,8 +577,7 @@ def test_resolver_not_called_for_signature_witness(db_session) -> None:
     write_permission_rows(
         db_session,
         contract_id=1,
-        function_records=[_fn_record("approveHash(bytes32)")],
-        capability_by_function={"approveHash(bytes32)": cap},
+        function_records=resolved_records([_fn_record("approveHash(bytes32)")], {"approveHash(bytes32)": cap}),
         resolve_principal_type=_resolver,
     )
     db_session.commit()
@@ -709,8 +600,7 @@ def test_resolver_does_not_override_threshold_group_safe(db_session) -> None:
     write_permission_rows(
         db_session,
         contract_id=1,
-        function_records=[_fn_record("exec()")],
-        capability_by_function={"exec()": cap},
+        function_records=resolved_records([_fn_record("exec()")], {"exec()": cap}),
         safe_address_lookup={"default": "0x" + "5" * 40},
         resolve_principal_type=_resolver,
     )
@@ -748,7 +638,6 @@ def test_row_abi_signature_is_the_canonical_one(db_session) -> None:
                 selector=selector,
             )
         ],
-        capability_by_function=None,
     )
     db_session.commit()
 
@@ -766,7 +655,6 @@ def test_row_abi_signature_falls_back_to_the_full_name(db_session) -> None:
         db_session,
         contract_id=1,
         function_records=[{"function": "doThing()", "selector": "0xdeadbeef"}],
-        capability_by_function=None,
     )
     db_session.commit()
     assert _ef_row(db_session).abi_signature == "doThing()"
@@ -788,8 +676,7 @@ def test_openness_open_on_conditional_universal(db_session) -> None:
     write_permission_rows(
         db_session,
         contract_id=1,
-        function_records=[_fn_record("f()")],
-        capability_by_function={"f()": cap},
+        function_records=resolved_records([_fn_record("f()")], {"f()": cap}),
     )
     row = _ef_row(db_session)
     assert row.authority_public is True
@@ -801,8 +688,7 @@ def test_openness_restricted_on_resolved_finite_set(db_session) -> None:
     write_permission_rows(
         db_session,
         contract_id=1,
-        function_records=[_fn_record("f()")],
-        capability_by_function={"f()": cap},
+        function_records=resolved_records([_fn_record("f()")], {"f()": cap}),
     )
     row = _ef_row(db_session)
     assert row.authority_public is False
@@ -816,8 +702,7 @@ def test_openness_restricted_on_witnessed_empty_set(db_session) -> None:
     write_permission_rows(
         db_session,
         contract_id=1,
-        function_records=[_fn_record("f()")],
-        capability_by_function={"f()": cap},
+        function_records=resolved_records([_fn_record("f()")], {"f()": cap}),
     )
     row = _ef_row(db_session)
     assert row.status == "resolved_empty"
@@ -829,8 +714,7 @@ def test_openness_not_determined_on_unsupported(db_session) -> None:
     write_permission_rows(
         db_session,
         contract_id=1,
-        function_records=[_fn_record("f()")],
-        capability_by_function={"f()": cap},
+        function_records=resolved_records([_fn_record("f()")], {"f()": cap}),
     )
     row = _ef_row(db_session)
     assert row.authority_public is False
@@ -849,8 +733,7 @@ def test_openness_not_determined_on_external_check_only(db_session) -> None:
     write_permission_rows(
         db_session,
         contract_id=1,
-        function_records=[_fn_record("f()")],
-        capability_by_function={"f()": cap},
+        function_records=resolved_records([_fn_record("f()")], {"f()": cap}),
     )
     row = _ef_row(db_session)
     assert row.authority_public is False
@@ -865,7 +748,6 @@ def test_openness_null_when_no_producer_said(db_session) -> None:
         db_session,
         contract_id=1,
         function_records=[_fn_record("f()")],
-        capability_by_function=None,
     )
     assert _ef_row(db_session).authority_openness is None
 
@@ -890,8 +772,7 @@ def test_authority_roles_persists_witnessed_role_grant(db_session) -> None:
     write_permission_rows(
         db_session,
         contract_id=1,
-        function_records=[_fn_record("f()")],
-        capability_by_function={"f()": cap},
+        function_records=resolved_records([_fn_record("f()")], {"f()": cap}),
     )
     row = _ef_row(db_session)
     assert row.authority_roles is not None
@@ -910,10 +791,9 @@ def test_assessment_projected_capability_writes_principal_rows(db_session) -> No
         db_session,
         contract_id=1,
         function_records=[_fn_record("f()", capability_expr=cap)],
-        capability_by_function=None,
     )
 
-    assert db_session.query(_TFunctionPrincipal).one().address == "0x" + "a" * 40
+    assert db_session.query(FunctionPrincipal).one().address == "0x" + "a" * 40
 
 
 def test_authority_roles_null_when_role_identity_dissolved(db_session) -> None:
@@ -928,8 +808,7 @@ def test_authority_roles_null_when_role_identity_dissolved(db_session) -> None:
     write_permission_rows(
         db_session,
         contract_id=1,
-        function_records=[_fn_record("f()")],
-        capability_by_function={"f()": cap},
+        function_records=resolved_records([_fn_record("f()")], {"f()": cap}),
     )
     assert _ef_row(db_session).authority_roles is None
 
@@ -939,8 +818,7 @@ def test_authority_roles_empty_when_proven_not_role_gated(db_session) -> None:
     write_permission_rows(
         db_session,
         contract_id=1,
-        function_records=[_fn_record("f()")],
-        capability_by_function={"f()": cap},
+        function_records=resolved_records([_fn_record("f()")], {"f()": cap}),
     )
     assert _ef_row(db_session).authority_roles == []
 
@@ -950,7 +828,6 @@ def test_authority_roles_null_when_no_capability_resolved(db_session) -> None:
         db_session,
         contract_id=1,
         function_records=[_fn_record("f()")],
-        capability_by_function=None,
     )
     assert _ef_row(db_session).authority_roles is None
 
@@ -975,8 +852,7 @@ def test_resolver_crash_warns_once_per_contract_and_records_degraded(db_session,
             write_permission_rows(
                 db_session,
                 contract_id=1,
-                function_records=[_fn_record("a()"), _fn_record("b()")],
-                capability_by_function={"a()": cap, "b()": cap},
+                function_records=resolved_records([_fn_record("a()"), _fn_record("b()")], {"a()": cap, "b()": cap}),
                 resolve_principal_type=_boom,
             )
     finally:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from db.models import Job
+from db.models import Job, derive_job_chain_id
 from utils.chains import UnknownChainError, canonical_chain, chain_by_id
 
 
@@ -33,3 +33,12 @@ def _mainnet_coalesced_chain(chain: str | None) -> str:
     historical NULLs.
     """
     return (chain or "ethereum").lower()
+
+
+def job_chain_id(job: Job) -> int:
+    """Resolve the first-class job chain, using request defaults only at ingress."""
+    chain_id = getattr(job, "chain_id", None)
+    if isinstance(chain_id, int) and not isinstance(chain_id, bool):
+        return chain_id
+    request = job.request if isinstance(job.request, dict) else {}
+    return derive_job_chain_id(request.get("chain"), getattr(job, "address", None)) or 1

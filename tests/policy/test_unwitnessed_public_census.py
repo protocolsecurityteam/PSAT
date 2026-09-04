@@ -22,6 +22,7 @@ from db.models import Contract
 from services.policy.permission_index import build_permission_index
 from services.policy.permission_index_writer import write_permission_rows
 from tests.conftest import requires_postgres
+from tests.support.policy_builders import resolved_records
 
 _TARGET = {"subject": {"address": "0x" + "ce" * 20, "name": "CensusTarget"}}
 
@@ -70,7 +71,6 @@ def test_fall_through_public_persists_json_null_conditions_never_empty_array(db_
         db_session,
         contract_id=contract.id,
         function_records=cast("list[dict[str, Any]]", payload["functions"]),
-        capability_by_function=None,
     )
     db_session.flush()
     assert _conditions_typeof(db_session, contract.id, "sweep") == "null"
@@ -97,8 +97,9 @@ def test_witnessed_public_with_conditions_persists_the_array(db_session):
     write_permission_rows(
         db_session,
         contract_id=contract.id,
-        function_records=cast("list[dict[str, Any]]", payload["functions"]),
-        capability_by_function={"sweep(address)": capability},
+        function_records=resolved_records(
+            cast("list[dict[str, Any]]", payload["functions"]), {"sweep(address)": capability}
+        ),
     )
     db_session.flush()
     assert _conditions_typeof(db_session, contract.id, "sweep") == "array"
@@ -165,7 +166,6 @@ def test_policy_minted_rows_carry_openness_and_roles_on_the_production_path(db_s
         db_session,
         contract_id=contract.id,
         function_records=cast("list[dict[str, Any]]", payload["functions"]),
-        capability_by_function={},
     )
     db_session.flush()
     rows = {
@@ -221,7 +221,6 @@ def test_rewrite_retracts_selectorless_claims_absent_from_assessment_projection(
                     },
                 ],
             ),
-            capability_by_function=None,
         )
         db_session.flush()
 

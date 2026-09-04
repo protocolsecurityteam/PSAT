@@ -912,7 +912,7 @@ def test_role_changes_detected(anvil_env, test_db):
     current_block = int(_cast(["block-number"], rpc_url))
 
     _register_contract(
-        test_db, addr, "role_control", current_block, monitoring_config={"watch_roles": True, "watch_ownership": True}
+        test_db, addr, "regular", current_block, monitoring_config={"watch_roles": True, "watch_ownership": True}
     )
 
     role = "0x" + "00" * 32  # DEFAULT_ADMIN_ROLE

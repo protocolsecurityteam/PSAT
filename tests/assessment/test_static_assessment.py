@@ -24,8 +24,16 @@ def _pause_inputs() -> tuple[dict, dict, dict]:
         "controller_tracking": [
             {
                 "controller_id": "owner",
+                "label": "owner",
+                "kind": "state_variable",
+                "confidence": "exact",
+                "tracking_mode": "state_only",
+                "writer_functions": [],
+                "associated_events": [],
+                "polling_sources": ["owner"],
+                "notes": [],
                 "source": "state_variable",
-                "read_spec": {"strategy": "getter", "target": "owner()"},
+                "read_spec": {"strategy": "getter_call", "target": "owner"},
             }
         ]
     }

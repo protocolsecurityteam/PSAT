@@ -245,27 +245,9 @@ def test_build_permission_index_uses_semantic_capabilities_for_principals():
             },
         },
     }
-    authority_snapshot = {
-        "contract_name": "RolesAuthority",
-        "controller_values": {
-            "state_variable:owner": {
-                "value": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                "resolved_type": "safe",
-                "details": {
-                    "address": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                    "owners": [
-                        "0x1111111111111111111111111111111111111111",
-                        "0x2222222222222222222222222222222222222222",
-                    ],
-                    "threshold": 2,
-                },
-            }
-        },
-    }
     payload = build_permission_index(
         target_analysis,
         target_snapshot=target_snapshot,
-        authority_snapshot=authority_snapshot,
         capability_resolver_output={
             "manage(address,bytes,uint256)": _finite_cap("0xcccccccccccccccccccccccccccccccccccccccc"),
             "setBeforeTransferHook(address)": _finite_cap("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
@@ -289,8 +271,6 @@ def test_build_permission_index_uses_semantic_capabilities_for_principals():
         ),
     )
 
-    assert payload["authority_contract"] is None
-    assert payload["principal_resolution"]["status"] == "complete"
     functions: dict[str, Any] = {item["function"]: item for item in payload["functions"]}
 
     manage = functions["manage(address,bytes,uint256)"]
@@ -371,11 +351,9 @@ def test_build_permission_index_with_authority_snapshot():
             }
         },
     }
-    authority_snapshot = {"contract_name": "Authority", "controller_values": {}}
     payload = build_permission_index(
         target_analysis,
         target_snapshot=target_snapshot,
-        authority_snapshot=authority_snapshot,
         capability_resolver_output={
             "manage(address,bytes,uint256)": _finite_cap("0xcccccccccccccccccccccccccccccccccccccccc"),
         },
@@ -391,8 +369,6 @@ def test_build_permission_index_with_authority_snapshot():
     )
 
     assert payload["contract_name"] == "Target"
-    assert payload["authority_contract"] is None
-    assert payload["principal_resolution"]["status"] == "complete"
 
 
 def test_build_permission_index_handles_vyper_dynarray_signatures():

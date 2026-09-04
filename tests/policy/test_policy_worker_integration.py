@@ -69,7 +69,7 @@ class TestProcessStoresAssessment:
         )
         monkeypatch.setattr(
             "workers.policy_worker.build_principal_index",
-            lambda *a, **kw: {"principals": []},
+            lambda *a, **kw: [],
         )
 
         worker.process(session, cast(Any, job))
@@ -124,7 +124,7 @@ class TestProcessSemanticInputs:
         )
         monkeypatch.setattr(
             "workers.policy_worker.build_principal_index",
-            lambda *a, **kw: {"principals": []},
+            lambda *a, **kw: [],
         )
         monkeypatch.setattr(
             PolicyWorker,
@@ -166,9 +166,9 @@ class TestGraphRefreshAfterPermissionIndex:
             call_order.append("resolution_graph")
             return {"nodes": [], "edges": [], "refreshed": True}, {}
 
-        def fake_build_labels(*args: Any, **kwargs: Any) -> dict:
+        def fake_build_labels(*args: Any, **kwargs: Any) -> list:
             call_order.append("principal_labels")
-            return {"principals": []}
+            return []
 
         monkeypatch.setattr("workers.policy_worker.get_artifact", fake_get_artifact)
         monkeypatch.setattr("workers.policy_worker.store_artifact", lambda *a, **kw: None)
@@ -246,7 +246,7 @@ class TestCrossContractEnrichmentAssessmentSync:
         )
         monkeypatch.setattr(
             "workers.policy_worker.build_principal_index",
-            lambda *a, **kw: {"principals": []},
+            lambda *a, **kw: [],
         )
         policy_claim = {"claim_id": "flow.out", "tier": "policy_derived", "witness": {"callee": AUTH_ADDRESS}}
         monkeypatch.setattr(
@@ -335,7 +335,37 @@ class TestProcessFanoutParity:
                 }
             ]
         )
-        assessment = _assessment(static_facts=static_facts, snapshot=observation_batch, graph=resolved_graph)
+        for function in ep_data["functions"]:
+            grant = function["authority_roles"][0]
+            members = [principal["address"] for principal in grant["principals"]]
+            function["capability_expr"] = {
+                "kind": "finite_set",
+                "membership_quality": "exact",
+                "members": members,
+                "trace": [
+                    {
+                        "step": "solmate_roles_authority",
+                        "roles": [grant["role"]],
+                        "role_members": {str(grant["role"]): members},
+                    }
+                ],
+            }
+        assessment = _assessment(
+            static_facts=static_facts,
+            snapshot=observation_batch,
+            graph=resolved_graph,
+            effects={
+                "functions": {
+                    function["function"]: {
+                        "abi_signature": function["abi_signature"],
+                        "selector": function["selector"],
+                        "state_changing": True,
+                        "claims": [],
+                    }
+                    for function in ep_data["functions"]
+                }
+            },
+        )
 
         def fake_get_artifact(_session: Any, _job_id: Any, name: str) -> Any:
             return {
@@ -398,12 +428,10 @@ class TestProcessFanoutParity:
         seq_payload, seq_stats = self._run(monkeypatch, "1")
         par_payload, par_stats = self._run(monkeypatch, "8")
 
-        assert seq_payload["contract_address"] == par_payload["contract_address"]
-        assert seq_payload["contract_name"] == par_payload["contract_name"]
-        assert len(seq_payload["principals"]) == len(par_payload["principals"])
+        assert len(seq_payload) == len(par_payload)
 
         # Principals are emitted in sorted-address order — direct equality holds.
-        for seq_p, par_p in zip(seq_payload["principals"], par_payload["principals"]):
+        for seq_p, par_p in zip(seq_payload, par_payload):
             assert seq_p == par_p
 
         # Cache discipline: 60 unknown principals should each classify roughly
@@ -473,7 +501,7 @@ class TestGraphRefreshRewritesTables:
             lambda *a, **kw: {"schema_version": "1", "functions": []},
         )
         monkeypatch.setattr("workers.policy_worker.resolve_control_graph", lambda **kw: (refreshed_graph, {}))
-        monkeypatch.setattr("workers.policy_worker.build_principal_index", lambda *a, **kw: {"principals": []})
+        monkeypatch.setattr("workers.policy_worker.build_principal_index", lambda *a, **kw: [])
         monkeypatch.setattr("workers.policy_worker.write_permission_rows", lambda *a, **kw: 0)
         monkeypatch.setattr("workers.policy_worker.replace_control_graph_rows", fake_replace)
         monkeypatch.setattr(

@@ -4,7 +4,7 @@
 Within a single cascade the BFS already dedupes by address (``processed``
 set). The persistent cache exists for *cross-cascade* reuse: when a
 sibling job walks the same OZ library / common implementation, we skip
-the scaffold + ``collect_static_facts`` + ``build_observation_plan``
+the scaffold + ``collect_static_inputs`` + ``build_observation_plan``
 trio.
 
 What we pin here:
@@ -146,7 +146,7 @@ def test_second_call_serves_static_artifacts_from_cache(monkeypatch):
     _materialize_contract_artifacts("0xABC", "http://rpc", workspace_prefix="test", chain="ethereum")
 
     assert len(scaffold_calls) == 1, "second call should skip scaffold"
-    assert len(collect_calls) == 1, "second call should skip collect_static_facts"
+    assert len(collect_calls) == 1, "second call should skip collect_static_inputs"
 
 
 def test_snapshot_always_rebuilt(monkeypatch):

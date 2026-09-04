@@ -11,6 +11,8 @@ from collections.abc import Mapping
 from typing import Any
 
 from schemas.assessment import Assessment
+from schemas.observations import ObservationPlan
+from services.resolution.observation_plan import compile_observation_plan
 
 
 def _list(value: object) -> list[Any]:
@@ -26,60 +28,13 @@ def contract_subject(assessment: Assessment) -> dict[str, Any]:
     }
 
 
-def observation_plan(assessment: Assessment) -> dict[str, Any]:
-    """Compile controller read/watch instructions without another wire type."""
-
-    tracked: list[dict[str, Any]] = []
-    for controller_key, controller in assessment["controllers"].items():
-        tracking = controller["tracking"] if isinstance(controller["tracking"], Mapping) else {}
-        events = _list(tracking.get("associated_events"))
-        writers = [
-            item["function"]
-            for item in _list(tracking.get("writer_functions"))
-            if isinstance(item, Mapping) and isinstance(item.get("function"), str)
-        ]
-        mode = tracking.get("mode")
-        cadence = "state_only"
-        if mode == "event_plus_state":
-            cadence = "realtime_confirm"
-        elif mode == "manual_review":
-            cadence = "periodic_reconciliation"
-        item: dict[str, Any] = {
-            "controller_id": controller_key,
-            "label": controller["label"],
-            "source": controller["source"],
-            "kind": controller["kind"],
-            "read_spec": controller["read_strategy"],
-            "tracking_mode": mode,
-            "event_watch": (
-                {
-                    "transport": "wss_logs",
-                    "contract_address": assessment["contract"]["deployment_address"],
-                    "events": events,
-                    "writer_functions": writers,
-                }
-                if events
-                else None
-            ),
-            "polling_fallback": {
-                "contract_address": assessment["contract"]["deployment_address"],
-                "polling_sources": _list(tracking.get("polling_sources")),
-                "cadence": cadence,
-                "notes": _list(tracking.get("notes")),
-            },
-            "notes": _list(tracking.get("notes")),
-        }
-        provenance = tracking.get("authority_provenance")
-        if provenance is not None:
-            item["authority_provenance"] = provenance
-        tracked.append(item)
-    return {
-        "schema_version": assessment["schema_version"],
-        "contract_address": assessment["contract"]["deployment_address"],
-        "contract_name": assessment["contract"]["name"],
-        "tracking_strategy": "event_first_with_polling_fallback",
-        "tracked_controllers": sorted(tracked, key=lambda item: str(item["label"])),
-    }
+def observation_plan(assessment: Assessment) -> ObservationPlan:
+    """Compile read/watch instructions from the canonical controller records."""
+    return compile_observation_plan(
+        assessment["contract"]["deployment_address"],
+        assessment["contract"]["name"],
+        assessment["controllers"],
+    )
 
 
 def controller_observations(assessment: Assessment) -> dict[str, Any]:

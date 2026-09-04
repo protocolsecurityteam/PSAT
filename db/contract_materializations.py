@@ -154,7 +154,7 @@ logger = logging.getLogger(__name__)
 # safety prep (index-based operand exclusion, element-aware operand ordering)
 # so the shape change and its invalidation land together rather than thrashing
 # through ``_bundle_differs``, which compares the whole serialized tree.
-STATIC_FACTS_SCHEMA_VERSION = 9
+STATIC_FACTS_SCHEMA_VERSION = 10
 
 
 # ── Provenance ─────────────────────────────────────────────────────────────

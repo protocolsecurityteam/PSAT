@@ -41,9 +41,9 @@ from services.resolution.cross_chain_authority import (
 )
 from services.resolution.tracking import clear_classify_cache
 from workers.policy_worker import (
-    _chain_id_for_job,
     _known_addresses_for_scope,
     _make_principal_type_resolver,
+    job_chain_id,
 )
 
 BASE_CHAIN_ID = 8453
@@ -188,7 +188,7 @@ def test_base_positive_arm_and_native_true_negative_through_real_classify(wire):
         classify_cache={},
         cross_chain_recognizer=recognizer,
     )
-    principals = {p["address"]: p for p in payload["principals"]}
+    principals = {p["address"]: p for p in payload}
 
     # Aliased L1 owner: labelled, with the implied L1 address as a hint only.
     aliased = principals[ALIASED_L1_OWNER]
@@ -256,7 +256,7 @@ def test_mainnet_run_classifies_everything_through_the_wire(wire):
         classify_cache={},
         cross_chain_recognizer=recognizer,
     )
-    principals = {p["address"]: p for p in payload["principals"]}
+    principals = {p["address"]: p for p in payload}
 
     for addr in (ALIASED_L1_OWNER, BASE_MESSENGER, BASE_BRIDGE):
         assert principals[addr]["resolved_type"] != CROSS_CHAIN_AUTHORITY_TYPE
@@ -289,7 +289,7 @@ def test_fp_resolver_labels_bridge_without_wire_and_types_native(wire):
 
 
 def _job(*, chain_id, chain=None, address=TARGET) -> Any:
-    """A ``_chain_id_for_job``-shaped stand-in (it reads only ``chain_id`` /
+    """A ``job_chain_id``-shaped stand-in (it reads only ``chain_id`` /
     ``address`` / ``request``), typed ``Any`` so the helper's ``Job`` param
     accepts it without a DB row."""
     return SimpleNamespace(id="j", chain_id=chain_id, address=address, request={"chain": chain} if chain else {})
@@ -300,8 +300,8 @@ def test_base_job_yields_live_recognizer_mainnet_job_yields_none():
     request chain name) binds a recognizer; a mainnet job binds None so the
     classification path is byte-identical to pre-multichain main."""
     base_by_id = _job(chain_id=BASE_CHAIN_ID)
-    assert _chain_id_for_job(base_by_id) == BASE_CHAIN_ID
-    rec = make_cross_chain_recognizer(_chain_id_for_job(base_by_id), _known_addresses_for_scope({}, TARGET))
+    assert job_chain_id(base_by_id) == BASE_CHAIN_ID
+    rec = make_cross_chain_recognizer(job_chain_id(base_by_id), _known_addresses_for_scope({}, TARGET))
     assert rec is not None
     assert rec(BASE_MESSENGER) == (
         CROSS_CHAIN_AUTHORITY_TYPE,
@@ -310,9 +310,9 @@ def test_base_job_yields_live_recognizer_mainnet_job_yields_none():
 
     # Chain derived from the request JSONB when the column is unset.
     base_by_name = _job(chain_id=None, chain="base")
-    assert _chain_id_for_job(base_by_name) == BASE_CHAIN_ID
-    assert make_cross_chain_recognizer(_chain_id_for_job(base_by_name)) is not None
+    assert job_chain_id(base_by_name) == BASE_CHAIN_ID
+    assert make_cross_chain_recognizer(job_chain_id(base_by_name)) is not None
 
     mainnet_job = _job(chain_id=1)
-    assert _chain_id_for_job(mainnet_job) == 1
-    assert make_cross_chain_recognizer(_chain_id_for_job(mainnet_job), _known_addresses_for_scope({}, TARGET)) is None
+    assert job_chain_id(mainnet_job) == 1
+    assert make_cross_chain_recognizer(job_chain_id(mainnet_job), _known_addresses_for_scope({}, TARGET)) is None

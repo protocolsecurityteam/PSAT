@@ -19,9 +19,9 @@ from db.models import (
     ControllerValue,
     Job,
     JobStage,
-    derive_job_chain_id,
 )
 from db.queue import create_job, get_artifact, store_artifact
+from db.queue._chains import _job_chain_name, job_chain_id
 from db.queue.typed import ArtifactSchemaError, load_assessment, load_assessment_inputs
 from schemas.observations import ObservationBatch, ObservationPlan
 from services.clients.rpc import require_rpc_url
@@ -72,7 +72,7 @@ from services.resolution.role_holder_plane import (
 )
 from services.resolution.tracking import observe_controllers
 from utils.balance_status import ASSET_SET_STATUS_FETCH_FAILED, BALANCE_WRITER_RESOLUTION
-from utils.chains import UnknownChainError, chain_by_id, chain_enabled
+from utils.chains import chain_by_id, chain_enabled
 from utils.logging import record_degraded, record_stage_metric
 from workers.base import BaseWorker
 
@@ -83,41 +83,16 @@ RECURSION_MAX_DEPTH = int(os.getenv("PSAT_RECURSION_MAX_DEPTH", "6"))
 
 def _rpc_url_for_job(job: Job) -> str:
     """eRPC URL for the job's own chain, resolved via the first-class
-    ``jobs.chain_id`` column (``_chain_id_for_job``), not the request JSONB —
+    ``jobs.chain_id`` column (``job_chain_id``), not the request JSONB —
     a chainless ``/api/analyze`` submission carries the mainnet edge default
     only in the column, so a request-only read fails loud on every such job."""
     request = job.request if isinstance(job.request, dict) else {}
     explicit = request.get("rpc_url")
     return require_rpc_url(
         explicit_rpc_url=explicit if isinstance(explicit, str) else None,
-        chain_id=_chain_id_for_job(job),
+        chain_id=job_chain_id(job),
         context=f"resolution rpc for job {job.id}",
     )
-
-
-def _chain_id_for_job(job: Job) -> int:
-    """The job's first-class ``chain_id`` (invariant 1). Prefers the populated
-    ``jobs.chain_id`` column and falls back to deriving it from
-    ``request["chain"]`` via the canonical registry; mainnet (1) is the last
-    resort for a chain-less row so behaviour is unchanged there."""
-    chain_id = getattr(job, "chain_id", None)
-    if isinstance(chain_id, int):
-        return chain_id
-    request = job.request if isinstance(job.request, dict) else {}
-    return derive_job_chain_id(request.get("chain"), job.address) or 1
-
-
-def _chain_name_for_job(job: Job) -> str:
-    """Canonical chain name for the job's first-class ``chain_id``.
-
-    Stamped onto spawned child/dependency-provider jobs so a discovered
-    contract inherits the parent's chain instead of cascading as ``None`` when
-    the request payload lacks a chain (a chainless ``/api/analyze`` submission).
-    Mainnet resolves to ``"ethereum"`` so mainnet spawns are unchanged."""
-    try:
-        return chain_by_id(_chain_id_for_job(job)).name
-    except UnknownChainError:
-        return "ethereum"
 
 
 def _build_root_artifacts(
@@ -185,7 +160,7 @@ class ResolutionWorker(BaseWorker):
             job.name or "Contract",
         )
         rpc_url = _rpc_url_for_job(job)
-        chain_id = _chain_id_for_job(job)
+        chain_id = job_chain_id(job)
 
         try:
             assessment = load_assessment(get_artifact, session, job.id)
@@ -866,7 +841,7 @@ class ResolutionWorker(BaseWorker):
             resolved_graph,
             rpc_url,
             site="resolution",
-            chain_name=_chain_name_for_job(job),
+            chain_name=_job_chain_name(job),
         )
 
     def _emit_dependency_edges_from_predicate_trees(
@@ -956,7 +931,7 @@ class ResolutionWorker(BaseWorker):
         # Derive from the job's first-class chain so the edge's
         # provider_chain and any spawned provider job are chain-stamped even when
         # the request payload carries no chain.
-        chain = _chain_name_for_job(job)
+        chain = _job_chain_name(job)
         # Defense in depth: A's chain equals every provider B's chain, so
         # a gated parent implies gated providers — but a disabled chain must spawn
         # no provider jobs, so gate the whole emission here. In practice A is always

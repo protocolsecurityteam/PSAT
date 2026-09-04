@@ -11,23 +11,12 @@ from .observations import ResolvedControllerType
 # One vocabulary with ``schemas.observations``: persisted rows carry
 # ``off_chain_witness`` (the PR #48 sink bridge wrote it), so the narrower
 # 8-member copy this alias used to be was a lie at the cast sites.
-ResolvedAddressType = ResolvedControllerType
 PermissionStatus = Literal["public", "unsupported", "resolved_empty"]
-PrincipalResolutionStatus = Literal[
-    "complete",
-    "no_authority",
-    "no_authority_snapshot",
-]
-
-
-class PrincipalResolution(TypedDict):
-    status: PrincipalResolutionStatus
-    reason: str
 
 
 class ResolvedPrincipal(TypedDict):
     address: str
-    resolved_type: ResolvedAddressType
+    resolved_type: ResolvedControllerType
     details: dict[str, object]
     source_contract: NotRequired[str]
     source_controller_id: NotRequired[str]
@@ -96,7 +85,12 @@ class PermissionIndex(TypedDict):
     schema_version: str
     contract_address: str
     contract_name: str
-    authority_contract: str | None
-    principal_resolution: PrincipalResolution
-    artifacts: dict[str, str]
     functions: list[PermissionRow]
+
+
+def role_number(value: Any) -> int | None:
+    """Parse a numeric role, leaving named or structured roles unresolved."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None

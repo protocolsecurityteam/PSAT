@@ -84,7 +84,6 @@ def _wire(monkeypatch, probe_map, *, batched: bool):
         return out
 
     monkeypatch.setattr(tracking, "_get_code", lambda *_a, **_k: "0x6000")
-    monkeypatch.setattr(tracking, "type_authority_contract", lambda *_a, **_k: {})
     monkeypatch.setattr(tracking, "_eth_call_raw", _fake_eth_call_raw)
     # Stub the batch layer on both parametrizations: the `batched` flag chooses
     # which classifier the test drives, but classify_resolved_address_with_status

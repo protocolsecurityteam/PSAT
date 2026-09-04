@@ -225,3 +225,21 @@ def _authority_bundle(snapshot: dict | None = None) -> dict:
         "observation_plan": _observation_plan(address=AUTH_ADDRESS, name="Authority"),
         "snapshot": snapshot or _minimal_snapshot({}, address=AUTH_ADDRESS),
     }
+
+
+def resolved_records(records, capabilities):
+    """Build writer inputs from resolver results using the production projection."""
+    from services.policy.capability_surface import capability_role_grants
+    from services.policy.permission_index import _column_values_for_capability
+    from services.resolution.capabilities import CapabilityExpr
+    from services.resolution.capability_resolver import capability_to_dict
+
+    out = []
+    for record in records:
+        cap = capabilities.get(record.get("function") or record.get("abi_signature"))
+        if cap is None:
+            out.append(dict(record))
+            continue
+        cap = capability_to_dict(cap) if isinstance(cap, CapabilityExpr) else cap
+        out.append({**record, **_column_values_for_capability(cap), "authority_roles": capability_role_grants(cap)})
+    return out

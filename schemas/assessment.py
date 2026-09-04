@@ -13,7 +13,9 @@ from typing import Literal
 from pydantic import JsonValue
 from typing_extensions import NotRequired, TypedDict
 
-AssessmentVersion = Literal["assessment/4"]
+from schemas.static_facts import Controller
+
+AssessmentVersion = Literal["assessment/5"]
 EntityKind = Literal["account", "contract"]
 EffectKind = Literal[
     "authority.grant",
@@ -57,7 +59,6 @@ EffectKind = Literal[
     "weth.withdraw",
 ]
 EffectFamily = Literal["control_plane", "flow", "exec", "user_plane", "fact"]
-EffectTargetKind = Literal["state", "function", "account", "asset", "code", "role", "operation"]
 EvidenceMethod = Literal[
     "source",
     "static_ir",
@@ -82,7 +83,6 @@ PropositionKind = Literal[
 SubjectKind = Literal["contract", "function", "controller", "entity", "effect"]
 AnalysisStatus = Literal["completed", "partial", "failed"]
 DiagnosticSeverity = Literal["degraded", "error"]
-TargetKind = Literal["contract", "function", "controller", "entity", "effect"]
 
 
 class Contract(TypedDict):
@@ -98,14 +98,6 @@ class Function(TypedDict):
     abi_signature: str | None
     selector: str | None
     state_changing: bool | None
-
-
-class Controller(TypedDict):
-    label: str
-    kind: str
-    source: JsonValue
-    read_strategy: JsonValue
-    tracking: JsonValue
 
 
 class Entity(TypedDict):
@@ -170,7 +162,7 @@ class Diagnostic(TypedDict):
     severity: DiagnosticSeverity
     code: str
     message: str
-    target_kind: NotRequired[TargetKind]
+    target_kind: NotRequired[SubjectKind]
     target: NotRequired[str]
 
 
@@ -317,7 +309,6 @@ __all__ = [
     "Effect",
     "EffectFamily",
     "EffectKind",
-    "EffectTargetKind",
     "Entity",
     "EntityKind",
     "Evidence",
@@ -326,6 +317,5 @@ __all__ = [
     "Proposition",
     "PropositionKind",
     "SubjectKind",
-    "TargetKind",
     "assessment_problems",
 ]

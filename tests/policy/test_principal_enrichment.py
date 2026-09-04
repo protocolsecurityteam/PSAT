@@ -123,7 +123,7 @@ def test_build_principal_index_enriches_safe_admin_and_operator(monkeypatch):
         rpc_url="http://rpc.example",
     )
 
-    principals = {item["address"]: item for item in payload["principals"]}
+    principals = {item["address"]: item for item in payload}
 
     manage_principal = principals["0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
     assert manage_principal["resolved_type"] == "eoa"
@@ -220,7 +220,7 @@ def test_build_principal_index_derives_enrichment_tags_from_claims(monkeypatch):
     )
 
     payload = build_principal_index(permission_index, rpc_url="http://rpc.example")
-    principals = {item["address"]: set(item["labels"]) for item in payload["principals"]}
+    principals = {item["address"]: set(item["labels"]) for item in payload}
 
     assert "vault_admin" in principals[admin_safe]
     assert "vault_operator" in principals[operator_addr]
@@ -310,8 +310,7 @@ def test_build_principal_index_with_resolved_graph_admin_safe():
 
     payload = build_principal_index(permission_index, resolution_graph=resolved_graph)
 
-    assert payload["contract_name"] == "Target"
-    principals = {item["address"]: item for item in payload["principals"]}
+    principals = {item["address"]: item for item in payload}
     assert principals["0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]["display_name"] == "Target owner Safe"
 
 
@@ -394,11 +393,10 @@ def test_build_principal_index_includes_generic_controller_principals(monkeypatc
         rpc_url="http://rpc.example",
     )
 
-    principals = {item["address"]: item for item in payload["principals"]}
+    principals = {item["address"]: item for item in payload}
     governance = principals["0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
     assert governance["display_name"] == "Target governance"
     assert "target_controller_governance" in governance["labels"]
-    assert governance["controller_context"] == ["governance"]
 
 
 def test_build_principal_index_prefers_analyzed_contract_name_for_contract_principals():
@@ -451,7 +449,7 @@ def test_build_principal_index_prefers_analyzed_contract_name_for_contract_princ
         resolution_graph=resolved_graph,
     )
 
-    principals = {item["address"]: item for item in payload["principals"]}
+    principals = {item["address"]: item for item in payload}
     assert principals["0x2222222222222222222222222222222222222222"]["display_name"] == "Executor"
 
 
@@ -519,7 +517,7 @@ def test_build_principal_index_uses_graph_context_for_unnamed_contract_principal
         resolution_graph=resolved_graph,
     )
 
-    principals = {item["address"]: item for item in payload["principals"]}
+    principals = {item["address"]: item for item in payload}
     assert principals["0x3333333333333333333333333333333333333333"]["display_name"] == "TokenManager token"
 
 
@@ -597,7 +595,7 @@ def test_build_principal_index_skips_nonterminal_contract_principals():
         resolution_graph=resolved_graph,
     )
 
-    principals = {item["address"]: item for item in payload["principals"]}
+    principals = {item["address"]: item for item in payload}
     assert "0x2222222222222222222222222222222222222222" not in principals
     assert "0x3333333333333333333333333333333333333333" in principals
 
@@ -655,7 +653,7 @@ def test_build_principal_index_skips_permission_controller_contract_principals()
         resolution_graph=resolved_graph,
     )
 
-    principals = {item["address"]: item for item in payload["principals"]}
+    principals = {item["address"]: item for item in payload}
     assert "0x2222222222222222222222222222222222222222" not in principals
 
 
@@ -744,10 +742,8 @@ def _principal_labels_parity_helper(monkeypatch, fanout: str):
                 tuple(p["labels"]),
                 p["confidence"],
                 tuple(p["graph_context"]),
-                tuple(p["controller_context"]),
-                tuple((perm["function"], perm["role"], perm.get("controller")) for perm in p["permissions"]),
             )
-            for p in payload["principals"]
+            for p in payload
         )
     )
     return canonical, dict(classify_cache), call_counter["n"]
@@ -883,7 +879,7 @@ def test_callee_edge_does_not_mint_controller_labels():
         {"contract_address": target, "contract_name": "StakingManager", "functions": []},
         resolution_graph=resolved_graph,
     )
-    principals = {item["address"]: item for item in payload["principals"]}
+    principals = {item["address"]: item for item in payload}
 
     gate_labels = set(principals[gate]["labels"])
     assert "controller_value" in gate_labels
@@ -956,7 +952,7 @@ def test_unattributed_edge_does_not_mint_controller_labels():
         {"contract_address": target, "contract_name": "Vault", "functions": []},
         resolution_graph=resolved_graph,
     )
-    principals = {item["address"]: item for item in payload["principals"]}
+    principals = {item["address"]: item for item in payload}
 
     # Positive control — the attributed gate keeps the whole controller set.
     gate_labels = set(principals[gate]["labels"])

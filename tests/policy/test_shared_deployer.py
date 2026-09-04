@@ -168,7 +168,7 @@ def test_shared_deployer_lands_on_principal_without_org_label(monkeypatch):
         rpc_url="http://rpc.example",
         protocol_deployer_groups=groups,
     )
-    profiles = {p["address"]: cast(Any, p) for p in payload["principals"]}
+    profiles = {p["address"]: cast(Any, p) for p in payload}
     profile = profiles[PRINCIPAL]
     fact = profile["details"]["shared_deployer"]
     assert fact["heuristic"] is True
@@ -192,5 +192,5 @@ def test_shared_deployer_omitted_when_no_groups(monkeypatch):
         rpc_url="http://rpc.example",
         protocol_deployer_groups=None,
     )
-    profiles = {p["address"]: cast(Any, p) for p in payload["principals"]}
+    profiles = {p["address"]: cast(Any, p) for p in payload}
     assert "shared_deployer" not in profiles[PRINCIPAL]["details"]

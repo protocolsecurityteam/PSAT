@@ -331,7 +331,6 @@ def test_the_row_replace_drops_last_run_s_policy_derived_claims(db_session):
                 ],
             }
         ],
-        capability_by_function=None,
     )
     db_session.commit()
 

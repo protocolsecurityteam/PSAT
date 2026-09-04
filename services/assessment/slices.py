@@ -19,14 +19,39 @@ def remove_analysis_slice(assessment: Assessment, detector: str) -> None:
     other_receipts = [analysis for analysis in assessment["analyses"] if analysis["detector"] != detector]
     shared_claims = {key for analysis in other_receipts for key in analysis["claims"]}
 
+    shared_evidence = {key for analysis in other_receipts for key in analysis["evidence"]}
+    withdrawn_evidence = owned_evidence - shared_evidence
     for claim in assessment["claims"].values():
-        claim["evidence"] = [key for key in claim["evidence"] if key not in owned_evidence]
-        claim["claims"] = [key for key in claim["claims"] if key not in owned_claims]
+        claim["evidence"] = [key for key in claim["evidence"] if key not in withdrawn_evidence]
 
+    removed: set[str] = set()
     for key in owned_claims - shared_claims:
         claim = assessment["claims"].get(key)
         if claim is not None and not claim["evidence"]:
             assessment["claims"].pop(key, None)
+            removed.add(key)
+
+    # A derivation requires all of its premises. Retract dependents transitively
+    # instead of silently changing their rule by dropping a premise.
+    while True:
+        dependents = {key for key, claim in assessment["claims"].items() if removed.intersection(claim["claims"])}
+        if not dependents:
+            break
+        for key in dependents:
+            assessment["claims"].pop(key)
+        removed.update(dependents)
+    for receipt in other_receipts:
+        if removed.intersection(receipt["claims"]):
+            receipt["claims"] = [key for key in receipt["claims"] if key not in removed]
+            receipt["status"] = "partial"
+            receipt["targets_completed"] = 0
+            receipt["omissions"].append(
+                {
+                    "target_kind": "contract",
+                    "target": assessment["contract"]["deployment_address"],
+                    "reason": "prerequisite_claim_withdrawn",
+                }
+            )
 
     referenced_evidence = {key for claim in assessment["claims"].values() for key in claim["evidence"]}
     referenced_evidence.update(key for analysis in other_receipts for key in analysis["evidence"])

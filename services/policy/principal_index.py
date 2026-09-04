@@ -20,7 +20,8 @@ from db.models import (
     FunctionPrincipal,
 )
 from schemas.observations import ResolvedControllerType, coerce_resolved_controller_type
-from schemas.principal_index import LabelConfidence, PrincipalIndex, PrincipalPermission, PrincipalProfile
+from schemas.permission_index import role_number
+from schemas.principal_index import LabelConfidence, PrincipalPermission, PrincipalProfile
 from services.concurrency import parallel_map
 from services.governance.principals import is_terminal_principal_type, resolve_terminal_principal
 from services.resolution.tracking import classify_resolved_address_with_status
@@ -204,20 +205,6 @@ def _shared_deployer_fact(address: str, deployer_groups: Mapping[str, Mapping[st
     }
 
 
-def _safe_role_int(role: Any) -> int | None:
-    """Coerce a role identifier to int, returning None for non-int shapes.
-
-    Role-name strings and Condition-mapping shapes cannot be represented as
-    numeric policy roles. Callers decide whether to skip-with-warning or
-    surface ``role=None`` on a typed permission while preserving the
-    original identifier in the controller bucket.
-    """
-    try:
-        return int(role)
-    except (TypeError, ValueError):
-        return None
-
-
 def _slug(value: str) -> str:
     lowered = value.lower()
     lowered = re.sub(r"[^a-z0-9]+", "_", lowered)
@@ -341,7 +328,7 @@ def _collect_permissions(
         # role_N label, exactly as [] did.
         for role_grant in function.get("authority_roles") or []:
             raw_role = role_grant.get("role")
-            role = _safe_role_int(raw_role)
+            role = role_number(raw_role)
             if role is None:
                 logger.debug(
                     "principal_index: skipping int-coercion for non-int role %r on %s",
@@ -551,7 +538,7 @@ def build_principal_index(
     protocol_safe_owner_sets: Mapping[str, Mapping[str, Any]] | None = None,
     protocol_deployer_groups: Mapping[str, Mapping[str, Any]] | None = None,
     resolve_controllers: Callable[[str], Sequence[Mapping[str, Any]] | None] | None = None,
-) -> PrincipalIndex:
+) -> list[PrincipalProfile]:
     """Construct principal records for every authority address.
 
     ``classify_cache`` is mutated in place. When supplied, classification
@@ -719,14 +706,6 @@ def build_principal_index(
             "confidence": confidence,
             "details": details,
             "graph_context": graph_context,
-            "controller_context": sorted(
-                {
-                    str(permission.get("controller", "")).strip()
-                    for permission in permissions
-                    if str(permission.get("controller", "")).strip()
-                }
-            ),
-            "permissions": permissions,
         }
 
     sorted_addresses = sorted(addresses)
@@ -753,9 +732,4 @@ def build_principal_index(
     record_stage_metric("label_classify_hits", classify_stats["hits"])
     record_stage_metric("label_classify_misses", classify_stats["misses"])
 
-    return {
-        "schema_version": "0.1",
-        "contract_address": permission_index["contract_address"],
-        "contract_name": contract_name,
-        "principals": principals,
-    }
+    return principals

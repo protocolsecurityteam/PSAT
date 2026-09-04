@@ -1,4 +1,4 @@
-"""Summary and compatibility views for contract analysis."""
+"""Static contract summaries and token-flow inputs."""
 
 from __future__ import annotations
 
@@ -303,29 +303,6 @@ _LABEL_TO_FLOW_DIRECTION = {
     "burn": "burn",
 }
 
-# Canonical 4-byte selectors for standardized access-control entrypoints,
-# keyed by ABI selector (interface params normalized to ``address``). Matched
-# on the *standard* — a contract can't stay IAccessControl / Solmate-Auth
-# compatible while changing these — so a rename can't dodge detection, while a
-# bespoke scheme falls through to its function name (a false-negative by
-# design, never a wrong tag). Both labels carry a capability tag downstream
-# ("roles" / "authority").
-#
-# Role MEMBERSHIP is matched here, not by the predicate post-pass: a
-# caller-keyed *data* map (e.g. LayerZero's per-sender ``composeQueue``) is
-# structurally indistinguishable from a caller-keyed ACL, so "writes a
-# caller_authority membership var" over-fires (``sendCompose`` reads as role
-# management). Ownership has no such ambiguity — a scalar compared to the
-# caller is an owner — so it stays in the post-pass.
-_ACCESS_CONTROL_SELECTORS: dict[str, str] = {
-    "0x2f2ff15d": "role_management",  # grantRole(bytes32,address)                   OZ AccessControl
-    "0xd547741f": "role_management",  # revokeRole(bytes32,address)                  OZ AccessControl
-    "0x67aff484": "role_management",  # setUserRole(address,uint8,bool)              Solmate RolesAuthority
-    "0x7d40583d": "role_management",  # setRoleCapability(uint8,address,bytes4,bool) Solmate RolesAuthority
-    "0xc6b0263e": "role_management",  # setPublicCapability(address,bytes4,bool)     Solmate RolesAuthority
-    "0x7a9e5e4b": "authority_update",  # setAuthority(address)                       Solmate Auth / DSAuth
-}
-
 
 def _label_for_selector(selector: object) -> str | None:
     if not isinstance(selector, str):
@@ -346,20 +323,6 @@ def _selector_for_signature(signature: str | None) -> str | None:
     return "0x" + keccak(text=signature)[:4].hex()
 
 
-def _access_control_label(function) -> str | None:
-    """Effect label for a standardized access-control entrypoint (OZ
-    AccessControl role grants, Solmate RolesAuthority setters, Solmate Auth
-    setAuthority), matched by the function's own canonical ABI selector.
-    Returns None for everything else."""
-    try:
-        signature = function.solidity_signature
-    except (ValueError, AttributeError):
-        # solidity_signature raises for struct-param functions; not relevant here.
-        return None
-    selector = _selector_for_signature(signature)
-    return _ACCESS_CONTROL_SELECTORS.get(selector) if selector else None
-
-
 def _callee_signature_from_ir(call_ir: Any) -> str | None:
     callee = getattr(call_ir, "function", None)
     for attr in ("full_name", "signature_str"):
@@ -372,80 +335,6 @@ def _callee_signature_from_ir(call_ir: Any) -> str | None:
     if isinstance(value, str) and "(" in value and value.endswith(")"):
         return value
     return None
-
-
-def _labels_from_external_call_sinks(graph_entry: dict | None) -> set[str]:
-    labels: set[str] = set()
-    if not graph_entry:
-        return labels
-    for sink in graph_entry.get("sinks") or []:
-        if not isinstance(sink, dict) or sink.get("kind") != "external_call":
-            continue
-        label = _label_for_selector(sink.get("selector"))
-        if label:
-            labels.add(label)
-    return labels
-
-
-def _function_has_low_level_value_call(function) -> bool:
-    """Check if the function (or any internal function it calls) sends ETH via .call{value:}."""
-    visited: set[int] = set()
-
-    def _check(fn) -> bool:
-        fn_id = id(fn)
-        if fn_id in visited:
-            return False
-        visited.add(fn_id)
-        for node in fn.nodes:
-            for ir in node.irs:
-                ir_str = str(ir)
-                if "LOW_LEVEL_CALL" in ir_str and "value:" in ir_str:
-                    return True
-        for call in _call_or_value(fn, "all_internal_calls"):
-            callee = getattr(call, "function", call) if not callable(call) else call
-            if hasattr(callee, "nodes") and _check(callee):
-                return True
-        return False
-
-    return _check(function)
-
-
-def _detect_encoded_selectors(function) -> set[str]:
-    """Scan IR for abi.encodeWithSelector calls with known ERC20 selectors."""
-    labels: set[str] = set()
-    visited: set[int] = set()
-
-    def _check(fn) -> None:
-        fn_id = id(fn)
-        if fn_id in visited:
-            return
-        visited.add(fn_id)
-        for node in fn.nodes:
-            for ir in node.irs:
-                ir_str = str(ir)
-                if "abi.encodeWithSelector" not in ir_str:
-                    continue
-                # Extract the selector value from IR
-                # IR: TMP = SOLIDITY_CALL abi.encodeWithSelector()(2835717307,to,amount)
-                paren_start = ir_str.rfind("(")
-                if paren_start < 0:
-                    continue
-                args = ir_str[paren_start + 1 :].rstrip(")")
-                first_arg = args.split(",")[0].strip()
-                try:
-                    selector_val = int(first_arg)
-                    label = _KNOWN_SELECTORS.get(selector_val)
-                    if label:
-                        labels.add(label)
-                except (ValueError, TypeError):
-                    pass
-        for call in _call_or_value(fn, "all_internal_calls"):
-            callee = getattr(call, "function", call) if not callable(call) else call
-            if hasattr(callee, "nodes"):
-                _check(callee)
-
-    _check(function)
-    return labels
 
 
 # ---------------------------------------------------------------------------

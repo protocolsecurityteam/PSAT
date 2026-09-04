@@ -488,7 +488,6 @@ def _write(db_session, contract, records: dict[str, Any]) -> None:
         db_session,
         contract_id=contract.id,
         function_records=list(records.values()),
-        capability_by_function={},
     )
     db_session.commit()
 

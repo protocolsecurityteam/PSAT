@@ -23,9 +23,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import TypeAdapter, ValidationError
+from pydantic import ValidationError
 
-from schemas.assessment import Assessment, assessment_problems
+from schemas.assessment import Assessment
 
 __all__ = ["ArtifactSchemaError", "load_assessment", "load_assessment_inputs"]
 
@@ -43,37 +43,21 @@ def _problem_list(exc: ValidationError) -> list[str]:
     return [f"{'.'.join(str(loc) for loc in err['loc']) or '<root>'}: {err['msg']}" for err in exc.errors()]
 
 
-def _load_typed(
-    read: Any,
-    session: Any,
-    job_id: Any,
-    name: str,
-    adapter: TypeAdapter[Any],
-) -> Any:
-    raw = read(session, job_id, name)
+def load_assessment(read: Any, session: Any, job_id: Any) -> Assessment | None:
+    """Read and strictly validate the canonical analytical document."""
+    from services.assessment.validation import checked
+
+    raw = read(session, job_id, "assessment")
     if raw is None:
         return None
     if not isinstance(raw, dict):
-        raise ArtifactSchemaError(name, [f"expected a JSON object, got {type(raw).__name__}"])
+        raise ArtifactSchemaError("assessment", [f"expected a JSON object, got {type(raw).__name__}"])
     try:
-        adapter.validate_python(raw)
+        return checked(raw)
     except ValidationError as exc:
-        raise ArtifactSchemaError(name, _problem_list(exc)) from None
-    return raw
-
-
-_ASSESSMENT_ADAPTER = TypeAdapter(Assessment)
-
-
-def load_assessment(read: Any, session: Any, job_id: Any) -> Assessment | None:
-    """The canonical evidence-backed pipeline output."""
-    assessment = _load_typed(read, session, job_id, "assessment", _ASSESSMENT_ADAPTER)
-    if assessment is None:
-        return None
-    problems = assessment_problems(assessment)
-    if problems:
-        raise ArtifactSchemaError("assessment", problems)
-    return assessment
+        raise ArtifactSchemaError("assessment", _problem_list(exc)) from None
+    except ValueError as exc:
+        raise ArtifactSchemaError("assessment", [str(exc)]) from None
 
 
 def load_assessment_inputs(

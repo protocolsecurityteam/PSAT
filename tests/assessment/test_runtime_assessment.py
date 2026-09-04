@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from typing import cast
+
+from schemas.static_facts import StaticFacts
 from services.assessment import (
     add_observations,
     add_resolution,
@@ -8,6 +11,7 @@ from services.assessment import (
     controller_observations,
     observation_plan,
 )
+from services.resolution.observation_plan import build_observation_plan
 from tests.support.policy_builders import TARGET_ADDRESS, _assessment, _minimal_snapshot, _minimal_static_facts
 
 
@@ -22,7 +26,16 @@ def test_runtime_inputs_are_transient_assessment_projections() -> None:
             "read_spec": {"strategy": "getter_call", "target": "owner", "type": "address"},
             "confidence": "exact",
             "tracking_mode": "event_plus_state",
-            "writer_functions": [{"function": "transferOwnership(address)"}],
+            "writer_functions": [
+                {
+                    "function": "transferOwnership(address)",
+                    "contract": "TestContract",
+                    "visibility": "external",
+                    "writes": ["owner"],
+                    "associated_events": [],
+                    "evidence": [],
+                }
+            ],
             "associated_events": [],
             "polling_sources": ["owner"],
             "notes": [],
@@ -34,8 +47,30 @@ def test_runtime_inputs_are_transient_assessment_projections() -> None:
 
     assert plan["contract_address"] == TARGET_ADDRESS
     assert plan["tracked_controllers"][0]["controller_id"] == "state_variable:owner"
-    assert plan["tracked_controllers"][0]["authority_provenance"] == "caller_gate"
+    assert plan["tracked_controllers"][0].get("authority_provenance") == "caller_gate"
     assert contract_subject(assessment)["subject"]["name"] == "TestContract"
+
+
+def test_root_and_recursive_plans_exclude_non_address_string_fields() -> None:
+    facts = _minimal_static_facts()
+    facts["controller_tracking"] = [
+        {
+            "controller_id": "external_contract:_name",
+            "label": "_name",
+            "source": "_name",
+            "kind": "external_contract",
+            "confidence": "exact",
+            "tracking_mode": "state_only",
+            "read_spec": {"strategy": "getter_call", "target": "name", "type": "string", "type_kind": "primitive"},
+            "writer_functions": [],
+            "associated_events": [],
+            "polling_sources": [],
+            "notes": [],
+        }
+    ]
+    root_plan = observation_plan(_assessment(static_facts=facts))
+    assert root_plan == build_observation_plan(cast(StaticFacts, facts))
+    assert root_plan["tracked_controllers"] == []
 
 
 def test_observations_and_graph_project_from_evidence() -> None:

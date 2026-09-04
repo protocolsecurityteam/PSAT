@@ -75,18 +75,6 @@ _CLASSIFY_MULTICALL_ENABLED = os.getenv("PSAT_CLASSIFY_MULTICALL", "1").lower() 
 _SNAPSHOT_MULTICALL_ENABLED = os.getenv("PSAT_SNAPSHOT_MULTICALL", "1").lower() in ("1", "true", "yes")
 
 
-def type_authority_contract(
-    rpc_url: str, address: str, block_tag: str = "latest", *, chain_id: int | None = None
-) -> dict[str, object]:
-    """Compatibility hook for old callers/tests.
-
-    Runtime authority expansion is now handled by semantic predicate
-    capabilities, not by standard-specific controller probes.
-    """
-    del rpc_url, address, block_tag, chain_id
-    return {}
-
-
 def clear_classify_cache() -> None:
     """Clear the process-wide classify cache. For tests + manual reset."""
     from utils.memory import reset_cache_pressure_state
@@ -902,20 +890,6 @@ def _classify_uncached_batched(
         return "eoa", {"address": normalized}, False
 
     # Bytecode-keccak shortcut: skip the batch round trip when bytecode matches a canonical impl.
-    if _KNOWN_BYTECODE_IMPLS:
-        try:
-            from services.clients.rpc import get_code_with_keccak
-
-            _, bytecode_keccak = get_code_with_keccak(rpc_url, normalized, chain_id=chain_id)
-        except Exception:
-            bytecode_keccak = None
-        if bytecode_keccak is not None:
-            hit = _KNOWN_BYTECODE_IMPLS.get(bytecode_keccak)
-            if hit is not None:
-                kind, partial = hit
-                details: dict[str, object] = {"address": normalized}
-                details.update(partial)
-                return kind, details, False
 
     probes = _probe_classify(rpc_url, normalized, block_tag, chain_id=chain_id)
     # Whole-batch failure → fall back to sequential so providers that reject batches don't degrade classification
@@ -975,10 +949,6 @@ def _classify_uncached_batched(
         return kind, details, had_error or uiv_err
 
     details = {"address": normalized}
-    try:
-        details.update(type_authority_contract(rpc_url, normalized, block_tag, chain_id=chain_id))
-    except Exception:
-        had_error = True
     if control_state[0] == "failed":
         # A definitive observation, published so a consumer can tell "plain
         # contract" from "answers every selector, duck typing withheld".
@@ -991,7 +961,6 @@ def _classify_uncached_batched(
 
 # Canonical-impl bytecode keccak registry; matches short-circuit the 6-probe classifier (empty by default — populate via
 # follow-up or test monkeypatch).
-_KNOWN_BYTECODE_IMPLS: dict[str, tuple[ResolvedControllerType, dict[str, object]]] = {}
 
 
 def _classify_uncached(
@@ -1009,20 +978,6 @@ def _classify_uncached(
         return "eoa", {"address": normalized}, False
 
     # Bytecode-keccak shortcut: skip the 6-probe sequence when bytecode matches a registered canonical impl.
-    if _KNOWN_BYTECODE_IMPLS:
-        try:
-            from services.clients.rpc import get_code_with_keccak
-
-            _, bytecode_keccak = get_code_with_keccak(rpc_url, normalized, chain_id=chain_id)
-        except Exception:
-            bytecode_keccak = None
-        if bytecode_keccak is not None:
-            hit = _KNOWN_BYTECODE_IMPLS.get(bytecode_keccak)
-            if hit is not None:
-                kind, partial = hit
-                details: dict[str, object] = {"address": normalized}
-                details.update(partial)
-                return kind, details, False
 
     had_error = False
 
@@ -1076,10 +1031,6 @@ def _classify_uncached(
         return kind, details, had_error or uiv_err
 
     details = {"address": normalized}
-    try:
-        details.update(type_authority_contract(rpc_url, normalized, block_tag, chain_id=chain_id))
-    except Exception:
-        had_error = True
     if control_state[0] == "failed":
         details["duck_type_negative_control"] = "failed"
     elif control_state[0] == "error":

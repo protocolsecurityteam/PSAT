@@ -837,18 +837,6 @@ def _tree_has_constant_equality_on_var(tree: PredicateTree, var_name: str) -> bo
     return False
 
 
-def _tree_has_authority(tree: PredicateTree) -> bool:
-    if tree.get("op") == "LEAF":
-        leaf = tree.get("leaf")
-        if leaf is None:
-            return False
-        return leaf.get("authority_role") in ("caller_authority", "delegated_authority")
-    for child in tree.get("children") or []:
-        if _tree_has_authority(child):
-            return True
-    return False
-
-
 def _tree_has_role(tree: PredicateTree, role: str) -> bool:
     if tree.get("op") == "LEAF":
         leaf = tree.get("leaf")

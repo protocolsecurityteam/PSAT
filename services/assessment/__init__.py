@@ -9,7 +9,6 @@ from .runtime import contract_subject, control_graph, controller_observations, o
 from .static import build_static_assessment
 from .validation import checked
 from .views import (
-    capability_claims,
     effect_matches_by_function,
     effect_presence,
     function_authority_claims,
@@ -30,7 +29,6 @@ __all__ = [
     "observation_plan",
     "add_stage_errors",
     "build_static_assessment",
-    "capability_claims",
     "checked",
     "effect_presence",
     "function_effect_claims",

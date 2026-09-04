@@ -13,7 +13,7 @@ def test_pipeline_reaches_done_stage(analyzed_weth):
 def test_assessment_artifact(analyzed_weth, live_client: LiveClient):
     art = live_client.artifact(analyzed_weth["name"], "assessment")
     assert isinstance(art, dict)
-    assert art.get("schema_version") == "assessment/4"
+    assert art.get("schema_version") == "assessment/5"
     assert isinstance(art.get("contract"), dict) and art["contract"].get("name")
     assert isinstance(art.get("evidence"), dict)
     assert isinstance(art.get("analyses"), list)

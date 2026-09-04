@@ -72,7 +72,6 @@ def test_claims_flow_from_static_pipeline_to_effective_function_row(tmp_path, db
         db_session,
         contract_id=contract.id,
         function_records=cast(list[dict[str, Any]], payload["functions"]),
-        capability_by_function=None,
     )
     db_session.commit()
 

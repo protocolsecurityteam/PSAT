@@ -5,7 +5,7 @@ from typing import cast
 from schemas.observations import ControllerInstruction, ObservationPlan
 from schemas.static_facts import StaticFacts
 from services.resolution.observation_plan import build_observation_plan
-from services.static import collect_static_facts
+from services.static import collect_static_inputs
 
 FIXTURES_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "contracts"
 
@@ -47,7 +47,7 @@ def test_build_observation_plan_uses_event_watch_when_available(tmp_path):
         "AuthModifierController",
         _fixture_source("composed/auth_modifier_controller.sol"),
     )
-    analysis = collect_static_facts(project_dir)
+    analysis = collect_static_inputs(project_dir)[0]
 
     plan = build_observation_plan(analysis)
 
@@ -98,7 +98,7 @@ def test_build_observation_plan_falls_back_to_state_only(tmp_path):
         "OwnerNoEvent",
         _fixture_source("tracking/owner_update_no_event.sol"),
     )
-    analysis = collect_static_facts(project_dir)
+    analysis = collect_static_inputs(project_dir)[0]
 
     plan = build_observation_plan(analysis)
 

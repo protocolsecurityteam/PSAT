@@ -45,10 +45,6 @@ def _is_mapping_type(variable: Any) -> bool:
     return type_str.startswith("mapping(")
 
 
-def _written_mappings(function: Any) -> list[Any]:
-    return [v for v in function.all_state_variables_written() if _is_mapping_type(v)]
-
-
 def _extract_index_writes(function: Any) -> list[tuple[str, list[Any], Any]]:
     triples: list[tuple[str, list[Any], Any]] = []
     for node in getattr(function, "nodes", []) or []:

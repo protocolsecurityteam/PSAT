@@ -15,9 +15,6 @@ from ..capabilities import (
     Condition,
     ExternalCheck,
 )
-from ..permissionless_shapes import (
-    earned_public_enabled,
-)
 from .authority import (
     _OWNER_SELECTOR,
     _canonical_authority_selector_for_slot,
@@ -182,8 +179,7 @@ def _resolve_equality_principal(
         # calldata, so leave it to the placeholder.
         signature = op.get("callee_signature")
         if (
-            earned_public_enabled()
-            and isinstance(signature, str)
+            isinstance(signature, str)
             and "(" in signature
             and not signature.endswith("()")
             and _view_call_caller_selects_key(op)

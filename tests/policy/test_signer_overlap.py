@@ -259,7 +259,7 @@ def test_signer_overlap_lands_on_safe_profile(monkeypatch):
         rpc_url="http://rpc.example",
         protocol_safe_owner_sets=registry,
     )
-    profiles = {p["address"]: cast(Any, p) for p in payload["principals"]}
+    profiles = {p["address"]: cast(Any, p) for p in payload}
     safe_profile = profiles[PAUSER.lower()]
     overlap = safe_profile["details"]["signer_overlap"]
     assert overlap["overlaps"][0]["subset"] is True
@@ -283,7 +283,7 @@ def test_contract_principal_gets_terminal_chain(monkeypatch):
         rpc_url="http://rpc.example",
         resolve_controllers=_resolve_controllers,
     )
-    profiles = {p["address"]: cast(Any, p) for p in payload["principals"]}
+    profiles = {p["address"]: cast(Any, p) for p in payload}
     contract_profile = profiles[CONTRACT_PRINCIPAL]
     assert contract_profile["details"]["terminal"] is False  # the way-point is not a settled key
     terminal = contract_profile["details"]["terminal_principal"]
@@ -303,7 +303,7 @@ def test_contract_principal_without_resolver_stays_non_terminal(monkeypatch):
         rpc_url="http://rpc.example",
         resolve_controllers=None,
     )
-    profiles = {p["address"]: cast(Any, p) for p in payload["principals"]}
+    profiles = {p["address"]: cast(Any, p) for p in payload}
     contract_profile = profiles[CONTRACT_PRINCIPAL]
     assert contract_profile["details"]["terminal"] is False
     assert "terminal_principal" not in contract_profile["details"]

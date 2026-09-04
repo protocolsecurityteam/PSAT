@@ -28,7 +28,7 @@ def test_absent_artifact_returns_none() -> None:
 
 def test_assessment_validates_as_the_canonical_wire() -> None:
     assessment = {
-        "schema_version": "assessment/4",
+        "schema_version": "assessment/5",
         "contract": {
             "chain_id": 1,
             "address": "0x1111111111111111111111111111111111111111",
@@ -72,3 +72,12 @@ def test_assessment_validates_as_the_canonical_wire() -> None:
     stale = {**assessment, "schema_version": "assessment/3"}
     with pytest.raises(ArtifactSchemaError, match="schema_version"):
         load_assessment(_reader({"assessment": stale}), None, "job")
+
+    invalid_boolean = {
+        **assessment,
+        "functions": {
+            "f()": {"abi_signature": "f()", "selector": None, "state_changing": "false"},
+        },
+    }
+    with pytest.raises(ArtifactSchemaError, match="state_changing"):
+        load_assessment(_reader({"assessment": invalid_boolean}), None, "job")

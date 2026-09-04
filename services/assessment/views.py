@@ -8,27 +8,12 @@ from typing import Any, cast
 
 from schemas.assessment import Assessment, Claim
 
-from .functions import resolve_function
-
 
 def function_effect_claims(assessment: Assessment, effect_kind: str | None = None) -> list[Claim]:
     claims: list[Claim] = []
     for claim in assessment["claims"].values():
         proposition = claim["proposition"]
         if proposition["kind"] != "function_effect":
-            continue
-        effect = proposition.get("effect")
-        if effect is None or (effect_kind is not None and effect["kind"] != effect_kind):
-            continue
-        claims.append(claim)
-    return claims
-
-
-def capability_claims(assessment: Assessment, effect_kind: str | None = None) -> list[Claim]:
-    claims: list[Claim] = []
-    for claim in assessment["claims"].values():
-        proposition = claim["proposition"]
-        if proposition["kind"] != "authority_capability":
             continue
         effect = proposition.get("effect")
         if effect is None or (effect_kind is not None and effect["kind"] != effect_kind):
@@ -105,10 +90,9 @@ def effect_matches_by_function(assessment: Assessment) -> dict[str, list[dict[st
     return out
 
 
-def project_permission_index(assessment: Assessment, permissions: Mapping[str, Any]) -> dict[str, Any]:
-    """Project canonical claims and policy observations onto permission rows."""
+def project_permission_index(assessment: Assessment) -> dict[str, Any]:
+    """Rebuild permission rows exclusively from canonical Assessment evidence."""
 
-    projected = copy.deepcopy(dict(permissions))
     claims = effect_matches_by_function(assessment)
     policy_observations = {
         evidence["subject"]: evidence["observation"]
@@ -117,34 +101,24 @@ def project_permission_index(assessment: Assessment, permissions: Mapping[str, A
         and evidence["subject_kind"] == "function"
         and isinstance(evidence["observation"], Mapping)
     }
-    functions = projected.get("functions")
-    if not isinstance(functions, list):
-        return projected
-    for function in functions:
-        if not isinstance(function, dict):
-            continue
-        signature, _problem = resolve_function(assessment, function)
-        if signature is not None:
-            function["claims"] = list(claims.get(signature, []))
-            observation = policy_observations.get(signature)
-            if isinstance(observation, Mapping):
-                for field in (
-                    "authority_public",
-                    "authority_openness",
-                    "direct_owner",
-                    "authority_roles",
-                    "controllers",
-                    "signature_witnesses",
-                    "capability_expr",
-                    "conditions",
-                    "status",
-                    "notes",
-                ):
-                    if field in observation:
-                        function[field] = copy.deepcopy(observation[field])
-                    else:
-                        function.pop(field, None)
-    return projected
+    functions = []
+    for signature, observation in sorted(policy_observations.items()):
+        identity = assessment["functions"][signature]
+        functions.append(
+            {
+                **copy.deepcopy(dict(observation)),
+                "function": signature,
+                "abi_signature": identity["abi_signature"] or signature,
+                "selector": identity["selector"],
+                "claims": list(claims.get(signature, [])),
+            }
+        )
+    return {
+        "schema_version": assessment["schema_version"],
+        "contract_address": assessment["contract"]["deployment_address"],
+        "contract_name": assessment["contract"]["name"],
+        "functions": functions,
+    }
 
 
 def static_index_view(assessment: Assessment) -> dict[str, Any]:
@@ -198,7 +172,6 @@ def static_inputs(assessment: Assessment) -> tuple[dict[str, Any], dict[str, Any
 
 
 __all__ = [
-    "capability_claims",
     "effect_presence",
     "function_effect_claims",
     "function_authority_claims",

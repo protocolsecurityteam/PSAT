@@ -27,9 +27,6 @@ from ..capabilities import (
 )
 from ..permissionless_shapes import (
     caller_gate_basis,
-    earned_public_enabled,
-    is_caller_keyed_membership_allowlist,
-    is_caller_keyed_time_allowlist,
     is_caller_keyed_time_denylist,
     is_permissionless_caller_shape,
     leaf_is_caller_tainted,
@@ -218,13 +215,6 @@ def _has_caller_keyed_value_predicate(leaf: LeafPredicate) -> bool:
     return any(k.get("source") in _CALLER_SOURCES for k in keys)
 
 
-# The E3/E4 allowlist discriminators now live in ``permissionless_shapes``
-# (the caller-taint default subsumes them); these module-level aliases keep
-# the legacy (flag-off) call sites monkeypatchable under their historic names.
-_is_caller_keyed_time_allowlist = is_caller_keyed_time_allowlist
-_is_caller_keyed_membership_allowlist = is_caller_keyed_membership_allowlist
-
-
 def _is_opaque_bool_return_predicate(leaf: LeafPredicate) -> bool:
     basis = leaf.get("basis") or []
     if "bool-return predicate" not in basis:
@@ -278,53 +268,13 @@ def _evaluate_leaf(leaf: LeafPredicate, ctx: EvaluationContext) -> CapabilityExp
                 # description; gating on ``cap.members`` fixes it.
                 if cap.kind == "finite_set" and cap.members:
                     return cap
-        if earned_public_enabled():
-            # The caller-taint default: a gate that discriminates on the caller's
-            # identity and matches no known permissionless shape is an
-            # authorization whose principals we couldn't enumerate — fail CLOSED
-            # (gated, principals unknown), never ``conditional_universal``/public.
-            # Permissionless shapes (denylist/claim-once polarity, quantity
-            # thresholds, self-service equality, effectful value-movement calls)
-            # deliberately fall through to open. Subsumes the legacy E3/E4 arms
-            # below.
-            if leaf_is_caller_tainted(leaf) and not is_permissionless_caller_shape(leaf):
-                return CapabilityExpr.external_check_only(
-                    ExternalCheck(
-                        target_address=None,
-                        target_call_selector=None,
-                        extra={
-                            "basis": [caller_gate_basis(leaf)],
-                            "expression": leaf.get("expression"),
-                        },
-                    )
-                )
-        elif _is_caller_keyed_time_allowlist(leaf):
-            # A deny-by-default caller-keyed time allowlist authorizes a caller SET (only
-            # the pre-approved, until expiry) — keep it a gated query-only check, never
-            # ``conditional_universal``/public. The share-lock and balance/allowance
-            # conditions deliberately fall through to open (see the helper).
+        if leaf_is_caller_tainted(leaf) and not is_permissionless_caller_shape(leaf):
             return CapabilityExpr.external_check_only(
                 ExternalCheck(
                     target_address=None,
                     target_call_selector=None,
                     extra={
-                        "basis": ["caller_keyed_time_allowlist"],
-                        "expression": leaf.get("expression"),
-                    },
-                )
-            )
-        elif _is_caller_keyed_membership_allowlist(leaf):
-            # ``require(allowed[msg.sender])`` — a positive caller allowlist. Only
-            # recorded addresses pass, so it's a gated external check, never the
-            # ``conditional_universal``/public a side-condition would emit. The
-            # denylist/claim-once (``falsy``) sibling deliberately falls through to
-            # open below. Mirrors the time-allowlist arm above.
-            return CapabilityExpr.external_check_only(
-                ExternalCheck(
-                    target_address=None,
-                    target_call_selector=None,
-                    extra={
-                        "basis": ["caller_keyed_membership_allowlist"],
+                        "basis": [caller_gate_basis(leaf)],
                         "expression": leaf.get("expression"),
                     },
                 )
@@ -386,8 +336,7 @@ def _evaluate_leaf(leaf: LeafPredicate, ctx: EvaluationContext) -> CapabilityExp
 
     if kind == "external_bool":
         if (
-            earned_public_enabled()
-            and operator == "truthy"
+            operator == "truthy"
             and leaf.get("callee_state_mutability") == "nonview"
             and leaf_is_caller_tainted(leaf)
             and is_permissionless_caller_shape(leaf)
@@ -492,7 +441,7 @@ def _evaluate_leaf(leaf: LeafPredicate, ctx: EvaluationContext) -> CapabilityExp
         # side-condition block above). ``is_permissionless_caller_shape`` is
         # shape-only and role-blind — consulting it here would re-open a
         # promoted authority to public, the caller-keyed-threshold fail-open.
-        if earned_public_enabled() and leaf_is_caller_tainted(leaf):
+        if leaf_is_caller_tainted(leaf):
             descriptor = leaf.get("set_descriptor")
             if descriptor is not None and _has_caller_keyed_value_predicate(leaf):
                 cap = ctx.adapter.enumerate(descriptor, ctx.contract_address)

@@ -3,11 +3,8 @@
 from __future__ import annotations
 
 import copy
-import json
 from collections.abc import Iterable, Mapping
 from typing import Any, cast
-
-from pydantic import JsonValue
 
 from schemas.assessment import (
     Analysis,
@@ -21,14 +18,13 @@ from schemas.assessment import (
 from services.effects.claims_bridge import verdict_to_claim
 from services.effects.config import VERDICT_PROVEN
 from services.static.claims.registry import entry_for
+from services.static.claims.types import TIER_PRECEDENCE
 
+from .functions import resolve_function
 from .keys import content_key
+from .keys import json_value as _json
 from .slices import remove_analysis_slice
 from .validation import checked
-
-
-def _json(value: Any) -> JsonValue:
-    return cast(JsonValue, json.loads(json.dumps(value, sort_keys=True, default=str)))
 
 
 def _existing_effect_claim(assessment: Assessment, function: str, kind: str) -> tuple[str, Any] | None:
@@ -53,7 +49,7 @@ def add_effects(
 
     result = cast(Assessment, copy.deepcopy(assessment))
     remove_analysis_slice(result, "effects.execution")
-    tier_rank = {"behavioral_observed": 4, "standard_exact": 3, "idiom_structural": 2, "policy_derived": 1}
+    tier_rank = TIER_PRECEDENCE
     for claim in result["claims"].values():
         current_proposition = claim["proposition"]
         if current_proposition["kind"] != "function_effect":
@@ -79,7 +75,7 @@ def add_effects(
     for verdict in verdict_items:
         row_id = getattr(verdict, "function_id", None)
         signature = signatures_by_function_row.get(row_id) if isinstance(row_id, int) else None
-        function = signature if signature in result["functions"] else None
+        function, _problem = resolve_function(result, {"function": signature, "abi_signature": signature})
         if function is None:
             omissions.append(
                 {

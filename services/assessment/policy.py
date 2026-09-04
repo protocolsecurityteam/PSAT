@@ -21,33 +21,23 @@ from schemas.assessment import (
     Evidence,
     Proposition,
 )
+from services.policy.capability_surface import capability_role_grants
 from services.static.claims.matchers import discover
 from services.static.claims.registry import entry_for, is_registered
 
 from .functions import resolve_function
-from .keys import content_key, entity_key
+from .keys import content_key, entity_key, entity_record
+from .keys import json_value as _json
 from .slices import prune_unreferenced_entities, remove_analysis_slice
+from .static import effect_targets
 from .validation import checked
-
-
-def _json(value: Any) -> JsonValue:
-    return cast(JsonValue, json.loads(json.dumps(value, sort_keys=True, default=str)))
 
 
 def _entity(result: Assessment, chain_id: int, principal: Mapping[str, Any]) -> tuple[str, Entity] | None:
     address = principal.get("address")
     if not isinstance(address, str) or not address:
         return None
-    normalized = address.lower()
-    resolved_type = str(principal.get("resolved_type") or "unknown")
-    contract_types = {"safe", "timelock", "proxy_admin", "contract", "cross_chain_authority"}
-    key = entity_key(chain_id, normalized)
-    entity: Entity = {
-        "chain_id": chain_id,
-        "address": normalized,
-        "kind": "contract" if resolved_type in contract_types else "account",
-        "tags": [] if resolved_type in ("eoa", "contract", "unknown") else [resolved_type],
-    }
+    key, entity = entity_record(chain_id, address, str(principal.get("resolved_type") or "unknown"))
     result["entities"][key] = entity
     return key, entity
 
@@ -102,7 +92,8 @@ def _conditions(value: Mapping[str, Any]) -> list[JsonValue]:
 
 def _with_conditions(authority: Authority, conditions: list[JsonValue]) -> Authority:
     if conditions:
-        authority["conditions"] = conditions
+        combined = [*authority.get("conditions", []), *conditions]
+        authority["conditions"] = list({json.dumps(item, sort_keys=True): item for item in combined}.values())
     return authority
 
 
@@ -121,38 +112,32 @@ def _authority_from_capability(
     if kind in ("OR", "AND"):
         children = capability.get("children")
         lowered = [
-            authority
+            _authority_from_capability(result, chain_id, child, principals)
             for child in (children if isinstance(children, list) else [])
             if isinstance(child, Mapping)
-            and (authority := _authority_from_capability(result, chain_id, child, principals)) is not None
         ]
+        if kind == "AND" and any(child is None for child in lowered):
+            return {"kind": "expression", "expression": _json(capability)}
+        lowered = [child for child in lowered if child is not None]
         if not lowered:
             return None
         authority = lowered[0] if len(lowered) == 1 else {"kind": "any" if kind == "OR" else "all", "children": lowered}
         return _with_conditions(cast(Authority, authority), conditions)
-    if kind == "finite_set" and capability.get("membership_quality", "exact") == "exact":
+    if kind == "finite_set" and capability.get("membership_quality") == "exact":
         authorities: list[Authority] = []
         role_members: set[str] = set()
-        for step in capability.get("trace") or []:
-            if not isinstance(step, Mapping) or step.get("step") != "solmate_roles_authority":
-                continue
-            members_by_role = step.get("role_members")
-            if not isinstance(members_by_role, Mapping):
-                continue
-            for role in step.get("roles") or []:
-                members = members_by_role.get(str(role))
-                if not isinstance(role, int) or not isinstance(members, list):
-                    continue
-                entities = sorted(
-                    {
-                        entity
-                        for member in members
-                        if (entity := _entity_for_address(result, chain_id, member, principals)) is not None
-                    }
-                )
-                role_members.update(str(member).lower() for member in members if isinstance(member, str))
-                if entities:
-                    authorities.append({"kind": "role", "role": str(role), "entities": entities})
+        for grant in capability_role_grants(dict(capability)) or []:
+            members = [principal["address"] for principal in grant["principals"]]
+            entities = sorted(
+                {
+                    entity
+                    for member in members
+                    if (entity := _entity_for_address(result, chain_id, member, principals)) is not None
+                }
+            )
+            role_members.update(member.lower() for member in members)
+            if entities:
+                authorities.append({"kind": "role", "role": str(grant["role"]), "entities": entities})
         members = capability.get("members")
         if isinstance(members, list):
             for member in members:
@@ -190,105 +175,7 @@ def _authorities(
             return authority, None
         return None, "authority_not_determined"
 
-    openness = permission.get("authority_openness")
-    if openness == "open" or permission.get("authority_public") is True:
-        return {"kind": "public"}, None
-
-    authorities: list[Authority] = []
-    direct = permission.get("direct_owner")
-    if isinstance(direct, Mapping):
-        entity = _entity(result, chain_id, direct)
-        if entity is not None:
-            authorities.append({"kind": "entity", "entity": entity[0]})
-
-    roles = permission.get("authority_roles")
-    role_unresolved = roles is None
-    if isinstance(roles, list):
-        for grant in roles:
-            if not isinstance(grant, Mapping):
-                continue
-            entity_ids: list[str] = []
-            principals = grant.get("principals")
-            if isinstance(principals, list):
-                for principal in principals:
-                    if isinstance(principal, Mapping) and (entity := _entity(result, chain_id, principal)) is not None:
-                        entity_ids.append(entity[0])
-            if entity_ids:
-                authorities.append(
-                    {
-                        "kind": "role",
-                        "role": str(grant.get("role")),
-                        "entities": sorted(set(entity_ids)),
-                    }
-                )
-
-    controllers = permission.get("controllers")
-    if isinstance(controllers, list):
-        for controller in controllers:
-            if not isinstance(controller, Mapping):
-                continue
-            principals = controller.get("principals")
-            if not isinstance(principals, list):
-                continue
-            for principal in principals:
-                if isinstance(principal, Mapping) and (entity := _entity(result, chain_id, principal)) is not None:
-                    authorities.append({"kind": "entity", "entity": entity[0]})
-
-    witnesses = permission.get("signature_witnesses")
-    if isinstance(witnesses, list):
-        for principal in witnesses:
-            if isinstance(principal, Mapping) and (entity := _entity(result, chain_id, principal)) is not None:
-                authorities.append({"kind": "entity", "entity": entity[0]})
-
-    unique: list[Authority] = []
-    seen: set[str] = set()
-    for authority in authorities:
-        key = json.dumps(authority, sort_keys=True)
-        if key not in seen:
-            seen.add(key)
-            unique.append(authority)
-    if len(unique) == 1:
-        return unique[0], None
-    if unique:
-        return {"kind": "any", "children": unique}, None
-    if permission.get("status") == "resolved_empty":
-        return None, None
-    if role_unresolved:
-        return None, "role_principals_not_determined"
     return None, "authority_not_determined"
-
-
-def _targets(permission: Mapping[str, Any], witness: Mapping[str, Any]) -> list[dict[str, str]]:
-    flags = witness.get("flags")
-    if isinstance(flags, list):
-        targets: list[dict[str, str]] = []
-        for flag in flags:
-            if not isinstance(flag, Mapping) or not isinstance(flag.get("var"), str):
-                continue
-            target = {"kind": "state", "value": str(flag["var"])}
-            if isinstance(flag.get("member"), str) and flag.get("member"):
-                target["member"] = str(flag["member"])
-            targets.append(target)
-        if targets:
-            return targets
-    targets: list[dict[str, str]] = []
-    state_names: set[str] = set()
-    writes = permission.get("state_writes")
-    if isinstance(writes, list):
-        for write in writes:
-            if not isinstance(write, Mapping) or not isinstance(write.get("var"), str):
-                continue
-            state_names.add(str(write["var"]))
-    targets.extend({"kind": "state", "value": name} for name in sorted(state_names))
-    sinks = permission.get("sinks")
-    if isinstance(sinks, list):
-        for sink in sinks:
-            if not isinstance(sink, Mapping) or sink.get("origin") == "guard":
-                continue
-            raw_target = sink.get("target")
-            if isinstance(raw_target, str) and raw_target and raw_target not in state_names:
-                targets.append({"kind": "operation", "value": raw_target})
-    return targets
 
 
 def _effect_claims(assessment: Assessment, function: str) -> list[tuple[str, Claim]]:
@@ -359,7 +246,7 @@ def _ensure_embedded_effect_claims(
         effect: Effect = {
             "kind": cast(EffectKind, kind),
             "family": cast(EffectFamily, entry.consumer_family),
-            "targets": _targets(permission, witness),
+            "targets": effect_targets(permission, witness),
             "affected_functions": sorted(set(affected)),
         }
         proposition: Proposition = {
@@ -410,17 +297,6 @@ def add_policy(assessment: Assessment, permissions: Mapping[str, Any], *, chain_
         evidence_keys.extend(embedded_evidence_keys)
         effects = _effect_claims(result, function)
         authority, unresolved_reason = _authorities(result, chain_id, permission)
-        if unresolved_reason is not None:
-            omissions.append(
-                {
-                    "target_kind": "function",
-                    "target": function,
-                    "reason": unresolved_reason,
-                }
-            )
-            continue
-        completed += 1
-
         observation_source: dict[str, Any] = {
             "authority_openness": permission.get("authority_openness"),
             "authority_public": permission.get("authority_public"),
@@ -430,7 +306,15 @@ def add_policy(assessment: Assessment, permissions: Mapping[str, Any], *, chain_
             "signature_witnesses": permission.get("signature_witnesses") or [],
             "notes": permission.get("notes") or [],
         }
-        for optional_field in ("capability_expr", "conditions", "status"):
+        for optional_field in (
+            "capability_expr",
+            "conditions",
+            "status",
+            "state_changing",
+            "state_writes",
+            "sinks",
+            "writer_selectors",
+        ):
             if optional_field in permission:
                 observation_source[optional_field] = permission[optional_field]
         observation = _json(observation_source)
@@ -460,6 +344,11 @@ def add_policy(assessment: Assessment, permissions: Mapping[str, Any], *, chain_
         }
         result["evidence"][evidence_key] = evidence
         evidence_keys.append(evidence_key)
+
+        if unresolved_reason is not None:
+            omissions.append({"target_kind": "function", "target": function, "reason": unresolved_reason})
+            continue
+        completed += 1
 
         if authority is None:
             # A resolved-empty authority set is a completed negative result, not

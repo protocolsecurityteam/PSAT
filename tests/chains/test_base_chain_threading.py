@@ -151,23 +151,23 @@ def test_resolver_threads_base_chain_into_eval_context(session, _erpc_base, monk
 # ---------------------------------------------------------------------------
 
 
-def test_resolution_worker_chain_id_for_job_column_and_derived():
-    from workers.resolution_worker import _chain_id_for_job
+def test_resolution_workerjob_chain_id_column_and_derived():
+    from workers.resolution_worker import job_chain_id
 
-    assert _chain_id_for_job(_row(chain_id=_BASE_ID, request={}, address="0x1")) == _BASE_ID
+    assert job_chain_id(_row(chain_id=_BASE_ID, request={}, address="0x1")) == _BASE_ID
     # No column → derive from request chain.
-    assert _chain_id_for_job(_row(request={"chain": "base"}, address="0x1")) == _BASE_ID
-    assert _chain_id_for_job(_row(request={"chain": "ethereum"}, address="0x1")) == 1
+    assert job_chain_id(_row(request={"chain": "base"}, address="0x1")) == _BASE_ID
+    assert job_chain_id(_row(request={"chain": "ethereum"}, address="0x1")) == 1
 
 
 def test_policy_worker_chain_helpers_base():
-    from workers.policy_worker import _chain_id_for_job, _chain_name_for_job
+    from workers.policy_worker import _job_chain_name, job_chain_id
 
     job = _row(chain_id=_BASE_ID, request={"chain": "base"}, address="0x1")
-    assert _chain_id_for_job(job) == _BASE_ID
-    assert _chain_name_for_job(job) == "base"
+    assert job_chain_id(job) == _BASE_ID
+    assert _job_chain_name(job) == "base"
     mainnet = _row(request={"chain": "ethereum"}, address="0x1")
-    assert _chain_name_for_job(mainnet) == "ethereum"
+    assert _job_chain_name(mainnet) == "ethereum"
 
 
 def test_static_worker_parent_chain_name_never_none():

@@ -19,15 +19,15 @@ from db.models import (
     JobStatus,
     PrincipalLabel,
     SessionLocal,
-    derive_job_chain_id,
 )
 from db.queue import get_artifact, store_artifact
+from db.queue._chains import _job_chain_name, job_chain_id
 from db.queue.typed import (
     ArtifactSchemaError,
     load_assessment,
 )
 from schemas.observations import ObservationBatch
-from schemas.permission_index import PermissionIndex, PrincipalResolution
+from schemas.permission_index import PermissionIndex
 from services.clients.rpc import require_rpc_url
 from services.concurrency import parallel_map
 from services.discovery import membership_gate
@@ -48,7 +48,6 @@ from services.resolution.graph_tables import replace_control_graph_rows
 from services.resolution.recursive import LoadedArtifacts, resolve_control_graph
 from services.resolution.tracking import classify_resolved_address_with_status, read_contract_controllers
 from services.static.claims import EffectMatch, resolve_claim_precedence
-from utils.chains import UnknownChainError, chain_by_id
 from utils.logging import log_timed_phase, record_degraded, record_stage_metric
 from workers.base import BaseWorker
 
@@ -168,37 +167,16 @@ def _known_addresses_for_scope(resolution_graph: Any, target_address: str | None
 
 def _rpc_url_for_job(job: Job) -> str:
     """eRPC URL for the job's own chain, resolved via the first-class
-    ``jobs.chain_id`` column (``_chain_id_for_job``), not the request JSONB —
+    ``jobs.chain_id`` column (``job_chain_id``), not the request JSONB —
     a chainless ``/api/analyze`` submission carries the mainnet edge default
     only in the column, so a request-only read fails loud on every such job."""
     request = job.request if isinstance(job.request, dict) else {}
     explicit = request.get("rpc_url")
     return require_rpc_url(
         explicit_rpc_url=explicit if isinstance(explicit, str) else None,
-        chain_id=_chain_id_for_job(job),
+        chain_id=job_chain_id(job),
         context=f"policy rpc for job {job.id}",
     )
-
-
-def _chain_id_for_job(job: Job) -> int:
-    """The job's first-class ``chain_id`` (invariant 1): the populated
-    ``jobs.chain_id`` column, else derived from ``request["chain"]`` via the
-    canonical registry, else mainnet for a chain-less row."""
-    chain_id = getattr(job, "chain_id", None)
-    if isinstance(chain_id, int):
-        return chain_id
-    request = job.request if isinstance(job.request, dict) else {}
-    return derive_job_chain_id(request.get("chain"), job.address) or 1
-
-
-def _chain_name_for_job(job: Job) -> str:
-    """Canonical chain name for the job (mainnet → ``"ethereum"``). Used for the
-    ``contract_materializations`` cache key + monitoring enrollment so both agree
-    with the name the resolution stage materialized under."""
-    try:
-        return chain_by_id(_chain_id_for_job(job)).name
-    except UnknownChainError:
-        return "ethereum"
 
 
 def _persist_spawn_summary(
@@ -424,8 +402,8 @@ class PolicyWorker(BaseWorker):
             job.name or "Contract",
         )
         rpc_url = _rpc_url_for_job(job)
-        chain_id = _chain_id_for_job(job)
-        chain_name = _chain_name_for_job(job)
+        chain_id = job_chain_id(job)
+        chain_name = _job_chain_name(job)
         durations_ms: dict[str, int] = {}
 
         # Optional: classify cache populated by the resolution stage. Lets the
@@ -458,11 +436,6 @@ class PolicyWorker(BaseWorker):
         resolution_graph = control_graph(assessment)
         observation_plan = observation_plan(assessment)
 
-        principal_resolution: PrincipalResolution = {
-            "status": "no_authority",
-            "reason": "Authority is represented by Assessment capability claims.",
-        }
-
         # Build effective permissions
         self.update_detail(session, job, "Computing effective permissions")
 
@@ -487,7 +460,6 @@ class PolicyWorker(BaseWorker):
             ep_data: PermissionIndex = build_permission_index(
                 static_facts,
                 target_snapshot=observation_batch,
-                principal_resolution=principal_resolution,
                 predicate_trees=predicate_trees if isinstance(predicate_trees, dict) else None,
                 capability_resolver_output=capability_resolver_output,
                 effects=effects_artifact if isinstance(effects_artifact, dict) else None,
@@ -511,7 +483,7 @@ class PolicyWorker(BaseWorker):
         from services.assessment import add_policy, project_permission_index
 
         assessment = add_policy(assessment, ep_data, chain_id=chain_id)
-        ep_data = cast(PermissionIndex, project_permission_index(assessment, ep_data))
+        ep_data = cast(PermissionIndex, project_permission_index(assessment))
         store_artifact(session, job.id, "assessment", data=assessment)
 
         # Write to effective_functions and function_principals tables from
@@ -542,7 +514,7 @@ class PolicyWorker(BaseWorker):
         # Uses the first-class job chain id (not the local ``chain_id``, which a
         # later block re-derives from request JSONB and can clobber to 1).
         cross_chain_recognizer = make_cross_chain_recognizer(
-            _chain_id_for_job(job), _known_addresses_for_scope(resolution_graph, job.address)
+            job_chain_id(job), _known_addresses_for_scope(resolution_graph, job.address)
         )
         if contract_row and isinstance(ep_data, dict):
             graph_nodes = resolution_graph.get("nodes") if isinstance(resolution_graph, dict) else None
@@ -557,10 +529,9 @@ class PolicyWorker(BaseWorker):
                     session,
                     contract_id=contract_row.id,
                     function_records=ep_data.get("functions", []),
-                    capability_by_function=None,
                     safe_address_lookup=safe_lookup or None,
                     resolve_principal_type=_make_principal_type_resolver(
-                        classify_cache, rpc_url, cross_chain_recognizer, chain_id=_chain_id_for_job(job)
+                        classify_cache, rpc_url, cross_chain_recognizer, chain_id=job_chain_id(job)
                     ),
                     deployment_address=deployment_address,
                 )
@@ -712,7 +683,7 @@ class PolicyWorker(BaseWorker):
                     perimeter_graph,
                     rpc_url,
                     site="policy_refresh",
-                    chain_name=_chain_name_for_job(job),
+                    chain_name=_job_chain_name(job),
                     budget=PERIMETER_SPAWN_LIMIT,
                     depth_cap=PERIMETER_SPAWN_DEPTH_CAP,
                     result=spawn_result,
@@ -732,7 +703,7 @@ class PolicyWorker(BaseWorker):
                 ep_data,
                 resolution_graph=(cast(dict, resolution_graph) if isinstance(resolution_graph, dict) else None),
                 rpc_url=rpc_url,
-                chain_id=_chain_id_for_job(job),
+                chain_id=job_chain_id(job),
                 # Same cache the resolution stage populated. Without this, labeling
                 # re-runs classify_resolved_address (6-10 RPCs each) for every
                 # principal — the dominant cost on big protocols (etherfi LP impl
@@ -741,7 +712,7 @@ class PolicyWorker(BaseWorker):
                 # Rebuilt against the refreshed graph so the alias-of-known scope
                 # reflects every node the refresh added.
                 cross_chain_recognizer=make_cross_chain_recognizer(
-                    _chain_id_for_job(job), _known_addresses_for_scope(resolution_graph, job.address)
+                    job_chain_id(job), _known_addresses_for_scope(resolution_graph, job.address)
                 ),
                 # Protocol-wide exact-owner Safe registry for signer-overlap.
                 # Only populated for protocol-scoped jobs; a bare contract static_facts
@@ -754,9 +725,9 @@ class PolicyWorker(BaseWorker):
                     load_protocol_deployer_groups(session, job.protocol_id) if job.protocol_id else None
                 ),
                 # Contract-principal -> ultimate Safe/EOA terminal walk.
-                resolve_controllers=_make_terminal_controller_resolver(rpc_url, chain_id=_chain_id_for_job(job)),
+                resolve_controllers=_make_terminal_controller_resolver(rpc_url, chain_id=job_chain_id(job)),
             )
-            ph["principal_count"] = len(pl_data.get("principals", []))
+            ph["principal_count"] = len(pl_data)
 
         # Write to principal_labels table
         if contract_row:
@@ -764,7 +735,7 @@ class PolicyWorker(BaseWorker):
                 PrincipalLabel.contract_id == contract_row.id,
                 deployment_scope(PrincipalLabel.deployment_address, deployment_address),
             ).delete(synchronize_session=False)
-            for p in pl_data.get("principals", []):
+            for p in pl_data:
                 if p.get("address"):
                     session.add(
                         PrincipalLabel(
@@ -782,7 +753,7 @@ class PolicyWorker(BaseWorker):
                     )
             session.commit()
 
-        record_stage_metric("principals_labeled", len(pl_data.get("principals", [])))
+        record_stage_metric("principals_labeled", len(pl_data))
 
         logger.info(
             "Policy stage principal labels complete for job %s address=%s name=%s",
@@ -802,8 +773,7 @@ class PolicyWorker(BaseWorker):
         self.update_detail(
             session,
             job,
-            f"Policy static_facts complete: {len(ep_data.get('functions', []))} functions, "
-            f"{len(pl_data.get('principals', []))} principals",
+            f"Policy static_facts complete: {len(ep_data.get('functions', []))} functions, {len(pl_data)} principals",
         )
         logger.info(
             "Policy stage complete for job %s address=%s name=%s",

@@ -13,6 +13,8 @@ from services.assessment import (
     function_authority_claims,
     project_permission_index,
 )
+from services.resolution.capabilities import CapabilityExpr, intersect
+from services.resolution.capability_resolver import capability_to_dict
 
 
 def _base() -> Assessment:
@@ -84,21 +86,82 @@ def _base() -> Assessment:
 
 
 def _permission(**overrides: object) -> dict:
-    return {
-        "schema_version": "1",
-        "functions": [
+    row = {
+        "function": "pause()",
+        "abi_signature": "pause()",
+        "authority_public": False,
+        "authority_openness": "restricted",
+        "direct_owner": None,
+        "authority_roles": [],
+        "controllers": [],
+        **overrides,
+    }
+    if "capability_expr" not in row:
+        members = [p["address"] for grant in row["controllers"] for p in grant.get("principals", [])]
+        trace = []
+        if row["direct_owner"]:
+            members.append(row["direct_owner"]["address"])
+        for grant in row["authority_roles"] or []:
+            role_members = [p["address"] for p in grant["principals"]]
+            members.extend(role_members)
+            trace.append(
+                {
+                    "step": "solmate_roles_authority",
+                    "roles": [grant["role"]],
+                    "role_members": {str(grant["role"]): role_members},
+                }
+            )
+        if row["authority_public"]:
+            cap = {"kind": "conditional_universal"}
+        elif members or row.get("status") == "resolved_empty":
+            cap = {"kind": "finite_set", "members": members, "membership_quality": "exact", "trace": trace}
+        else:
+            cap = {
+                "kind": "unsupported",
+                "unsupported_reason": (
+                    "role_principals_not_determined" if row["authority_roles"] is None else "authority_not_determined"
+                ),
+            }
+        row["capability_expr"] = cap
+    return {"schema_version": "1", "functions": [row]}
+
+
+def test_role_trace_cannot_restore_a_caller_removed_by_intersection() -> None:
+    alice, bob = "0x" + "2" * 40, "0x" + "3" * 40
+    role = CapabilityExpr.finite_set(
+        [alice, bob],
+        trace=[
             {
-                "function": "pause()",
-                "abi_signature": "pause()",
-                "authority_public": False,
-                "authority_openness": "restricted",
-                "direct_owner": None,
-                "authority_roles": [],
-                "controllers": [],
-                **overrides,
+                "step": "solmate_roles_authority",
+                "roles": [8],
+                "role_members": {"8": [alice, bob]},
             }
         ],
-    }
+    )
+    capability = capability_to_dict(intersect(role, CapabilityExpr.finite_set([alice])))
+    result = add_policy(_base(), _permission(capability_expr=capability), chain_id=1)
+    authority = function_authority_claims(result)[0]["proposition"].get("authority")
+    assert authority == {"kind": "role", "role": "8", "entities": [f"1:{alice}"]}
+
+
+def test_rejected_function_cannot_escape_into_permission_rows() -> None:
+    result = add_policy(
+        _base(),
+        _permission(
+            function="invented()",
+            abi_signature="invented()",
+            capability_expr={"kind": "conditional_universal"},
+        ),
+        chain_id=1,
+    )
+    assert project_permission_index(result)["functions"] == []
+
+
+def test_permission_projection_round_trips_without_original_resolver_output() -> None:
+    import json
+
+    result = add_policy(_base(), _permission(authority_public=True, authority_openness="open"), chain_id=1)
+    assert project_permission_index(json.loads(json.dumps(result))) == project_permission_index(result)
 
 
 def test_public_authority_produces_a_capability_claim() -> None:
@@ -232,8 +295,8 @@ def test_unresolved_authority_is_an_omission_not_a_claim() -> None:
 
 
 def test_permission_claims_are_projected_from_the_assessment() -> None:
-    assessment = _base()
-    projected = project_permission_index(assessment, _permission())
+    assessment = add_policy(_base(), _permission(authority_public=True), chain_id=1)
+    projected = project_permission_index(assessment)
     claims = projected["functions"][0]["claims"]
     assert [claim["claim_id"] for claim in claims] == ["pause.set"]
     assert claims[0]["witness"]["flags"] == [{"var": "paused", "member": None}]
@@ -246,8 +309,7 @@ def test_permission_authority_is_projected_from_assessment_evidence() -> None:
         _permission(authority_public=True, authority_openness="open"),
         chain_id=1,
     )
-    stale = _permission(authority_public=False, authority_openness="restricted", status="unsupported")
-    projected = project_permission_index(assessment, stale)
+    projected = project_permission_index(assessment)
     function = projected["functions"][0]
 
     assert function["authority_public"] is True
@@ -265,7 +327,7 @@ def test_resolved_empty_permission_keeps_projection_evidence_without_a_claim() -
     assert not function_authority_claims(assessment)
     evidence = [item for item in assessment["evidence"].values() if item["producer"] == "policy.capability"]
     assert len(evidence) == 1
-    projected = project_permission_index(assessment, _permission(authority_public=True, authority_openness="open"))
+    projected = project_permission_index(assessment)
     assert projected["functions"][0]["status"] == "resolved_empty"
     assert projected["functions"][0]["authority_public"] is False
 
@@ -340,7 +402,11 @@ def test_irreducible_all_authority_keeps_composite_semantics() -> None:
     expression = {
         "kind": "AND",
         "children": [
-            {"kind": "finite_set", "members": ["0x2222222222222222222222222222222222222222"]},
+            {
+                "kind": "finite_set",
+                "members": ["0x2222222222222222222222222222222222222222"],
+                "membership_quality": "exact",
+            },
             {
                 "kind": "threshold_group",
                 "threshold": {"m": 2, "signers": ["0x3", "0x4", "0x5"]},

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 from pydantic import TypeAdapter
 
 from schemas.assessment import Assessment, assessment_problems
@@ -9,10 +11,11 @@ from schemas.assessment import Assessment, assessment_problems
 _ADAPTER = TypeAdapter(Assessment)
 
 
-def checked(assessment: Assessment) -> Assessment:
+def checked(value: object) -> Assessment:
     """Validate shape and references, returning the original document."""
 
-    _ADAPTER.validate_python(assessment)
+    _ADAPTER.validate_python(value, strict=True)
+    assessment = cast(Assessment, value)
     problems = assessment_problems(assessment)
     if problems:
         raise ValueError("invalid assessment: " + "; ".join(problems))

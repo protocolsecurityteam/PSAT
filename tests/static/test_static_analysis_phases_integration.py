@@ -47,7 +47,7 @@ def _capture_store_artifact(monkeypatch):
 
 
 class TestAnalysisPhaseSuccess:
-    """Mock collect_static_facts() to return a dict; verify artifact is stored."""
+    """Mock collect_static_inputs() to return a dict; verify artifact is stored."""
 
     def test_stores_static_facts_and_assessment(self, monkeypatch, tmp_path):
         worker = StaticWorker()
@@ -75,7 +75,7 @@ class TestAnalysisPhaseSuccess:
         assert result == static_facts_data
         names = [call["name"] for call in calls]
         assert names == ["assessment"]
-        assert calls[0]["data"]["schema_version"] == "assessment/4"
+        assert calls[0]["data"]["schema_version"] == "assessment/5"
 
         from services.assessment import static_inputs
 

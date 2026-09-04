@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from schemas.observations import ControllerInstruction, EventWatch, ObservationPlan, PollingFallback
-from schemas.static_facts import StaticFacts
+from schemas.static_facts import Controller, StaticFacts
 
 
 def _is_address_like_read_spec(read_spec: object) -> bool:
@@ -90,11 +92,19 @@ def _is_runtime_resolvable_controller(target: object) -> bool:
 
 def build_observation_plan(analysis: StaticFacts) -> ObservationPlan:
     """Build an event-first, polling-backed watch plan from contract analysis output."""
-    contract_address = analysis["subject"]["address"]
-    contract_name = analysis["subject"]["name"]
+    return compile_observation_plan(
+        analysis["subject"]["address"],
+        analysis["subject"]["name"],
+        {target["controller_id"]: target for target in analysis["controller_tracking"]},
+    )
 
+
+def compile_observation_plan(
+    contract_address: str, contract_name: str, controllers: Mapping[str, Controller]
+) -> ObservationPlan:
+    """Compile the same controller instructions for root and recursive analysis."""
     tracked_controllers: list[ControllerInstruction] = []
-    for target in analysis.get("controller_tracking", []):
+    for controller_id, target in controllers.items():
         if not _is_runtime_resolvable_controller(target):
             continue
         associated_events = list(target.get("associated_events", []))
@@ -123,7 +133,7 @@ def build_observation_plan(analysis: StaticFacts) -> ObservationPlan:
         }
 
         tracked: ControllerInstruction = {
-            "controller_id": target["controller_id"],
+            "controller_id": controller_id,
             "label": target["label"],
             "source": target["source"],
             "kind": target["kind"],

@@ -147,7 +147,7 @@ def _stub_policy_internals(monkeypatch, job_address):
         lambda *a, **kw: {"schema_version": "1", "functions": []},
     )
     monkeypatch.setattr("workers.policy_worker.resolve_control_graph", lambda **kw: ({}, {}))
-    monkeypatch.setattr("workers.policy_worker.build_principal_index", lambda *a, **kw: {"principals": []})
+    monkeypatch.setattr("workers.policy_worker.build_principal_index", lambda *a, **kw: [])
     monkeypatch.setattr(PolicyWorker, "_enrich_cross_contract", lambda self, *a, **kw: {})
     monkeypatch.setattr("services.monitoring.enrollment.maybe_enroll_protocol", _poisoning_enroll)
 

@@ -8,7 +8,7 @@ from schemas.static_facts import (
     SemanticFunctionSummary,
     StaticFacts,
 )
-from services.static import collect_static_facts
+from services.static import collect_static_inputs
 
 pytestmark = pytest.mark.compile
 
@@ -125,14 +125,14 @@ def test_collect_static_inputs_returns_semantic_artifacts(tmp_path):
     assert "functions" in effects or "error" in effects
 
 
-def test_collect_static_facts_uses_semantic_factory_without_upgrade_timelock_name_guessing(tmp_path):
+def test_collect_static_inputs_uses_semantic_factory_without_upgrade_timelock_name_guessing(tmp_path):
     project_dir = _write_project(
         tmp_path,
         "UpgradeFactory",
         _fixture_source("composed/upgrade_factory_uups.sol"),
     )
 
-    analysis = collect_static_facts(project_dir)
+    analysis = collect_static_inputs(project_dir)[0]
 
     # Upgradeability is recovered from the UUPS *standard* (``proxiableUUID`` +
     # ``upgradeTo`` selector), not by guessing on the ``upgradeTo`` name — the
@@ -157,14 +157,14 @@ def test_collect_static_facts_uses_semantic_factory_without_upgrade_timelock_nam
     assert "owner" in create_child["controller_refs"]
 
 
-def test_collect_static_facts_detects_erc721_as_nft(tmp_path):
+def test_collect_static_inputs_detects_erc721_as_nft(tmp_path):
     project_dir = _write_project(
         tmp_path,
         "Collectible",
         _fixture_source("nft/collectible_erc721.sol"),
     )
 
-    analysis = collect_static_facts(project_dir)
+    analysis = collect_static_inputs(project_dir)[0]
 
     assert "ERC721" in analysis["contract_classification"]["standards"]
     assert analysis["contract_classification"]["is_nft"] is True
@@ -178,7 +178,7 @@ def test_state_write_in_internal_helper_surfaces_on_caller(tmp_path):
         _fixture_source("pause/indirect_owner_pause.sol"),
     )
 
-    analysis = collect_static_facts(project_dir)
+    analysis = collect_static_inputs(project_dir)[0]
     semantic = _semantic_function(analysis, "pause()")
     assert "owner" in semantic["controller_refs"]
     assert any(sink_id.endswith(":state_write:paused") for sink_id in semantic["sink_ids"])
@@ -191,7 +191,7 @@ def test_contract_creation_sink_classified(tmp_path):
         _fixture_source("composed/upgrade_factory_uups.sol"),
     )
 
-    analysis = collect_static_facts(project_dir)
+    analysis = collect_static_inputs(project_dir)[0]
     semantic = _semantic_function(analysis, "createChild()")
     assert any(sink_id.endswith(":contract_creation:Child") for sink_id in semantic["sink_ids"])
 
@@ -231,7 +231,7 @@ def test_additional_semantic_sink_kinds_surface_on_semantic_summary(
         _fixture_source(fixture_name),
     )
 
-    analysis = collect_static_facts(project_dir)
+    analysis = collect_static_inputs(project_dir)[0]
     semantic = _semantic_function(analysis, signature)
     assert any(sink_id.endswith(f":{sink_kind}:{target}") for sink_id in semantic["sink_ids"])
     assert "owner" in semantic["controller_refs"]
@@ -244,7 +244,7 @@ def test_external_call_in_internal_helper_surfaces_on_caller(tmp_path):
         _fixture_source("calls/indirect_external_call_control.sol"),
     )
 
-    analysis = collect_static_facts(project_dir)
+    analysis = collect_static_inputs(project_dir)[0]
     semantic = _semantic_function(analysis, "pingTarget(uint256)")
     assert "owner" in semantic["controller_refs"]
     assert any(sink_id.endswith(":external_call:target.ping") for sink_id in semantic["sink_ids"])
@@ -257,7 +257,7 @@ def test_modifier_helper_auth_structure_recovered(tmp_path):
         _fixture_source("composed/auth_modifier_controller.sol"),
     )
 
-    analysis = collect_static_facts(project_dir)
+    analysis = collect_static_inputs(project_dir)[0]
 
     for signature in ("setHook(address)", "manage(PingTarget,uint256)", "transferOwnership(address)"):
         semantic = _semantic_function(analysis, signature)
@@ -320,7 +320,7 @@ def test_semantic_function_semantics_detect_pause_and_asset_flow(tmp_path):
         _fixture_source("token/token_erc20_ownable_pausable.sol"),
     )
 
-    analysis = collect_static_facts(project_dir)
+    analysis = collect_static_inputs(project_dir)[0]
 
     pause = _semantic_function(analysis, "pause()")
     assert any(sink_id.endswith(":state_write:paused") for sink_id in pause["sink_ids"])
@@ -333,7 +333,7 @@ def test_controller_tracking_falls_back_to_state_only_without_events(tmp_path):
         _fixture_source("tracking/owner_update_no_event.sol"),
     )
 
-    analysis = collect_static_facts(project_dir)
+    analysis = collect_static_inputs(project_dir)[0]
 
     owner_tracking = _tracked_controller(analysis, "owner")
     assert owner_tracking["tracking_mode"] == "state_only"
@@ -374,7 +374,7 @@ def test_non_authority_external_calls_with_caller_args_not_classified_as_authori
         """,
     )
 
-    analysis = collect_static_facts(project_dir)
+    analysis = collect_static_inputs(project_dir)[0]
     semantic = _semantic_function(analysis, "manage(PingTarget,uint256)")
 
     assert "owner" in semantic["controller_refs"]
@@ -409,7 +409,7 @@ def test_void_role_registry_upgrader_is_controller_ref(tmp_path):
         """,
     )
 
-    analysis = collect_static_facts(project_dir)
+    analysis = collect_static_inputs(project_dir)[0]
     semantic = _semantic_function(analysis, "upgradeTo(address)")
 
     assert "roleRegistry" in semantic["controller_refs"]
@@ -443,7 +443,7 @@ def test_external_role_getter_name_is_not_tracked_as_role_identifier(tmp_path):
         """,
     )
 
-    analysis = collect_static_facts(project_dir)
+    analysis = collect_static_inputs(project_dir)[0]
     semantic = _semantic_function(analysis, "pauseContract()")
 
     assert "roleRegistry" in semantic["controller_refs"]
@@ -490,7 +490,7 @@ def test_modifier_helper_preserves_opaque_role_identifier(tmp_path):
         """,
     )
 
-    analysis = collect_static_facts(project_dir)
+    analysis = collect_static_inputs(project_dir)[0]
     semantic = _semantic_function(analysis, "pause()")
 
     # ``guards`` is no longer populated by the semantic summary.
@@ -541,7 +541,7 @@ def test_opaque_external_void_helper_guard_is_controller_ref(tmp_path):
         """,
     )
 
-    analysis = collect_static_facts(project_dir)
+    analysis = collect_static_inputs(project_dir)[0]
     semantic = _semantic_function(analysis, "pause()")
     assert "gate" in semantic["controller_refs"]
 
@@ -587,7 +587,7 @@ def test_opaque_external_role_helper_is_controller_ref(tmp_path):
         """,
     )
 
-    analysis = collect_static_facts(project_dir)
+    analysis = collect_static_inputs(project_dir)[0]
     semantic = _semantic_function(analysis, "pause()")
     assert "auth" in semantic["controller_refs"]
 
@@ -634,7 +634,7 @@ def test_opaque_external_policy_helper_is_controller_ref(tmp_path):
         """,
     )
 
-    analysis = collect_static_facts(project_dir)
+    analysis = collect_static_inputs(project_dir)[0]
     semantic = _semantic_function(analysis, "execute()")
     assert "policy" in semantic["controller_refs"]
 

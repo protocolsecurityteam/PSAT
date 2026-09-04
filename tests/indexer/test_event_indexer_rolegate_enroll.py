@@ -26,8 +26,8 @@ from tests.conftest import DATABASE_URL as _DB_URL
 from tests.conftest import _can_connect, requires_postgres
 from workers.event_log_indexer import (
     _is_delegated_role_gate_descriptor,
-    _is_single_address_param_signature,
     enroll_from_completed_jobs,
+    is_single_address_param_signature,
 )
 
 _PROXY = "0x" + "62" * 20  # the registry proxy — where RoleSet is emitted
@@ -50,11 +50,11 @@ def _gate_descriptor(authority_address: str | None = _PROXY) -> dict[str, Any]:
 
 
 def test_single_address_param_signature():
-    assert _is_single_address_param_signature("onlyOperatingMultisig(address)")
-    assert not _is_single_address_param_signature("canCall(address,address,bytes4)")
-    assert not _is_single_address_param_signature("foo()")
-    assert not _is_single_address_param_signature("foo(uint256)")
-    assert not _is_single_address_param_signature(None)
+    assert is_single_address_param_signature("onlyOperatingMultisig(address)")
+    assert not is_single_address_param_signature("canCall(address,address,bytes4)")
+    assert not is_single_address_param_signature("foo()")
+    assert not is_single_address_param_signature("foo(uint256)")
+    assert not is_single_address_param_signature(None)
 
 
 def test_matches_delegated_role_gate():

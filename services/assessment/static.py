@@ -1,19 +1,9 @@
-"""Build the canonical static Assessment from analyzer facts.
-
-The current static pipeline still emits its historical artifacts while the
-single-PR rewrite is in progress.  This module is the cutover boundary: it
-turns those facts into stable domain objects, evidence-backed claims, and
-static_facts receipts.  Downstream stages will update this document rather than
-inventing another stage-shaped source of truth.
-"""
+"""Build canonical domain objects, evidence, and detector receipts from static inputs."""
 
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping
 from typing import Any, cast
-
-from pydantic import JsonValue
 
 from schemas.assessment import (
     Analysis,
@@ -34,13 +24,8 @@ from services.static.claims.matchers import discover
 from services.static.claims.registry import entry_for, is_registered
 
 from .keys import content_key, entity_key
+from .keys import json_value as _json
 from .validation import checked
-
-
-def _json(value: Any) -> JsonValue:
-    """Normalize analyzer values to the JSON domain once, at ingress."""
-
-    return cast(JsonValue, json.loads(json.dumps(value, sort_keys=True, default=str)))
 
 
 def _selector(info: Mapping[str, Any]) -> str | None:
@@ -68,33 +53,10 @@ def _functions(effects: Mapping[str, Any]) -> dict[str, Function]:
 
 
 def _controllers(static_facts: Mapping[str, Any]) -> dict[str, Controller]:
-    raw_controllers = static_facts.get("controller_tracking")
-    if not isinstance(raw_controllers, list):
-        return {}
-    controllers: dict[str, Controller] = {}
-    for raw in raw_controllers:
-        if not isinstance(raw, Mapping):
-            continue
-        local_id = raw.get("controller_id")
-        if not isinstance(local_id, str) or not local_id:
-            continue
-        controllers[local_id] = {
-            "label": str(raw.get("label") or local_id),
-            "kind": str(raw.get("kind") or "unknown"),
-            "source": _json(raw.get("source")),
-            "read_strategy": _json(raw.get("read_spec")),
-            "tracking": _json(
-                {
-                    "mode": raw.get("tracking_mode"),
-                    "writer_functions": raw.get("writer_functions") or [],
-                    "associated_events": raw.get("associated_events") or [],
-                    "polling_sources": raw.get("polling_sources") or [],
-                    "notes": raw.get("notes") or [],
-                    "authority_provenance": raw.get("authority_provenance"),
-                }
-            ),
-        }
-    return controllers
+    return {
+        raw["controller_id"]: cast(Controller, {key: value for key, value in raw.items() if key != "controller_id"})
+        for raw in static_facts.get("controller_tracking", [])
+    }
 
 
 def _iter_mandatory_state_reads(tree: Any) -> set[tuple[str, str | None]]:
@@ -190,7 +152,7 @@ def _pause_victims(
     return sorted(set(victims))
 
 
-def _effect_targets(info: Mapping[str, Any], witness: Mapping[str, Any]) -> list[dict[str, str]]:
+def effect_targets(info: Mapping[str, Any], witness: Mapping[str, Any]) -> list[dict[str, str]]:
     flags = _pause_flags(witness)
     if flags:
         flag_targets: list[dict[str, str]] = []
@@ -292,7 +254,7 @@ def _claims_and_evidence(
             effect: Effect = {
                 "kind": cast(EffectKind, kind),
                 "family": cast(EffectFamily, registry_entry.consumer_family),
-                "targets": _effect_targets(info, witness),
+                "targets": effect_targets(info, witness),
                 "affected_functions": affected,
             }
             proposition: Proposition = {
@@ -506,7 +468,7 @@ def build_static_assessment(
     }
     analyses.insert(0, facts_receipt)
     assessment: Assessment = {
-        "schema_version": "assessment/4",
+        "schema_version": "assessment/5",
         "contract": contract,
         "functions": functions,
         "controllers": controllers,

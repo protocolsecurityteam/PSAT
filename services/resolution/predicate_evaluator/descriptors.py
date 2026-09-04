@@ -19,7 +19,6 @@ from ..capabilities import (
 )
 from ..permissionless_shapes import (
     caller_gate_basis,
-    earned_public_enabled,
     is_permissionless_caller_shape,
     leaf_is_caller_tainted,
 )
@@ -43,8 +42,6 @@ def _stamp_caller_gate_check(cap: CapabilityExpr, leaf: LeafPredicate) -> Capabi
     — keeps the legacy side-condition fold. The decision is made here, where
     the leaf is in hand, never by pattern-matching check dicts downstream."""
     if cap.kind != "external_check_only" or cap.check is None:
-        return cap
-    if not earned_public_enabled():
         return cap
     if not (leaf_is_caller_tainted(leaf) and not is_permissionless_caller_shape(leaf)):
         return cap

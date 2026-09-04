@@ -58,6 +58,7 @@ from db.effect_cache import (
 )
 from db.models import Contract, EffectBehaviorCache, EffectiveFunction, EffectVerdict, Job, JobStage
 from db.queue import advance_job, get_artifact, store_artifact
+from db.queue._chains import job_chain_id
 from db.queue.typed import ArtifactSchemaError, load_assessment
 from services.effects.config import (
     EFFECT_CLASS_VALUE_OUT,
@@ -516,7 +517,7 @@ class EffectsWorker(BaseWorker):
         from services.clients.rpc import eth_call_batch, require_rpc_url
         from services.effects.simulate import eth_simulate_v1
 
-        chain_id = _chain_id_for_job(job)
+        chain_id = job_chain_id(job)
         request = job.request if isinstance(job.request, dict) else {}
         explicit = request.get("rpc_url")
         rpc_url = require_rpc_url(
@@ -764,7 +765,7 @@ class EffectsWorker(BaseWorker):
         scope = (
             JobScope(
                 address=address,
-                chain_id=_chain_id_for_job(job),
+                chain_id=job_chain_id(job),
                 # Only an empty-planning marker at least as new as this job counts
                 # as ownership — see ``_scope_predicate`` rule 4.
                 planned_since=getattr(job, "created_at", None),
@@ -1219,10 +1220,13 @@ class EffectsWorker(BaseWorker):
         fn_ids = {it.candidate.function_id for it in items if it.candidate.function_id is not None}
         if not fn_ids:
             return 0
-        verdicts = session.query(EffectVerdict).filter(EffectVerdict.function_id.in_(fn_ids)).all()
         rows = session.query(EffectiveFunction).filter(EffectiveFunction.id.in_(fn_ids)).all()
-        row_by_id = {row.id: row for row in rows if row.id is not None}
         contract_ids = {row.contract_id for row in rows}
+        # Assessment replaces the contract's execution receipt as a whole.
+        # Include prior verdicts for functions outside this scheduling batch.
+        rows = session.query(EffectiveFunction).filter(EffectiveFunction.contract_id.in_(contract_ids)).all()
+        row_by_id = {row.id: row for row in rows if row.id is not None}
+        verdicts = session.query(EffectVerdict).filter(EffectVerdict.function_id.in_(row_by_id)).all()
         contracts = session.query(Contract).filter(Contract.id.in_(contract_ids)).all()
         contract_by_id = {contract.id: contract for contract in contracts}
 
@@ -1267,7 +1271,24 @@ class EffectsWorker(BaseWorker):
                 )
                 continue
 
+            deployment = assessment["contract"]["deployment_address"]
+            owned_rows = [
+                row
+                for row in rows
+                if row.contract_id == contract_id and (row.deployment_address or contract.address).lower() == deployment
+            ]
+            owned_ids = {row.id for row in owned_rows}
+            if not owned_ids.intersection(fn_ids):
+                record_degraded(
+                    phase="effects_assessment",
+                    exc=RuntimeError("selected deployment has no matching Assessment owner"),
+                    context={"contract_id": contract_id, "job_id": str(contract.job_id)},
+                )
+                continue
+            contract_verdicts = [verdict for verdict in contract_verdicts if verdict.function_id in owned_ids]
+
             from services.assessment import add_effects, effect_matches_by_function
+            from services.assessment.functions import resolve_function
 
             assessment = add_effects(
                 assessment,
@@ -1276,11 +1297,16 @@ class EffectsWorker(BaseWorker):
             )
             store_artifact(session, contract.job_id, "assessment", data=assessment)
             projected_claims = effect_matches_by_function(assessment)
-            for row in rows:
-                if row.contract_id != contract_id:
-                    continue
-                signature = row.abi_signature or row.function_name
-                row_claims = projected_claims.get(signature, [])
+            for row in owned_rows:
+                signature, _problem = resolve_function(
+                    assessment,
+                    {
+                        "function": row.function_name,
+                        "abi_signature": row.abi_signature,
+                        "selector": row.selector,
+                    },
+                )
+                row_claims = projected_claims.get(signature, []) if signature is not None else []
                 row.claims = row_claims
             updated += 1
         if ownerless:
@@ -1764,18 +1790,6 @@ def _transcript_artifact_name(transcript: dict[str, Any]) -> str:
     body = json.dumps(transcript, sort_keys=True, default=str)
     digest = hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
     return f"effect_transcript_{effect_class}_{digest}"
-
-
-def _chain_id_for_job(job: Job) -> int:
-    """The job's first-class ``chain_id`` (invariant 1), else derived from
-    ``request['chain']``, else mainnet — mirrors ``policy_worker``."""
-    from db.models import derive_job_chain_id
-
-    chain_id = getattr(job, "chain_id", None)
-    if isinstance(chain_id, int):
-        return chain_id
-    request = job.request if isinstance(job.request, dict) else {}
-    return derive_job_chain_id(request.get("chain"), getattr(job, "address", None)) or 1
 
 
 def main() -> None:

@@ -8,13 +8,11 @@ from typing import Any, Mapping, cast
 
 from eth_utils.crypto import keccak
 
-from schemas.observations import ObservationBatch, coerce_resolved_controller_type
+from schemas.observations import ObservationBatch, ResolvedControllerType, coerce_resolved_controller_type
 from schemas.permission_index import (
     AuthorityRoleGrant,
     PermissionIndex,
     PermissionRow,
-    PrincipalResolution,
-    ResolvedAddressType,
     ResolvedControllerGrant,
     ResolvedPrincipal,
 )
@@ -173,7 +171,7 @@ def _abi_signature_and_selector(
 
 def _resolved_principal(
     address: str,
-    resolved_type: ResolvedAddressType,
+    resolved_type: ResolvedControllerType,
     details: dict[str, object],
     *,
     source_contract: str | None = None,
@@ -648,9 +646,6 @@ def build_permission_index(
     target_analysis: Mapping[str, Any] | StaticFacts,
     *,
     target_snapshot: Mapping[str, Any] | ObservationBatch | None = None,
-    authority_snapshot: Mapping[str, Any] | ObservationBatch | None = None,
-    artifact_paths: dict[str, str] | None = None,
-    principal_resolution: PrincipalResolution | None = None,
     predicate_trees: Mapping[str, Any] | None = None,
     capability_resolver_output: Mapping[str, Any] | None = None,
     effects: Mapping[str, Any] | None = None,
@@ -667,7 +662,7 @@ def build_permission_index(
     contract_address = target_analysis["subject"]["address"].lower()
     contract_name = target_analysis["subject"]["name"]
 
-    known = _known_principals(target_snapshot, authority_snapshot)
+    known = _known_principals(target_snapshot)
     controller_lookup = _controller_lookup(target_snapshot)
     canonical_signatures = _canonical_signature_map(predicate_trees)
     capability_dicts = _normalize_capability_output(capability_resolver_output)
@@ -796,12 +791,5 @@ def build_permission_index(
         "schema_version": "0.1",
         "contract_address": contract_address,
         "contract_name": contract_name,
-        "authority_contract": None,
-        "principal_resolution": principal_resolution
-        or {
-            "status": "complete",
-            "reason": "Semantic capability resolver output was joined into the permission view.",
-        },
-        "artifacts": artifact_paths or {},
         "functions": functions,
     }

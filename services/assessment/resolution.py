@@ -3,15 +3,13 @@
 from __future__ import annotations
 
 import copy
-import json
 from collections.abc import Mapping
 from typing import Any, cast
 
-from pydantic import JsonValue
+from schemas.assessment import Analysis, Assessment, Claim, Evidence, Proposition
 
-from schemas.assessment import Analysis, Assessment, Claim, Entity, Evidence, Proposition
-
-from .keys import content_key, entity_key
+from .keys import content_key, entity_record
+from .keys import json_value as _json
 from .slices import prune_unreferenced_entities, remove_analysis_slice
 from .validation import checked
 
@@ -27,24 +25,6 @@ AUTHORITY_RELATIONS = frozenset(
     }
 )
 DEPENDENCY_RELATIONS = frozenset({"external_call_target"})
-
-
-def _json(value: Any) -> JsonValue:
-    return cast(JsonValue, json.loads(json.dumps(value, sort_keys=True, default=str)))
-
-
-def _entity(chain_id: int, address: str, node: Mapping[str, Any]) -> tuple[str, Entity]:
-    normalized = address.lower()
-    resolved_type = str(node.get("resolved_type") or "unknown")
-    contract_types = {"safe", "timelock", "proxy_admin", "contract", "cross_chain_authority"}
-    tags = [] if resolved_type in ("eoa", "contract", "unknown") else [resolved_type]
-    key = entity_key(chain_id, normalized)
-    return key, {
-        "chain_id": chain_id,
-        "address": normalized,
-        "kind": "contract" if resolved_type in contract_types else "account",
-        "tags": tags,
-    }
 
 
 def _node_evidence(contract: Mapping[str, Any], key: str, node: Mapping[str, Any]) -> tuple[str, Evidence]:
@@ -100,7 +80,7 @@ def add_resolution(assessment: Assessment, graph: Mapping[str, Any], *, chain_id
         address = node.get("address")
         if not isinstance(node_id, str) or not isinstance(address, str) or not address:
             continue
-        key, entity = _entity(chain_id, address, node)
+        key, entity = entity_record(chain_id, address, str(node.get("resolved_type") or "unknown"))
         result["entities"][key] = entity
         node_entities[node_id] = key
         evidence_key, evidence = _node_evidence(result["contract"], key, node)

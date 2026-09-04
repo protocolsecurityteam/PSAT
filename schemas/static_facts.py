@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal
 
-from typing_extensions import NotRequired
+from typing_extensions import NotRequired, TypedDict
 
 ControlModel = Literal["ownable", "role_control", "auth", "governance", "custom", "unknown"]
 UpgradeabilityPattern = Literal["uups", "transparent", "beacon", "custom", "none", "unknown"]
@@ -284,8 +284,7 @@ class ControllerWriterFunction(TypedDict):
     evidence: list[Evidence]
 
 
-class ControllerTrackingTarget(TypedDict):
-    controller_id: str
+class Controller(TypedDict):
     label: str
     source: str
     kind: ControllerKind
@@ -298,6 +297,10 @@ class ControllerTrackingTarget(TypedDict):
     notes: list[str]
     # Absent = not determined. See ``ControllerProvenance``.
     authority_provenance: NotRequired[ControllerProvenance]
+
+
+class ControllerTrackingTarget(Controller):
+    controller_id: str
 
 
 class SecondaryImplPointer(TypedDict):

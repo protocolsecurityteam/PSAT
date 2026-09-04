@@ -109,23 +109,21 @@ def test_safe_role_int_handles_string_and_dict_without_crashing() -> None:
     """A direct ``int(role_grant["role"])`` cast crashes on the
     string role-name and Condition-mapping shapes. ``_safe_role_int``
     must coerce ints, return ``None`` for non-int, and never raise."""
-    from services.policy.principal_index import _safe_role_int as _safe_role_int_pe
-    from services.resolution.recursive import _safe_role_int as _safe_role_int_rr
+    from schemas.permission_index import role_number
 
-    for safe_role_int in (_safe_role_int_pe, _safe_role_int_rr):
-        # Happy path — int passes through.
-        assert safe_role_int(0) == 0
-        assert safe_role_int(7) == 7
-        # Numeric string also works for persisted numeric role identifiers.
-        assert safe_role_int("3") == 3
-        # Non-numeric string returns None — caller decides skip/log.
-        assert safe_role_int("PAUSER_ROLE") is None
-        # Condition-mapping returns None instead of TypeError.
-        assert safe_role_int({"kind": "time", "description": "x"}) is None
-        # None / missing returns None.
-        assert safe_role_int(None) is None
-        # Lists also return None.
-        assert safe_role_int([1, 2, 3]) is None
+    # Happy path — int passes through.
+    assert role_number(0) == 0
+    assert role_number(7) == 7
+    # Numeric string also works for persisted numeric role identifiers.
+    assert role_number("3") == 3
+    # Non-numeric string returns None — caller decides skip/log.
+    assert role_number("PAUSER_ROLE") is None
+    # Condition-mapping returns None instead of TypeError.
+    assert role_number({"kind": "time", "description": "x"}) is None
+    # None / missing returns None.
+    assert role_number(None) is None
+    # Lists also return None.
+    assert role_number([1, 2, 3]) is None
 
 
 def test_principal_index_skips_non_int_role_without_crashing() -> None:
