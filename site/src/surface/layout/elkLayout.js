@@ -243,6 +243,8 @@ export function buildGraphLayout(machines, fundFlows, principals, bandHeights = 
     // to a constant estimate until GroupNode reports the real height.
     const measuredBand = bandHeights[p.address];
     const headerHeight = measuredBand != null ? measuredBand : groupHeaderHeight(controllers.length);
+    const directControls = new Set((p.controls || []).map((address) => address?.toLowerCase()).filter(Boolean));
+    const directCount = kids.filter((address) => directControls.has(address)).length;
     nodes.push({
       id: p.address,
       type: "group",
@@ -253,6 +255,8 @@ export function buildGraphLayout(machines, fundFlows, principals, bandHeights = 
       data: {
         principal: p,
         childCount: kids.length,
+        directCount,
+        viaGovernanceCount: kids.length - directCount,
         heuristicCount: kids.filter((address) => machineByAddr.get(address)?.membershipKind === "heuristic").length,
         totalUsd: groupTotalUsd.get(principalAddr) || 0,
         controllers,

@@ -68,6 +68,23 @@ describe("buildMachines", () => {
     expect(machines[0].totalFunctions).toBeGreaterThanOrEqual(machines[1].totalFunctions);
   });
 
+  it("distinguishes direct control from contracts reached through governance", async () => {
+    const machines = buildMachines(ETHERFI_COMPANY_RICH, functionData);
+    const addresses = machines.map((machine) => machine.address);
+    const principal = {
+      address: "0x" + "ab".repeat(20),
+      type: "safe",
+      primary_for: addresses,
+      controls: [addresses[0]],
+      controls_detail: [],
+    };
+    const { nodes } = await buildGraphLayout(machines, [], [principal]);
+    const group = nodes.find((node) => node.type === "group");
+
+    expect(group.data.directCount).toBe(1);
+    expect(group.data.viaGovernanceCount).toBe(addresses.length - 1);
+  });
+
   it("does not turn missing or unknown claims into blank ops rows", () => {
     const contract = { address: RICH_ADDRESSES.VAULT, name: "Vault", is_proxy: false };
     const data = { contracts: [contract], principals: [], fund_flows: [] };
