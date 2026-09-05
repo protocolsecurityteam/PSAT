@@ -415,32 +415,31 @@ def test_sigterm_abandons_jobs_past_drain_timeout(mock_claim, mock_session_cls, 
 
     mock_claim.side_effect = _claim_side_effect
 
-    # process() blocks longer than the 0s drain window.
+    # Keep process() blocked until the assertions finish. This proves the
+    # worker abandons an in-flight future without relying on scheduler timing.
+    release = threading.Event()
+
     def _slow_process(session, job):
         started.set()
-        time.sleep(2.0)
+        release.wait(timeout=10.0)
         finished.set()
 
     w = _ConcurrentWorker()
     w.process = _slow_process
 
-    def _trigger_term():
-        started.wait(timeout=1.0)
-        time.sleep(0.01)
-        w._handle_sigterm(signal.SIGTERM, None)
-
-    threading.Thread(target=_trigger_term, daemon=True).start()
-
-    t0 = time.monotonic()
+    runner = threading.Thread(target=w.run_loop)
+    runner.start()
     try:
-        w.run_loop()
-        elapsed = time.monotonic() - t0
-        # Abandonment means returning while the job is still in flight; the
-        # wall-clock bound is deliberately loose for loaded CI runners.
+        assert started.wait(timeout=5.0), "worker did not start the claimed job"
+        w._handle_sigterm(signal.SIGTERM, None)
+        runner.join(timeout=5.0)
+
+        assert not runner.is_alive(), "run_loop did not return after its zero-second drain timeout"
         assert not finished.is_set(), "run_loop drained the in-flight job instead of abandoning it"
-        assert elapsed < 1.0, f"run_loop should have abandoned promptly, took {elapsed:.2f}s"
     finally:
         # Drain the abandoned worker thread before yielding to the next test.
+        release.set()
+        runner.join(timeout=5.0)
         if w._job_pool:
             w._job_pool.shutdown(wait=True)
 
