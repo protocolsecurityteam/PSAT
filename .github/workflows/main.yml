@@ -2,7 +2,7 @@ name: Main deploy
 
 # Sequential chain on push to main:
 #   1. ci      (same suite as PRs)
-#   2. deploy  (prod; gated by `production` environment approval)
+#   2. deploy  (prod; credentials scoped to the `production` environment)
 on:
   push:
     branches: [main]
@@ -25,7 +25,7 @@ jobs:
     if: false
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # `production` env gates FLY_PROD_API_TOKEN + manual approval (Settings → Environments).
+    # `production` scopes FLY_PROD_API_TOKEN; its deployment branch policy allows only main.
     environment: production
     env:
       FLY_API_TOKEN: ${{ secrets.FLY_PROD_API_TOKEN }}
