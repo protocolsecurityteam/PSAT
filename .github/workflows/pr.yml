@@ -96,6 +96,25 @@ jobs:
           python -m deploy.preview.control validate-ip-inventory \
             --inventory "$RUNNER_TEMP/fly-ips-before.json" --allow-empty
 
+      - name: Allocate private Flycast address if missing
+        run: |
+          flyctl ips list -a "${{ steps.plan.outputs.app }}" --json > "$RUNNER_TEMP/fly-ips-check.json"
+          python - "$RUNNER_TEMP/fly-ips-check.json" "${{ steps.plan.outputs.app }}" <<'PY'
+          import json
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          payload = json.loads(Path(sys.argv[1]).read_text() or "[]")
+          if isinstance(payload, dict):
+              payload = payload.get("ips", payload.get("IPAddresses")) or []
+          if not payload:
+              subprocess.run(
+                  ["flyctl", "ips", "allocate-v6", "--private", "-a", sys.argv[2]],
+                  check=True,
+              )
+          PY
+
       - name: Create per-PR Neon database
         env:
           PGPASSWORD: ${{ secrets.NEON_STAGING_PASSWORD }}
