@@ -21,8 +21,6 @@ jobs:
 
   deploy:
     needs: ci
-    # TEMPORARILY DISABLED to save server costs — remove this `if:` to re-enable.
-    if: false
     runs-on: ubuntu-latest
     timeout-minutes: 20
     # `production` scopes FLY_PROD_API_TOKEN; its deployment branch policy allows only main.

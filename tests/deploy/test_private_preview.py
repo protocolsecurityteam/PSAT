@@ -269,13 +269,11 @@ def test_manual_dispatch_inputs_are_validated_before_target_lookup() -> None:
         assert '--head-sha "${{ inputs.head_sha }}"' not in workflow
 
 
-def test_fork_prod_is_disabled_and_production_deploy_stays_paused() -> None:
+def test_fork_prod_is_disabled() -> None:
     fork = (WORKFLOWS / "fork-prod-to-pr.yml").read_text()
     assert "NEON" not in fork
     assert "exit 1" in fork
     assert "/fork-prod is disabled" in fork
-    main = (WORKFLOWS / "main.yml").read_text()
-    assert "if: false" in main
 
 
 def test_production_deploy_injects_private_health_secret_and_uses_cloudflare() -> None:
@@ -291,6 +289,7 @@ def test_production_deploy_injects_private_health_secret_and_uses_cloudflare() -
     assert '--config "$RUNNER_TEMP/fly.production.toml"' in main
     assert "PROD_URL: https://snif.sh" in main
     assert "PSAT_ADMIN_KEY: ${{ secrets.PSAT_ADMIN_KEY }}" not in main
+    assert "if: false" not in main
 
 
 def test_comment_commands_are_exact_and_revalidate_pr() -> None:
