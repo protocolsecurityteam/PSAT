@@ -73,6 +73,7 @@ jobs:
           flyctl secrets set --stage -a "${{ steps.fly.outputs.app }}" \
             DATABASE_URL="$DB_URL" \
             PSAT_ADMIN_KEY="${{ secrets.PSAT_ADMIN_KEY }}" \
+            PSAT_EDGE_MODE="preview" \
             PSAT_SITE_ORIGIN="${{ steps.fly.outputs.url }}" \
             ETHERSCAN_API_KEY="${{ secrets.ETHERSCAN_API_KEY }}" \
             ERPC_BASE_URL="${{ secrets.ERPC_BASE_URL }}" \

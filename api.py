@@ -35,6 +35,7 @@ from routers import (
     protocols,
     spa,
 )
+from utils.edge import CloudflareBoundary, EdgeConfig
 from utils.logging import bind_trace_context, configure_logging, trace_id_var
 from utils.ratelimit import SlidingWindowRateLimiter, client_ip
 
@@ -181,6 +182,7 @@ class BodySizeLimitMiddleware:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Install JSON logging and verify DB reachability on startup."""
+    EdgeConfig.from_env()
     configure_logging()
     try:
         # Local import dodges a circular at module load (db.models indirectly
@@ -275,7 +277,9 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
             "exc_type": type(exc).__name__,
         },
     )
-    return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
+    return JSONResponse(
+        status_code=500, content={"detail": "Internal Server Error"}, headers={"Cache-Control": "private, no-store"}
+    )
 
 
 app.add_exception_handler(Exception, unhandled_exception_handler)
@@ -338,12 +342,12 @@ def _apply_security_headers(response):
 
 @app.middleware("http")
 async def edge_guard_middleware(request: Request, call_next):
-    """Per-IP rate limit + security headers on every response.
+    """Security headers for application responses; boundary rejections carry these too."""
+    response = await call_next(request)
+    return _apply_security_headers(response)
 
-    The body-size cap runs in ``BodySizeLimitMiddleware`` (registered below,
-    outermost); this guard adds the global rate limit and stamps the security
-    headers, including on its own 429.
-    """
+
+def _rate_limit_response(request: Request):
     retry_after = _global_limiter.hit(client_ip(request))
     if retry_after is not None:
         return _security_headers_response(
@@ -352,13 +356,14 @@ async def edge_guard_middleware(request: Request, call_next):
             {"Retry-After": str(retry_after)},
         )
 
-    response = await call_next(request)
-    return _apply_security_headers(response)
+    return None
 
 
-# Outermost: the body-size cap must see the raw request stream before any other
-# middleware buffers it. Registered last so it wraps the whole stack.
+# The body-size cap precedes middleware that buffers the request body; the
+# provenance wrapper below inspects headers without consuming the stream.
 app.add_middleware(BodySizeLimitMiddleware)
+# Authenticate the origin before trusting visitor headers or consuming a rate bucket.
+app.add_middleware(CloudflareBoundary, rate_limit=_rate_limit_response, denial_headers=_SECURITY_HEADERS)
 
 
 spa.mount_static_assets(app)
@@ -418,4 +423,5 @@ def serve() -> None:
         limit_concurrency=int(limit_concurrency) if limit_concurrency else None,
         log_config=uvicorn_log_config(),
         access_log=False,
+        proxy_headers=False,
     )
