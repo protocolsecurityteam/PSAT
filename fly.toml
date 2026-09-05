@@ -12,6 +12,8 @@ kill_timeout = 30
 [env]
   PORT = "8000"
   PYTHONUNBUFFERED = "1"
+  PSAT_EDGE_MODE = "cloudflare"
+  PSAT_SITE_ORIGIN = "https://snif.sh"
   # Bumped from deploy/start_workers.sh defaults (2/1/1). Sized for the workers VM
   # (shared-cpu-8x:16GB) — 8 cores fit ~12 always-on Python procs plus
   # forge subprocess bursts without queueing. Policy bumped to 3 procs ×
@@ -69,6 +71,10 @@ kill_timeout = 30
     interval = "30s"
     timeout = "5s"
     grace_period = "60s"
+    [http_service.http_checks.headers]
+      # main.yml replaces this in a protected temporary config before deploy.
+      # Leaving the placeholder intact fails the production health check closed.
+      X-PSAT-Health-Secret = "REPLACE_WITH_PSAT_HEALTH_SECRET"
 
 # Per-group VM sizing. Tune with `fly scale vm <size> --process-group <name>`.
 

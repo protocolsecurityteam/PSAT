@@ -95,11 +95,6 @@ def _log_endpoint(route: str, *, company: str, started: float, **extras: Any) ->
 @router.get("/api/company/{company_name}", response_model=None)
 def company_overview(company_name: str, response: Response) -> CompanyOverviewResponse:
     """Aggregated governance overview for all contracts in a company."""
-    # Largest payload on the site (1-3 MB). Letting the browser hold it for
-    # 15s + serve-stale-while-revalidate makes back/forward navigation and
-    # tab switches inside the company page instant — both CompanyOverview
-    # and ProtocolSurface read this URL on mount.
-    response.headers["Cache-Control"] = "private, max-age=15, stale-while-revalidate=60"
     started = time.monotonic()
     with deps.SessionLocal() as session:
         try:
@@ -128,7 +123,6 @@ def company_addresses(company_name: str, response: Response) -> dict[str, Any]:
     167 KB list isn't shipped on every page-load — ``AddressesModal``
     fetches this lazily when the user opens it.
     """
-    response.headers["Cache-Control"] = "private, max-age=15, stale-while-revalidate=60"
     started = time.monotonic()
     with deps.SessionLocal() as session:
         protocol_row, jobs = resolve_company_jobs(session, company_name)
@@ -160,7 +154,6 @@ def company_functions(company_name: str, response: Response) -> dict[str, Any]:
     the main payload and populates the function inspector when it
     arrives.
     """
-    response.headers["Cache-Control"] = "private, max-age=15, stale-while-revalidate=60"
     started = time.monotonic()
     with deps.SessionLocal() as session:
         try:

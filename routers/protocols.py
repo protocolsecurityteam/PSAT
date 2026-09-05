@@ -128,7 +128,9 @@ def subscribe_to_protocol(protocol_id: int, request: ProtocolSubscribeRequest) -
         }
 
 
-@router.get("/api/protocols/{protocol_id}/subscriptions", response_model=None)
+@router.get(
+    "/api/protocols/{protocol_id}/subscriptions", dependencies=[Depends(deps.require_admin_key)], response_model=None
+)
 def list_protocol_subscriptions(protocol_id: int) -> list[SubscriptionItem]:
     """List all ProtocolSubscription rows for a protocol."""
     from utils.secrets import sanitize_url

@@ -78,12 +78,12 @@ def health(x_psat_admin_key: str | None = Header(default=None)):
     return body
 
 
-@router.get("/api/health/monitoring")
+@router.get("/api/health/monitoring", dependencies=[Depends(deps.require_admin_key)])
 def monitoring_health() -> Any:
     """Monitoring-fleet liveness, for an external uptime checker.
 
-    Unauthenticated like ``/api/health`` (it is a probe surface), but where
-    that endpoint proves only that *web* is alive, this one 503s the moment any
+    Operator-only because it exposes fleet/process details. Where basic health
+    proves only that *web* is alive, this one 503s the moment any
     background monitoring daemon goes stale or errors — closing the "web up,
     monitoring dead" blind spot. 200 with an empty ``stale`` list when all
     processes are fresh; 503 with the offending processes otherwise.
@@ -116,7 +116,7 @@ def version() -> dict[str, str]:
     return {"sha": os.environ.get("GIT_SHA", "unknown")}
 
 
-@router.get("/api/config")
+@router.get("/api/config", dependencies=[Depends(deps.require_admin_key)])
 def config() -> dict[str, str]:
     from utils.secrets import sanitize_url
 

@@ -2,15 +2,11 @@ name: PR cleanup
 
 on:
   pull_request:
-    # Mirror pr-preview.yml: only previews for main-targeted PRs exist,
-    # so only main-targeted PRs need teardown.
     branches: [main]
     types: [closed]
 
-# Let cleanup finish even if a duplicate event is queued; destructive ops
-# are all idempotent (|| true).
 concurrency:
-  group: cleanup-${{ github.event.pull_request.number }}
+  group: preview-${{ github.event.pull_request.number }}
   cancel-in-progress: false
 
 permissions:
@@ -19,67 +15,74 @@ permissions:
 
 jobs:
   destroy:
-    # Fork PRs never had a preview created (see pr-preview.yml), nothing to destroy.
     if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     environment: staging
     env:
+      FLY_API_TOKEN: ${{ secrets.FLY_STAGING_DEPLOY_TOKEN }}
+      PSAT_STAGING_FLY_ORG: ${{ vars.PSAT_STAGING_FLY_ORG }}
+      PSAT_PREVIEW_APP_PREFIX: ${{ vars.PSAT_PREVIEW_APP_PREFIX }}
+      NEON_STAGING_ADMIN_HOST: ${{ secrets.NEON_STAGING_HOST }}
+      NEON_STAGING_ADMIN_USER: ${{ secrets.NEON_STAGING_USER }}
       PR_NUMBER: ${{ github.event.pull_request.number }}
-      FLY_APP_NAME: psat-pr-${{ github.event.pull_request.number }}
-      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-      NEON_STAGING_HOST: ${{ secrets.NEON_STAGING_HOST }}
-      NEON_STAGING_USER: ${{ secrets.NEON_STAGING_USER }}
-      NEON_API_KEY: ${{ secrets.NEON_API_KEY }}
-      # Hardcoded project id for fork-branch cleanup — see fork-prod-to-pr.yml.
-      PROD_NEON_PROJECT_ID: morning-silence-94271256
       ARTIFACT_STORAGE_ENDPOINT: ${{ secrets.ARTIFACT_STORAGE_ENDPOINT }}
       ARTIFACT_STORAGE_BUCKET: ${{ secrets.ARTIFACT_STORAGE_BUCKET }}
-      # awscli reads these standard names; Tigris is S3-compatible.
       AWS_ACCESS_KEY_ID: ${{ secrets.ARTIFACT_STORAGE_ACCESS_KEY }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.ARTIFACT_STORAGE_SECRET_KEY }}
       AWS_DEFAULT_REGION: auto
     steps:
-      - name: Setup flyctl
-        uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
 
-      - name: Destroy Fly app
-        run: flyctl apps destroy "$FLY_APP_NAME" --yes || true
+      - name: Resolve exact cleanup targets
+        id: plan
+        run: |
+          : "${FLY_API_TOKEN:?Set staging secret FLY_STAGING_DEPLOY_TOKEN}"
+          : "${PSAT_STAGING_FLY_ORG:?Set staging variable PSAT_STAGING_FLY_ORG}"
+          : "${PSAT_PREVIEW_APP_PREFIX:?Set staging variable PSAT_PREVIEW_APP_PREFIX}"
+          : "${NEON_STAGING_ADMIN_HOST:?Set staging-only Neon administrator host}"
+          : "${NEON_STAGING_ADMIN_USER:?Set staging-only Neon administrator user}"
+          : "${ARTIFACT_STORAGE_ENDPOINT:?Set staging-only artifact endpoint}"
+          : "${ARTIFACT_STORAGE_BUCKET:?Set staging-only artifact bucket}"
+          : "${AWS_ACCESS_KEY_ID:?Set staging-only bucket access key}"
+          : "${AWS_SECRET_ACCESS_KEY:?Set staging-only bucket secret key}"
+          python -m deploy.preview.control plan --pr-number "$PR_NUMBER" \
+            --organization "$PSAT_STAGING_FLY_ORG" --app-prefix "$PSAT_PREVIEW_APP_PREFIX" \
+            --github-output "$GITHUB_OUTPUT"
 
-      - name: Drop Neon database
+      - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1
+
+      - name: Inspect app ownership before destruction
+        id: inventory
+        run: |
+          flyctl apps list --org "$PSAT_STAGING_FLY_ORG" --json > "$RUNNER_TEMP/fly-apps.json"
+          python -m deploy.preview.control validate-app-inventory --pr-number "$PR_NUMBER" \
+            --organization "$PSAT_STAGING_FLY_ORG" --app-prefix "$PSAT_PREVIEW_APP_PREFIX" \
+            --inventory "$RUNNER_TEMP/fly-apps.json" --allow-missing --github-output "$GITHUB_OUTPUT"
+
+      - name: Destroy validated staging Fly app
+        if: steps.inventory.outputs.exists == 'true'
+        run: flyctl apps destroy "${{ steps.plan.outputs.app }}" --yes
+
+      - name: Drop exact staging Neon database
         env:
           PGPASSWORD: ${{ secrets.NEON_STAGING_PASSWORD }}
+          PREVIEW_DATABASE: ${{ steps.plan.outputs.database }}
         run: |
-          # WITH (FORCE) terminates any lingering connections (workers that
-          # didn't disconnect before the Fly app was destroyed). PG16+, Neon
-          # supports it. Fresh psql session — don't reuse any prior one.
-          psql "sslmode=require host=$NEON_STAGING_HOST user=$NEON_STAGING_USER dbname=neondb" \
-            -c "DROP DATABASE IF EXISTS \"psat_pr_${PR_NUMBER}\" WITH (FORCE);" || true
+          : "${PGPASSWORD:?Set staging-only Neon administrator password}"
+          psql "sslmode=require host=$NEON_STAGING_ADMIN_HOST user=$NEON_STAGING_ADMIN_USER dbname=neondb" \
+            -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS \"$PREVIEW_DATABASE\" WITH (FORCE);"
 
-      - name: Delete forked Neon branches
-        # Idempotent — matches branches named "pr-${PR_NUMBER}-fork-*" in the
-        # prod project. PRs that were never forked match nothing; the loop is
-        # a no-op. Skips cleanly when NEON_API_KEY isn't set so the workflow
-        # stays usable from environments that haven't adopted forking yet.
-        if: env.NEON_API_KEY != ''
+      - name: Delete exact staging artifact prefix
         run: |
-          curl -sf -H "Authorization: Bearer $NEON_API_KEY" \
-            "https://console.neon.tech/api/v2/projects/$PROD_NEON_PROJECT_ID/branches" \
-            | jq -r ".branches[] | select(.name | startswith(\"pr-${PR_NUMBER}-fork-\")) | .id" \
-            | while read BRANCH_ID; do
-                echo "Deleting forked branch: $BRANCH_ID"
-                curl -sf -X DELETE -H "Authorization: Bearer $NEON_API_KEY" \
-                  "https://console.neon.tech/api/v2/projects/$PROD_NEON_PROJECT_ID/branches/$BRANCH_ID" || true
-              done
-
-      - name: Delete Tigris prefix
-        run: |
-          aws s3 rm "s3://${ARTIFACT_STORAGE_BUCKET}/pr-${PR_NUMBER}/" \
-            --recursive \
-            --endpoint-url "$ARTIFACT_STORAGE_ENDPOINT" || true
+          aws s3 rm "s3://${ARTIFACT_STORAGE_BUCKET}/${{ steps.plan.outputs.artifact_prefix }}" \
+            --recursive --endpoint-url "$ARTIFACT_STORAGE_ENDPOINT"
 
       - name: Update sticky PR comment
         uses: marocchino/sticky-pull-request-comment@773744901bac0e8cbb5a0dc842800d45e9b2b405
         with:
           header: psat-preview
           message: |
-            Preview environment `${{ env.FLY_APP_NAME }}` has been torn down.
+            Private preview `${{ steps.plan.outputs.app }}` and its staging-scoped database/artifact targets were cleaned up.
+            Production-fork branches are outside routine staging credentials and require the separately approved exception runbook.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from urllib.parse import urlparse
 
 import pytest
@@ -32,11 +33,12 @@ def test_cors_rejects_attacker_origin(live_base_url: str):
 
 
 def test_cors_allows_configured_origin(live_base_url: str):
-    expected = _expected_allowed_origin(live_base_url)
-    if not expected.endswith(".fly.dev"):
+    expected = os.environ.get("PSAT_LIVE_SITE_ORIGIN", "").rstrip("/")
+    if not expected:
+        expected = _expected_allowed_origin(live_base_url)
+    if not (expected.endswith(".fly.dev") or expected.endswith(".flycast")):
         pytest.skip(
-            f"base URL {live_base_url} is not a Fly preview; "
-            "PSAT_SITE_ORIGIN is only guaranteed for preview deployments"
+            f"origin {expected} is not a Fly preview; PSAT_SITE_ORIGIN is only guaranteed for preview deployments"
         )
 
     r = requests.options(
