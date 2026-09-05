@@ -158,14 +158,16 @@ jobs:
 
       - name: Generate private preview Fly configuration
         run: |
+          # Fly resolves [build].dockerfile relative to the generated config,
+          # so keep this file at the repository root beside deploy/Dockerfile.
           python -m deploy.preview.control render-config \
             --pr-number "$PR_NUMBER" --organization "$PSAT_STAGING_FLY_ORG" \
             --app-prefix "$PSAT_PREVIEW_APP_PREFIX" \
-            --template deploy/preview/fly.preview.toml.template --output "$RUNNER_TEMP/fly-preview.toml"
+            --template deploy/preview/fly.preview.toml.template --output "$GITHUB_WORKSPACE/fly-preview.toml"
 
       - name: Deploy private preview
         run: |
-          flyctl deploy -a "${{ steps.plan.outputs.app }}" --config "$RUNNER_TEMP/fly-preview.toml" \
+          flyctl deploy -a "${{ steps.plan.outputs.app }}" --config "$GITHUB_WORKSPACE/fly-preview.toml" \
             --remote-only --flycast --no-public-ips --ha=false \
             --build-arg GIT_SHA="${{ github.event.pull_request.head.sha }}"
 

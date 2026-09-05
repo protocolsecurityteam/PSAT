@@ -55,6 +55,7 @@ def test_generated_config_is_private_flycast_http_with_idle_wake() -> None:
     rendered = render_config((PREVIEW / "fly.preview.toml.template").read_text(), plan)
     config = tomli.loads(rendered)
     assert config["app"] == "psat-stage-pr-42"
+    assert (ROOT / config["build"]["dockerfile"]).is_file()
     assert config["env"]["PSAT_EDGE_MODE"] == "preview"
     assert config["http_service"] == {
         "internal_port": 8000,
@@ -243,6 +244,9 @@ def test_deploy_and_http_jobs_enforce_private_path() -> None:
     assert "validate-ip-inventory" in pr
     assert "validate-app-inventory" in pr
     assert 'PSAT_EDGE_MODE="preview"' in pr
+    assert '--output "$GITHUB_WORKSPACE/fly-preview.toml"' in pr
+    assert '--config "$GITHUB_WORKSPACE/fly-preview.toml"' in pr
+    assert "$RUNNER_TEMP/fly-preview.toml" not in pr
     for name in ("pr.yml", "rerun-live-tests.yml", "reset-pr-db.yml"):
         workflow = (WORKFLOWS / name).read_text()
         assert "private_proxy.sh start" in workflow
