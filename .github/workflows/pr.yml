@@ -198,8 +198,9 @@ jobs:
             - **Neon DB:** `${{ steps.plan.outputs.database }}` in the staging project
             - **Artifact prefix:** `${{ steps.plan.outputs.artifact_prefix }}` in the staging-only bucket
 
-            Authorized operators: authenticate with the staging Fly access token, run
-            `flyctl proxy 8080:80 ${{ steps.plan.outputs.app }}.flycast --org ${{ env.PSAT_STAGING_FLY_ORG }}`,
+            Authorized operators: authenticate `flyctl` with a Fly account or token authorized for
+            `${{ env.PSAT_STAGING_FLY_ORG }}`, then run
+            `flyctl proxy 8080:80 ${{ steps.plan.outputs.app }}.flycast --app ${{ steps.plan.outputs.app }} --org ${{ env.PSAT_STAGING_FLY_ORG }}`,
             then open `http://127.0.0.1:8080`. The private route does not bypass the PSAT admin key.
 
   live-tests:

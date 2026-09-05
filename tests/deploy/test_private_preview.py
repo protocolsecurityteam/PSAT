@@ -247,6 +247,7 @@ def test_deploy_and_http_jobs_enforce_private_path() -> None:
     assert '--output "$GITHUB_WORKSPACE/fly-preview.toml"' in pr
     assert '--config "$GITHUB_WORKSPACE/fly-preview.toml"' in pr
     assert "$RUNNER_TEMP/fly-preview.toml" not in pr
+    assert "flyctl proxy 8080:80 ${{ steps.plan.outputs.app }}.flycast --app ${{ steps.plan.outputs.app }}" in pr
     for name in ("pr.yml", "rerun-live-tests.yml", "reset-pr-db.yml"):
         workflow = (WORKFLOWS / name).read_text()
         assert "private_proxy.sh start" in workflow
