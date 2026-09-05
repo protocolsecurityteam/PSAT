@@ -292,7 +292,9 @@ def test_production_deploy_injects_private_health_secret_and_uses_cloudflare() -
     main = (WORKFLOWS / "main.yml").read_text()
     assert "PSAT_HEALTH_SECRET: ${{ secrets.PSAT_HEALTH_SECRET }}" in main
     assert "source.count(marker) != 1" in main
-    assert '--config "$RUNNER_TEMP/fly.production.toml"' in main
+    assert 'python - "$GITHUB_WORKSPACE/fly.production.toml"' in main
+    assert '--config "$GITHUB_WORKSPACE/fly.production.toml"' in main
+    assert "$RUNNER_TEMP/fly.production.toml" not in main
     assert "PROD_URL: https://snif.sh" in main
     assert "PSAT_ADMIN_KEY: ${{ secrets.PSAT_ADMIN_KEY }}" not in main
     assert "if: false" not in main
