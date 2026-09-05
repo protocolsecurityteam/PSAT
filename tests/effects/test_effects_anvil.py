@@ -32,6 +32,7 @@ from services.effects.config import (
     VERDICT_PROVEN,
     VERDICT_UNKNOWN,
 )
+from services.effects.exceptions import ForkRpcTimeoutError
 from services.effects.harness import SimContext
 from tests.support.effects_stubs import GUARDED, PAUSE, UNGATED, RecordingStore, StubAnvil
 from workers.effects_worker import _is_cacheable
@@ -548,6 +549,50 @@ def test_a_timelock_holding_no_asset_says_so_rather_than_moving_nothing():
 def test_build_anvil_cmd_nonforking_has_no_fork_flags():
     cmd = _build_anvil_cmd("anvil", 8546, "prague", None, {"X-ERPC-Secret-Token": "s"})
     assert "--fork-url" not in cmd and "--fork-header" not in cmd
+
+
+def test_deploy_waits_until_anvil_publishes_the_transaction_receipt(monkeypatch):
+    anvil = SubprocessAnvil.__new__(SubprocessAnvil)
+    contract = "0x" + "12" * 20
+    receipts = iter([None, {"contractAddress": contract}])
+    calls: list[tuple[str, list]] = []
+
+    def rpc(method, params):
+        calls.append((method, params))
+        if method == "eth_sendTransaction":
+            return "0xtx"
+        return next(receipts)
+
+    monkeypatch.setattr(anvil, "_rpc", rpc)
+    monkeypatch.setattr("services.effects.anvil.time.sleep", lambda _seconds: None)
+
+    assert anvil.deploy("0xsender", "0xbytecode") == contract
+    assert [method for method, _params in calls] == [
+        "eth_sendTransaction",
+        "eth_getTransactionReceipt",
+        "eth_getTransactionReceipt",
+    ]
+
+
+def test_deploy_rejects_a_mined_receipt_without_a_contract_address(monkeypatch):
+    anvil = SubprocessAnvil.__new__(SubprocessAnvil)
+    responses = iter(["0xtx", {"status": "0x0", "contractAddress": None}])
+    monkeypatch.setattr(anvil, "_rpc", lambda _method, _params: next(responses))
+
+    with pytest.raises(ForkRpcTimeoutError, match="has no contract address"):
+        anvil.deploy("0xsender", "0xbytecode")
+
+
+def test_deploy_times_out_when_the_receipt_never_appears(monkeypatch):
+    anvil = SubprocessAnvil.__new__(SubprocessAnvil)
+    calls = iter(["0xtx", None])
+    clocks = iter([0.0, 0.0, 16.0])
+    monkeypatch.setattr(anvil, "_rpc", lambda _method, _params: next(calls))
+    monkeypatch.setattr("services.effects.anvil.time.monotonic", lambda: next(clocks))
+    monkeypatch.setattr("services.effects.anvil.time.sleep", lambda _seconds: None)
+
+    with pytest.raises(ForkRpcTimeoutError, match="did not become available"):
+        anvil.deploy("0xsender", "0xbytecode")
 
 
 # ---------------------------------------------------------------------------

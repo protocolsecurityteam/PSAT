@@ -62,6 +62,8 @@ logger = logging.getLogger(__name__)
 # daemon, so a wedged read can never hold the process open).
 _OUTPUT_TAIL_LINES = 40
 _DRAIN_JOIN_TIMEOUT_S = 2.0
+_TRANSACTION_RECEIPT_TIMEOUT_S = 15.0
+_TRANSACTION_RECEIPT_POLL_INTERVAL_S = 0.05
 
 # Post-Cancun forks that carry EIP-6780 (and later) semantics. A fork pinned to
 # anything earlier can mint witnesses wrong for the live chain.
@@ -987,8 +989,16 @@ class SubprocessAnvil:
         new contract address. Used only by the offline integration test's fixture
         setup on a non-forking anvil."""
         tx_hash = self._rpc("eth_sendTransaction", [{"from": from_addr, "data": creation_bytecode}])
-        receipt = self._rpc("eth_getTransactionReceipt", [tx_hash])
-        return str(receipt["contractAddress"])
+        deadline = time.monotonic() + _TRANSACTION_RECEIPT_TIMEOUT_S
+        while time.monotonic() < deadline:
+            receipt = self._rpc("eth_getTransactionReceipt", [tx_hash])
+            if isinstance(receipt, dict):
+                contract_address = receipt.get("contractAddress")
+                if isinstance(contract_address, str):
+                    return contract_address
+                raise ForkRpcTimeoutError(f"anvil deployment receipt for {tx_hash} has no contract address")
+            time.sleep(_TRANSACTION_RECEIPT_POLL_INTERVAL_S)
+        raise ForkRpcTimeoutError(f"anvil deployment receipt for {tx_hash} did not become available")
 
     def accounts(self) -> list[str]:
         return list(self._rpc("eth_accounts", []))

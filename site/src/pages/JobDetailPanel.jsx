@@ -32,12 +32,12 @@ const LOKI_RANGE_BUFFER_MS = 60 * 60 * 1000;
 
 // Map a browser hostname back to the Fly app that produced the page.
 //   psat.fly.dev         → "psat"          (prod)
-//   psat-pr-90.fly.dev   → "psat-pr-90"    (preview)
+//   <preview>.flycast    → "<preview>"      (private preview over WireGuard)
 //   anything else        → null            (fall back to wildcard query)
 export function inferFlyApp(hostname) {
   if (!hostname) return null;
-  const m = hostname.match(/^(psat(?:-pr-\d+)?)\.fly\.dev$/);
-  return m ? m[1] : null;
+  const m = hostname.match(/^(psat(?:-pr-\d+)?)\.fly\.dev$|^([a-z0-9](?:[a-z0-9-]*[a-z0-9])?-pr-\d+)\.flycast$/);
+  return m ? (m[1] || m[2]) : null;
 }
 
 function parseIsoMs(value) {

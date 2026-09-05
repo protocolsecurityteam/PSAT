@@ -1,155 +1,88 @@
 name: PR comment commands
 
-# Listens for slash commands in PR comments and dispatches the matching
-# workflow. Only repo collaborators with write+ permission can trigger;
-# anyone else's comment is ignored. The workflow itself does no destructive
-# work — all of that lives in the dispatched workflows.
-#
-# Supported commands:
-#   /fork-prod    → fork-prod-to-pr.yml
-#   /reset-db     → reset-pr-db.yml
-#   /rerun-tests  → rerun-live-tests.yml
 on:
   issue_comment:
     types: [created]
 
 permissions:
-  contents: read
-  pull-requests: write
-  # Required so we can dispatch workflows via the API.
   actions: write
+  contents: read
+  issues: write
+  pull-requests: read
 
 jobs:
-  fork-prod:
-    if: github.event.issue.pull_request && contains(github.event.comment.body, '/fork-prod')
+  dispatch:
+    if: github.event.issue.pull_request
     runs-on: ubuntu-latest
     steps:
-      - name: Authorize commenter
-        # Reject if the commenter doesn't have write+ on the repo. Without this,
-        # any drive-by commenter could fire prod-touching actions.
+      - name: Authorize exact command and resolve trusted PR
+        id: request
         uses: actions/github-script@v7
         with:
           script: |
+            const command = context.payload.comment.body.trim();
+            const supported = new Map([
+              ['/reset-db', 'reset-pr-db.yml'],
+              ['/rerun-tests', 'rerun-live-tests.yml'],
+            ]);
+            if (command === '/fork-prod') {
+              core.setFailed('/fork-prod is disabled until the separately approved production-read credential and data policy exist');
+              return;
+            }
+            if (!supported.has(command)) {
+              core.setOutput('accepted', 'false');
+              return;
+            }
+
             const login = context.payload.comment.user.login;
-            const { data: perm } = await github.rest.repos.getCollaboratorPermissionLevel({
+            const { data: permission } = await github.rest.repos.getCollaboratorPermissionLevel({
               owner: context.repo.owner,
               repo: context.repo.repo,
               username: login,
             });
-            if (!['admin', 'maintain', 'write'].includes(perm.permission)) {
-              core.setFailed(`@${login} lacks write permission (got: ${perm.permission})`);
+            if (!['admin', 'maintain', 'write'].includes(permission.permission)) {
+              core.setFailed(`@${login} lacks write permission`);
+              return;
             }
 
-      - name: React to comment (rocket)
-        uses: actions/github-script@v7
-        with:
-          script: |
-            await github.rest.reactions.createForIssueComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              comment_id: context.payload.comment.id,
-              content: 'rocket',
-            });
-
-      - name: Dispatch fork workflow
-        # GITHUB_TOKEN can dispatch workflow_dispatch — this is one of the
-        # explicit exceptions to the "GITHUB_TOKEN events don't trigger
-        # downstream workflows" rule.
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh workflow run fork-prod-to-pr.yml \
-            --ref main \
-            -f pr_number="${{ github.event.issue.number }}" \
-            --repo "${{ github.repository }}"
-
-  reset-db:
-    if: github.event.issue.pull_request && contains(github.event.comment.body, '/reset-db')
-    runs-on: ubuntu-latest
-    steps:
-      - name: Authorize commenter
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const login = context.payload.comment.user.login;
-            const { data: perm } = await github.rest.repos.getCollaboratorPermissionLevel({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              username: login,
-            });
-            if (!['admin', 'maintain', 'write'].includes(perm.permission)) {
-              core.setFailed(`@${login} lacks write permission (got: ${perm.permission})`);
-            }
-
-      - name: React to comment (+1)
-        uses: actions/github-script@v7
-        with:
-          script: |
-            await github.rest.reactions.createForIssueComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              comment_id: context.payload.comment.id,
-              content: '+1',
-            });
-
-      - name: Dispatch reset-db workflow
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh workflow run reset-pr-db.yml \
-            --ref main \
-            -f pr_number="${{ github.event.issue.number }}" \
-            --repo "${{ github.repository }}"
-
-  rerun-tests:
-    if: github.event.issue.pull_request && contains(github.event.comment.body, '/rerun-tests')
-    runs-on: ubuntu-latest
-    steps:
-      - name: Authorize commenter
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const login = context.payload.comment.user.login;
-            const { data: perm } = await github.rest.repos.getCollaboratorPermissionLevel({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              username: login,
-            });
-            if (!['admin', 'maintain', 'write'].includes(perm.permission)) {
-              core.setFailed(`@${login} lacks write permission (got: ${perm.permission})`);
-            }
-
-      - name: React to comment (rocket)
-        uses: actions/github-script@v7
-        with:
-          script: |
-            await github.rest.reactions.createForIssueComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              comment_id: context.payload.comment.id,
-              content: 'rocket',
-            });
-
-      - name: Resolve PR head SHA
-        # The dispatched workflow needs the PR head to checkout matching test
-        # code and pin the raw.github audit fixture URL.
-        id: pr
-        uses: actions/github-script@v7
-        with:
-          script: |
             const { data: pr } = await github.rest.pulls.get({
               owner: context.repo.owner,
               repo: context.repo.repo,
               pull_number: context.payload.issue.number,
             });
+            if (pr.state !== 'open' || pr.base.ref !== 'main') {
+              core.setFailed('Preview commands require an open PR into main');
+              return;
+            }
+            if (pr.head.repo?.full_name !== `${context.repo.owner}/${context.repo.repo}`) {
+              core.setFailed('Privileged preview commands reject fork PRs');
+              return;
+            }
+            core.setOutput('workflow', supported.get(command));
+            core.setOutput('pr_number', String(pr.number));
             core.setOutput('head_sha', pr.head.sha);
+            core.setOutput('accepted', 'true');
 
-      - name: Dispatch rerun-tests workflow
+      - name: React to accepted command
+        if: steps.request.outputs.accepted == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.reactions.createForIssueComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: context.payload.comment.id,
+              content: 'rocket',
+            });
+
+      - name: Dispatch workflow from protected default branch
+        if: steps.request.outputs.accepted == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WORKFLOW: ${{ steps.request.outputs.workflow }}
+          PR_NUMBER: ${{ steps.request.outputs.pr_number }}
+          HEAD_SHA: ${{ steps.request.outputs.head_sha }}
         run: |
-          gh workflow run rerun-live-tests.yml \
-            --ref main \
-            -f pr_number="${{ github.event.issue.number }}" \
-            -f head_sha="${{ steps.pr.outputs.head_sha }}" \
-            --repo "${{ github.repository }}"
+          gh workflow run "$WORKFLOW" --ref main \
+            -f pr_number="$PR_NUMBER" -f head_sha="$HEAD_SHA" \
+            --repo "$GITHUB_REPOSITORY"

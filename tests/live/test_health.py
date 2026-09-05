@@ -10,8 +10,8 @@ import requests
 from tests.live.conftest import LiveClient
 
 
-def test_health_reports_ok(live_client: LiveClient):
-    r = live_client.health()
+def test_health_reports_ok(public_live_client: LiveClient):
+    r = public_live_client.health()
     assert r.status_code == 200, r.text
     body = r.json()
     assert body.get("status") == "ok"

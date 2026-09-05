@@ -19,24 +19,15 @@ if TYPE_CHECKING:
 
 
 def client_ip(request: Request) -> str:
-    """Trusted per-IP identity for rate limiting.
+    """Use only the boundary's verified visitor identity, otherwise the socket peer.
 
-    Invariant: a limiter must never be keyed on an attacker-controllable
-    value. Fly sets ``Fly-Client-IP`` to the real client and *appends* the
-    client to ``X-Forwarded-For`` — so the RIGHT-most XFF hop is the
-    least-forgeable fallback; the LEFT-most hop is fully client-supplied and
-    would hand every request a fresh bucket. When Cloudflare is later placed
-    in front, the trusted header becomes ``CF-Connecting-IP`` — not handled
-    here yet.
+    Uvicorn proxy-header rewriting must remain disabled. Local/private previews
+    intentionally ignore all forwarded headers; network access grants no identity.
     """
-    fly = request.headers.get("fly-client-ip")
-    if fly and fly.strip():
-        return fly.strip()
-    xff = request.headers.get("x-forwarded-for")
-    if xff:
-        hops = [h.strip() for h in xff.split(",") if h.strip()]
-        if hops:
-            return hops[-1]
+    state = getattr(request, "state", None)
+    trusted = getattr(state, "edge_visitor_ip", None)
+    if trusted:
+        return trusted
     client = getattr(request, "client", None)
     return client.host if client else "<unknown>"
 

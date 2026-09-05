@@ -217,7 +217,7 @@ def test_rotating_left_xff_hop_does_not_escape_limit(client):
     assert codes[3] == 429
 
 
-def test_client_ip_prefers_fly_then_rightmost_xff():
+def test_client_ip_ignores_untrusted_forwarding_headers():
     from types import SimpleNamespace
     from typing import cast
 
@@ -228,8 +228,8 @@ def test_client_ip_prefers_fly_then_rightmost_xff():
     def req(headers, host="1.1.1.1"):
         return cast(Request, SimpleNamespace(headers=headers, client=SimpleNamespace(host=host)))
 
-    assert client_ip(req({"fly-client-ip": "8.8.8.8", "x-forwarded-for": "1.2.3.4"})) == "8.8.8.8"
-    assert client_ip(req({"x-forwarded-for": "1.2.3.4, 5.6.7.8"})) == "5.6.7.8"
+    assert client_ip(req({"fly-client-ip": "8.8.8.8", "x-forwarded-for": "1.2.3.4"})) == "1.1.1.1"
+    assert client_ip(req({"x-forwarded-for": "1.2.3.4, 5.6.7.8"})) == "1.1.1.1"
     assert client_ip(req({})) == "1.1.1.1"
 
 

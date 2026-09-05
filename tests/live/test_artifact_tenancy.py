@@ -10,18 +10,26 @@ import requests
 
 from tests.live.conftest import LiveClient
 
-_PR_HOST_RE = re.compile(r"https?://psat-pr-(\d+)\.fly\.dev", re.IGNORECASE)
+_PR_HOST_RE = re.compile(r"https?://[a-z0-9-]*pr-(\d+)\.(?:fly\.dev|flycast)", re.IGNORECASE)
 
 
 def _other_pr_base_url(self_url: str) -> str | None:
     m = _PR_HOST_RE.match(self_url.rstrip("/"))
-    if not m:
+    self_pr = m.group(1) if m else os.environ.get("PSAT_LIVE_PR_NUMBER", "").strip()
+    if not re.fullmatch(r"[1-9][0-9]{0,5}", self_pr):
         return None
-    self_pr = m.group(1)
     other_pr = os.environ.get("PSAT_LIVE_OTHER_PR", "").strip()
     if not other_pr or other_pr == self_pr:
         return None
-    return f"https://psat-pr-{other_pr}.fly.dev"
+    explicit_url = os.environ.get("PSAT_LIVE_OTHER_URL", "").rstrip("/")
+    if not explicit_url:
+        return None
+    other_match = _PR_HOST_RE.fullmatch(explicit_url)
+    if other_match and other_match.group(1) != other_pr:
+        return None
+    if explicit_url.startswith("http://127.0.0.1:"):
+        return explicit_url
+    return explicit_url if other_match else None
 
 
 def _first_listed_run_name(base_url: str) -> str | None:
@@ -41,7 +49,8 @@ def test_other_prs_artifacts_not_readable(live_client: LiveClient, live_base_url
     other_url = _other_pr_base_url(live_base_url)
     if other_url is None:
         pytest.skip(
-            "no second preview available; set PSAT_LIVE_OTHER_PR=<pr_number> to enable cross-PR tenancy verification"
+            "no validated second preview route; set PSAT_LIVE_OTHER_PR and PSAT_LIVE_OTHER_URL "
+            "to a second authenticated private proxy"
         )
 
     other_run = _first_listed_run_name(other_url)

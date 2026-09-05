@@ -5,8 +5,8 @@ from __future__ import annotations
 from tests.live.conftest import LiveClient
 
 
-def test_list_monitored_contracts_shape(live_client: LiveClient):
-    rows = live_client.list_monitored_contracts()
+def test_list_monitored_contracts_shape(public_live_client: LiveClient):
+    rows = public_live_client.list_monitored_contracts()
     assert isinstance(rows, list)
     if not rows:
         return
@@ -15,8 +15,8 @@ def test_list_monitored_contracts_shape(live_client: LiveClient):
             assert key in row, f"monitored contract row missing {key!r}: {row}"
 
 
-def test_list_monitored_events_shape(live_client: LiveClient):
-    rows = live_client.list_monitored_events(limit=20)
+def test_list_monitored_events_shape(public_live_client: LiveClient):
+    rows = public_live_client.list_monitored_events(limit=20)
     assert isinstance(rows, list)
     for row in rows:
         for key in ("id", "monitored_contract_id", "event_type", "detected_at"):

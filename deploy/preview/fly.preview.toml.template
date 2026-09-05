@@ -1,0 +1,74 @@
+app = "__PSAT_PREVIEW_APP__"
+primary_region = "iad"
+kill_signal = "SIGTERM"
+kill_timeout = 30
+
+[build]
+  dockerfile = "deploy/Dockerfile"
+
+[env]
+  PORT = "8000"
+  PYTHONUNBUFFERED = "1"
+  PSAT_EDGE_MODE = "preview"
+  PSAT_EXA_CACHE = "1"
+  PSAT_TAVILY_CACHE = "1"
+  PSAT_EFFECTS_STAGE = "1"
+  PSAT_STATIC_WORKERS = "3"
+  PSAT_RESOLUTION_WORKERS = "2"
+  PSAT_POLICY_WORKERS = "3"
+  PSAT_POLICY_JOB_CONCURRENCY = "2"
+
+[deploy]
+  release_command = "uv run --no-sync alembic upgrade head"
+
+[processes]
+  web = "./deploy/start_web.sh"
+  workers = "./deploy/start_workers.sh"
+  browser = "./deploy/start_browser.sh"
+  monitor = "./deploy/start_monitor.sh"
+
+# Flycast is HTTP-only. Encryption and admission come from the authenticated
+# Fly private-network tunnel, while application admin checks remain in force.
+[http_service]
+  internal_port = 8000
+  force_https = false
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ["web"]
+
+  [http_service.concurrency]
+    type = "connections"
+    hard_limit = 100
+    soft_limit = 80
+
+  [[http_service.http_checks]]
+    method = "get"
+    path = "/api/health"
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "60s"
+
+[[vm]]
+  processes = ["web"]
+  size = "shared-cpu-1x"
+  memory = "512mb"
+
+[[vm]]
+  processes = ["workers"]
+  size = "shared-cpu-8x"
+  memory = "16gb"
+
+[[vm]]
+  processes = ["browser"]
+  size = "shared-cpu-2x"
+  memory = "2gb"
+
+[[vm]]
+  processes = ["monitor"]
+  size = "shared-cpu-1x"
+  memory = "512mb"
+
+[[restart]]
+  policy = "always"
+  processes = ["monitor"]

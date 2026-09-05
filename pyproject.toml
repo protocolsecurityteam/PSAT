@@ -29,6 +29,7 @@ dependencies = [
   # (deploy/Dockerfile installs the same pin on PATH).
   "vyper==0.3.10",
   "uvicorn>=0.42.0",
+  "pyjwt[crypto]>=2.12,<3",
 ]
 
 [dependency-groups]

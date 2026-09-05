@@ -97,8 +97,8 @@ ALLOW_LIST: dict[str, dict[int, str]] = {
         # Same fork-close-cleanup exemption class as the effects_worker entry
         # above: SubprocessAnvil.close() escalating SIGTERM → SIGKILL is a
         # resource outcome (port/pid), not a change to the stage's verdicts.
-        850: "Fork-close cleanup side-effect; SIGKILL escalation does not degrade the verdicts.",
-        861: "Fork-close cleanup side-effect; an unreaped pid does not degrade the verdicts.",
+        852: "Fork-close cleanup side-effect; SIGKILL escalation does not degrade the verdicts.",
+        863: "Fork-close cleanup side-effect; an unreaped pid does not degrade the verdicts.",
     },
     "services/resolution/repos/event_logs_rpc.py": {
         # Env-var parse, evaluated per call on every job of every worker in the
