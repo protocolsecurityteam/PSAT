@@ -26,7 +26,9 @@ jobs:
     environment: staging
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      FLY_API_TOKEN: ${{ secrets.FLY_STAGING_TUNNEL_TOKEN }}
+      # flyctl proxy reads the app's network before establishing WireGuard;
+      # the staging org token is the narrowest configured token with both grants.
+      FLY_API_TOKEN: ${{ secrets.FLY_STAGING_DEPLOY_TOKEN }}
       PSAT_STAGING_FLY_ORG: ${{ vars.PSAT_STAGING_FLY_ORG }}
       PSAT_PREVIEW_APP_PREFIX: ${{ vars.PSAT_PREVIEW_APP_PREFIX }}
       PR_NUMBER: ${{ inputs.pr_number }}
@@ -52,7 +54,7 @@ jobs:
       - name: Resolve and validate preview target
         id: plan
         run: |
-          : "${FLY_API_TOKEN:?Set staging secret FLY_STAGING_TUNNEL_TOKEN}"
+          : "${FLY_API_TOKEN:?Set staging secret FLY_STAGING_DEPLOY_TOKEN}"
           python -m deploy.preview.control plan --pr-number "$PR_NUMBER" \
             --organization "$PSAT_STAGING_FLY_ORG" --app-prefix "$PSAT_PREVIEW_APP_PREFIX" \
             --github-output "$GITHUB_OUTPUT"
@@ -61,8 +63,7 @@ jobs:
 
       - name: Open authenticated private proxy
         run: |
-          # The WireGuard-only token cannot enumerate or mutate Fly apps. The
-          # validated PR number, app prefix, and org determine the private route.
+          # The validated PR number, app prefix, and org determine the private route.
           deploy/preview/private_proxy.sh start "${{ steps.plan.outputs.app }}" \
             "$PSAT_STAGING_FLY_ORG" "$PROXY_PORT" "$RUNNER_TEMP/psat-private-proxy"
 

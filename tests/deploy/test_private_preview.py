@@ -146,7 +146,8 @@ def test_private_proxy_dry_run_is_bounded_and_rejects_injection(tmp_path: Path) 
         text=True,
     )
     assert result.stdout.strip() == (
-        "flyctl proxy 18080:80 psat-stage-pr-42.flycast --org psat-staging --bind-addr 127.0.0.1 --quiet"
+        "flyctl proxy 18080:80 psat-stage-pr-42.flycast --app psat-stage-pr-42 --org psat-staging "
+        "--bind-addr 127.0.0.1 --quiet"
     )
     bad = subprocess.run(
         [script, "--dry-run", "start", "psat-stage-pr-42;id", "psat-staging", "18080", str(tmp_path)],
@@ -232,7 +233,6 @@ def test_all_preview_lifecycle_workflows_keep_private_fly_boundary() -> None:
     assert "secrets.NEON_API_KEY" not in text
     assert "|| true" not in text
     assert "FLY_STAGING_DEPLOY_TOKEN" in text
-    assert "FLY_STAGING_TUNNEL_TOKEN" in text
     assert "secrets.PSAT_STAGING_ADMIN_KEY" in text
     assert "secrets.ARTIFACT_STORAGE_BUCKET" in text
     assert "TODO(security): replace these shared database/provider/storage" in text
@@ -254,12 +254,13 @@ def test_deploy_and_http_jobs_enforce_private_path() -> None:
         assert "http://127.0.0.1:" in workflow
 
 
-def test_tunnel_jobs_work_with_wireguard_only_token() -> None:
+def test_tunnel_jobs_use_staging_org_token_without_inventory_commands() -> None:
     pr = (WORKFLOWS / "pr.yml").read_text()
     live_job = pr.split("\n  live-tests:\n", 1)[1].split("\n  destroy-preview-workers:\n", 1)[0]
     rerun = (WORKFLOWS / "rerun-live-tests.yml").read_text()
     for workflow in (live_job, rerun):
-        assert "FLY_STAGING_TUNNEL_TOKEN" in workflow
+        assert "FLY_STAGING_DEPLOY_TOKEN" in workflow
+        assert "FLY_STAGING_TUNNEL_TOKEN" not in workflow
         assert "flyctl apps list" not in workflow
         assert "private_proxy.sh start" in workflow
 

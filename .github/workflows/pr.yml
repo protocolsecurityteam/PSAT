@@ -210,7 +210,9 @@ jobs:
     runs-on: ubuntu-latest
     environment: staging
     env:
-      FLY_API_TOKEN: ${{ secrets.FLY_STAGING_TUNNEL_TOKEN }}
+      # flyctl proxy reads the app's network before establishing WireGuard;
+      # the staging org token is the narrowest configured token with both grants.
+      FLY_API_TOKEN: ${{ secrets.FLY_STAGING_DEPLOY_TOKEN }}
       PSAT_STAGING_FLY_ORG: ${{ vars.PSAT_STAGING_FLY_ORG }}
       PSAT_PREVIEW_APP_PREFIX: ${{ vars.PSAT_PREVIEW_APP_PREFIX }}
       PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -222,9 +224,8 @@ jobs:
       - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1
       - name: Validate app and open authenticated private proxy
         run: |
-          : "${FLY_API_TOKEN:?Set staging secret FLY_STAGING_TUNNEL_TOKEN}"
-          # This job uses a WireGuard-only token, so it derives the bounded app
-          # name locally and cannot enumerate or mutate apps in the organization.
+          : "${FLY_API_TOKEN:?Set staging secret FLY_STAGING_DEPLOY_TOKEN}"
+          # Derive the bounded app name locally before flyctl reads its network.
           python -m deploy.preview.control plan --pr-number "$PR_NUMBER" \
             --organization "$PSAT_STAGING_FLY_ORG" --app-prefix "$PSAT_PREVIEW_APP_PREFIX"
           deploy/preview/private_proxy.sh start "${{ needs.deploy.outputs.app }}" \

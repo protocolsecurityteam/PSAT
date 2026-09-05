@@ -32,7 +32,7 @@ pid_file="$state_dir/fly-proxy.pid"
 log_file="$state_dir/fly-proxy.log"
 
 if (( dry_run )); then
-  printf '%q ' flyctl proxy "${port}:80" "${app}.flycast" --org "$organization" --bind-addr 127.0.0.1 --quiet
+  printf '%q ' flyctl proxy "${port}:80" "${app}.flycast" --app "$app" --org "$organization" --bind-addr 127.0.0.1 --quiet
   printf '\n'
   exit 0
 fi
@@ -64,7 +64,7 @@ fi
 
 [[ ! -e "$pid_file" ]] || { echo "proxy state already exists" >&2; exit 1; }
 : "${FLY_API_TOKEN:?FLY_API_TOKEN is required}"
-flyctl proxy "${port}:80" "${app}.flycast" --org "$organization" --bind-addr 127.0.0.1 --quiet >"$log_file" 2>&1 &
+flyctl proxy "${port}:80" "${app}.flycast" --app "$app" --org "$organization" --bind-addr 127.0.0.1 --quiet >"$log_file" 2>&1 &
 pid=$!
 printf '%s\n' "$pid" > "$pid_file"
 
