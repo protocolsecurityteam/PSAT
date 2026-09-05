@@ -1,192 +1,25 @@
-name: Fork prod DB to PR preview
+name: Fork prod DB to PR preview (disabled)
 
-# Manual workflow — run when you want a PR preview to render with prod-shape
-# data. Creates a Neon CoW branch from prod, points the preview's DATABASE_URL
-# at the branch's compute endpoint, and scales background workers to 0 so they
-# don't run real jobs (and burn API credits) against the cloned data.
-#
-# Web stays up. The branch is destroyed automatically when the PR closes (see
-# pr-cleanup.yml). Re-run this workflow to refresh the snapshot from prod.
 on:
   workflow_dispatch:
     inputs:
       pr_number:
-        description: "PR number whose preview should fork prod data"
+        description: "Open, same-repository PR number"
+        required: true
+        type: string
+      head_sha:
+        description: "Current PR head SHA"
         required: true
         type: string
 
-# Shared with pr.yml so fork and deploy serialize on the same preview.
-# cancel-in-progress: false → fork queues behind any in-progress deploy
-# rather than stomping its secrets/restarts. A subsequent push will cancel
-# this fork (pr.yml uses cancel-in-progress: true); rerun /fork-prod to
-# restore.
-concurrency:
-  group: preview-${{ inputs.pr_number }}
-  cancel-in-progress: false
-
 permissions:
   contents: read
-  pull-requests: write
 
 jobs:
-  fork:
+  disabled:
     runs-on: ubuntu-latest
-    environment: staging
-    env:
-      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-      NEON_API_KEY: ${{ secrets.NEON_API_KEY }}
-      # Hardcoded — Neon project IDs aren't sensitive and rarely change.
-      PROD_NEON_PROJECT_ID: morning-silence-94271256
-      PR_NUMBER: ${{ inputs.pr_number }}
-      APP_NAME: psat-pr-${{ inputs.pr_number }}
     steps:
-      - name: Setup flyctl
-        uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1
-
-      - name: Verify preview app exists
-        # Belt-and-suspenders: refuse to ever target the prod app, and bail if
-        # the preview app doesn't exist (mistyped PR number).
+      - name: Refuse production-data fork
         run: |
-          if [[ "$APP_NAME" == "psat" ]]; then
-            echo "::error::Refusing to fork onto prod app"
-            exit 1
-          fi
-          flyctl status -a "$APP_NAME" > /dev/null
-
-      - name: Stop background process groups
-        # workers/monitor/browser would otherwise pick up "in-flight" jobs from
-        # the cloned data and run them — hitting Etherscan/RPC/OpenRouter/Tavily
-        # for real. Web stays up so the preview URL keeps working.
-        run: |
-          for proc in workers monitor browser; do
-            flyctl machines list -a "$APP_NAME" --json \
-              | jq -r ".[] | select(.config.metadata.fly_process_group == \"$proc\" and .state != \"stopped\") | .id" \
-              | xargs -r -I{} flyctl machines stop {} -a "$APP_NAME" || true
-          done
-
-      - name: Create Neon branch from prod
-        id: branch
-        # Branch name encodes the PR + a timestamp so re-forks don't collide
-        # and pr-cleanup can match every fork-branch for a given PR with one
-        # prefix glob.
-        run: |
-          PROD_BRANCH=$(curl -sf -H "Authorization: Bearer $NEON_API_KEY" \
-            "https://console.neon.tech/api/v2/projects/$PROD_NEON_PROJECT_ID/branches" \
-            | jq -r '.branches[] | select(.primary == true) | .id')
-
-          if [[ -z "$PROD_BRANCH" || "$PROD_BRANCH" == "null" ]]; then
-            echo "::error::Could not find primary branch on prod project"
-            exit 1
-          fi
-
-          BRANCH_NAME="pr-${PR_NUMBER}-fork-$(date +%s)"
-          BODY=$(jq -nc \
-            --arg name "$BRANCH_NAME" \
-            --arg parent "$PROD_BRANCH" \
-            '{branch: {name: $name, parent_id: $parent}, endpoints: [{type: "read_write"}]}')
-
-          RESPONSE=$(curl -sf -X POST \
-            -H "Authorization: Bearer $NEON_API_KEY" \
-            -H "Content-Type: application/json" \
-            "https://console.neon.tech/api/v2/projects/$PROD_NEON_PROJECT_ID/branches" \
-            -d "$BODY")
-
-          BRANCH_ID=$(echo "$RESPONSE" | jq -r '.branch.id')
-          ENDPOINT_HOST=$(echo "$RESPONSE" | jq -r '.endpoints[0].host')
-
-          if [[ -z "$BRANCH_ID" || "$BRANCH_ID" == "null" || -z "$ENDPOINT_HOST" || "$ENDPOINT_HOST" == "null" ]]; then
-            echo "::error::Branch create returned unexpected shape: $RESPONSE"
-            exit 1
-          fi
-
-          echo "branch_id=$BRANCH_ID" >> $GITHUB_OUTPUT
-          echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
-          echo "endpoint_host=$ENDPOINT_HOST" >> $GITHUB_OUTPUT
-
-      - name: Reset role password and stage DATABASE_URL on preview
-        # Neon stores role passwords per-branch, so prod's neondb_owner
-        # password (which CI never has) doesn't apply to the fork. Reset it
-        # on the new branch to get a fresh password we can use for this
-        # preview only — prod's password is unaffected.
-        #
-        # --stage so we control when the secret applies — the next step
-        # uses `secrets deploy` which only rolls running machines (web),
-        # leaving the workers/monitor/browser we stopped earlier stopped.
-        run: |
-          BRANCH_ID="${{ steps.branch.outputs.branch_id }}"
-          # Retry: Neon returns 4xx on reset_password until the create-branch
-          # operations finish provisioning. A few seconds is usually enough.
-          PW_RESPONSE=""
-          for i in $(seq 1 24); do
-            if PW_RESPONSE=$(curl -sf -X POST \
-                -H "Authorization: Bearer $NEON_API_KEY" \
-                "https://console.neon.tech/api/v2/projects/$PROD_NEON_PROJECT_ID/branches/$BRANCH_ID/roles/neondb_owner/reset_password"); then
-              break
-            fi
-            echo "attempt $i: branch not ready, sleeping 5s"
-            sleep 5
-          done
-          NEW_PW=$(echo "$PW_RESPONSE" | jq -r '.role.password')
-          if [[ -z "$NEW_PW" || "$NEW_PW" == "null" ]]; then
-            echo "::error::Password reset returned unexpected shape: $PW_RESPONSE"
-            exit 1
-          fi
-          # Mask the password from logs before it gets used; even though
-          # `flyctl secrets set` won't echo it, defense in depth.
-          echo "::add-mask::$NEW_PW"
-          DB_URL="postgresql://neondb_owner:${NEW_PW}@${{ steps.branch.outputs.endpoint_host }}/neondb?sslmode=require"
-          flyctl secrets set --stage -a "$APP_NAME" DATABASE_URL="$DB_URL"
-
-      - name: Apply staged DATABASE_URL
-        # `flyctl machines restart` does NOT apply staged secrets — only
-        # `flyctl secrets deploy` (or a full deploy) does. This rolls only
-        # currently-running machines, so workers/monitor/browser that we
-        # stopped earlier stay stopped.
-        run: flyctl secrets deploy -a "$APP_NAME"
-
-      - name: Wait for preview /api/health
-        # Same 2-min ceiling pattern as pr.yml live-tests.
-        run: |
-          URL="https://$APP_NAME.fly.dev/api/health"
-          for i in $(seq 1 24); do
-            if curl -fsS --max-time 5 "$URL" >/dev/null; then
-              echo "preview healthy after attempt $i"
-              exit 0
-            fi
-            echo "attempt $i: $URL not healthy yet, sleeping 5s"
-            sleep 5
-          done
-          echo "::error::Preview never healthy at $URL after fork"
-          curl -v --max-time 5 "$URL" || true
+          echo "::error::/fork-prod is disabled. Configure a separately approved GitHub environment, a narrowly production-read Neon credential, snapshot sanitization, and exceptional-fork cleanup before enabling it."
           exit 1
-
-      - name: Delete prior fork branches for this PR
-        # Only after the new fork is healthy and serving traffic — otherwise
-        # we'd kill the old endpoint while web is still connected to it.
-        # The PR-close cleanup also globs these, but cleaning up here keeps
-        # idle Neon endpoints from accumulating across multiple /fork-prod
-        # refreshes during the same PR.
-        run: |
-          KEEP="${{ steps.branch.outputs.branch_id }}"
-          curl -sf -H "Authorization: Bearer $NEON_API_KEY" \
-            "https://console.neon.tech/api/v2/projects/$PROD_NEON_PROJECT_ID/branches" \
-            | jq -r ".branches[] | select(.name | startswith(\"pr-${PR_NUMBER}-fork-\")) | select(.id != \"$KEEP\") | .id" \
-            | while read OLD_ID; do
-                echo "Deleting prior fork branch: $OLD_ID"
-                curl -sf -X DELETE -H "Authorization: Bearer $NEON_API_KEY" \
-                  "https://console.neon.tech/api/v2/projects/$PROD_NEON_PROJECT_ID/branches/$OLD_ID" || true
-              done
-
-      - name: Post sticky comment
-        uses: marocchino/sticky-pull-request-comment@773744901bac0e8cbb5a0dc842800d45e9b2b405
-        with:
-          number: ${{ env.PR_NUMBER }}
-          header: psat-fork
-          message: |
-            ### :test_tube: Forked from prod
-
-            - **URL:** https://${{ env.APP_NAME }}.fly.dev
-            - **Neon branch:** `${{ steps.branch.outputs.branch_name }}` (auto-deleted when the PR closes)
-            - **Workers:** scaled to 0 against the forked data
-            - :warning: **Any push to this PR will undo the fork** (the deploy resets `DATABASE_URL` to the per-PR staging DB and restarts workers). Comment `/fork-prod` again to restore.
-            - **Refresh:** comment `/fork-prod` again to pull a newer prod snapshot

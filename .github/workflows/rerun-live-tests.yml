@@ -1,27 +1,17 @@
 name: Rerun live tests
 
-# Manual workflow — comment `/rerun-tests` on a PR to dispatch (see
-# pr-comment-commands.yml). Reruns `pytest -m live` against the existing
-# preview without rebuilding or redeploying. Useful when live tests flaked
-# or when /reset-db / /fork-prod left the preview in a different state and
-# you want to re-validate.
-#
-# Bypasses the path-filter gate that skips live tests on site-only PRs —
-# if the user explicitly asked, run them.
 on:
   workflow_dispatch:
     inputs:
       pr_number:
-        description: "PR number whose live tests should be rerun"
+        description: "Open, same-repository PR number"
         required: true
         type: string
       head_sha:
-        description: "PR head SHA — pins the audit fixture URL via raw.github"
+        description: "Current PR head SHA"
         required: true
         type: string
 
-# Shared with pr.yml / fork-prod-to-pr.yml / reset-pr-db.yml — don't run
-# tests against a preview that's mid-deploy or mid-reset.
 concurrency:
   group: preview-${{ inputs.pr_number }}
   cancel-in-progress: false
@@ -35,62 +25,84 @@ jobs:
     runs-on: ubuntu-latest
     environment: staging
     env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      FLY_API_TOKEN: ${{ secrets.FLY_STAGING_TUNNEL_TOKEN }}
+      PSAT_STAGING_FLY_ORG: ${{ vars.PSAT_STAGING_FLY_ORG }}
+      PSAT_PREVIEW_APP_PREFIX: ${{ vars.PSAT_PREVIEW_APP_PREFIX }}
       PR_NUMBER: ${{ inputs.pr_number }}
-      APP_NAME: psat-pr-${{ inputs.pr_number }}
-      PREVIEW_URL: https://psat-pr-${{ inputs.pr_number }}.fly.dev
+      INPUT_HEAD_SHA: ${{ inputs.head_sha }}
+      PROXY_PORT: "18080"
     steps:
       - uses: actions/checkout@v4
+
+      - name: Validate dispatch target against GitHub
+        id: target
+        run: |
+          python -c 'from deploy.preview.control import parse_pr_number; import sys; parse_pr_number(sys.argv[1])' "$PR_NUMBER"
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" > "$RUNNER_TEMP/pr.json"
+          python -m deploy.preview.control validate-pr-record \
+            --record "$RUNNER_TEMP/pr.json" --pr-number "$PR_NUMBER" \
+            --repository "$GITHUB_REPOSITORY" --head-sha "$INPUT_HEAD_SHA" \
+            --github-output "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
         with:
-          # Pin to the PR head so test code matches the deployed code.
-          ref: ${{ inputs.head_sha }}
+          ref: ${{ steps.target.outputs.head_sha }}
+
+      - name: Resolve and validate preview target
+        id: plan
+        run: |
+          : "${FLY_API_TOKEN:?Set staging secret FLY_STAGING_TUNNEL_TOKEN}"
+          python -m deploy.preview.control plan --pr-number "$PR_NUMBER" \
+            --organization "$PSAT_STAGING_FLY_ORG" --app-prefix "$PSAT_PREVIEW_APP_PREFIX" \
+            --github-output "$GITHUB_OUTPUT"
+
+      - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1
+
+      - name: Open authenticated private proxy
+        run: |
+          # The WireGuard-only token cannot enumerate or mutate Fly apps. The
+          # validated PR number, app prefix, and org determine the private route.
+          deploy/preview/private_proxy.sh start "${{ steps.plan.outputs.app }}" \
+            "$PSAT_STAGING_FLY_ORG" "$PROXY_PORT" "$RUNNER_TEMP/psat-private-proxy"
+
+      - name: Wait for preview health over private proxy
+        run: |
+          for attempt in $(seq 1 24); do
+            if curl -fsS --max-time 5 "http://127.0.0.1:$PROXY_PORT/api/health" >/dev/null; then
+              echo "preview healthy after attempt $attempt"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::Preview never became healthy over its private Flycast route"
+          exit 1
 
       - uses: astral-sh/setup-uv@v5
       - run: uv sync --dev
 
-      - name: Wait for preview /api/health
-        run: |
-          URL="$PREVIEW_URL/api/health"
-          # 2 min ceiling: cold-start is 30-60s; past that the preview is unhealthy.
-          for i in $(seq 1 24); do
-            if curl -fsS --max-time 5 "$URL" >/dev/null; then
-              echo "preview healthy after attempt $i"
-              exit 0
-            fi
-            echo "attempt $i: $URL not healthy yet, sleeping 5s"
-            sleep 5
-          done
-          echo "::error::Preview never healthy at $URL"
-          curl -v --max-time 5 "$URL" || true
-          exit 1
-
-      - name: Run live suite
+      - name: Run live suite through private proxy
         env:
-          PSAT_LIVE_URL: ${{ env.PREVIEW_URL }}
-          PSAT_ADMIN_KEY: ${{ secrets.PSAT_ADMIN_KEY }}
-          # Pin to PR head SHA via raw.github — stable in git history regardless of renames.
-          PSAT_LIVE_AUDIT_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ inputs.head_sha }}/tests/fixtures/audits/sample_audit.pdf
+          PSAT_LIVE_URL: http://127.0.0.1:18080
+          PSAT_LIVE_SITE_ORIGIN: ${{ steps.plan.outputs.private_url }}
+          PSAT_LIVE_PR_NUMBER: ${{ env.PR_NUMBER }}
+          PSAT_ADMIN_KEY: ${{ secrets.PSAT_STAGING_ADMIN_KEY }}
+          PSAT_LIVE_SUPPORTED_CHAIN_IDS: "1,8453"
+          PSAT_LIVE_AUDIT_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ steps.target.outputs.head_sha }}/tests/fixtures/audits/sample_audit.pdf
         run: uv run --no-sync pytest -m live -q
 
-      - name: Post sticky result (success)
-        if: success()
+      - name: Close private proxy
+        if: always() && steps.plan.outputs.app != ''
+        run: deploy/preview/private_proxy.sh stop "${{ steps.plan.outputs.app }}" "$PSAT_STAGING_FLY_ORG" "$PROXY_PORT" "$RUNNER_TEMP/psat-private-proxy"
+
+      - name: Post sticky result
+        if: always()
         uses: marocchino/sticky-pull-request-comment@773744901bac0e8cbb5a0dc842800d45e9b2b405
         with:
           number: ${{ env.PR_NUMBER }}
           header: psat-live-tests
           message: |
-            ### :white_check_mark: Live integration tests passed (manual rerun)
+            ### Manual live test rerun: `${{ job.status }}`
 
-            - **Preview:** ${{ env.PREVIEW_URL }}
-            - **Run:** [#${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
-
-      - name: Post sticky result (failure)
-        if: failure()
-        uses: marocchino/sticky-pull-request-comment@773744901bac0e8cbb5a0dc842800d45e9b2b405
-        with:
-          number: ${{ env.PR_NUMBER }}
-          header: psat-live-tests
-          message: |
-            ### :x: Live integration tests failed (manual rerun)
-
-            - **Preview:** ${{ env.PREVIEW_URL }}
-            - **Run:** [#${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            Tests reached `${{ steps.plan.outputs.app }}` only through an authenticated Fly private proxy.
+            [Workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})

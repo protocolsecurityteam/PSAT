@@ -1,20 +1,12 @@
 name: PR
 
-# Strict sequential chain via `needs:` — no workflow_run, no parallel firing.
-#   1. ci          (lint, typecheck, frontend-test, test+coverage)
-#   2. deploy      (Fly preview + Neon DB; runs only on ci success)
-#   3. live-tests  (pytest -m live against the preview; runs only on deploy success)
 on:
   pull_request:
     branches: [main]
 
-# Latest push wins; the whole chain (ci/deploy/live-tests) cancels together.
-# Shared with fork-prod-to-pr.yml so a deploy and a /fork-prod can't race on
-# the preview's secrets and machines — a push during fork cancels the fork
-# (rerun /fork-prod after); a fork during deploy queues behind the deploy.
 concurrency:
   group: preview-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -26,193 +18,253 @@ jobs:
 
   deploy:
     needs: ci
-    # Forks lack secrets — skip cleanly. Fork PRs still get ci above.
     if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     environment: staging
     outputs:
-      app: ${{ steps.fly.outputs.app }}
-      url: ${{ steps.fly.outputs.url }}
+      app: ${{ steps.plan.outputs.app }}
+      private_url: ${{ steps.plan.outputs.private_url }}
     env:
-      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-      NEON_STAGING_HOST: ${{ secrets.NEON_STAGING_HOST }}
-      NEON_STAGING_POOLER_HOST: ${{ secrets.NEON_STAGING_POOLER_HOST }}
-      NEON_STAGING_USER: ${{ secrets.NEON_STAGING_USER }}
-      NEON_STAGING_PASSWORD: ${{ secrets.NEON_STAGING_PASSWORD }}
+      FLY_API_TOKEN: ${{ secrets.FLY_STAGING_DEPLOY_TOKEN }}
+      PSAT_STAGING_FLY_ORG: ${{ vars.PSAT_STAGING_FLY_ORG }}
+      PSAT_PREVIEW_APP_PREFIX: ${{ vars.PSAT_PREVIEW_APP_PREFIX }}
+      # TODO(security): replace these shared database/provider/storage values
+      # with independently scoped staging keys after the private Fly cutover.
+      PSAT_STAGING_DB_RUNTIME_ROLE: ${{ secrets.NEON_STAGING_USER }}
+      NEON_STAGING_ADMIN_HOST: ${{ secrets.NEON_STAGING_HOST }}
+      NEON_STAGING_ADMIN_USER: ${{ secrets.NEON_STAGING_USER }}
+      NEON_STAGING_ADMIN_PASSWORD: ${{ secrets.NEON_STAGING_PASSWORD }}
+      NEON_STAGING_RUNTIME_POOLER_HOST: ${{ secrets.NEON_STAGING_POOLER_HOST }}
+      NEON_STAGING_RUNTIME_USER: ${{ secrets.NEON_STAGING_USER }}
+      NEON_STAGING_RUNTIME_PASSWORD: ${{ secrets.NEON_STAGING_PASSWORD }}
       PR_NUMBER: ${{ github.event.pull_request.number }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
 
-      - name: Compute Fly app + URL
-        id: fly
+      - name: Validate isolated staging configuration
+        id: plan
         run: |
-          APP="psat-pr-${PR_NUMBER}"
-          echo "app=$APP" >> $GITHUB_OUTPUT
-          echo "url=https://${APP}.fly.dev" >> $GITHUB_OUTPUT
+          : "${FLY_API_TOKEN:?Set staging secret FLY_STAGING_DEPLOY_TOKEN}"
+          : "${PSAT_STAGING_FLY_ORG:?Set staging variable PSAT_STAGING_FLY_ORG}"
+          : "${PSAT_PREVIEW_APP_PREFIX:?Set staging variable PSAT_PREVIEW_APP_PREFIX}"
+          : "${PSAT_STAGING_DB_RUNTIME_ROLE:?Set existing staging secret NEON_STAGING_USER}"
+          : "${NEON_STAGING_ADMIN_HOST:?Set staging-only Neon administrator host}"
+          : "${NEON_STAGING_ADMIN_USER:?Set staging-only Neon administrator user}"
+          : "${NEON_STAGING_ADMIN_PASSWORD:?Set staging-only Neon administrator password}"
+          : "${NEON_STAGING_RUNTIME_POOLER_HOST:?Set staging runtime pooler host}"
+          : "${NEON_STAGING_RUNTIME_USER:?Set staging runtime user}"
+          : "${NEON_STAGING_RUNTIME_PASSWORD:?Set staging runtime password}"
+          python -m deploy.preview.control plan \
+            --pr-number "$PR_NUMBER" --organization "$PSAT_STAGING_FLY_ORG" \
+            --app-prefix "$PSAT_PREVIEW_APP_PREFIX" --github-output "$GITHUB_OUTPUT"
+          python -c 'from deploy.preview.control import validate_runtime_role; import sys; validate_runtime_role(sys.argv[1])' \
+            "$PSAT_STAGING_DB_RUNTIME_ROLE"
+          [[ "$NEON_STAGING_RUNTIME_USER" == "$PSAT_STAGING_DB_RUNTIME_ROLE" ]] || {
+            echo "::error::Runtime database user must match PSAT_STAGING_DB_RUNTIME_ROLE"
+            exit 1
+          }
 
       - name: Setup flyctl
         uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1
 
-      - name: Create Fly app if missing
-        run: flyctl apps create "${{ steps.fly.outputs.app }}" --org personal || true
+      - name: Inspect preview app ownership
+        id: inventory
+        run: |
+          flyctl apps list --org "$PSAT_STAGING_FLY_ORG" --json > "$RUNNER_TEMP/fly-apps.json"
+          python -m deploy.preview.control validate-app-inventory \
+            --pr-number "$PR_NUMBER" --organization "$PSAT_STAGING_FLY_ORG" \
+            --app-prefix "$PSAT_PREVIEW_APP_PREFIX" --inventory "$RUNNER_TEMP/fly-apps.json" \
+            --allow-missing --github-output "$GITHUB_OUTPUT"
+
+      - name: Create preview app in staging organization
+        if: steps.inventory.outputs.exists == 'false'
+        run: flyctl apps create "${{ steps.plan.outputs.app }}" --org "$PSAT_STAGING_FLY_ORG" --yes
+
+      - name: Verify preview app ownership
+        run: |
+          flyctl apps list --org "$PSAT_STAGING_FLY_ORG" --json > "$RUNNER_TEMP/fly-apps-after-create.json"
+          python -m deploy.preview.control validate-app-inventory \
+            --pr-number "$PR_NUMBER" --organization "$PSAT_STAGING_FLY_ORG" \
+            --app-prefix "$PSAT_PREVIEW_APP_PREFIX" --inventory "$RUNNER_TEMP/fly-apps-after-create.json"
+
+      - name: Reject public ingress on an existing app
+        if: steps.inventory.outputs.exists == 'true'
+        run: |
+          flyctl ips list -a "${{ steps.plan.outputs.app }}" --json > "$RUNNER_TEMP/fly-ips-before.json"
+          python -m deploy.preview.control validate-ip-inventory \
+            --inventory "$RUNNER_TEMP/fly-ips-before.json" --allow-empty
 
       - name: Create per-PR Neon database
         env:
           PGPASSWORD: ${{ secrets.NEON_STAGING_PASSWORD }}
+          PREVIEW_DATABASE: ${{ steps.plan.outputs.database }}
         run: |
-          # CREATE DATABASE must hit the direct compute endpoint (pgbouncer txn mode blocks admin).
-          psql "sslmode=require host=$NEON_STAGING_HOST user=$NEON_STAGING_USER dbname=neondb" \
-            -c "CREATE DATABASE \"psat_pr_${PR_NUMBER}\";" || true
+          role_exists=$(psql "sslmode=require host=$NEON_STAGING_ADMIN_HOST user=$NEON_STAGING_ADMIN_USER dbname=neondb" \
+            -v ON_ERROR_STOP=1 -Atc "SELECT 1 FROM pg_roles WHERE rolname = '$PSAT_STAGING_DB_RUNTIME_ROLE'")
+          [[ "$role_exists" == "1" ]] || { echo "::error::Staging runtime role is missing"; exit 1; }
+          database_exists=$(psql "sslmode=require host=$NEON_STAGING_ADMIN_HOST user=$NEON_STAGING_ADMIN_USER dbname=neondb" \
+            -v ON_ERROR_STOP=1 -Atc "SELECT 1 FROM pg_database WHERE datname = '$PREVIEW_DATABASE'")
+          if [[ "$database_exists" != "1" ]]; then
+            psql "sslmode=require host=$NEON_STAGING_ADMIN_HOST user=$NEON_STAGING_ADMIN_USER dbname=neondb" \
+              -v ON_ERROR_STOP=1 -c "CREATE DATABASE \"$PREVIEW_DATABASE\" OWNER \"$PSAT_STAGING_DB_RUNTIME_ROLE\";"
+          fi
 
-      - name: Stage Fly secrets
+      - name: Stage preview runtime secrets
+        env:
+          APP_NAME: ${{ steps.plan.outputs.app }}
+          PREVIEW_DATABASE: ${{ steps.plan.outputs.database }}
+          PRIVATE_URL: ${{ steps.plan.outputs.private_url }}
+          PSAT_DATABASE_PASSWORD: ${{ secrets.NEON_STAGING_PASSWORD }}
+          PSAT_STAGING_ADMIN_KEY: ${{ secrets.PSAT_STAGING_ADMIN_KEY }}
+          STAGING_ETHERSCAN_API_KEY: ${{ secrets.ETHERSCAN_API_KEY }}
+          STAGING_ERPC_BASE_URL: ${{ secrets.ERPC_BASE_URL }}
+          STAGING_ERPC_SECRET: ${{ secrets.ERPC_SECRET }}
+          STAGING_ENVIO_API_TOKEN: ${{ secrets.ENVIO_API_TOKEN }}
+          STAGING_TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+          STAGING_EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
+          STAGING_OPEN_ROUTER_KEY: ${{ secrets.OPEN_ROUTER_KEY }}
+          STAGING_PROTOCOL_GITHUB_TOKEN: ${{ secrets.PROTOCOL_GITHUB_TOKEN }}
+          STAGING_ARTIFACT_STORAGE_ENDPOINT: ${{ secrets.ARTIFACT_STORAGE_ENDPOINT }}
+          STAGING_ARTIFACT_STORAGE_BUCKET: ${{ secrets.ARTIFACT_STORAGE_BUCKET }}
+          STAGING_ARTIFACT_STORAGE_ACCESS_KEY: ${{ secrets.ARTIFACT_STORAGE_ACCESS_KEY }}
+          STAGING_ARTIFACT_STORAGE_SECRET_KEY: ${{ secrets.ARTIFACT_STORAGE_SECRET_KEY }}
         run: |
-          # App uses the pooler so N previews × ~10 workers don't blow Neon's connection cap.
-          DB_URL="postgresql://${NEON_STAGING_USER}:${NEON_STAGING_PASSWORD}@${NEON_STAGING_POOLER_HOST}/psat_pr_${PR_NUMBER}?sslmode=require"
-          flyctl secrets set --stage -a "${{ steps.fly.outputs.app }}" \
-            DATABASE_URL="$DB_URL" \
-            PSAT_ADMIN_KEY="${{ secrets.PSAT_ADMIN_KEY }}" \
-            PSAT_EDGE_MODE="preview" \
-            PSAT_SITE_ORIGIN="${{ steps.fly.outputs.url }}" \
-            ETHERSCAN_API_KEY="${{ secrets.ETHERSCAN_API_KEY }}" \
-            ERPC_BASE_URL="${{ secrets.ERPC_BASE_URL }}" \
-            ERPC_SECRET="${{ secrets.ERPC_SECRET }}" \
-            ENVIO_API_TOKEN="${{ secrets.ENVIO_API_TOKEN }}" \
-            TAVILY_API_KEY="${{ secrets.TAVILY_API_KEY }}" \
-            PSAT_TAVILY_CACHE="1" \
-            EXA_API_KEY="${{ secrets.EXA_API_KEY }}" \
-            PSAT_EXA_CACHE="1" \
-            OPEN_ROUTER_KEY="${{ secrets.OPEN_ROUTER_KEY }}" \
-            GITHUB_TOKEN="${{ secrets.PROTOCOL_GITHUB_TOKEN }}" \
-            ARTIFACT_STORAGE_ENDPOINT="${{ secrets.ARTIFACT_STORAGE_ENDPOINT }}" \
-            ARTIFACT_STORAGE_BUCKET="${{ secrets.ARTIFACT_STORAGE_BUCKET }}" \
-            ARTIFACT_STORAGE_ACCESS_KEY="${{ secrets.ARTIFACT_STORAGE_ACCESS_KEY }}" \
-            ARTIFACT_STORAGE_SECRET_KEY="${{ secrets.ARTIFACT_STORAGE_SECRET_KEY }}" \
-            ARTIFACT_STORAGE_PREFIX="pr-${PR_NUMBER}/" \
+          required=(PSAT_STAGING_ADMIN_KEY STAGING_ETHERSCAN_API_KEY STAGING_ERPC_BASE_URL STAGING_ERPC_SECRET
+            STAGING_ENVIO_API_TOKEN STAGING_TAVILY_API_KEY STAGING_EXA_API_KEY STAGING_OPEN_ROUTER_KEY
+            STAGING_PROTOCOL_GITHUB_TOKEN STAGING_ARTIFACT_STORAGE_ENDPOINT STAGING_ARTIFACT_STORAGE_BUCKET
+            STAGING_ARTIFACT_STORAGE_ACCESS_KEY STAGING_ARTIFACT_STORAGE_SECRET_KEY)
+          for name in "${required[@]}"; do
+            [[ -n "${!name:-}" ]] || { echo "::error::Missing staging secret $name"; exit 1; }
+          done
+          DB_URL=$(python -m deploy.preview.control database-url \
+            --user "$NEON_STAGING_RUNTIME_USER" --host "$NEON_STAGING_RUNTIME_POOLER_HOST" \
+            --database "$PREVIEW_DATABASE")
+          flyctl secrets set --stage -a "$APP_NAME" \
+            DATABASE_URL="$DB_URL" PSAT_ADMIN_KEY="$PSAT_STAGING_ADMIN_KEY" \
+            PSAT_EDGE_MODE="preview" PSAT_SITE_ORIGIN="$PRIVATE_URL" \
+            ETHERSCAN_API_KEY="$STAGING_ETHERSCAN_API_KEY" \
+            ERPC_BASE_URL="$STAGING_ERPC_BASE_URL" ERPC_SECRET="$STAGING_ERPC_SECRET" \
+            ENVIO_API_TOKEN="$STAGING_ENVIO_API_TOKEN" TAVILY_API_KEY="$STAGING_TAVILY_API_KEY" \
+            PSAT_TAVILY_CACHE="1" EXA_API_KEY="$STAGING_EXA_API_KEY" PSAT_EXA_CACHE="1" \
+            OPEN_ROUTER_KEY="$STAGING_OPEN_ROUTER_KEY" GITHUB_TOKEN="$STAGING_PROTOCOL_GITHUB_TOKEN" \
+            ARTIFACT_STORAGE_ENDPOINT="$STAGING_ARTIFACT_STORAGE_ENDPOINT" \
+            ARTIFACT_STORAGE_BUCKET="$STAGING_ARTIFACT_STORAGE_BUCKET" \
+            ARTIFACT_STORAGE_ACCESS_KEY="$STAGING_ARTIFACT_STORAGE_ACCESS_KEY" \
+            ARTIFACT_STORAGE_SECRET_KEY="$STAGING_ARTIFACT_STORAGE_SECRET_KEY" \
+            ARTIFACT_STORAGE_PREFIX="${{ steps.plan.outputs.artifact_prefix }}" \
             PSAT_SUPPORTED_CHAIN_IDS="1,8453"
 
-      - name: Generate preview-specific fly config
-        # Identical to fly.toml except min_machines_running = 0 so idle previews
-        # suspend fully. Prod's fly.toml keeps ≥1 web machine warm.
-        run: sed 's/^  min_machines_running = 1$/  min_machines_running = 0/' fly.toml > fly-preview.toml
-
-      - name: Deploy preview
+      - name: Generate private preview Fly configuration
         run: |
-          flyctl deploy -a "${{ steps.fly.outputs.app }}" \
-            --config fly-preview.toml \
-            --remote-only \
-            --ha=false \
+          python -m deploy.preview.control render-config \
+            --pr-number "$PR_NUMBER" --organization "$PSAT_STAGING_FLY_ORG" \
+            --app-prefix "$PSAT_PREVIEW_APP_PREFIX" \
+            --template deploy/preview/fly.preview.toml.template --output "$RUNNER_TEMP/fly-preview.toml"
+
+      - name: Deploy private preview
+        run: |
+          flyctl deploy -a "${{ steps.plan.outputs.app }}" --config "$RUNNER_TEMP/fly-preview.toml" \
+            --remote-only --flycast --no-public-ips --ha=false \
             --build-arg GIT_SHA="${{ github.event.pull_request.head.sha }}"
 
-      - name: Start non-web process groups
-        # Defensive: after destroy-preview-workers, the next deploy recreates
-        # these machines in started state, so this is usually a no-op. Kept
-        # for the edge case where a machine exists but was left stopped (e.g.
-        # manual intervention). auto_start_machines in fly.toml only applies
-        # to web, so we can't rely on it for these process groups.
+      - name: Verify private-only Fly addresses
         run: |
-          APP="${{ steps.fly.outputs.app }}"
+          flyctl ips list -a "${{ steps.plan.outputs.app }}" --json > "$RUNNER_TEMP/fly-ips.json"
+          python -m deploy.preview.control validate-ip-inventory --inventory "$RUNNER_TEMP/fly-ips.json"
+
+      - name: Start non-web process groups
+        run: |
           for proc in workers browser monitor; do
-            flyctl machines list -a "$APP" --json \
-              | jq -r ".[] | select(.config.metadata.fly_process_group == \"$proc\" and .state == \"stopped\") | .id" \
-              | xargs -r -I{} flyctl machines start {} -a "$APP"
+            mapfile -t machines < <(flyctl machines list -a "${{ steps.plan.outputs.app }}" --json \
+              | jq -r ".[] | select(.config.metadata.fly_process_group == \"$proc\" and .state == \"stopped\") | .id")
+            for machine in "${machines[@]}"; do
+              flyctl machines start "$machine" -a "${{ steps.plan.outputs.app }}"
+            done
           done
 
-      - name: Post sticky preview comment
+      - name: Post private preview instructions
         uses: marocchino/sticky-pull-request-comment@773744901bac0e8cbb5a0dc842800d45e9b2b405
         with:
           number: ${{ env.PR_NUMBER }}
           header: psat-preview
           message: |
-            ### :rocket: PSAT preview deployed
+            ### :lock: PSAT private preview deployed
 
-            - **URL:** ${{ steps.fly.outputs.url }}
-            - **Health:** ${{ steps.fly.outputs.url }}/api/health
-            - **Fly app:** `${{ steps.fly.outputs.app }}`
-            - **Neon DB:** `psat_pr_${{ env.PR_NUMBER }}` (staging pooler)
-            - **Artifact prefix:** `pr-${{ env.PR_NUMBER }}/` (shared staging bucket)
+            - **Fly app:** `${{ steps.plan.outputs.app }}` in `${{ env.PSAT_STAGING_FLY_ORG }}`
+            - **Neon DB:** `${{ steps.plan.outputs.database }}` in the staging project
+            - **Artifact prefix:** `${{ steps.plan.outputs.artifact_prefix }}` in the staging-only bucket
 
-            This environment is torn down automatically when the PR closes.
+            Authorized operators: authenticate with the staging Fly access token, run
+            `flyctl proxy 8080:80 ${{ steps.plan.outputs.app }}.flycast --org ${{ env.PSAT_STAGING_FLY_ORG }}`,
+            then open `http://127.0.0.1:8080`. The private route does not bypass the PSAT admin key.
 
   live-tests:
     needs: [ci, deploy]
-    # Skip on site-only PRs (no Python or CI-config changes) — saves the
-    # OpenRouter / Etherscan / Tavily / RPC spend that the live suite incurs.
-    # Explicit fork gate retained — don't rely solely on transitive skip
-    # from deploy when forks lack secrets.
     if: |
       github.event.pull_request.head.repo.full_name == github.repository &&
       (needs.ci.outputs.python == 'true' || needs.ci.outputs.ci-config == 'true')
     runs-on: ubuntu-latest
     environment: staging
+    env:
+      FLY_API_TOKEN: ${{ secrets.FLY_STAGING_TUNNEL_TOKEN }}
+      PSAT_STAGING_FLY_ORG: ${{ vars.PSAT_STAGING_FLY_ORG }}
+      PSAT_PREVIEW_APP_PREFIX: ${{ vars.PSAT_PREVIEW_APP_PREFIX }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      PROXY_PORT: "18080"
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
-
-      - name: Wait for preview /api/health
+      - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1
+      - name: Validate app and open authenticated private proxy
         run: |
-          URL="${{ needs.deploy.outputs.url }}/api/health"
-          # 2 min ceiling: cold-start is 30-60s; past that the deploy is unhealthy.
-          for i in $(seq 1 24); do
-            if curl -fsS --max-time 5 "$URL" >/dev/null; then
-              echo "preview healthy after attempt $i"
+          : "${FLY_API_TOKEN:?Set staging secret FLY_STAGING_TUNNEL_TOKEN}"
+          # This job uses a WireGuard-only token, so it derives the bounded app
+          # name locally and cannot enumerate or mutate apps in the organization.
+          python -m deploy.preview.control plan --pr-number "$PR_NUMBER" \
+            --organization "$PSAT_STAGING_FLY_ORG" --app-prefix "$PSAT_PREVIEW_APP_PREFIX"
+          deploy/preview/private_proxy.sh start "${{ needs.deploy.outputs.app }}" \
+            "$PSAT_STAGING_FLY_ORG" "$PROXY_PORT" "$RUNNER_TEMP/psat-private-proxy"
+      - name: Wait for preview health over private proxy
+        run: |
+          for attempt in $(seq 1 24); do
+            if curl -fsS --max-time 5 "http://127.0.0.1:$PROXY_PORT/api/health" >/dev/null; then
+              echo "preview healthy after attempt $attempt"
               exit 0
             fi
-            echo "attempt $i: $URL not healthy yet, sleeping 5s"
             sleep 5
           done
-          echo "::error::Preview never healthy at $URL"
-          curl -v --max-time 5 "$URL" || true
+          echo "::error::Preview never became healthy over its private Flycast route"
           exit 1
-
       - uses: astral-sh/setup-uv@v5
       - run: uv sync --dev
-
-      - name: Run live suite
+      - name: Run live suite through private proxy
         env:
-          PSAT_LIVE_URL: ${{ needs.deploy.outputs.url }}
-          PSAT_ADMIN_KEY: ${{ secrets.PSAT_ADMIN_KEY }}
-          # Runner-side mirror of the preview deploy's PSAT_SUPPORTED_CHAIN_IDS: lets
-          # chain-gated live tests (tests/live/test_base_chain.py) run instead of skip.
+          PSAT_LIVE_URL: http://127.0.0.1:18080
+          PSAT_LIVE_SITE_ORIGIN: ${{ needs.deploy.outputs.private_url }}
+          PSAT_LIVE_PR_NUMBER: ${{ env.PR_NUMBER }}
+          PSAT_ADMIN_KEY: ${{ secrets.PSAT_STAGING_ADMIN_KEY }}
           PSAT_LIVE_SUPPORTED_CHAIN_IDS: "1,8453"
-          # Pin to PR head SHA via raw.github — stable in git history regardless of renames.
           PSAT_LIVE_AUDIT_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.event.pull_request.head.sha }}/tests/fixtures/audits/sample_audit.pdf
         run: uv run pytest -m live -q
-
-      - name: Post sticky result (success)
-        if: success()
+      - name: Close private proxy
+        if: always()
+        run: deploy/preview/private_proxy.sh stop "${{ needs.deploy.outputs.app }}" "$PSAT_STAGING_FLY_ORG" "$PROXY_PORT" "$RUNNER_TEMP/psat-private-proxy"
+      - name: Post sticky result
+        if: always()
         uses: marocchino/sticky-pull-request-comment@773744901bac0e8cbb5a0dc842800d45e9b2b405
         with:
-          number: ${{ github.event.pull_request.number }}
+          number: ${{ env.PR_NUMBER }}
           header: psat-live-tests
           message: |
-            ### :white_check_mark: Live integration tests passed
+            ### Live integration tests: `${{ job.status }}`
 
-            - **Preview:** ${{ needs.deploy.outputs.url }}
-            - **Run:** [#${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
-
-      - name: Post sticky result (failure)
-        if: failure()
-        uses: marocchino/sticky-pull-request-comment@773744901bac0e8cbb5a0dc842800d45e9b2b405
-        with:
-          number: ${{ github.event.pull_request.number }}
-          header: psat-live-tests
-          message: |
-            ### :x: Live integration tests failed
-
-            - **Preview:** ${{ needs.deploy.outputs.url }}
-            - **Run:** [#${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            Tests reached `${{ needs.deploy.outputs.app }}` only through an authenticated Fly private proxy.
+            [Workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
 
   destroy-preview-workers:
-    # Destroy workers/browser/monitor whenever deploy actually ran. Skips only
-    # when deploy itself was skipped (fork PRs, CI failures). Own concurrency
-    # group with cancel-in-progress=false so a follow-up push can't cancel
-    # this cleanup mid-flight. We destroy (not stop) because stopped machines
-    # still count against Fly's concurrent-machine quota, which becomes the
-    # binding constraint with several PRs open at once. The next push's deploy
-    # recreates these machines from fly.toml fresh.
     needs: [deploy, live-tests]
     if: always() && needs.deploy.result != 'skipped'
     concurrency:
@@ -221,18 +273,29 @@ jobs:
     runs-on: ubuntu-latest
     environment: staging
     env:
-      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      FLY_API_TOKEN: ${{ secrets.FLY_STAGING_DEPLOY_TOKEN }}
+      PSAT_STAGING_FLY_ORG: ${{ vars.PSAT_STAGING_FLY_ORG }}
+      PSAT_PREVIEW_APP_PREFIX: ${{ vars.PSAT_PREVIEW_APP_PREFIX }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
       - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1
-      - name: Destroy machines
-        # Destroys background process groups only. `web` is intentionally
-        # excluded so the preview URL stays reachable for manual inspection
-        # (Fly auto-suspends it via min_machines_running=0 once idle).
-        # `--force` allows destroying running machines without a separate stop.
+      - name: Validate target and destroy background machines
         run: |
-          APP="psat-pr-${{ github.event.pull_request.number }}"
+          python -m deploy.preview.control plan --pr-number "$PR_NUMBER" \
+            --organization "$PSAT_STAGING_FLY_ORG" --app-prefix "$PSAT_PREVIEW_APP_PREFIX" \
+            --github-output "$RUNNER_TEMP/plan-output"
+          APP=$(sed -n 's/^app=//p' "$RUNNER_TEMP/plan-output")
+          flyctl apps list --org "$PSAT_STAGING_FLY_ORG" --json > "$RUNNER_TEMP/fly-apps.json"
+          python -m deploy.preview.control validate-app-inventory --pr-number "$PR_NUMBER" \
+            --organization "$PSAT_STAGING_FLY_ORG" --app-prefix "$PSAT_PREVIEW_APP_PREFIX" \
+            --inventory "$RUNNER_TEMP/fly-apps.json"
           for proc in workers browser monitor; do
-            flyctl machines list -a "$APP" --json \
-              | jq -r ".[] | select(.config.metadata.fly_process_group == \"$proc\") | .id" \
-              | xargs -r -I{} flyctl machines destroy {} -a "$APP" --force || true
+            mapfile -t machines < <(flyctl machines list -a "$APP" --json \
+              | jq -r ".[] | select(.config.metadata.fly_process_group == \"$proc\") | .id")
+            for machine in "${machines[@]}"; do
+              flyctl machines destroy "$machine" -a "$APP" --force
+            done
           done

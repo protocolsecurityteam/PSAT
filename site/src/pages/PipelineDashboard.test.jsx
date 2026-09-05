@@ -752,6 +752,7 @@ describe("inferFlyApp", () => {
     expect(inferFlyApp("psat.fly.dev")).toBe("psat");
     expect(inferFlyApp("psat-pr-1.fly.dev")).toBe("psat-pr-1");
     expect(inferFlyApp("psat-pr-123.fly.dev")).toBe("psat-pr-123");
+    expect(inferFlyApp("psat-stage-pr-123.flycast")).toBe("psat-stage-pr-123");
     expect(inferFlyApp("localhost")).toBeNull();
     expect(inferFlyApp("example.com")).toBeNull();
     expect(inferFlyApp("evil-psat.fly.dev.attacker.com")).toBeNull();

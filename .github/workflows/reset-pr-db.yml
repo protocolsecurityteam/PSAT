@@ -1,23 +1,17 @@
 name: Reset PR preview DB
 
-# Manual workflow — comment `/reset-db` on a PR to dispatch (see
-# pr-comment-commands.yml). Drops the per-PR Neon DB, recreates it, runs
-# `alembic upgrade head`, and restarts the preview machines so they reconnect
-# with a fresh schema.
-#
-# Always points DATABASE_URL at the per-PR staging DB. If the preview was
-# previously /fork-prod'd, the fork is undone — comment `/fork-prod` again
-# to restore.
 on:
   workflow_dispatch:
     inputs:
       pr_number:
-        description: "PR number whose preview DB should be wiped"
+        description: "Open, same-repository PR number"
+        required: true
+        type: string
+      head_sha:
+        description: "Current PR head SHA"
         required: true
         type: string
 
-# Shared with pr.yml and fork-prod-to-pr.yml — serializes deploys, forks,
-# and resets on the same preview's secrets and machines.
 concurrency:
   group: preview-${{ inputs.pr_number }}
   cancel-in-progress: false
@@ -31,95 +25,130 @@ jobs:
     runs-on: ubuntu-latest
     environment: staging
     env:
-      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-      NEON_STAGING_HOST: ${{ secrets.NEON_STAGING_HOST }}
-      NEON_STAGING_POOLER_HOST: ${{ secrets.NEON_STAGING_POOLER_HOST }}
-      NEON_STAGING_USER: ${{ secrets.NEON_STAGING_USER }}
-      NEON_STAGING_PASSWORD: ${{ secrets.NEON_STAGING_PASSWORD }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      FLY_API_TOKEN: ${{ secrets.FLY_STAGING_DEPLOY_TOKEN }}
+      PSAT_STAGING_FLY_ORG: ${{ vars.PSAT_STAGING_FLY_ORG }}
+      PSAT_PREVIEW_APP_PREFIX: ${{ vars.PSAT_PREVIEW_APP_PREFIX }}
+      PSAT_STAGING_DB_RUNTIME_ROLE: ${{ secrets.NEON_STAGING_USER }}
+      NEON_STAGING_ADMIN_HOST: ${{ secrets.NEON_STAGING_HOST }}
+      NEON_STAGING_ADMIN_USER: ${{ secrets.NEON_STAGING_USER }}
+      NEON_STAGING_RUNTIME_HOST: ${{ secrets.NEON_STAGING_HOST }}
+      NEON_STAGING_RUNTIME_POOLER_HOST: ${{ secrets.NEON_STAGING_POOLER_HOST }}
+      NEON_STAGING_RUNTIME_USER: ${{ secrets.NEON_STAGING_USER }}
       PR_NUMBER: ${{ inputs.pr_number }}
-      APP_NAME: psat-pr-${{ inputs.pr_number }}
+      INPUT_HEAD_SHA: ${{ inputs.head_sha }}
+      PROXY_PORT: "18080"
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup flyctl
-        uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1
-
-      - name: Verify preview app exists
-        # Belt-and-suspenders: refuse to ever target the prod app, and bail
-        # if the preview doesn't exist (mistyped PR number).
+      - name: Validate dispatch target against GitHub
+        id: target
         run: |
-          if [[ "$APP_NAME" == "psat" ]]; then
-            echo "::error::Refusing to target prod app"
-            exit 1
-          fi
-          flyctl status -a "$APP_NAME" > /dev/null
+          python -c 'from deploy.preview.control import parse_pr_number; import sys; parse_pr_number(sys.argv[1])' "$PR_NUMBER"
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" > "$RUNNER_TEMP/pr.json"
+          python -m deploy.preview.control validate-pr-record \
+            --record "$RUNNER_TEMP/pr.json" --pr-number "$PR_NUMBER" \
+            --repository "$GITHUB_REPOSITORY" --head-sha "$INPUT_HEAD_SHA" \
+            --github-output "$GITHUB_OUTPUT"
 
-      - name: Stop all preview machines
-        # Drain connections so DROP DATABASE WITH FORCE doesn't have to fight
-        # active uvicorn/worker pools, and prevent writes during the reset.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.target.outputs.head_sha }}
+
+      - name: Resolve preview target
+        id: plan
         run: |
-          flyctl machines list -a "$APP_NAME" --json \
-            | jq -r '.[] | select(.state != "stopped") | .id' \
-            | xargs -r -I{} flyctl machines stop {} -a "$APP_NAME" || true
+          : "${FLY_API_TOKEN:?Set staging secret FLY_STAGING_DEPLOY_TOKEN}"
+          : "${NEON_STAGING_ADMIN_HOST:?Set staging-only Neon administrator host}"
+          : "${NEON_STAGING_ADMIN_USER:?Set staging-only Neon administrator user}"
+          : "${NEON_STAGING_RUNTIME_HOST:?Set staging runtime direct host}"
+          : "${NEON_STAGING_RUNTIME_POOLER_HOST:?Set staging runtime pooler host}"
+          : "${NEON_STAGING_RUNTIME_USER:?Set staging runtime user}"
+          : "${PSAT_STAGING_DB_RUNTIME_ROLE:?Set staging runtime database role}"
+          [[ "$NEON_STAGING_RUNTIME_USER" == "$PSAT_STAGING_DB_RUNTIME_ROLE" ]] || exit 1
+          python -c 'from deploy.preview.control import validate_runtime_role; import sys; validate_runtime_role(sys.argv[1])' \
+            "$PSAT_STAGING_DB_RUNTIME_ROLE"
+          python -m deploy.preview.control plan --pr-number "$PR_NUMBER" \
+            --organization "$PSAT_STAGING_FLY_ORG" --app-prefix "$PSAT_PREVIEW_APP_PREFIX" \
+            --github-output "$GITHUB_OUTPUT"
 
-      - name: Stage per-PR staging DATABASE_URL
-        # If the preview was forked, DATABASE_URL points at a Neon CoW branch.
-        # Reset always returns to the per-PR staging DB so behavior is
-        # predictable. --stage so subsequent secret writes don't auto-restart;
-        # we restart explicitly below after migrations are applied.
+      - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1
+
+      - name: Verify preview app ownership
         run: |
-          DB_URL="postgresql://${NEON_STAGING_USER}:${NEON_STAGING_PASSWORD}@${NEON_STAGING_POOLER_HOST}/psat_pr_${PR_NUMBER}?sslmode=require"
-          flyctl secrets set --stage -a "$APP_NAME" DATABASE_URL="$DB_URL"
+          flyctl apps list --org "$PSAT_STAGING_FLY_ORG" --json > "$RUNNER_TEMP/fly-apps.json"
+          python -m deploy.preview.control validate-app-inventory --pr-number "$PR_NUMBER" \
+            --organization "$PSAT_STAGING_FLY_ORG" --app-prefix "$PSAT_PREVIEW_APP_PREFIX" \
+            --inventory "$RUNNER_TEMP/fly-apps.json"
 
-      - name: Drop and recreate per-PR database
+      - name: Stop preview machines
+        run: |
+          mapfile -t machines < <(flyctl machines list -a "${{ steps.plan.outputs.app }}" --json \
+            | jq -r '.[] | select(.state != "stopped") | .id')
+          for machine in "${machines[@]}"; do
+            flyctl machines stop "$machine" -a "${{ steps.plan.outputs.app }}"
+          done
+
+      - name: Restore staging runtime database secret
+        env:
+          PSAT_DATABASE_PASSWORD: ${{ secrets.NEON_STAGING_PASSWORD }}
+        run: |
+          : "${PSAT_DATABASE_PASSWORD:?Set staging runtime database password}"
+          DB_URL=$(python -m deploy.preview.control database-url \
+            --user "$NEON_STAGING_RUNTIME_USER" --host "$NEON_STAGING_RUNTIME_POOLER_HOST" \
+            --database "${{ steps.plan.outputs.database }}")
+          flyctl secrets set --stage -a "${{ steps.plan.outputs.app }}" DATABASE_URL="$DB_URL"
+
+      - name: Drop and recreate exact staging database
         env:
           PGPASSWORD: ${{ secrets.NEON_STAGING_PASSWORD }}
+          PREVIEW_DATABASE: ${{ steps.plan.outputs.database }}
         run: |
-          # WITH (FORCE) terminates any lingering connections from machines
-          # that didn't cleanly shut down. Hits the direct compute endpoint —
-          # pgbouncer txn mode blocks DDL.
-          psql "sslmode=require host=$NEON_STAGING_HOST user=$NEON_STAGING_USER dbname=neondb" \
-            -c "DROP DATABASE IF EXISTS \"psat_pr_${PR_NUMBER}\" WITH (FORCE);"
-          psql "sslmode=require host=$NEON_STAGING_HOST user=$NEON_STAGING_USER dbname=neondb" \
-            -c "CREATE DATABASE \"psat_pr_${PR_NUMBER}\";"
+          : "${PGPASSWORD:?Set staging-only Neon administrator password}"
+          psql "sslmode=require host=$NEON_STAGING_ADMIN_HOST user=$NEON_STAGING_ADMIN_USER dbname=neondb" \
+            -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS \"$PREVIEW_DATABASE\" WITH (FORCE);"
+          psql "sslmode=require host=$NEON_STAGING_ADMIN_HOST user=$NEON_STAGING_ADMIN_USER dbname=neondb" \
+            -v ON_ERROR_STOP=1 -c "CREATE DATABASE \"$PREVIEW_DATABASE\" OWNER \"$PSAT_STAGING_DB_RUNTIME_ROLE\";"
 
       - uses: astral-sh/setup-uv@v5
       - run: uv sync --dev
 
-      - name: Apply migrations
-        # Run alembic from the runner against the freshly-recreated DB. The
-        # app's release_command also runs alembic, but invoking flyctl deploy
-        # would trigger a full rebuild — slower and unnecessary since the
-        # image hasn't changed.
+      - name: Apply migrations with staging runtime credentials
         env:
-          DATABASE_URL: postgresql://${{ secrets.NEON_STAGING_USER }}:${{ secrets.NEON_STAGING_PASSWORD }}@${{ secrets.NEON_STAGING_HOST }}/psat_pr_${{ inputs.pr_number }}?sslmode=require
-        run: uv run --no-sync alembic upgrade head
+          PSAT_DATABASE_PASSWORD: ${{ secrets.NEON_STAGING_PASSWORD }}
+        run: |
+          DATABASE_URL=$(python -m deploy.preview.control database-url \
+            --user "$NEON_STAGING_RUNTIME_USER" --host "$NEON_STAGING_RUNTIME_HOST" \
+            --database "${{ steps.plan.outputs.database }}")
+          export DATABASE_URL
+          uv run --no-sync alembic upgrade head
 
       - name: Start preview machines
-        # Picks up the staged DATABASE_URL on boot. Web auto-starts on first
-        # request via auto_start_machines, but we kick everything explicitly
-        # so workers/monitor/browser come back too.
         run: |
-          flyctl machines list -a "$APP_NAME" --json \
-            | jq -r '.[] | select(.state == "stopped") | .id' \
-            | xargs -r -I{} flyctl machines start {} -a "$APP_NAME"
+          mapfile -t machines < <(flyctl machines list -a "${{ steps.plan.outputs.app }}" --json \
+            | jq -r '.[] | select(.state == "stopped") | .id')
+          for machine in "${machines[@]}"; do
+            flyctl machines start "$machine" -a "${{ steps.plan.outputs.app }}"
+          done
 
-      - name: Wait for preview /api/health
-        # Same 2-min ceiling pattern as pr.yml live-tests. Confirms the new
-        # connection pool reaches the migrated DB before we declare success.
+      - name: Open authenticated private proxy
+        run: deploy/preview/private_proxy.sh start "${{ steps.plan.outputs.app }}" "$PSAT_STAGING_FLY_ORG" "$PROXY_PORT" "$RUNNER_TEMP/psat-private-proxy"
+
+      - name: Wait for preview health over private proxy
         run: |
-          URL="https://$APP_NAME.fly.dev/api/health"
-          for i in $(seq 1 24); do
-            if curl -fsS --max-time 5 "$URL" >/dev/null; then
-              echo "preview healthy after attempt $i"
+          for attempt in $(seq 1 24); do
+            if curl -fsS --max-time 5 "http://127.0.0.1:$PROXY_PORT/api/health" >/dev/null; then
+              echo "preview healthy after attempt $attempt"
               exit 0
             fi
-            echo "attempt $i: $URL not healthy yet, sleeping 5s"
             sleep 5
           done
-          echo "::error::Preview never healthy at $URL after reset"
-          curl -v --max-time 5 "$URL" || true
+          echo "::error::Preview never became healthy after database reset"
           exit 1
+
+      - name: Close private proxy
+        if: always() && steps.plan.outputs.app != ''
+        run: deploy/preview/private_proxy.sh stop "${{ steps.plan.outputs.app }}" "$PSAT_STAGING_FLY_ORG" "$PROXY_PORT" "$RUNNER_TEMP/psat-private-proxy"
 
       - name: Post sticky comment
         uses: marocchino/sticky-pull-request-comment@773744901bac0e8cbb5a0dc842800d45e9b2b405
@@ -127,10 +156,8 @@ jobs:
           number: ${{ env.PR_NUMBER }}
           header: psat-reset-db
           message: |
-            ### :recycle: Preview DB reset
+            ### :recycle: Private preview DB reset
 
-            - **DB:** `psat_pr_${{ env.PR_NUMBER }}` (dropped, recreated, migrated to head)
-            - **URL:** https://${{ env.APP_NAME }}.fly.dev
-            - **Run:** [#${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
-
-            > Any prior `/fork-prod` is undone — `DATABASE_URL` now points at the per-PR staging DB. Comment `/fork-prod` to restore the prod fork.
+            `${{ steps.plan.outputs.database }}` was recreated in staging and migrated to this PR head.
+            The health check passed through an authenticated private proxy.
+            [Workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
