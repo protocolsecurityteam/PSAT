@@ -39,9 +39,10 @@ jobs:
         id: deploy
         # Runtime secrets are managed manually via `fly secrets set -a psat ...`; this workflow doesn't touch them.
         # GIT_SHA is baked into the image so /api/version can return it for post-deploy smoke checks.
+        # Fly resolves relative build paths from the config file, so keep the generated config at the workspace root.
         run: |
           : "${PSAT_HEALTH_SECRET:?Set production secret PSAT_HEALTH_SECRET}"
-          python - "$RUNNER_TEMP/fly.production.toml" <<'PY'
+          python - "$GITHUB_WORKSPACE/fly.production.toml" <<'PY'
           import os
           import re
           import sys
@@ -56,7 +57,7 @@ jobs:
               raise SystemExit("fly.toml health-secret marker is missing or repeated")
           Path(sys.argv[1]).write_text(source.replace(marker, secret))
           PY
-          flyctl deploy -a psat --config "$RUNNER_TEMP/fly.production.toml" --remote-only \
+          flyctl deploy -a psat --config "$GITHUB_WORKSPACE/fly.production.toml" --remote-only \
             --build-arg GIT_SHA="${{ github.sha }}"
 
       - name: Wait for /api/health
@@ -120,7 +121,7 @@ jobs:
             exit 1
           fi
           echo "rolling back to $PREV_IMAGE"
-          flyctl deploy -a psat --config "$RUNNER_TEMP/fly.production.toml" \
+          flyctl deploy -a psat --config "$GITHUB_WORKSPACE/fly.production.toml" \
             --image "$PREV_IMAGE" --remote-only --strategy immediate || {
             echo "::error::Rollback deploy failed; manual intervention required"
             exit 1
