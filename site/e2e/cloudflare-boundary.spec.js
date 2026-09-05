@@ -11,7 +11,7 @@ test("anonymous browsing, origin denial, and both operator credentials", async (
   expect((await company.json()).company).toBe("Example");
 
   await page.getByRole("button", { name: "Menu", exact: true }).click();
-  await expect(page.getByRole("link", { name: "Operator sign in" })).toHaveAttribute("href", "/operator/?admin=1");
+  await expect(page.getByRole("link", { name: "Operator sign in" })).toHaveCount(0);
   const keyOnly = await request.get("/api/jobs", { headers: { "X-PSAT-Admin-Key": "test-admin-key" } });
   expect(keyOnly.status()).toBe(403);
   expect(keyOnly.headers()["cache-control"]).toBe("private, no-store");
