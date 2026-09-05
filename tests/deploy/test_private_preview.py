@@ -278,6 +278,21 @@ def test_fork_prod_is_disabled_and_production_deploy_stays_paused() -> None:
     assert "if: false" in main
 
 
+def test_production_deploy_injects_private_health_secret_and_uses_cloudflare() -> None:
+    config = tomli.loads((ROOT / "fly.toml").read_text())
+    assert config["env"]["PSAT_EDGE_MODE"] == "cloudflare"
+    assert config["env"]["PSAT_SITE_ORIGIN"] == "https://snif.sh"
+    check = config["http_service"]["http_checks"][0]
+    assert check["headers"]["X-PSAT-Health-Secret"] == "REPLACE_WITH_PSAT_HEALTH_SECRET"
+
+    main = (WORKFLOWS / "main.yml").read_text()
+    assert "PSAT_HEALTH_SECRET: ${{ secrets.PSAT_HEALTH_SECRET }}" in main
+    assert "source.count(marker) != 1" in main
+    assert '--config "$RUNNER_TEMP/fly.production.toml"' in main
+    assert "PROD_URL: https://snif.sh" in main
+    assert "PSAT_ADMIN_KEY: ${{ secrets.PSAT_ADMIN_KEY }}" not in main
+
+
 def test_comment_commands_are_exact_and_revalidate_pr() -> None:
     commands = (WORKFLOWS / "pr-comment-commands.yml").read_text()
     assert "comment.body.trim()" in commands

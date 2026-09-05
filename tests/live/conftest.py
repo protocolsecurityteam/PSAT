@@ -44,7 +44,8 @@ class LiveClient:
     def __init__(self, base_url: str, admin_key: str) -> None:
         self.base_url = base_url.rstrip("/")
         self._session = requests.Session()
-        self._session.headers.update({"X-PSAT-Admin-Key": admin_key})
+        if admin_key:
+            self._session.headers.update({"X-PSAT-Admin-Key": admin_key})
         # Retry idempotent reads on transient 5xx. Previews occasionally return
         # a one-shot 500 when a worker commits and the read lands mid-refresh
         # (e.g. ``/api/analyses`` right after a fixture finishes). 3 retries
@@ -442,26 +443,26 @@ class LiveClient:
 # ---------------------------------------------------------------------------
 
 
-# Files whose tests are provably read-only AND environment-agnostic — i.e. their
-# assertions don't depend on preview-specific config or pre-existing prod state.
-# These get @pytest.mark.smoke so `pytest -m "live and smoke"` can run against
-# prod post-deploy without touching real data and without false positives from
-# unrelated drift.
+# Tests that are provably read-only, environment-agnostic, and anonymous. These
+# get @pytest.mark.smoke so production CI can exercise the public Cloudflare path
+# without a human Access session or admin key.
 #
 # Audited 2026-04-24:
-# - test_health.py: pure GETs (/api/health, /api/config, /api/stats, /, /assets)
-# - test_monitoring_reads.py: GET monitoring/event/proxy-event lists, shape-only
-# - test_auth_and_errors.py: 4 tests; 2 GETs, 2 POSTs that 401/400 BEFORE any
-#   DB write (admin-key dependency + 0x-prefix check both run pre-handler-body)
+# - selected test_health.py checks: GET /api/health, /, and /assets
+# - test_monitoring_reads.py: public GET monitoring/event lists, shape-only
+# - selected test_auth_and_errors.py check: anonymous POST denied before any write
 #
 # Deliberately excluded from smoke (still run on PR previews via `live` marker):
 # - test_cors.py: asserts ACAO == preview's own origin; prod uses a custom origin
 # - test_pipeline_health.py: flags wedged jobs, which is pre-existing state, not
 #   a deploy regression — would cause false rollbacks
-SMOKE_SAFE_FILES = {
-    "test_health.py",
-    "test_monitoring_reads.py",
-    "test_auth_and_errors.py",
+SMOKE_SAFE_TESTS = {
+    ("test_health.py", "test_health_reports_ok"),
+    ("test_health.py", "test_spa_fallback_serves_frontend"),
+    ("test_health.py", "test_frontend_assets_served"),
+    ("test_monitoring_reads.py", "test_list_monitored_contracts_shape"),
+    ("test_monitoring_reads.py", "test_list_monitored_events_shape"),
+    ("test_auth_and_errors.py", "test_analyze_without_admin_key_rejected"),
 }
 
 
@@ -475,7 +476,7 @@ def pytest_collection_modifyitems(config, items):
         if "/tests/live/" not in path and "\\tests\\live\\" not in path:
             continue
         item.add_marker(live_mark)
-        if os.path.basename(path) in SMOKE_SAFE_FILES:
+        if (os.path.basename(path), item.name) in SMOKE_SAFE_TESTS:
             item.add_marker(smoke_mark)
 
 
@@ -497,11 +498,17 @@ def live_client(live_base_url: str, live_admin_key: str) -> LiveClient:
     return LiveClient(live_base_url, live_admin_key)
 
 
+@pytest.fixture(scope="session")
+def public_live_client(live_base_url: str) -> LiveClient:
+    return LiveClient(live_base_url, "")
+
+
 @pytest.fixture(scope="session", autouse=True)
-def _require_live_api(live_client: LiveClient):
+def _require_live_api(live_base_url: str):
     """Health-gate the entire live suite once per session."""
-    if not live_client.is_healthy():
-        pytest.skip(f"API not reachable at {live_client.base_url}")
+    client = LiveClient(live_base_url, "")
+    if not client.is_healthy():
+        pytest.skip(f"API not reachable at {client.base_url}")
 
 
 @pytest.fixture(scope="session")

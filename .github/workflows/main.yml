@@ -29,7 +29,8 @@ jobs:
     environment: production
     env:
       FLY_API_TOKEN: ${{ secrets.FLY_PROD_API_TOKEN }}
-      PROD_URL: https://psat.fly.dev
+      PSAT_HEALTH_SECRET: ${{ secrets.PSAT_HEALTH_SECRET }}
+      PROD_URL: https://snif.sh
     steps:
       - uses: actions/checkout@v4
 
@@ -41,7 +42,23 @@ jobs:
         # Runtime secrets are managed manually via `fly secrets set -a psat ...`; this workflow doesn't touch them.
         # GIT_SHA is baked into the image so /api/version can return it for post-deploy smoke checks.
         run: |
-          flyctl deploy -a psat --remote-only \
+          : "${PSAT_HEALTH_SECRET:?Set production secret PSAT_HEALTH_SECRET}"
+          python - "$RUNNER_TEMP/fly.production.toml" <<'PY'
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          secret = os.environ["PSAT_HEALTH_SECRET"]
+          if not re.fullmatch(r"[a-f0-9]{64}", secret):
+              raise SystemExit("PSAT_HEALTH_SECRET must be a random 32-byte hex secret")
+          source = Path("fly.toml").read_text()
+          marker = "REPLACE_WITH_PSAT_HEALTH_SECRET"
+          if source.count(marker) != 1:
+              raise SystemExit("fly.toml health-secret marker is missing or repeated")
+          Path(sys.argv[1]).write_text(source.replace(marker, secret))
+          PY
+          flyctl deploy -a psat --config "$RUNNER_TEMP/fly.production.toml" --remote-only \
             --build-arg GIT_SHA="${{ github.sha }}"
 
       - name: Wait for /api/health
@@ -87,7 +104,6 @@ jobs:
         # No /api/analyze, no PUT/PATCH/DELETE — safe against real data.
         env:
           PSAT_LIVE_URL: ${{ env.PROD_URL }}
-          PSAT_ADMIN_KEY: ${{ secrets.PSAT_ADMIN_KEY }}
         run: uv run pytest -m "live and smoke" -q
 
       - name: Rollback prod on smoke failure
@@ -106,7 +122,8 @@ jobs:
             exit 1
           fi
           echo "rolling back to $PREV_IMAGE"
-          flyctl deploy -a psat --image "$PREV_IMAGE" --remote-only --strategy immediate || {
+          flyctl deploy -a psat --config "$RUNNER_TEMP/fly.production.toml" \
+            --image "$PREV_IMAGE" --remote-only --strategy immediate || {
             echo "::error::Rollback deploy failed; manual intervention required"
             exit 1
           }
