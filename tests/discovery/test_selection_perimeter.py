@@ -26,6 +26,7 @@ from unittest.mock import patch
 
 import pytest
 
+from tests.attempt_helpers import claimed_call
 from tests.conftest import requires_postgres
 from workers.base import JobHandledDirectly
 
@@ -114,7 +115,7 @@ def _add_selection_job(session, *, protocol_id, company, analyze_limit):
 
 def _run(worker, session, job):
     try:
-        worker.process(session, job)
+        claimed_call(worker.process, session, job)
     except JobHandledDirectly:
         pass
 

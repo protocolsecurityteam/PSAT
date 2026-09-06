@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session
 
 from db.models import Base, Contract, DAppInteraction, Job, JobStage, JobStatus, Protocol
 from db.queue import create_job, get_artifact
+from tests.attempt_helpers import claimed_call
 from tests.conftest import requires_postgres
 from workers.base import JobHandledDirectly
 
@@ -183,7 +184,7 @@ def test_process_runs_against_real_queue_and_fake_dapp(
 
     worker = dapp_worker_module.DAppCrawlWorker()
     with pytest.raises(JobHandledDirectly):
-        worker.process(db_session, job)
+        claimed_call(worker.process, db_session, job)
 
     db_session.refresh(job)
     assert captured == {"chain_id": 137, "wait": 7}
@@ -294,7 +295,7 @@ def test_persists_dapp_interactions(
 
     worker = dapp_worker_module.DAppCrawlWorker()
     with pytest.raises(JobHandledDirectly):
-        worker.process(db_session, job)
+        claimed_call(worker.process, db_session, job)
 
     rows = (
         db_session.execute(select(DAppInteraction).where(DAppInteraction.job_id == job.id).order_by(DAppInteraction.id))

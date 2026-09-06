@@ -182,10 +182,12 @@ class DefiLlamaWorker(BaseWorker):
             job.name = f"DefiLlama: {protocol}"
             session.commit()
 
+        self._prepare_direct_transition(session, job)
         complete_job(
             session,
             job.id,
             f"DefiLlama scan complete for {protocol}: {len(addresses)} addresses written to contracts table",
+            lease_id=self.claim_lease(job),
         )
         raise JobHandledDirectly()
 

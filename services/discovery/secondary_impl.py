@@ -182,6 +182,7 @@ def queue_secondary_impl_jobs(
             chain=chain,
             root_job_id=root_job_id if force else None,
             discovery_relationship="secondary_implementation",
+            routing_from=parent_job,
         )
         if decision in ("skip", "backpatched"):
             logger.info("secondary impl %s -> %s (proxy %s)", addr_lc, decision, proxy_lc)
@@ -204,5 +205,5 @@ def queue_secondary_impl_jobs(
             child_request["protocol_id"] = protocol_id
         if force:
             child_request["force"] = True
-        created.append(create_job(session, child_request))
+        created.append(create_job(session, child_request, routing_from=parent_job))
     return created

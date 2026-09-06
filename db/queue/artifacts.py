@@ -84,18 +84,13 @@ def store_artifact(session: Session, job_id: Any, name: str, data: Any = None, t
     storage and only metadata (storage_key, stored_object_size_bytes, content_type) is stored
     in Postgres. Otherwise, the body lives inline in ``data`` / ``text_data``.
 
-    If the storage put succeeds but the DB write fails, the storage object is
-    deleted — but only if the row did not pre-exist. Overwriting a previously-
-    committed artifact with the same deterministic key and then rolling back
-    leaves the object in place (deleting it would break the previous row).
+    Each publication has a unique immutable body key. Failed publication can
+    delete only its own body; a competing winner's pointer remains readable.
     """
     client = get_storage_client()
     if client is not None:
         body, content_type = serialize_artifact(data, text_data)
         key = artifact_key(job_id, name)
-        preexisting = session.execute(
-            select(Artifact.id).where(Artifact.job_id == job_id, Artifact.name == name).limit(1)
-        ).scalar_one_or_none()
 
         client.put(key, body, content_type, metadata={"artifact_name": name, "job_id": str(job_id)})
         stmt = pg_insert(Artifact).values(
@@ -123,11 +118,10 @@ def store_artifact(session: Session, job_id: Any, name: str, data: Any = None, t
             session.commit()
         except Exception:
             session.rollback()
-            if preexisting is None:
-                try:
-                    client.delete(key)
-                except StorageError:
-                    logger.warning("Failed to clean up orphan storage object %s", key)
+            try:
+                client.delete(key)
+            except StorageError:
+                logger.warning("Failed to clean up orphan storage object %s", key)
             raise
         return
 

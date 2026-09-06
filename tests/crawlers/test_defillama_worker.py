@@ -17,6 +17,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from tests.attempt_helpers import claimed_call
 from workers.base import JobHandledDirectly
 from workers.defillama_worker import DefiLlamaWorker
 
@@ -64,10 +65,10 @@ def _patch_worker_deps(monkeypatch: pytest.MonkeyPatch) -> dict[str, list]:
     def fake_store(session, job_id, name, data=None, text_data=None):
         store_calls.append((name, data))
 
-    def fake_complete(session, job_id, detail=""):
+    def fake_complete(session, job_id, detail="", **_routing):
         complete_calls.append((job_id, detail))
 
-    def fake_update_detail(session, job_id, detail):
+    def fake_update_detail(session, job_id, detail, **_routing):
         pass
 
     def fake_get_or_create_protocol(session, name, official_domain=None, canonical_slug=None, aliases=None):
@@ -107,7 +108,7 @@ class TestMissingProtocol:
         _patch_worker_deps(monkeypatch)
 
         with pytest.raises(ValueError, match="defillama_protocol"):
-            worker.process(session, cast(Any, job))
+            claimed_call(worker.process, session, cast(Any, job))
 
     def test_none_request_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         worker = DefiLlamaWorker()
@@ -116,7 +117,7 @@ class TestMissingProtocol:
         _patch_worker_deps(monkeypatch)
 
         with pytest.raises(ValueError, match="defillama_protocol"):
-            worker.process(session, cast(Any, job))
+            claimed_call(worker.process, session, cast(Any, job))
 
 
 class TestHappyPath:
@@ -143,7 +144,7 @@ class TestHappyPath:
         )
 
         with pytest.raises(JobHandledDirectly):
-            worker.process(session, cast(Any, job))
+            claimed_call(worker.process, session, cast(Any, job))
 
         stored_names = [name for name, _ in trackers["store_calls"]]
         assert "defillama_full_scan" in stored_names
@@ -168,7 +169,7 @@ class TestJobName:
         )
 
         with pytest.raises(JobHandledDirectly):
-            worker.process(session, cast(Any, job))
+            claimed_call(worker.process, session, cast(Any, job))
 
         assert job.name == f"DefiLlama: {PROTOCOL}"
 
@@ -186,7 +187,7 @@ class TestJobName:
         )
 
         with pytest.raises(JobHandledDirectly):
-            worker.process(session, cast(Any, job))
+            claimed_call(worker.process, session, cast(Any, job))
 
         assert job.name == original_name
 
@@ -212,7 +213,7 @@ class TestNoCloneEnvVar:
         monkeypatch.setattr("workers.defillama_worker.scan_protocol", spy_scan)
 
         with pytest.raises(JobHandledDirectly):
-            worker.process(session, cast(Any, job))
+            claimed_call(worker.process, session, cast(Any, job))
 
         assert captured_kwargs[0]["no_clone"] is True
 
@@ -234,7 +235,7 @@ class TestNoCloneEnvVar:
         monkeypatch.setattr("workers.defillama_worker.scan_protocol", spy_scan)
 
         with pytest.raises(JobHandledDirectly):
-            worker.process(session, cast(Any, job))
+            claimed_call(worker.process, session, cast(Any, job))
 
         assert captured_kwargs[0]["no_clone"] is False
 
@@ -260,7 +261,7 @@ class TestScanResultArtifactContent:
         )
 
         with pytest.raises(JobHandledDirectly):
-            worker.process(session, cast(Any, job))
+            claimed_call(worker.process, session, cast(Any, job))
 
         full_scan = next(d for name, d in trackers["store_calls"] if name == "defillama_full_scan")
         assert full_scan["protocol"] == PROTOCOL
@@ -291,7 +292,7 @@ class TestScanResultArtifactContent:
         )
 
         with pytest.raises(JobHandledDirectly):
-            worker.process(session, cast(Any, job))
+            claimed_call(worker.process, session, cast(Any, job))
 
         summary = next(d for name, d in trackers["store_calls"] if name == "discovery_summary")
         assert summary["mode"] == "defillama_scan"
@@ -318,7 +319,7 @@ class TestZeroAddressesFound:
         )
 
         with pytest.raises(JobHandledDirectly):
-            worker.process(session, cast(Any, job))
+            claimed_call(worker.process, session, cast(Any, job))
 
         assert len(trackers["complete_calls"]) == 1
 
@@ -341,7 +342,7 @@ class TestScanProtocolRaises:
         )
 
         with pytest.raises(RuntimeError, match="clone failed"):
-            worker.process(session, cast(Any, job))
+            claimed_call(worker.process, session, cast(Any, job))
 
 
 class TestProtocolCreation:
@@ -360,7 +361,7 @@ class TestProtocolCreation:
         )
 
         with pytest.raises(JobHandledDirectly):
-            worker.process(session, cast(Any, job))
+            claimed_call(worker.process, session, cast(Any, job))
 
         assert trackers["protocol_calls"] == [(PROTOCOL, None)]
         assert job.protocol_id == 1
@@ -379,7 +380,7 @@ class TestProtocolCreation:
         )
 
         with pytest.raises(JobHandledDirectly):
-            worker.process(session, cast(Any, job))
+            claimed_call(worker.process, session, cast(Any, job))
 
         assert trackers["protocol_calls"] == [("Aave", None)]
         assert job.company == "Aave"
@@ -414,7 +415,7 @@ class TestListingAddressNomination:
 
         monkeypatch.setattr("workers.defillama_worker.bulk_upsert_discovered_contracts", fake_bulk)
         with pytest.raises(JobHandledDirectly):
-            worker.process(session, cast(Any, job))
+            claimed_call(worker.process, session, cast(Any, job))
         return captured
 
     def test_bare_listing_address_is_nominated_on_ethereum(self, monkeypatch: pytest.MonkeyPatch) -> None:

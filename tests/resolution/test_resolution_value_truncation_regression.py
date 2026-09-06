@@ -41,6 +41,7 @@ from services.resolution.tracking import (
     build_control_snapshot,
     clear_classify_cache,
 )
+from tests.attempt_helpers import claimed_call
 from tests.cache_helpers import requires_postgres
 from workers.base import BaseWorker
 
@@ -277,7 +278,7 @@ def test_execute_job_marks_terminal_on_session_poisoning_dataerror(clean_db, tes
 
     worker = _SessionPoisoningWorker(contract_id=contract.id)
     # Must return normally. Pre-fix this raised PendingRollbackError.
-    worker._execute_job(session, job_row)
+    claimed_call(worker._execute_job, session, job_row)
 
     session.expire_all()
     refreshed = session.get(Job, job_row.id)

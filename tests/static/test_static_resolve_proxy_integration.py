@@ -15,6 +15,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from services.discovery.classifier import ClassificationIncompleteError
+from tests.attempt_helpers import claimed_call
 from tests.conftest import DATABASE_URL as _DB_URL
 from tests.conftest import _can_connect, requires_postgres
 from workers.static_worker import StaticWorker
@@ -56,7 +57,7 @@ def _capture_store_and_create(monkeypatch):
 
     child_counter = iter(range(100))
 
-    def _fake_create(_session, request):
+    def _fake_create(_session, request, **_routing):
         created_jobs.append(request)
         return SimpleNamespace(id=f"child-{next(child_counter)}")
 
@@ -83,7 +84,7 @@ def test_non_proxy_stores_flags_with_is_proxy_false(monkeypatch):
         lambda address, rpc_url, **_kw: {"type": "regular"},
     )
 
-    worker._resolve_proxy(session, job, _ADDR, "TestContract")
+    claimed_call(worker._resolve_proxy, session, job, _ADDR, "TestContract")
 
     assert len(store_calls) == 1
     name, data, _ = store_calls[0]
@@ -106,7 +107,7 @@ def test_non_proxy_library_type(monkeypatch):
         lambda address, rpc_url, **_kw: {"type": "library"},
     )
 
-    worker._resolve_proxy(session, job, _ADDR, "TestContract")
+    claimed_call(worker._resolve_proxy, session, job, _ADDR, "TestContract")
 
     assert store_calls[0][1] == {"is_proxy": False, "classification_type": "library"}
 
@@ -134,7 +135,7 @@ def test_proxy_with_implementation_creates_child_job(monkeypatch):
         },
     )
 
-    worker._resolve_proxy(session, job, _ADDR, "TestContract")
+    claimed_call(worker._resolve_proxy, session, job, _ADDR, "TestContract")
 
     # contract_flags stored correctly
     assert len(store_calls) == 1
@@ -176,7 +177,7 @@ def test_proxy_child_job_inherits_chain(monkeypatch):
         },
     )
 
-    worker._resolve_proxy(session, job, _ADDR, "TestContract")
+    claimed_call(worker._resolve_proxy, session, job, _ADDR, "TestContract")
 
     assert len(created_jobs) == 1
     assert created_jobs[0]["chain"] == "base"
@@ -200,7 +201,7 @@ def test_proxy_uses_job_name_for_child_naming(monkeypatch):
         },
     )
 
-    worker._resolve_proxy(session, job, _ADDR, "FallbackName")
+    claimed_call(worker._resolve_proxy, session, job, _ADDR, "FallbackName")
 
     assert created_jobs[0]["name"] == "MyProxy: (impl)"
 
@@ -223,7 +224,7 @@ def test_proxy_falls_back_to_contract_name_for_child(monkeypatch):
         },
     )
 
-    worker._resolve_proxy(session, job, _ADDR, "ContractNameFallback")
+    claimed_call(worker._resolve_proxy, session, job, _ADDR, "ContractNameFallback")
 
     assert created_jobs[0]["name"] == "ContractNameFallback: (impl)"
 
@@ -267,7 +268,7 @@ def test_beacon_is_analyzed_yet_still_spawns_impl_child(monkeypatch):
     monkeypatch.setattr("workers.static_worker.reconcile_impl_job_for_proxy", lambda *a, **k: "spawn")
     monkeypatch.setattr("workers.static_worker._redirect_proxy_policy_dependencies", lambda *a, **k: None)
 
-    worker._resolve_proxy(session, job, _ADDR, "TestContract")
+    claimed_call(worker._resolve_proxy, session, job, _ADDR, "TestContract")
 
     # The beacon is analysed as itself: is_proxy stays False.
     assert contract_row.is_proxy is False
@@ -313,7 +314,7 @@ def test_diamond_proxy_creates_jobs_for_impl_and_facets(monkeypatch):
         },
     )
 
-    worker._resolve_proxy(session, job, _ADDR, "TestContract")
+    claimed_call(worker._resolve_proxy, session, job, _ADDR, "TestContract")
 
     # Flags stored with facets
     flags = store_calls[0][1]
@@ -350,7 +351,7 @@ def test_diamond_proxy_deduplicates_impl_in_facets(monkeypatch):
         },
     )
 
-    worker._resolve_proxy(session, job, _ADDR, "TestContract")
+    claimed_call(worker._resolve_proxy, session, job, _ADDR, "TestContract")
 
     # Only 2 child jobs: impl + facet 1 (impl not duplicated)
     assert len(created_jobs) == 2
@@ -377,7 +378,7 @@ def test_proxy_facets_only_no_impl(monkeypatch):
         },
     )
 
-    worker._resolve_proxy(session, job, _ADDR, "TestContract")
+    claimed_call(worker._resolve_proxy, session, job, _ADDR, "TestContract")
 
     assert len(created_jobs) == 2
     assert created_jobs[0]["name"] == "TestContract: (facet 1)"
@@ -399,7 +400,7 @@ def test_no_rpc_stores_classification_skipped(monkeypatch):
     monkeypatch.delenv("ETH_RPC", raising=False)
     monkeypatch.delenv("ERPC_BASE_URL", raising=False)
 
-    worker._resolve_proxy(session, job, _ADDR, "TestContract")
+    claimed_call(worker._resolve_proxy, session, job, _ADDR, "TestContract")
 
     assert len(store_calls) == 1
     flags = store_calls[0][1]
@@ -428,7 +429,7 @@ def test_erpc_mainnet_route_used_when_request_has_no_rpc(monkeypatch):
         ),
     )
 
-    worker._resolve_proxy(session, job, _ADDR, "TestContract")
+    claimed_call(worker._resolve_proxy, session, job, _ADDR, "TestContract")
 
     assert captured_rpc == ["https://erpc-proxy.example/main/evm/1"]
     assert store_calls[0][1]["is_proxy"] is True
@@ -450,7 +451,7 @@ def test_erpc_chain_route_used_when_request_has_chain(monkeypatch):
         lambda address, rpc_url, **_kw: captured_rpc.append(rpc_url) or {"type": "regular"},
     )
 
-    worker._resolve_proxy(session, job, _ADDR, "TestContract")
+    claimed_call(worker._resolve_proxy, session, job, _ADDR, "TestContract")
 
     assert captured_rpc == ["https://erpc-proxy.example/main/evm/8453"]
     assert store_calls[0][1]["classification_type"] == "regular"
@@ -474,7 +475,7 @@ def test_classify_exception_stores_classification_error(monkeypatch):
         lambda address, rpc_url, **_kw: (_ for _ in ()).throw(ConnectionError("RPC timeout")),
     )
 
-    worker._resolve_proxy(session, job, _ADDR, "TestContract")
+    claimed_call(worker._resolve_proxy, session, job, _ADDR, "TestContract")
 
     assert len(store_calls) == 1
     flags = store_calls[0][1]
@@ -500,7 +501,7 @@ def test_classify_generic_exception_stores_error(monkeypatch):
         _raise,
     )
 
-    worker._resolve_proxy(session, job, _ADDR, "TestContract")
+    claimed_call(worker._resolve_proxy, session, job, _ADDR, "TestContract")
 
     flags = store_calls[0][1]
     assert "unexpected bytecode format" in flags["classification_error"]
@@ -532,7 +533,7 @@ def test_existing_impl_job_skips_child_creation(monkeypatch):
         },
     )
 
-    worker._resolve_proxy(session, job, _ADDR, "TestContract")
+    claimed_call(worker._resolve_proxy, session, job, _ADDR, "TestContract")
 
     # Flags are still stored
     assert store_calls[0][1]["is_proxy"] is True
@@ -571,7 +572,7 @@ def test_partial_existing_jobs_creates_only_missing(monkeypatch):
         },
     )
 
-    worker._resolve_proxy(session, job, _ADDR, "TestContract")
+    claimed_call(worker._resolve_proxy, session, job, _ADDR, "TestContract")
 
     # Only facet child job created (impl was skipped)
     assert len(created_jobs) == 1
@@ -607,7 +608,7 @@ def test_classification_incomplete_fails_closed_and_reraises(monkeypatch):
     )
 
     with pytest.raises(ClassificationIncompleteError):
-        worker._resolve_proxy(session, job, _ADDR, "TestContract")
+        claimed_call(worker._resolve_proxy, session, job, _ADDR, "TestContract")
 
     # Degradation recorded, and crucially NO is_proxy=False contract_flags shell
     # artifact was written (which would have let the stage analyze the shell).

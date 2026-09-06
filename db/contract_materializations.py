@@ -68,6 +68,7 @@ from db.storage import (
     _key_prefix,
     content_shortfall,
     get_storage_client,
+    immutable_write_token,
 )
 from utils.chains import chain_cache_token
 
@@ -250,7 +251,7 @@ def _blob_key(chain_norm: str, keccak_norm: str, kind: str) -> str:
     bucket. Path separators around chain and keccak make S3-console
     browsing usable.
     """
-    return f"{_key_prefix()}contract_materializations/{chain_norm}/{keccak_norm}/{kind}.json"
+    return f"{_key_prefix()}contract_materializations/{chain_norm}/{keccak_norm}/{immutable_write_token()}/{kind}.json"
 
 
 def find_by_keccak(

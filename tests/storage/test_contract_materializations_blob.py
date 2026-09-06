@@ -53,7 +53,7 @@ class _StubStorage:
         self.fail_put: set[str] = set()
 
     def put(self, key: str, body: bytes, content_type: str, metadata=None) -> None:
-        if key in self.fail_put:
+        if key in self.fail_put or any(key.endswith(suffix) for suffix in self.fail_put):
             raise StorageError(f"injected put failure for {key}")
         self.put_calls.append((key, content_type))
         self.objects[key] = body
@@ -241,8 +241,7 @@ def test_materialize_writes_to_blob_when_storage_configured(_route_to_test_db, _
     # Two puts, in the keccak-namespaced layout.
     assert len(storage.put_calls) == 2
     keys_written = sorted(k for (k, _) in storage.put_calls)
-    assert keys_written[0].endswith("/analysis.json")
-    assert keys_written[1].endswith("/tracking_plan.json")
+    assert {key.rsplit("/", 1)[-1] for key in keys_written} == {"analysis.json", "tracking_plan.json"}
     # Round-trip via hydrate_*.
     with patch("db.contract_materializations.get_storage_client", return_value=storage):
         assert cm.hydrate_analysis(row) == {"controllers": ["a"]}
@@ -286,7 +285,7 @@ def test_materialize_rolls_back_when_blob_upload_fails(_route_to_test_db, _clean
     # we can mark it as failing.
     chain = "1"
     keccak = "0x" + "ee" * 32
-    bad_key = cm._blob_key(chain, keccak, "tracking_plan")
+    bad_key = "/tracking_plan.json"
     storage.fail_put.add(bad_key)
 
     def _builder() -> dict[str, Any]:

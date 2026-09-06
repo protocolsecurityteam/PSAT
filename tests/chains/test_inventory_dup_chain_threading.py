@@ -24,6 +24,7 @@ import uuid
 
 import pytest
 
+from tests.attempt_helpers import claimed_call
 from tests.conftest import requires_postgres
 
 
@@ -235,7 +236,7 @@ def test_defillama_worker_chainless_job_writes_ethereum_not_null(db_session, mon
     monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
 
     with pytest.raises(JobHandledDirectly):
-        worker.process(db_session, job)
+        claimed_call(worker.process, db_session, job)
 
     row = db_session.query(Contract).filter(Contract.address == addr).one()
     assert row.chain == "ethereum"

@@ -20,6 +20,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
+from tests.attempt_helpers import claimed_call, proxy_parent
 from tests.conftest import requires_postgres
 
 
@@ -99,7 +100,12 @@ def test_reconcile_skip_same_proxy(db_session):
     impl, proxy = _addr(), _addr()
     _mk_job(db_session, impl, proxy=proxy, status=JobStatus.completed, stage=JobStage.done)
     try:
-        assert reconcile_impl_job_for_proxy(db_session, impl_addr=impl, proxy_addr=proxy) == "skip"
+        assert (
+            reconcile_impl_job_for_proxy(
+                db_session, impl_addr=impl, proxy_addr=proxy, routing_from=proxy_parent(db_session)
+            )
+            == "skip"
+        )
     finally:
         _cleanup_jobs(db_session, [impl])
 
@@ -116,7 +122,9 @@ def test_reconcile_backpatches_completed_standalone_and_reenqueues(db_session):
     impl, proxy = _addr(), _addr()
     job = _mk_job(db_session, impl, status=JobStatus.completed, stage=JobStage.done)
     try:
-        decision = reconcile_impl_job_for_proxy(db_session, impl_addr=impl, proxy_addr=proxy, proxy_type="eip1967")
+        decision = reconcile_impl_job_for_proxy(
+            db_session, impl_addr=impl, proxy_addr=proxy, proxy_type="eip1967", routing_from=proxy_parent(db_session)
+        )
         assert decision == "backpatched"
         db_session.refresh(job)
         assert isinstance(job.request, dict)
@@ -132,19 +140,23 @@ def test_reconcile_backpatches_completed_standalone_and_reenqueues(db_session):
 
 
 @requires_postgres
-def test_reconcile_backpatches_queued_standalone_without_reenqueue(db_session):
-    """A standalone job still queued before resolution just gains proxy context;
-    no stage reset is needed (it hasn't run yet)."""
+def test_reconcile_preserves_queued_standalone_route_and_request(db_session):
+    """An active standalone is unsuitable for proxy storage; preserve it and spawn."""
     from db.models import JobStage, JobStatus
     from db.queue import reconcile_impl_job_for_proxy
 
     impl, proxy = _addr(), _addr()
     job = _mk_job(db_session, impl, status=JobStatus.queued, stage=JobStage.static)
     try:
-        assert reconcile_impl_job_for_proxy(db_session, impl_addr=impl, proxy_addr=proxy) == "backpatched"
+        assert (
+            reconcile_impl_job_for_proxy(
+                db_session, impl_addr=impl, proxy_addr=proxy, routing_from=proxy_parent(db_session)
+            )
+            == "spawn"
+        )
         db_session.refresh(job)
         assert isinstance(job.request, dict)
-        assert job.request["proxy_address"] == proxy
+        assert "proxy_address" not in job.request
         assert job.stage == JobStage.static  # unchanged — not past resolution
         assert job.status == JobStatus.queued
     finally:
@@ -155,7 +167,12 @@ def test_reconcile_backpatches_queued_standalone_without_reenqueue(db_session):
 def test_reconcile_spawn_when_no_existing_job(db_session):
     from db.queue import reconcile_impl_job_for_proxy
 
-    assert reconcile_impl_job_for_proxy(db_session, impl_addr=_addr(), proxy_addr=_addr()) == "spawn"
+    assert (
+        reconcile_impl_job_for_proxy(
+            db_session, impl_addr=_addr(), proxy_addr=_addr(), routing_from=proxy_parent(db_session)
+        )
+        == "spawn"
+    )
 
 
 @requires_postgres
@@ -168,7 +185,12 @@ def test_reconcile_spawn_for_different_proxy_shared_impl(db_session):
     impl, p1, p2 = _addr(), _addr(), _addr()
     _mk_job(db_session, impl, proxy=p1, status=JobStatus.completed, stage=JobStage.done)
     try:
-        assert reconcile_impl_job_for_proxy(db_session, impl_addr=impl, proxy_addr=p2) == "spawn"
+        assert (
+            reconcile_impl_job_for_proxy(
+                db_session, impl_addr=impl, proxy_addr=p2, routing_from=proxy_parent(db_session)
+            )
+            == "spawn"
+        )
     finally:
         _cleanup_jobs(db_session, [impl])
 
@@ -186,7 +208,11 @@ def test_reconcile_force_scopes_by_root_job(db_session):
     try:
         # Same proxy, but a different cascade root → not a dup in this cascade.
         decision = reconcile_impl_job_for_proxy(
-            db_session, impl_addr=impl, proxy_addr=proxy, root_job_id=str(uuid.uuid4())
+            db_session,
+            impl_addr=impl,
+            proxy_addr=proxy,
+            root_job_id=str(uuid.uuid4()),
+            routing_from=proxy_parent(db_session),
         )
         assert decision == "spawn"
     finally:
@@ -349,7 +375,7 @@ def test_resolve_proxy_backpatches_standalone_impl(db_session, monkeypatch):
     monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
 
     try:
-        worker._resolve_proxy(db_session, proxy_job, proxy, "UUPSProxy")
+        claimed_call(worker._resolve_proxy, db_session, proxy_job, proxy, "UUPSProxy")
         db_session.refresh(impl_job)
         assert isinstance(impl_job.request, dict)
         assert impl_job.request["proxy_address"] == proxy
@@ -536,14 +562,21 @@ def test_end_to_end_heal_standalone_impl_resolves_after_backpatch(db_session, mo
 
     try:
         # --- Phase A: standalone resolution is a false-negative (the bug) ---
-        worker.process(db_session, job)
+        claimed_call(worker.process, db_session, job)
         ef_a, principals_a, cap_a = _gate_status_and_principal(db_session, job, contract, deployment=None)
         assert ef_a.status == "resolved_empty", f"standalone gate should be resolved_empty, got {ef_a.status} ({cap_a})"
         assert principals_a == []
         assert ef_a.deployment_address is None
 
+        # A provider can be adopted only after its active attempt has settled.
+        from db.queue import complete_job
+
+        assert job.lease_id is not None
+        complete_job(db_session, job.id, lease_id=job.lease_id)
         # --- Step: proxy discovered later → reconcile back-patches the impl job ---
-        decision = reconcile_impl_job_for_proxy(db_session, impl_addr=impl, proxy_addr=proxy, proxy_type="eip1967")
+        decision = reconcile_impl_job_for_proxy(
+            db_session, impl_addr=impl, proxy_addr=proxy, proxy_type="eip1967", routing_from=proxy_parent(db_session)
+        )
         assert decision == "backpatched"
         db_session.refresh(job)
         req = job.request
@@ -551,7 +584,7 @@ def test_end_to_end_heal_standalone_impl_resolves_after_backpatch(db_session, mo
         assert req["proxy_address"] == proxy  # the impl now carries proxy context
 
         # --- Phase B: re-resolution against the proxy heals the function ---
-        worker.process(db_session, job)
+        claimed_call(worker.process, db_session, job)
         ef_b, principals_b, cap_b = _gate_status_and_principal(db_session, job, contract, deployment=proxy)
         assert ef_b.status != "resolved_empty", f"proxy-context gate should resolve, got resolved_empty ({cap_b})"
         assert principals_b == [governor], f"gate should resolve to the proxy's governor, got {principals_b}"

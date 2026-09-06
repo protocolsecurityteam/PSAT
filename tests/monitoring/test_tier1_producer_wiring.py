@@ -41,6 +41,7 @@ from services.monitoring.restaking_enrollment import (
     node_addresses_from_fold,
 )
 from services.resolution.role_holder_plane import ROLE_GRANTED_TOPIC0, ROLE_REVOKED_TOPIC0
+from tests.attempt_helpers import claimed_call
 from workers.resolution_worker import ResolutionWorker
 
 # The measured EtherFiNodesManager PROXY. Its ``contracts`` row is keyed at the
@@ -376,7 +377,7 @@ class TestResolutionStageComposition:
         session = MagicMock()
         session.execute.return_value.scalar_one_or_none.return_value = None
 
-        ResolutionWorker().process(session, _job())  # pyright: ignore[reportArgumentType]
+        claimed_call(ResolutionWorker().process, session, _job())
 
         assert len(seen) == 1
         assert seen[0]["registry_address"] == REGISTRY
@@ -393,7 +394,7 @@ class TestResolutionStageComposition:
         session.execute.return_value.scalar_one_or_none.return_value = None
         job = _job(request={"rpc_url": "https://rpc.example", "chain": "ethereum", "proxy_address": PROXY_REGISTRY})
 
-        ResolutionWorker().process(session, job)  # pyright: ignore[reportArgumentType]
+        claimed_call(ResolutionWorker().process, session, job)
 
         assert seen[0]["registry_address"] == PROXY_REGISTRY
 
@@ -412,7 +413,7 @@ class TestResolutionStageComposition:
         details: list[str] = []
         monkeypatch.setattr(ResolutionWorker, "update_detail", lambda _self, _s, _j, text: details.append(text))
 
-        ResolutionWorker().process(session, _job())  # pyright: ignore[reportArgumentType]
+        claimed_call(ResolutionWorker().process, session, _job())
 
         assert degraded == ["resolution_role_holder_plane"]
         # The stage still reached its terminal detail.
@@ -430,7 +431,7 @@ class TestResolutionStageComposition:
         session = MagicMock()
         session.execute.return_value.scalar_one_or_none.return_value = None
 
-        ResolutionWorker().process(session, _job())  # pyright: ignore[reportArgumentType]
+        claimed_call(ResolutionWorker().process, session, _job())
 
 
 # ---------------------------------------------------------------------------

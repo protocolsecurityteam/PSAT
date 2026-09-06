@@ -7,6 +7,7 @@ request payloads, not the artifact-output JSON shape.
 from __future__ import annotations
 
 import re
+from typing import Literal
 from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -32,6 +33,7 @@ def _require_http_url(value: str) -> str:
 
 
 class AnalyzeRequest(BaseModel):
+    compute_target: Literal["cloud", "local"] = "cloud"
     address: str | None = Field(default=None, min_length=42, max_length=42)
 
     @field_validator("address")

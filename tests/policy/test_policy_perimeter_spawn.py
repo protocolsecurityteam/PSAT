@@ -36,6 +36,7 @@ from services.discovery.perimeter import (
 from services.resolution.tracking import (
     _resolve_pinned_block as _REAL_RESOLVE_PINNED_BLOCK,
 )
+from tests.attempt_helpers import claimed_call
 from tests.conftest import requires_postgres
 
 pytestmark = [requires_postgres]
@@ -120,7 +121,7 @@ def _graph(root, nodes) -> dict:
 def _spawn(session, job, graph, **kwargs) -> dict:
     kwargs.setdefault("site", "policy_refresh")
     kwargs.setdefault("chain_name", "ethereum")
-    return dict(queue_discovered_contracts(session, job, graph, "https://rpc.example", **kwargs))
+    return dict(claimed_call(queue_discovered_contracts, session, job, graph, "https://rpc.example", **kwargs))
 
 
 def _jobs_for(session, address):

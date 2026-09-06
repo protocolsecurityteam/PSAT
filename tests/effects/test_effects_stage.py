@@ -19,6 +19,7 @@ from db.queue import create_job
 from services.effects.config import EFFECT_CLASS_SUPPLY, VERDICT_PROVEN, effects_stage_enabled
 from services.effects.exceptions import ForkRpcTimeoutError
 from services.effects.harness import proven
+from tests.attempt_helpers import claimed_call
 from tests.cache_helpers import requires_postgres
 from tests.support.effects_worker_harness import (
     CONTRACT_A,
@@ -154,7 +155,7 @@ def test_flag_on_zero_candidate_passthrough(clean_jobs, test_session_local):
     job_row = create_job(session, {"address": "0xabc", "name": "effects-passthrough"})
 
     worker = EffectsWorker()
-    worker._execute_job(session, job_row)
+    claimed_call(worker._execute_job, session, job_row)
 
     session.expire_all()
     refreshed = session.get(Job, job_row.id)
@@ -173,7 +174,7 @@ def test_fail_forward_exhaustion_advances_never_terminal(clean_jobs, test_sessio
     job_row = create_job(session, {"address": "0xabc", "name": "effects-failforward"})
 
     worker = _FailingEffectsWorker(ForkRpcTimeoutError("fork RPC down"))
-    worker._execute_job(session, job_row)
+    claimed_call(worker._execute_job, session, job_row)
 
     session.expire_all()
     refreshed = session.get(Job, job_row.id)
@@ -192,7 +193,7 @@ def test_fail_forward_on_terminal_kind_also_advances(clean_jobs, test_session_lo
     job_row = create_job(session, {"address": "0xabc", "name": "effects-terminal-kind"})
 
     worker = _FailingEffectsWorker(ValueError("bad candidate"))
-    worker._execute_job(session, job_row)
+    claimed_call(worker._execute_job, session, job_row)
 
     session.expire_all()
     refreshed = session.get(Job, job_row.id)

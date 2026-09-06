@@ -9,7 +9,7 @@ import os
 import signal
 import threading
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
@@ -64,6 +64,7 @@ def _make_job(**overrides):
         worker_id="some-worker",
         detail=None,
         retry_count=0,
+        lease_id=uuid.uuid4(),
     )
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
@@ -116,21 +117,12 @@ def test_handle_sigterm_sets_running_false(mock_signal):
 
 
 @patch("workers.base.signal.signal")
-def test_recover_stale_jobs_requeues(mock_signal):
-    """Stale jobs are set to queued with worker_id cleared."""
-    w = _TestWorker()
-    stale_job = _make_job(
-        updated_at=datetime.now(timezone.utc) - timedelta(seconds=300),
-    )
-    mock_session = MagicMock()
-    mock_session.execute.return_value.scalars.return_value.all.return_value = [stale_job]
-
-    w._recover_stale_jobs(mock_session)
-
-    assert stale_job.status == JobStatus.queued
-    assert stale_job.worker_id is None
-    assert stale_job.detail == "Re-queued after stale processing timeout"
-    mock_session.commit.assert_called_once()
+@patch("workers.base.reclaim_stuck_jobs")
+def test_recover_stale_jobs_requeues(mock_reclaim, mock_signal):
+    worker = _TestWorker()
+    session = MagicMock()
+    worker._recover_stale_jobs(session)
+    mock_reclaim.assert_called_once_with(session)
 
 
 @patch("workers.base.signal.signal")
@@ -178,7 +170,9 @@ def test_run_loop_claims_processes_and_advances(mock_advance, mock_claim, mock_s
     w.run_loop()
 
     w.process.assert_called_once_with(mock_session, job)
-    mock_advance.assert_called_once_with(mock_session, job.id, JobStage.static, "Completed discovery", lease_id=None)
+    mock_advance.assert_called_once_with(
+        mock_session, job.id, JobStage.static, "Completed discovery", lease_id=job.lease_id
+    )
 
 
 @patch("workers.base.signal.signal")
@@ -430,7 +424,7 @@ def test_run_loop_next_stage_done_calls_complete_job(mock_complete, mock_claim, 
     w.process = MagicMock()
     w.run_loop()
 
-    mock_complete.assert_called_once_with(mock_session, job.id, lease_id=None)
+    mock_complete.assert_called_once_with(mock_session, job.id, lease_id=job.lease_id)
 
 
 @patch("workers.base.signal.signal")
@@ -496,7 +490,7 @@ def test_update_detail_delegates_to_queue(mock_update, mock_signal):
     mock_session = MagicMock()
     mock_job = _make_job()
     w.update_detail(mock_session, cast(Any, mock_job), "50% done")
-    mock_update.assert_called_once_with(mock_session, mock_job.id, "50% done")
+    mock_update.assert_called_once_with(mock_session, mock_job.id, "50% done", lease_id=mock_job.lease_id)
 
 
 # ---------------------------------------------------------------------------

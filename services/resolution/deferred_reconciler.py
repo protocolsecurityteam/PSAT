@@ -340,6 +340,15 @@ def reconcile_deferred_resolutions(session: Session, *, chain_id: int, limit: in
             chain_id,
         )
 
+    # Hold all candidate group locks in canonical order for this batch. Shared
+    # with proxy adoption and operator recovery, before any row mutations.
+    from db.compute import lock_compute_groups
+
+    planned_groups = {
+        row.id: row.compute_group_id
+        for row in session.execute(select(Job.id, Job.compute_group_id).where(Job.id.in_(by_job)))
+    }
+    lock_compute_groups(session, *planned_groups.values())
     reenqueued = 0
     for job_id, (address, authorities) in by_job.items():
         if reenqueued >= limit:
@@ -350,14 +359,23 @@ def reconcile_deferred_resolutions(session: Session, *, chain_id: int, limit: in
         # all-warm transition (backfill_complete is monotonic).
         if not all(_authority_backfilled(session, chain_id, addr) for addr in authorities):
             continue
+        actual_group = session.execute(select(Job.compute_group_id).where(Job.id == job_id)).scalar_one_or_none()
+        if actual_group != planned_groups.get(job_id):
+            continue
         job = session.get(Job, job_id)
         if job is None or job.status != JobStatus.completed or job.stage != JobStage.done:
             continue
         if _address_has_active_job(session, job.address, chain_id=chain_id, exclude_job_id=job.id):
             continue
         orphan_contract_id = adopt.get(job_id)
+        contract = None
         if orphan_contract_id is not None:
-            contract = session.get(Contract, orphan_contract_id)
+            contract = session.execute(
+                select(Contract)
+                .where(Contract.id == orphan_contract_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            ).scalar_one_or_none()
             # Re-check under the same transaction that produced the plan: the row
             # must still be orphaned and the job must still own nothing.
             if contract is None or contract.job_id is not None:
@@ -373,15 +391,13 @@ def reconcile_deferred_resolutions(session: Session, *, chain_id: int, limit: in
             # the marker. So the choice is repair-and-re-enqueue or leave it
             # alone; reach-without-repair is a re-enqueue storm plus a
             # guaranteed no-op.
+        if not _requeue_policy(session, job, "Re-resolving: durable event index caught up for a deferred authority"):
+            continue
+        if contract is not None:
             contract.job_id = job.id
             logger.info(
-                "deferred-resolution reconciler re-linked orphaned contract %s (%s) to job %s before "
-                "re-enqueue; contracts.job_id had been cleared by a job deletion",
-                orphan_contract_id,
-                contract.address,
-                job_id,
+                "deferred-resolution reconciler re-linked orphaned contract %s to job %s", orphan_contract_id, job_id
             )
-        _requeue_policy(job, "Re-resolving: durable event index caught up for a deferred authority")
         reenqueued += 1
         logger.info(
             "deferred-resolution reconciler re-enqueued policy for job %s address=%s authorities=%s",
@@ -397,17 +413,12 @@ def reconcile_deferred_resolutions(session: Session, *, chain_id: int, limit: in
     return reenqueued
 
 
-def _requeue_policy(job: Job, detail: str) -> None:
-    """Reset a completed job to a fresh queued policy stage so the production
-    pipeline re-resolves and re-persists everything. Clears the lease / backoff
-    columns so ``claim_job`` mints a fresh lease immediately."""
-    job.stage = JobStage.policy
-    job.status = JobStatus.queued
-    job.worker_id = None
-    job.lease_id = None
-    job.lease_expires_at = None
-    job.next_attempt_at = None
-    job.detail = detail
+def _requeue_policy(session: Session, job: Job, detail: str) -> bool:
+    from db.compute import reactivate_terminal_job
+
+    return reactivate_terminal_job(
+        session, job.id, expected_stage=JobStage.done, next_stage=JobStage.policy, detail=detail
+    )
 
 
 def _iter_role_store_frontiers(node: Any) -> Iterator[tuple[str, int]]:
@@ -487,6 +498,15 @@ def reconcile_role_set_drift(session: Session, *, chain_id: int, limit: int = 20
             prior = frontiers.get(authority)
             frontiers[authority] = frontier if prior is None else min(prior, frontier)
 
+    # Hold all candidate group locks in canonical order for this batch. Shared
+    # with proxy adoption and operator recovery, before any row mutations.
+    from db.compute import lock_compute_groups
+
+    planned_groups = {
+        row.id: row.compute_group_id
+        for row in session.execute(select(Job.id, Job.compute_group_id).where(Job.id.in_(by_job)))
+    }
+    lock_compute_groups(session, *planned_groups.values())
     reenqueued = 0
     for job_id, (address, frontiers) in by_job.items():
         if reenqueued >= limit:
@@ -499,12 +519,16 @@ def reconcile_role_set_drift(session: Session, *, chain_id: int, limit: int = 20
         ]
         if not drifted:
             continue
+        actual_group = session.execute(select(Job.compute_group_id).where(Job.id == job_id)).scalar_one_or_none()
+        if actual_group != planned_groups.get(job_id):
+            continue
         job = session.get(Job, job_id)
         if job is None or job.status != JobStatus.completed or job.stage != JobStage.done:
             continue
         if _address_has_active_job(session, job.address, chain_id=chain_id, exclude_job_id=job.id):
             continue
-        _requeue_policy(job, "Re-resolving: role-store membership drifted past the folded frontier")
+        if not _requeue_policy(session, job, "Re-resolving: role-store membership drifted past the folded frontier"):
+            continue
         reenqueued += 1
         logger.info(
             "role-drift reconciler re-enqueued policy for job %s address=%s authorities=%s",

@@ -26,7 +26,7 @@ import os
 import threading
 import urllib.error
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -34,6 +34,7 @@ from typing import Any
 from dotenv import load_dotenv
 
 from services.clients.rpc import erpc_url_for_chain_id, rpc_headers
+from services.concurrency import ContextThreadPoolExecutor as ThreadPoolExecutor
 from utils.chains import canonical_chain, canonical_chain_list
 from utils.logging import record_degraded
 

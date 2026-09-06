@@ -22,6 +22,7 @@ via prefix scan over ``stage_timing_*`` and concatenates.
 
 from __future__ import annotations
 
+import uuid
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import MagicMock
@@ -271,6 +272,7 @@ def test_record_timing_runs_before_advance_in_run_loop(monkeypatch):
 
     job = SimpleNamespace(
         id="job-ordering",
+        lease_id=uuid.uuid4(),
         address="0xabc",
         name="t",
         status=JobStatus.processing,
@@ -342,9 +344,11 @@ def test_run_loop_folds_recorded_metrics_into_artifact(monkeypatch):
             record_stage_metric("dependencies", 5)
             record_stage_metric("is_proxy", True)
 
-    # lease_id absent → no heartbeat thread / inflight registration to stub.
+    import uuid
+
     job = SimpleNamespace(
         id="job-metrics",
+        lease_id=uuid.uuid4(),
         address="0xabc",
         name="t",
         status=JobStatus.processing,

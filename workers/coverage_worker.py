@@ -43,11 +43,13 @@ from __future__ import annotations
 
 import logging
 import os
+import uuid
 
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from db.models import Contract, Job, JobStage, JobStatus
+from db.queue import DEFAULT_JOB_LEASE_TTL_S
 from utils.logging import log_timed_phase, record_degraded, record_stage_metric
 from workers.base import BaseWorker
 
@@ -97,6 +99,11 @@ class CoverageWorker(BaseWorker):
                 SELECT j.id
                 FROM jobs j
                 WHERE j.stage = 'coverage' AND j.status = 'queued'
+                  AND (j.next_attempt_at IS NULL OR j.next_attempt_at <= NOW())
+                  AND NOT EXISTS (
+                      SELECT 1 FROM job_dependencies dep
+                      WHERE dep.depender_job_id = j.id AND dep.status = 'pending'
+                  )
                   AND NOT EXISTS (
                     SELECT 1 FROM audit_reports ar
                     WHERE ar.protocol_id = j.protocol_id
@@ -121,6 +128,11 @@ class CoverageWorker(BaseWorker):
             return None
         job.status = JobStatus.processing
         job.worker_id = self.worker_id
+        job.lease_id = uuid.uuid4()
+        session.execute(
+            text("UPDATE jobs SET lease_expires_at = NOW() + (:ttl * INTERVAL '1 second') WHERE id = :id"),
+            {"ttl": DEFAULT_JOB_LEASE_TTL_S, "id": job.id},
+        )
         session.commit()
         session.refresh(job)
         return job
@@ -138,6 +150,11 @@ class CoverageWorker(BaseWorker):
                 SELECT j.id
                 FROM jobs j
                 WHERE j.stage = 'coverage' AND j.status = 'queued'
+                  AND (j.next_attempt_at IS NULL OR j.next_attempt_at <= NOW())
+                  AND NOT EXISTS (
+                      SELECT 1 FROM job_dependencies dep
+                      WHERE dep.depender_job_id = j.id AND dep.status = 'pending'
+                  )
                   AND j.updated_at < (NOW() - (:timeout * INTERVAL '1 second'))
                 ORDER BY j.updated_at ASC
                 FOR UPDATE SKIP LOCKED
@@ -162,6 +179,11 @@ class CoverageWorker(BaseWorker):
         )
         job.status = JobStatus.processing
         job.worker_id = self.worker_id
+        job.lease_id = uuid.uuid4()
+        session.execute(
+            text("UPDATE jobs SET lease_expires_at = NOW() + (:ttl * INTERVAL '1 second') WHERE id = :id"),
+            {"ttl": DEFAULT_JOB_LEASE_TTL_S, "id": job.id},
+        )
         session.commit()
         session.refresh(job)
         return job

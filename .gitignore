@@ -40,3 +40,7 @@ phase-b-results.md
 coverage.xml
 diff-cover.html
 diff-cover.md
+
+# Dedicated local production-compute credentials
+.env.compute
+logs/local-compute*

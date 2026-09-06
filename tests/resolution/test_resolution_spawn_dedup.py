@@ -10,6 +10,7 @@ import uuid
 
 from sqlalchemy import func
 
+from tests.attempt_helpers import claimed_call
 from tests.conftest import requires_postgres
 
 
@@ -37,7 +38,13 @@ def test_spawn_dedup_is_case_insensitive(db_session):
     create_job(db_session, {"address": child_addr[:2] + child_addr[2:].upper()})
     db_session.commit()
 
-    ResolutionWorker()._queue_discovered_contracts(db_session, parent, _graph(parent_addr, child_addr), "http://r.l")
+    claimed_call(
+        ResolutionWorker()._queue_discovered_contracts,
+        db_session,
+        parent,
+        _graph(parent_addr, child_addr),
+        "http://r.l",
+    )
 
     assert db_session.query(Job).filter(func.lower(Job.address) == child_addr).count() == 1
 
@@ -55,7 +62,13 @@ def test_spawn_dedup_is_chain_scoped(db_session, monkeypatch):
     create_job(db_session, {"address": child_addr, "chain": "ethereum"})
     db_session.commit()
 
-    ResolutionWorker()._queue_discovered_contracts(db_session, parent, _graph(parent_addr, child_addr), "http://r.l")
+    claimed_call(
+        ResolutionWorker()._queue_discovered_contracts,
+        db_session,
+        parent,
+        _graph(parent_addr, child_addr),
+        "http://r.l",
+    )
 
     base_jobs = db_session.query(Job).filter(func.lower(Job.address) == child_addr).filter(Job.chain_id == 8453).count()
     assert base_jobs == 1

@@ -10,6 +10,7 @@ import pytest
 
 from db.models import Artifact, Job, JobStatus
 from db.queue import create_job, fail_job_terminal
+from tests.attempt_helpers import lease_for
 from tests.cache_helpers import requires_postgres
 
 
@@ -43,7 +44,7 @@ def test_retry_endpoint_resets_failed_terminal_to_queued(api_client, clean_jobs)
     manual_retry artifact entry appended."""
     db_session = clean_jobs
     job = create_job(db_session, {"address": "0xabc", "name": "manual-retry"})
-    fail_job_terminal(db_session, job.id, "boom", kind="terminal")
+    fail_job_terminal(db_session, job.id, "boom", kind="terminal", lease_id=lease_for(db_session, job.id))
 
     response = api_client.post(f"/api/jobs/{job.id}/retry")
     assert response.status_code == 200
@@ -182,7 +183,7 @@ def test_retry_endpoint_concurrent_operators_serialize_via_row_lock(clean_jobs, 
 
     db_session = clean_jobs
     job = create_job(db_session, {"address": "0xabc", "name": "race"})
-    fail_job_terminal(db_session, job.id, "boom", kind="terminal")
+    fail_job_terminal(db_session, job.id, "boom", kind="terminal", lease_id=lease_for(db_session, job.id))
     job_id = job.id
     db_session.commit()
 

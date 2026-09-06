@@ -11,6 +11,8 @@ from sqlalchemy import func, select, text
 from sqlalchemy import update as sa_update
 from sqlalchemy.orm import Session
 
+from db.attempts import session_attempt
+from db.compute import ROUTED_COMPUTE_STAGES, parent_route, routing_enabled, worker_compute_target
 from db.models import Job, JobDependency, JobStage, JobStatus, derive_job_chain_id
 
 from .heartbeats import DEFAULT_JOB_LEASE_TTL_S, DEFAULT_JOB_STALE_TIMEOUT, LeaseLost
@@ -81,6 +83,10 @@ def create_job(
     session: Session,
     request_dict: dict[str, Any],
     initial_stage: JobStage = JobStage.discovery,
+    *,
+    compute_target: str = "cloud",
+    routing_from: Job | None = None,
+    commit: bool = True,
 ) -> Job:
     """Insert a new job at the given stage with status=queued.
 
@@ -93,7 +99,18 @@ def create_job(
 
     trace_id = trace_id_var.get() or uuid.uuid4().hex[:16]
     address = request_dict.get("address")
+    job_id = uuid.uuid4()
+    compute_group_id = job_id
+    if routing_from is not None:
+        compute_target, compute_group_id = parent_route(session, routing_from)
+    if compute_target not in {"cloud", "local"}:
+        raise ValueError("compute_target must be cloud or local")
+    if compute_target == "local" and not routing_enabled():
+        raise ValueError("Local compute routing is disabled")
     job = Job(
+        id=job_id,
+        compute_target=compute_target,
+        compute_group_id=compute_group_id,
         address=address,
         # Explicit enqueue-path dual-write (invariant 1). Shares the model's
         # derivation, which also runs as a column default for any non-create_job
@@ -109,8 +126,11 @@ def create_job(
         trace_id=trace_id,
     )
     session.add(job)
-    session.commit()
-    session.refresh(job)
+    if commit:
+        session.commit()
+        session.refresh(job)
+    else:
+        session.flush()
     return job
 
 
@@ -165,6 +185,8 @@ def claim_job(
         .limit(1)
         .with_for_update(skip_locked=True)
     )
+    if target_stage in ROUTED_COMPUTE_STAGES:
+        stmt = stmt.where(Job.compute_target == worker_compute_target())
     job = session.execute(stmt).scalar_one_or_none()
     if job is None:
         return None
@@ -185,22 +207,36 @@ def claim_job(
 
 
 def _check_lease_or_raise(job: Job, lease_id: uuid.UUID | None) -> None:
-    """Verify the caller still holds the row's lease; raise ``LeaseLost`` if not.
+    """Diagnostic-only check; mutation authority comes from conditional SQL."""
+    if lease_id is None or job.status != JobStatus.processing or job.lease_id != lease_id:
+        raise LeaseLost(f"Job {job.id}: caller does not hold a processing lease")
 
-    ``lease_id=None`` means the caller doesn't care (legacy/admin path);
-    skip the check. The pre-claim ``lease_id`` column may itself be NULL
-    on rows that pre-date the lease columns — in that case treat the
-    write as authoritative (no live competing claimant).
-    """
-    if lease_id is None:
-        return
-    if job.lease_id is None:
-        return
-    if job.lease_id != lease_id:
-        raise LeaseLost(
-            f"Job {job.id}: lease {lease_id} no longer holds the row "
-            f"(current holder: {job.lease_id}, worker_id={job.worker_id})"
-        )
+
+def _transition(session: Session, job_id: Any, claim_lease: uuid.UUID, **values: Any) -> None:
+    if claim_lease is None:
+        raise LeaseLost(f"Job {job_id}: missing claim-time lease")
+    attempt = session_attempt(session)
+    if attempt is not None:
+        attempt.check_cancelled()
+        if attempt.job_id != job_id or attempt.lease_id != claim_lease:
+            raise LeaseLost("Transition does not match the bound attempt")
+    # Flush dependencies/other output in this same transaction. If the CAS
+    # rejects the attempt, none of that output is allowed to commit later.
+    try:
+        session.flush()
+        matched = session.execute(
+            sa_update(Job)
+            .where(Job.id == job_id, Job.status == JobStatus.processing, Job.lease_id == claim_lease)
+            .values(**values)
+            .returning(Job.id)
+        ).scalar_one_or_none()
+        if matched is None:
+            raise LeaseLost(f"Job {job_id}: conditional lifecycle mutation rejected")
+        session.info["attempt_transition"] = session.get_transaction()
+        session.commit()
+    except BaseException:
+        session.rollback()
+        raise
 
 
 def heartbeat_job(
@@ -224,6 +260,7 @@ def heartbeat_job(
             SET lease_expires_at = NOW() + (:ttl * INTERVAL '1 second'),
                 updated_at = NOW()
             WHERE id = :job_id
+              AND status = 'processing'
               AND lease_id = :lease_id
             RETURNING id
             """
@@ -236,61 +273,37 @@ def heartbeat_job(
         raise LeaseLost(f"Job {job_id}: heartbeat rejected — lease {lease_id} no longer holds the row")
 
 
-def update_job_detail(session: Session, job_id: Any, detail: str) -> None:
-    """Update the human-readable progress message on a job."""
-    job = session.get(Job, job_id)
-    if job:
-        job.detail = detail
-        session.commit()
+def update_job_detail(session: Session, job_id: Any, detail: str, *, lease_id: uuid.UUID) -> None:
+    _transition(session, job_id, lease_id, detail=detail)
 
 
-def advance_job(
-    session: Session,
-    job_id: Any,
-    next_stage: JobStage,
-    detail: str = "",
-    *,
-    lease_id: uuid.UUID | None = None,
-) -> None:
-    """Move a job to the next stage and reset status to queued.
-
-    *lease_id*: when provided, refuses to write if the caller no longer
-    holds the row's lease (raises ``LeaseLost``). ``BaseWorker``
-    threads its claim-time lease through here so a worker that's been
-    silently reclaimed can't advance a job a sibling is now processing.
-    """
-    job = session.get(Job, job_id)
-    if job is None:
-        return
-    _check_lease_or_raise(job, lease_id)
-    job.stage = next_stage
-    job.status = JobStatus.queued
-    job.detail = detail or f"Advanced to {next_stage.value}"
-    job.worker_id = None
-    job.lease_id = None
-    job.lease_expires_at = None
-    session.commit()
+def advance_job(session: Session, job_id: Any, next_stage: JobStage, detail: str = "", *, lease_id: uuid.UUID) -> None:
+    values: dict[str, Any] = dict(
+        stage=next_stage,
+        status=JobStatus.queued,
+        detail=detail or f"Advanced to {next_stage.value}",
+        worker_id=None,
+        lease_id=None,
+        lease_expires_at=None,
+    )
+    if next_stage == JobStage.coverage:
+        values["compute_target"] = "cloud"
+    _transition(session, job_id, lease_id, **values)
 
 
-def complete_job(
-    session: Session,
-    job_id: Any,
-    detail: str = "Analysis complete",
-    *,
-    lease_id: uuid.UUID | None = None,
-) -> None:
-    """Mark a job as completed with stage=done. See :func:`advance_job` for *lease_id*."""
-    job = session.get(Job, job_id)
-    if job is None:
-        return
-    _check_lease_or_raise(job, lease_id)
-    job.stage = JobStage.done
-    job.status = JobStatus.completed
-    job.detail = detail
-    job.worker_id = None
-    job.lease_id = None
-    job.lease_expires_at = None
-    session.commit()
+def complete_job(session: Session, job_id: Any, detail: str = "Analysis complete", *, lease_id: uuid.UUID) -> None:
+    _transition(
+        session,
+        job_id,
+        lease_id,
+        stage=JobStage.done,
+        status=JobStatus.completed,
+        detail=detail,
+        worker_id=None,
+        lease_id=None,
+        lease_expires_at=None,
+        compute_target="cloud",
+    )
 
 
 def _convert_impl_job_to_proxy_context(
@@ -298,41 +311,29 @@ def _convert_impl_job_to_proxy_context(
     job: Job,
     *,
     proxy_addr: str,
+    routing_from: Job,
     proxy_type: str | None = None,
     discovery_relationship: str = "implementation",
-) -> None:
-    """Back-patch a standalone impl job to proxy context, re-enqueuing it if it ran.
+) -> bool:
+    from db.compute import reactivate_terminal_job
 
-    An impl discovered standalone (e.g. via deployer expansion) before its proxy is
-    classified gets a job with no ``proxy_address`` and resolves against its own
-    empty storage. When the proxy later links it, convert that same job to proxy
-    context — one job, no duplicate — and re-run from static so split-proxy
-    secondary-impl linkage fires and resolution re-reads against the proxy. The
-    re-resolution's deployment-scoped writes sweep the stale standalone rows.
-    """
     req = dict(job.request) if isinstance(job.request, dict) else {}
     req["proxy_address"] = proxy_addr
     if proxy_type:
         req["proxy_type"] = proxy_type
     req.setdefault("discovery_relationship", discovery_relationship)
-    job.request = req  # reassign so SQLAlchemy flushes the JSONB change
-
-    already_ran_resolution = job.status == JobStatus.completed or job.stage in (
-        JobStage.resolution,
-        JobStage.policy,
-        JobStage.effects,
-        JobStage.coverage,
-        JobStage.done,
+    changed = reactivate_terminal_job(
+        session,
+        job.id,
+        expected_stage=JobStage.done,
+        next_stage=JobStage.static,
+        detail=f"Re-resolving in proxy context ({proxy_addr})",
+        request=req,
+        routing_from=routing_from,
     )
-    if already_ran_resolution:
-        job.stage = JobStage.static
-        job.status = JobStatus.queued
-        job.worker_id = None
-        job.lease_id = None
-        job.lease_expires_at = None
-        job.next_attempt_at = None
-        job.detail = f"Re-resolving in proxy context ({proxy_addr})"
-    session.commit()
+    if changed:
+        session.commit()
+    return changed
 
 
 def reconcile_impl_job_for_proxy(
@@ -344,6 +345,7 @@ def reconcile_impl_job_for_proxy(
     chain: str | None = None,
     root_job_id: str | None = None,
     discovery_relationship: str = "implementation",
+    routing_from: Job,
 ) -> str:
     """Decide how to spawn/dedupe an implementation job now known to sit behind
     ``proxy_addr``. Returns one of:
@@ -396,14 +398,21 @@ def reconcile_impl_job_for_proxy(
         ).limit(1)
     ).scalar_one_or_none()
     if standalone is not None:
-        _convert_impl_job_to_proxy_context(
+        changed = _convert_impl_job_to_proxy_context(
             session,
             standalone,
             proxy_addr=proxy_lc,
             proxy_type=proxy_type,
             discovery_relationship=discovery_relationship,
+            routing_from=routing_from,
         )
-        return "backpatched"
+        if changed:
+            return "backpatched"
+        # An active standalone or another proxy's concurrent adoption is not
+        # a suitable storage-context provider for this deployment. Preserve its
+        # independent run and let the caller create the required proxy child.
+        current_request = standalone.request if isinstance(standalone.request, dict) else {}
+        return "skip" if current_request.get("proxy_address") == proxy_lc else "spawn"
 
     other_proxy = session.execute(_scoped(select(Job.id).where(Job.address == impl_lc)).limit(1)).scalar_one_or_none()
     if other_proxy is not None:
@@ -416,22 +425,18 @@ def reconcile_impl_job_for_proxy(
     return "spawn"
 
 
-def fail_job(session: Session, job_id: Any, error: str) -> None:
-    """Mark a job as failed with the error traceback.
-
-    Retained for callers outside ``BaseWorker`` that have not been migrated
-    to the transient/terminal split. Inside the worker the failure path
-    routes through :func:`requeue_job` (transient) or
-    :func:`fail_job_terminal` (terminal) so retries and DLQ semantics apply.
-    """
-    job = session.get(Job, job_id)
-    if job is None:
-        return
-    job.status = JobStatus.failed
-    job.error = error
-    job.detail = "Failed"
-    job.worker_id = None
-    session.commit()
+def fail_job(session: Session, job_id: Any, error: str, *, lease_id: uuid.UUID) -> None:
+    _transition(
+        session,
+        job_id,
+        lease_id,
+        status=JobStatus.failed,
+        error=error,
+        detail="Failed",
+        worker_id=None,
+        lease_id=None,
+        lease_expires_at=None,
+    )
 
 
 def requeue_job(
@@ -441,34 +446,22 @@ def requeue_job(
     *,
     retry_count: int,
     next_attempt_at: datetime,
-    lease_id: uuid.UUID | None = None,
+    lease_id: uuid.UUID,
 ) -> None:
-    """Re-queue a job after a transient failure with a backoff timestamp.
-
-    Mirrors :func:`fail_job`'s transactional discipline: one commit, no
-    silent swallows. The row goes back to ``status='queued'`` so any
-    eligible worker can claim it once ``NOW() >= next_attempt_at``;
-    ``worker_id`` is cleared so the previous claimer's id doesn't linger
-    on what's now an unclaimed row.
-
-    The accumulated ``stage_errors`` artifact is the per-job audit log of
-    every attempt — this function does not touch it. The caller (typically
-    ``BaseWorker``) appends the just-failed attempt before calling here.
-    """
-    job = session.get(Job, job_id)
-    if job is None:
-        return
-    _check_lease_or_raise(job, lease_id)
-    job.status = JobStatus.queued
-    job.error = error
-    job.retry_count = retry_count
-    job.next_attempt_at = next_attempt_at
-    job.last_failure_kind = "transient"
-    job.detail = f"Retry scheduled for {next_attempt_at.isoformat()}"
-    job.worker_id = None
-    job.lease_id = None
-    job.lease_expires_at = None
-    session.commit()
+    _transition(
+        session,
+        job_id,
+        lease_id,
+        status=JobStatus.queued,
+        error=error,
+        retry_count=retry_count,
+        next_attempt_at=next_attempt_at,
+        last_failure_kind="transient",
+        detail=f"Retry scheduled for {next_attempt_at.isoformat()}",
+        worker_id=None,
+        lease_id=None,
+        lease_expires_at=None,
+    )
 
 
 def release_job_lease(
@@ -536,36 +529,18 @@ def fail_job_terminal(
     *,
     kind: str,
     retry_count: int | None = None,
-    lease_id: uuid.UUID | None = None,
+    lease_id: uuid.UUID,
 ) -> None:
-    """Mark a job as terminally failed (no further automatic retries).
-
-    Distinct from :func:`fail_job` so observers can tell "retries exhausted
-    or deterministically broken" apart from "just hit the legacy code
-    path". The stale-job sweep does not resurrect ``failed_terminal`` rows.
-
-    *kind* is the classifier verdict (``"transient"`` if retries were
-    exhausted; ``"terminal"`` if classified as deterministic from the
-    start). Persisted to ``last_failure_kind`` so an operator can answer
-    "was this a flaky upstream or a bug?" without resolving the artifact.
-
-    *retry_count* defaults to None — leaves the column unchanged, which is
-    the right behaviour for deterministic terminal failures (we never
-    retried, so the count shouldn't move). The retries-exhausted path
-    passes ``new_retry_count`` so the row records the total attempt count.
-    """
-    job = session.get(Job, job_id)
-    if job is None:
-        return
-    _check_lease_or_raise(job, lease_id)
-    job.status = JobStatus.failed_terminal
-    job.error = error
-    job.detail = "Failed (terminal)"
-    job.last_failure_kind = kind
-    job.next_attempt_at = None
-    job.worker_id = None
-    job.lease_id = None
-    job.lease_expires_at = None
+    values: dict[str, Any] = dict(
+        status=JobStatus.failed_terminal,
+        error=error,
+        detail="Failed (terminal)",
+        last_failure_kind=kind,
+        next_attempt_at=None,
+        worker_id=None,
+        lease_id=None,
+        lease_expires_at=None,
+    )
     if retry_count is not None:
-        job.retry_count = retry_count
-    session.commit()
+        values["retry_count"] = retry_count
+    _transition(session, job_id, lease_id, **values)

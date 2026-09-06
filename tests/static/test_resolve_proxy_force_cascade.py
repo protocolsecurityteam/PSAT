@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock
 
+from tests.attempt_helpers import claimed_call
 from tests.conftest import requires_postgres
 from workers.static_worker import StaticWorker
 
@@ -36,7 +37,7 @@ def test_resolve_proxy_queues_hidden_proxy_impl(monkeypatch):
     )
     monkeypatch.setattr(
         "workers.static_worker.create_job",
-        lambda _session, request: created_jobs.append(request) or SimpleNamespace(id="child-1"),
+        lambda _session, request, **_routing: created_jobs.append(request) or SimpleNamespace(id="child-1"),
     )
     monkeypatch.setattr(
         "services.discovery.classifier.classify_single",
@@ -48,7 +49,7 @@ def test_resolve_proxy_queues_hidden_proxy_impl(monkeypatch):
         },
     )
 
-    worker._resolve_proxy(session, job, job.address, job.name)
+    claimed_call(worker._resolve_proxy, session, job, job.address, job.name)
 
     assert store_calls[0][0] == "contract_flags"
     assert store_calls[0][1]["is_proxy"] is True
@@ -105,7 +106,7 @@ def test_process_attempts_semantic_proxy_classification_for_non_obvious_names(mo
     monkeypatch.setattr(worker, "_run_tracking_plan_phase", lambda *args, **kwargs: None)
     monkeypatch.setattr(worker, "update_detail", lambda *args, **kwargs: None)
 
-    worker.process(session, cast(Any, job))
+    claimed_call(worker.process, session, cast(Any, job))
 
     assert called == ["resolve"]
 
@@ -138,7 +139,9 @@ def test_force_dedupes_impl_jobs_within_same_root_cascade(monkeypatch):
     created_jobs: list[dict] = []
     monkeypatch.setattr(
         "workers.static_worker.create_job",
-        lambda _session, request: created_jobs.append(request) or SimpleNamespace(id=f"child-{len(created_jobs)}"),
+        lambda _session, request, **_routing: (
+            created_jobs.append(request) or SimpleNamespace(id=f"child-{len(created_jobs)}")
+        ),
     )
     monkeypatch.setattr(
         "workers.static_worker.store_artifact",
@@ -163,8 +166,8 @@ def test_force_dedupes_impl_jobs_within_same_root_cascade(monkeypatch):
         request={"rpc_url": "https://rpc", "force": True, "root_job_id": "root-1", "chain_id": 1},
     )
 
-    worker._resolve_proxy(session, job1, job1.address, job1.name)
-    worker._resolve_proxy(session, job2, job2.address, job2.name)
+    claimed_call(worker._resolve_proxy, session, job1, job1.address, job1.name)
+    claimed_call(worker._resolve_proxy, session, job2, job2.address, job2.name)
 
     # First proxy spawned its impl; second proxy in same cascade was deduped.
     assert len(created_jobs) == 1, f"second proxy in same cascade must dedupe its impl; got {len(created_jobs)} jobs"
@@ -185,7 +188,9 @@ def test_force_does_not_dedupe_across_different_root_cascades(monkeypatch):
     created_jobs: list[dict] = []
     monkeypatch.setattr(
         "workers.static_worker.create_job",
-        lambda _session, request: created_jobs.append(request) or SimpleNamespace(id=f"child-{len(created_jobs)}"),
+        lambda _session, request, **_routing: (
+            created_jobs.append(request) or SimpleNamespace(id=f"child-{len(created_jobs)}")
+        ),
     )
     monkeypatch.setattr(
         "workers.static_worker.store_artifact",
@@ -210,8 +215,8 @@ def test_force_does_not_dedupe_across_different_root_cascades(monkeypatch):
         request={"rpc_url": "https://rpc", "force": True, "root_job_id": "root-B", "chain_id": 1},
     )
 
-    worker._resolve_proxy(session, job_root_a, job_root_a.address, job_root_a.name)
-    worker._resolve_proxy(session, job_root_b, job_root_b.address, job_root_b.name)
+    claimed_call(worker._resolve_proxy, session, job_root_a, job_root_a.address, job_root_a.name)
+    claimed_call(worker._resolve_proxy, session, job_root_b, job_root_b.address, job_root_b.name)
 
     assert len(created_jobs) == 2, "fresh cascades must each get their own impl job"
     assert {j["root_job_id"] for j in created_jobs} == {"root-A", "root-B"}
@@ -231,7 +236,9 @@ def test_no_force_uses_global_dedupe(monkeypatch):
     created_jobs: list[dict] = []
     monkeypatch.setattr(
         "workers.static_worker.create_job",
-        lambda _session, request: created_jobs.append(request) or SimpleNamespace(id="should-not-be-created"),
+        lambda _session, request, **_routing: (
+            created_jobs.append(request) or SimpleNamespace(id="should-not-be-created")
+        ),
     )
     monkeypatch.setattr(
         "workers.static_worker.store_artifact",
@@ -248,7 +255,7 @@ def test_no_force_uses_global_dedupe(monkeypatch):
     )
 
     job = _job(request={"rpc_url": "https://rpc"})  # no force
-    worker._resolve_proxy(session, job, job.address, job.name)
+    claimed_call(worker._resolve_proxy, session, job, job.address, job.name)
 
     assert created_jobs == [], "global dedupe must reject this impl when prior job exists"
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
@@ -10,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import func, select, text
 
+from db.compute import ComputeGroupBusy, lock_compute_groups, move_group_to_cloud, routing_enabled
 from db.models import Artifact, Contract, Job, JobStage, JobStatus, Protocol, derive_job_chain_id
 from db.queue import store_artifact
 from schemas.api_requests import AnalyzeRequest
@@ -88,6 +90,16 @@ def analyze_address(request: AnalyzeRequest) -> JobDict:
         # ignored in favor of eRPC, so a pinned provider can't shadow the
         # proxy. Stored verbatim and sanitized by ``Job.to_dict`` at output.
         req_dict = request.model_dump()
+        if request.compute_target == "local":
+            if not routing_enabled():
+                raise HTTPException(status_code=409, detail="Local compute routing is disabled")
+            from services.compute.runtime import ready_contract
+
+            try:
+                ready_contract(session)
+            except ValueError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+
         # Optional protocol context: an address submission that also names a
         # company links to the EXISTING protocol row — lookup-only, so a typo'd
         # name 404s instead of minting a duplicate protocol (company-only
@@ -107,11 +119,15 @@ def analyze_address(request: AnalyzeRequest) -> JobDict:
                 HumanAssertion(actor=W5_ADMIN_ACTOR, asserted_at=datetime.now(timezone.utc))
             )
         if request.dapp_urls:
-            job = deps.create_job(session, req_dict, initial_stage=JobStage.dapp_crawl)
+            job = deps.create_job(
+                session, req_dict, initial_stage=JobStage.dapp_crawl, compute_target=request.compute_target
+            )
         elif request.defillama_protocol:
-            job = deps.create_job(session, req_dict, initial_stage=JobStage.defillama_scan)
+            job = deps.create_job(
+                session, req_dict, initial_stage=JobStage.defillama_scan, compute_target=request.compute_target
+            )
         else:
-            job = deps.create_job(session, req_dict)
+            job = deps.create_job(session, req_dict, compute_target=request.compute_target)
         deps.log_admin_mutation("analyze_create", id=str(job.id), stage=job.stage.value)
         return job.to_dict()
 
@@ -176,7 +192,7 @@ def analyze_remaining(company_name: str) -> AnalyzeRemainingResponse:
                 "protocol_id": protocol_row.id,
                 "company": company_name,
             }
-            job = deps.create_job(session, req_dict)
+            job = deps.create_job(session, req_dict, compute_target="cloud")
             contract.job_id = job.id
             session.commit()
             queued.append({"job_id": str(job.id), "address": contract.address})
@@ -369,7 +385,13 @@ def retry_job(job_id: str) -> JobDict:
         # artifact-append below would see them race on ``store_artifact``'s
         # upsert (last writer clobbers the first writer's manual_retry entry).
         # The lock is held until the outer ``session.commit()`` below.
+        group = session.execute(select(Job.compute_group_id).where(Job.id == parsed)).scalar_one_or_none()
+        if group is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+        lock_compute_groups(session, group)
         job = session.execute(select(Job).where(Job.id == parsed).with_for_update()).scalar_one_or_none()
+        if job is not None and job.compute_group_id != group:
+            raise HTTPException(status_code=409, detail="Job changed groups; refresh and retry")
         if job is None:
             raise HTTPException(status_code=404, detail="Job not found")
         if job.status != JobStatus.failed_terminal:
@@ -383,6 +405,8 @@ def retry_job(job_id: str) -> JobDict:
         job.last_failure_kind = None
         job.detail = "Manual retry requested by operator"
         job.worker_id = None
+        job.lease_id = None
+        job.lease_expires_at = None
         # Drop the prior ``error`` text — it referred to the now-superseded
         # terminal failure. The audit log preserves it via the manual_retry
         # entry below + the prior failure entries already in stage_errors.
@@ -530,3 +554,31 @@ def get_job_stage_timings(job_id: str) -> JobStageTimingsResponse:
                     timings[stage] = value
 
     return {"job_id": resolved_job_id, "stage_timings": timings}
+
+
+@router.get("/api/compute-capabilities", dependencies=[Depends(deps.require_admin_key)])
+def compute_capabilities() -> dict:
+    if not routing_enabled():
+        return {"local_enabled": False}
+    from services.compute.runtime import ready_contract
+
+    with deps.SessionLocal() as session:
+        try:
+            ready_contract(session)
+        except ValueError:
+            return {"local_enabled": False}
+    return {"local_enabled": True}
+
+
+@router.post("/api/jobs/{job_id}/move-to-cloud", dependencies=[Depends(deps.require_admin_key)])
+def move_local_run_to_cloud(job_id: uuid.UUID) -> dict:
+    with deps.SessionLocal() as session:
+        if session.get(Job, job_id) is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+        try:
+            count = move_group_to_cloud(session, job_id)
+            session.commit()
+        except ComputeGroupBusy as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        deps.log_admin_mutation("move_local_run_to_cloud", id=str(job_id), count=count)
+        return {"moved": count, "compute_target": "cloud"}

@@ -19,6 +19,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from tests.attempt_helpers import claimed_call
 from workers.base import JobHandledDirectly
 
 # ---------------------------------------------------------------------------
@@ -120,7 +121,7 @@ def _patch_worker_deps(
 
     monkeypatch.setattr(worker_module, "store_artifact", fake_store_artifact)
 
-    def fake_complete_job(session, job_id, detail=""):
+    def fake_complete_job(session, job_id, detail="", **_routing):
         complete_calls.append((job_id, detail))
 
     monkeypatch.setattr(worker_module, "complete_job", fake_complete_job)
@@ -153,7 +154,7 @@ class TestMissingDappUrls:
         job = _job(request={})
 
         with pytest.raises(ValueError, match="missing dapp_urls"):
-            worker.process(session, cast(Any, job))
+            claimed_call(worker.process, session, cast(Any, job))
 
     def test_empty_list(self, dapp_worker_module):
         worker = dapp_worker_module.DAppCrawlWorker()
@@ -161,7 +162,7 @@ class TestMissingDappUrls:
         job = _job(request={"dapp_urls": []})
 
         with pytest.raises(ValueError, match="missing dapp_urls"):
-            worker.process(session, cast(Any, job))
+            claimed_call(worker.process, session, cast(Any, job))
 
     def test_request_is_none(self, dapp_worker_module):
         worker = dapp_worker_module.DAppCrawlWorker()
@@ -169,7 +170,7 @@ class TestMissingDappUrls:
         job = _job(request=None)
 
         with pytest.raises(ValueError, match="missing dapp_urls"):
-            worker.process(session, cast(Any, job))
+            claimed_call(worker.process, session, cast(Any, job))
 
 
 class TestHappyPath:
@@ -186,7 +187,7 @@ class TestHappyPath:
 
         worker = dapp_worker_module.DAppCrawlWorker()
         with pytest.raises(JobHandledDirectly):
-            worker.process(session, cast(Any, job))
+            claimed_call(worker.process, session, cast(Any, job))
 
         stored_names = [name for name, _ in spies["store_calls"]]
         assert "dapp_crawl_results" in stored_names
@@ -215,7 +216,7 @@ class TestJobName:
 
         worker = dapp_worker_module.DAppCrawlWorker()
         with pytest.raises(JobHandledDirectly):
-            worker.process(session, cast(Any, job))
+            claimed_call(worker.process, session, cast(Any, job))
 
         assert job.name == "DApp crawl (2 URLs)"
         session.commit.assert_called()
@@ -228,7 +229,7 @@ class TestJobName:
 
         worker = dapp_worker_module.DAppCrawlWorker()
         with pytest.raises(JobHandledDirectly):
-            worker.process(session, cast(Any, job))
+            claimed_call(worker.process, session, cast(Any, job))
 
         assert job.name == "My Custom Name"
 
@@ -253,7 +254,7 @@ class TestCrawlParameters:
 
         worker = dapp_worker_module.DAppCrawlWorker()
         with pytest.raises(JobHandledDirectly):
-            worker.process(session, cast(Any, job))
+            claimed_call(worker.process, session, cast(Any, job))
 
         assert captured["chain_id"] == 137
         assert captured["wait"] == 20
@@ -273,7 +274,7 @@ class TestCrawlParameters:
 
         worker = dapp_worker_module.DAppCrawlWorker()
         with pytest.raises(JobHandledDirectly):
-            worker.process(session, cast(Any, job))
+            claimed_call(worker.process, session, cast(Any, job))
 
         assert captured["wait"] == 10
 
@@ -289,7 +290,7 @@ class TestProtocolCreation:
 
         worker = dapp_worker_module.DAppCrawlWorker()
         with pytest.raises(JobHandledDirectly):
-            worker.process(session, cast(Any, job))
+            claimed_call(worker.process, session, cast(Any, job))
 
         assert spies["protocol_calls"] == [("ether.fi", "ether.fi")]
         assert job.protocol_id == 1
@@ -303,7 +304,7 @@ class TestProtocolCreation:
 
         worker = dapp_worker_module.DAppCrawlWorker()
         with pytest.raises(JobHandledDirectly):
-            worker.process(session, cast(Any, job))
+            claimed_call(worker.process, session, cast(Any, job))
 
         assert spies["protocol_calls"] == [("uniswap.org", "uniswap.org")]
 
@@ -315,7 +316,7 @@ class TestProtocolCreation:
 
         worker = dapp_worker_module.DAppCrawlWorker()
         with pytest.raises(JobHandledDirectly):
-            worker.process(session, cast(Any, job))
+            claimed_call(worker.process, session, cast(Any, job))
 
         assert spies["protocol_calls"] == [("Ether.fi", "stake.ether.fi")]
         assert job.company == "Ether.fi"
@@ -353,7 +354,7 @@ class TestInteractionPersistence:
 
         worker = dapp_worker_module.DAppCrawlWorker()
         with pytest.raises(JobHandledDirectly):
-            worker.process(session, cast(Any, job))
+            claimed_call(worker.process, session, cast(Any, job))
 
         added = [call.args[0] for call in session.add.call_args_list]
         interactions = [row for row in added if type(row).__name__ == "DAppInteraction"]

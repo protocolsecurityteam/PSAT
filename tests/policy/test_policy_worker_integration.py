@@ -8,6 +8,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from tests.attempt_helpers import claimed_call
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -160,7 +162,7 @@ class TestProcessStoresAllArtifacts:
             lambda *a, **kw: {"principals": []},
         )
 
-        worker.process(session, cast(Any, job))
+        claimed_call(worker.process, session, cast(Any, job))
 
         stored_names = [name for name, _ in store_calls]
         assert "effective_permissions" in stored_names
@@ -225,7 +227,7 @@ class TestProcessSemanticInputs:
             lambda self, session, job, contract_analysis, control_snapshot, **kw: {},
         )
 
-        worker.process(session, cast(Any, job))
+        claimed_call(worker.process, session, cast(Any, job))
 
         semantic_errors = [entry for entry in degraded if entry["phase"] == "effective_permissions_semantic_inputs"]
         assert len(semantic_errors) == 1
@@ -275,7 +277,7 @@ class TestGraphRefreshAfterEffectivePermissions:
         monkeypatch.setattr("workers.policy_worker.resolve_control_graph", fake_resolve_graph)
         monkeypatch.setattr("workers.policy_worker.build_principal_labels", fake_build_labels)
 
-        worker.process(session, cast(Any, job))
+        claimed_call(worker.process, session, cast(Any, job))
 
         ep_idx = call_order.index("effective_permissions")
         rg_idx = call_order.index("resolved_control_graph")
@@ -359,7 +361,7 @@ class TestCrossContractEnrichmentArtifactSync:
             lambda self, session, job, contract_analysis, control_snapshot, **kw: {"mintRewards()": [policy_claim]},
         )
 
-        worker.process(session, cast(Any, job))
+        claimed_call(worker.process, session, cast(Any, job))
 
         effective_payloads = [data for name, data in store_calls if name == "effective_permissions"]
         assert len(effective_payloads) == 2
@@ -502,7 +504,8 @@ class TestProcessFanoutParity:
             lambda self, session, job, contract_analysis, control_snapshot, **kw: {},
         )
 
-        worker.process(session, cast(Any, job))
+        monkeypatch.setattr("workers.policy_worker.queue_discovered_contracts", lambda *a, **kw: 0)
+        claimed_call(worker.process, session, cast(Any, job))
 
         labels_payload = next(data for name, data in store_calls if name == "principal_labels")
         return labels_payload, {"classify_calls": classify_calls}
@@ -600,7 +603,7 @@ class TestGraphRefreshRewritesTables:
             lambda self, session, job, contract_analysis, control_snapshot, **kw: {},
         )
 
-        worker.process(session, cast(Any, job))
+        claimed_call(worker.process, session, cast(Any, job))
         return replace_calls, refreshed_graph
 
     def test_refreshed_graph_is_written_to_the_tables(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -621,3 +624,10 @@ class TestGraphRefreshRewritesTables:
         or write."""
         replace_calls, _ = self._run_process(monkeypatch, contract_row=None)
         assert replace_calls == []
+
+
+@pytest.fixture(autouse=True)
+def _stub_progress_transition(monkeypatch):
+    # These unit tests return None for Contract lookup on a mock Session.
+    # Progress CAS uses real Postgres in the queue/fencing integration suites.
+    monkeypatch.setattr("workers.base.BaseWorker.update_detail", lambda *a, **kw: None)

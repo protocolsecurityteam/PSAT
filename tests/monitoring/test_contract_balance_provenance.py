@@ -16,6 +16,7 @@ from db.models import Contract, ContractBalance, ContractBalanceFetch, ContractB
 from services.monitoring.balance_observation import NativeReading
 from services.monitoring.balance_reads import PINNED_FINALITY_MARGIN
 from services.monitoring.tvl import refresh_contract_balances
+from tests.attempt_helpers import claimed_call
 from tests.conftest import requires_postgres
 from tests.support.balance_stubs import failed_page, page
 from utils.balance_status import (
@@ -454,7 +455,7 @@ class TestObservedAddressPerWriter:
         monkeypatch.setattr("services.clients.etherscan.get_token_balances_page", lambda a, **k: page([]))
         monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
 
-        cast(Any, worker)._fetch_balances(db_session, job, impl, chain_id=1)
+        claimed_call(cast(Any, worker)._fetch_balances, db_session, job, impl, chain_id=1)
 
         assert read_at == [proxy_addr]
         fetches = _fetches(db_session, proxy.id)
@@ -659,7 +660,7 @@ class TestHalvesFailIndependently:
         monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
         worker = ResolutionWorker()
         job = SimpleNamespace(id="j1", address=contract.address, request={}, chain_id=1)
-        cast(Any, worker)._fetch_balances(db_session, job, contract, chain_id=1)
+        claimed_call(cast(Any, worker)._fetch_balances, db_session, job, contract, chain_id=1)
 
     def test_token_half_succeeding_persists_its_rows(self, db_session, monkeypatch):
         """ACCEPTANCE: pinned native OK + get_eth_balance raises + token page OK."""

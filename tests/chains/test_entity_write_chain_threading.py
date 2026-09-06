@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import uuid
 
+from tests.attempt_helpers import claimed_call
 from tests.conftest import requires_postgres
 
 
@@ -181,7 +182,7 @@ def test_resolution_child_job_stamped_from_chain_id_not_request(db_session, monk
         ],
     }
 
-    ResolutionWorker()._queue_discovered_contracts(db_session, parent, resolved_graph, "http://rpc.local")
+    claimed_call(ResolutionWorker()._queue_discovered_contracts, db_session, parent, resolved_graph, "http://rpc.local")
 
     child = db_session.query(Job).filter(Job.address == child_addr).one()
     assert child.request["chain"] == "base"
@@ -207,7 +208,7 @@ def test_resolution_child_job_mainnet_chainless_stamps_ethereum(db_session):
         ],
     }
 
-    ResolutionWorker()._queue_discovered_contracts(db_session, parent, resolved_graph, "http://rpc.local")
+    claimed_call(ResolutionWorker()._queue_discovered_contracts, db_session, parent, resolved_graph, "http://rpc.local")
 
     child = db_session.query(Job).filter(Job.address == child_addr).one()
     assert child.request["chain"] == "ethereum"

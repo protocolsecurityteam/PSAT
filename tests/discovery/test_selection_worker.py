@@ -24,6 +24,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy import update as sa_update
 
+from tests.attempt_helpers import claimed_call
 from tests.conftest import requires_postgres
 from workers.base import JobHandledDirectly
 
@@ -217,7 +218,10 @@ def _add_sibling_job(
 
 
 @requires_postgres
-def test_selection_ranks_across_sources_and_queues_top_n(db_session, worker, seed_protocol):
+@pytest.mark.parametrize("compute_target", ["cloud", "local"])
+def test_selection_ranks_across_sources_and_queues_top_n(
+    db_session, worker, seed_protocol, monkeypatch, compute_target
+):
     """All three discovery sources compete in one ranking pass.
 
     Seed: inventory (high confidence), dapp_crawl (null confidence → defaults
@@ -263,9 +267,12 @@ def test_selection_ranks_across_sources_and_queues_top_n(db_session, worker, see
     )
 
     job = _add_selection_job(db_session, protocol_id=protocol_id, company=company, analyze_limit=3)
+    monkeypatch.setenv("PSAT_LOCAL_COMPUTE_ROUTING_ENABLED", "1")
+    job.compute_target = compute_target
+    db_session.commit()
 
     with pytest.raises(JobHandledDirectly):
-        worker.process(db_session, job)
+        claimed_call(worker.process, db_session, job)
     db_session.refresh(job)
 
     # Parent job finished and moved to done
@@ -277,6 +284,9 @@ def test_selection_ranks_across_sources_and_queues_top_n(db_session, worker, see
         db_session.execute(select(Job).where(Job.request["parent_job_id"].as_string() == str(job.id))).scalars().all()
     )
     assert len(children) == 3
+    assert all(
+        child.compute_target == compute_target and child.compute_group_id == job.compute_group_id for child in children
+    )
     child_addresses = {child.address for child in children}
     # Top three by rank_score: recent activity wins over stale inventory
     assert child_addresses == {inv_top, dapp_top, defi_mid}
@@ -337,7 +347,7 @@ def test_selection_filters_below_confidence_threshold(db_session, worker, seed_p
 
     job = _add_selection_job(db_session, protocol_id=protocol_id, company=company, analyze_limit=5)
     with pytest.raises(JobHandledDirectly):
-        worker.process(db_session, job)
+        claimed_call(worker.process, db_session, job)
     db_session.refresh(job)
 
     assert job.status.value == "completed"
@@ -368,7 +378,7 @@ def test_null_confidence_dapp_and_defillama_rows_participate(db_session, worker,
 
     job = _add_selection_job(db_session, protocol_id=protocol_id, company=company, analyze_limit=3)
     with pytest.raises(JobHandledDirectly):
-        worker.process(db_session, job)
+        claimed_call(worker.process, db_session, job)
     db_session.refresh(job)
 
     children = (
@@ -396,7 +406,7 @@ def test_upgrade_history_rows_are_excluded(db_session, worker, seed_protocol):
     )
     job = _add_selection_job(db_session, protocol_id=protocol_id, company=company, analyze_limit=3)
     with pytest.raises(JobHandledDirectly):
-        worker.process(db_session, job)
+        claimed_call(worker.process, db_session, job)
 
     children = (
         db_session.execute(select(Job).where(Job.request["parent_job_id"].as_string() == str(job.id))).scalars().all()
@@ -435,7 +445,7 @@ def test_existing_non_proxy_job_skips_address(db_session, worker, seed_protocol)
 
     job = _add_selection_job(db_session, protocol_id=protocol_id, company=company, analyze_limit=3)
     with pytest.raises(JobHandledDirectly):
-        worker.process(db_session, job)
+        claimed_call(worker.process, db_session, job)
 
     new_children = (
         db_session.execute(select(Job).where(Job.request["parent_job_id"].as_string() == str(job.id))).scalars().all()
@@ -474,7 +484,7 @@ def test_proxy_with_existing_job_is_re_queued(db_session, worker, seed_protocol)
 
     job = _add_selection_job(db_session, protocol_id=protocol_id, company=company, analyze_limit=3)
     with pytest.raises(JobHandledDirectly):
-        worker.process(db_session, job)
+        claimed_call(worker.process, db_session, job)
 
     new_children = (
         db_session.execute(select(Job).where(Job.request["parent_job_id"].as_string() == str(job.id))).scalars().all()
@@ -640,7 +650,7 @@ def test_corroborated_contract_outranks_single_source_peer(db_session, worker, s
 
     job = _add_selection_job(db_session, protocol_id=protocol_id, company=company, analyze_limit=1)
     with pytest.raises(JobHandledDirectly):
-        worker.process(db_session, job)
+        claimed_call(worker.process, db_session, job)
 
     children = (
         db_session.execute(select(Job).where(Job.request["parent_job_id"].as_string() == str(job.id))).scalars().all()
@@ -756,7 +766,7 @@ class TestAnalyzeLimitFilling:
         from workers.base import JobHandledDirectly
 
         try:
-            worker.process(db_session, parent)
+            claimed_call(worker.process, db_session, parent)
         except JobHandledDirectly:
             pass
 
@@ -884,7 +894,7 @@ def test_selection_settles_pending_nominations_before_ranking(db_session, worker
     job = _add_selection_job(db_session, protocol_id=protocol_id, company=company, analyze_limit=2)
 
     with pytest.raises(JobHandledDirectly):
-        worker.process(db_session, job)
+        claimed_call(worker.process, db_session, job)
 
     assert seen["probed"] == [candidate.address]
     db_session.refresh(candidate)

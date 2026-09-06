@@ -130,6 +130,7 @@ from .proxies import (
     ProxyUpgradeEvent,
     WatchedProxy,
 )
+from .reanalysis import MonitoringReanalysis, MonitoringReanalysisReceipt
 from .roles import (
     RoleHolderPlane,
     RoleHolderPlaneRefresh,
@@ -151,6 +152,8 @@ from .tokens import (
 )
 
 __all__ = [
+    "MonitoringReanalysis",
+    "MonitoringReanalysisReceipt",
     "ADMITTING_WITNESS_RULES",
     "AddressLabel",
     "Artifact",

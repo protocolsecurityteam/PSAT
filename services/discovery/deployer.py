@@ -29,10 +29,11 @@ from __future__ import annotations
 import contextvars
 import logging
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import as_completed
 from typing import Any
 
 from services.clients import etherscan
+from services.concurrency import ContextThreadPoolExecutor as ThreadPoolExecutor
 from services.discovery.inventory_domain import _debug_log
 from services.discovery.static_dependencies import normalize_address
 from utils.chains import chain_by_id

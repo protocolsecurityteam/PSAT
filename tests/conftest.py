@@ -52,6 +52,7 @@ from db.models import (  # noqa: E402
     Job,
     MonitoredContract,
     MonitoredEvent,
+    MonitoringReanalysis,
     Protocol,
     ProtocolSubscription,
     ProxySubscription,
@@ -708,6 +709,7 @@ def db_session():
         yield session
     finally:
         session.rollback()
+        session.info.pop("job_attempt", None)
         # Clean monitoring + coverage tables (order respects FK constraints).
         # AuditContractCoverage references Contract + AuditReport + Protocol;
         # delete it before those get cascaded away via Protocol cleanup.
@@ -715,6 +717,7 @@ def db_session():
             AuditContractCoverage,
             MonitoredEvent,
             MonitoredContract,
+            MonitoringReanalysis,
             ProtocolSubscription,
             TvlSnapshot,
             ProxyUpgradeEvent,

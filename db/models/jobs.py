@@ -34,6 +34,10 @@ class Job(Base):
     __tablename__ = "jobs"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    compute_target: Mapped[str] = mapped_column(String, nullable=False, default="cloud", server_default="cloud")
+    compute_group_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), nullable=False, default=uuid.uuid4, server_default=text("gen_random_uuid()")
+    )
     address: Mapped[str | None] = mapped_column(String(42), nullable=True)
     # First-class chain identity for the deployment (invariant 1). Derived at
     # create time from ``request["chain"]`` via the canonical registry and
@@ -104,6 +108,9 @@ class Job(Base):
     )
 
     __table_args__ = (
+        CheckConstraint("compute_target IN ('cloud', 'local')", name="ck_jobs_compute_target"),
+        Index("ix_jobs_compute_claim", "compute_target", "stage", "status", "created_at"),
+        Index("ix_jobs_compute_group_id", "compute_group_id"),
         Index("ix_jobs_stage_status", "stage", "status"),
         Index("ix_jobs_trace_id", "trace_id"),
         # Partial index — powers the lease-expiry sweep. Most rows aren't
@@ -134,6 +141,8 @@ class Job(Base):
 
         return {
             "job_id": str(self.id),
+            "compute_target": self.compute_target,
+            "compute_group_id": str(self.compute_group_id),
             "address": self.address,
             "company": self.company,
             "name": self.name,

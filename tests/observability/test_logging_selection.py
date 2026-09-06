@@ -26,6 +26,7 @@ from unittest.mock import patch
 
 import pytest
 
+from tests.attempt_helpers import claimed_call
 from tests.conftest import requires_postgres
 from utils.logging import bind_trace_context, stage_metrics_var
 from workers.base import JobHandledDirectly
@@ -130,7 +131,7 @@ def selection_pass(db_session, worker, caplog):
         ):
             with caplog.at_level(logging.INFO, logger="workers.selection_worker"):
                 with pytest.raises(JobHandledDirectly):
-                    worker.process(db_session, job)
+                    claimed_call(worker.process, db_session, job)
     finally:
         stage_metrics_var.reset(token)
         # db_session teardown clears Contract/Protocol but not Job; drop the

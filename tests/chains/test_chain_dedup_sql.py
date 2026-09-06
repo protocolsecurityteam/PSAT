@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import uuid
 
+from tests.attempt_helpers import proxy_parent
 from tests.conftest import requires_postgres
 
 
@@ -87,9 +88,19 @@ def test_reconcile_root_none_respects_chain_same_proxy(db_session):
     create_job(db_session, {"address": impl, "chain": "ethereum", "proxy_address": proxy})
 
     # Different chain, no root scoping → must spawn its own deployment, not skip.
-    assert reconcile_impl_job_for_proxy(db_session, impl_addr=impl, proxy_addr=proxy, chain="base") == "spawn"
+    assert (
+        reconcile_impl_job_for_proxy(
+            db_session, impl_addr=impl, proxy_addr=proxy, chain="base", routing_from=proxy_parent(db_session)
+        )
+        == "spawn"
+    )
     # Same chain → true duplicate → skip.
-    assert reconcile_impl_job_for_proxy(db_session, impl_addr=impl, proxy_addr=proxy, chain="ethereum") == "skip"
+    assert (
+        reconcile_impl_job_for_proxy(
+            db_session, impl_addr=impl, proxy_addr=proxy, chain="ethereum", routing_from=proxy_parent(db_session)
+        )
+        == "skip"
+    )
 
 
 @requires_postgres
@@ -103,9 +114,19 @@ def test_reconcile_root_none_respects_chain_standalone(db_session):
 
     # Base first (pure read, no mutation): the eth standalone is a different
     # chain, so nothing to backpatch → spawn.
-    assert reconcile_impl_job_for_proxy(db_session, impl_addr=impl, proxy_addr=proxy, chain="base") == "spawn"
-    # Ethereum reconcile backpatches its own standalone.
-    assert reconcile_impl_job_for_proxy(db_session, impl_addr=impl, proxy_addr=proxy, chain="ethereum") == "backpatched"
+    assert (
+        reconcile_impl_job_for_proxy(
+            db_session, impl_addr=impl, proxy_addr=proxy, chain="base", routing_from=proxy_parent(db_session)
+        )
+        == "spawn"
+    )
+    # The active Ethereum standalone retains its own storage context.
+    assert (
+        reconcile_impl_job_for_proxy(
+            db_session, impl_addr=impl, proxy_addr=proxy, chain="ethereum", routing_from=proxy_parent(db_session)
+        )
+        == "spawn"
+    )
 
 
 @requires_postgres
@@ -122,18 +143,37 @@ def test_reconcile_root_scoped_and_chain_both_apply(db_session):
 
     # Same root + same chain → true duplicate within the cascade → skip.
     assert (
-        reconcile_impl_job_for_proxy(db_session, impl_addr=impl, proxy_addr=proxy, chain="ethereum", root_job_id=root)
+        reconcile_impl_job_for_proxy(
+            db_session,
+            impl_addr=impl,
+            proxy_addr=proxy,
+            chain="ethereum",
+            root_job_id=root,
+            routing_from=proxy_parent(db_session),
+        )
         == "skip"
     )
     # Same root, different chain → chain applies in the root branch → spawn.
     assert (
-        reconcile_impl_job_for_proxy(db_session, impl_addr=impl, proxy_addr=proxy, chain="base", root_job_id=root)
+        reconcile_impl_job_for_proxy(
+            db_session,
+            impl_addr=impl,
+            proxy_addr=proxy,
+            chain="base",
+            root_job_id=root,
+            routing_from=proxy_parent(db_session),
+        )
         == "spawn"
     )
     # Different root, same chain → root scoping still narrows → spawn.
     assert (
         reconcile_impl_job_for_proxy(
-            db_session, impl_addr=impl, proxy_addr=proxy, chain="ethereum", root_job_id=str(uuid.uuid4())
+            db_session,
+            impl_addr=impl,
+            proxy_addr=proxy,
+            chain="ethereum",
+            root_job_id=str(uuid.uuid4()),
+            routing_from=proxy_parent(db_session),
         )
         == "spawn"
     )

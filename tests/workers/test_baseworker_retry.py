@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from db.models import Artifact, Job, JobStage, JobStatus
 from db.queue import create_job
+from tests.attempt_helpers import claimed_call
 from tests.cache_helpers import requires_postgres
 from workers.base import BaseWorker
 
@@ -108,7 +109,7 @@ def test_transient_exception_requeues(clean_jobs, test_session_local, monkeypatc
     job_row = create_job(job, {"address": "0xabc", "name": "transient-1"})
 
     worker = _ConfigurableWorker(side_effect=lambda _n: _transient_exc())
-    worker._execute_job(job, job_row)
+    claimed_call(worker._execute_job, job, job_row)
 
     job.expire_all()
     refreshed = job.get(Job, job_row.id)
@@ -151,7 +152,7 @@ def test_transient_retries_exhausted_to_terminal(clean_jobs, test_session_local,
         # Re-fetch the job each iteration so retry_count is current.
         job.expire_all()
         current = job.get(Job, job_row.id)
-        worker._execute_job(job, current)
+        claimed_call(worker._execute_job, job, current)
 
     job.expire_all()
     refreshed = job.get(Job, job_row.id)
@@ -184,7 +185,7 @@ def test_terminal_exception_skips_retries(clean_jobs, test_session_local):
     job_row = create_job(job, {"address": "0xabc", "name": "terminal-1"})
 
     worker = _ConfigurableWorker(side_effect=lambda _n: ValueError("bad input"))
-    worker._execute_job(job, job_row)
+    claimed_call(worker._execute_job, job, job_row)
 
     job.expire_all()
     refreshed = job.get(Job, job_row.id)
@@ -235,7 +236,7 @@ def test_transient_then_success(clean_jobs, test_session_local, monkeypatch):
         for _ in range(3):
             job.expire_all()
             current = job.get(Job, job_row.id)
-            worker._execute_job(job, current)
+            claimed_call(worker._execute_job, job, current)
     finally:
         base.advance_job = monkey_advance
 
@@ -300,7 +301,7 @@ def test_persist_stage_errors_preserves_corrupt_prior_as_breadcrumb(clean_jobs, 
     # Run a worker attempt that triggers _persist_stage_errors via the
     # normal failure path. Use a terminal exception so the path executes once.
     worker = _ConfigurableWorker(side_effect=lambda _n: ValueError("bad input"))
-    worker._execute_job(db_session, job_row)
+    claimed_call(worker._execute_job, db_session, job_row)
 
     db_session.expire_all()
     payload = _read_stage_errors(db_session, job_row.id)

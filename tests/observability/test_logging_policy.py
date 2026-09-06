@@ -28,6 +28,7 @@ from typing import Any, cast
 
 import pytest
 
+from tests.attempt_helpers import claimed_call
 from utils.logging import (
     bind_trace_context,
     degraded_errors_var,
@@ -124,7 +125,7 @@ def _drive_process_with_missing_contract_row(monkeypatch: pytest.MonkeyPatch) ->
         lambda self, session, job, contract_analysis, control_snapshot, **kw: {},
     )
 
-    worker.process(session, cast(Any, job))
+    claimed_call(worker.process, session, cast(Any, job))
     return session
 
 
@@ -263,3 +264,10 @@ def test_principal_classification_failures_collect_per_contract() -> None:
 
     # The memo collapses the repeat: two distinct addresses, two failures.
     assert len(failures) == 2
+
+
+@pytest.fixture(autouse=True)
+def _stub_progress_transition(monkeypatch):
+    # These unit tests return None for Contract lookup on a mock Session.
+    # Progress CAS uses real Postgres in the queue/fencing integration suites.
+    monkeypatch.setattr("workers.base.BaseWorker.update_detail", lambda *a, **kw: None)

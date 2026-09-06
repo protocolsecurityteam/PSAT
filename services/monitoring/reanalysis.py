@@ -6,6 +6,7 @@ import logging
 from typing import Any
 
 from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from db.models import (
@@ -16,6 +17,9 @@ from db.models import (
     Job,
     JobStatus,
     MonitoredContract,
+    MonitoringReanalysis,
+    MonitoringReanalysisReceipt,
+    derive_job_chain_id,
 )
 from db.queue import create_job
 from services.monitoring.event_topics import _HANDROLLED_EVENT_TYPE_TO_TAGS
@@ -143,28 +147,6 @@ def maybe_queue_reanalysis(
         )
         return None
 
-    # Deduplicate: skip if a job is already in-flight for this address+chain.
-    in_flight_candidates = (
-        session.execute(
-            select(Job).where(
-                func.lower(Job.address) == mc.address.lower(),
-                Job.status.in_([JobStatus.queued, JobStatus.processing]),
-            )
-        )
-        .scalars()
-        .all()
-    )
-    for candidate in in_flight_candidates:
-        req = candidate.request if isinstance(candidate.request, dict) else {}
-        if req.get("chain", "ethereum") == mc.chain:
-            logger.info(
-                "Skipping re-analysis for %s: job %s already in-flight (stage=%s)",
-                mc.address,
-                candidate.id,
-                candidate.stage.value,
-            )
-            return None
-
     # Determine a human-readable trigger label
     if event_type == "state_changed_poll":
         trigger = f"poll:{(data or {}).get('field', 'unknown')}"
@@ -190,35 +172,74 @@ def maybe_queue_reanalysis(
     if snapshot:
         request_dict["reanalysis_snapshot"] = snapshot
 
-    job = create_job(session, request_dict)
-
-    # A fresh job is going to rewrite this protocol's planes, and the current
-    # score was folded over the ones it replaces. Marked after ``create_job``
-    # commits, so the mark never references a job that rolled back.
-    if mc.protocol_id:
-        from services.scoring.dirty import SCORE_DIRTY_REANALYSIS, mark_protocol_score_dirty
-
-        if mark_protocol_score_dirty(session, mc.protocol_id, SCORE_DIRTY_REANALYSIS):
-            try:
-                session.commit()
-            except Exception:
-                # The mark swallows its own failure; the commit it induces must
-                # too, or a best-effort mark would sink the job this function
-                # exists to create. ``create_job`` already committed it.
-                session.rollback()
-                logger.warning(
-                    "Re-analysis: protocol score dirty-mark commit failed for protocol %s",
-                    mc.protocol_id,
-                    exc_info=True,
-                )
-
-    logger.info(
-        "Queued re-analysis job %s for %s (trigger: %s)",
-        job.id,
-        mc.address,
-        trigger,
+    chain_id = derive_job_chain_id(mc.chain, mc.address)
+    stmt = pg_insert(MonitoringReanalysis).values(chain_id=chain_id, address=mc.address.lower(), request=request_dict)
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["chain_id", "address"],
+        set_={
+            "generation": MonitoringReanalysis.generation + 1,
+            "request": stmt.excluded.request,
+            "triggered_at": func.now(),
+        },
     )
-    return job
+    session.execute(stmt)
+    created = reconcile_pending_reanalysis(session, chain_id=chain_id, address=mc.address.lower())
+    return created[0] if created else None
+
+
+def reconcile_pending_reanalysis(
+    session: Session,
+    *,
+    chain_id: int | None = None,
+    address: str | None = None,
+    limit: int = 100,
+) -> list[Job]:
+    """Consume each exact marker generation atomically; caller commits."""
+    stmt = (
+        select(MonitoringReanalysis)
+        .where(MonitoringReanalysis.generation > MonitoringReanalysis.acknowledged_generation)
+        .order_by(MonitoringReanalysis.chain_id, MonitoringReanalysis.address)
+        .limit(limit)
+        .with_for_update(skip_locked=True)
+    )
+    if chain_id is not None:
+        stmt = stmt.where(MonitoringReanalysis.chain_id == chain_id)
+    if address is not None:
+        stmt = stmt.where(MonitoringReanalysis.address == address)
+    created = []
+    for marker in session.execute(stmt.execution_options(populate_existing=True)).scalars():
+        if not chain_enabled(marker.request.get("chain")):
+            continue
+        active = session.execute(
+            select(Job.id)
+            .where(
+                Job.chain_id == marker.chain_id,
+                func.lower(Job.address) == marker.address,
+                Job.status.in_([JobStatus.queued, JobStatus.processing]),
+            )
+            .limit(1)
+        ).first()
+        if active:
+            continue
+        generation = marker.generation
+        receipt_id = (marker.chain_id, marker.address, generation)
+        if session.get(MonitoringReanalysisReceipt, receipt_id) is not None:
+            marker.acknowledged_generation = generation
+            continue
+        job = create_job(session, dict(marker.request), compute_target="cloud", commit=False)
+        session.add(
+            MonitoringReanalysisReceipt(
+                chain_id=marker.chain_id, address=marker.address, generation=generation, job_id=job.id
+            )
+        )
+        marker.acknowledged_generation = generation
+        if job.protocol_id:
+            from services.scoring.dirty import SCORE_DIRTY_REANALYSIS, mark_protocol_score_dirty
+
+            mark_protocol_score_dirty(session, job.protocol_id, SCORE_DIRTY_REANALYSIS)
+        session.flush()
+        created.append(job)
+    return created
 
 
 # ---------------------------------------------------------------------------

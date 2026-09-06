@@ -154,7 +154,7 @@ function ActiveRow({ job, now, selected, onSelect }) {
       <span className={`rdot${pulse ? " pulse-dot" : ""}`} style={{ background: dotColor }} />
       <span className="rname">
         <b>{monitorJobLabel(job)}</b>
-        <small>{job.company || "—"}</small>
+        <small>{job.company || "—"} · {job.compute_target === "local" ? "Local" : "Cloud"}</small>
       </span>
       <StageProgress job={job} />
       <span className="adetail">{job.detail || (job.status === "queued" ? "waiting…" : "")}</span>
@@ -182,7 +182,7 @@ function HistoryRow({ job, now, selected, onSelect }) {
       <span className="rdot" style={{ background: dotColor }} />
       <span className="rname">
         <b>{monitorJobLabel(job)}</b>
-        <small>{job.company || "—"}</small>
+        <small>{job.company || "—"} · {job.compute_target === "local" ? "Local" : "Cloud"}</small>
       </span>
       <StageProgress job={job} />
       {isFailed ? (
@@ -505,6 +505,7 @@ export default function PipelineDashboard() {
           {selected?.type === "job" && selectedJob ? (
             <JobDetail
               job={selectedJob}
+              groupJobs={allJobs.filter((row) => row.compute_group_id && row.compute_group_id === selectedJob.compute_group_id)}
               onClose={clearSelection}
               refreshTick={refreshTick}
               now={now}

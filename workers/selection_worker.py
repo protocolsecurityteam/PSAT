@@ -116,6 +116,11 @@ class SelectionWorker(BaseWorker):
                 SELECT j.id
                 FROM jobs j
                 WHERE j.stage = 'selection' AND j.status = 'queued'
+                  AND (j.next_attempt_at IS NULL OR j.next_attempt_at <= NOW())
+                  AND NOT EXISTS (
+                      SELECT 1 FROM job_dependencies dep
+                      WHERE dep.depender_job_id = j.id AND dep.status = 'pending'
+                  )
                   AND NOT EXISTS (
                     SELECT 1 FROM jobs sib
                     WHERE sib.stage IN ('dapp_crawl', 'defillama_scan')
@@ -143,6 +148,11 @@ class SelectionWorker(BaseWorker):
                 SELECT j.id
                 FROM jobs j
                 WHERE j.stage = 'selection' AND j.status = 'queued'
+                  AND (j.next_attempt_at IS NULL OR j.next_attempt_at <= NOW())
+                  AND NOT EXISTS (
+                      SELECT 1 FROM job_dependencies dep
+                      WHERE dep.depender_job_id = j.id AND dep.status = 'pending'
+                  )
                   AND j.updated_at < (NOW() - (:timeout * INTERVAL '1 second'))
                 ORDER BY j.updated_at ASC
                 FOR UPDATE SKIP LOCKED
@@ -436,7 +446,7 @@ class SelectionWorker(BaseWorker):
             }
             if company:
                 child_request["company"] = company
-            child_job = create_job(session, child_request)
+            child_job = create_job(session, child_request, routing_from=job)
             child_ids.append(
                 {
                     "job_id": str(child_job.id),
@@ -520,7 +530,8 @@ class SelectionWorker(BaseWorker):
                 "selected": [{"address": c.get("address"), "rank_score": c.get("rank_score")} for c in child_ids],
             },
         )
-        complete_job(session, job.id, detail)
+        self._prepare_direct_transition(session, job)
+        complete_job(session, job.id, detail, lease_id=self.claim_lease(job))
         raise JobHandledDirectly()
 
 

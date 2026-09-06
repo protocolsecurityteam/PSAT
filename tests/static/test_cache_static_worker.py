@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from tests.attempt_helpers import claimed_call
 from tests.cache_helpers import (
     ADDR_A,
     IMPL_ADDR,
@@ -55,7 +56,7 @@ def test_static_worker_cache_hit_skips_analysis(db_session, monkeypatch):
     worker = StaticWorker()
     phases_run = _patch_static_worker_phases(monkeypatch, worker)
 
-    worker.process(db_session, job)
+    claimed_call(worker.process, db_session, job)
 
     # Dependency phase and proxy resolution should run; Slither/analysis/tracking should NOT
     assert "resolve_proxy" in phases_run
@@ -98,7 +99,7 @@ def test_static_worker_cache_miss_runs_analysis(db_session, monkeypatch):
     worker = StaticWorker()
     phases_run = _patch_static_worker_phases(monkeypatch, worker)
 
-    worker.process(db_session, job)
+    claimed_call(worker.process, db_session, job)
 
     # All phases should run (slither CLI subprocess removed in commit 438a11c).
     assert "resolve_proxy" in phases_run
@@ -130,7 +131,7 @@ def test_proxy_cache_non_proxy_source(db_session, monkeypatch):
     worker = StaticWorker()
     phases_run = _patch_static_worker_phases(monkeypatch, worker)
 
-    worker.process(db_session, target_job)
+    claimed_call(worker.process, db_session, target_job)
 
     assert "resolve_proxy" not in phases_run
     assert "dependency" in phases_run
@@ -174,7 +175,7 @@ def test_proxy_cache_proxy_unchanged(db_session, monkeypatch):
     from workers.base import JobHandledDirectly
 
     with pytest.raises(JobHandledDirectly):
-        worker.process(db_session, target_job)
+        claimed_call(worker.process, db_session, target_job)
 
     assert "resolve_proxy" not in phases_run
 
@@ -213,7 +214,7 @@ def test_proxy_cache_proxy_upgraded(db_session, monkeypatch):
     phases_run = _patch_static_worker_phases(monkeypatch, worker)
 
     with pytest.raises(JobHandledDirectly):
-        worker.process(db_session, target_job)
+        claimed_call(worker.process, db_session, target_job)
 
     assert "resolve_proxy" in phases_run
 
@@ -244,7 +245,7 @@ def test_proxy_cache_rpc_fails(db_session, monkeypatch):
     phases_run = _patch_static_worker_phases(monkeypatch, worker)
 
     with pytest.raises(JobHandledDirectly):
-        worker.process(db_session, target_job)
+        claimed_call(worker.process, db_session, target_job)
 
     assert "resolve_proxy" in phases_run
 
@@ -276,7 +277,7 @@ def test_proxy_cache_no_cache_flag(db_session, monkeypatch):
     worker = StaticWorker()
     phases_run = _patch_static_worker_phases(monkeypatch, worker)
 
-    worker.process(db_session, job)
+    claimed_call(worker.process, db_session, job)
 
     assert "resolve_proxy" in phases_run
 
@@ -311,7 +312,7 @@ def test_proxy_cache_immutable_eip1167(db_session, monkeypatch):
     from workers.base import JobHandledDirectly
 
     with pytest.raises(JobHandledDirectly):
-        worker.process(db_session, target_job)
+        claimed_call(worker.process, db_session, target_job)
 
     assert "resolve_proxy" not in phases_run
     assert resolve_called == []  # No RPC for immutable proxy type
@@ -343,7 +344,7 @@ def test_proxy_cache_diamond_proxy_falls_back(db_session, monkeypatch):
     phases_run = _patch_static_worker_phases(monkeypatch, worker)
 
     with pytest.raises(JobHandledDirectly):
-        worker.process(db_session, target_job)
+        claimed_call(worker.process, db_session, target_job)
 
     assert "resolve_proxy" in phases_run
 
@@ -595,7 +596,7 @@ def test_e2e_discovery_then_static_with_cache(db_session, monkeypatch):
     static_worker = StaticWorker()
     phases_run = _patch_static_worker_phases(monkeypatch, static_worker)
 
-    static_worker.process(db_session, new_job)
+    claimed_call(static_worker.process, db_session, new_job)
 
     # Slither/analysis/tracking should be skipped
     assert "slither" not in phases_run

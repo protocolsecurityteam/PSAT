@@ -27,6 +27,7 @@ from db.queue import (
     reclaim_stuck_jobs,
     requeue_job,
 )
+from tests.attempt_helpers import lease_for
 from tests.cache_helpers import requires_postgres
 
 
@@ -69,7 +70,14 @@ def test_claim_job_skips_future_next_attempt_at(clean_jobs):
     """A queued job with next_attempt_at in the future is invisible to claim_job."""
     job = create_job(db_session, {"address": "0x" + "a" * 40, "name": "future-retry"})
     future = datetime.now(timezone.utc) + timedelta(minutes=10)
-    requeue_job(db_session, job.id, "transient blip", retry_count=1, next_attempt_at=future)
+    requeue_job(
+        db_session,
+        job.id,
+        "transient blip",
+        retry_count=1,
+        next_attempt_at=future,
+        lease_id=lease_for(db_session, job.id),
+    )
 
     claimed = claim_job(db_session, JobStage.discovery, "test-worker")
     assert claimed is None
@@ -81,7 +89,14 @@ def test_claim_job_claims_past_next_attempt_at(clean_jobs):
     """Once next_attempt_at <= NOW(), the job is claimable again."""
     job = create_job(db_session, {"address": "0x" + "b" * 40, "name": "past-retry"})
     past = datetime.now(timezone.utc) - timedelta(seconds=5)
-    requeue_job(db_session, job.id, "transient blip", retry_count=1, next_attempt_at=past)
+    requeue_job(
+        db_session,
+        job.id,
+        "transient blip",
+        retry_count=1,
+        next_attempt_at=past,
+        lease_id=lease_for(db_session, job.id),
+    )
 
     claimed = claim_job(db_session, JobStage.discovery, "test-worker")
     assert claimed is not None
@@ -112,7 +127,14 @@ def test_requeue_job_sets_retry_state(clean_jobs):
     job = create_job(db_session, {"address": "0x" + "d" * 40, "name": "requeue"})
     next_at = datetime.now(timezone.utc) + timedelta(seconds=30)
 
-    requeue_job(db_session, job.id, "boom traceback", retry_count=1, next_attempt_at=next_at)
+    requeue_job(
+        db_session,
+        job.id,
+        "boom traceback",
+        retry_count=1,
+        next_attempt_at=next_at,
+        lease_id=lease_for(db_session, job.id),
+    )
 
     db_session.expire_all()
     refreshed = db_session.get(Job, job.id)
@@ -135,7 +157,7 @@ def test_fail_job_terminal_sets_terminal_state(clean_jobs):
     db_session = clean_jobs
     job = create_job(db_session, {"address": "0x" + "e" * 40, "name": "terminal"})
 
-    fail_job_terminal(db_session, job.id, "deterministic boom", kind="terminal")
+    fail_job_terminal(db_session, job.id, "deterministic boom", kind="terminal", lease_id=lease_for(db_session, job.id))
 
     db_session.expire_all()
     refreshed = db_session.get(Job, job.id)
@@ -158,9 +180,10 @@ def test_fail_job_terminal_preserves_retry_count(clean_jobs):
         "blip",
         retry_count=4,
         next_attempt_at=datetime.now(timezone.utc) + timedelta(seconds=1),
+        lease_id=lease_for(db_session, job.id),
     )
 
-    fail_job_terminal(db_session, job.id, "exhausted", kind="transient")
+    fail_job_terminal(db_session, job.id, "exhausted", kind="transient", lease_id=lease_for(db_session, job.id))
 
     db_session.expire_all()
     refreshed = db_session.get(Job, job.id)
@@ -180,7 +203,7 @@ def test_reclaim_stuck_jobs_ignores_failed_terminal(clean_jobs):
     db_session = clean_jobs
     """An ancient ``failed_terminal`` row must NEVER be resurrected by the sweep."""
     job = create_job(db_session, {"address": "0x" + "1" * 40, "name": "terminal-old"})
-    fail_job_terminal(db_session, job.id, "terminal", kind="terminal")
+    fail_job_terminal(db_session, job.id, "terminal", kind="terminal", lease_id=lease_for(db_session, job.id))
     _backdate(db_session, job.id, seconds_ago=10_000)
 
     rescued = reclaim_stuck_jobs(db_session, stale_timeout_seconds=1)

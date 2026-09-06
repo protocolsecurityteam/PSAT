@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from tests.attempt_helpers import claimed_call
 from tests.cache_helpers import (
     ADDR_A,
     ADDR_B,
@@ -135,7 +136,7 @@ def test_company_mode_unaffected(db_session, monkeypatch):
     )
 
     worker = DiscoveryWorker()
-    worker.process(db_session, job)
+    claimed_call(worker.process, db_session, job)
 
     assert company_called == [True]
 
@@ -314,7 +315,7 @@ def test_first_run_no_previous_inventory(db_session, monkeypatch):
     monkeypatch.setattr(worker, "_spawn_parallel_discovery", lambda *a, **kw: None)
 
     with pytest.raises(JobHandledDirectly):
-        worker._process_company(db_session, job)
+        claimed_call(worker._process_company, db_session, job)
 
     stored = get_artifact(db_session, job.id, "contract_inventory")
     assert isinstance(stored, dict)
@@ -368,7 +369,7 @@ def test_rerun_merges_with_previous_inventory(db_session, monkeypatch):
     monkeypatch.setattr(worker, "_spawn_parallel_discovery", lambda *a, **kw: None)
 
     with pytest.raises(JobHandledDirectly):
-        worker._process_company(db_session, job)
+        claimed_call(worker._process_company, db_session, job)
 
     stored = get_artifact(db_session, job.id, "contract_inventory")
     assert isinstance(stored, dict)

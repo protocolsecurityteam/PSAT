@@ -50,6 +50,7 @@ from services.discovery.perimeter import (
     queue_discovered_contracts,
 )
 from services.governance.control_graph_types import materialize_fp_principal_nodes
+from tests.attempt_helpers import claimed_call
 from tests.conftest import requires_postgres
 
 pytestmark = [requires_postgres]
@@ -345,7 +346,8 @@ def test_non_analyzable_principal_mints_a_node_and_provably_no_job(db_session, a
     db_session.add(job)
     db_session.commit()
 
-    spawn = queue_discovered_contracts(
+    spawn = claimed_call(
+        queue_discovered_contracts,
         db_session,
         job,
         {"root_contract_address": contract.address, "max_depth": 6, "nodes": payloads, "edges": []},
@@ -389,7 +391,8 @@ def test_end_to_end_the_timelock_gets_one_job_and_the_safe_gets_none(db_session,
     db_session.add(job)
     db_session.commit()
 
-    spawn = queue_discovered_contracts(
+    spawn = claimed_call(
+        queue_discovered_contracts,
         db_session,
         job,
         {"root_contract_address": contract.address, "max_depth": 6, "nodes": payloads, "edges": []},
@@ -439,7 +442,8 @@ def test_a_walk_node_that_is_unanalyzed_is_still_refused(db_session, anchor, mon
         "analyzed": False,
         "details": {"source": "semantic_capability:role_grant"},
     }
-    spawn = queue_discovered_contracts(
+    spawn = claimed_call(
+        queue_discovered_contracts,
         db_session,
         job,
         {"root_contract_address": contract.address, "max_depth": 6, "nodes": [walk_node], "edges": []},
@@ -491,7 +495,8 @@ def test_a_forged_basis_marker_does_not_buy_admission(db_session, anchor, monkey
     }
     graph = {"root_contract_address": contract.address, "max_depth": 6, "nodes": [forged_node], "edges": []}
 
-    spawn = queue_discovered_contracts(
+    spawn = claimed_call(
+        queue_discovered_contracts,
         db_session,
         job,
         graph,
@@ -508,7 +513,8 @@ def test_a_forged_basis_marker_does_not_buy_admission(db_session, anchor, monkey
 
     # The same node, named by the caller's set, IS admitted — so the refusal
     # above is the set doing the work, not some unrelated gate.
-    admitted = queue_discovered_contracts(
+    admitted = claimed_call(
+        queue_discovered_contracts,
         db_session,
         job,
         graph,

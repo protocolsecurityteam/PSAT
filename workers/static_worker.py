@@ -764,7 +764,13 @@ class StaticWorker(BaseWorker):
                 # Proxy jobs skip resolution/policy — complete directly
                 from db.queue import complete_job
 
-                complete_job(session, job.id, f"Proxy {contract_name} — impl child job queued for full analysis")
+                self._prepare_direct_transition(session, job)
+                complete_job(
+                    session,
+                    job.id,
+                    f"Proxy {contract_name} — impl child job queued for full analysis",
+                    lease_id=self.claim_lease(job),
+                )
                 raise JobHandledDirectly()
             elif has_cached_static:
                 # Static artifacts already present from cache — skip analysis phases.
@@ -1011,6 +1017,7 @@ class StaticWorker(BaseWorker):
                 proxy_type=proxy_type,
                 chain=chain,
                 root_job_id=root_job_id if force else None,
+                routing_from=job,
             )
             if decision in ("skip", "backpatched"):
                 _redirect_proxy_policy_dependencies(
@@ -1070,7 +1077,7 @@ class StaticWorker(BaseWorker):
                 child_request["protocol_id"] = job.protocol_id
             if force:
                 child_request["force"] = True
-            child_job = create_job(session, child_request)
+            child_job = create_job(session, child_request, routing_from=job)
             _redirect_proxy_policy_dependencies(
                 session,
                 chain=chain,

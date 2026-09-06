@@ -18,6 +18,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from tests.attempt_helpers import claimed_call
 from tests.conftest import DATABASE_URL as _DB_URL
 from tests.conftest import _can_connect, requires_postgres
 from tests.support.balance_stubs import page, pinned_native_unavailable
@@ -203,7 +204,7 @@ def test_fetch_balances_passes_chain_id_to_etherscan(monkeypatch):
     job = _row(id="job-1", address="0x" + "11" * 20, request={"chain": "base"})
     contract_row = _row(id=7, address=job.address, protocol_id=None)
 
-    worker._fetch_balances(session, job, contract_row, chain_id=_BASE_ID)
+    claimed_call(worker._fetch_balances, session, job, contract_row, chain_id=_BASE_ID)
 
     assert captured["balance_chain"] == _BASE_ID
     assert captured["token_chain"] == _BASE_ID

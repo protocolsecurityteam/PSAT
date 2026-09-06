@@ -30,6 +30,7 @@ from services.discovery.secondary_impl import (
     queue_secondary_impl_jobs,
     resolve_secondary_impl_addresses,
 )
+from tests.attempt_helpers import claimed_call
 from tests.conftest import requires_postgres
 
 # ---------------------------------------------------------------------------
@@ -374,6 +375,9 @@ def test_queue_secondary_impl_jobs_records_and_spawns(db_session):
     db_session.add(proxy_contract)
     db_session.commit()
 
+    from tests.attempt_helpers import prepare_attempt
+
+    db_session.info["job_attempt"] = prepare_attempt(db_session, parent)
     created = queue_secondary_impl_jobs(
         db_session,
         proxy_contract=proxy_contract,
@@ -416,6 +420,7 @@ def test_queue_secondary_impl_jobs_records_and_spawns(db_session):
     remaining = db_session.query(Job).filter(Job.address == admin).count()
     assert remaining == 1
 
+    db_session.info.pop("job_attempt", None)
     # cleanup (db_session fixture doesn't sweep Job/Contract rows we orphan)
     db_session.query(Job).filter(Job.address.in_([core, admin])).delete(synchronize_session=False)
     db_session.query(Contract).filter(Contract.address == proxy).delete(synchronize_session=False)
@@ -493,7 +498,7 @@ def test_static_cache_hit_still_resolves_secondary_impls(db_session, monkeypatch
     monkeypatch.setattr("workers.static_worker.get_source_files", lambda *a, **kw: {"C.sol": "contract C {}"})
     monkeypatch.setattr("workers.static_worker._check_proxy_cache", lambda *a, **kw: {"type": "regular"})
 
-    worker.process(db_session, impl_job)
+    claimed_call(worker.process, db_session, impl_job)
 
     child = db_session.query(Job).filter(Job.address == admin).one_or_none()
     assert child is not None, "cache-hit path must still queue the secondary-impl child job"

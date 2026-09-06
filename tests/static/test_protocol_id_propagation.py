@@ -23,6 +23,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tests.attempt_helpers import claimed_call
 from tests.conftest import requires_postgres
 
 DATABASE_URL = os.environ.get("TEST_DATABASE_URL", "")
@@ -95,7 +96,7 @@ class TestStaticWorkerProtocolIdPropagation:
         worker = StaticWorker()
 
         with patch("services.discovery.classifier.classify_single", mock_classify):
-            worker._resolve_proxy(mock_session, job, job.address, "eETH")
+            claimed_call(worker._resolve_proxy, mock_session, job, job.address, "eETH")
 
         # create_job must have been called
         mock_create_job.assert_called_once()
@@ -128,7 +129,7 @@ class TestStaticWorkerProtocolIdPropagation:
         worker = StaticWorker()
 
         with patch("services.discovery.classifier.classify_single", mock_classify):
-            worker._resolve_proxy(mock_session, job, job.address, "TestContract")
+            claimed_call(worker._resolve_proxy, mock_session, job, job.address, "TestContract")
 
         mock_create_job.assert_called_once()
         child_request = mock_create_job.call_args[0][1]
@@ -166,7 +167,7 @@ class TestStaticWorkerProtocolIdPropagation:
         worker = StaticWorker()
 
         with patch("services.discovery.classifier.classify_single", mock_classify):
-            worker._resolve_proxy(mock_session, job, job.address, "DiamondProxy")
+            claimed_call(worker._resolve_proxy, mock_session, job, job.address, "DiamondProxy")
 
         # Should create 2 child jobs (one per facet)
         assert mock_create_job.call_count == 2
@@ -370,7 +371,7 @@ class TestProtocolIdPropagationIntegration:
 
         with patch("services.discovery.classifier.classify_single", return_value=classify_result):
             assert parent_job.address is not None
-            worker._resolve_proxy(pg_session, parent_job, parent_job.address, "TestProxy")
+            claimed_call(worker._resolve_proxy, pg_session, parent_job, parent_job.address, "TestProxy")
 
         # Query the child job directly from the DB
         from sqlalchemy import select
@@ -479,7 +480,7 @@ class TestProtocolIdPropagationIntegration:
         worker = StaticWorker()
         with patch("services.discovery.classifier.classify_single", return_value=_proxy_classification(impl_addr)):
             assert root.address is not None
-            worker._resolve_proxy(pg_session, root, root.address, "RootProxy")
+            claimed_call(worker._resolve_proxy, pg_session, root, root.address, "RootProxy")
 
         from sqlalchemy import select
 

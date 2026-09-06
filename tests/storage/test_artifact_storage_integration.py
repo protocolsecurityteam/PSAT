@@ -20,6 +20,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 
+from tests.attempt_helpers import lease_for
 from tests.cache_helpers import requires_postgres
 from tests.conftest import SessionFactory, requires_storage
 
@@ -221,7 +222,7 @@ def test_nested_artifact_keys_round_trip_through_storage(db_session, storage_buc
         assert get_artifact(db_session, job.id, name) == bundle[kind]
 
 
-def test_repeat_store_overwrites_same_key(db_session, storage_bucket):
+def test_repeat_store_publishes_new_immutable_key(db_session, storage_bucket):
     from db.models import Artifact
     from db.queue import create_job, get_artifact, store_artifact
 
@@ -236,7 +237,8 @@ def test_repeat_store_overwrites_same_key(db_session, storage_bucket):
         select(Artifact).where(Artifact.job_id == job.id, Artifact.name == "x")
     ).scalar_one()
 
-    assert first_key == second_row.storage_key, "second write should reuse the deterministic key"
+    assert first_key != second_row.storage_key, "publications must have distinct immutable body keys"
+    assert storage_bucket.get(first_key) == b'{"v": 1}'
     assert get_artifact(db_session, job.id, "x") == {"v": 2}
 
 
@@ -850,7 +852,6 @@ def test_artifact_storage_prefix_scopes_keys_and_round_trips(monkeypatch, db_ses
         artifact_key,
         create_job,
         get_artifact,
-        source_file_key,
         store_artifact,
         store_source_files,
     )
@@ -861,8 +862,10 @@ def test_artifact_storage_prefix_scopes_keys_and_round_trips(monkeypatch, db_ses
     store_artifact(db_session, job.id, "flagged", data={"ok": True})
     store_source_files(db_session, job.id, {"src/A.sol": "contract A {}"})
 
-    art_k = artifact_key(job.id, "flagged")
-    src_k = source_file_key(job.id, "src/A.sol")
+    from db.models import Artifact, SourceFile
+
+    art_k = db_session.execute(select(Artifact.storage_key).where(Artifact.job_id == job.id)).scalar_one()
+    src_k = db_session.execute(select(SourceFile.storage_key).where(SourceFile.job_id == job.id)).scalar_one()
     assert art_k.startswith("pr-123/artifacts/")
     assert src_k.startswith("pr-123/source_files/")
 
@@ -873,11 +876,11 @@ def test_artifact_storage_prefix_scopes_keys_and_round_trips(monkeypatch, db_ses
 
     # Trailing / in env is idempotent.
     monkeypatch.setenv("ARTIFACT_STORAGE_PREFIX", "pr-123/")
-    assert artifact_key(job.id, "flagged") == art_k
+    assert artifact_key(job.id, "flagged").startswith(f"pr-123/artifacts/{job.id}/")
 
     # Unset → original unprefixed shape.
     monkeypatch.delenv("ARTIFACT_STORAGE_PREFIX")
-    assert artifact_key(job.id, "flagged") == f"artifacts/{job.id}/flagged"
+    assert artifact_key(job.id, "flagged").startswith(f"artifacts/{job.id}/")
 
 
 # /api/jobs no longer goes through ``_resolve_artifact_value`` — it reads
@@ -1350,7 +1353,7 @@ def test_claim_and_advance_job(db_session):
     assert claim_job(db_session, JobStage.discovery, "test-worker-2") is None
 
     # Advance to next stage
-    advance_job(db_session, claimed.id, JobStage.static)
+    advance_job(db_session, claimed.id, JobStage.static, lease_id=lease_for(db_session, claimed.id))
     db_session.refresh(claimed)
     assert claimed.stage == JobStage.static
     assert claimed.status == JobStatus.queued
@@ -1364,7 +1367,7 @@ def test_fail_job(db_session):
     claimed = claim_job(db_session, JobStage.discovery, "test-worker")
     assert claimed is not None
 
-    fail_job(db_session, claimed.id, "something went wrong")
+    fail_job(db_session, claimed.id, "something went wrong", lease_id=lease_for(db_session, claimed.id))
     db_session.refresh(claimed)
     assert claimed.status == JobStatus.failed
     assert claimed.error == "something went wrong"
@@ -1378,7 +1381,7 @@ def test_complete_job(db_session):
     claimed = claim_job(db_session, JobStage.discovery, "test-worker")
     assert claimed is not None
 
-    complete_job(db_session, claimed.id)
+    complete_job(db_session, claimed.id, lease_id=lease_for(db_session, claimed.id))
     db_session.refresh(claimed)
     assert claimed.status == JobStatus.completed
     assert claimed.stage == JobStage.done

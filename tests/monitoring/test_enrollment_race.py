@@ -32,6 +32,7 @@ from sqlalchemy import Select, create_engine, func, select
 from sqlalchemy.orm import Session
 
 from db.models import Contract, Job, JobStage, JobStatus, MonitoredContract, Protocol
+from tests.attempt_helpers import claimed_call
 from tests.conftest import DATABASE_URL, requires_postgres
 
 pytestmark = requires_postgres
@@ -223,7 +224,7 @@ def test_benign_enroll_race_does_not_poison_policy_job(race_session, monkeypatch
     job = _seed_policy_job(race_session)
     _stub_policy_internals(monkeypatch, job.address)
 
-    PolicyWorker().process(race_session, job)  # must not raise
+    claimed_call(PolicyWorker().process, race_session, job)  # must not raise
 
     # The poisoned session was rolled back inside the handler, so it is usable
     # for the post-process success path. Without the fix this SELECT raises

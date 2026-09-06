@@ -31,6 +31,7 @@ import pytest
 from services.clients.rpc import EthCallResult
 from services.resolution import flow_asset_plane as fap
 from services.resolution.role_holder_plane import ProbeBlock
+from tests.attempt_helpers import claimed_call
 from workers.resolution_worker import ResolutionWorker
 
 BLOCK = 25643300
@@ -726,7 +727,7 @@ def test_a_failing_writer_degrades_the_step_not_the_stage(monkeypatch: pytest.Mo
 
     session = MagicMock()
     session.execute.return_value.scalar_one_or_none.return_value = None
-    rw.ResolutionWorker().process(session, cast(Any, _job()))
+    claimed_call(rw.ResolutionWorker().process, session, cast(Any, _job()))
 
     assert [d["phase"] for d in degraded] == ["resolution_flow_asset_plane"]
     # The stage still stored what it did prove.

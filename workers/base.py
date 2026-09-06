@@ -17,6 +17,7 @@ from typing import Any, cast
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from db.attempts import JobAttempt, current_attempt, install_attempt_subprocess_tracking
 from db.models import Job, JobDependency, JobStage, JobStatus, SessionLocal
 from db.queue import (
     DEFAULT_JOB_LEASE_TTL_S,
@@ -128,27 +129,21 @@ class BaseWorker:
     poll_interval: float = 2.0
 
     def __init__(self) -> None:
+        install_attempt_subprocess_tracking()
+        self._attempts: dict[Any, JobAttempt] = {}
         # Idempotent — the per-worker ``main()`` may have already called
         # this, but a bare ``BaseWorker()`` constructed in tests still
         # gets the JSON formatter installed so emitted log lines parse.
         configure_logging()
         self.worker_id = f"{self.__class__.__name__}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
         self._running = True
+        self._shutdown_requested = threading.Event()
         # -inf = "never swept; sweep now"; throttles _claim_job to RECLAIM_INTERVAL_S between sweeps.
         self._last_reclaim_at: float = float("-inf")
-        # Currently-claimed job_id → claim-time lease_id. Populated by
-        # ``_execute_job`` for the duration of a single job, drained on
-        # success/failure. ``_handle_sigterm`` reads a snapshot of this
-        # map and explicitly releases each lease via ``release_job_lease``
-        # so a Fly machine drain doesn't strand the row in ``processing``
-        # for the full 15-minute lease TTL — observed on PR-63 as a 16+
-        # minute static-stage wedge after a worker SIGTERM mid-forge-build.
+        # Shutdown cancels authority first; _execute_job releases only after
+        # rollback. Keep this registry until cleanup, including failed releases.
         self._inflight_jobs: dict[uuid.UUID, uuid.UUID] = {}
-        self._inflight_lock = threading.Lock()
-        # Set when graceful shutdown has spawned its release thread; idempotent
-        # guard against duplicate handler invocations (Fly sends SIGTERM twice
-        # before SIGKILL).
-        self._shutdown_release_started = False
+        self._inflight_lock = threading.RLock()
         signal.signal(signal.SIGTERM, self._handle_sigterm)
         signal.signal(signal.SIGINT, self._handle_sigterm)
 
@@ -188,69 +183,11 @@ class BaseWorker:
     def _handle_sigterm(self, signum: int, frame: object) -> None:
         logger.info("Worker %s received signal %s, shutting down gracefully", self.worker_id, signum)
         self._running = False
-        # Release the currently-claimed job's lease on a daemon thread so a
-        # sibling worker can immediately reclaim. The main thread is likely
-        # blocked in ``subprocess.run`` (forge build, slither) — it cannot
-        # release for itself before Fly escalates to SIGKILL. The daemon
-        # thread opens its own ``SessionLocal()`` so it doesn't share the
-        # main thread's session state, and finishes well within Fly's
-        # ``kill_timeout``.
-        if self._shutdown_release_started:
-            return
-        self._shutdown_release_started = True
-        threading.Thread(
-            target=self._release_inflight_leases,
-            name=f"{self.worker_id}-shutdown-release",
-            daemon=True,
-        ).start()
-
-    def _release_inflight_leases(self) -> None:
-        """Release every lease in ``self._inflight_jobs``.
-
-        Runs on a daemon thread spawned by ``_handle_sigterm``. Uses
-        ``release_job_lease`` (SQL-level conditional UPDATE on
-        ``lease_id``) so the call is a no-op if the main thread raced to
-        ``complete_job`` first or ``reclaim_stuck_jobs`` already swept.
-        Errors are logged and swallowed — the worker is shutting down
-        either way; failing here would just crash the daemon thread.
-        """
+        self._shutdown_requested.set()
         with self._inflight_lock:
-            snapshot = dict(self._inflight_jobs)
-        if not snapshot:
-            return
-        logger.info(
-            "Worker %s releasing %d in-flight job lease(s) before shutdown",
-            self.worker_id,
-            len(snapshot),
-        )
-        session = SessionLocal()
-        try:
-            for job_id, lease_id in snapshot.items():
-                try:
-                    released = release_job_lease(
-                        session,
-                        job_id,
-                        lease_id=lease_id,
-                        reason=f"graceful shutdown of {self.worker_id}",
-                    )
-                except Exception:
-                    logger.exception(
-                        "Worker %s: failed to release lease for job %s",
-                        self.worker_id,
-                        job_id,
-                    )
-                    continue
-                if released:
-                    logger.info("Worker %s released lease for job %s", self.worker_id, job_id)
-                else:
-                    logger.info(
-                        "Worker %s: lease for job %s already gone (sibling reclaimed or main "
-                        "thread completed it first)",
-                        self.worker_id,
-                        job_id,
-                    )
-        finally:
-            session.close()
+            attempts = list(self._attempts.values())
+        for attempt in attempts:
+            attempt.cancel()
 
     def process(self, session: Session, job: Job) -> None:
         """Subclasses implement this to run their pipeline stage."""
@@ -265,34 +202,7 @@ class BaseWorker:
         return claim_job(session, self.stage, self.worker_id)
 
     def _recover_stale_jobs(self, session: Session) -> None:
-        """Requeue jobs stuck in 'processing' for longer than STALE_JOB_TIMEOUT."""
-        from datetime import datetime, timedelta, timezone
-
-        cutoff = datetime.now(timezone.utc) - timedelta(seconds=STALE_JOB_TIMEOUT)
-        stale = (
-            session.execute(
-                select(Job).where(
-                    Job.stage == self.stage,
-                    Job.status == JobStatus.processing,
-                    Job.updated_at < cutoff,
-                )
-            )
-            .scalars()
-            .all()
-        )
-        for job in stale:
-            logger.warning(
-                "Worker %s: requeuing stale job %s (%s) — stuck since %s",
-                self.worker_id,
-                job.id,
-                job.name or job.address,
-                job.updated_at.isoformat(),
-            )
-            job.status = JobStatus.queued
-            job.worker_id = None
-            job.detail = "Re-queued after stale processing timeout"
-        if stale:
-            session.commit()
+        reclaim_stuck_jobs(session)
 
     def _execute_job(self, session: Session, job: Job) -> None:
         """Run a single claimed job to completion: process → record timing → advance/complete/fail.
@@ -309,6 +219,7 @@ class BaseWorker:
         """
         # ``getattr`` defaults guard the test stubs that pass a bare
         # ``SimpleNamespace`` job without a request/trace_id field.
+        self.claim_lease(job)
         raw_request = getattr(job, "request", None)
         request = raw_request if isinstance(raw_request, dict) else {}
         with bind_trace_context(
@@ -336,15 +247,21 @@ class BaseWorker:
             # build a bare SimpleNamespace job from tripping AttributeError.
             claim_job_id = getattr(job, "id")
             claim_lease_id = getattr(job, "lease_id", None)
+            if claim_lease_id is None:
+                raise LeaseLost(f"Job {claim_job_id}: worker execution requires a claim-time lease")
+            attempt = JobAttempt(claim_job_id, claim_lease_id)
+            attempt_token = current_attempt.set(attempt)
+            session.info["job_attempt"] = attempt
+            with self._inflight_lock:
+                self._attempts[claim_job_id] = attempt
+                if self._shutdown_requested.is_set():
+                    attempt.cancel()
             # Heartbeats run from background/parallel helper threads. Keep
             # them on the immutable claim-time token instead of rereading ORM
             # attributes from a long-lived worker session.
             setattr(job, "_heartbeat_job_id", claim_job_id)
             setattr(job, "_heartbeat_lease_id", claim_lease_id)
-            # Register this (job_id, lease_id) for graceful-shutdown release.
-            # ``_handle_sigterm`` reads this map on its daemon thread; the
-            # ``finally`` below removes the entry whether the job completes,
-            # advances, or errors so a stale id never lingers.
+            # Register the immutable claim until attempt cleanup finishes.
             inflight_registered = False
             if claim_lease_id is not None:
                 with self._inflight_lock:
@@ -355,9 +272,12 @@ class BaseWorker:
 
             def _background_heartbeat() -> None:
                 while not heartbeat_stop.wait(_job_heartbeat_interval_s()):
+                    if attempt.cancelled.is_set():
+                        return
                     try:
                         self._heartbeat(session, job)
                     except LeaseLost as lease_exc:
+                        attempt.cancel()
                         logger.warning(
                             "Worker %s: background heartbeat lost lease for job %s: %s",
                             self.worker_id,
@@ -385,7 +305,10 @@ class BaseWorker:
                 t0 = time.monotonic()
                 rss_before = current_rss_bytes()
                 started_at_iso = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+                attempt.started_at = started_at_iso
+                attempt.started_monotonic = t0
                 try:
+                    attempt.check_cancelled()
                     self.process(session, job)
                     elapsed = time.monotonic() - t0
                     ended_at_iso = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
@@ -449,22 +372,8 @@ class BaseWorker:
                 except JobHandledDirectly:
                     elapsed = time.monotonic() - t0
                     ended_at_iso = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-                    # Fresh session — process() may have left the original in an inconsistent state.
-                    try:
-                        fresh_for_timing = SessionLocal()
-                        self._record_stage_timing(
-                            fresh_for_timing,
-                            job,
-                            started_at=started_at_iso,
-                            ended_at=ended_at_iso,
-                            elapsed_s=elapsed,
-                            status="handled_directly",
-                        )
-                        fresh_for_timing.close()
-                    except Exception:
-                        logger.exception("Worker %s: failed to record handled_directly timing", self.worker_id)
-                    if degraded_accumulator:
-                        self._persist_stage_errors(job, degraded_accumulator)
+                    # Direct handlers have already cleared their lease. They
+                    # own any pre-transition diagnostics; never publish here.
                     logger.info(
                         "Worker %s: job %s handled directly by process()",
                         self.worker_id,
@@ -590,6 +499,14 @@ class BaseWorker:
                     terminal_retry_count = new_retry_count if kind == "transient" else None
                     try:
                         session.rollback()
+                        self._record_stage_timing(
+                            session,
+                            job,
+                            started_at=started_at_iso,
+                            ended_at=ended_at_iso,
+                            elapsed_s=elapsed,
+                            status="failed",
+                        )
                         if will_retry:
                             assert next_attempt_at is not None  # type-narrow for pyright
                             requeue_job(
@@ -615,14 +532,6 @@ class BaseWorker:
                                 retry_count=terminal_retry_count,
                                 lease_id=claim_lease_id,
                             )
-                        self._record_stage_timing(
-                            session,
-                            job,
-                            started_at=started_at_iso,
-                            ended_at=ended_at_iso,
-                            elapsed_s=elapsed,
-                            status="failed",
-                        )
                     except LeaseLost as lease_exc:
                         # Same bail as the success path: a sibling owns
                         # the row now; persisting our failure would
@@ -640,6 +549,14 @@ class BaseWorker:
                         try:
                             fresh = SessionLocal()
                             truncated = error[-4000:]
+                            self._record_stage_timing(
+                                fresh,
+                                job,
+                                started_at=started_at_iso,
+                                ended_at=ended_at_iso,
+                                elapsed_s=elapsed,
+                                status="failed",
+                            )
                             if will_retry:
                                 assert next_attempt_at is not None
                                 requeue_job(
@@ -659,14 +576,6 @@ class BaseWorker:
                                     retry_count=terminal_retry_count,
                                     lease_id=claim_lease_id,
                                 )
-                            self._record_stage_timing(
-                                fresh,
-                                job,
-                                started_at=started_at_iso,
-                                ended_at=ended_at_iso,
-                                elapsed_s=elapsed,
-                                status="failed",
-                            )
                             fresh.close()
                         except LeaseLost as lease_exc:
                             logger.warning(
@@ -687,11 +596,30 @@ class BaseWorker:
                     heartbeat_thread.join(timeout=1)
                 degraded_errors_var.reset(accumulator_token)
                 stage_metrics_var.reset(metrics_token)
-                if inflight_registered:
-                    with self._inflight_lock:
-                        self._inflight_jobs.pop(claim_job_id, None)
+                # Cancelled helpers retain this shared authority object. Any
+                # future commit is rejected, and an already-fenced transaction
+                # holds the row until commit/rollback, serializing lease release.
+                attempt.cancel()
+                try:
+                    session.rollback()
+                finally:
+                    current_attempt.reset(attempt_token)
+                    try:
+                        with SessionLocal() as release_session:
+                            release_job_lease(release_session, claim_job_id, lease_id=claim_lease_id)
+                    except Exception:
+                        # Expiry remains the fallback if shutdown cannot reach
+                        # the DB. Authority is already cancelled in every helper.
+                        logger.warning(
+                            "Could not release cancelled job %s; awaiting expiry", claim_job_id, exc_info=True
+                        )
+                    finally:
+                        with self._inflight_lock:
+                            self._attempts.pop(claim_job_id, None)
+                            if inflight_registered:
+                                self._inflight_jobs.pop(claim_job_id, None)
 
-    def _run_one_job(self, job_id) -> None:
+    def _run_one_job(self, job_id, claim_lease_id) -> None:
         """K>1 dispatcher entry point: open a per-job session, re-fetch the job
         ORM object inside that session, run it through ``_execute_job``, close.
 
@@ -708,6 +636,8 @@ class BaseWorker:
             if job is None:
                 logger.warning("Worker %s: claimed job %s vanished before processing", self.worker_id, job_id)
                 return
+            if job.status != JobStatus.processing or job.lease_id != claim_lease_id:
+                raise LeaseLost(f"Job {job_id}: dispatcher claim was superseded")
             self._execute_job(session, job)
         except Exception:
             logger.exception("Worker %s: unexpected error in dispatched job %s", self.worker_id, job_id)
@@ -715,6 +645,22 @@ class BaseWorker:
             session.close()
 
     def run_loop(self) -> None:
+        from db.compute import ROUTED_COMPUTE_STAGES, routing_enabled, worker_compute_target
+
+        if self.stage in ROUTED_COMPUTE_STAGES:
+            target = worker_compute_target()
+            if target == "local":
+                from pathlib import Path
+
+                from services.compute.runtime import preflight
+
+                with SessionLocal() as startup_session:
+                    preflight(startup_session, repository=Path(__file__).resolve().parents[1])
+            elif routing_enabled() or os.getenv("PSAT_LOCAL_COMPUTE_PREPARE") == "1":
+                from services.compute.runtime import publish_worker_runtime
+
+                with SessionLocal() as startup_session:
+                    publish_worker_runtime(startup_session, self.stage.value)
         logger.info(
             "Worker %s starting (stage=%s, job_concurrency=%d)",
             self.worker_id,
@@ -778,6 +724,7 @@ class BaseWorker:
             claim_session = SessionLocal()
             job_to_dispatch: Job | None = None
             job_id_for_dispatch = None
+            lease_for_dispatch = None
             try:
                 recovery_counter += 1
                 if recovery_counter >= 30:
@@ -790,6 +737,7 @@ class BaseWorker:
                     # object will be expired/detached on the dispatcher
                     # thread and we rebuild it via session.get there.
                     job_id_for_dispatch = job_to_dispatch.id
+                    lease_for_dispatch = job_to_dispatch.lease_id
             except Exception:
                 logger.exception("Worker %s encountered error in claim loop", self.worker_id)
             finally:
@@ -810,7 +758,7 @@ class BaseWorker:
             # ``bind_trace_context`` inside ``_execute_job`` then layers on
             # the job-specific bind once the row is loaded.
             ctx = contextvars.copy_context()
-            future = self._job_pool.submit(ctx.run, self._run_one_job, job_id_for_dispatch)
+            future = self._job_pool.submit(ctx.run, self._run_one_job, job_id_for_dispatch, lease_for_dispatch)
             self._inflight.add(future)
 
         # Drain on shutdown so in-flight jobs land cleanly. Anything still
@@ -841,9 +789,16 @@ class BaseWorker:
         if finished:
             self._inflight -= finished
 
+    @staticmethod
+    def claim_lease(job: Job) -> uuid.UUID:
+        lease = getattr(job, "_heartbeat_lease_id", None) or getattr(job, "lease_id", None)
+        if lease is None:
+            raise LeaseLost(f"Job {job.id}: missing claim-time lease")
+        return lease
+
     def update_detail(self, session: Session, job: Job, detail: str) -> None:
         """Update the job's progress detail message."""
-        update_job_detail(session, job.id, detail)
+        update_job_detail(session, job.id, detail, lease_id=self.claim_lease(job))
 
     def _heartbeat(self, session: Session, job: Job) -> None:  # noqa: ARG002 — session kept for caller back-compat
         """Extend the row's lease past now+ttl using a fresh session.
@@ -888,18 +843,7 @@ class BaseWorker:
         if lease_id is missing:
             lease_id = getattr(job, "lease_id", None)
         if lease_id is None:
-            # Pre-migration row, or a job claimed by an out-of-process
-            # legacy claim path; fall back to bumping updated_at so the
-            # legacy sweep predicate still keeps the row alive.
-            from sqlalchemy import update as sa_update
-
-            try:
-                with SessionLocal() as fresh:
-                    fresh.execute(sa_update(Job).where(Job.id == job_id).values(updated_at=datetime.now(timezone.utc)))
-                    fresh.commit()
-            except Exception:
-                logger.warning("heartbeat (legacy path) write failed", exc_info=True)
-            return
+            raise LeaseLost(f"Job {job_id}: heartbeat requires a claim-time lease")
 
         try:
             with SessionLocal() as fresh:
@@ -910,6 +854,10 @@ class BaseWorker:
                     lease_ttl_seconds=DEFAULT_JOB_LEASE_TTL_S,
                 )
         except LeaseLost:
+            with self._inflight_lock:
+                attempt = self._attempts.get(job_id)
+            if attempt is not None and attempt.lease_id == lease_id:
+                attempt.cancel()
             raise
         except Exception:
             logger.warning("heartbeat write failed (non-fatal)", exc_info=True)
@@ -1018,7 +966,7 @@ class BaseWorker:
         error: str,
         kind: str,
         retry_count: int | None,
-        lease_id: uuid.UUID | None,
+        lease_id: uuid.UUID,
     ) -> None:
         """Finalize a job whose retries are exhausted (or that failed
         terminally). Default: degrade pending dependents, then mark the row
@@ -1121,6 +1069,24 @@ class BaseWorker:
                 fresh.close()
             except Exception:
                 logger.debug("stage_errors session close failed", exc_info=True)
+
+    def _prepare_direct_transition(self, session: Session, job: Job) -> None:
+        """Publish direct-handler diagnostics while the attempt still owns the row."""
+        attempt = current_attempt.get()
+        if attempt is None or attempt.started_at is None or attempt.started_monotonic is None:
+            return  # helper-only callers do not own a BaseWorker timing scope
+        attempt.check_cancelled()
+        self._record_stage_timing(
+            session,
+            job,
+            started_at=attempt.started_at,
+            ended_at=datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+            elapsed_s=time.monotonic() - attempt.started_monotonic,
+            status="handled_directly",
+        )
+        if errors := degraded_errors_var.get():
+            self._persist_stage_errors(job, errors)
+        self._satisfy_dependencies(session, job, completed_stage=self.stage)
 
     def _record_stage_timing(
         self,

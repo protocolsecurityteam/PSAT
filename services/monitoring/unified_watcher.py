@@ -76,7 +76,7 @@ from services.monitoring.event_topics import (
     value_changed_event_type,
 )
 from services.monitoring.polling_plan import decode_poll_outcome, project_entry_return
-from services.monitoring.reanalysis import maybe_queue_reanalysis
+from services.monitoring.reanalysis import maybe_queue_reanalysis, reconcile_pending_reanalysis
 from services.monitoring.salience import assign_salience, stamp_signal_class
 from services.monitoring.tracking_plan_state import TRACKED_TOPICS_STALE_SINCE_KEY
 from services.monitoring.verify_status import (
@@ -2129,6 +2129,8 @@ def run_scan_loop(
         sleep_for = interval
         try:
             with SessionLocal() as session:
+                reconcile_pending_reanalysis(session)
+                session.commit()
                 result = scan_for_events(session, rpc_url)
             if result:
                 logger.info("Detected %d new event(s)", len(result))
@@ -2178,6 +2180,8 @@ def run_poll_loop(
     while not stop_event.is_set():
         try:
             with SessionLocal() as session:
+                reconcile_pending_reanalysis(session)
+                session.commit()
                 new_events = poll_for_state_changes(session, rpc_url)
                 if new_events:
                     logger.info("Poll detected %d state change(s)", len(new_events))

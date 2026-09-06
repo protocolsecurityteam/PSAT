@@ -248,15 +248,26 @@ def storage_key_candidates(key: str) -> list[str]:
     return [key, tail]
 
 
+def immutable_write_token() -> str:
+    from uuid import uuid4
+
+    from db.attempts import current_attempt
+
+    attempt = current_attempt.get()
+    if attempt is not None:
+        attempt.check_cancelled()
+    return f"{attempt.lease_id if attempt is not None else 'system'}/{uuid4()}"
+
+
 def artifact_key(job_id: UUID | str, name: str) -> str:
-    """Deterministic S3 key for an artifact body."""
-    return f"{_key_prefix()}artifacts/{job_id}/{_safe_name(name)}"
+    """Unique immutable key for one publication, including its attempt authority."""
+    return f"{_key_prefix()}artifacts/{job_id}/{immutable_write_token()}/{_safe_name(name)}"
 
 
 def source_file_key(job_id: UUID | str, path: str) -> str:
-    """Deterministic S3 key for a source file (path is hashed to avoid unsafe chars)."""
+    """Unique source-body key (path is hashed to avoid unsafe characters)."""
     digest = hashlib.sha1(path.encode("utf-8")).hexdigest()
-    return f"{_key_prefix()}source_files/{job_id}/{digest}"
+    return f"{_key_prefix()}source_files/{job_id}/{immutable_write_token()}/{digest}"
 
 
 def protocol_score_document_key(protocol_id: int, token: str) -> str:
@@ -537,6 +548,8 @@ def get_storage_client() -> StorageClient | None:
     """
     endpoint, bucket, access_key, secret_key = _read_env()
     if not (endpoint and bucket and access_key and secret_key):
+        if os.getenv("PSAT_COMPUTE_TARGET") == "local":
+            raise StorageUnavailable("Local compute requires complete object-storage configuration")
         logger.info("ARTIFACT_STORAGE_* env vars not all set — artifact bodies will be stored inline in Postgres")
         return None
     return StorageClient(endpoint, bucket, access_key, secret_key)

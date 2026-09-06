@@ -29,6 +29,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tests.attempt_helpers import claimed_call
 from tests.support.balance_stubs import page, pinned_native_unavailable
 
 # offline: the dependency phase probes eth_getCode and company mode resolves the
@@ -206,7 +207,7 @@ def test_dep_phase_passes_proxy_address(monkeypatch, tmp_path):
 
     project_dir = tmp_path / "p"
     project_dir.mkdir()
-    worker._run_dependency_phase(MagicMock(), job, project_dir, "Impl", IMPL)
+    claimed_call(worker._run_dependency_phase, MagicMock(), job, project_dir, "Impl", IMPL)
 
     assert len(captured) == 1
     assert captured[0]["address"] == IMPL
@@ -242,7 +243,7 @@ def test_dep_phase_stores_upgrade_history(monkeypatch, tmp_path):
 
     project_dir = tmp_path / "p"
     project_dir.mkdir()
-    worker._run_dependency_phase(MagicMock(), _job(), project_dir, "TestContract", TARGET)
+    claimed_call(worker._run_dependency_phase, MagicMock(), _job(), project_dir, "TestContract", TARGET)
 
     assert "upgrade_history" in store
     assert store["upgrade_history"]["total_upgrades"] == 2
@@ -266,7 +267,7 @@ def test_dep_phase_skips_upgrade_history_when_no_proxies(monkeypatch, tmp_path):
 
     project_dir = tmp_path / "p"
     project_dir.mkdir()
-    worker._run_dependency_phase(MagicMock(), _job(), project_dir, "TestContract", TARGET)
+    claimed_call(worker._run_dependency_phase, MagicMock(), _job(), project_dir, "TestContract", TARGET)
 
     assert "upgrade_history" not in store
     assert "dependencies" in store
@@ -760,7 +761,7 @@ def test_resolution_worker_rewrites_address_for_impl_jobs(monkeypatch):
 
     monkeypatch.setattr("workers.resolution_worker.resolve_control_graph", fake_resolve_graph)
 
-    worker.process(session, job)
+    claimed_call(worker.process, session, job)
 
     # The tracking plan should have proxy address, not impl
     assert captured_plans[0]["contract_address"] == PROXY
@@ -902,7 +903,7 @@ def test_discovery_company_mode_advances_to_selection(monkeypatch):
     monkeypatch.setattr("workers.discovery.create_job", fail_create_job)
     monkeypatch.setattr(
         "workers.discovery.advance_job",
-        lambda _s, job_id, next_stage, detail="": advance_calls.append((job_id, next_stage, detail)),
+        lambda _s, job_id, next_stage, detail="", **_lease: advance_calls.append((job_id, next_stage, detail)),
     )
     monkeypatch.setattr(worker, "update_detail", lambda *_a, **_kw: None)
 
@@ -933,7 +934,7 @@ def test_discovery_company_mode_advances_to_selection(monkeypatch):
     monkeypatch.setattr(worker, "_spawn_parallel_discovery", lambda *_a, **_kw: None)
 
     try:
-        worker.process(session, job)  # pyright: ignore[reportArgumentType]
+        claimed_call(worker.process, session, job)
     except JobHandledDirectly:
         pass  # expected hand-off signal
 
@@ -1022,7 +1023,7 @@ def test_discovery_reads_and_writes_protocol_declared_chains(monkeypatch):
     monkeypatch.setattr("services.discovery.run_discovery.run_discovery", fake_run_discovery)
 
     try:
-        worker.process(session, job)  # pyright: ignore[reportArgumentType]
+        claimed_call(worker.process, session, job)
     except JobHandledDirectly:
         pass
 
@@ -1087,7 +1088,7 @@ def test_static_worker_reads_discovery_artifacts(monkeypatch):
     monkeypatch.setattr(worker, "_run_tracking_plan_phase", lambda *_a, **_kw: None)
     monkeypatch.setattr(worker, "update_detail", lambda *_a, **_kw: None)
 
-    worker.process(session, job)
+    claimed_call(worker.process, session, job)
 
     assert len(scaffold_args) == 1
     passed_sources, passed_meta, passed_build, passed_remap = scaffold_args[0]
@@ -1230,7 +1231,7 @@ def test_dep_phase_records_degraded_on_failure(monkeypatch, tmp_path):
         ):
             project_dir = tmp_path / "p"
             project_dir.mkdir()
-            worker._run_dependency_phase(MagicMock(), _job(), project_dir, "Test", TARGET)
+            claimed_call(worker._run_dependency_phase, MagicMock(), _job(), project_dir, "Test", TARGET)
     finally:
         degraded_errors_var.reset(token)
 
@@ -1295,7 +1296,7 @@ def test_static_worker_proxy_skips_analysis_and_completes(monkeypatch):
     monkeypatch.setattr(worker, "update_detail", lambda *_a, **_kw: None)
 
     completed = []
-    monkeypatch.setattr("db.queue.complete_job", lambda _s, _j, detail="": completed.append(True))
+    monkeypatch.setattr("db.queue.complete_job", lambda _s, _j, detail="", **_lease: completed.append(True))
 
     # Analysis/tracking-plan should NOT be called for a proxy parent
     # (proxies short-circuit to spawn an impl child job).
@@ -1304,7 +1305,7 @@ def test_static_worker_proxy_skips_analysis_and_completes(monkeypatch):
     monkeypatch.setattr(worker, "_run_tracking_plan_phase", lambda *_a, **_kw: slither_called.append(True))
 
     try:
-        worker.process(session, job)
+        claimed_call(worker.process, session, job)
         assert False, "Expected JobHandledDirectly"
     except JobHandledDirectly:
         pass
@@ -1384,7 +1385,7 @@ def test_policy_worker_fails_cleanly_on_missing_artifacts(monkeypatch):
     import pytest
 
     with pytest.raises(RuntimeError, match="contract_analysis"):
-        worker.process(session, job)
+        claimed_call(worker.process, session, job)
 
     # contract_analysis present but control_snapshot missing
     monkeypatch.setattr(
@@ -1393,7 +1394,7 @@ def test_policy_worker_fails_cleanly_on_missing_artifacts(monkeypatch):
     )
 
     with pytest.raises(RuntimeError, match="control_snapshot"):
-        worker.process(session, job)
+        claimed_call(worker.process, session, job)
 
 
 # ===================================================================
@@ -1418,7 +1419,7 @@ def test_resolution_worker_fails_on_missing_artifacts(monkeypatch):
         lambda _s, _j, name: None,
     )
     with pytest.raises(RuntimeError, match="control_tracking_plan"):
-        worker.process(session, job)
+        claimed_call(worker.process, session, job)
 
     # tracking plan present but contract_analysis missing
     monkeypatch.setattr(
@@ -1428,4 +1429,4 @@ def test_resolution_worker_fails_on_missing_artifacts(monkeypatch):
         ),
     )
     with pytest.raises(RuntimeError, match="contract_analysis"):
-        worker.process(session, job)
+        claimed_call(worker.process, session, job)

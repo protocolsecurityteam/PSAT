@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from db.models import Artifact, JobStage
 from db.queue import create_job
+from tests.attempt_helpers import claimed_call
 from tests.cache_helpers import requires_postgres
 from utils.logging import record_degraded
 from workers.base import BaseWorker
@@ -78,7 +79,7 @@ def test_failing_process_writes_stage_errors_with_severity_error(db_session, tes
 
     worker = _FailingWorker(raise_after_degraded=True, n_degraded=0)
     # Worker uses session.rollback() in the failure path, so a real session works.
-    worker._execute_job(db_session, job)
+    claimed_call(worker._execute_job, db_session, job)
 
     db_session.expire_all()
     payload = _read_stage_errors(db_session, job.id)
@@ -117,7 +118,7 @@ def test_successful_process_with_degraded_records_writes_artifact(db_session, te
     monkey_complete = db_queue.complete_job
     db_queue.complete_job = lambda _s, jid: completes.append(jid)
     try:
-        worker._execute_job(db_session, job)
+        claimed_call(worker._execute_job, db_session, job)
     finally:
         base.advance_job = monkey_advance
         db_queue.complete_job = monkey_complete
@@ -142,7 +143,7 @@ def test_combined_degraded_and_error_produce_one_artifact(db_session, test_sessi
     db_session.commit()
 
     worker = _FailingWorker(raise_after_degraded=True, n_degraded=2)
-    worker._execute_job(db_session, job)
+    claimed_call(worker._execute_job, db_session, job)
 
     db_session.expire_all()
     payload = _read_stage_errors(db_session, job.id)
@@ -178,7 +179,7 @@ def test_fresh_session_fail_path_persists_artifact(db_session, test_session_loca
     worker = _BrokenSessionWorker()
     # Pre-close path will exercise the inner fail_job retry — verify the artifact
     # write nonetheless lands (it uses its own SessionLocal).
-    worker._execute_job(db_session, job)
+    claimed_call(worker._execute_job, db_session, job)
 
     # Open a fresh session pointed at the test DB to read — the test session
     # is closed.
@@ -205,7 +206,7 @@ def test_successful_process_without_degraded_writes_no_artifact(db_session, test
     monkey_advance = base.advance_job
     base.advance_job = lambda *_a, **_kw: None
     try:
-        worker._execute_job(db_session, job)
+        claimed_call(worker._execute_job, db_session, job)
     finally:
         base.advance_job = monkey_advance
 

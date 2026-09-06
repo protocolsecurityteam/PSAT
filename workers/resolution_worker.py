@@ -1000,7 +1000,7 @@ class ResolutionWorker(BaseWorker):
                     "discovered_by": "resolution_dependency",
                     "chain": chain,
                 }
-                provider_job = create_job(session, provider_request, initial_stage=JobStage.discovery)
+                provider_job = create_job(session, provider_request, initial_stage=JobStage.discovery, routing_from=job)
                 if parent_company:
                     provider_job.company = parent_company
                 if job.protocol_id:

@@ -193,6 +193,14 @@ def unwrap_results(results: Sequence[tuple[T, R | BaseException]]) -> list[R]:
     return out
 
 
+class ContextThreadPoolExecutor(ThreadPoolExecutor):
+    """Every task explicitly receives the caller's attempt and logging context."""
+
+    def submit(self, fn, /, *args, **kwargs):
+        context = contextvars.copy_context()
+        return super().submit(context.run, fn, *args, **kwargs)
+
+
 class RpcExecutor:
     """Process-wide ``ThreadPoolExecutor`` shared across every fan-out site.
 
@@ -212,7 +220,7 @@ class RpcExecutor:
         with cls._lock:
             if cls._instance is None:
                 workers = _max_fanout()
-                cls._instance = ThreadPoolExecutor(
+                cls._instance = ContextThreadPoolExecutor(
                     max_workers=workers,
                     thread_name_prefix="psat-rpc",
                 )
@@ -220,7 +228,8 @@ class RpcExecutor:
 
     @classmethod
     def submit(cls, fn: Callable[..., R], *args: Any, **kwargs: Any) -> Future[R]:
-        return cls.get().submit(fn, *args, **kwargs)
+        ctx = contextvars.copy_context()
+        return cls.get().submit(ctx.run, fn, *args, **kwargs)
 
     @classmethod
     def reset_for_tests(cls) -> None:

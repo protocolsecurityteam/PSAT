@@ -15,6 +15,7 @@ import time as _time
 
 import pytest
 
+from tests.attempt_helpers import claimed_call
 from tests.cache_helpers import db_session, requires_postgres  # noqa: F401
 
 _HAS_ANVIL = shutil.which("anvil") is not None
@@ -466,7 +467,8 @@ class TestAnvilProxyCache:
         from workers.static_worker import StaticWorker
 
         worker = StaticWorker()
-        worker._run_dependency_phase(
+        claimed_call(
+            worker._run_dependency_phase,
             db_session,
             job,
             tmp_path,

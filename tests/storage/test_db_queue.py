@@ -189,12 +189,14 @@ def test_reclaim_stuck_jobs_ignores_terminal_states(session):
 
     completed = create_job(session, {"address": "0x" + "4" * 40})
     claim_job(session, JobStage.discovery, "w1")
-    complete_job(session, completed.id)
+    assert completed.lease_id is not None
+    complete_job(session, completed.id, lease_id=completed.lease_id)
     _backdate_job(session, completed.id, seconds_ago=10)
 
     failed = create_job(session, {"address": "0x" + "5" * 40})
     claim_job(session, JobStage.discovery, "w2")
-    fail_job(session, failed.id, "boom")
+    assert failed.lease_id is not None
+    fail_job(session, failed.id, "boom", lease_id=failed.lease_id)
     _backdate_job(session, failed.id, seconds_ago=10)
 
     reclaimed_ids = reclaim_stuck_jobs(session, stale_timeout_seconds=1)
@@ -241,6 +243,7 @@ def test_reclaimed_job_cannot_be_silently_finished_by_original_holder(session):
     a = claim_job(session, JobStage.discovery, "worker-A")
     assert a is not None
     a_lease = getattr(a, "lease_id", None)
+    assert a_lease is not None
     assert a_lease is not None, "claim_job must mint a lease id for the holder"
 
     _backdate_job(session, job.id, seconds_ago=1000)
@@ -267,6 +270,7 @@ def test_reclaimed_job_cannot_be_silently_advanced_by_original_holder(session):
     a = claim_job(session, JobStage.discovery, "worker-A")
     assert a is not None
     a_lease = getattr(a, "lease_id", None)
+    assert a_lease is not None
 
     _backdate_job(session, job.id, seconds_ago=1000)
     reclaim_stuck_jobs(session, stale_timeout_seconds=1)

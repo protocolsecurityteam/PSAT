@@ -14,6 +14,7 @@ from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 from db.models import JobStage, JobStatus
+from tests.attempt_helpers import claimed_call
 from utils.logging import chain_var
 from workers.base import BaseWorker, _job_chain_log_value
 
@@ -85,7 +86,7 @@ def test_execute_job_binds_chain_from_request(_mock_advance, _mock_signal):
     w._satisfy_dependencies = MagicMock(return_value=0)
     w.process = MagicMock(side_effect=lambda _s, _j: captured.__setitem__("chain", chain_var.get()))
 
-    w._execute_job(MagicMock(), cast(Any, job))
+    claimed_call(w._execute_job, MagicMock(), cast(Any, job))
     assert captured["chain"] == "base"
     # Contextvar is reset on exit — no leak into the next job.
     assert chain_var.get() is None
@@ -102,5 +103,5 @@ def test_execute_job_binds_chain_from_chain_id_when_request_omits_it(_mock_advan
     w._satisfy_dependencies = MagicMock(return_value=0)
     w.process = MagicMock(side_effect=lambda _s, _j: captured.__setitem__("chain", chain_var.get()))
 
-    w._execute_job(MagicMock(), cast(Any, job))
+    claimed_call(w._execute_job, MagicMock(), cast(Any, job))
     assert captured["chain"] == "base"

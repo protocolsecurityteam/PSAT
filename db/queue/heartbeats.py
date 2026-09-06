@@ -12,6 +12,7 @@ from sqlalchemy import func, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
+from db.attempts import LeaseLost as LeaseLost
 from db.models import SessionLocal, WorkerHeartbeat
 
 logger = logging.getLogger("db.queue")
@@ -179,15 +180,3 @@ def renew_daemon_lease(
     a competitor (expired and stolen) since the last renewal.
     """
     return try_acquire_daemon_lease(session, name, holder, ttl_seconds)
-
-
-class LeaseLost(RuntimeError):
-    """Raised when a mutating queue write detects the caller no longer
-    holds the row's lease.
-
-    A worker should treat this as fatal for the current attempt: another
-    worker has been handed the job, and any further writes from this
-    thread would corrupt that worker's view. The handler in
-    ``BaseWorker._execute_job`` logs it and bails without further
-    advance/requeue/fail_terminal calls.
-    """

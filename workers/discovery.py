@@ -913,11 +913,13 @@ class DiscoveryWorker(BaseWorker):
         # DApp/DefiLlama siblings to settle, then ranks the full set of
         # unanalyzed contracts for this protocol and creates the top-N
         # analysis child jobs under the shared analyze_limit budget.
+        self._prepare_direct_transition(session, job)
         advance_job(
             session,
             job.id,
             JobStage.selection,
             f"Discovery complete for {company}: {len(discovered)} contracts; ranking pending",
+            lease_id=self.claim_lease(job),
         )
         raise JobHandledDirectly()
 
@@ -975,7 +977,7 @@ class DiscoveryWorker(BaseWorker):
                 "rpc_url": request.get("rpc_url"),
                 "protocol_id": job.protocol_id,
             }
-            dl_job = create_job(session, defillama_request, initial_stage=JobStage.defillama_scan)
+            dl_job = create_job(session, defillama_request, initial_stage=JobStage.defillama_scan, routing_from=job)
             logger.info("Job %s: spawned DefiLlama scan job %s (slug=%s)", job.id, dl_job.id, slug)
 
         # Spawn DApp crawl
@@ -994,7 +996,7 @@ class DiscoveryWorker(BaseWorker):
                 "rpc_url": request.get("rpc_url"),
                 "protocol_id": job.protocol_id,
             }
-            crawl_job = create_job(session, dapp_request, initial_stage=JobStage.dapp_crawl)
+            crawl_job = create_job(session, dapp_request, initial_stage=JobStage.dapp_crawl, routing_from=job)
             logger.info("Job %s: spawned DApp crawl job %s (url=%s)", job.id, crawl_job.id, dapp_url)
 
     def _process_address(self, session: Session, job: Job) -> None:

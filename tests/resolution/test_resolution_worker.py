@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from db.models import ContractBalance, ContractBalanceFetch
+from tests.attempt_helpers import claimed_call
 from tests.conftest import DATABASE_URL as _DB_URL
 from tests.conftest import _can_connect, requires_postgres
 from tests.support.balance_stubs import page, pinned_native_unavailable
@@ -84,7 +85,7 @@ class TestProcessHappyPath:
 
         ctx = _patch_all(monkeypatch)
 
-        worker.process(session, cast(Any, job))
+        claimed_call(worker.process, session, cast(Any, job))
 
         stored_names = [name for name, _ in ctx["store_calls"]]
         assert "control_snapshot" in stored_names
@@ -115,7 +116,7 @@ class TestProxyAddressOverride:
         monkeypatch.setattr("workers.resolution_worker.build_control_snapshot", fake_build)
 
         job = _job(request={"rpc_url": "https://rpc.example", "proxy_address": PROXY_ADDRESS})
-        worker.process(session, cast(Any, job))
+        claimed_call(worker.process, session, cast(Any, job))
 
         # The plan passed to build_control_snapshot should have proxy address
         assert captured_plan[0]["contract_address"] == PROXY_ADDRESS
@@ -176,7 +177,7 @@ class TestFetchBalancesHappyPath:
         )
         monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
 
-        cast(Any, worker)._fetch_balances(session, job, fake_contract, chain_id=1)
+        claimed_call(cast(Any, worker)._fetch_balances, session, job, fake_contract, chain_id=1)
 
         # 2 holdings rows: 1 ETH + 1 token. The third ``add`` is the
         # ``ContractBalanceFetch`` provenance row, which is NOT a holding and is
@@ -198,7 +199,7 @@ class TestFetchBalancesHappyPath:
         monkeypatch.setattr("services.clients.etherscan.get_token_balances_page", lambda addr, *a, **k: page([]))
         monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
 
-        cast(Any, worker)._fetch_balances(session, job, fake_contract, chain_id=1)
+        claimed_call(cast(Any, worker)._fetch_balances, session, job, fake_contract, chain_id=1)
 
         # Should still add ETH balance even if price failed
         assert _balance_rows(session) == 1
@@ -219,7 +220,7 @@ class TestFetchBalancesHappyPath:
         monkeypatch.setattr("services.clients.etherscan.get_token_balances_page", lambda addr, *a, **k: page([]))
         monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
 
-        cast(Any, worker)._fetch_balances(session, job, fake_contract, chain_id=1)
+        claimed_call(cast(Any, worker)._fetch_balances, session, job, fake_contract, chain_id=1)
 
         # No holdings row on a failed read — the balance is not known, and the
         # earlier code path recorded that only via ``record_degraded``, leaving
@@ -245,7 +246,7 @@ class TestFetchBalancesHappyPath:
         monkeypatch.setattr("services.clients.etherscan.get_token_balances_page", lambda addr, *a, **k: page([]))
         monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
 
-        cast(Any, worker)._fetch_balances(session, job, fake_contract, chain_id=56)
+        claimed_call(cast(Any, worker)._fetch_balances, session, job, fake_contract, chain_id=56)
 
         native_rows = [o for o in _added(session) if isinstance(o, ContractBalance) and o.token_address is None]
         assert len(native_rows) == 1
@@ -270,7 +271,7 @@ class TestFetchBalancesEarlyReturn:
         job = _job(address=None)
         fake_contract = SimpleNamespace(id=42, address=TARGET_ADDRESS, protocol_id=None)
 
-        cast(Any, worker)._fetch_balances(session, job, fake_contract, chain_id=1)
+        claimed_call(cast(Any, worker)._fetch_balances, session, job, fake_contract, chain_id=1)
         session.add.assert_not_called()
 
     def test_no_contract_row_returns_early(self) -> None:
@@ -278,7 +279,7 @@ class TestFetchBalancesEarlyReturn:
         session = MagicMock()
         job = _job()
 
-        cast(Any, worker)._fetch_balances(session, job, None, chain_id=1)
+        claimed_call(cast(Any, worker)._fetch_balances, session, job, None, chain_id=1)
         session.add.assert_not_called()
 
 
@@ -298,7 +299,7 @@ class TestQueueDiscoveredContracts:
 
         create_calls: list[dict] = []
 
-        def fake_create_job(_session: Any, request_dict: dict, initial_stage: Any = None) -> Any:
+        def fake_create_job(_session: Any, request_dict: dict, initial_stage: Any = None, **_routing) -> Any:
             create_calls.append(request_dict)
             return SimpleNamespace(id=uuid.uuid4(), company=None)
 
@@ -320,7 +321,7 @@ class TestQueueDiscoveredContracts:
         )
 
         job = _job()
-        worker._queue_discovered_contracts(session, cast(Any, job), graph, "https://rpc.example")
+        claimed_call(worker._queue_discovered_contracts, session, cast(Any, job), graph, "https://rpc.example")
 
         assert len(create_calls) == 1
         assert create_calls[0]["address"] == CHILD_ADDRESS
@@ -344,7 +345,7 @@ class TestQueueDiscoveredContracts:
         graph = _resolved_graph(nodes=[{"address": CHILD_ADDRESS, "node_type": "contract", "analyzed": True}])
 
         job = _job(request={"rpc_url": "https://rpc.example", "chain": "ethereum"})
-        worker._queue_discovered_contracts(session, cast(Any, job), graph, "https://rpc.example")
+        claimed_call(worker._queue_discovered_contracts, session, cast(Any, job), graph, "https://rpc.example")
 
         assert len(create_calls) == 1
         assert create_calls[0]["chain"] == "ethereum"
@@ -383,7 +384,7 @@ class TestQueueDiscoveredContractsCompanyInheritance:
         create_calls: list[dict] = []
         child_ns = SimpleNamespace(id=uuid.uuid4(), company=None)
 
-        def fake_create_job(_session: Any, request_dict: dict, initial_stage: Any = None) -> Any:
+        def fake_create_job(_session: Any, request_dict: dict, initial_stage: Any = None, **_routing) -> Any:
             create_calls.append(request_dict)
             return child_ns
 
@@ -396,7 +397,7 @@ class TestQueueDiscoveredContractsCompanyInheritance:
         graph = _resolved_graph(nodes=[{"address": CHILD_ADDRESS, "node_type": "contract", "analyzed": True}])
 
         job = _job(company=None, request={"rpc_url": "https://rpc.example", "parent_job_id": parent_id})
-        worker._queue_discovered_contracts(session, cast(Any, job), graph, "https://rpc.example")
+        claimed_call(worker._queue_discovered_contracts, session, cast(Any, job), graph, "https://rpc.example")
 
         assert len(create_calls) == 1
         # Company should be set on child job
@@ -410,7 +411,7 @@ class TestQueueDiscoveredContractsCompanyInheritance:
         create_calls: list[dict] = []
         child_ns = SimpleNamespace(id=uuid.uuid4(), company=None)
 
-        def fake_create_job(_session: Any, request_dict: dict, initial_stage: Any = None) -> Any:
+        def fake_create_job(_session: Any, request_dict: dict, initial_stage: Any = None, **_routing) -> Any:
             create_calls.append(request_dict)
             return child_ns
 
@@ -423,7 +424,7 @@ class TestQueueDiscoveredContractsCompanyInheritance:
         graph = _resolved_graph(nodes=[{"address": CHILD_ADDRESS, "node_type": "contract", "analyzed": True}])
 
         job = _job(company="Direct Corp")
-        worker._queue_discovered_contracts(session, cast(Any, job), graph, "https://rpc.example")
+        claimed_call(worker._queue_discovered_contracts, session, cast(Any, job), graph, "https://rpc.example")
 
         assert len(create_calls) == 1
         assert child_ns.company == "Direct Corp"
@@ -446,7 +447,7 @@ class TestMissingArtifactsRaise:
         monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
 
         with pytest.raises(RuntimeError, match="control_tracking_plan artifact not found"):
-            worker.process(session, cast(Any, job))
+            claimed_call(worker.process, session, cast(Any, job))
 
     def test_missing_contract_analysis_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         worker = ResolutionWorker()
@@ -462,7 +463,7 @@ class TestMissingArtifactsRaise:
         monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
 
         with pytest.raises(RuntimeError, match="contract_analysis artifact not found"):
-            worker.process(session, cast(Any, job))
+            claimed_call(worker.process, session, cast(Any, job))
 
     def test_non_dict_tracking_plan_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         worker = ResolutionWorker()
@@ -476,7 +477,7 @@ class TestMissingArtifactsRaise:
         monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
 
         with pytest.raises(RuntimeError, match="control_tracking_plan artifact not found"):
-            worker.process(session, cast(Any, job))
+            claimed_call(worker.process, session, cast(Any, job))
 
 
 # ---------------------------------------------------------------------------
@@ -497,7 +498,7 @@ class TestFetchBalancesZeroEth:
         monkeypatch.setattr("services.clients.etherscan.get_token_balances_page", lambda addr, *a, **k: page([]))
         monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
 
-        cast(Any, worker)._fetch_balances(session, job, fake_contract, chain_id=1)
+        claimed_call(cast(Any, worker)._fetch_balances, session, job, fake_contract, chain_id=1)
 
         # No holdings row for a zero balance — a row here would be consumed as
         # "this deployment holds the native asset". The zero itself is recorded
@@ -546,7 +547,7 @@ class TestFetchBalancesProxyAddress:
         monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
 
         job = _job(request={"proxy_address": PROXY_ADDRESS})
-        cast(Any, worker)._fetch_balances(session, job, fake_contract, chain_id=1)
+        claimed_call(cast(Any, worker)._fetch_balances, session, job, fake_contract, chain_id=1)
 
         assert captured_addrs[0] == TARGET_ADDRESS
 
@@ -577,7 +578,7 @@ class TestQueueDiscoveredContractsParentChainEdgeCases:
 
         graph = _resolved_graph(nodes=[{"address": CHILD_ADDRESS, "node_type": "contract", "analyzed": True}])
         job = _job(company=None, request={"rpc_url": "https://rpc.example", "parent_job_id": str(uuid.uuid4())})
-        worker._queue_discovered_contracts(session, cast(Any, job), graph, "https://rpc.example")
+        claimed_call(worker._queue_discovered_contracts, session, cast(Any, job), graph, "https://rpc.example")
 
         # Should still create the job, just no company
         assert len(create_calls) == 1
@@ -610,7 +611,7 @@ class TestQueueDiscoveredContractsParentChainEdgeCases:
         create_calls: list[dict] = []
         child_ns = SimpleNamespace(id=uuid.uuid4(), company=None)
 
-        def fake_create_job(_session: Any, request_dict: dict, initial_stage: Any = None) -> Any:
+        def fake_create_job(_session: Any, request_dict: dict, initial_stage: Any = None, **_routing) -> Any:
             create_calls.append(request_dict)
             return child_ns
 
@@ -622,7 +623,7 @@ class TestQueueDiscoveredContractsParentChainEdgeCases:
 
         graph = _resolved_graph(nodes=[{"address": CHILD_ADDRESS, "node_type": "contract", "analyzed": True}])
         job = _job(company=None, request={"rpc_url": "https://rpc.example", "parent_job_id": parent_id})
-        worker._queue_discovered_contracts(session, cast(Any, job), graph, "https://rpc.example")
+        claimed_call(worker._queue_discovered_contracts, session, cast(Any, job), graph, "https://rpc.example")
 
         assert len(create_calls) == 1
         assert child_ns.company == "GrandCorp"
@@ -695,7 +696,8 @@ def test_dependency_emission_walks_check_trees(db_session_for_resolution):
         }
     }
 
-    ResolutionWorker()._emit_dependency_edges_from_predicate_trees(
+    claimed_call(
+        ResolutionWorker()._emit_dependency_edges_from_predicate_trees,
         session,
         cast(Any, depender_job),
         cast(Any, snapshot),
@@ -759,8 +761,12 @@ def test_dependency_emission_records_pending_status_metrics(db_session_for_resol
     metrics: dict = {}
     token = stage_metrics_var.set(metrics)
     try:
-        ResolutionWorker()._emit_dependency_edges_from_predicate_trees(
-            session, cast(Any, depender_job), cast(Any, snapshot), "https://rpc.example"
+        claimed_call(
+            ResolutionWorker()._emit_dependency_edges_from_predicate_trees,
+            session,
+            cast(Any, depender_job),
+            cast(Any, snapshot),
+            "https://rpc.example",
         )
     finally:
         stage_metrics_var.reset(token)
@@ -814,8 +820,12 @@ def test_dependency_emission_warns_and_records_on_cycle(db_session_for_resolutio
     token = stage_metrics_var.set(metrics)
     try:
         with caplog.at_level(_logging.WARNING, logger="workers.resolution_worker"):
-            ResolutionWorker()._emit_dependency_edges_from_predicate_trees(
-                session, cast(Any, job_a), cast(Any, snapshot), "https://rpc.example"
+            claimed_call(
+                ResolutionWorker()._emit_dependency_edges_from_predicate_trees,
+                session,
+                cast(Any, job_a),
+                cast(Any, snapshot),
+                "https://rpc.example",
             )
     finally:
         stage_metrics_var.reset(token)
@@ -1031,7 +1041,7 @@ class TestStructuralOwnershipPropagation:
         monkeypatch.setattr("services.discovery.perimeter.create_job", _fake_create)
 
         graph = _resolved_graph(nodes=[{"address": dep_addr, "node_type": "contract", "analyzed": True}])
-        ResolutionWorker()._queue_discovered_contracts(session, cast(Any, job), graph, "rpc")
+        claimed_call(ResolutionWorker()._queue_discovered_contracts, session, cast(Any, job), graph, "rpc")
 
         assert len(create_calls) == 1
         assert create_calls[0]["discovery_relationship"] == "implementation"
@@ -1065,7 +1075,7 @@ class TestStructuralOwnershipPropagation:
         monkeypatch.setattr("services.discovery.perimeter.create_job", _fake_create)
 
         graph = _resolved_graph(nodes=[{"address": dep_addr, "node_type": "contract", "analyzed": True}])
-        ResolutionWorker()._queue_discovered_contracts(session, cast(Any, job), graph, "rpc")
+        claimed_call(ResolutionWorker()._queue_discovered_contracts, session, cast(Any, job), graph, "rpc")
 
         assert len(create_calls) == 1
         assert create_calls[0]["discovery_relationship"] == "beacon"
@@ -1150,7 +1160,7 @@ class TestStructuralOwnershipPropagation:
         monkeypatch.setattr("services.discovery.perimeter.create_job", _fake_create)
 
         graph = _resolved_graph(nodes=[{"address": dep_addr, "node_type": "contract", "analyzed": True}])
-        ResolutionWorker()._queue_discovered_contracts(session, cast(Any, job), graph, "rpc")
+        claimed_call(ResolutionWorker()._queue_discovered_contracts, session, cast(Any, job), graph, "rpc")
 
         assert len(create_calls) == 1
         assert create_calls[0]["discovery_relationship"] == "proxy"
@@ -1240,7 +1250,7 @@ class TestStructuralOwnershipPropagation:
         monkeypatch.setattr("services.discovery.perimeter.create_job", _fake_create)
 
         graph = _resolved_graph(nodes=[{"address": dep_addr, "node_type": "contract", "analyzed": True}])
-        ResolutionWorker()._queue_discovered_contracts(session, cast(Any, job), graph, "rpc")
+        claimed_call(ResolutionWorker()._queue_discovered_contracts, session, cast(Any, job), graph, "rpc")
 
         assert len(create_calls) == 1
         assert "discovery_relationship" not in create_calls[0], (
@@ -1282,7 +1292,7 @@ class TestStructuralOwnershipPropagation:
         monkeypatch.setattr("services.discovery.perimeter.create_job", _fake_create)
 
         graph = _resolved_graph(nodes=[{"address": dep_addr, "node_type": "contract", "analyzed": True}])
-        ResolutionWorker()._queue_discovered_contracts(session, cast(Any, job), graph, "rpc")
+        claimed_call(ResolutionWorker()._queue_discovered_contracts, session, cast(Any, job), graph, "rpc")
 
         assert len(create_calls) == 1
         assert "discovery_relationship" not in create_calls[0], (
@@ -1320,7 +1330,7 @@ class TestStructuralOwnershipPropagation:
         monkeypatch.setattr("services.discovery.perimeter.create_job", _fake_create)
 
         graph = _resolved_graph(nodes=[{"address": dep_addr, "node_type": "contract", "analyzed": True}])
-        ResolutionWorker()._queue_discovered_contracts(session, cast(Any, job), graph, "rpc")
+        claimed_call(ResolutionWorker()._queue_discovered_contracts, session, cast(Any, job), graph, "rpc")
 
         assert len(create_calls) == 1
         # The relationship is still passed (parent IS structurally linked),
@@ -1352,7 +1362,7 @@ class TestResolvedGraphEmpty:
         ctx = _patch_all(monkeypatch)
         monkeypatch.setattr("workers.resolution_worker.resolve_control_graph", fake_resolve_empty)
 
-        worker.process(session, cast(Any, job))
+        claimed_call(worker.process, session, cast(Any, job))
 
         stored_names = [name for name, _ in ctx["store_calls"]]
         assert "control_snapshot" in stored_names
@@ -1448,7 +1458,7 @@ def test_three_state_columns_reach_postgres_and_absence_lands_sql_null(
     }
 
     _patch_all(monkeypatch, snapshot=snapshot, resolved_graph=graph)
-    ResolutionWorker().process(db_session, cast(Any, _job(id=real_job.id, request=real_job.request)))
+    claimed_call(ResolutionWorker().process, db_session, cast(Any, _job(id=real_job.id, request=real_job.request)))
 
     cv_rows = {
         cid: (prov, details_typeof, details_is_sql_null)
@@ -1530,7 +1540,7 @@ def test_graph_without_max_depth_persists_sql_null_not_zero(db_session, monkeypa
     assert "max_depth" not in graph
 
     _patch_all(monkeypatch, resolved_graph=graph)
-    ResolutionWorker().process(db_session, cast(Any, _job(id=real_job.id, request=real_job.request)))
+    claimed_call(ResolutionWorker().process, db_session, cast(Any, _job(id=real_job.id, request=real_job.request)))
 
     row = db_session.execute(
         text("select analysis_state, graph_max_depth from control_graph_nodes where contract_id = :cid"),

@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 
+import { ComputeRecovery } from "./ComputeRecovery.jsx";
 import { api } from "../api/client.js";
 import { shortenAddress } from "../shared/format.js";
 import {
@@ -217,7 +218,7 @@ function StageRow({ stage, kind, blob, maxElapsed, job }) {
 // sections → retry footer) directly into the page's `.dock` container; the
 // dock + responsive backdrop are owned by the page so the same component
 // serves both the wide docked layout and the <900px overlay drawer.
-export function JobDetail({ job, onClose, refreshTick, now = Date.now() }) {
+export function JobDetail({ job, groupJobs, onClose, refreshTick, now = Date.now() }) {
   const jobId = job?.job_id || null;
   const [errors, setErrors] = useState(null);
   const [stageTimings, setStageTimings] = useState(null);
@@ -387,6 +388,7 @@ export function JobDetail({ job, onClose, refreshTick, now = Date.now() }) {
         <button type="button" className="job-panel-close" onClick={onClose} aria-label="Close panel">×</button>
       </header>
 
+      <ComputeRecovery key={job.job_id} job={job} groupJobs={groupJobs} />
       <div className="job-panel-meta">
         <span className="job-panel-tag" style={{ color: stageColor, borderColor: `${stageColor}55` }}>
           {formatStageLabel(job.stage)}

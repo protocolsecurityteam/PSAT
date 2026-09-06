@@ -25,6 +25,7 @@ from unittest.mock import patch
 import pytest
 from sqlalchemy import select
 
+from tests.attempt_helpers import claimed_call
 from tests.conftest import requires_postgres
 from workers.base import JobHandledDirectly
 
@@ -158,7 +159,7 @@ def _run_selection(db_session, pid, company):
     with patch("signal.signal"):
         worker = SelectionWorker()
     with pytest.raises(JobHandledDirectly):
-        worker.process(db_session, job)
+        claimed_call(worker.process, db_session, job)
     db_session.refresh(job)
     from db.models import Job
 

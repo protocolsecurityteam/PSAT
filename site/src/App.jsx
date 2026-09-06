@@ -39,12 +39,21 @@ export default function App() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [job, setJob] = useState(null);
   const [, setActiveJobs] = useState([]);
-  const [form, setForm] = useState({ target: "", name: "", chain: "", analyzeLimit: "5" });
+  const [form, setForm] = useState({ target: "", name: "", chain: "", analyzeLimit: "5", computeTarget: "cloud" });
   const [formOpen, setFormOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const analysesRef = useRef([]);
   const doneTimerRef = useRef(null);
   const isAdmin = useIsAdmin();
+  const [localComputeEnabled, setLocalComputeEnabled] = useState(false);
+  useEffect(() => {
+    if (!isAdmin || !formOpen) return;
+    let cancelled = false;
+    api("/api/compute-capabilities", { silent: true })
+      .then((value) => { if (!cancelled) setLocalComputeEnabled(value.local_enabled === true); })
+      .catch(() => { if (!cancelled) setLocalComputeEnabled(false); });
+    return () => { cancelled = true; };
+  }, [isAdmin, formOpen]);
 
   // First-run admin login: ?admin=1 prompts once for the key when none is
   // stored. This is the only key-entry path now that operator controls are
@@ -185,6 +194,7 @@ export default function App() {
             chain: form.chain.trim() || null,
             analyze_limit: Number.parseInt(form.analyzeLimit, 10) || 5,
           };
+      payload.compute_target = localComputeEnabled ? form.computeTarget : "cloud";
       const nextJob = await api("/api/analyze", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
       setJob(nextJob);
       setFormOpen(false);
@@ -240,6 +250,10 @@ export default function App() {
             <label><span>Run name</span><input value={form.name} onChange={(e) => setForm((c) => ({ ...c, name: e.target.value }))} placeholder="Optional" /></label>
             <label><span>Chain</span><input value={form.chain} onChange={(e) => setForm((c) => ({ ...c, chain: e.target.value }))} placeholder="Optional" /></label>
             <label><span>Analyze limit</span><input type="number" min="1" max="200" value={form.analyzeLimit} onChange={(e) => setForm((c) => ({ ...c, analyzeLimit: e.target.value }))} /></label>
+            <label><span>Compute</span><select aria-label="Compute" value={localComputeEnabled ? form.computeTarget : "cloud"} onChange={(e) => setForm((c) => ({ ...c, computeTarget: e.target.value }))}>
+              <option value="cloud">Cloud</option>
+              {localComputeEnabled && <option value="local">Local workstation</option>}
+            </select></label>
             <button type="submit" disabled={loading}>{loading ? "Starting..." : "Run"}</button>
           </form>
         </div>

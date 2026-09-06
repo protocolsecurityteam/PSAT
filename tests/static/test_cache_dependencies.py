@@ -4,6 +4,7 @@ _resolve_*/_merge_* helper functions."""
 
 from __future__ import annotations
 
+from tests.attempt_helpers import claimed_call
 from tests.cache_helpers import (
     ADDR_A,
     FAKE_CLS_OUTPUT,
@@ -82,7 +83,7 @@ def test_static_deps_stored_on_first_run(db_session, monkeypatch):
     monkeypatch.setattr(worker, "_run_tracking_plan_phase", lambda *a, **kw: None)
     monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
 
-    worker.process(db_session, job)
+    claimed_call(worker.process, db_session, job)
 
     # Verify the static_dependencies artifact was stored
     art = get_artifact(db_session, job.id, "static_dependencies")
@@ -168,7 +169,7 @@ def test_static_deps_reused_on_cache_hit(db_session, monkeypatch):
     monkeypatch.setattr(worker, "_run_tracking_plan_phase", lambda *a, **kw: None)
     monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
 
-    worker.process(db_session, job)
+    claimed_call(worker.process, db_session, job)
 
     # find_dependencies was NOT called
     assert find_deps_called == []
@@ -242,7 +243,7 @@ def test_dynamic_deps_still_run_on_cache_hit(db_session, monkeypatch):
     monkeypatch.setattr(worker, "_run_tracking_plan_phase", lambda *a, **kw: None)
     monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
 
-    worker.process(db_session, job)
+    claimed_call(worker.process, db_session, job)
 
     # Dynamic dependency discovery was called
     assert dynamic_called == [True]
@@ -318,7 +319,7 @@ def test_dynamic_deps_artifact_stored_on_first_run(db_session, monkeypatch):
     monkeypatch.setattr(worker, "_run_tracking_plan_phase", lambda *a, **kw: None)
     monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
 
-    worker.process(db_session, job)
+    claimed_call(worker.process, db_session, job)
 
     art = get_artifact(db_session, job.id, "dynamic_dependencies")
     assert isinstance(art, dict)
@@ -352,7 +353,7 @@ def test_dynamic_deps_append_only_merge_on_rerun(db_session, monkeypatch):
     monkeypatch.setattr(worker, "_run_tracking_plan_phase", lambda *a, **kw: None)
     monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
 
-    worker.process(db_session, job)
+    claimed_call(worker.process, db_session, job)
 
     # start_block should be last_block + 1 = 201
     assert captured_kwargs.get("start_block") == 201
@@ -390,7 +391,7 @@ def test_dynamic_deps_no_new_transactions_uses_previous(db_session, monkeypatch)
     monkeypatch.setattr(worker, "_run_tracking_plan_phase", lambda *a, **kw: None)
     monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
 
-    worker.process(db_session, job)
+    claimed_call(worker.process, db_session, job)
 
     # Should use previous output as-is (no error)
     art = get_artifact(db_session, job.id, "dynamic_dependencies")
@@ -428,7 +429,7 @@ def test_dynamic_deps_explicit_tx_hashes_skip_merge(db_session, monkeypatch):
     monkeypatch.setattr(worker, "_run_tracking_plan_phase", lambda *a, **kw: None)
     monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
 
-    worker.process(db_session, job)
+    claimed_call(worker.process, db_session, job)
 
     # start_block should be None (no incremental fetch)
     assert captured_kwargs.get("start_block") is None
@@ -472,7 +473,7 @@ def test_dynamic_deps_source_job_fallback(db_session, monkeypatch):
     monkeypatch.setattr(worker, "_run_tracking_plan_phase", lambda *a, **kw: None)
     monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
 
-    worker.process(db_session, job)
+    claimed_call(worker.process, db_session, job)
 
     # start_block should be 201 (from source job's last block + 1)
     assert captured_kwargs.get("start_block") == 201
@@ -525,7 +526,7 @@ def test_classifications_stored_on_first_run(db_session, monkeypatch):
     monkeypatch.setattr(worker, "_run_tracking_plan_phase", lambda *a, **kw: None)
     monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
 
-    worker.process(db_session, job)
+    claimed_call(worker.process, db_session, job)
 
     art = get_artifact(db_session, job.id, "classifications")
     assert isinstance(art, dict)
@@ -577,7 +578,7 @@ def test_classifications_reused_via_pre_classified(db_session, monkeypatch):
     monkeypatch.setattr(worker, "_run_tracking_plan_phase", lambda *a, **kw: None)
     monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
 
-    worker.process(db_session, job)
+    claimed_call(worker.process, db_session, job)
 
     # Previous classifications should be in pre_classified
     pre = captured_kwargs.get("pre_classified")
@@ -725,7 +726,7 @@ def test_upgrade_history_append_only_on_rerun(db_session, monkeypatch):
     monkeypatch.setattr(worker, "_run_tracking_plan_phase", lambda *a, **kw: None)
     monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
 
-    worker.process(db_session, job)
+    claimed_call(worker.process, db_session, job)
 
     # from_block should be max_block + 1 = 51
     assert captured_kwargs["from_block"] == 51
@@ -782,7 +783,7 @@ def test_upgrade_history_no_new_events_uses_previous(db_session, monkeypatch):
     monkeypatch.setattr(worker, "_run_tracking_plan_phase", lambda *a, **kw: None)
     monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
 
-    worker.process(db_session, job)
+    claimed_call(worker.process, db_session, job)
 
     # Previous data should be preserved
     art = get_artifact(db_session, job.id, "upgrade_history")
@@ -1105,7 +1106,7 @@ def test_dependency_phase_threads_job_chain_id_to_subphases(db_session, monkeypa
     monkeypatch.setattr(worker, "_run_tracking_plan_phase", lambda *a, **kw: None)
     monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
 
-    worker.process(db_session, job)
+    claimed_call(worker.process, db_session, job)
 
     assert captured.get("dyn_chain_id") == 8453  # F2
     assert captured.get("uh_chain_id") == 8453  # F1

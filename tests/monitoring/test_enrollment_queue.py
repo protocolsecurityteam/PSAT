@@ -35,6 +35,7 @@ from services.monitoring.reconciler import (
     drain_enrollment_queue,
     sweep_enqueue_stale,
 )
+from tests.attempt_helpers import claimed_call
 from tests.conftest import DATABASE_URL, requires_postgres
 
 pytestmark = requires_postgres
@@ -428,7 +429,8 @@ def test_sweep_enqueues_k_oldest_nulls_first(qsession):
 # ---------------------------------------------------------------------------
 
 
-def test_policy_worker_marks_dirty(qsession, monkeypatch):
+@pytest.mark.parametrize("compute_target", ["cloud", "local"])
+def test_policy_worker_marks_dirty(qsession, monkeypatch, compute_target):
     from workers.policy_worker import PolicyWorker
 
     proto = _make_protocol(qsession)
@@ -443,6 +445,7 @@ def test_policy_worker_marks_dirty(qsession, monkeypatch):
         stage=JobStage.policy,
         request={"rpc_url": "https://rpc.example", "chain": "ethereum"},
     )
+    job.compute_target = compute_target
     qsession.add(job)
     qsession.commit()
 
@@ -471,7 +474,7 @@ def test_policy_worker_marks_dirty(qsession, monkeypatch):
     # Stub the DeFiLlama fetch so the initial-TVL block doesn't touch the network.
     monkeypatch.setattr("services.monitoring.tvl.fetch_defillama_tvl", lambda *a, **kw: None)
 
-    PolicyWorker().process(qsession, job)
+    claimed_call(PolicyWorker().process, qsession, job)
 
     row = qsession.execute(
         select(MonitoringEnrollmentQueue).where(MonitoringEnrollmentQueue.protocol_id == proto.id)

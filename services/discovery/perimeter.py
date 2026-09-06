@@ -686,7 +686,7 @@ def queue_discovered_contracts(
             child_request["discovery_relationship"] = structural_rel
             child_request["parent_is_member"] = parent_is_member
 
-        child_job = create_job(session, child_request, initial_stage=JobStage.discovery)
+        child_job = create_job(session, child_request, initial_stage=JobStage.discovery, routing_from=job)
         if parent_company:
             child_job.company = parent_company
         if job.protocol_id:

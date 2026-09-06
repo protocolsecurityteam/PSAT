@@ -30,6 +30,8 @@ class JobDict(TypedDict):
     """Serialized Job row — the shape of ``Job.to_dict()``."""
 
     job_id: str
+    compute_target: str
+    compute_group_id: str
     address: str | None
     company: str | None
     name: str | None

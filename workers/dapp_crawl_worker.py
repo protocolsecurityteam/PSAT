@@ -174,10 +174,12 @@ class DAppCrawlWorker(BaseWorker):
             job.name = f"DApp crawl ({len(urls)} URLs)"
             session.commit()
 
+        self._prepare_direct_transition(session, job)
         complete_job(
             session,
             job.id,
             f"DApp crawl complete: {len(addresses)} addresses written to contracts table",
+            lease_id=self.claim_lease(job),
         )
         raise JobHandledDirectly()
 

@@ -44,6 +44,7 @@ def enqueue_selection_pass(session: Session, protocol_id: int, *, reason: str) -
         session,
         {"protocol_id": protocol_id, "name": f"{reason}_selection_{protocol_id}"},
         initial_stage=JobStage.selection,
+        compute_target="cloud",
     )
     logger.info("selection pass enqueued", extra={"protocol_id": protocol_id, "reason": reason})
     return True

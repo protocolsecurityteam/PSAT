@@ -114,27 +114,13 @@ def test_heartbeat_does_not_reuse_passed_session_on_lease_path(
 
 
 @patch("workers.base.signal.signal")
-def test_heartbeat_does_not_reuse_passed_session_on_legacy_path(
-    _mock_signal: MagicMock,
-) -> None:
-    """Same invariant for the legacy (``lease_id is None``) path: the
-    fallback ``UPDATE jobs SET updated_at=...`` must run on a fresh
-    session, not the worker's main session.
-    """
-    w = _TestWorker()
-    job = _make_job(lease_id=None)
+def test_heartbeat_requires_claim_time_lease(_mock_signal):
+    import pytest
 
-    worker_session = MagicMock()
-    worker_session.execute.side_effect = AssertionError(
-        "_heartbeat legacy path must NOT issue the UPDATE through the worker's main session"
-    )
+    from db.attempts import LeaseLost
 
-    fresh_session = _ctx_session(MagicMock())
-    SessionLocalMock = MagicMock(return_value=fresh_session)
-
-    with patch("workers.base.SessionLocal", SessionLocalMock):
-        w._heartbeat(worker_session, cast(Any, job))
-
-    assert SessionLocalMock.called, "_heartbeat (legacy path) must open a fresh SessionLocal()"
-    assert fresh_session.execute.called, "fresh session must receive the UPDATE"
-    assert fresh_session.commit.called, "fresh session must commit"
+    worker = _TestWorker()
+    with patch("workers.base.SessionLocal") as sessions:
+        with pytest.raises(LeaseLost, match="claim-time lease"):
+            worker._heartbeat(MagicMock(), cast(Any, _make_job(lease_id=None)))
+    sessions.assert_not_called()

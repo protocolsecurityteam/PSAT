@@ -74,7 +74,7 @@ def queue_rebuilds(session: Session, candidates: list[RebuildCandidate]) -> dict
         }
         if candidate.protocol_id:
             request["protocol_id"] = candidate.protocol_id
-        job = create_job(session, request)
+        job = create_job(session, request, compute_target="cloud")
         logger.info(
             "queued materialization rebuild job %s for %s (%s, %s)",
             job.id,
