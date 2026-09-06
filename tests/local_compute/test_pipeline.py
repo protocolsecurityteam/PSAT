@@ -3,7 +3,7 @@
 import uuid
 
 import pytest
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from db.models import Artifact, JobStage, JobStatus, MonitoredContract
 from db.queue import claim_job, create_job, store_artifact
@@ -74,6 +74,8 @@ def test_direct_completion_publishes_diagnostics_before_clearing_lease(db_sessio
     from utils.logging import record_degraded
     from workers.base import JobHandledDirectly
 
+    # Diagnostic writes use an independent session against the same test DB.
+    monkeypatch.setattr("workers.base.SessionLocal", sessionmaker(bind=db_session.get_bind()))
     job = create_job(db_session, {}, initial_stage=JobStage.static)
     claimed = claim_job(db_session, JobStage.static, "direct")
     assert claimed is not None
