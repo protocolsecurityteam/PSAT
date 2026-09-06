@@ -46,6 +46,14 @@ RUN uv pip install "vyper==0.3.10"
 # Playwright browsers + OS deps (required by dapp_crawl_worker). ~400MB.
 RUN uv run --no-sync playwright install --with-deps chromium
 
+# Runtime attestation calls solc --version before workers claim jobs. An empty
+# solc-select cache makes that command download "latest", racing across workers
+# and exceeding the startup timeout. Match CI's default compiler at build time.
+# Invoke directly, as start_workers.sh does: uv run uses a different cache root.
+RUN .venv/bin/solc-select install 0.8.27 \
+    && .venv/bin/solc-select use 0.8.27 \
+    && .venv/bin/solc --version
+
 COPY api.py serve.py alembic.ini ./
 COPY alembic/ alembic/
 COPY db/ db/
