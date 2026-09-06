@@ -9,6 +9,7 @@ kill_timeout = 30
 [env]
   PORT = "8000"
   PYTHONUNBUFFERED = "1"
+  PSAT_RPC_ROUTING_IDENTITY = "production-erpc-v1"
   PSAT_EDGE_MODE = "preview"
   PSAT_EXA_CACHE = "1"
   PSAT_TAVILY_CACHE = "1"
