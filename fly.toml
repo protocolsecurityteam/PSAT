@@ -13,6 +13,7 @@ kill_timeout = 30
   PORT = "8000"
   PYTHONUNBUFFERED = "1"
   PSAT_RPC_ROUTING_IDENTITY = "production-erpc-v1"
+  PSAT_LOCAL_COMPUTE_ROUTING_ENABLED = "1"
   PSAT_EDGE_MODE = "cloudflare"
   PSAT_SITE_ORIGIN = "https://snif.sh"
   # Bumped from deploy/start_workers.sh defaults (2/1/1). Sized for the workers VM
