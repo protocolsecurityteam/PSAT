@@ -4,7 +4,7 @@ Drives the REAL resolver (``resolve_contract_capabilities`` → AdapterRegistry 
 cross-contract inline → capability algebra → CapabilitySurface) against snapshots of the
 prod etherfi contracts (real ``predicate_trees`` + ``state_var_values`` pulled from the
 analysis artifacts by ``tests/fixtures/cofinite/generate.py``). Seeds Job +
-predicate_trees artifact + Contract/ControllerValue the production path reads, then
+Assessment predicate evidence + Contract/ControllerValue the production path reads, then
 asserts at the surface/status level — so a revert at any layer (negate, membership
 normalization, projection) is caught.
 
@@ -105,7 +105,7 @@ def _no_network(monkeypatch):
 
 def _seed_job_with_trees(session, *, address: str, artifact: dict):
     from db.models import Job, JobStage, JobStatus
-    from db.queue import store_artifact
+    from tests.support.assessment_artifacts import store_test_assessment
 
     job = Job(
         address=address,
@@ -118,11 +118,12 @@ def _seed_job_with_trees(session, *, address: str, artifact: dict):
     session.add(job)
     session.flush()
     # The resolver reads ``artifact["trees"]`` (+ canonical_signatures); store the dump verbatim.
-    store_artifact(
+    store_test_assessment(
         session,
         job.id,
-        "predicate_trees",
-        data={
+        address=address,
+        name="C",
+        predicate_trees={
             "trees": artifact["trees"],
             "canonical_signatures": artifact.get("canonical_signatures"),
             "contract": artifact.get("contract", address),
@@ -151,7 +152,7 @@ def _resolve(session, *, address: str, job_id):
     from services.resolution.capability_resolver import resolve_contract_capabilities
 
     out = resolve_contract_capabilities(session, address=address, chain_id=1, job_id=job_id)
-    assert out is not None, f"resolver returned None for {address} — predicate_trees artifact not found"
+    assert out is not None, f"resolver returned None for {address} — Assessment predicate evidence not found"
     return out
 
 

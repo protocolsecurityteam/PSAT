@@ -103,9 +103,9 @@ def session():
 @requires_postgres
 def test_resolver_threads_base_chain_into_eval_context(session, _erpc_base, monkeypatch):
     from db.models import Job, JobStage, JobStatus
-    from db.queue import store_artifact
     from services.resolution import capability_resolver
     from services.resolution.capabilities import CapabilityExpr, Condition
+    from tests.support.assessment_artifacts import store_test_assessment
 
     address = "0x" + "cc" * 20
     job = Job(
@@ -119,7 +119,13 @@ def test_resolver_threads_base_chain_into_eval_context(session, _erpc_base, monk
     )
     session.add(job)
     session.flush()
-    store_artifact(session, job.id, "predicate_trees", data={"trees": {"foo()": None}})
+    store_test_assessment(
+        session,
+        job.id,
+        address=address,
+        chain_id=_BASE_ID,
+        predicate_trees={"trees": {"foo()": None}},
+    )
     session.commit()
 
     captured: dict[str, object] = {}
@@ -145,23 +151,23 @@ def test_resolver_threads_base_chain_into_eval_context(session, _erpc_base, monk
 # ---------------------------------------------------------------------------
 
 
-def test_resolution_worker_chain_id_for_job_column_and_derived():
-    from workers.resolution_worker import _chain_id_for_job
+def test_resolution_workerjob_chain_id_column_and_derived():
+    from workers.resolution_worker import job_chain_id
 
-    assert _chain_id_for_job(_row(chain_id=_BASE_ID, request={}, address="0x1")) == _BASE_ID
+    assert job_chain_id(_row(chain_id=_BASE_ID, request={}, address="0x1")) == _BASE_ID
     # No column → derive from request chain.
-    assert _chain_id_for_job(_row(request={"chain": "base"}, address="0x1")) == _BASE_ID
-    assert _chain_id_for_job(_row(request={"chain": "ethereum"}, address="0x1")) == 1
+    assert job_chain_id(_row(request={"chain": "base"}, address="0x1")) == _BASE_ID
+    assert job_chain_id(_row(request={"chain": "ethereum"}, address="0x1")) == 1
 
 
 def test_policy_worker_chain_helpers_base():
-    from workers.policy_worker import _chain_id_for_job, _chain_name_for_job
+    from workers.policy_worker import _job_chain_name, job_chain_id
 
     job = _row(chain_id=_BASE_ID, request={"chain": "base"}, address="0x1")
-    assert _chain_id_for_job(job) == _BASE_ID
-    assert _chain_name_for_job(job) == "base"
+    assert job_chain_id(job) == _BASE_ID
+    assert _job_chain_name(job) == "base"
     mainnet = _row(request={"chain": "ethereum"}, address="0x1")
-    assert _chain_name_for_job(mainnet) == "ethereum"
+    assert _job_chain_name(mainnet) == "ethereum"
 
 
 def test_static_worker_parent_chain_name_never_none():
@@ -229,12 +235,12 @@ def test_materialize_contract_artifacts_threads_chain(monkeypatch):
 
     def _fake_cache(*, effective_address, bytecode_keccak, workspace_prefix, chain=None):
         captured["chain"] = chain
-        return ("Name", {"subject": {}}, {"contract_address": effective_address}, None)
+        return ("Name", {"subject": {}}, {"contract_address": effective_address}, None, None)
 
     monkeypatch.setattr(recursive, "_materialize_with_cross_process_cache", _fake_cache)
     monkeypatch.setattr("services.discovery.classifier.classify_single", lambda address, rpc_url, **_kw: None)
-    monkeypatch.setattr(recursive, "build_control_snapshot", lambda _plan, _rpc, **_kw: {"controller_values": {}})
-    monkeypatch.setattr(recursive, "_build_effective_permissions", lambda _a, _s: {"functions": []})
+    monkeypatch.setattr(recursive, "observe_controllers", lambda _plan, _rpc, **_kw: {"controller_values": {}})
+    monkeypatch.setattr(recursive, "_build_permission_index", lambda _a, _s, _e, _t: {"functions": []})
 
     recursive._materialize_contract_artifacts(
         "0x" + "22" * 20, "http://127.0.0.1:8545", workspace_prefix="t", chain="base"

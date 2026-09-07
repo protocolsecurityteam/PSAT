@@ -37,7 +37,7 @@ from db.models import (
     UpgradeEvent,
     WatchedProxy,
 )
-from schemas.control_tracking import MonitoredContractType
+from schemas.observations import MonitoredContractType
 from tests.conftest import requires_postgres
 from tests.support.anvil import (
     ACCOUNT0,
@@ -224,7 +224,7 @@ def _setup_monitored(
     # tests that flip needs_polling=True after setup exercise the same
     # poll dispatch the production path uses.
     plan_proxy_type = (contract.proxy_type or None) or ("custom" if contract_type == "proxy" else None)
-    tracking_plan: dict | None = None
+    observation_plan: dict | None = None
     if contract_type in ("regular", "pausable", "proxy"):
         tracked: list[dict] = [
             {
@@ -253,11 +253,11 @@ def _setup_monitored(
                     },
                 }
             )
-        tracking_plan = {"tracked_controllers": tracked}
+        observation_plan = {"tracked_controllers": tracked}
     polling_plan = build_polling_plan(
         contract_type=contract_type,
         proxy_type=plan_proxy_type,
-        tracking_plan=tracking_plan,
+        observation_plan=observation_plan,
         tracked_topics=None,
     )
     config = {

@@ -36,12 +36,20 @@ from db.models import (
     exactness_eligible_cursor_clause,
 )
 from db.queue import HEARTBEAT_EVENT_INDEXER, get_artifact, record_heartbeat
+from db.queue.typed import load_assessment_inputs
 from services.clients.etherscan import get_contract_creation_block
 from services.clients.rpc import require_rpc_url, rpc_request
+from services.monitoring.config import load_monitoring_config
+from services.monitoring.event_topics import WITNESS_TIER_HINT, WITNESS_TIER_SELF_DESCRIBING
 from services.resolution.caller_sources import CALLER_SOURCES as _CALLER_SOURCES
 from services.resolution.deferred_reconciler import reconcile_deferred_resolutions, reconcile_role_set_drift
 from services.resolution.repos.event_logs_rpc import FetchedEventLog, FetchWindowStat
-from services.resolution.role_store_standards import all_topic0s, detect_standards, resolve_probe_code
+from services.resolution.role_store_standards import (
+    all_topic0s,
+    detect_standards,
+    is_single_address_param_signature,
+    resolve_probe_code,
+)
 from utils.chains import (
     ChainInfo,
     UnknownChainError,
@@ -54,6 +62,8 @@ from utils.logging import bind_trace_context, configure_logging, log_timed_phase
 from utils.secrets import sanitize_string
 
 logger = logging.getLogger("workers.event_log_indexer")
+
+_HISTORICAL_WITNESS_TIERS = frozenset({WITNESS_TIER_SELF_DESCRIBING, WITNESS_TIER_HINT})
 
 # Process identity for every line this daemon emits. ``BaseWorker`` mints the
 # same shape per process and binds it; the indexer is not a BaseWorker, so its
@@ -94,10 +104,6 @@ DEFAULT_INSERT_BATCH = int(os.getenv("PSAT_EVENT_INDEXER_INSERT_BATCH", "1000"))
 # fully enrolled cost one indexed lookup each and do not consume this budget, so
 # the fleet drains from the front and then settles at zero work per pass.
 DEFAULT_TRACKED_TOPIC_ENROLL_LIMIT = int(os.getenv("PSAT_EVENT_INDEXER_TRACKED_TOPIC_LIMIT", "50"))
-# How many active monitored contracts a single pass will look at at all. Purely a
-# memory/latency bound on the scan; it is NOT a work budget, and it must stay
-# comfortably above the fleet size or the tail becomes unreachable again.
-DEFAULT_TRACKED_TOPIC_SCAN_LIMIT = int(os.getenv("PSAT_EVENT_INDEXER_TRACKED_TOPIC_SCAN_LIMIT", "5000"))
 # When a pass stops on its window budget there's more backfill pending, so the
 # backfill loop re-runs after this short pause instead of the full poll interval
 # — a cold fleet drains at throughput rather than idling 60s between every
@@ -145,16 +151,6 @@ def _is_solmate_cancall_descriptor(descriptor: dict[str, Any]) -> bool:
     )
 
 
-def _is_single_address_param_signature(signature: Any) -> bool:
-    """True for ``name(address)`` — exactly one parameter, of type ``address``.
-    The shape of a delegated role gate's callee (``onlyOperatingMultisig(address)``
-    and siblings), as opposed to Solmate's 3-arg canCall or a multi-arg canCall."""
-    if not isinstance(signature, str) or "(" not in signature or not signature.rstrip().endswith(")"):
-        return False
-    params = signature[signature.index("(") + 1 : signature.rindex(")")]
-    return [p.strip() for p in params.split(",") if p.strip()] == ["address"]
-
-
 def _is_delegated_role_gate_descriptor(descriptor: dict[str, Any]) -> bool:
     """A caller-keyed external bool check against a single-address-param callee on
     a delegated authority — ``roleRegistry.onlyX(msg.sender)`` — that is NOT the
@@ -165,7 +161,7 @@ def _is_delegated_role_gate_descriptor(descriptor: dict[str, Any]) -> bool:
         return False
     if _is_solmate_cancall_descriptor(descriptor):
         return False
-    if not _is_single_address_param_signature(descriptor.get("callee_signature")):
+    if not is_single_address_param_signature(descriptor.get("callee_signature")):
         return False
     keys = descriptor.get("key_sources") or []
     return any(isinstance(k, dict) and k.get("source") in _CALLER_SOURCES for k in keys)
@@ -940,9 +936,10 @@ def enroll_from_completed_jobs(session: Session, *, limit: int = 500) -> int:
     witness_cache: dict[tuple[int, str], tuple[int | None, str]] = {}
     role_store_topic_cache: dict[tuple[int, str], list[str]] = {}
     for job in jobs:
-        artifact = get_artifact(session, job.id, "predicate_trees")
-        if not isinstance(artifact, dict):
+        inputs = load_assessment_inputs(get_artifact, session, job.id)
+        if inputs is None:
             continue
+        _static_facts, artifact, _effects = inputs
         # Stamp each cursor with the job's own chain — the first-class
         # ``Job.chain_id`` (backfilled for all address-scoped rows in Phase 0).
         # For a not-yet-migrated NULL, derive from the job's own ``request["chain"]``
@@ -1023,9 +1020,7 @@ def enroll_from_completed_jobs(session: Session, *, limit: int = 500) -> int:
     return inserted
 
 
-def enroll_from_tracked_topics(
-    session: Session, *, limit: int = 500, scan_limit: int = DEFAULT_TRACKED_TOPIC_SCAN_LIMIT
-) -> int:
+def enroll_from_tracked_topics(session: Session, *, limit: int = 500) -> int:
     """Enrol durable cursors for the topics a monitoring tracking plan already
     names, which nothing enrolled before.
 
@@ -1038,33 +1033,74 @@ def enroll_from_tracked_topics(
     ``monitoring_config->tracked_topics`` already lists those topics per emitter,
     and it is analyzer-derived, so enrolling from it closes the gathering hole.
 
-    What this reads from ``tracked_topics`` is ``topic0`` and nothing else. It
-    does NOT read ``effect_tags.writes[]``: that list is a union over every
-    emitter of a signature, so reading it forward attributes a write to the wrong
-    event. Consequently these cursors carry no variable attribution at all, which
-    is what ``enrollment_basis = tracked_topics_asserted`` records and what the
+    Historical enrollment admits only topics whose ``witness_tier`` explicitly
+    supports a published or read-verified state fact. ``activity``, absent, and
+    unknown tiers remain eligible for forward monitoring, but do not earn a
+    deployment-to-head backfill in the resolution index.
+
+    Each pass also removes an existing cursor when its ONLY provenance is
+    ``tracked_topics_asserted`` and the current active plans no longer admit its
+    topic. Predicate-hint cursors are independent resolution evidence and are
+    never removed by this reconciliation.
+
+    Beyond that admission decision this reads only ``topic0``. It does NOT read
+    ``effect_tags.writes[]``: that list is a union over every emitter of a
+    signature, so reading it forward attributes a write to the wrong event.
+    Consequently these cursors carry no variable attribution at all, which is
+    what ``enrollment_basis = tracked_topics_asserted`` records and what the
     resolution-side gate keys on. Enrolment gathers evidence; it licenses nothing.
     """
     rows = session.execute(
         select(MonitoredContract.address, MonitoredContract.chain, MonitoredContract.monitoring_config)
         .where(MonitoredContract.is_active.is_(True))
         .order_by(MonitoredContract.id.asc())
-        .limit(scan_limit)
     ).all()
-    if len(rows) == scan_limit:
-        # The scan is truncated, so the tail of the fleet is unreachable this
-        # pass AND every later one — the drain counter would read zero while
-        # those addresses stay permanently unenrolled. Loud, because the
-        # shortfall is otherwise indistinguishable from a drained fleet.
-        logger.warning(
-            "tracked-topic enrolment scan hit its row limit; fleet tail unreachable",
-            extra={"scan_limit": scan_limit, "scanned": len(rows)},
+    surfaces: list[tuple[str, int, list[str]]] = []
+    admitted: set[tuple[int, str, str]] = set()
+    for address, chain, raw_config in rows:
+        if not _is_enrollable_event_address(address):
+            continue
+        try:
+            chain_id = chain_by_name(chain).chain_id
+        except (UnknownChainError, TypeError):
+            continue
+        if chain_id not in supported_chain_ids():
+            continue
+        config = load_monitoring_config(raw_config)
+        seen: set[str] = set()
+        wanted: list[str] = []
+        for spec in config.get("tracked_topics", []):
+            if spec.get("witness_tier") not in _HISTORICAL_WITNESS_TIERS:
+                continue
+            topic0 = spec["topic0"].lower()
+            if topic0 in seen:
+                continue
+            seen.add(topic0)
+            wanted.append(topic0)
+            admitted.add((chain_id, address.lower(), topic0))
+        surfaces.append((address, chain_id, wanted))
+
+    removed = 0
+    tracked_cursors = session.execute(
+        select(IndexedEventCursor).where(IndexedEventCursor.enrollment_basis == ENROLLMENT_BASIS_TRACKED_TOPICS)
+    ).scalars()
+    for cursor in tracked_cursors:
+        key = (cursor.chain_id, cursor.event_address.lower(), cursor.topic0.lower())
+        if key not in admitted:
+            session.delete(cursor)
+            removed += 1
+    if removed:
+        session.flush()
+        logger.info(
+            "removed historical cursors no longer supported by a resolution-capable tracked topic",
+            extra={"removed": removed},
         )
+
     inserted = 0
     worked = 0
     seed_cache: dict[tuple[int, str], int | None] = {}
     witness_cache: dict[tuple[int, str], tuple[int | None, str]] = {}
-    for address, chain, config in rows:
+    for address, chain_id, wanted in surfaces:
         # ``limit`` bounds the addresses that still NEED a cursor, not the rows
         # inspected. Bounding the rows would re-inspect the same head of the
         # ordering every pass and never reach the tail — the surface would look
@@ -1073,29 +1109,6 @@ def enroll_from_tracked_topics(
         # ordering nothing records.
         if worked >= limit:
             break
-        if not _is_enrollable_event_address(address):
-            continue
-        try:
-            # The row's OWN chain through the registry — never a map-wide default,
-            # so an address that lives on another chain is not guessed as mainnet.
-            chain_id = chain_by_name(chain).chain_id
-        except (UnknownChainError, TypeError):
-            continue
-        if chain_id not in supported_chain_ids():
-            continue
-        specs = (config or {}).get("tracked_topics") if isinstance(config, dict) else None
-        if not isinstance(specs, list):
-            continue
-        seen: set[str] = set()
-        wanted: list[str] = []
-        for spec in specs:
-            topic0 = spec.get("topic0") if isinstance(spec, dict) else None
-            if not isinstance(topic0, str) or not topic0.lower().startswith("0x") or len(topic0) != 66:
-                continue
-            if topic0.lower() in seen:
-                continue
-            seen.add(topic0.lower())
-            wanted.append(topic0)
         # An address whose every tracked topic already has a cursor is skipped
         # without spending the budget or a single RPC read, so successive passes
         # advance through the fleet instead of re-walking its head.

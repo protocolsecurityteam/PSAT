@@ -171,7 +171,7 @@ def get_all_artifacts(session: Session, job_id: Any) -> dict[str, Any]:
     **Fails closed.** If any row's body could not be read this raises rather
     than returning a short dict. A short dict is byte-identical to "this job
     produced fewer artifacts", so a bucket outage rendered as *"this analysis
-    has no effective_permissions"* — the substitution of an unanswered question
+    has no permission_index"* — the substitution of an unanswered question
     for a proven negative.
 
     That includes the keyless row — a row with no ``storage_key`` and no inline

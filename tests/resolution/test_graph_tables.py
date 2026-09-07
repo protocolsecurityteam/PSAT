@@ -2,7 +2,7 @@
 writer both the resolution stage and the policy-stage graph refresh share.
 
 What these tests pin (the N3 divergence): the policy refresh projects
-``role_principal`` edges (they need effective_permissions, absent at resolution
+``role_principal`` edges (they need permission_index, absent at resolution
 time), and rewriting only the artifact left them structurally unreachable in
 ``control_graph_edges`` while every row still asserted the walk's
 ``graph_max_depth``. The shared writer must (a) persist the refreshed graph's
@@ -36,7 +36,6 @@ def _node(address: str, resolved_type: str = "contract", **overrides) -> dict:
         "label": address,
         "contract_name": None,
         "depth": 0,
-        "analyzed": False,
         "analysis_state": None,
         "details": {"address": address},
         "artifacts": {},
@@ -65,7 +64,7 @@ def _resolution_graph() -> dict:
         "root_contract_address": ROOT,
         "max_depth": 6,
         "nodes": [
-            _node(ROOT, analyzed=True, analysis_state="analyzed"),
+            _node(ROOT, analysis_state="analyzed"),
             _node(SAFE, resolved_type="safe", node_type="principal", depth=1, analysis_state="not_analyzable"),
         ],
         "edges": [_edge(ROOT, SAFE, "controller_value")],

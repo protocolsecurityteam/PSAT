@@ -2,9 +2,7 @@
 contract address, return semantic capabilities per externally-callable
 function.
 
-It loads the persisted ``predicate_trees``
-artifact (written by the static stage's
-``build_predicate_artifacts`` + ``store_artifact``), wires the
+It loads predicate trees from the persisted Assessment, wires the
 Postgres-backed generic event-log repo into an
 ``EvaluationContext``, evaluates each function's PredicateTree
 through ``evaluate_tree_with_registry`` to a ``CapabilityExpr``,
@@ -33,7 +31,7 @@ Usage:
     # }
 
 Returns ``None`` when the contract has no completed analysis or no
-predicate-tree artifact yet. Callers degrade explicitly instead of
+predicate-tree evidence yet. Callers degrade explicitly instead of
 using the old static summary as an authority source.
 """
 
@@ -51,6 +49,7 @@ from sqlalchemy.orm import Session
 from db.deployment import deployment_scope, normalize_deployment
 from db.models import Contract, ControllerValue, Job, JobStatus
 from db.queue import get_artifact
+from db.queue.typed import load_assessment_inputs
 from services.clients.rpc import ChainContext, chain_context, eth_call_batch, rpc_request
 from utils.chains import require_chain
 from utils.logging import record_degraded, record_stage_metric
@@ -197,21 +196,19 @@ def find_analysis_job_for_address(
     session: Session,
     address: str,
     *,
-    required_artifact: str = "predicate_trees",
     chain: str | None = None,
     completed_only: bool = True,
 ) -> AnalysisJobLookup | None:
     """Find the job whose artifacts should be used for a runtime address.
 
-    Proxies are runtime addresses, but their semantic artifacts usually live
-    on the implementation child job. Prefer a direct artifact when present;
+    Proxies are runtime addresses, but their Assessment usually lives on the
+    implementation child job. Prefer a direct artifact when present;
     otherwise follow the proxy Contract row to the implementation job.
     """
     for runtime_job in _jobs_for_address(session, address, chain=chain, completed_only=completed_only):
         lookup = _analysis_lookup_for_runtime_job(
             session,
             runtime_job,
-            required_artifact=required_artifact,
             chain=chain,
             completed_only=completed_only,
         )
@@ -307,7 +304,6 @@ def resolve_contract_capabilities(
         lookup = find_analysis_job_for_address(
             session,
             addr,
-            required_artifact="predicate_trees",
             chain=chain,
             completed_only=True,
         )
@@ -317,12 +313,12 @@ def resolve_contract_capabilities(
         analysis_job = lookup.analysis_job
         runtime_addr = (runtime_job.address or addr).lower()
 
-    artifact = get_artifact(session, analysis_job.id, "predicate_trees")
+    inputs = load_assessment_inputs(get_artifact, session, analysis_job.id)
+    artifact = inputs[1] if inputs is not None else None
     if not isinstance(artifact, dict) or "trees" not in artifact:
         lookup = _analysis_lookup_for_runtime_job(
             session,
             runtime_job,
-            required_artifact="predicate_trees",
             chain=chain,
             completed_only=True,
         )
@@ -330,7 +326,8 @@ def resolve_contract_capabilities(
             return None
         runtime_job = lookup.runtime_job
         analysis_job = lookup.analysis_job
-        artifact = get_artifact(session, analysis_job.id, "predicate_trees")
+        inputs = load_assessment_inputs(get_artifact, session, analysis_job.id)
+        artifact = inputs[1] if inputs is not None else None
         if not isinstance(artifact, dict) or "trees" not in artifact:
             return None
 
@@ -526,8 +523,8 @@ def _selector_for_signature(
     if isinstance(canonical, str) and "(" in canonical and canonical.endswith(")"):
         return "0x" + keccak(text=canonical).hex()[:8]
 
-    from services.policy.effective_permissions import _abi_signature
-    from services.static.contract_analysis_pipeline.predicate_artifacts import is_canonical_abi_signature
+    from services.policy.permission_index import _abi_signature
+    from services.static.static_analysis.predicate_artifacts import is_canonical_abi_signature
 
     # Fallback: string normalization of full_name. Correct for contract/interface
     # params (→ ``address``); enum/struct params can't be recovered from the name
@@ -800,27 +797,19 @@ def _analysis_lookup_for_runtime_job(
     session: Session,
     runtime_job: Job,
     *,
-    required_artifact: str,
     chain: str | None,
     completed_only: bool,
 ) -> AnalysisJobLookup | None:
-    # A proxy's own predicate_trees artifact is present but *empty* — it has no
-    # logic of its own, so the analyzable functions live on the implementation
-    # child job. Treating that empty artifact as "present" (the old
-    # ``_job_has_artifact`` check) returns the proxy job and shadows the
-    # implementation's real trees, which strands cross-contract authority
-    # inlining with an empty tree set and drops the true controller (e.g. an
-    # upgrade gate delegating to RoleRegistry.onlyProtocolUpgrader never
-    # resolves its owner/timelock). Prefer whichever job carries a *substantive*
-    # artifact; only fall back to a present-but-empty one when neither does (a
-    # contract that genuinely has no gated functions).
-    runtime_artifact = get_artifact(session, runtime_job.id, required_artifact)
-    if _artifact_is_substantive(required_artifact, runtime_artifact):
+    # A proxy's Assessment can contain an empty predicate-tree input because its
+    # logic lives on the implementation child. Prefer whichever Assessment has
+    # substantive trees; fall back to an empty one only when neither does.
+    runtime_artifact = get_artifact(session, runtime_job.id, "assessment")
+    if _assessment_is_substantive(runtime_artifact):
         return AnalysisJobLookup(runtime_job=runtime_job, analysis_job=runtime_job)
 
     impl_job = _implementation_child_job(session, runtime_job, chain=chain, completed_only=completed_only)
-    impl_artifact = get_artifact(session, impl_job.id, required_artifact) if impl_job is not None else None
-    if impl_job is not None and _artifact_is_substantive(required_artifact, impl_artifact):
+    impl_artifact = get_artifact(session, impl_job.id, "assessment") if impl_job is not None else None
+    if impl_job is not None and _assessment_is_substantive(impl_artifact):
         return AnalysisJobLookup(runtime_job=runtime_job, analysis_job=impl_job)
 
     if isinstance(runtime_artifact, dict):
@@ -903,19 +892,22 @@ def _job_chain(job: Job) -> str | None:
     return chain if isinstance(chain, str) and chain else None
 
 
-def _artifact_is_substantive(artifact_name: str, artifact: Any) -> bool:
-    """Whether an artifact carries usable content — not merely that a row exists.
+def _assessment_is_substantive(artifact: Any) -> bool:
+    """Whether Assessment embeds at least one predicate or check tree."""
 
-    A proxy contract's ``predicate_trees`` artifact is present but empty (no
-    logic of its own), so ``predicate_trees`` counts as substantive only when it
-    carries at least one ``trees``/``check_trees`` entry. Other artifact kinds
-    count as substantive whenever the row is a dict.
-    """
     if not isinstance(artifact, dict):
         return False
-    if artifact_name == "predicate_trees":
-        return bool(artifact.get("trees") or artifact.get("check_trees"))
-    return True
+    evidence = artifact.get("evidence")
+    if not isinstance(evidence, dict):
+        return False
+    for item in evidence.values():
+        if not isinstance(item, dict) or item.get("producer") != "static.facts":
+            continue
+        observation = item.get("observation")
+        inputs = observation.get("predicate_trees") if isinstance(observation, dict) else None
+        if isinstance(inputs, dict):
+            return bool(inputs.get("trees") or inputs.get("check_trees"))
+    return False
 
 
 def _load_state_var_values(

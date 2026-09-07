@@ -11,6 +11,7 @@ import pytest
 import requests
 
 WETH_ADDRESS = "0xC02aaA39b223FE8D0A0e5c4F27eAD9083C756Cc2"
+VEDA_TELLER_ADDRESS = "0xe2acf9f80a2756e51d1e53f9f41583c84279fb1f"
 
 # These bound job *completion* (worker-side pipeline wall time), not the HTTP
 # calls that poll for it. The CI live runner is a shared-cpu-8x Fly machine:
@@ -532,6 +533,19 @@ def cached_weth(analyzed_weth, live_client: LiveClient) -> dict[str, Any]:
     job = live_client.submit_and_wait(WETH_ADDRESS)
     if job["status"] != "completed":
         pytest.fail(f"Cached WETH run did not complete on {live_client.base_url}: {job.get('error')}")
+    return job
+
+
+@pytest.fixture(scope="session")
+def analyzed_veda_teller(live_client: LiveClient) -> dict[str, Any]:
+    """Analyze the shared known-guarded Veda Teller once per live session."""
+
+    try:
+        job = live_client.submit_and_wait(VEDA_TELLER_ADDRESS)
+    except TimeoutError as exc:
+        pytest.skip(f"Veda Teller analysis did not finish in time on {live_client.base_url}: {exc}")
+    if job["status"] != "completed":
+        pytest.skip(f"Veda Teller analysis did not complete (status={job['status']})")
     return job
 
 

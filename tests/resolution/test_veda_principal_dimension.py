@@ -4,7 +4,7 @@ Drives the REAL resolver (``resolve_contract_capabilities``) against a snapshot 
 prod etherfi Veda stack — ``TellerWithMultiAssetSupport`` 0x99de9e5a, its ``BoringVault``
 0x917cee80, and their shared ``RolesAuthority`` 0x402dff43 (real predicate_trees + real
 role events in ``tests/fixtures/solmate/veda_teller_stack.json``). Seeds Job +
-predicate_trees artifacts + Contract/ControllerValue + IndexedEventLog/cursor (the
+Assessment predicate evidence + Contract/ControllerValue + IndexedEventLog/cursor (the
 production path: PostgresEventLogRepo → SolmateRolesAuthorityAdapter → cross-contract
 inline → capability algebra → CapabilitySurface), and asserts at the surface/status level
 so a symptom-patch revert at any layer is caught.
@@ -125,7 +125,7 @@ def _no_network(monkeypatch):
 
 def _seed_job_with_trees(session, *, address: str, trees: dict | None):
     from db.models import Job, JobStage, JobStatus
-    from db.queue import store_artifact
+    from tests.support.assessment_artifacts import store_test_assessment
 
     job = Job(
         address=address,
@@ -138,7 +138,7 @@ def _seed_job_with_trees(session, *, address: str, trees: dict | None):
     session.add(job)
     session.flush()
     if trees is not None:
-        store_artifact(session, job.id, "predicate_trees", data=trees)
+        store_test_assessment(session, job.id, address=address, predicate_trees=trees)
     session.commit()
     return job
 
@@ -276,7 +276,7 @@ def _resolve(
         _seed_role_events(session, authority=authority, events=fixture["role_events"] + list(extra_events or []))
 
     out = resolve_contract_capabilities(session, address=teller, chain_id=1, job_id=teller_job.id)
-    assert out is not None, "resolver returned None — predicate_trees artifact not found"
+    assert out is not None, "resolver returned None — Assessment predicate evidence not found"
     return out
 
 

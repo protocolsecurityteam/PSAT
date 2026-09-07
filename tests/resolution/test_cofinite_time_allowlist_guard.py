@@ -34,12 +34,12 @@ import pytest
 slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
 
-from services.policy.effective_permissions import _column_values_for_capability  # noqa: E402
+from services.policy.permission_index import _column_values_for_capability  # noqa: E402
 from services.resolution.capability_resolver import capability_to_dict  # noqa: E402
 from services.resolution.predicate_evaluator import evaluate_tree  # noqa: E402
-from services.static.contract_analysis_pipeline.predicates import build_predicate_tree  # noqa: E402
-from services.static.contract_analysis_pipeline.reentrancy_pause import apply_reentrancy_pause_pass  # noqa: E402
-from services.static.contract_analysis_pipeline.writer_gate import apply_writer_gate_pass  # noqa: E402
+from services.static.static_analysis.predicates import build_predicate_tree  # noqa: E402
+from services.static.static_analysis.reentrancy_pause import apply_reentrancy_pause_pass  # noqa: E402
+from services.static.static_analysis.writer_gate import apply_writer_gate_pass  # noqa: E402
 
 # Admin-written mappings (owner-gated setters) so the allowlist reads classify as
 # caller_authority rather than inert business reads.

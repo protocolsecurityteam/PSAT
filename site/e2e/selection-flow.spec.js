@@ -18,6 +18,35 @@ const POOL = "0x2222222222222222222222222222222222222222";
 const GOV_SAFE = "0x3333333333333333333333333333333333333333"; // primary owner of VAULT → group node
 const CO_SAFE = "0x4444444444444444444444444444444444444444"; // node-less co-controller of POOL
 
+const VAULT_FUNCTIONS = [
+  {
+    function: "pauseContract()",
+    selector: "0x11111111",
+    claims: [{ claim_id: "pause.set", tier: "standard_exact", witness: {} }],
+    direct_owner: {
+      address: GOV_SAFE,
+      resolved_type: "safe",
+      details: { threshold: 4, owners: ["0x0a", "0x0b", "0x0c", "0x0d", "0x0e", "0x0f", "0x10"] },
+    },
+    authority_roles: [],
+    controllers: [],
+  },
+];
+const POOL_FUNCTIONS = [
+  {
+    function: "setOracle()",
+    selector: "0x22222222",
+    claims: [{ claim_id: "authority.replace", tier: "standard_exact", witness: {} }],
+    direct_owner: {
+      address: CO_SAFE,
+      resolved_type: "safe",
+      details: { threshold: 2, owners: ["0x21", "0x22", "0x23"] },
+    },
+    authority_roles: [],
+    controllers: [],
+  },
+];
+
 const FIXTURE = {
   protocol_id: 1,
   contracts: [
@@ -30,20 +59,6 @@ const FIXTURE = {
       proxy_type: "ERC1967",
       upgrade_count: 2,
       job_id: "vault-job",
-      functions: [
-        {
-          function: "pauseContract()",
-          selector: "0x11111111",
-          effect_labels: ["pause_toggle"],
-          direct_owner: {
-            address: GOV_SAFE,
-            resolved_type: "safe",
-            details: { threshold: 4, owners: ["0x0a", "0x0b", "0x0c", "0x0d", "0x0e", "0x0f", "0x10"] },
-          },
-          authority_roles: [],
-          controllers: [],
-        },
-      ],
     },
     {
       address: POOL,
@@ -53,20 +68,6 @@ const FIXTURE = {
       is_proxy: false,
       upgrade_count: 0,
       job_id: "pool-job",
-      functions: [
-        {
-          function: "setOracle()",
-          selector: "0x22222222",
-          effect_labels: ["config"],
-          direct_owner: {
-            address: CO_SAFE,
-            resolved_type: "safe",
-            details: { threshold: 2, owners: ["0x21", "0x22", "0x23"] },
-          },
-          authority_roles: [],
-          controllers: [],
-        },
-      ],
     },
   ],
   principals: [
@@ -103,12 +104,25 @@ const FIXTURE = {
 
 /** The safe's controlled contract names — the entities that must NOT leak. */
 const CONTROLLED_NAMES = ["Vault", "LiquidityPool"];
+const FUNCTIONS_FIXTURE = {
+  functions: {
+    [`ethereum::${VAULT}`]: VAULT_FUNCTIONS,
+    [`ethereum::${POOL}`]: POOL_FUNCTIONS,
+  },
+};
 
 async function goToSurface(page, { admin = false } = {}) {
+  let functionsRequested = false;
   if (admin) {
     // The Agent tab gates on the presence of an admin key only.
     await page.addInitScript(() => window.localStorage.setItem("psat_admin_key", "e2e"));
   }
+  await page.route("**/api/company/seltest/functions", (route) =>
+    {
+      functionsRequested = true;
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(FUNCTIONS_FIXTURE) });
+    }
+  );
   await page.route("**/api/company/seltest", (route) =>
     route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(FIXTURE) })
   );
@@ -125,6 +139,7 @@ async function goToSurface(page, { admin = false } = {}) {
   await page.goto("/company/seltest/surface");
   await page.waitForSelector(".ps-surface", { timeout: 10000 });
   await page.waitForSelector(".react-flow__node", { timeout: 15000 });
+  expect(functionsRequested).toBe(true);
 }
 
 /** Pick a search mode pill in the top-left modes bar. The filter panel starts

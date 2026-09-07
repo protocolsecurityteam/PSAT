@@ -92,7 +92,7 @@ class Job(Base):
     # own source (a cache-hit job never fetches), and legacy rows stay NULL and so
     # never act as a reuse donor. State is still resolved per (chain, address).
     source_content_hash: Mapped[str | None] = mapped_column(String(66), nullable=True)
-    analysis_schema_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    static_facts_schema_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False

@@ -2,8 +2,7 @@
 
 Drives the real static pipeline (compile with Slither, run
 ``build_predicate_artifacts_with_pause_info`` -> ``build_effects`` ->
-``build_claims`` -> ``project_effect_labels``) over every corpus contract and
-compares the flattened ``(contract, address, function, selector, effect_labels,
+compares the flattened ``(contract, address, function, selector,
 claims)`` tuples against the checked-in golden. The whole corpus pins solc
 ``0.8.27`` (the version the offline CI ``test`` job installs), so a producer
 change that silently relabels a corpus function fails here in the default suite
@@ -40,7 +39,7 @@ def test_label_corpus_golden(tmp_path):
     expected = harness.load_golden()
     diff = harness.unified_diff(expected, actual, label="corpus")
     assert not diff, (
-        "effect-labels golden drift over the frozen corpus.\n"
+        "Assessment golden drift over the frozen corpus.\n"
         "If this change is intended, regenerate with "
         "tests/regenerate_label_golden.py and commit the reviewed golden diff.\n\n" + diff
     )

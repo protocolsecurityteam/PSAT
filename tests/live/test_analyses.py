@@ -31,13 +31,12 @@ def test_analysis_detail_roundtrip(analyzed_weth, live_client: LiveClient):
     assert isinstance(detail.get("available_artifacts"), list)
 
 
-def test_analysis_detail_inlines_contract_analysis(analyzed_weth, live_client: LiveClient):
-    # contract_analysis is unconditionally inlined (api.py:770-779).
+def test_analysis_detail_inlines_assessment(analyzed_weth, live_client: LiveClient):
     detail = live_client.analysis_detail(analyzed_weth["name"])
-    assert isinstance(detail.get("contract_analysis"), dict)
-    via_artifact = live_client.artifact(analyzed_weth["name"], "contract_analysis")
+    assert isinstance(detail.get("assessment"), dict)
+    via_artifact = live_client.artifact(analyzed_weth["name"], "assessment")
     assert isinstance(via_artifact, dict)
-    assert detail["contract_analysis"].get("subject", {}).get("name") == via_artifact.get("subject", {}).get("name")
+    assert detail["assessment"]["contract"]["name"] == via_artifact["contract"]["name"]
 
 
 def test_analysis_detail_contract_id_is_usable(analyzed_weth, live_client: LiveClient):

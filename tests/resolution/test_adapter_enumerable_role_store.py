@@ -57,10 +57,6 @@ _CALLEE_SELECTOR = "0x" + keccak(text=_CALLEE_SIG).hex()[:8]
 
 # The adapter itself does not branch on earned-public, but every behavior-bearing
 # test runs under both flag states; this makes that explicit.
-@pytest.fixture(params=["1", "0"], ids=["earned_on", "earned_off"])
-def both_flags(request, monkeypatch):
-    monkeypatch.setenv("PSAT_AUTHORITY_EARNED_PUBLIC", request.param)
-    return request.param
 
 
 # ---------------------------------------------------------------------------
@@ -336,7 +332,7 @@ def test_matches_proxy_hop_detection(session, monkeypatch):
 
 
 @requires_postgres
-def test_warm_fold_probe_returns_finite_set(session, monkeypatch, both_flags):
+def test_warm_fold_probe_returns_finite_set(session, monkeypatch):
     _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
     _seed_proxy_impl(session)
     _seed_cursor(session, _ROLE_SET)
@@ -353,7 +349,7 @@ def test_warm_fold_probe_returns_finite_set(session, monkeypatch, both_flags):
 
 
 @requires_postgres
-def test_pin_once_block_none_resolves_via_blocknumber(session, monkeypatch, both_flags):
+def test_pin_once_block_none_resolves_via_blocknumber(session, monkeypatch):
     # Unpinned pass (ctx.block None): the adapter reads ONE eth_blockNumber height
     # and uses it for the fold read + probe + trace, so the enumeration still lands.
     _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
@@ -371,7 +367,7 @@ def test_pin_once_block_none_resolves_via_blocknumber(session, monkeypatch, both
 
 
 @requires_postgres
-def test_pin_once_blocknumber_failure_settles_probe_unavailable(session, monkeypatch, both_flags):
+def test_pin_once_blocknumber_failure_settles_probe_unavailable(session, monkeypatch):
     # Unpinned pass AND the height read fails → probe_unavailable (fail-closed),
     # never a fold/probe/trace read at three different (or unpinned) heights.
     _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
@@ -388,7 +384,7 @@ def test_pin_once_blocknumber_failure_settles_probe_unavailable(session, monkeyp
 
 
 @requires_postgres
-def test_trace_carries_fold_frontier(session, monkeypatch, both_flags):
+def test_trace_carries_fold_frontier(session, monkeypatch):
     # The drift arm keys on fold_frontier == the folded cursor height.
     _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
     _seed_proxy_impl(session)
@@ -403,7 +399,7 @@ def test_trace_carries_fold_frontier(session, monkeypatch, both_flags):
 
 
 @requires_postgres
-def test_finite_set_projects_principal_type_controller(session, monkeypatch, both_flags):
+def test_finite_set_projects_principal_type_controller(session, monkeypatch):
     # Acceptance: the enumerated controllers render principal_type="controller"
     # THROUGH project_capability_surface, carrying the trace for auditability.
     _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
@@ -420,7 +416,7 @@ def test_finite_set_projects_principal_type_controller(session, monkeypatch, bot
 
 
 @requires_postgres
-def test_settled_decline_records_metric(session, monkeypatch, both_flags):
+def test_settled_decline_records_metric(session, monkeypatch):
     # Adapter-site decline counter: a settled probe_unavailable is observable at the
     # adapter (its persisted basis is superseded by the :1976 guard downstream).
     _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
@@ -445,7 +441,7 @@ def test_settled_decline_records_metric(session, monkeypatch, both_flags):
 
 
 @requires_postgres
-def test_probe_transport_failure_not_memoized_cross_capability(session, monkeypatch, both_flags):
+def test_probe_transport_failure_not_memoized_cross_capability(session, monkeypatch):
     # F3: a transport blip must NOT poison the shared pass memo — a second enumerate
     # for the same (authority, selector, block) re-probes and can succeed. (Pre-fix
     # the failure was cached and settled the whole family to probe_unavailable.)
@@ -490,7 +486,7 @@ def test_probe_transport_failure_not_memoized_cross_capability(session, monkeypa
 
 
 @requires_postgres
-def test_cold_index_defers_pending_index(session, monkeypatch, both_flags):
+def test_cold_index_defers_pending_index(session, monkeypatch):
     # Events present but NO warm cursor → cold. Defer for self-heal, never probe.
     _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
     _seed_proxy_impl(session)
@@ -504,7 +500,7 @@ def test_cold_index_defers_pending_index(session, monkeypatch, both_flags):
 
 
 @requires_postgres
-def test_warm_zero_events_settles_unconfirmed(session, monkeypatch, both_flags):
+def test_warm_zero_events_settles_unconfirmed(session, monkeypatch):
     # Warm cursor, but the store emitted no role events → cannot confirm it speaks
     # the standard we'd fold; settle to a probe (NOT an exact-empty false nobody).
     _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
@@ -519,7 +515,7 @@ def test_warm_zero_events_settles_unconfirmed(session, monkeypatch, both_flags):
 
 
 @requires_postgres
-def test_negative_control_passes_declines(session, monkeypatch, both_flags):
+def test_negative_control_passes_declines(session, monkeypatch):
     # A gate that passes a random control address is not an allowlist → decline.
     _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
     _seed_proxy_impl(session)
@@ -534,7 +530,7 @@ def test_negative_control_passes_declines(session, monkeypatch, both_flags):
 
 
 @requires_postgres
-def test_probe_transport_failure_is_indeterminate(session, monkeypatch, both_flags):
+def test_probe_transport_failure_is_indeterminate(session, monkeypatch):
     # A wire failure is NOT a membership failure: settle to probe_unavailable and
     # classify nobody (no finite_set, no exact-empty).
     _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
@@ -551,7 +547,7 @@ def test_probe_transport_failure_is_indeterminate(session, monkeypatch, both_fla
 
 
 @requires_postgres
-def test_probe_filters_non_members(session, monkeypatch, both_flags):
+def test_probe_filters_non_members(session, monkeypatch):
     # Two active holders in the events, but the gate only passes one — the probe is
     # the ground truth, so the non-passing candidate is dropped.
     _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
@@ -568,7 +564,7 @@ def test_probe_filters_non_members(session, monkeypatch, both_flags):
 
 
 @requires_postgres
-def test_oz_polarity_grant_then_revoke_not_member(session, monkeypatch, both_flags):
+def test_oz_polarity_grant_then_revoke_not_member(session, monkeypatch):
     # OZ AccessControlEnumerable fold: RoleGranted then RoleRevoked for the same
     # (holder, role) folds to not-a-member; a distinct still-granted holder stays.
     _stub_probe_code(monkeypatch, _code_with(*OZ_ACCESS_CONTROL_ENUMERABLE.marker_selectors))
@@ -588,7 +584,7 @@ def test_oz_polarity_grant_then_revoke_not_member(session, monkeypatch, both_fla
 
 
 @requires_postgres
-def test_all_revoked_provably_nobody_empty_exact(session, monkeypatch, both_flags):
+def test_all_revoked_provably_nobody_empty_exact(session, monkeypatch):
     # Warm, events present, but every holder revoked and the negative control
     # reverts → provably nobody: exact-empty finite_set (blocks OR'd public siblings).
     _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
@@ -606,7 +602,7 @@ def test_all_revoked_provably_nobody_empty_exact(session, monkeypatch, both_flag
 
 
 @requires_postgres
-def test_getter_crosscheck_mismatch_declines(session, monkeypatch, both_flags):
+def test_getter_crosscheck_mismatch_declines(session, monkeypatch):
     # With the getter cross-check on, a getter holder set that disagrees with the
     # event fold declines LOUD rather than emitting a contradicted set.
     monkeypatch.setenv("PSAT_ROLE_STORE_GETTER_CROSSCHECK", "1")
@@ -624,7 +620,7 @@ def test_getter_crosscheck_mismatch_declines(session, monkeypatch, both_flags):
 
 
 @requires_postgres
-def test_getter_crosscheck_match_returns_set(session, monkeypatch, both_flags):
+def test_getter_crosscheck_match_returns_set(session, monkeypatch):
     monkeypatch.setenv("PSAT_ROLE_STORE_GETTER_CROSSCHECK", "1")
     _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
     _seed_proxy_impl(session)
@@ -644,7 +640,7 @@ def test_getter_crosscheck_match_returns_set(session, monkeypatch, both_flags):
 
 
 @requires_postgres
-def test_dispatch_order_adapter_preempts_generic(session, monkeypatch, both_flags):
+def test_dispatch_order_adapter_preempts_generic(session, monkeypatch):
     _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
     _seed_proxy_impl(session)
     _seed_cursor(session, _ROLE_SET)
@@ -673,7 +669,7 @@ def test_dispatch_order_adapter_preempts_generic(session, monkeypatch, both_flag
 
 
 @requires_postgres
-def test_zero_survivors_over_nonempty_candidates_declines_not_exact_empty(session, monkeypatch, both_flags):
+def test_zero_survivors_over_nonempty_candidates_declines_not_exact_empty(session, monkeypatch):
     # A live holder exists (candidate universe non-empty) but the real gate
     # rejects every candidate: either the gate's one role is unheld or the gate
     # admits callers outside the role model (hybrid msg.sender== gate). The two
@@ -692,7 +688,7 @@ def test_zero_survivors_over_nonempty_candidates_declines_not_exact_empty(sessio
 
 
 @requires_postgres
-def test_registry_context_db_error_declines_not_empty_candidates(session, monkeypatch, both_flags):
+def test_registry_context_db_error_declines_not_empty_candidates(session, monkeypatch):
     # A DB error while reading the registry's own controllers must never
     # shrink the candidate universe into a (possibly empty) member set.
     _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
@@ -711,7 +707,7 @@ def test_registry_context_db_error_declines_not_empty_candidates(session, monkey
 
 
 @requires_postgres
-def test_registry_controller_context_is_chain_scoped(session, monkeypatch, both_flags):
+def test_registry_controller_context_is_chain_scoped(session, monkeypatch):
     # A same-address twin registry on another chain carries a controller value
     # that must NOT leak into this chain's candidate universe (cross-chain twin
     # aliasing inside the caller-set computation).

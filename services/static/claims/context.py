@@ -53,7 +53,7 @@ def _is_canonical_signature(signature: str) -> bool:
     type — i.e. hashing it yields the selector the chain would dispatch on. A
     residual user-defined name (``setAuthority(Authority)``) means the signature
     was never lowered, so its hash is not a real selector."""
-    from ..contract_analysis_pipeline.predicate_artifacts import is_canonical_abi_signature
+    from ..static_analysis.predicate_artifacts import is_canonical_abi_signature
 
     return is_canonical_abi_signature(signature)
 
@@ -61,7 +61,7 @@ def _is_canonical_signature(signature: str) -> bool:
 def _lowered_types(elements: Any) -> list[str] | None:
     """EVM-canonical ABI type strings for a sequence of Slither typed elements
     (event members / getter keys), or ``None`` when one cannot be lowered."""
-    from ..contract_analysis_pipeline.predicate_artifacts import _is_elementary_token, _lower_type_to_abi
+    from ..static_analysis.predicate_artifacts import _is_elementary_token, _lower_type_to_abi
 
     lowered: list[str] = []
     for element in elements:
@@ -218,13 +218,6 @@ class ClaimContext:
         for a witness)."""
         return [str(s.get("id")) for s in self.sinks(function) if s.get("kind") == kind and s.get("id")]
 
-    # -- labels / predicate trees --------------------------------------------
-
-    def effect_labels(self, function: str) -> list[str]:
-        record = self._functions.get(function) or {}
-        labels = record.get("effect_labels")
-        return list(labels) if isinstance(labels, list) else []
-
     def predicate_tree(self, function: str) -> Any | None:
         return self._trees.get(function)
 
@@ -258,7 +251,7 @@ class ClaimContext:
         return resolved
 
     def _lower_signature_from_slither(self, function: str) -> str | None:
-        from ..contract_analysis_pipeline.predicate_artifacts import _canonical_signature
+        from ..static_analysis.predicate_artifacts import _canonical_signature
 
         for fn in getattr(self.contract, "functions", None) or []:
             if (getattr(fn, "full_name", None) or getattr(fn, "name", None)) != function:

@@ -16,7 +16,7 @@ to reference a given authority is cold: the adapter fails closed to
 
 That is fail-safe (never a wrong/over-broad controller set — just
 "unknown"), but it is *sticky*: the cold result lands in
-``EffectiveFunction`` / ``FunctionPrincipal`` / the ``effective_permissions``
+``EffectiveFunction`` / ``FunctionPrincipal`` / the ``permission_index``
 artifact and onward into the control graph + Surface, and nothing
 recomputes it once the index catches up.
 

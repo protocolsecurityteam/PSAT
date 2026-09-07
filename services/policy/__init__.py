@@ -1,9 +1,9 @@
 """Policy package."""
 
-from .effective_permissions import build_effective_permissions
-from .principal_enrichment import build_principal_labels
+from .permission_index import build_permission_index
+from .principal_index import build_principal_index
 
 __all__ = [
-    "build_effective_permissions",
-    "build_principal_labels",
+    "build_permission_index",
+    "build_principal_index",
 ]

@@ -6,9 +6,9 @@ import logging
 import os
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
-from typing import cast
+from typing import Any, cast
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -19,11 +19,11 @@ from db.models import (
     ControllerValue,
     Job,
     JobStage,
-    derive_job_chain_id,
 )
-from db.nested_artifacts import store_bundle as store_nested_artifacts
 from db.queue import create_job, get_artifact, store_artifact
-from schemas.control_tracking import ControlSnapshot, ControlTrackingPlan
+from db.queue._chains import _job_chain_name, job_chain_id
+from db.queue.typed import ArtifactSchemaError, load_assessment, load_assessment_inputs
+from schemas.observations import ObservationBatch, ObservationPlan
 from services.clients.rpc import require_rpc_url
 from services.discovery.perimeter import queue_discovered_contracts
 from services.monitoring.asset_sweep import SweepOutcome
@@ -70,9 +70,9 @@ from services.resolution.role_holder_plane import (
     pin_probe_block,
     resolve_role_holder_planes,
 )
-from services.resolution.tracking import build_control_snapshot
+from services.resolution.tracking import observe_controllers
 from utils.balance_status import ASSET_SET_STATUS_FETCH_FAILED, BALANCE_WRITER_RESOLUTION
-from utils.chains import UnknownChainError, chain_by_id, chain_enabled
+from utils.chains import chain_by_id, chain_enabled
 from utils.logging import record_degraded, record_stage_metric
 from workers.base import BaseWorker
 
@@ -83,53 +83,28 @@ RECURSION_MAX_DEPTH = int(os.getenv("PSAT_RECURSION_MAX_DEPTH", "6"))
 
 def _rpc_url_for_job(job: Job) -> str:
     """eRPC URL for the job's own chain, resolved via the first-class
-    ``jobs.chain_id`` column (``_chain_id_for_job``), not the request JSONB —
+    ``jobs.chain_id`` column (``job_chain_id``), not the request JSONB —
     a chainless ``/api/analyze`` submission carries the mainnet edge default
     only in the column, so a request-only read fails loud on every such job."""
     request = job.request if isinstance(job.request, dict) else {}
     explicit = request.get("rpc_url")
     return require_rpc_url(
         explicit_rpc_url=explicit if isinstance(explicit, str) else None,
-        chain_id=_chain_id_for_job(job),
+        chain_id=job_chain_id(job),
         context=f"resolution rpc for job {job.id}",
     )
 
 
-def _chain_id_for_job(job: Job) -> int:
-    """The job's first-class ``chain_id`` (invariant 1). Prefers the populated
-    ``jobs.chain_id`` column and falls back to deriving it from
-    ``request["chain"]`` via the canonical registry; mainnet (1) is the last
-    resort for a chain-less row so behaviour is unchanged there."""
-    chain_id = getattr(job, "chain_id", None)
-    if isinstance(chain_id, int):
-        return chain_id
-    request = job.request if isinstance(job.request, dict) else {}
-    return derive_job_chain_id(request.get("chain"), job.address) or 1
-
-
-def _chain_name_for_job(job: Job) -> str:
-    """Canonical chain name for the job's first-class ``chain_id``.
-
-    Stamped onto spawned child/dependency-provider jobs so a discovered
-    contract inherits the parent's chain instead of cascading as ``None`` when
-    the request payload lacks a chain (a chainless ``/api/analyze`` submission).
-    Mainnet resolves to ``"ethereum"`` so mainnet spawns are unchanged."""
-    try:
-        return chain_by_id(_chain_id_for_job(job)).name
-    except UnknownChainError:
-        return "ethereum"
-
-
 def _build_root_artifacts(
-    contract_analysis: dict,
-    tracking_plan: dict,
-    snapshot: ControlSnapshot,
+    static_facts: Mapping[str, Any],
+    observation_plan: Mapping[str, Any],
+    snapshot: ObservationBatch,
     predicate_trees: dict | None = None,
 ) -> LoadedArtifacts:
     """Package the root job's in-memory artifacts for the recursive resolver."""
     return {
-        "analysis": contract_analysis,
-        "tracking_plan": tracking_plan,
+        "static_facts": static_facts,
+        "observation_plan": observation_plan,
         "snapshot": snapshot,
         "predicate_trees": predicate_trees,
     }
@@ -185,20 +160,20 @@ class ResolutionWorker(BaseWorker):
             job.name or "Contract",
         )
         rpc_url = _rpc_url_for_job(job)
-        chain_id = _chain_id_for_job(job)
+        chain_id = job_chain_id(job)
 
-        # Read control_tracking_plan from DB
-        tracking_plan = get_artifact(session, job.id, "control_tracking_plan")
-        if not isinstance(tracking_plan, dict):
-            raise RuntimeError("control_tracking_plan artifact not found")
+        try:
+            assessment = load_assessment(get_artifact, session, job.id)
+        except ArtifactSchemaError as exc:
+            raise RuntimeError(f"{exc.artifact_name} artifact failed validation") from exc
+        if assessment is None:
+            raise RuntimeError("assessment artifact not found")
 
-        # Read contract_analysis from DB (needed for recursive resolution)
-        contract_analysis = get_artifact(session, job.id, "contract_analysis")
-        if not isinstance(contract_analysis, dict):
-            raise RuntimeError("contract_analysis artifact not found")
-        predicate_trees = get_artifact(session, job.id, "predicate_trees")
-        if not isinstance(predicate_trees, dict):
-            predicate_trees = None
+        from services.assessment import contract_subject, observation_plan, static_inputs
+
+        _embedded_static_facts, predicate_trees, _embedded_effects = static_inputs(assessment)
+        observation_plan = observation_plan(assessment)
+        static_facts = contract_subject(assessment)
 
         # For impl jobs, read storage from the proxy address (where state lives)
         request = job.request if isinstance(job.request, dict) else {}
@@ -216,11 +191,11 @@ class ResolutionWorker(BaseWorker):
             # and revert when the proxy doesn't delegatecall to this impl
             # (beacon / per-instance patterns, e.g. EtherFiNode). Keep the impl
             # address as a getter fallback so those reverting reads recover.
-            getter_fallback_address = tracking_plan.get("contract_address")
-            tracking_plan = {**tracking_plan, "contract_address": proxy_address}
-            contract_analysis = {
-                **contract_analysis,
-                "subject": {**contract_analysis.get("subject", {}), "address": proxy_address},
+            getter_fallback_address = observation_plan.get("contract_address")
+            observation_plan = {**observation_plan, "contract_address": proxy_address}
+            static_facts = {
+                **static_facts,
+                "subject": {**static_facts["subject"], "address": proxy_address},
             }
             logger.info(
                 "Job %s: impl contract — reading state from proxy %s",
@@ -231,8 +206,8 @@ class ResolutionWorker(BaseWorker):
         # Build control snapshot via RPC calls
         self.update_detail(session, job, "Reading current controller state")
         t0 = time.monotonic()
-        snapshot = build_control_snapshot(
-            cast(ControlTrackingPlan, tracking_plan),
+        snapshot = observe_controllers(
+            cast(ObservationPlan, observation_plan),
             rpc_url,
             heartbeat=lambda: self._heartbeat(session, job),
             getter_fallback_address=getter_fallback_address,
@@ -241,12 +216,14 @@ class ResolutionWorker(BaseWorker):
         )
         logger.info(
             "resolution phase complete: control snapshot",
-            extra={"duration_ms": int((time.monotonic() - t0) * 1000), "phase": "control_snapshot"},
+            extra={"duration_ms": int((time.monotonic() - t0) * 1000), "phase": "observation_batch"},
         )
-        # Keep as artifact — policy stage reads it as JSON
-        store_artifact(session, job.id, "control_snapshot", data=snapshot)
+        from services.assessment import add_observations
+
+        assessment = add_observations(assessment, snapshot)
+        store_artifact(session, job.id, "assessment", data=assessment)
         # A reverting controller read is recorded as an ``eth_call_error`` NULL
-        # entry (see build_control_snapshot); counting those as resolved hid the
+        # entry (see observe_controllers); counting those as resolved hid the
         # etherfi NULL-controller incident. Split the count so the resolved metric
         # reflects only real values and the read errors chart on their own.
         _controller_values = snapshot.get("controller_values", {})
@@ -315,7 +292,7 @@ class ResolutionWorker(BaseWorker):
             session, job, contract_row, chain_id=chain_id, heartbeat=lambda: self._heartbeat(session, job)
         )
 
-        root_artifacts = _build_root_artifacts(contract_analysis, tracking_plan, snapshot, predicate_trees)
+        root_artifacts = _build_root_artifacts(static_facts, observation_plan, snapshot, predicate_trees)
 
         self.update_detail(session, job, "Resolving recursive control graph")
         t0 = time.monotonic()
@@ -324,7 +301,7 @@ class ResolutionWorker(BaseWorker):
         # on cascade workloads — see PSAT_BENCH_NOTES in
         # services/resolution/recursive.py).
         classify_cache: dict[str, tuple[str, dict[str, object]]] = {}
-        resolved_graph, nested_artifacts = resolve_control_graph(
+        resolved_graph, _ = resolve_control_graph(
             root_artifacts=root_artifacts,
             rpc_url=rpc_url,
             chain_id=chain_id,
@@ -344,11 +321,10 @@ class ResolutionWorker(BaseWorker):
         record_stage_metric("graph_nodes", graph_nodes)
         record_stage_metric("graph_edges", graph_edges)
         if resolved_graph:
-            # Persist each nested contract's artifacts so the policy stage can
-            # read them back by address (no local filesystem).
-            store_nested_artifacts(session, job.id, nested_artifacts)
-            # Keep as artifact — policy stage reads it as JSON
-            store_artifact(session, job.id, "resolved_control_graph", data=resolved_graph)
+            from services.assessment import add_resolution
+
+            assessment = add_resolution(assessment, resolved_graph, chain_id=chain_id)
+            store_artifact(session, job.id, "assessment", data=assessment)
             # Persist the classify cache so the policy stage skips re-running
             # the 6-10 RPC fan-out per address. dict[str, tuple] → JSON-friendly
             # dict[str, list] for storage.
@@ -379,7 +355,7 @@ class ResolutionWorker(BaseWorker):
                 )
                 session.commit()
 
-            # Queue analysis jobs for contracts discovered during resolution
+            # Queue static_facts jobs for contracts discovered during resolution
             self._queue_discovered_contracts(session, job, cast(dict, resolved_graph), rpc_url)
 
         # Emit JobDependency edges so the policy stage waits for any
@@ -575,9 +551,10 @@ class ResolutionWorker(BaseWorker):
         """
         if not deployment_address:
             return 0
-        effects = get_artifact(session, job.id, "effects")
-        if not isinstance(effects, dict):
+        inputs = load_assessment_inputs(get_artifact, session, job.id)
+        if inputs is None:
             return 0
+        _static_facts, _predicate_trees, effects = inputs
         receivers = collect_asset_receivers(effects)
         if not receivers:
             return 0
@@ -853,7 +830,7 @@ class ResolutionWorker(BaseWorker):
         )
 
     def _queue_discovered_contracts(self, session: Session, job: Job, resolved_graph: dict, rpc_url: str) -> None:
-        """Queue analysis jobs for contracts found during resolution that have no existing job.
+        """Queue static_facts jobs for contracts found during resolution that have no existing job.
 
         No budget: the walk's own ``max_depth`` already bounds this graph. The
         policy-stage refresh, which is recursive, passes one.
@@ -864,14 +841,14 @@ class ResolutionWorker(BaseWorker):
             resolved_graph,
             rpc_url,
             site="resolution",
-            chain_name=_chain_name_for_job(job),
+            chain_name=_job_chain_name(job),
         )
 
     def _emit_dependency_edges_from_predicate_trees(
         self,
         session: Session,
         job: Job,
-        snapshot: ControlSnapshot,
+        snapshot: ObservationBatch,
         rpc_url: str,
     ) -> None:
         """Insert ``JobDependency`` rows for every external contract A's
@@ -905,9 +882,10 @@ class ResolutionWorker(BaseWorker):
 
         from db.models import JobDependency
 
-        predicate_trees = get_artifact(session, job.id, "predicate_trees")
-        if not isinstance(predicate_trees, dict):
+        inputs = load_assessment_inputs(get_artifact, session, job.id)
+        if inputs is None:
             return
+        _static_facts, predicate_trees, _effects = inputs
         tree_maps = [
             tree_map
             for tree_map in (predicate_trees.get("trees"), predicate_trees.get("check_trees"))
@@ -953,7 +931,7 @@ class ResolutionWorker(BaseWorker):
         # Derive from the job's first-class chain so the edge's
         # provider_chain and any spawned provider job are chain-stamped even when
         # the request payload carries no chain.
-        chain = _chain_name_for_job(job)
+        chain = _job_chain_name(job)
         # Defense in depth: A's chain equals every provider B's chain, so
         # a gated parent implies gated providers — but a disabled chain must spawn
         # no provider jobs, so gate the whole emission here. In practice A is always
@@ -1015,7 +993,6 @@ class ResolutionWorker(BaseWorker):
             satisfied_lookup = find_analysis_job_for_address(
                 session,
                 target_addr,
-                required_artifact="effective_permissions",
                 chain=chain,
                 completed_only=False,
             )

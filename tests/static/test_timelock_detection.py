@@ -29,17 +29,17 @@ import pytest
 pytest.importorskip("slither")
 from slither import Slither
 
-from schemas.contract_analysis import (
+from schemas.static_facts import (
     RoleDefinition,
     SemanticControlAnalysis,
     TimelockAnalysis,
 )
-from services.static.claims import attach_claims_to_effects, build_claims, project_effect_labels
-from services.static.contract_analysis_pipeline.effects import build_effects
-from services.static.contract_analysis_pipeline.predicate_artifacts import (
+from services.static.claims import attach_claims_to_effects, build_claims
+from services.static.static_analysis.effects import build_effects
+from services.static.static_analysis.predicate_artifacts import (
     build_predicate_artifacts_with_pause_info,
 )
-from services.static.contract_analysis_pipeline.summaries import (
+from services.static.static_analysis.summaries import (
     _detect_timelock,
     _determine_control_model,
 )
@@ -149,7 +149,6 @@ def _timelock(tmp_path: Path, source: str, name: str = "C"):
     trees, _pause = build_predicate_artifacts_with_pause_info(contract)
     effects = build_effects(contract)
     attach_claims_to_effects(effects, build_claims(contract, effects, trees))
-    project_effect_labels(effects)
     return _detect_timelock(contract, tmp_path, _ROLES, effects)
 
 

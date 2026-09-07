@@ -144,7 +144,6 @@ def test_flow_in_pull_from_third_party():
                         "origin": "body",
                     }
                 ],
-                "effect_labels": [],
             }
         },
     }
@@ -299,7 +298,6 @@ def _fn_record(signature: str, selector: str, **extra: Any) -> dict[str, Any]:
         "sinks": [],
         "state_writes": [],
         "value_flows": [],
-        "effect_labels": [],
     }
     record.update(extra)
     return record

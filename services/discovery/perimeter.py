@@ -4,14 +4,14 @@ One walker, two call sites, deliberately the SAME code path:
 
 * the **resolution stage** spawns from the walk's first graph, and
 * the **policy stage** spawns from the refreshed graph it rebuilds once
-  ``effective_permissions`` exists — the refresh that projects
+  ``permission_index`` exists — the refresh that projects
   ``role_principal`` nodes into the graph.
 
 Until the second call site existed, every node FIRST discovered by the policy
 refresh was permanently outside the perimeter even though it satisfied every
 gate here. Measured on the PR-161 corpus: 32 addresses carry
 ``details->>'source' = 'semantic_capability:role_grant'`` with
-``node_type='contract'``, of which **19 had no job** — all 19 ``analyzed=true``,
+``node_type='contract'``, of which **19 had no job** — all 19 had completed analysis,
 so all 19 pass the gates below unmodified.
 
 **Every candidate that does not become a job is accounted for**, in one of three
@@ -552,7 +552,7 @@ def queue_discovered_contracts(
 
     *fp_materialized_addresses* — lowercase addresses this caller MINTED in this
     same job (``materialize_fp_principal_nodes``). Only these are exempt from the
-    ``analyzed`` gate. It is an explicit set, not a field on the node, because a
+    analysis-state gate. It is an explicit set, not a field on the node, because a
     field can be forged: ``details`` is free-form JSONB the walk copies verbatim
     from upstream principal payloads, so a provenance MARKER inside it is a
     now-fact about writers, whereas the caller's own set is a construction the
@@ -618,7 +618,7 @@ def queue_discovered_contracts(
             _out(addr, "root_node")
             continue
         # Only queue contracts that were analyzed during the walk — with one
-        # declared exception. ``analyzed`` is the walk's own gate and it is
+        # declared exception. ``analysis_state`` is the walk's own gate and it is
         # correct for walk-produced nodes: an unanalysed one was reached, and
         # not analysing it was a decision this stage already recorded.
         #
@@ -628,7 +628,7 @@ def queue_discovered_contracts(
         # principal ingresses (``authority_roles[].principals`` and
         # ``controllers[].principals``) never saw it — 73 addresses / 411 of
         # 1,200 FP rows on the PR-161 corpus, 72 of them with no ``contracts``
-        # row at all. Reading its ``analyzed=false`` as "this stage chose not to
+        # row at all. Reading its missing analysis state as "this stage chose not to
         # analyse it" would restate the very defect: unanalysed is its
         # DEFINITION, not a verdict, and it is exactly the population that needs
         # analysis. Admitting it changes no other gate — ``node_type``,
@@ -639,7 +639,7 @@ def queue_discovered_contracts(
         # Membership of the CALLER's minted set, never a field on the node: a
         # graph node's ``details`` is attacker-reachable through the walk's
         # verbatim copy of upstream principal payloads.
-        if not node.get("analyzed") and addr not in fp_minted:
+        if node.get("analysis_state") != "analyzed" and addr not in fp_minted:
             _out(addr, "not_analyzed")
             continue
         if node.get("node_type") != "contract":

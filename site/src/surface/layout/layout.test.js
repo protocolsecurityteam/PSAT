@@ -9,7 +9,7 @@ import {
   ETHERFI_COMPANY_RICH,
   RICH_ADDRESSES,
 } from "../../test/fixtures.js";
-import { buildMachines } from "./buildMachines.js";
+import { buildMachines, membershipKind } from "./buildMachines.js";
 import {
   buildIndirectCallerContext,
   collectDirectCallers,
@@ -31,6 +31,22 @@ const functionData = Object.fromEntries(
 );
 
 describe("buildMachines", () => {
+  it("keeps heuristic membership explicit on the machine", () => {
+    expect(membershipKind({
+      membership_state: "member",
+      membership_witnesses: [
+        { rule: "w4h_deployer_affinity", heuristic: true },
+      ],
+    })).toBe("heuristic");
+    expect(membershipKind({
+      membership_state: "member",
+      membership_witnesses: [
+        { rule: "w4h_deployer_affinity", heuristic: true },
+        { rule: "w3_control", heuristic: false },
+      ],
+    })).toBe("supported");
+  });
+
   it("groups each fixture function into a lane and skips role constants", () => {
     const machines = buildMachines(ETHERFI_COMPANY_RICH, functionData);
     expect(machines).toHaveLength(2);
@@ -50,6 +66,50 @@ describe("buildMachines", () => {
   it("sorts machines by totalFunctions desc", () => {
     const machines = buildMachines(ETHERFI_COMPANY_RICH, functionData);
     expect(machines[0].totalFunctions).toBeGreaterThanOrEqual(machines[1].totalFunctions);
+  });
+
+  it("distinguishes direct control from contracts reached through governance", async () => {
+    const machines = buildMachines(ETHERFI_COMPANY_RICH, functionData);
+    const addresses = machines.map((machine) => machine.address);
+    const principal = {
+      address: "0x" + "ab".repeat(20),
+      type: "safe",
+      primary_for: addresses,
+      controls: [addresses[0]],
+      controls_detail: [],
+    };
+    const { nodes } = await buildGraphLayout(machines, [], [principal]);
+    const group = nodes.find((node) => node.type === "group");
+
+    expect(group.data.directCount).toBe(1);
+    expect(group.data.viaGovernanceCount).toBe(addresses.length - 1);
+  });
+
+  it("does not turn missing or unknown claims into blank ops rows", () => {
+    const contract = { address: RICH_ADDRESSES.VAULT, name: "Vault", is_proxy: false };
+    const data = { contracts: [contract], principals: [], fund_flows: [] };
+    const functions = {
+      [entityKey("ethereum", contract.address)]: [
+        { function: "missing()", claims: [] },
+        { function: "unknown()", claims: [{ claim_id: "not.registered", tier: "policy_derived", witness: {} }] },
+      ],
+    };
+    expect(buildMachines(data, functions)).toEqual([]);
+  });
+
+  it("renders transfer-policy configuration as a control claim", () => {
+    const contract = { address: RICH_ADDRESSES.VAULT, name: "Vault", is_proxy: false };
+    const data = { contracts: [contract], principals: [], fund_flows: [] };
+    const functions = {
+      [entityKey("ethereum", contract.address)]: [
+        {
+          function: "setAllowed(address,bool)",
+          claims: [{ claim_id: "transfer_policy.configure", tier: "policy_derived", witness: {} }],
+        },
+      ],
+    };
+    const machine = buildMachines(data, functions)[0];
+    expect(machine.lanes.top[0].action).toBe("configures transfer policy");
   });
 });
 

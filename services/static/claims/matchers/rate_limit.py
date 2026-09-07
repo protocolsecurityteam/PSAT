@@ -44,7 +44,7 @@ from typing import Any
 
 from ..context import ClaimContext, abi_selector
 from ..decorator import claim_matcher
-from ..types import ClaimEvidence
+from ..types import MatchedEvidence
 from . import _facts
 
 # The bucket-limiter ABI, by published signature. ``consume`` reverts on
@@ -83,10 +83,9 @@ def _mandatory_callee_names(ctx: ClaimContext, function: str) -> set[str]:
 @claim_matcher(
     claim_id="rate_limit.consume",
     sentence="passes an amount through a bucket rate limiter",
-    legacy_projection=None,
     consumer_family="fact",
 )
-def rate_limit_consume(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
+def rate_limit_consume(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
     sinks = [
         sink
         for sink in _facts.body_sinks(ctx, function)
@@ -132,4 +131,4 @@ def rate_limit_consume(ctx: ClaimContext, function: str) -> ClaimEvidence | None
             "not_determined on either: no severity conclusion may be drawn."
         ),
     }
-    return ClaimEvidence(tier="idiom_structural", witness=witness)
+    return MatchedEvidence(tier="idiom_structural", witness=witness)

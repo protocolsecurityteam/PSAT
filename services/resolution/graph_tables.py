@@ -5,12 +5,12 @@ One writer, two call sites, deliberately the SAME code path:
 * the **resolution stage** (``workers/resolution_worker``) persists the walk's
   first graph, and
 * the **policy stage** (``workers/policy_worker``) persists the refreshed graph
-  it rebuilds once ``effective_permissions`` exists — the refresh that projects
+  it rebuilds once ``permission_index`` exists — the refresh that projects
   ``role_principal`` edges into the graph.
 
 Until the second call site existed, the policy refresh rewrote ONLY the
 artifact, so the table plane was a strict subset of the artifact plane: every
-``role_principal`` edge (they need effective_permissions, absent at resolution
+``role_principal`` edge (they need permission_index, absent at resolution
 time) lived in the artifact and in ``principal_labels`` but was structurally
 unreachable in ``control_graph_edges`` — while every row still carried the
 walk's ``graph_max_depth``, a completeness assertion the rows did not support.
@@ -75,7 +75,6 @@ def replace_control_graph_rows(
                 label=node.get("label"),
                 contract_name=node.get("contract_name"),
                 depth=node.get("depth"),
-                analyzed=node.get("analyzed", False),
                 # Absent in the graph => NULL, not a guessed value.
                 analysis_state=node.get("analysis_state"),
                 # The walk's horizon, which the row otherwise loses:

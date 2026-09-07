@@ -34,17 +34,13 @@ logger = logging.getLogger("db.queue")
 # ---------------------------------------------------------------------------
 
 # Artifact names that constitute cached static data (immutable, never change).
-# slither_results / analysis_report were removed when vulnerability-detector
+# slither_results / static_facts_report were removed when vulnerability-detector
 # triage was split out of PSAT's pipeline; downstream stages don't depend on
 # them, and the only writer (StaticWorker._run_slither_phase) is gone.
-# predicate_trees / effects are emitted by semantic static analysis and are
-# required by resolution and policy, so cache hits must carry them forward.
+# Assessment embeds the semantic static inputs; no parallel analytical
+# artifacts are copied.
 _STATIC_ARTIFACT_NAMES = frozenset(
     {
-        "contract_analysis",
-        "control_tracking_plan",
-        "predicate_trees",
-        "effects",
         "static_dependencies",
         "enrichment_cache",
     }
@@ -62,6 +58,57 @@ _SEED_ARTIFACT_NAMES = frozenset(
 # Contract columns that are mutable (resolved live by _resolve_proxy) and
 # must NOT be carried over from a cached job.
 _MUTABLE_CONTRACT_FIELDS = frozenset({"is_proxy", "proxy_type", "implementation", "beacon", "admin"})
+
+
+def _store_assessment_from_source(
+    session: Session,
+    *,
+    source_job_id: Any,
+    job: Job,
+    contract: Contract,
+    address: str,
+    source_hash_fallback: str | None = None,
+) -> None:
+    """Rebuild a target Assessment from a donor's embedded static inputs."""
+
+    from db.queue.typed import load_assessment
+    from services.assessment import static_inputs
+
+    source_assessment = load_assessment(get_artifact, session, source_job_id)
+    if source_assessment is None:
+        return
+    copied_analysis, copied_trees, copied_effects = static_inputs(source_assessment)
+    subject = copied_analysis.get("subject")
+    if isinstance(subject, dict):
+        copied_analysis = {
+            **copied_analysis,
+            "subject": {**subject, "address": address.lower()},
+        }
+
+    request = job.request if isinstance(job.request, dict) else {}
+    chain_id = job.chain_id or derive_job_chain_id(request.get("chain"), job.address)
+    if chain_id is None:
+        return
+
+    from services.assessment import build_static_assessment
+
+    subject = copied_analysis.get("subject")
+    subject_name = subject.get("name") if isinstance(subject, dict) else None
+    assessment = build_static_assessment(
+        chain_id=chain_id,
+        address=address.lower(),
+        contract_name=(
+            subject_name
+            if isinstance(subject_name, str) and subject_name
+            else contract.contract_name or job.name or "Contract"
+        ),
+        code_hash=None,
+        source_hash=job.source_content_hash or source_hash_fallback,
+        static_facts=copied_analysis,
+        effects=copied_effects,
+        predicate_trees=copied_trees,
+    )
+    store_artifact(session, job.id, "assessment", data=assessment)
 
 
 def copy_row(session: Session, source: Base, *, exclude: frozenset[str] = frozenset(), **overrides: Any) -> Base:
@@ -103,10 +150,10 @@ def copy_row(session: Session, source: Base, *, exclude: frozenset[str] = frozen
     return new_row
 
 
-def proven_analysis_schema_version(session: Session, job: Job) -> int | None:
+def proven_static_facts_schema_version(session: Session, job: Job) -> int | None:
     """The analyzer era *job*'s static artifacts were produced under, or None.
 
-    ``jobs.analysis_schema_version`` is stamped only on the fetch path
+    ``jobs.static_facts_schema_version`` is stamped only on the fetch path
     (``workers/discovery``): a same-address cache hit copies the donor's
     artifacts and returns before the stamp, so the column reads NULL on 32 of
     the working DB's 86 completed cache-hit jobs. NULL is not "current" — it is
@@ -126,7 +173,7 @@ def proven_analysis_schema_version(session: Session, job: Job) -> int | None:
     rests on the visited set instead: each hop moves to a distinct job id, so a
     finite table is exhausted in finite steps whatever the links look like.
     """
-    version = getattr(job, "analysis_schema_version", None)
+    version = getattr(job, "static_facts_schema_version", None)
     if isinstance(version, int):
         return version
 
@@ -161,7 +208,7 @@ def proven_analysis_schema_version(session: Session, job: Job) -> int | None:
             return None
         if current is None:
             return None
-        version = getattr(current, "analysis_schema_version", None)
+        version = getattr(current, "static_facts_schema_version", None)
         if isinstance(version, int):
             return version
 
@@ -177,7 +224,7 @@ def find_completed_static_cache(
     Returns the cached :class:`Job` if one exists with:
     - status = completed, stage = done
     - at least one ``source_files`` row
-    - the ``contract_analysis`` artifact (key indicator that the static stage finished)
+    - the ``assessment`` artifact (key indicator that the static stage finished)
     - a ``contracts`` row for this address/chain with a ``contract_summaries`` row
 
     The contract lookup uses (address, chain) rather than ``job_id`` so that
@@ -236,14 +283,25 @@ def find_completed_static_cache(
         if not contract_row:
             continue
 
+        # The exact-address path must obey the same analyzer-era gate as the
+        # source-hash fallback. An Assessment row merely proves some analysis
+        # existed; it does not prove the stored wire can be read by this code.
+        # Cache-hit jobs may carry NULL locally, so follow their donor chain to
+        # the witnessed era rather than checking only the immediate column.
+        if not contract_row.is_proxy:
+            from db.contract_materializations import STATIC_FACTS_SCHEMA_VERSION
+
+            if proven_static_facts_schema_version(session, candidate) != STATIC_FACTS_SCHEMA_VERSION:
+                continue
+
         # Static-stage-finished check. For non-proxy contracts the canonical
-        # indicator is ``contract_analysis`` (slither output + summary).
-        # Proxies never produce ``contract_analysis`` on their own job —
+        # indicator is ``assessment`` (canonical static result).
+        # Proxies never produce ``assessment`` on their own job —
         # it lives on the impl child — so require ``contract_flags`` instead,
         # which proxies do write (is_proxy + proxy_type). Without this
         # branch, re-discovered proxies would miss the cache and do a full
         # fresh Etherscan fetch + slither run every time.
-        required_artifact = "contract_flags" if contract_row.is_proxy else "contract_analysis"
+        required_artifact = "contract_flags" if contract_row.is_proxy else "assessment"
         has_required = session.execute(
             select(Artifact).where(Artifact.job_id == candidate.id, Artifact.name == required_artifact).limit(1)
         ).scalar_one_or_none()
@@ -270,14 +328,14 @@ def find_completed_static_cache(
 def _find_static_cache_by_source_hash(session: Session, source_content_hash: str) -> Job | None:
     """Most-recent completed job whose verified source hashes to *source_content_hash*
     under the current analyzer schema version, with a real analyzed root (a
-    ``contract_analysis`` artifact + a summaried contract).
+    ``assessment`` artifact + a summarized contract).
 
     Version-gated so a bumped analyzer misses stale donors (``jobs`` rows carry
     the schema version they were analyzed under). Proxies are never donors — they
-    carry ``contract_flags`` rather than ``contract_analysis`` and are analyzed
+    carry ``contract_flags`` rather than ``assessment`` and are analyzed
     per chain.
     """
-    from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
+    from db.contract_materializations import STATIC_FACTS_SCHEMA_VERSION
 
     candidates = (
         session.execute(
@@ -286,7 +344,7 @@ def _find_static_cache_by_source_hash(session: Session, source_content_hash: str
                 Job.status == JobStatus.completed,
                 Job.stage == JobStage.done,
                 Job.source_content_hash == source_content_hash,
-                Job.analysis_schema_version == ANALYSIS_SCHEMA_VERSION,
+                Job.static_facts_schema_version == STATIC_FACTS_SCHEMA_VERSION,
             )
             .order_by(Job.updated_at.desc())
         )
@@ -302,7 +360,7 @@ def _find_static_cache_by_source_hash(session: Session, source_content_hash: str
         if not has_src:
             continue
         # A summaried contract at the donor's own (address, chain) proves the
-        # static tables landed; contract_analysis proves the analysis (not a
+        # static tables landed; assessment proves the analysis (not a
         # proxy stub). Chain-qualified: a CREATE2 same-address deployment on
         # another chain can carry different source, so the donor job must pair
         # with its own chain's row.
@@ -319,7 +377,7 @@ def _find_static_cache_by_source_hash(session: Session, source_content_hash: str
         if not donor_contract:
             continue
         has_analysis = session.execute(
-            select(Artifact).where(Artifact.job_id == candidate.id, Artifact.name == "contract_analysis").limit(1)
+            select(Artifact).where(Artifact.job_id == candidate.id, Artifact.name == "assessment").limit(1)
         ).scalar_one_or_none()
         if not has_analysis:
             continue
@@ -409,9 +467,8 @@ def copy_static_cache(session: Session, source_job_id: Any, target_job_id: Any) 
     - ``source_files`` rows
     - ``contract_summaries`` and ``role_definitions``
       rows (linked to the new contract row)
-    - Static artifacts (``contract_analysis``, ``control_tracking_plan``,
-      ``predicate_trees``, ``effects``, ``static_dependencies``,
-      ``enrichment_cache``)
+    - Assessment rebuilt from the donor's embedded static inputs
+    - Non-analytical cache helpers (``static_dependencies``, ``enrichment_cache``)
 
     The source contract is looked up by (address, chain) rather than by
     ``job_id`` so that subsequent cache copies still work after a prior copy
@@ -523,19 +580,19 @@ def copy_static_cache(session: Session, source_job_id: Any, target_job_id: Any) 
         else:
             store_artifact(session, target_job_id, art.name, data=art.data, text_data=art.text_data)
 
+    target_job = session.get(Job, target_job_id)
+    if target_job is not None:
+        _store_assessment_from_source(
+            session,
+            source_job_id=source_job_id,
+            job=target_job,
+            contract=new_contract,
+            address=target_job.address or src_contract.address,
+            source_hash_fallback=src_job.source_content_hash,
+        )
+
     session.commit()
     return new_contract.id
-
-
-# Code-plane artifacts safe to reuse across a same-source deployment. Unlike the
-# same-chain ``copy_static_cache`` set, this EXCLUDES ``static_dependencies`` and
-# ``enrichment_cache`` (dependency addresses / Etherscan enrichment differ per
-# chain and are re-derived by the static/discovery stage) and every
-# ``_SEED_ARTIFACT_NAMES`` member (dynamic_dependencies / classifications /
-# upgrade_history are on-chain-derived and MERGED on re-run — cross-chain merge
-# would be wrong). ``contract_analysis`` / ``control_tracking_plan`` carry the one
-# deployment-specific field (the contract address), which is re-stamped on copy.
-_CROSS_CHAIN_STATIC_ARTIFACTS = frozenset({"contract_analysis", "control_tracking_plan", "predicate_trees", "effects"})
 
 
 def copy_static_cache_cross_chain(
@@ -550,11 +607,10 @@ def copy_static_cache_cross_chain(
     Unlike :func:`copy_static_cache` (which reassigns the donor's Contract row —
     correct only same-chain), this leaves the donor untouched and copies onto the
     target's OWN Contract row (already created per-chain by discovery, with the
-    right address/chain/deployer/proxy state). It copies only source-derived
-    artifacts, re-stamping the contract address in ``contract_analysis`` /
-    ``control_tracking_plan`` so resolution reads the target deployment's state,
-    and it copies the summary + role definitions (the static worker skips
-    ``_write_analysis_tables`` on a cache hit). The STATE plane (proxy impl,
+    right address/chain/deployer/proxy state). It rebuilds Assessment from the
+    donor's embedded source inputs under the target chain/address, and copies
+    the summary + role definitions (the static worker skips
+    ``_write_static_fact_indexes`` on a cache hit). The STATE plane (proxy impl,
     controllers, balances, events, monitoring) is untouched and resolved per
     ``(chain, address)`` downstream.
 
@@ -614,16 +670,17 @@ def copy_static_cache_cross_chain(
         for rd in donor_roles:
             copy_row(session, rd, contract_id=target_contract.id)
 
-    # --- code-plane artifacts (re-stamp the deployment address) ---
-    for name in _CROSS_CHAIN_STATIC_ARTIFACTS:
-        payload = get_artifact(session, source_job_id, name)
-        if payload is None:
-            continue
-        if name == "contract_analysis" and isinstance(payload, dict) and isinstance(payload.get("subject"), dict):
-            payload = {**payload, "subject": {**payload["subject"], "address": target_addr_norm}}
-        elif name == "control_tracking_plan" and isinstance(payload, dict):
-            payload = {**payload, "contract_address": target_addr_norm}
-        store_artifact(session, target_job_id, name, data=payload)
+    # Assessment contains chain-qualified identity, so rebuild rather than copy.
+    target_job = session.get(Job, target_job_id)
+    if target_job is not None:
+        _store_assessment_from_source(
+            session,
+            source_job_id=source_job_id,
+            job=target_job,
+            contract=target_contract,
+            address=target_addr_norm,
+            source_hash_fallback=src_job.source_content_hash,
+        )
 
     session.commit()
     return target_contract.id

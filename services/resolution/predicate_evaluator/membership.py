@@ -6,7 +6,7 @@ import logging
 from typing import TYPE_CHECKING, Any, cast
 
 from services.resolution.caller_sources import CALLER_SOURCES as _CALLER_SOURCES
-from services.static.contract_analysis_pipeline.predicate_types import (
+from services.static.static_analysis.predicate_types import (
     SetDescriptor,
 )
 

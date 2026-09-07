@@ -27,11 +27,13 @@ router = APIRouter()
 # Artifact names the consumer frontend fetches via ``/artifact/``. Any other
 # name is operator/internal and gated behind a valid admin key. Compared
 # against the requested name after extension-stripping and lower-casing.
-_CONSUMER_SAFE_ARTIFACTS = frozenset({"upgrade_history", "dependencies", "dependency_graph_viz", "policy_state"})
+_CONSUMER_SAFE_ARTIFACTS = frozenset(
+    {"assessment", "upgrade_history", "dependencies", "dependency_graph_viz", "policy_state"}
+)
 
 # Internal/operator artifacts excluded from the public ``/api/analyses``
 # listing so their existence isn't enumerable to anonymous callers.
-_INTERNAL_ARTIFACT_NAMES = frozenset({"stage_errors", "stage_timings", "predicate_trees", "control_tracking_plan"})
+_INTERNAL_ARTIFACT_NAMES = frozenset({"stage_errors", "stage_timings", "predicate_trees", "static_facts"})
 
 
 def _is_internal_artifact_name(name: str) -> bool:
@@ -154,7 +156,7 @@ def analyses(response: Response) -> list[AnalysisListEntry]:
                     contracts_by_key.setdefault((_coalesce_chain(c.chain), addr_lower), c)
 
         job_ids = [job.id for job in jobs]
-        # Earlier code fetched every job's ``contract_analysis`` artifact body
+        # Earlier code fetched every job's ``static_facts`` artifact body
         # from object storage just to read ``subject.name`` and ``summary``.
         # Both were redundant: ``contract_name`` is on the prefetched
         # ``Contract`` row and ``summary`` is never consumed by the frontend

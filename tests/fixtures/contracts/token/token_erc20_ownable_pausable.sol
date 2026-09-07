@@ -30,10 +30,10 @@ contract Token is IERC20 {
 
     function totalSupply() external pure returns (uint256) { return 0; }
     function balanceOf(address) external pure returns (uint256) { return 0; }
-    function transfer(address, uint256) external view whenNotPaused returns (bool) { return true; }
+    function transfer(address, uint256) external whenNotPaused returns (bool) { return true; }
     function allowance(address, address) external pure returns (uint256) { return 0; }
-    function approve(address, uint256) external view whenNotPaused returns (bool) { return true; }
-    function transferFrom(address, address, uint256) external view whenNotPaused returns (bool) { return true; }
+    function approve(address, uint256) external whenNotPaused returns (bool) { return true; }
+    function transferFrom(address, address, uint256) external whenNotPaused returns (bool) { return true; }
     function pause() external onlyOwner { paused = true; }
     function unpause() external onlyOwner { paused = false; }
     function mint(address, uint256) external onlyOwner {}

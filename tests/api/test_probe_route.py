@@ -1,7 +1,7 @@
 """End-to-end tests for ``POST /api/contract/{address}/probe/membership``.
 
 Exercises the full route: address → most-recent completed Job →
-predicate_trees artifact → probe_membership. Uses the
+Assessment predicate evidence → probe_membership. Uses the
 ``api_client`` + ``db_session`` fixtures from conftest, which point
 the FastAPI app at the test database.
 
@@ -39,7 +39,7 @@ def _seed_completed_job_with_artifact(
     updated_at: datetime | None = None,
 ):
     from db.models import Job, JobStage, JobStatus
-    from db.queue import store_artifact
+    from tests.support.assessment_artifacts import store_test_assessment
 
     ts = updated_at or datetime.now(timezone.utc)
     job = Job(
@@ -54,7 +54,13 @@ def _seed_completed_job_with_artifact(
     db_session.add(job)
     db_session.flush()
     if predicate_trees is not None:
-        store_artifact(db_session, job.id, "predicate_trees", data=predicate_trees)
+        store_test_assessment(
+            db_session,
+            job.id,
+            address=address,
+            predicate_trees=predicate_trees,
+            chain_id=chain_id or 1,
+        )
     db_session.commit()
     return job
 
@@ -241,7 +247,7 @@ def test_probe_membership_no_completed_job_returns_404(api_client, db_session):
 
 @requires_postgres
 def test_probe_membership_no_artifact_returns_404(api_client, db_session):
-    """A completed job without a predicate_trees artifact returns 404."""
+    """A completed job without an Assessment returns 404."""
     import api as api_module
 
     _no_auth(api_module)
@@ -257,7 +263,7 @@ def test_probe_membership_no_artifact_returns_404(api_client, db_session):
         },
     )
     assert resp.status_code == 404
-    assert "predicate_trees artifact missing" in resp.json()["detail"]
+    assert "Assessment missing" in resp.json()["detail"]
 
 
 @requires_postgres
@@ -795,7 +801,7 @@ def test_probe_membership_picks_most_recent_completed_job(api_client, db_session
     one."""
     import api as api_module
     from db.models import Job, JobStage, JobStatus
-    from db.queue import store_artifact
+    from tests.support.assessment_artifacts import store_test_assessment
 
     _no_auth(api_module)
     address = "0x" + "2f" * 20
@@ -839,8 +845,8 @@ def test_probe_membership_picks_most_recent_completed_job(api_client, db_session
             },
         }
 
-    store_artifact(db_session, older.id, "predicate_trees", data=_tree("OLD"))
-    store_artifact(db_session, newer.id, "predicate_trees", data=_tree("NEW"))
+    store_test_assessment(db_session, older.id, address=address, predicate_trees=_tree("OLD"))
+    store_test_assessment(db_session, newer.id, address=address, predicate_trees=_tree("NEW"))
     db_session.commit()
 
     resp = api_client.post(

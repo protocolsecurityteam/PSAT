@@ -19,17 +19,16 @@ from __future__ import annotations
 
 from ..context import ClaimContext
 from ..decorator import claim_matcher
-from ..types import ClaimEvidence
+from ..types import MatchedEvidence
 from . import _facts
 
 
 @claim_matcher(
     claim_id="callee_pointer.rotate",
     sentence="changes a code pointer that another entry point of this contract invokes at runtime",
-    legacy_projection="hook_update",
     consumer_family="control_plane",
 )
-def callee_pointer_rotate(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
+def callee_pointer_rotate(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
     tree = ctx.predicate_tree(function)
     if tree is not None and _facts.tree_is_one_shot(tree):
         # An initializer setting a pointer for the first time is setup, not a
@@ -49,7 +48,7 @@ def callee_pointer_rotate(ctx: ClaimContext, function: str) -> ClaimEvidence | N
             links.append({"pointer": getattr(pointer, "name", ""), "invoked_by": sibling})
     if not links:
         return None
-    return ClaimEvidence(
+    return MatchedEvidence(
         tier="idiom_structural",
         witness={"kind": "use_link", "links": sorted(links, key=lambda link: link["pointer"])},
     )

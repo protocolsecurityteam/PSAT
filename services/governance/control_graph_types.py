@@ -70,7 +70,7 @@ from db.models import (
     FunctionPrincipal,
 )
 from db.queue import _mainnet_coalesced_chain
-from schemas.control_tracking import ResolvedControllerType, coerce_resolved_controller_type
+from schemas.observations import ResolvedControllerType, coerce_resolved_controller_type
 from services.aggregations.company_overview.entity_keys import _coalesce_chain
 from services.discovery.perimeter import (
     CONTROL_GRAPH_BASIS_KEY,
@@ -122,7 +122,7 @@ def _coherent_analysis_state(node: Any) -> str | None:
     folding in ``safe`` without revisiting the state leaves a row that types an
     address as a Safe while claiming its analyzability was never determined.
 
-    ``graph_max_depth`` NULL (legacy rows) suppresses the depth comparison by
+    ``graph_max_depth`` NULL suppresses the depth comparison by
     using an unreachable horizon: without the walk's recorded horizon we cannot
     honestly claim ``beyond_depth_horizon``, and the fallthrough for analyzable
     types is ``None`` — which leaves the column NULL, not a guess.
@@ -133,7 +133,7 @@ def _coherent_analysis_state(node: Any) -> str | None:
 
     max_depth = node.graph_max_depth if isinstance(node.graph_max_depth, int) else (node.depth or 0) + 1
     walk_node = {
-        "analyzed": bool(node.analyzed),
+        "analysis_state": node.analysis_state,
         "details": node.details if isinstance(node.details, dict) else {},
         "resolved_type": node.resolved_type,
         "depth": node.depth or 0,
@@ -362,8 +362,8 @@ def materialize_fp_principal_nodes(
 
     **What a minted node asserts, and only this:** the FP row proves this
     address is a resolved principal of a gated function on the anchor contract.
-    Everything else stays not-determined — ``analyzed`` is False and
-    ``analysis_state`` is NULL (never stamped; stamping ``analyzed`` would make
+    Everything else stays not-determined — ``analysis_state`` is NULL
+    (never stamped; stamping ``analyzed`` would make
     the perimeter spawn on a node no walk ever produced), ``graph_max_depth`` is
     NULL because no walk horizon covered this node, ``contract_name`` is NULL,
     and no intrinsic config (a safe's owners, a timelock's delay) is invented
@@ -403,7 +403,7 @@ def materialize_fp_principal_nodes(
 
     Returns ``(ledger, minted_node_payloads)``. The payloads are graph-shaped
     node dicts for the caller to hand to ``queue_discovered_contracts``; they
-    are deliberately NOT written into the persisted ``resolved_control_graph``
+    are deliberately NOT written into the persisted ``resolution_graph``
     artifact, which is the walk's output and must not acquire nodes no walk
     produced.
 
@@ -570,7 +570,6 @@ def materialize_fp_principal_nodes(
                 label=None,
                 contract_name=None,
                 depth=minted_depth,
-                analyzed=False,
                 analysis_state=None,
                 graph_max_depth=None,
                 details=details,
@@ -617,7 +616,6 @@ def materialize_fp_principal_nodes(
                 "label": None,
                 "contract_name": None,
                 "depth": minted_depth,
-                "analyzed": False,
                 "analysis_state": None,
                 "details": details,
                 "artifacts": {},

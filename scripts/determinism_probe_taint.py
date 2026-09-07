@@ -136,13 +136,13 @@ def _install_control(sink: dict[str, dict[str, str]]) -> None:
 
 
 def _run(fixture: str, contract: str) -> Mapping[str, Any]:
-    from services.static.contract_analysis_pipeline import collect_contract_analysis_with_artifacts
+    from services.static.static_analysis import collect_static_inputs
     from tests.support.foundry_project import write_foundry_project
 
     source = (FIXTURES / fixture).read_text()
     with tempfile.TemporaryDirectory() as tmp:
         project = write_foundry_project(Path(tmp), contract, source)
-        _analysis, _trees, effects = collect_contract_analysis_with_artifacts(project)
+        _analysis, _trees, effects = collect_static_inputs(project)
     return effects or {}
 
 
@@ -159,8 +159,8 @@ def _suppressions(fixture: str, contract: str) -> dict[str, Any]:
 
     from services.static.claims.context import ClaimContext
     from services.static.claims.matchers._taint import arbitrary_exec_taint
-    from services.static.contract_analysis_pipeline.effects import build_effects
-    from services.static.contract_analysis_pipeline.shared import _select_subject_contract
+    from services.static.static_analysis.effects import build_effects
+    from services.static.static_analysis.shared import _select_subject_contract
     from tests.support.foundry_project import write_foundry_project
 
     source = (FIXTURES / fixture).read_text()

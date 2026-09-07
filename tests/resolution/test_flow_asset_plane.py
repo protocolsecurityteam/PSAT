@@ -585,13 +585,14 @@ def _stage_ctx(
     artifact_store: dict[str, Any] = {}
 
     def fake_get_artifact(_session: Any, _job_id: Any, name: str) -> Any:
-        return effects if name == "effects" else None
+        return None
 
     def fake_store_artifact(_session: Any, _job_id: Any, name: str, data: Any = None, text_data: Any = None) -> None:
         store_calls.append((name, data))
         artifact_store[name] = data
 
     monkeypatch.setattr(rw, "get_artifact", fake_get_artifact)
+    monkeypatch.setattr(rw, "load_assessment_inputs", lambda *_args, **_kwargs: ({}, {}, effects))
     monkeypatch.setattr(rw, "store_artifact", fake_store_artifact)
     monkeypatch.setattr(rw, "pin_probe_block", lambda *a, **k: probe_block)
     monkeypatch.setattr(fap, "eth_call_batch", lambda *a, **k: results)
@@ -731,5 +732,6 @@ def test_a_failing_writer_degrades_the_step_not_the_stage(monkeypatch: pytest.Mo
     assert [d["phase"] for d in degraded] == ["resolution_flow_asset_plane"]
     # The stage still stored what it did prove.
     stored = [name for name, _ in ctx["store_calls"]]
-    assert "control_snapshot" in stored
-    assert "resolved_control_graph" in stored
+    assert "assessment" in stored
+    assert "observation_batch" not in stored
+    assert "resolution_graph" not in stored

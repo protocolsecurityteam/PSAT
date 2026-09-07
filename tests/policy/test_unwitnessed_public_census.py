@@ -19,9 +19,10 @@ from typing import Any, cast
 from sqlalchemy import text
 
 from db.models import Contract
-from services.policy.effective_permissions import build_effective_permissions
-from services.policy.effective_permissions_writer import write_effective_function_rows
+from services.policy.permission_index import build_permission_index
+from services.policy.permission_index_writer import write_permission_rows
 from tests.conftest import requires_postgres
+from tests.support.policy_builders import resolved_records
 
 _TARGET = {"subject": {"address": "0x" + "ce" * 20, "name": "CensusTarget"}}
 
@@ -57,7 +58,7 @@ def test_fall_through_public_persists_json_null_conditions_never_empty_array(db_
     db_session.add(contract)
     db_session.flush()
 
-    payload = build_effective_permissions(
+    payload = build_permission_index(
         _TARGET,
         capability_resolver_output={},
         effects=_effects("sweep(address)"),
@@ -66,11 +67,10 @@ def test_fall_through_public_persists_json_null_conditions_never_empty_array(db_
     fn = next(f for f in payload["functions"] if f["function"] == "sweep(address)")
     assert fn.get("status") == "public"
 
-    write_effective_function_rows(
+    write_permission_rows(
         db_session,
         contract_id=contract.id,
         function_records=cast("list[dict[str, Any]]", payload["functions"]),
-        capability_by_function=None,
     )
     db_session.flush()
     assert _conditions_typeof(db_session, contract.id, "sweep") == "null"
@@ -88,17 +88,18 @@ def test_witnessed_public_with_conditions_persists_the_array(db_session):
         "membership_quality": "exact",
         "confidence": "enumerable",
     }
-    payload = build_effective_permissions(
+    payload = build_permission_index(
         _TARGET,
         capability_resolver_output={"sweep(address)": capability},
         effects=_effects("sweep(address)"),
         predicate_trees={"schema_version": "semantic", "trees": {}},
     )
-    write_effective_function_rows(
+    write_permission_rows(
         db_session,
         contract_id=contract.id,
-        function_records=cast("list[dict[str, Any]]", payload["functions"]),
-        capability_by_function={"sweep(address)": capability},
+        function_records=resolved_records(
+            cast("list[dict[str, Any]]", payload["functions"]), {"sweep(address)": capability}
+        ),
     )
     db_session.flush()
     assert _conditions_typeof(db_session, contract.id, "sweep") == "array"
@@ -111,8 +112,8 @@ def test_policy_minted_rows_carry_openness_and_roles_on_the_production_path(db_s
     reroute) must reach the table with ``authority_openness`` and
     ``authority_roles`` PROJECTED FROM the capability_expr the row itself
     publishes — never the NULL that is documented as "written before the
-    column existed". Exercises the real path: ``build_effective_permissions``
-    → ``write_effective_function_rows`` with an EMPTY resolver output, which
+    column existed". Exercises the real path: ``build_permission_index``
+    → ``write_permission_rows`` with an EMPTY resolver output, which
     is exactly the branch that dropped the answers.
 
     Input-shape → published-state table this test pins:
@@ -151,7 +152,7 @@ def test_policy_minted_rows_carry_openness_and_roles_on_the_production_path(db_s
             },
         }
     }
-    payload = build_effective_permissions(
+    payload = build_permission_index(
         _TARGET,
         capability_resolver_output={},
         effects=effects,
@@ -161,11 +162,10 @@ def test_policy_minted_rows_carry_openness_and_roles_on_the_production_path(db_s
             "guard_extraction_uncertain": ["gated(address)"],
         },
     )
-    write_effective_function_rows(
+    write_permission_rows(
         db_session,
         contract_id=contract.id,
         function_records=cast("list[dict[str, Any]]", payload["functions"]),
-        capability_by_function={},
     )
     db_session.flush()
     rows = {
@@ -187,17 +187,7 @@ def test_policy_minted_rows_carry_openness_and_roles_on_the_production_path(db_s
 
 
 @requires_postgres
-def test_observed_claim_carry_does_not_cross_selectorless_entry_points(db_session):
-    """``fallback`` and ``receive`` are BOTH selector-less, so once the
-    selector-less sentinel became ``""`` a contract declaring both produced two
-    rows under one observed-carry key and the carry cross-assigned one row's
-    observed claims to the other. The key is now ``(selector, function_name)``.
-
-    Armed population: 0 realised on the local corpus (no analysed contract
-    declares both, and every persisted selector-less row still carries the
-    fabricated selector that predates the sentinel) — structural on the first
-    contract that declares both after the sentinel.
-    """
+def test_rewrite_retracts_selectorless_claims_absent_from_assessment_projection(db_session):
     from services.effects import claims_bridge
 
     contract = Contract(address="0x" + "fb" * 20, chain="ethereum")
@@ -211,7 +201,7 @@ def test_observed_claim_carry_does_not_cross_selectorless_entry_points(db_sessio
     }
 
     def _write(fallback_claims):
-        write_effective_function_rows(
+        write_permission_rows(
             db_session,
             contract_id=contract.id,
             function_records=cast(
@@ -222,28 +212,20 @@ def test_observed_claim_carry_does_not_cross_selectorless_entry_points(db_sessio
                         "abi_signature": "fallback()",
                         "selector": "",
                         "claims": fallback_claims,
-                        "effect_labels": [],
-                        "effect_targets": [],
-                        "action_summary": "stub",
                     },
                     {
                         "function": "receive()",
                         "abi_signature": "receive()",
                         "selector": "",
                         "claims": [],
-                        "effect_labels": [],
-                        "effect_targets": [],
-                        "action_summary": "stub",
                     },
                 ],
             ),
-            capability_by_function=None,
         )
         db_session.flush()
 
     _write([observed])
-    # A policy-only rewrite: the carry must return the observed claim to
-    # fallback() and leave receive() claim-free.
+    # A new Assessment projection carries no claims, so both old rows retract.
     _write([])
 
     rows = db_session.execute(
@@ -251,5 +233,5 @@ def test_observed_claim_carry_does_not_cross_selectorless_entry_points(db_sessio
         {"cid": contract.id},
     ).all()
     by_name = {name: claims for name, claims in rows}
-    assert [claim["claim_id"] for claim in by_name["fallback"] or []] == ["flow.out"]
+    assert (by_name["fallback"] or []) == []
     assert (by_name["receive"] or []) == []

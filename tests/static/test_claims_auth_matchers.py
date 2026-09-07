@@ -19,7 +19,6 @@ from __future__ import annotations
 from services.static.claims import (
     build_claims,
     is_registered,
-    legacy_projections,
     registry,
 )
 from services.static.claims.context import selector_of
@@ -128,7 +127,6 @@ def _fn(signature, *, state_writes=None, view=False):
         "selector": selector_of(signature) or "",
         "sinks": [],
         "state_writes": list(state_writes or []),
-        "effect_labels": [],
         "state_changing": not view,
     }
 
@@ -162,26 +160,17 @@ def _tiers(functions, signature, claim_id):
 
 
 # ---------------------------------------------------------------------------
-# Registry metadata (every auth claim is registered with the right projection)
+# Registry metadata
 # ---------------------------------------------------------------------------
 
 
-def test_auth_claims_registered_with_projections():
+def test_auth_claims_registered():
     _run("Probe", {"ping()": (_fn("ping()"), None)})  # forces discover()
     for claim_id in AUTH_FAMILY:
         assert is_registered(claim_id), claim_id
         entry = registry()[claim_id]
         assert entry.sentence.strip()
         assert entry.consumer_family == "control_plane"
-
-    projections = legacy_projections()
-    for claim_id in ("ownership.transfer", "ownership.renounce", "ownership.accept"):
-        assert projections[claim_id] == "ownership_transfer"
-    for claim_id in ("roles.grant", "roles.revoke", "roles.configure"):
-        assert projections[claim_id] == "role_management"
-    assert projections["authority.replace"] == "authority_update"
-    # A genuinely new claim with no honest legacy equivalent (like safe.*).
-    assert projections["authorized_caller.rotate"] is None
 
 
 # ---------------------------------------------------------------------------

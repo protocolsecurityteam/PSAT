@@ -7,7 +7,7 @@ Focuses on:
 - GET /api/jobs (list with proxy flagging)
 - POST /api/analyze (dapp_urls, defillama_protocol paths)
 - GET /api/analyses/{run_name}/artifact/{artifact_name} (lookup by id/address, extension stripping)
-- GET /api/analyses/{run_name} (relational-table fallback paths, control_snapshot, resolved_control_graph from tables)
+- GET /api/analyses/{run_name} (relational-table fallback paths, observation_batch, resolution_graph from tables)
 - GET /api/company/{company_name}
 - Proxy subscription endpoints
 - SPA fallback for /api/* paths
@@ -311,7 +311,7 @@ def test_artifact_lookup_by_job_id(mock_session_cls, mock_get_artifact):
 
     mock_get_artifact.return_value = {"data": "value"}
 
-    response = client.get(f"/api/analyses/{job_id}/artifact/contract_analysis", headers=_admin_headers())
+    response = client.get(f"/api/analyses/{job_id}/artifact/static_facts", headers=_admin_headers())
     assert response.status_code == 200
     assert response.json() == {"data": "value"}
 
@@ -346,7 +346,7 @@ def test_artifact_lookup_by_address(mock_session_cls, mock_get_artifact):
 
     mock_get_artifact.return_value = {"found": True}
 
-    response = client.get(f"/api/analyses/{addr}/artifact/contract_analysis", headers=_admin_headers())
+    response = client.get(f"/api/analyses/{addr}/artifact/static_facts", headers=_admin_headers())
     assert response.status_code == 200
     assert response.json()["found"] is True
 
@@ -486,7 +486,7 @@ def test_artifact_txt_extension_stripping(mock_session_cls, mock_get_artifact):
     # First call with stripped name returns None, second with original returns data
     mock_get_artifact.side_effect = [None, "report text"]
 
-    response = client.get("/api/analyses/job1/artifact/analysis_report.txt", headers=_admin_headers())
+    response = client.get("/api/analyses/job1/artifact/static_facts_report.txt", headers=_admin_headers())
     assert response.status_code == 200
     assert "report text" in response.text
 
@@ -506,7 +506,7 @@ def test_artifact_json_extension_stripping(mock_session_cls, mock_get_artifact):
 
     mock_get_artifact.side_effect = [{"key": "val"}]
 
-    response = client.get("/api/analyses/job1/artifact/contract_analysis.json", headers=_admin_headers())
+    response = client.get("/api/analyses/job1/artifact/static_facts.json", headers=_admin_headers())
     assert response.status_code == 200
     assert response.json() == {"key": "val"}
 
@@ -524,326 +524,13 @@ def test_artifact_job_not_found_returns_404(mock_session_cls):
     mock_session.execute.return_value = mock_exec
     mock_session.get.return_value = None
 
-    response = client.get("/api/analyses/nonexistent/artifact/contract_analysis", headers=_admin_headers())
+    response = client.get("/api/analyses/nonexistent/artifact/static_facts", headers=_admin_headers())
     assert response.status_code == 404
 
 
 # ============================================================================
 # 7. GET /api/analyses/{run_name} - relational table paths
 # ============================================================================
-
-
-@patch("routers.deps.get_all_artifacts")
-@patch("routers.deps.SessionLocal")
-def test_analysis_detail_relational_effective_permissions(mock_session_cls, mock_get_all_artifacts):
-    """When contract_row exists with EffectiveFunctions, payload gets effective_permissions from relational tables."""
-    client = _make_client()
-    job = _fake_job(name="rel_job", address="0xaaa")
-
-    mock_session = MagicMock()
-    _mock_session_ctx(mock_session_cls, mock_session)
-
-    contract_row = MagicMock()
-    contract_row.id = uuid.uuid4()
-    contract_row.is_proxy = False
-    contract_row.implementation = None
-    contract_row.contract_name = "TestContract"
-    contract_row.address = "0xaaa"
-    contract_row.summary = None
-    contract_row.job_id = job.id
-
-    ef = MagicMock()
-    ef.id = uuid.uuid4()
-    ef.abi_signature = "pause()"
-    ef.function_name = "pause"
-    ef.selector = "0x8456cb59"
-    ef.effect_labels = ["pause_toggle"]
-    ef.action_summary = "Pauses the contract"
-    ef.authority_public = False
-
-    fp = MagicMock()
-    fp.address = "0xowner"
-    fp.resolved_type = "eoa"
-    fp.origin = "owner_slot"
-    fp.details = {"role": "admin"}
-    fp.principal_type = "controller"
-    fp.function_id = ef.id
-    # selectinload puts principals on ef.principals; no separate FP query.
-    ef.principals = [fp]
-
-    call_count = {"n": 0}
-
-    def route_execute(stmt, *args, **kwargs):
-        call_count["n"] += 1
-        result = MagicMock()
-        if call_count["n"] == 1:
-            # Job lookup
-            result.scalar_one_or_none.return_value = job
-        elif call_count["n"] == 2:
-            # Contract lookup
-            result.scalar_one_or_none.return_value = contract_row
-        elif call_count["n"] == 3:
-            # EffectiveFunction query (batched per contract, principals eager-loaded)
-            result.scalars.return_value.all.return_value = [ef]
-            result.scalars.return_value.__iter__ = lambda s: iter([ef])
-        elif call_count["n"] == 4:
-            # PrincipalLabel query
-            result.scalars.return_value.all.return_value = []
-        elif call_count["n"] == 5:
-            # ControllerValue query (for control_snapshot)
-            result.scalars.return_value.all.return_value = []
-        elif call_count["n"] == 6:
-            # ControlGraphNode query
-            result.scalars.return_value.all.return_value = []
-        else:
-            result.scalar_one_or_none.return_value = None
-            result.scalars.return_value.all.return_value = []
-            result.scalars.return_value.__iter__ = lambda s: iter([])
-        return result
-
-    mock_session.execute.side_effect = route_execute
-
-    mock_get_all_artifacts.return_value = {
-        "contract_analysis": {
-            "subject": {"name": "TestContract"},
-            "summary": {"control_model": "ownable"},
-        },
-    }
-
-    response = client.get("/api/analyses/rel_job")
-    assert response.status_code == 200
-    body = response.json()
-    assert "effective_permissions" in body
-    perms = body["effective_permissions"]
-    assert perms["contract_name"] == "TestContract"
-    assert len(perms["functions"]) == 1
-    fn = perms["functions"][0]
-    assert fn["function"] == "pause()"
-    assert fn["selector"] == "0x8456cb59"
-    assert fn["effect_labels"] == ["pause_toggle"]
-    assert len(fn["controllers"]) == 1
-    assert fn["controllers"][0]["principals"][0]["address"] == "0xowner"
-
-
-@patch("routers.deps.get_all_artifacts")
-@patch("routers.deps.SessionLocal")
-def test_analysis_detail_relational_control_snapshot(mock_session_cls, mock_get_all_artifacts):
-    """When control_snapshot is NOT in artifacts, build it from ControllerValue table."""
-    client = _make_client()
-    job = _fake_job(name="cv_job", address="0xaaa")
-
-    mock_session = MagicMock()
-    _mock_session_ctx(mock_session_cls, mock_session)
-
-    contract_row = MagicMock()
-    contract_row.id = uuid.uuid4()
-    contract_row.is_proxy = False
-    contract_row.implementation = None
-    contract_row.contract_name = "CVContract"
-    contract_row.address = "0xaaa"
-    contract_row.summary = None
-
-    cv = MagicMock()
-    cv.controller_id = "owner"
-    cv.value = "0xdeadbeef"
-    cv.resolved_type = "eoa"
-    cv.source = "storage_slot"
-    cv.details = {"slot": "0x00"}
-
-    call_count = {"n": 0}
-
-    def route_execute(stmt, *args, **kwargs):
-        call_count["n"] += 1
-        result = MagicMock()
-        if call_count["n"] == 1:
-            result.scalar_one_or_none.return_value = job
-        elif call_count["n"] == 2:
-            result.scalar_one_or_none.return_value = contract_row
-        elif call_count["n"] == 3:
-            # EffectiveFunction: empty
-            result.scalars.return_value.all.return_value = []
-        elif call_count["n"] == 4:
-            # PrincipalLabel: empty
-            result.scalars.return_value.all.return_value = []
-        elif call_count["n"] == 5:
-            # ControllerValue
-            result.scalars.return_value.all.return_value = [cv]
-        elif call_count["n"] == 6:
-            # ControlGraphNode (for resolved_control_graph)
-            result.scalars.return_value.all.return_value = []
-        else:
-            result.scalar_one_or_none.return_value = None
-            result.scalars.return_value.all.return_value = []
-        return result
-
-    mock_session.execute.side_effect = route_execute
-
-    # No control_snapshot in artifacts
-    mock_get_all_artifacts.return_value = {
-        "contract_analysis": {
-            "subject": {"name": "CVContract"},
-            "summary": {},
-        },
-    }
-
-    response = client.get("/api/analyses/cv_job")
-    assert response.status_code == 200
-    body = response.json()
-    assert "control_snapshot" in body
-    cs = body["control_snapshot"]
-    assert cs["contract_name"] == "CVContract"
-    assert "owner" in cs["controller_values"]
-    assert cs["controller_values"]["owner"]["value"] == "0xdeadbeef"
-
-
-@patch("routers.deps.get_all_artifacts")
-@patch("routers.deps.SessionLocal")
-def test_analysis_detail_relational_control_graph(mock_session_cls, mock_get_all_artifacts):
-    """When resolved_control_graph is NOT in artifacts, build it from CGN/CGE tables."""
-    client = _make_client()
-    job = _fake_job(name="cg_job", address="0xaaa")
-
-    mock_session = MagicMock()
-    _mock_session_ctx(mock_session_cls, mock_session)
-
-    contract_row = MagicMock()
-    contract_row.id = uuid.uuid4()
-    contract_row.is_proxy = False
-    contract_row.implementation = None
-    contract_row.contract_name = "CGContract"
-    contract_row.address = "0xaaa"
-    contract_row.summary = None
-
-    cgn = MagicMock()
-    cgn.address = "0xnode1"
-    cgn.node_type = "contract"
-    cgn.resolved_type = "safe"
-    cgn.label = "GnosisSafe"
-    cgn.contract_name = "GnosisSafe"
-    cgn.depth = 0
-    cgn.analyzed = True
-
-    cge = MagicMock()
-    cge.from_node_id = "address:0xnode1"
-    cge.to_node_id = "address:0xaaa"
-    cge.relation = "owner"
-    cge.label = "owns"
-
-    call_count = {"n": 0}
-
-    def route_execute(stmt, *args, **kwargs):
-        call_count["n"] += 1
-        result = MagicMock()
-        if call_count["n"] == 1:
-            result.scalar_one_or_none.return_value = job
-        elif call_count["n"] == 2:
-            result.scalar_one_or_none.return_value = contract_row
-        elif call_count["n"] == 3:
-            # EffectiveFunction: empty
-            result.scalars.return_value.all.return_value = []
-        elif call_count["n"] == 4:
-            # PrincipalLabel: empty
-            result.scalars.return_value.all.return_value = []
-        elif call_count["n"] == 5:
-            # ControllerValue: empty (no control_snapshot)
-            result.scalars.return_value.all.return_value = []
-        elif call_count["n"] == 6:
-            # ControlGraphNode
-            result.scalars.return_value.all.return_value = [cgn]
-        elif call_count["n"] == 7:
-            # ControlGraphEdge
-            result.scalars.return_value.all.return_value = [cge]
-        else:
-            result.scalar_one_or_none.return_value = None
-            result.scalars.return_value.all.return_value = []
-        return result
-
-    mock_session.execute.side_effect = route_execute
-
-    # No resolved_control_graph in artifacts
-    mock_get_all_artifacts.return_value = {
-        "contract_analysis": {
-            "subject": {"name": "CGContract"},
-            "summary": {},
-        },
-    }
-
-    response = client.get("/api/analyses/cg_job")
-    assert response.status_code == 200
-    body = response.json()
-    assert "resolved_control_graph" in body
-    rcg = body["resolved_control_graph"]
-    assert rcg["root_contract_address"] == "0xaaa"
-    assert len(rcg["nodes"]) == 1
-    assert rcg["nodes"][0]["address"] == "0xnode1"
-    assert len(rcg["edges"]) == 1
-    assert rcg["edges"][0]["relation"] == "owner"
-
-
-@patch("routers.deps.get_all_artifacts")
-@patch("routers.deps.SessionLocal")
-def test_analysis_detail_relational_principal_labels(mock_session_cls, mock_get_all_artifacts):
-    """When PrincipalLabel rows exist, they populate principal_labels in payload."""
-    client = _make_client()
-    job = _fake_job(name="pl_job", address="0xaaa")
-
-    mock_session = MagicMock()
-    _mock_session_ctx(mock_session_cls, mock_session)
-
-    contract_row = MagicMock()
-    contract_row.id = uuid.uuid4()
-    contract_row.is_proxy = False
-    contract_row.implementation = None
-    contract_row.contract_name = "PLContract"
-    contract_row.address = "0xaaa"
-    contract_row.summary = None
-
-    pl = MagicMock()
-    pl.address = "0xowner"
-    pl.label = "Owner"
-    pl.resolved_type = "eoa"
-
-    call_count = {"n": 0}
-
-    def route_execute(stmt, *args, **kwargs):
-        call_count["n"] += 1
-        result = MagicMock()
-        if call_count["n"] == 1:
-            result.scalar_one_or_none.return_value = job
-        elif call_count["n"] == 2:
-            result.scalar_one_or_none.return_value = contract_row
-        elif call_count["n"] == 3:
-            # EffectiveFunction: empty
-            result.scalars.return_value.all.return_value = []
-        elif call_count["n"] == 4:
-            # PrincipalLabel
-            result.scalars.return_value.all.return_value = [pl]
-        elif call_count["n"] == 5:
-            # ControllerValue: empty
-            result.scalars.return_value.all.return_value = []
-        elif call_count["n"] == 6:
-            # ControlGraphNode: empty
-            result.scalars.return_value.all.return_value = []
-        else:
-            result.scalar_one_or_none.return_value = None
-            result.scalars.return_value.all.return_value = []
-        return result
-
-    mock_session.execute.side_effect = route_execute
-
-    mock_get_all_artifacts.return_value = {
-        "contract_analysis": {
-            "subject": {"name": "PLContract"},
-            "summary": {},
-        },
-    }
-
-    response = client.get("/api/analyses/pl_job")
-    assert response.status_code == 200
-    body = response.json()
-    assert "principal_labels" in body
-    assert body["principal_labels"]["principals"][0]["address"] == "0xowner"
-    assert body["principal_labels"]["principals"][0]["label"] == "Owner"
 
 
 @patch("routers.deps.get_all_artifacts")
@@ -960,7 +647,7 @@ def test_analyses_list_rank_scores_from_contracts_table(mock_session_cls):
     )
     artifact_row = SimpleNamespace(
         job_id=child_job.id,
-        name="contract_analysis",
+        name="static_facts",
         storage_key=None,
         data={"subject": {"name": "ContractX"}, "summary": {}},
         text_data=None,
@@ -1236,7 +923,7 @@ def test_analyses_company_from_parent_chain(mock_session_cls):
     artifacts = [
         SimpleNamespace(
             job_id=child_job.id,
-            name="contract_analysis",
+            name="static_facts",
             storage_key=None,
             data={"subject": {"name": "Child"}, "summary": {}},
             text_data=None,
@@ -1280,7 +967,7 @@ def test_analyses_proxy_hidden_when_impl_not_completed(mock_session_cls):
     """A completed proxy is suppressed until its impl child also completes.
 
     Showing the proxy alone would render a half-populated card (no
-    contract_analysis, generic proxy name) that mutates once the impl
+    static_facts, generic proxy name) that mutates once the impl
     lands. jobs_by_address holds completed jobs only, so a missing entry
     is sufficient to suppress.
     """
@@ -1313,7 +1000,7 @@ def test_analyses_proxy_hidden_when_impl_not_completed(mock_session_cls):
     artifacts = [
         SimpleNamespace(
             job_id=proxy_job.id,
-            name="contract_analysis",
+            name="static_facts",
             storage_key=None,
             data={"subject": {"name": "ProxyContract"}, "summary": {}},
             text_data=None,
@@ -1348,201 +1035,6 @@ def test_analyses_proxy_hidden_when_impl_not_completed(mock_session_cls):
 # ============================================================================
 # 16. GET /api/analyses/{run_name} - proxy job inherits impl relational tables
 # ============================================================================
-
-
-@patch("routers.deps.get_all_artifacts")
-@patch("routers.deps.get_artifact")
-@patch("routers.deps.SessionLocal")
-def test_analysis_detail_proxy_inherits_impl_relational_tables(
-    mock_session_cls, mock_get_artifact, mock_get_all_artifacts
-):
-    """When loading a proxy job detail, effective_permissions / control_snapshot /
-    resolved_control_graph / principal_labels should be inherited from impl's
-    relational tables when not available from artifacts."""
-    client = _make_client()
-
-    proxy_addr = "0x1111111111111111111111111111111111111111"
-    impl_addr = "0x2222222222222222222222222222222222222222"
-    proxy_job_id = uuid.uuid4()
-    impl_job_id = uuid.uuid4()
-
-    proxy_job = _fake_job(
-        job_id=str(proxy_job_id),
-        address=proxy_addr,
-        name="ProxyRelTest",
-        request={"address": proxy_addr},
-    )
-    impl_job = _fake_job(
-        job_id=str(impl_job_id),
-        address=impl_addr,
-        name="ProxyRelTest: (impl)",
-        request={"address": impl_addr, "proxy_address": proxy_addr},
-    )
-
-    mock_session = MagicMock()
-    _mock_session_ctx(mock_session_cls, mock_session)
-
-    proxy_contract = MagicMock()
-    proxy_contract.id = uuid.uuid4()
-    proxy_contract.is_proxy = True
-    proxy_contract.implementation = impl_addr
-    proxy_contract.contract_name = "ProxyRelTest"
-    proxy_contract.address = proxy_addr
-    proxy_contract.summary = None
-    proxy_contract.job_id = proxy_job_id
-
-    impl_contract = MagicMock()
-    impl_contract.id = uuid.uuid4()
-    impl_contract.is_proxy = False
-    impl_contract.implementation = None
-    impl_contract.contract_name = "ImplContract"
-    impl_contract.address = impl_addr
-    impl_contract.summary = MagicMock()
-    impl_contract.summary.control_model = "authority"
-    impl_contract.summary.is_upgradeable = True
-    impl_contract.summary.is_pausable = False
-    impl_contract.summary.has_timelock = False
-    impl_contract.summary.standards = ["ERC20"]
-
-    ef = MagicMock()
-    ef.id = uuid.uuid4()
-    ef.abi_signature = "transfer(address,uint256)"
-    ef.function_name = "transfer"
-    ef.selector = "0xa9059cbb"
-    ef.effect_labels = ["asset_send"]
-    ef.action_summary = "Sends tokens"
-    ef.authority_public = True
-
-    fp_owner = MagicMock()
-    fp_owner.address = "0xowner"
-    fp_owner.resolved_type = "eoa"
-    fp_owner.origin = "direct owner"
-    fp_owner.principal_type = "direct_owner"
-    fp_owner.details = {}
-
-    fp_role = MagicMock()
-    fp_role.address = "0xrole"
-    fp_role.resolved_type = "safe"
-    fp_role.origin = "role 1"
-    fp_role.principal_type = "authority_role"
-    fp_role.details = {"threshold": 2}
-
-    fp_controller = MagicMock()
-    fp_controller.address = "0xcontroller"
-    fp_controller.resolved_type = "contract"
-    fp_controller.origin = "roleRegistry"
-    fp_controller.principal_type = "controller"
-    fp_controller.details = {"authority_kind": "external_authority"}
-
-    cv = MagicMock()
-    cv.controller_id = "admin"
-    cv.value = "0xadmin"
-    cv.resolved_type = "eoa"
-    cv.source = "slot"
-    cv.details = {}
-
-    cgn = MagicMock()
-    cgn.address = "0xowner"
-    cgn.node_type = "external"
-    cgn.resolved_type = "eoa"
-    cgn.label = "Owner"
-    cgn.contract_name = None
-    cgn.depth = 1
-    cgn.analyzed = False
-
-    cge = MagicMock()
-    cge.from_node_id = "address:0xowner"
-    cge.to_node_id = "address:0x2222222222222222222222222222222222222222"
-    cge.relation = "owner"
-    cge.label = "owns"
-
-    pl = MagicMock()
-    pl.address = "0xowner"
-    pl.label = "Admin"
-    pl.resolved_type = "eoa"
-
-    mock_session.get.return_value = None
-
-    fp_owner.function_id = ef.id
-    fp_role.function_id = ef.id
-    fp_controller.function_id = ef.id
-    # selectinload puts principals on ef.principals; no separate FP query.
-    ef.principals = [fp_owner, fp_role, fp_controller]
-
-    def make_result(scalar=None, scalars_all=None):
-        r = MagicMock()
-        items = scalars_all or []
-        r.scalar_one_or_none.return_value = scalar
-        r.scalars.return_value.all.return_value = items
-        # api.py iterates ``Result.scalars()`` directly in the batched
-        # prefetch paths; MagicMock needs explicit __iter__ for that.
-        r.scalars.return_value.__iter__ = lambda s: iter(items)
-        return r
-
-    # Calls 0-6: proxy's own relational queries; 7-8: impl job + Contract;
-    # 9+: impl's relational queries (EF eager-loads FP, then CV/CGN/CGE/PL).
-    call_results = [
-        make_result(scalar=proxy_job),  # 0: Job lookup by name
-        make_result(scalar=proxy_contract),  # 1: Contract lookup for proxy
-        make_result(scalars_all=[]),  # 2: EffectiveFunction for proxy (empty)
-        make_result(scalars_all=[]),  # 3: PrincipalLabel for proxy (empty)
-        make_result(scalars_all=[]),  # 4: ControllerValue for proxy (empty)
-        make_result(scalars_all=[]),  # 5: ControlGraphNode for proxy (empty)
-        make_result(scalars_all=[]),  # 6: ControlGraphEdge for proxy (empty)
-        make_result(scalar=impl_job),  # 7: impl job lookup by address
-        make_result(scalar=impl_contract),  # 8: impl Contract lookup
-        make_result(scalars_all=[ef]),  # 9: EffectiveFunction for impl
-        make_result(scalars_all=[cv]),  # 10: ControllerValue for impl
-        make_result(scalars_all=[cgn]),  # 11: ControlGraphNode for impl
-        make_result(scalars_all=[cge]),  # 12: ControlGraphEdge for impl
-        make_result(scalars_all=[pl]),  # 13: PrincipalLabel for impl
-    ]
-    # Add extra fallback results
-    for _ in range(10):
-        call_results.append(make_result())
-
-    mock_session.execute.side_effect = call_results
-
-    # Proxy has no analysis artifacts
-    mock_get_all_artifacts.side_effect = [
-        {
-            "dependency_graph_viz": {"nodes": [], "edges": []},
-            "dependencies": {"deps": []},
-        },
-        # impl artifacts (empty, so relational tables are used)
-        {},
-    ]
-
-    mock_get_artifact.return_value = None
-
-    response = client.get("/api/analyses/ProxyRelTest")
-    assert response.status_code == 200
-    body = response.json()
-
-    # Should have inherited effective_permissions from impl relational tables
-    assert "effective_permissions" in body
-    assert body["effective_permissions"]["functions"][0]["function"] == "transfer(address,uint256)"
-
-    # Should have inherited control_snapshot from impl
-    assert "control_snapshot" in body
-    assert "admin" in body["control_snapshot"]["controller_values"]
-
-    # Should have inherited resolved_control_graph from impl
-    assert "resolved_control_graph" in body
-    assert len(body["resolved_control_graph"]["nodes"]) >= 1
-
-    # Should have inherited principal_labels from impl
-    assert "principal_labels" in body
-    assert body["principal_labels"]["principals"][0]["address"] == "0xowner"
-
-    # Should have contract_name from impl
-    assert body["contract_name"] == "ImplContract"
-
-    # Summary from impl contract
-    assert body["summary"]["control_model"] == "authority"
-
-    # Proxy-specific fields
-    assert body["implementation_address"] == impl_addr
 
 
 # ============================================================================
@@ -1680,9 +1172,11 @@ def test_company_overview_with_proxy_and_effects(db_session, api_client):
         function_name="pause",
         selector="0x8456cb59",
         abi_signature="pause()",
-        effect_labels=["pause_toggle", "asset_pull", "delegatecall_execution"],
-        effect_targets=[],
-        action_summary="Pauses",
+        claims=[
+            {"claim_id": "pause.set", "tier": "standard_exact", "witness": {}},
+            {"claim_id": "flow.in", "tier": "standard_exact", "witness": {}},
+            {"claim_id": "delegatecall.execute", "tier": "idiom_structural", "witness": {}},
+        ],
         authority_public=False,
         authority_roles=[],
     )
@@ -1804,7 +1298,7 @@ def test_analyses_chain_populated_from_contracts_table(mock_session_cls):
     artifacts = [
         SimpleNamespace(
             job_id=child_job.id,
-            name="contract_analysis",
+            name="static_facts",
             storage_key=None,
             data={"subject": {"name": "ChainTest"}, "summary": {}},
             text_data=None,
@@ -1839,13 +1333,13 @@ def test_analyses_chain_populated_from_contracts_table(mock_session_cls):
 
 
 # ============================================================================
-# 19. GET /api/analyses - entry without contract_analysis is not appended
+# 19. GET /api/analyses - entry without static_facts is not appended
 # ============================================================================
 
 
 @patch("routers.deps.SessionLocal")
 def test_analyses_entry_without_analysis_still_appears(mock_session_cls):
-    """A job without contract_analysis artifact still appears in results, but
+    """A job without static_facts artifact still appears in results, but
     without contract_name or summary fields from the analysis."""
     client = _make_client()
     job = _fake_job(name="no_analysis", address="0xeeee")
@@ -1894,7 +1388,7 @@ def test_analyses_entry_without_analysis_still_appears(mock_session_cls):
 def test_analyses_proxy_uses_impl_analysis_when_proxy_has_none(mock_session_cls):
     """When proxy's Contract row has no name, the proxy entry inherits the
     impl's Contract.contract_name. Earlier code reached for the impl's
-    contract_analysis artifact body to read subject.name, but the listing
+    static_facts artifact body to read subject.name, but the listing
     no longer fetches artifact bodies — names come from the prefetched
     Contract rows directly. This regression test now seeds both
     Contract rows and asserts the impl-name is what surfaces."""

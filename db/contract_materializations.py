@@ -1,6 +1,6 @@
 """Cross-job, cross-process materialization cache.
 
-A row per ``(chain, bytecode_keccak)`` holding the static analysis +
+A row per ``(chain, bytecode_keccak)`` holding the static static_facts +
 tracking-plan bundle so two impl jobs requesting the same contract pay
 the expensive forge+Slither cost exactly once. Concurrent requests are
 serialized via ``pg_advisory_xact_lock(hashtext(chain || ':' || keccak))``:
@@ -19,14 +19,14 @@ onto the id token so a name-keyed writer and an id-keyed reader hit the
 same row. ``None``/empty resolves to the mainnet token ``"1"``, matching
 how ``Job.request['chain']`` defaults.
 
-Bundle storage: the ``analysis`` and ``tracking_plan`` payloads can be
-multi-megabyte JSON blobs (a Compound-v3-class contract analysis is
+Bundle storage: the ``static_facts`` and ``observation_plan`` payloads can be
+multi-megabyte JSON blobs (a Compound-v3-class contract static_facts is
 ~5-20 MB). Postgres JSONB stores fine but detoasts on every read,
 inflates page-cache pressure on this hot table, and slows backup /
 dump / restore. The schema therefore carries paired columns:
 
-  - ``analysis`` (JSONB) and ``analysis_blob_key`` (Text)
-  - ``tracking_plan`` (JSONB) and ``tracking_plan_blob_key`` (Text)
+  - ``static_facts`` (JSONB) and ``static_facts_blob_key`` (Text)
+  - ``observation_plan`` (JSONB) and ``observation_plan_blob_key`` (Text)
 
 When object storage is configured (``ARTIFACT_STORAGE_*`` env vars set,
 ``db.storage.get_storage_client()`` returns non-None) new writes go to
@@ -35,16 +35,16 @@ columns are then the source of truth. When storage is unconfigured
 (local dev, offline tests without minio) writes fall back to inline
 JSONB and blob_key is NULL.
 
-Reads are always handled by ``hydrate_analysis`` / ``hydrate_tracking_plan``
+Reads are always handled by ``hydrate_static_facts`` / ``hydrate_observation_plan``
 which try the blob first and transparently fall back to inline JSONB.
 That fallback is what lets pre-migration rows keep working while the
-backfill (``scripts/backfill_contract_materializations_to_blob.py``)
+materialization writes
 catches up — and what insulates the pipeline from a transient Tigris
 outage when the inline copy still exists. When it does not, the read
 raises ``StorageContentIncomplete``: "the bucket could not answer" and
 "this row stored nothing" are different facts, and the caller
 (``services/resolution/recursive``) turns the second into an empty
-analysis that the effects probe is then seeded from.
+static_facts that the effects probe is then seeded from.
 """
 
 from __future__ import annotations
@@ -75,9 +75,9 @@ logger = logging.getLogger(__name__)
 
 # Analyzer/pipeline schema version stamped on every materialized row. The read
 # paths (``find_by_keccak``/``find_by_address``/``materialize_or_wait``) only
-# serve a row whose ``analysis_schema_version`` equals this constant, so a row
+# serve a row whose ``static_facts_schema_version`` equals this constant, so a row
 # written by an older analyzer reads as a miss and is rebuilt. Bump by hand only
-# when the static-analysis / tracking-plan / predicate-tree *output shape*
+# when the static-static_facts / tracking-plan / predicate-tree *output shape*
 # changes — deliberately NOT tied to a git SHA, which would cold-rebuild every
 # multi-MB forge+Slither bundle on unrelated deploys (frontend, docs, workers).
 # v2: the effects sink emitter resolves a library-wrapped/cast token receiver to
@@ -154,7 +154,7 @@ logger = logging.getLogger(__name__)
 # safety prep (index-based operand exclusion, element-aware operand ordering)
 # so the shape change and its invalidation land together rather than thrashing
 # through ``_bundle_differs``, which compares the whole serialized tree.
-ANALYSIS_SCHEMA_VERSION = 6
+STATIC_FACTS_SCHEMA_VERSION = 10
 
 
 # ── Provenance ─────────────────────────────────────────────────────────────
@@ -242,10 +242,10 @@ def _normalize(chain: str | int | None, address: str, bytecode_keccak: str) -> t
 
 
 def _blob_key(chain_norm: str, keccak_norm: str, kind: str) -> str:
-    """Deterministic blob key for an analysis/tracking_plan payload.
+    """Deterministic blob key for an static_facts/observation_plan payload.
 
-    ``kind`` is the payload name without extension (``"analysis"`` or
-    ``"tracking_plan"``). Includes the PR-preview prefix from
+    ``kind`` is the payload name without extension (``"static_facts"`` or
+    ``"observation_plan"``). Includes the PR-preview prefix from
     ``ARTIFACT_STORAGE_PREFIX`` so previews scope cleanly under one
     bucket. Path separators around chain and keccak make S3-console
     browsing usable.
@@ -261,10 +261,8 @@ def find_by_keccak(
 ) -> ContractMaterialization | None:
     """Return the row for ``(chain, bytecode_keccak)`` if status='ready'.
 
-    ``status='pending'`` rows are NOT returned — a pending row means a
-    builder is still in flight; the caller should take the advisory
-    lock and re-read inside it. Rows stamped with a different
-    ``analysis_schema_version`` are likewise skipped (read as a miss) so
+    Non-ready rows are not returned. Rows stamped with a different
+    ``static_facts_schema_version`` are likewise skipped (read as a miss) so
     a bumped analyzer rebuilds rather than serving a stale bundle.
     """
     chain_norm = chain_cache_token(chain)
@@ -274,7 +272,7 @@ def find_by_keccak(
             ContractMaterialization.chain == chain_norm,
             ContractMaterialization.bytecode_keccak == keccak_norm,
             ContractMaterialization.status == "ready",
-            ContractMaterialization.analysis_schema_version == ANALYSIS_SCHEMA_VERSION,
+            ContractMaterialization.static_facts_schema_version == STATIC_FACTS_SCHEMA_VERSION,
         )
     ).scalar_one_or_none()
     return row
@@ -291,7 +289,7 @@ def find_by_address(
     Address-keyed lookup is the legacy entry path — same-bytecode-different-address
     contracts share one row keyed by keccak, but a known address still
     resolves to that row via the unique index. A row stamped with a
-    different ``analysis_schema_version`` reads as a miss so a bumped
+    different ``static_facts_schema_version`` reads as a miss so a bumped
     analyzer rebuilds rather than serving a stale bundle.
     """
     chain_norm = chain_cache_token(chain)
@@ -301,17 +299,17 @@ def find_by_address(
             ContractMaterialization.chain == chain_norm,
             ContractMaterialization.address == addr_norm,
             ContractMaterialization.status == "ready",
-            ContractMaterialization.analysis_schema_version == ANALYSIS_SCHEMA_VERSION,
+            ContractMaterialization.static_facts_schema_version == STATIC_FACTS_SCHEMA_VERSION,
         )
     ).scalar_one_or_none()
     return row
 
 
 def _hydrate(row: ContractMaterialization, *, blob_key_attr: str, inline_attr: str) -> dict | None:
-    """Generic blob-or-inline read for analysis / tracking_plan columns.
+    """Generic blob-or-inline read for static_facts / observation_plan columns.
 
     Three outcomes, and a caller can tell them apart — which is the whole point,
-    because this function's output *is* the analysis state the resolution stage
+    because this function's output *is* the static_facts state the resolution stage
     reasons over and the effects probe is seeded from:
 
       * a ``dict`` — **proven present**: read from the blob, or from the inline
@@ -321,10 +319,10 @@ def _hydrate(row: ContractMaterialization, *, blob_key_attr: str, inline_attr: s
       * ``None`` — **proven absent**: the row records no blob key *and* no
         inline payload, so nothing was ever stored for this column. On the
         working DB this is exactly the 6 ``status='failed'`` rows, where no
-        analysis was ever produced.
+        static_facts was ever produced.
       * ``StorageContentIncomplete`` — the row records a blob key and we could
         not obtain its content, with no inline fallback. Returning ``None`` here
-        is what let a bucket outage read as "this contract has no analysis, no
+        is what let a bucket outage read as "this contract has no static_facts, no
         plan, no predicate trees" at ``services/resolution/recursive`` — and that
         verdict then gets cached as a witness. Which subclass says why, and the
         type is the only thing ``workers.retry_policy`` sees:
@@ -398,33 +396,39 @@ def _hydrate(row: ContractMaterialization, *, blob_key_attr: str, inline_attr: s
     )
 
 
-def hydrate_analysis(row: ContractMaterialization) -> dict | None:
-    """Load the row's ``analysis`` payload, transparently picking the
-    blob path when ``analysis_blob_key`` is set and falling back to the
+def hydrate_static_facts(row: ContractMaterialization) -> dict | None:
+    """Load the row's ``static_facts`` payload, transparently picking the
+    blob path when ``static_facts_blob_key`` is set and falling back to the
     inline JSONB column otherwise. ``None`` means the row genuinely
-    has no analysis (nothing was ever stored — the ``status='failed'``
+    has no static_facts (nothing was ever stored — the ``status='failed'``
     corner case). Raises ``StorageContentIncomplete`` when a blob key is
     recorded but its content cannot be obtained: that is not the same fact and
-    must not reach a consumer as an empty analysis."""
-    return _hydrate(row, blob_key_attr="analysis_blob_key", inline_attr="analysis")
+    must not reach a consumer as an empty static_facts."""
+    return _hydrate(row, blob_key_attr="static_facts_blob_key", inline_attr="static_facts")
 
 
-def hydrate_tracking_plan(row: ContractMaterialization) -> dict | None:
-    """Symmetric to ``hydrate_analysis`` for ``tracking_plan``, including the
+def hydrate_observation_plan(row: ContractMaterialization) -> dict | None:
+    """Symmetric to ``hydrate_static_facts`` for ``observation_plan``, including the
     ``StorageContentIncomplete`` third state."""
-    return _hydrate(row, blob_key_attr="tracking_plan_blob_key", inline_attr="tracking_plan")
+    return _hydrate(row, blob_key_attr="observation_plan_blob_key", inline_attr="observation_plan")
 
 
 def hydrate_predicate_trees(row: ContractMaterialization) -> dict | None:
     """Load the row's predicate-tree artifact (semantic source of truth
     for revert/auth guards). Returns None if the cache row predates the
     predicate-pipeline migration (pre-c1d2e3f4a5b6) so callers can fall
-    back to rebuilding the artifact from the analysis dict if they need
+    back to rebuilding the artifact from the static_facts dict if they need
     mapping-writer enumeration. Raises ``StorageContentIncomplete`` when the
     row records a blob key whose content cannot be obtained — "written before
     the migration" and "the bucket is down" are different facts and the
     fallback is only correct for the first."""
     return _hydrate(row, blob_key_attr="predicate_trees_blob_key", inline_attr="predicate_trees")
+
+
+def hydrate_effects(row: ContractMaterialization) -> dict | None:
+    """Load the low-level effects input required to rebuild nested permissions."""
+
+    return row.effects if isinstance(row.effects, dict) else None
 
 
 def _advisory_lock(session: Session, chain_norm: str, keccak_norm: str) -> None:
@@ -471,7 +475,7 @@ def find_reusable_by_source_hash(
         .where(
             ContractMaterialization.source_content_hash == source_content_hash,
             ContractMaterialization.status == "ready",
-            ContractMaterialization.analysis_schema_version == ANALYSIS_SCHEMA_VERSION,
+            ContractMaterialization.static_facts_schema_version == STATIC_FACTS_SCHEMA_VERSION,
         )
         .limit(1)
     ).scalar_one_or_none()
@@ -501,11 +505,12 @@ def _copy_bundle_row(
         bytecode_keccak=keccak_norm,
         address=addr_norm,
         contract_name=donor.contract_name,
-        analysis=donor.analysis,
-        tracking_plan=donor.tracking_plan,
+        static_facts=donor.static_facts,
+        observation_plan=donor.observation_plan,
         predicate_trees=donor.predicate_trees,
-        analysis_blob_key=donor.analysis_blob_key,
-        tracking_plan_blob_key=donor.tracking_plan_blob_key,
+        effects=donor.effects,
+        static_facts_blob_key=donor.static_facts_blob_key,
+        observation_plan_blob_key=donor.observation_plan_blob_key,
         predicate_trees_blob_key=donor.predicate_trees_blob_key,
         source_content_hash=source_content_hash,
         status="ready",
@@ -518,7 +523,7 @@ def _copy_bundle_row(
             **build_provenance(PRODUCED_BY_RESOLUTION),
             "reused_from": {"chain": donor.chain, "bytecode_keccak": donor.bytecode_keccak},
         },
-        analysis_schema_version=ANALYSIS_SCHEMA_VERSION,
+        static_facts_schema_version=STATIC_FACTS_SCHEMA_VERSION,
     )
     stmt = pg_insert(ContractMaterialization).values(**values)
     stmt = stmt.on_conflict_do_update(
@@ -526,18 +531,19 @@ def _copy_bundle_row(
         set_={
             "address": stmt.excluded.address,
             "contract_name": stmt.excluded.contract_name,
-            "analysis": stmt.excluded.analysis,
-            "tracking_plan": stmt.excluded.tracking_plan,
+            "static_facts": stmt.excluded.static_facts,
+            "observation_plan": stmt.excluded.observation_plan,
             "predicate_trees": stmt.excluded.predicate_trees,
-            "analysis_blob_key": stmt.excluded.analysis_blob_key,
-            "tracking_plan_blob_key": stmt.excluded.tracking_plan_blob_key,
+            "effects": stmt.excluded.effects,
+            "static_facts_blob_key": stmt.excluded.static_facts_blob_key,
+            "observation_plan_blob_key": stmt.excluded.observation_plan_blob_key,
             "predicate_trees_blob_key": stmt.excluded.predicate_trees_blob_key,
             "source_content_hash": stmt.excluded.source_content_hash,
             "status": "ready",
             "error": None,
             "builder_started_at": None,
             "provenance": stmt.excluded.provenance,
-            "analysis_schema_version": stmt.excluded.analysis_schema_version,
+            "static_facts_schema_version": stmt.excluded.static_facts_schema_version,
             "materialized_at": func.now(),
             "updated_at": func.now(),
         },
@@ -585,12 +591,12 @@ def materialize_or_wait(
              upsert ``status='building'`` with our timestamp and proceed
              to phase 2. Stale rows mean the prior worker crashed or was
              SIGKILLed; we take over.
-           * no row, ``failed``, or legacy ``pending`` → upsert
+           * no row or ``failed`` → upsert
              ``status='building'``, set ``builder_started_at = NOW()``,
              release lock, proceed to phase 2.
       2. **Build** — call ``builder()`` with no DB session held. The
-         bundle has ``contract_name``, ``analysis``, ``tracking_plan``,
-         and optionally ``predicate_trees``. Blob uploads (if storage
+         bundle has ``contract_name``, ``static_facts``, ``observation_plan``,
+         and optionally ``predicate_trees`` and ``effects``. Blob uploads (if storage
          is configured) happen here too.
       3. **Write** — open a fresh session, take the advisory lock, recheck
          (a concurrent fresh-takeover may have written ``status='ready'``
@@ -649,7 +655,11 @@ def materialize_or_wait(
                     ContractMaterialization.bytecode_keccak == keccak_norm,
                 )
             ).scalar_one_or_none()
-            if row is not None and row.status == "ready" and row.analysis_schema_version == ANALYSIS_SCHEMA_VERSION:
+            if (
+                row is not None
+                and row.status == "ready"
+                and row.static_facts_schema_version == STATIC_FACTS_SCHEMA_VERSION
+            ):
                 session.commit()
                 return row
             # An old-version 'ready' row falls through to the claim below and
@@ -712,7 +722,7 @@ def materialize_or_wait(
                 builder_started_at=now_dt,
                 error=None,
                 source_content_hash=src_hash,
-                analysis_schema_version=ANALYSIS_SCHEMA_VERSION,
+                static_facts_schema_version=STATIC_FACTS_SCHEMA_VERSION,
             )
             claim_stmt = claim_stmt.on_conflict_do_update(
                 constraint="contract_materializations_pkey",
@@ -732,6 +742,8 @@ def materialize_or_wait(
     # ── Phase 2: builder + blob uploads, no DB connection held ─────
     try:
         bundle = builder()
+        if not all(isinstance(bundle.get(name), dict) for name in ("static_facts", "observation_plan", "effects")):
+            raise ValueError("materialization builder returned an incomplete semantic bundle")
     except Exception as exc:
         err = f"{type(exc).__name__}: {exc}"[:4000]
         with SessionLocal() as session:
@@ -744,7 +756,7 @@ def materialize_or_wait(
                 builder_started_at=None,
                 source_content_hash=_src["hash"],
                 provenance=build_provenance(PRODUCED_BY_RESOLUTION),
-                analysis_schema_version=ANALYSIS_SCHEMA_VERSION,
+                static_facts_schema_version=STATIC_FACTS_SCHEMA_VERSION,
             )
             stmt = stmt.on_conflict_do_update(
                 constraint="contract_materializations_pkey",
@@ -761,15 +773,19 @@ def materialize_or_wait(
             session.commit()
         raise
 
-    analysis_payload = bundle.get("analysis")
-    tracking_plan_payload = bundle.get("tracking_plan")
+    analysis_payload = bundle.get("static_facts")
+    observation_plan_payload = bundle.get("observation_plan")
     predicate_trees_payload = bundle.get("predicate_trees")
-    analysis_blob_key: str | None = None
-    tracking_plan_blob_key: str | None = None
+    effects_payload = bundle.get("effects")
+    static_facts_blob_key: str | None = None
+    observation_plan_blob_key: str | None = None
     predicate_trees_blob_key: str | None = None
     analysis_inline: dict | None = analysis_payload if isinstance(analysis_payload, dict) else None
-    tracking_plan_inline: dict | None = tracking_plan_payload if isinstance(tracking_plan_payload, dict) else None
+    observation_plan_inline: dict | None = (
+        observation_plan_payload if isinstance(observation_plan_payload, dict) else None
+    )
     predicate_trees_inline: dict | None = predicate_trees_payload if isinstance(predicate_trees_payload, dict) else None
+    effects_inline: dict | None = effects_payload if isinstance(effects_payload, dict) else None
 
     client = get_storage_client()
     if client is not None:
@@ -778,13 +794,13 @@ def materialize_or_wait(
         # On failure, propagate without writing a row — the next caller
         # retries the build cleanly.
         if analysis_inline is not None:
-            analysis_blob_key = _blob_key(chain_norm, keccak_norm, "analysis")
-            _put_blob(client, analysis_blob_key, analysis_inline)
+            static_facts_blob_key = _blob_key(chain_norm, keccak_norm, "static_facts")
+            _put_blob(client, static_facts_blob_key, analysis_inline)
             analysis_inline = None
-        if tracking_plan_inline is not None:
-            tracking_plan_blob_key = _blob_key(chain_norm, keccak_norm, "tracking_plan")
-            _put_blob(client, tracking_plan_blob_key, tracking_plan_inline)
-            tracking_plan_inline = None
+        if observation_plan_inline is not None:
+            observation_plan_blob_key = _blob_key(chain_norm, keccak_norm, "observation_plan")
+            _put_blob(client, observation_plan_blob_key, observation_plan_inline)
+            observation_plan_inline = None
         if predicate_trees_inline is not None:
             predicate_trees_blob_key = _blob_key(chain_norm, keccak_norm, "predicate_trees")
             _put_blob(client, predicate_trees_blob_key, predicate_trees_inline)
@@ -796,7 +812,7 @@ def materialize_or_wait(
 
         # Recheck: a stale-takeover caller may have raced past phase 1
         # with us and committed first. Their bundle is keccak-equivalent
-        # (same bytecode → same static analysis), so we serve it and
+        # (same bytecode → same static static_facts), so we serve it and
         # discard ours.
         existing = session.execute(
             select(ContractMaterialization).where(
@@ -807,7 +823,7 @@ def materialize_or_wait(
         if (
             existing is not None
             and existing.status == "ready"
-            and existing.analysis_schema_version == ANALYSIS_SCHEMA_VERSION
+            and existing.static_facts_schema_version == STATIC_FACTS_SCHEMA_VERSION
         ):
             session.commit()
             return existing
@@ -817,11 +833,12 @@ def materialize_or_wait(
             bytecode_keccak=keccak_norm,
             address=addr_norm,
             contract_name=bundle.get("contract_name"),
-            analysis=analysis_inline,
-            tracking_plan=tracking_plan_inline,
+            static_facts=analysis_inline,
+            observation_plan=observation_plan_inline,
             predicate_trees=predicate_trees_inline,
-            analysis_blob_key=analysis_blob_key,
-            tracking_plan_blob_key=tracking_plan_blob_key,
+            effects=effects_inline,
+            static_facts_blob_key=static_facts_blob_key,
+            observation_plan_blob_key=observation_plan_blob_key,
             predicate_trees_blob_key=predicate_trees_blob_key,
             source_content_hash=_src["hash"],
             status="ready",
@@ -831,25 +848,26 @@ def materialize_or_wait(
             # this bundle is *of*. The producer is known, the job is not, and
             # the stamp says exactly that.
             provenance=build_provenance(PRODUCED_BY_RESOLUTION),
-            analysis_schema_version=ANALYSIS_SCHEMA_VERSION,
+            static_facts_schema_version=STATIC_FACTS_SCHEMA_VERSION,
         )
         stmt = stmt.on_conflict_do_update(
             constraint="contract_materializations_pkey",
             set_={
                 "status": "ready",
                 "contract_name": stmt.excluded.contract_name,
-                "analysis": stmt.excluded.analysis,
-                "tracking_plan": stmt.excluded.tracking_plan,
+                "static_facts": stmt.excluded.static_facts,
+                "observation_plan": stmt.excluded.observation_plan,
                 "predicate_trees": stmt.excluded.predicate_trees,
-                "analysis_blob_key": stmt.excluded.analysis_blob_key,
-                "tracking_plan_blob_key": stmt.excluded.tracking_plan_blob_key,
+                "effects": stmt.excluded.effects,
+                "static_facts_blob_key": stmt.excluded.static_facts_blob_key,
+                "observation_plan_blob_key": stmt.excluded.observation_plan_blob_key,
                 "predicate_trees_blob_key": stmt.excluded.predicate_trees_blob_key,
                 "source_content_hash": stmt.excluded.source_content_hash,
                 "address": stmt.excluded.address,
                 "error": None,
                 "builder_started_at": None,
                 "provenance": stmt.excluded.provenance,
-                "analysis_schema_version": stmt.excluded.analysis_schema_version,
+                "static_facts_schema_version": stmt.excluded.static_facts_schema_version,
                 "materialized_at": func.now(),
                 "updated_at": func.now(),
             },
@@ -874,30 +892,30 @@ def materialize_or_wait(
 def _publish_blobs(
     chain_norm: str,
     keccak_norm: str,
-    analysis: dict,
-    tracking_plan: dict,
+    static_facts: dict,
+    observation_plan: dict,
     predicate_trees: dict | None,
 ) -> tuple[dict | None, dict | None, dict | None, str | None, str | None, str | None]:
     """Upload the bundle when storage is configured; else keep it inline.
 
-    Returns ``(analysis_inline, tracking_plan_inline, predicate_trees_inline,
-    analysis_key, tracking_plan_key, predicate_trees_key)`` — the same
+    Returns ``(analysis_inline, observation_plan_inline, predicate_trees_inline,
+    analysis_key, observation_plan_key, predicate_trees_key)`` — the same
     inline-or-blob split ``materialize_or_wait`` phase 2 produces. Upload
     failures propagate: a row pointing at a key the bucket does not have reads
     as "this contract's payload could not be produced" forever after.
     """
     client = get_storage_client()
     if client is None:
-        return analysis, tracking_plan, predicate_trees, None, None, None
-    analysis_key = _blob_key(chain_norm, keccak_norm, "analysis")
-    _put_blob(client, analysis_key, analysis)
-    tracking_plan_key = _blob_key(chain_norm, keccak_norm, "tracking_plan")
-    _put_blob(client, tracking_plan_key, tracking_plan)
+        return static_facts, observation_plan, predicate_trees, None, None, None
+    analysis_key = _blob_key(chain_norm, keccak_norm, "static_facts")
+    _put_blob(client, analysis_key, static_facts)
+    observation_plan_key = _blob_key(chain_norm, keccak_norm, "observation_plan")
+    _put_blob(client, observation_plan_key, observation_plan)
     predicate_trees_key: str | None = None
     if predicate_trees is not None:
         predicate_trees_key = _blob_key(chain_norm, keccak_norm, "predicate_trees")
         _put_blob(client, predicate_trees_key, predicate_trees)
-    return None, None, None, analysis_key, tracking_plan_key, predicate_trees_key
+    return None, None, None, analysis_key, observation_plan_key, predicate_trees_key
 
 
 def publish_materialization(
@@ -906,9 +924,10 @@ def publish_materialization(
     address: str,
     bytecode_keccak: str,
     contract_name: str | None,
-    analysis: dict | None,
-    tracking_plan: dict | None,
+    static_facts: dict | None,
+    observation_plan: dict | None,
     predicate_trees: dict | None = None,
+    effects: dict | None = None,
     source_content_hash: str | None = None,
     provenance: dict[str, Any],
     refresh_on_differ: bool = False,
@@ -917,13 +936,13 @@ def publish_materialization(
 
     The producer-side counterpart to :func:`materialize_or_wait`: that function
     exists to *build* a bundle under request coalescing, this one exists to
-    *record* one the caller already holds — the main pipeline's own analysis
+    *record* one the caller already holds — the main pipeline's own static_facts
     artifacts (F4a), or a completed job's artifacts promoted into the versioned
-    store (F4b). Coverage then follows from analysis having run, instead of from
+    store (F4b). Coverage then follows from static_facts having run, instead of from
     which dependencies the authority recursion happened to visit.
 
     **Fill-or-refresh, never a downgrade.** Any row that is not ready at the
-    current schema version is written outright — absent, ``failed``, ``pending``,
+    current schema version is written outright — absent, ``failed``,
     superseded, or ``building``. Overwriting a live ``building`` claim is safe
     and deliberate: that builder's phase-3 recheck finds our ready row and
     discards its own duplicate build, which is the same coalescing
@@ -935,8 +954,8 @@ def publish_materialization(
       under the current analyzer, so where it DIFFERS from the stored bundle it
       is the later record and the row is refreshed (``refreshed``). Identical
       bytecode does not imply an identical bundle: the analyzer improves without
-      every improvement earning an ``ANALYSIS_SCHEMA_VERSION`` bump (a bump
-      invalidates the whole fleet at once and bills a re-analysis of it), so
+      every improvement earning an ``STATIC_FACTS_SCHEMA_VERSION`` bump (a bump
+      invalidates the whole fleet at once and bills a re-static_facts of it), so
       without this a ready row is frozen forever and later analyzer work never
       reaches the store it was written to.
     * ``refresh_on_differ=False`` — the caller is passing on a bundle SOMEONE
@@ -954,8 +973,8 @@ def publish_materialization(
     Refusals, each a fact the caller reports rather than a silent no-op:
 
     ``incomplete_bundle``
-        No analysis or no tracking plan. A ready row whose ``analysis`` is
-        absent reads to the resolution stage as *this contract has no analysis*
+        No static_facts or no tracking plan. A ready row whose ``static_facts`` is
+        absent reads to the resolution stage as *this contract has no static_facts*
         — a claim about the contract that a missing artifact never made.
     ``keccak_bound_to_other_address``
         A ready current row for this bytecode already names a different
@@ -968,7 +987,7 @@ def publish_materialization(
         is current at that address is not something this writer witnessed, so
         it does not overwrite the other row's claim.
     """
-    if not isinstance(analysis, dict) or not isinstance(tracking_plan, dict):
+    if not isinstance(static_facts, dict) or not isinstance(observation_plan, dict) or not isinstance(effects, dict):
         return PUBLISH_INCOMPLETE_BUNDLE
 
     chain_norm, addr_norm, keccak_norm = _normalize(chain, address, bytecode_keccak)
@@ -991,7 +1010,9 @@ def publish_materialization(
         ).scalar_one_or_none()
         outcome = _publish_precheck(existing, addr_norm)
         if outcome == PUBLISH_ALREADY_CURRENT:
-            if not refresh_on_differ or not _bundle_differs(existing, analysis, tracking_plan, predicate_trees):
+            if not refresh_on_differ or not _bundle_differs(
+                existing, static_facts, observation_plan, predicate_trees, effects
+            ):
                 session.commit()
                 return PUBLISH_ALREADY_CURRENT
             written = PUBLISH_REFRESHED
@@ -1027,43 +1048,45 @@ def publish_materialization(
             analysis_key,
             plan_key,
             trees_key,
-        ) = _publish_blobs(chain_norm, keccak_norm, analysis, tracking_plan, predicate_trees)
+        ) = _publish_blobs(chain_norm, keccak_norm, static_facts, observation_plan, predicate_trees)
 
         stmt = pg_insert(ContractMaterialization).values(
             chain=chain_norm,
             bytecode_keccak=keccak_norm,
             address=addr_norm,
             contract_name=contract_name,
-            analysis=analysis_inline,
-            tracking_plan=plan_inline,
+            static_facts=analysis_inline,
+            observation_plan=plan_inline,
             predicate_trees=trees_inline,
-            analysis_blob_key=analysis_key,
-            tracking_plan_blob_key=plan_key,
+            effects=effects,
+            static_facts_blob_key=analysis_key,
+            observation_plan_blob_key=plan_key,
             predicate_trees_blob_key=trees_key,
             source_content_hash=source_content_hash,
             status="ready",
             error=None,
             builder_started_at=None,
             provenance=provenance,
-            analysis_schema_version=ANALYSIS_SCHEMA_VERSION,
+            static_facts_schema_version=STATIC_FACTS_SCHEMA_VERSION,
         )
         stmt = stmt.on_conflict_do_update(
             constraint="contract_materializations_pkey",
             set_={
                 "address": stmt.excluded.address,
                 "contract_name": stmt.excluded.contract_name,
-                "analysis": stmt.excluded.analysis,
-                "tracking_plan": stmt.excluded.tracking_plan,
+                "static_facts": stmt.excluded.static_facts,
+                "observation_plan": stmt.excluded.observation_plan,
                 "predicate_trees": stmt.excluded.predicate_trees,
-                "analysis_blob_key": stmt.excluded.analysis_blob_key,
-                "tracking_plan_blob_key": stmt.excluded.tracking_plan_blob_key,
+                "effects": stmt.excluded.effects,
+                "static_facts_blob_key": stmt.excluded.static_facts_blob_key,
+                "observation_plan_blob_key": stmt.excluded.observation_plan_blob_key,
                 "predicate_trees_blob_key": stmt.excluded.predicate_trees_blob_key,
                 "source_content_hash": stmt.excluded.source_content_hash,
                 "status": "ready",
                 "error": None,
                 "builder_started_at": None,
                 "provenance": stmt.excluded.provenance,
-                "analysis_schema_version": stmt.excluded.analysis_schema_version,
+                "static_facts_schema_version": stmt.excluded.static_facts_schema_version,
                 "materialized_at": func.now(),
                 "updated_at": func.now(),
             },
@@ -1075,9 +1098,10 @@ def publish_materialization(
 
 def _bundle_differs(
     existing: ContractMaterialization | None,
-    analysis: dict,
-    tracking_plan: dict,
+    static_facts: dict,
+    observation_plan: dict,
     predicate_trees: dict | None,
+    effects: dict | None,
 ) -> bool:
     """Does the stored bundle say something other than the caller's?
 
@@ -1090,9 +1114,10 @@ def _bundle_differs(
         return True
     try:
         stored = (
-            hydrate_analysis(existing),
-            hydrate_tracking_plan(existing),
+            hydrate_static_facts(existing),
+            hydrate_observation_plan(existing),
             hydrate_predicate_trees(existing),
+            hydrate_effects(existing),
         )
     except Exception as exc:
         logger.info(
@@ -1102,7 +1127,9 @@ def _bundle_differs(
             exc,
         )
         return True
-    return [_canonical(p) for p in stored] != [_canonical(p) for p in (analysis, tracking_plan, predicate_trees)]
+    return [_canonical(p) for p in stored] != [
+        _canonical(p) for p in (static_facts, observation_plan, predicate_trees, effects)
+    ]
 
 
 def _canonical(payload: dict | None) -> str | None:
@@ -1136,7 +1163,7 @@ def _publish_precheck(existing: ContractMaterialization | None, addr_norm: str) 
     """
     if existing is None:
         return None
-    if existing.status != "ready" or existing.analysis_schema_version != ANALYSIS_SCHEMA_VERSION:
+    if existing.status != "ready" or existing.static_facts_schema_version != STATIC_FACTS_SCHEMA_VERSION:
         return None
     if (existing.address or "").lower() != addr_norm:
         return PUBLISH_KECCAK_BOUND_TO_OTHER_ADDRESS

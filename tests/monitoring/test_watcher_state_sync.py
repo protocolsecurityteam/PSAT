@@ -78,7 +78,7 @@ class TestRevertedEthCallPolling:
         polling_plan = build_polling_plan(
             contract_type="proxy",
             proxy_type="custom",
-            tracking_plan=None,
+            observation_plan=None,
             tracked_topics=None,
         )
         # Add an owner entry too so the mock batch's index-1 revert

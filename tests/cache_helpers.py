@@ -302,6 +302,9 @@ def _create_completed_job_with_static_data(session, address=ADDR_A):
     job = create_job(session, {"address": address, "name": "TestContract"})
     job.status = JobStatus.completed
     job.stage = JobStage.done
+    from db.contract_materializations import STATIC_FACTS_SCHEMA_VERSION
+
+    job.static_facts_schema_version = STATIC_FACTS_SCHEMA_VERSION
     session.commit()
 
     # Contract row
@@ -356,10 +359,12 @@ def _create_completed_job_with_static_data(session, address=ADDR_A):
     )
 
     # Artifacts
-    store_artifact(session, job.id, "contract_analysis", data={"summary": {"control_model": "ownable"}})
+    from tests.support.policy_builders import _assessment, _minimal_static_facts
+
+    facts = _minimal_static_facts(address=address, name="TestContract")
+    store_artifact(session, job.id, "assessment", data=_assessment(static_facts=facts))
     store_artifact(session, job.id, "slither_results", data={"results": {"detectors": []}})
-    store_artifact(session, job.id, "analysis_report", text_data="Test analysis report")
-    store_artifact(session, job.id, "control_tracking_plan", data={"controllers": []})
+    store_artifact(session, job.id, "static_facts_report", text_data="Test analysis report")
     store_artifact(session, job.id, "contract_flags", data={"is_proxy": False})
 
     return job
@@ -408,10 +413,12 @@ def _create_source_job_with_proxy(
     session.commit()
 
     store_source_files(session, job.id, {"src/Proxy.sol": "contract Proxy {}"})
-    store_artifact(session, job.id, "contract_analysis", data={"summary": {}})
+    from tests.support.policy_builders import _assessment, _minimal_static_facts
+
+    facts = _minimal_static_facts(address=address, name="ProxyContract")
+    store_artifact(session, job.id, "assessment", data=_assessment(static_facts=facts))
     store_artifact(session, job.id, "slither_results", data={"results": {"detectors": []}})
-    store_artifact(session, job.id, "analysis_report", text_data="proxy report")
-    store_artifact(session, job.id, "control_tracking_plan", data={"controllers": []})
+    store_artifact(session, job.id, "static_facts_report", text_data="proxy report")
 
     return job
 
@@ -487,8 +494,8 @@ def _patch_static_worker_phases(monkeypatch, worker):
     monkeypatch.setattr(worker, "_resolve_proxy", lambda *a, **kw: phases_run.append("resolve_proxy"))
     monkeypatch.setattr(worker, "_scaffold_project", lambda *a, **kw: None)
     monkeypatch.setattr(worker, "_run_dependency_phase", lambda *a, **kw: phases_run.append("dependency"))
-    monkeypatch.setattr(worker, "_run_analysis_phase", lambda *a, **kw: phases_run.append("analysis") or True)
-    monkeypatch.setattr(worker, "_run_tracking_plan_phase", lambda *a, **kw: phases_run.append("tracking_plan"))
+    monkeypatch.setattr(worker, "_run_static_facts_phase", lambda *a, **kw: phases_run.append("analysis") or True)
+    monkeypatch.setattr(worker, "_publish_materialization", lambda *a, **kw: phases_run.append("materialization"))
     monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
     return phases_run
 
@@ -498,7 +505,7 @@ def _patch_static_worker_non_dep_phases(monkeypatch, worker):
     phases_run = []
     monkeypatch.setattr(worker, "_resolve_proxy", lambda *a, **kw: phases_run.append("resolve_proxy"))
     monkeypatch.setattr(worker, "_scaffold_project", lambda *a, **kw: None)
-    monkeypatch.setattr(worker, "_run_analysis_phase", lambda *a, **kw: phases_run.append("analysis") or True)
-    monkeypatch.setattr(worker, "_run_tracking_plan_phase", lambda *a, **kw: phases_run.append("tracking_plan"))
+    monkeypatch.setattr(worker, "_run_static_facts_phase", lambda *a, **kw: phases_run.append("analysis") or True)
+    monkeypatch.setattr(worker, "_publish_materialization", lambda *a, **kw: phases_run.append("materialization"))
     monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
     return phases_run

@@ -1,4 +1,4 @@
-"""Profiling instrumentation for ``collect_contract_analysis_with_artifacts``
+"""Profiling instrumentation for ``collect_static_inputs``
 and ``build_predicate_artifacts_with_pause_info``.
 
 Asserts that the per-phase log lines are emitted with the structured
@@ -21,7 +21,7 @@ import logging
 from typing import Any
 from unittest.mock import patch
 
-from services.static.contract_analysis_pipeline import predicate_artifacts
+from services.static.static_analysis import predicate_artifacts
 
 
 class _StubFn:

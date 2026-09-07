@@ -1,33 +1,10 @@
-"""Effects → claims bridge.
+"""Convert proven execution verdicts into effect matches.
 
-Turns a *proven* effect verdict into a registry claim so the frontend renders it
-through the one shared claims vocabulary (``site/src/vocab/``) with zero
-duplicated display logic. This is the consumption boundary where the write-only
-verdict substrate becomes "labels-observable, scoring-deferred".
-
-Design constraints this module honours verbatim:
-
-- **Registry is the sole minter.** Claims are built only through
-  :func:`services.static.claims.registry.emit_claim` and collapsed through
-  :func:`resolve_claim_precedence` — never hand-built dicts. An id not in the
-  registry cannot escape (the same anti-creep invariant static relies on).
-- **Fail-closed.** Only ``verdict == proven`` mints. ``unknown`` / degraded
-  mint nothing. A Tier-0 *historical* verdict mints only when its current-state
-  check passed (``current_check_passed is True``); a failed current check proves
-  *past* capability, and a present-tense label would overclaim.
-- **Witness is a pointer, not a payload.** The claim witness records the verdict
-  identity (``effect_verdict_id`` / ``effect_class`` / ``behavior_hash`` /
-  ``verdict_tier``) plus a minimal observed summary. Transcripts never enter
-  ``EffectiveFunction.claims`` — they live in the artifact store.
-
-Pure functions, no I/O: the two call sites (``workers.effects_worker`` and
-``services.policy.effective_permissions_writer``) do the DB reads/writes and
-hand this module plain verdict-shaped objects.
-"""
+Assessment owns evidence merging and claim projection. Historical verdicts
+require a successful current-state check before asserting present capability."""
 
 from __future__ import annotations
 
-from collections.abc import Iterable
 from typing import Any, Protocol
 
 from services.effects.config import (
@@ -44,11 +21,9 @@ from services.static.claims.registry import (
     RegistryEntry,
     emit_claim,
     is_registered,
-    legacy_projections,
     register,
-    resolve_claim_precedence,
 )
-from services.static.claims.types import TIER_PRECEDENCE, Claim, Tier
+from services.static.claims.types import EffectMatch, Tier
 from utils.execution_record import PROVING_EXECUTION_KEY
 from utils.scoring_status import WITNESS_TIER_BEHAVIORAL_OBSERVED
 
@@ -87,7 +62,6 @@ if not is_registered(AUTHORITY_GRANT):
             sentence="lets a caller pass a permission gate that previously rejected it",
             gate=_no_static_gate,
             trigger=_no_static_trigger,
-            legacy_projection="authority_update",
             consumer_family="control_plane",
         )
     )
@@ -159,7 +133,7 @@ def _mints(verdict: VerdictLike) -> bool:
     return True
 
 
-def verdict_to_claim(verdict: VerdictLike) -> Claim | None:
+def verdict_to_claim(verdict: VerdictLike) -> EffectMatch | None:
     """Mint the registry claim for one proven verdict, or ``None`` when the
     verdict fails the fail-closed gate or maps to no claim. The witness is a pointer to the
     verdict (never the transcript)."""
@@ -406,164 +380,7 @@ def _execution_summary(verdict: VerdictLike) -> dict[str, Any]:
     return {PROVING_EXECUTION_KEY: residue[PROVING_EXECUTION_KEY]}
 
 
-def claims_from_verdicts(verdicts: Iterable[Any]) -> list[Claim]:
-    """Every mintable proven verdict, mapped to its claim (fail-closed drops
-    filtered out)."""
-    out: list[Claim] = []
-    for verdict in verdicts:
-        claim = verdict_to_claim(verdict)
-        if claim is not None:
-            out.append(claim)
-    return out
-
-
 # The witness keys ``verdict_to_claim`` above owns. A witness carrying ONLY these
 # is a pure pointer to an observation and has no structural detail to donate; a
 # witness carrying anything else was built by a static matcher. No static witness
 # in the registry uses one of these names, so the two key spaces never collide.
-_OBSERVED_WITNESS_KEYS = frozenset({"effect_verdict_id", "effect_class", "behavior_hash", "verdict_tier", "observed"})
-
-
-def _tier_rank(tier: str | None) -> int:
-    return TIER_PRECEDENCE.get(tier or "", 0)
-
-
-def _carries_static_detail(claim: Claim) -> bool:
-    witness = claim.get("witness")
-    if not isinstance(witness, dict):
-        return False
-    return any(key not in _OBSERVED_WITNESS_KEYS for key in witness)
-
-
-def _donor_for(claim_id: str, prior: list[Claim]) -> Claim | None:
-    """The prior claim whose structural detail a freshly observed claim inherits:
-    the strongest one that HAS any, not simply the strongest one.
-
-    Choosing by tier alone is self-defeating once a row has already been damaged.
-    A stripped ``behavioral_observed`` claim outranks the fresh ``standard_exact``
-    static claim sitting beside it, gets picked as its own donor, and donates
-    nothing — so a re-run of the policy stage, which exists to re-supply the
-    static claim, could not repair a single damaged row."""
-    fallback: Claim | None = None
-    donor: Claim | None = None
-    for claim in prior:
-        if claim.get("claim_id") != claim_id:
-            continue
-        rank = _tier_rank(claim.get("tier", ""))
-        if fallback is None or rank > _tier_rank(fallback.get("tier", "")):
-            fallback = claim
-        if _carries_static_detail(claim) and (donor is None or rank > _tier_rank(donor.get("tier", ""))):
-            donor = claim
-    return donor if donor is not None else fallback
-
-
-def _carry_forward_static_witness(donor: Claim, observed: dict[str, Any]) -> dict[str, Any]:
-    """Keep the superseded static witness's structural facts on the observed one.
-
-    Precedence is about TIER — how well we know the claim is true — and a fork
-    observation is the strongest evidence that value moved. It is not evidence
-    about WHERE it can go or HOW MUCH: the probe watched one execution, while
-    ``target_kind``/``amount_kind``/``*_param_index`` are universals the static
-    lattice derived from the code. Dropping them because a stronger tier arrived
-    discarded the only answer to the question the stage exists to ask.
-
-    The effect was perverse: the claim survived at ``behavioral_observed`` while
-    its destination and amount vanished, so the functions we learned the MOST
-    about published the LEAST. Of four sibling ``EtherFiRedemptionManager.redeem*``
-    with identical static flow sets, the one whose probe actually executed was the
-    only one to lose its lattice.
-
-    The carry is the full union of the donor's keys, not a per-family allowlist:
-    ``flow.out`` witnesses carry ``flows``/``direction``/``sink_ids``, but
-    ``pause.set`` carries ``flags``/``polarity`` and ``supply.*`` carries
-    ``supply``/``selector``, and an allowlist silently under-carried all of them.
-    Every carried key is a *structural* universal about the code, which one
-    execution cannot refute, and a claim only mints behind the proven gate — so a
-    carry only ever adds detail to a claim the observation already confirmed.
-
-    ``static_tier`` stamps where that detail came from, because the donor may be
-    as weak as ``policy_derived`` and a consumer reading the whole witness at
-    ``behavioral_observed`` quality would be laundering the tier. A donor that
-    already carries the stamp keeps it: the structural keys are still the ones
-    that static tier established, not the donor's own.
-
-    Observed keys always win on a collision — the observation is the newer, better
-    evidence about anything it genuinely measured."""
-    static = donor.get("witness")
-    if not isinstance(static, dict):
-        return observed
-    # The donor's OWN observation pointer is not static detail and must not ride
-    # along: it names a different verdict, and its ``observed`` summary would
-    # survive onto a witness whose pointer has already moved on.
-    carried = {k: v for k, v in static.items() if k not in _OBSERVED_WITNESS_KEYS}
-    if not carried:
-        return observed
-    merged = dict(carried)
-    merged["static_tier"] = static.get("static_tier", donor.get("tier"))
-    merged.update(observed)
-    return merged
-
-
-def _drop_superseded(prior: list[Claim], minted: list[Claim]) -> list[Claim]:
-    """Drop any prior claim a freshly minted one restates at the same tier.
-
-    ``resolve_claim_precedence`` keeps the FIRST claim at the strongest tier, so
-    a stale ``behavioral_observed`` claim ahead of its own re-minted replacement
-    wins on a tie and the repair never lands. Dropping it explicitly says that in
-    one place, rather than depending on the tie-break of another module by
-    ordering the list a particular way."""
-    restated = {(claim["claim_id"], claim["tier"]) for claim in minted}
-    return [claim for claim in prior if (claim.get("claim_id"), claim.get("tier")) not in restated]
-
-
-def merge_observed_claims(existing: Iterable[Claim], verdicts: Iterable[Any]) -> list[Claim]:
-    """Fold this function's proven verdicts into its existing claim list under the
-    registry precedence rule. Idempotent: re-merging the same verdicts is a no-op
-    because ``resolve_claim_precedence`` keeps one claim per (id, strongest tier)
-    and ``behavioral_observed`` outranks every static tier, so a second pass finds
-    nothing stronger to install — and the carry-forward below is itself
-    idempotent, since re-merging copies the same structural keys back."""
-    prior = list(existing)
-    minted = claims_from_verdicts(verdicts)
-    for claim in minted:
-        donor = _donor_for(claim["claim_id"], prior)
-        if donor is not None:
-            claim["witness"] = _carry_forward_static_witness(donor, claim.get("witness") or {})
-    return resolve_claim_precedence([*_drop_superseded(prior, minted), *minted])
-
-
-def reproject_effect_labels(existing_labels: Iterable[str], claims: Iterable[Claim]) -> list[str]:
-    """Re-derive the legacy ``effect_labels`` as the union of the labels already
-    present and the registry ``legacy_projection`` of every claim on the function
-    (the same additive dual-write discipline ``project_effect_labels`` uses), so
-    the legacy display path stays in sync with the claims plane."""
-    projections = legacy_projections()
-    labels = {str(label) for label in existing_labels}
-    for claim in claims:
-        projected = projections.get(claim.get("claim_id", ""))
-        if projected:
-            labels.add(projected)
-    return sorted(labels)
-
-
-def merge_into_function(
-    existing_claims: Iterable[Claim] | None,
-    existing_labels: Iterable[str] | None,
-    verdicts: Iterable[Any],
-) -> tuple[list[Claim], list[str]] | None:
-    """The whole per-function merge: fold proven verdicts into the claims, then
-    re-project the legacy labels. Returns ``(claims, effect_labels)`` or ``None``
-    when nothing minted (so a caller leaves untouched rows exactly as written —
-    the identity path keeps every claim-free function byte-identical).
-
-    The fold itself is :func:`merge_observed_claims` and must stay that way. This
-    seam once inlined its own precedence call instead, which is how the two paths
-    that merge the same claims came to disagree: the writer carried the static
-    lattice forward and the effects worker — the path that actually mints observed
-    claims — deleted it."""
-    existing_claims = list(existing_claims or [])
-    if not claims_from_verdicts(verdicts):
-        return None
-    merged_claims = merge_observed_claims(existing_claims, verdicts)
-    merged_labels = reproject_effect_labels(existing_labels or [], merged_claims)
-    return merged_claims, merged_labels

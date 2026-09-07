@@ -8,67 +8,19 @@ import FastAPI.
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
-from typing import Any
+from typing import Any, cast
 
-from sqlalchemy import func, select
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
-from db.models import (
-    Contract,
-    ControllerValue,
-    EffectiveFunction,
-    Job,
-    JobStatus,
-    PrincipalLabel,
-)
+from db.models import Contract, Job, JobStatus
 
 # Indirect through ``routers.deps`` so tests get a single patch point for
 # ``SessionLocal``/``get_all_artifacts``.
 from routers import deps
-from services.aggregations.action_summary import describe_action
-from services.policy.capability_surface import capability_currency, exact_empty_credit
+from schemas.assessment import Assessment
 
 logger = logging.getLogger(__name__)
-
-
-def _principal_label_payload(row: PrincipalLabel) -> dict[str, Any]:
-    """One ``principal_labels`` row as published, with two assertions narrowed.
-
-    ``confidence`` is NOT published under that name. The column is a
-    NAMING-BRANCH label: ``principal_enrichment._display_name`` returns ``"high"``
-    both for the ``safe_signer`` branch (an on-chain-verified fact) and for the
-    final fallback, where it means only *"``resolved_type`` was not the literal
-    string ``unknown``"*, and both print ``high``. Distribution: ``high`` 1,376 /
-    ``medium`` 180 / ``low`` **0** — ``low`` is reachable only when
-    ``resolved_type == "unknown"`` and no such row exists, so the field is
-    two-valued in practice, is ~97% a restatement of ``resolved_type``, and CANNOT
-    express "I did not determine this" — a state an evidence column has to keep
-    distinct from a determined answer.
-    Published as ``naming_rule``, which is what it measures. A real per-principal
-    confidence has to come from whether the identity was verified on-chain (Safe
-    ``getOwners``/``getThreshold``, timelock ``getMinDelay``) — that derivation
-    needs wiring this consumer does not own, and inventing one from this column
-    would be manufacturing the evidence the rename exists to stop claiming.
-
-    ``label`` is byte-identical to ``display_name`` on 1,556/1,556 rows, so a
-    consumer reading both believed there were two facts. It is published only when
-    the two actually differ.
-    """
-    out: dict[str, Any] = {
-        "address": row.address,
-        "display_name": row.display_name,
-        "resolved_type": row.resolved_type,
-        "labels": list(row.labels or []),
-        # Which naming branch produced ``display_name``. Never an epistemic
-        # confidence, and never omitted — key-absence marks a pre-rename payload.
-        "naming_rule": row.confidence,
-        "details": row.details or {},
-        "graph_context": list(row.graph_context or []),
-    }
-    if row.label is not None and row.label != row.display_name:
-        out["label"] = row.label
-    return out
 
 
 def _artifacts_or_degrade(
@@ -175,27 +127,20 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
     }
 
     for artifact_name in (
-        "contract_analysis",
-        "control_snapshot",
+        "assessment",
         "dependencies",
-        "resolved_control_graph",
         "dependency_graph_viz",
         "upgrade_history",
-        "principal_history",
-        # Raw predicate trees per externally-callable function. Consumers
-        # can read this directly or fetch resolved semantic capabilities
-        # below.
-        "predicate_trees",
     ):
         if artifact_name in all_artifacts and isinstance(all_artifacts[artifact_name], dict):
             payload[artifact_name] = all_artifacts[artifact_name]
 
-    # Resolved semantic capabilities. Computed lazily — the raw
-    # predicate_trees lives on the artifact; resolving it to the typed
+    # Resolved semantic capabilities. Computed lazily from Assessment evidence;
+    # resolving predicate trees to the typed
     # CapabilityExpr requires the AdapterRegistry + repos. Defensive: a
     # capability-resolution failure MUST NOT fail the whole analysis_detail
     # response; the rest of the detail payload is still useful.
-    if "predicate_trees" in all_artifacts and job.address:
+    if "assessment" in all_artifacts and job.address:
         try:
             from services.resolution.capability_resolver import resolve_contract_capabilities
 
@@ -262,11 +207,16 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
         if impl_job:
             _inherit_from_impl(session, payload, job, impl_job, impl_addr, not_determined, body_absent)
 
-    # Add subject info from contract_analysis if available
-    if isinstance(all_artifacts.get("contract_analysis"), dict):
-        subject = all_artifacts["contract_analysis"].get("subject", {})
-        payload["contract_name"] = subject.get("name", payload["run_name"])
-        payload["summary"] = all_artifacts["contract_analysis"].get("summary")
+    # Canonical claims + detector coverage own the compatibility boolean.
+    if isinstance(all_artifacts.get("assessment"), dict):
+        from services.assessment import effect_presence
+
+        assessment = cast(Assessment, all_artifacts["assessment"])
+        payload["assessment"] = assessment
+        summary = payload.get("summary")
+        summary = dict(summary) if isinstance(summary, dict) else {}
+        summary["is_pausable"] = effect_presence(assessment, "pause.set")
+        payload["summary"] = summary
 
     # Synthesis fallback for upgrade_history. Mirrors the per-artifact
     # endpoint at /api/analyses/{job}/artifact/upgrade_history. Runs after
@@ -292,227 +242,24 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
         # above, re-asking will not change the answer.
         payload["artifacts_body_absent"] = dict(sorted(body_absent.items()))
 
+    if contract_row is not None:
+        payload.setdefault("contract_name", contract_row.contract_name or payload["run_name"])
+
     return payload
 
 
 def _populate_from_contract(session: Session, payload: dict[str, Any], contract_row: Contract) -> None:
-    ef_rows = list(
-        session.execute(
-            select(EffectiveFunction)
-            .where(EffectiveFunction.contract_id == contract_row.id)
-            .options(selectinload(EffectiveFunction.principals))
-        ).scalars()
-    )
-
-    index_head = _index_frontier(session, contract_row)
-    ef_list = _serialize_effective_functions(ef_rows, index_head=index_head)
-    if ef_list:
-        payload["effective_permissions"] = {
-            "functions": ef_list,
-            "contract_name": contract_row.contract_name,
-            "contract_address": contract_row.address,
+    del session
+    if not contract_row.is_proxy:
+        payload["contract_name"] = contract_row.contract_name or payload["run_name"]
+    if not contract_row.is_proxy and contract_row.summary:
+        payload["summary"] = {
+            "control_model": contract_row.summary.control_model,
+            "is_upgradeable": contract_row.summary.is_upgradeable,
+            "is_pausable": contract_row.summary.is_pausable,
+            "has_timelock": contract_row.summary.has_timelock,
+            "standards": list(contract_row.summary.standards or []),
         }
-        if "effective_permissions" not in payload.get("available_artifacts", []):
-            payload["available_artifacts"] = sorted(
-                set(payload.get("available_artifacts", [])) | {"effective_permissions"}
-            )
-
-    # Build principal_labels from table
-    pl_rows = (
-        session.execute(select(PrincipalLabel).where(PrincipalLabel.contract_id == contract_row.id)).scalars().all()
-    )
-    if pl_rows:
-        payload["principal_labels"] = {
-            "principals": [_principal_label_payload(p) for p in pl_rows],
-            "contract_name": contract_row.contract_name,
-            "contract_address": contract_row.address,
-        }
-
-    if "control_snapshot" not in payload:
-        cv_rows = (
-            session.execute(select(ControllerValue).where(ControllerValue.contract_id == contract_row.id))
-            .scalars()
-            .all()
-        )
-        if cv_rows:
-            payload["control_snapshot"] = _build_control_snapshot(contract_row, cv_rows)
-
-    if "resolved_control_graph" not in payload:
-        from db.models import ControlGraphEdge, ControlGraphNode
-
-        cgn_rows = (
-            session.execute(select(ControlGraphNode).where(ControlGraphNode.contract_id == contract_row.id))
-            .scalars()
-            .all()
-        )
-        cge_rows = (
-            session.execute(select(ControlGraphEdge).where(ControlGraphEdge.contract_id == contract_row.id))
-            .scalars()
-            .all()
-        )
-        if cgn_rows:
-            payload["resolved_control_graph"] = _build_control_graph(contract_row.address, cgn_rows, cge_rows)
-
-
-def _index_frontier(session: Session, contract_row: Contract) -> int | None:
-    """The durable event index's own frontier for this contract's chain — the
-    yardstick ``capability_currency`` measures a capability's fold height
-    against. A local read; ``None`` when the chain has no cursors at all, which
-    keeps the currency verdict ``not_determined`` rather than inventing a head.
-    """
-    from db.models import IndexedEventCursor
-    from utils.chains import UnknownChainError, chain_by_name
-
-    try:
-        chain_id = chain_by_name(contract_row.chain or "ethereum").chain_id
-    except (UnknownChainError, AttributeError):
-        return None
-    return session.execute(
-        select(func.max(IndexedEventCursor.last_indexed_block)).where(IndexedEventCursor.chain_id == chain_id)
-    ).scalar()
-
-
-def _serialize_effective_functions(
-    ef_rows: list[EffectiveFunction], *, index_head: int | None = None
-) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    for ef in ef_rows:
-        direct_owner = None
-        controller_principals: list[dict[str, Any]] = []
-        signature_witnesses: list[dict[str, Any]] = []
-        for fp in ef.principals or []:
-            principal_dict = {
-                "address": fp.address,
-                "resolved_type": fp.resolved_type,
-                "source_controller_id": fp.origin,
-                "principal_type": fp.principal_type,
-                "details": fp.details or {},
-            }
-            if fp.principal_type == "direct_owner" and direct_owner is None:
-                direct_owner = principal_dict
-            elif fp.principal_type == "signature_witness":
-                signature_witnesses.append(principal_dict)
-            else:
-                controller_principals.append(principal_dict)
-        _action_summary_text, _action_summary_kind, _action_summary_note = describe_action(
-            ef.action_summary, getattr(ef, "claims", None), ef.effect_labels
-        )
-        entry: dict[str, Any] = {
-            "function": ef.abi_signature or ef.function_name,
-            "selector": ef.selector,
-            "effect_labels": list(ef.effect_labels or []),
-            "effect_targets": list(ef.effect_targets or []),
-            "claims": list(getattr(ef, "claims", None) or []),
-            # The quotable copy of the structured planes, reconciled against them
-            # and labelled with which shape it is: 130 local rows say
-            # "Performs a contract action." (no evidence at all), 528 restate
-            # effect_targets as a "write", and the 20 arbitrary-execution rows
-            # outlived the narrowing of the structured exec.arbitrary claim. See
-            # services/aggregations/action_summary.
-            "action_summary": _action_summary_text,
-            "action_summary_kind": _action_summary_kind,
-            "action_summary_note": _action_summary_note,
-            "authority_public": ef.authority_public,
-            # Three-state authority verdict beside the bool it splits. NULL on a
-            # row written before the column existed — passed through as null so
-            # a consumer can tell "this row never carried the distinction" from
-            # the resolver's own 'not_determined'.
-            "authority_openness": getattr(ef, "authority_openness", None),
-            "controllers": [{"principals": controller_principals}] if controller_principals else [],
-            # Three states preserved: a non-empty list is witnessed, ``None``
-            # is role-gated with the role not determined (the enumerable
-            # role-store dissolves role identity by design), ``[]`` is proven
-            # not role-gated. ``or []`` folded the middle into the last.
-            "authority_roles": _authority_roles_state(ef.authority_roles),
-            "direct_owner": direct_owner,
-            "signature_witnesses": signature_witnesses,
-        }
-        capability_expr = getattr(ef, "capability_expr", None)
-        if capability_expr is not None:
-            entry["capability_expr"] = capability_expr
-            entry["capability_currency"] = capability_currency(capability_expr, index_head=index_head)
-            # Served beside the payload it gates, never derived downstream from
-            # ``exact + members == []``: a consumer reading that shape alone
-            # cannot tell a read-confirmed empty from a provenance-less one.
-            # ``not_determined`` here withholds the earned-negative credit; it
-            # never asserts a caller exists, and it does not change ``status``.
-            entry["exact_empty_credit"] = exact_empty_credit(capability_expr)
-        conditions = getattr(ef, "conditions", None)
-        if conditions is not None:
-            entry["conditions"] = conditions
-        status = getattr(ef, "status", None)
-        if status is not None:
-            entry["status"] = status
-        out.append(entry)
-    return out
-
-
-def _authority_roles_state(column: Any) -> Any:
-    """The ``authority_roles`` column, with one guard: a non-empty list whose
-    members are ALL non-objects was unreadable as role grants, not a witnessed
-    role requirement — serve the not-determined ``None``, exactly as the
-    company serializer does when the same list enriches to nothing
-    (``services/governance/principals.py``), so the two surfaces derive the
-    same state from the same row. 0-realised on observed rows (0 non-object
-    grants of 210 non-empty ones)."""
-    if isinstance(column, list) and column and not any(isinstance(grant, dict) for grant in column):
-        return None
-    return column
-
-
-def _build_control_snapshot(contract_row: Contract, cv_rows: Sequence[ControllerValue]) -> dict[str, Any]:
-    return {
-        "contract_name": contract_row.contract_name,
-        "contract_address": contract_row.address,
-        "controller_values": {
-            cv.controller_id: {
-                "value": cv.value,
-                "resolved_type": cv.resolved_type,
-                "source": cv.source,
-                "block_number": cv.block_number,
-                "observed_via": cv.observed_via,
-                "details": cv.details or {},
-            }
-            for cv in cv_rows
-        },
-    }
-
-
-def _build_control_graph(root_address: str, cgn_rows, cge_rows) -> dict[str, Any]:
-    return {
-        "root_contract_address": root_address,
-        "nodes": [
-            {
-                "id": f"address:{n.address}",
-                "address": n.address,
-                "node_type": n.node_type,
-                "resolved_type": n.resolved_type,
-                "label": n.label,
-                "contract_name": n.contract_name,
-                "depth": n.depth,
-                "analyzed": n.analyzed,
-                # ``analyzed=false`` is four populations; this says which, and
-                # ``null`` is the honest fifth ("not determined") for rows
-                # written before the column. ``graph_max_depth`` is what makes
-                # "beyond_depth_horizon" checkable against ``depth``.
-                "analysis_state": n.analysis_state,
-                "graph_max_depth": n.graph_max_depth,
-                "details": n.details or {},
-            }
-            for n in cgn_rows
-        ],
-        "edges": [
-            {
-                "from_id": e.from_node_id,
-                "to_id": e.to_node_id,
-                "relation": e.relation,
-                "label": e.label,
-                "source_controller_id": e.source_controller_id,
-                "notes": list(e.notes or []),
-            }
-            for e in cge_rows
-        ],
-    }
 
 
 def _inherit_from_impl(
@@ -530,14 +277,7 @@ def _inherit_from_impl(
         not_determined if not_determined is not None else {},
         body_absent if body_absent is not None else {},
     )
-    for fallback_name in (
-        "contract_analysis",
-        "control_snapshot",
-        "resolved_control_graph",
-        "effective_permissions",
-        "principal_labels",
-        "principal_history",
-    ):
+    for fallback_name in ("assessment",):
         if fallback_name not in payload:
             val = impl_artifacts.get(fallback_name)
             if val is not None:
@@ -545,53 +285,6 @@ def _inherit_from_impl(
 
     impl_c = session.execute(select(Contract).where(Contract.job_id == impl_job.id).limit(1)).scalar_one_or_none()
     if impl_c:
-        if "effective_permissions" not in payload:
-            impl_efs = list(
-                session.execute(
-                    select(EffectiveFunction)
-                    .where(EffectiveFunction.contract_id == impl_c.id)
-                    .options(selectinload(EffectiveFunction.principals))
-                ).scalars()
-            )
-            if impl_efs:
-                payload["effective_permissions"] = {
-                    "functions": _serialize_effective_functions(impl_efs, index_head=_index_frontier(session, impl_c)),
-                    "contract_name": impl_c.contract_name,
-                    "contract_address": impl_c.address,
-                }
-
-        if "control_snapshot" not in payload:
-            impl_cvs = (
-                session.execute(select(ControllerValue).where(ControllerValue.contract_id == impl_c.id)).scalars().all()
-            )
-            if impl_cvs:
-                payload["control_snapshot"] = _build_control_snapshot(impl_c, impl_cvs)
-
-        if "resolved_control_graph" not in payload:
-            from db.models import ControlGraphEdge, ControlGraphNode
-
-            impl_cgn = (
-                session.execute(select(ControlGraphNode).where(ControlGraphNode.contract_id == impl_c.id))
-                .scalars()
-                .all()
-            )
-            impl_cge = (
-                session.execute(select(ControlGraphEdge).where(ControlGraphEdge.contract_id == impl_c.id))
-                .scalars()
-                .all()
-            )
-            if impl_cgn:
-                payload["resolved_control_graph"] = _build_control_graph(impl_c.address, impl_cgn, impl_cge)
-
-        if "principal_labels" not in payload:
-            impl_pls = (
-                session.execute(select(PrincipalLabel).where(PrincipalLabel.contract_id == impl_c.id)).scalars().all()
-            )
-            if impl_pls:
-                payload["principal_labels"] = {
-                    "principals": [_principal_label_payload(p) for p in impl_pls],
-                }
-
         if "contract_name" not in payload and impl_c.contract_name:
             payload["contract_name"] = impl_c.contract_name
         if "summary" not in payload and impl_c.summary:

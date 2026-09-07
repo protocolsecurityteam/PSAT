@@ -41,13 +41,13 @@ from services.resolution.adapters.event_indexed import EventIndexedAdapter  # no
 from services.resolution.adapters.solmate_roles import SolmateRolesAuthorityAdapter  # noqa: E402
 from services.resolution.capabilities import CapabilityExpr  # noqa: E402
 from services.resolution.predicate_evaluator import evaluate_tree_with_registry  # noqa: E402
-from services.static.contract_analysis_pipeline.predicate_artifacts import (  # noqa: E402
+from services.static.static_analysis.predicate_artifacts import (  # noqa: E402
     apply_solmate_authority_hint_pass,
 )
-from services.static.contract_analysis_pipeline.predicate_types import PredicateTree  # noqa: E402
-from services.static.contract_analysis_pipeline.predicates import build_predicate_tree  # noqa: E402
-from services.static.contract_analysis_pipeline.reentrancy_pause import apply_reentrancy_pause_pass  # noqa: E402
-from services.static.contract_analysis_pipeline.writer_gate import apply_writer_gate_pass  # noqa: E402
+from services.static.static_analysis.predicate_types import PredicateTree  # noqa: E402
+from services.static.static_analysis.predicates import build_predicate_tree  # noqa: E402
+from services.static.static_analysis.reentrancy_pause import apply_reentrancy_pause_pass  # noqa: E402
+from services.static.static_analysis.writer_gate import apply_writer_gate_pass  # noqa: E402
 
 CONTRACT = "0x" + "11" * 20
 OWNER = "0x" + "ab" * 20

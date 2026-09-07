@@ -54,11 +54,11 @@ _LRT_FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "contracts" / 
 
 def _analyze_real_contract(tmp_path, fixture: dict):
     """Scaffold the saved verified source into a Foundry project and run the
-    PRODUCTION static pipeline (``collect_contract_analysis_with_artifacts``,
+    PRODUCTION static pipeline (``collect_static_inputs``,
     the same entry point ``StaticWorker`` uses) over the real contract."""
     import json as _json
 
-    from services.static.contract_analysis_pipeline import collect_contract_analysis_with_artifacts
+    from services.static.static_analysis import collect_static_inputs
 
     proj = tmp_path / "proj"
     for path, content in fixture["sources"].items():
@@ -83,7 +83,7 @@ def _analyze_real_contract(tmp_path, fixture: dict):
             }
         )
     )
-    analysis, _trees, _effects = collect_contract_analysis_with_artifacts(proj)
+    analysis, _trees, _effects = collect_static_inputs(proj)
     return analysis
 
 
@@ -168,7 +168,7 @@ def test_detect_named_address_var_pointer(inline_var_contract):
     var directly (inline assembly). The var is found at its layout slot, and a
     ``governor`` read by a modifier (never delegatecalled) is NOT mistaken for a
     pointer."""
-    from services.static.contract_analysis_pipeline.secondary_impl import detect_secondary_impl_pointers
+    from services.static.static_analysis.secondary_impl import detect_secondary_impl_pointers
 
     pointers = detect_secondary_impl_pointers(inline_var_contract)
     by_name = {p["name"]: p for p in pointers}
@@ -179,7 +179,7 @@ def test_detect_named_address_var_pointer(inline_var_contract):
 
 
 def test_detect_empty_for_plain_contract(tmp_path):
-    from services.static.contract_analysis_pipeline.secondary_impl import detect_secondary_impl_pointers
+    from services.static.static_analysis.secondary_impl import detect_secondary_impl_pointers
 
     c = _compile(
         tmp_path,
@@ -196,7 +196,7 @@ def test_detect_eip1967_style_minus_one_slot(tmp_path):
     """The ``bytes32(uint256(keccak256("…")) - 1)`` slot idiom resolves correctly."""
     from eth_utils.crypto import keccak
 
-    from services.static.contract_analysis_pipeline.secondary_impl import detect_secondary_impl_pointers
+    from services.static.static_analysis.secondary_impl import detect_secondary_impl_pointers
 
     c = _compile(
         tmp_path,
@@ -217,7 +217,7 @@ def test_detect_indirected_fallback(tmp_path):
     """A fallback that forwards through an internal helper
     (``fallback() -> _delegate(adminImpl)``) is still detected via the transitive
     IR walk — the standard OZ-style indirection the first implementation missed."""
-    from services.static.contract_analysis_pipeline.secondary_impl import detect_secondary_impl_pointers
+    from services.static.static_analysis.secondary_impl import detect_secondary_impl_pointers
 
     c = _compile(
         tmp_path,
@@ -237,7 +237,7 @@ contract C is S {
 def test_detect_rejects_plain_call_on_delegatecall_named_var(tmp_path):
     """#3: a plain ``.call()`` on a variable merely NAMED ``delegatecallTarget``
     must NOT be flagged — detection keys on the IR operation, not a substring."""
-    from services.static.contract_analysis_pipeline.secondary_impl import detect_secondary_impl_pointers
+    from services.static.static_analysis.secondary_impl import detect_secondary_impl_pointers
 
     c = _compile(
         tmp_path,
@@ -431,7 +431,6 @@ def test_static_cache_hit_still_resolves_secondary_impls(db_session, monkeypatch
     ``StaticWorker.process`` through the cache branch.
     """
     from db.models import Contract, Job, JobStage, JobStatus
-    from db.queue import store_artifact
     from workers.static_worker import StaticWorker
 
     def _a() -> str:
@@ -463,17 +462,13 @@ def test_static_cache_hit_still_resolves_secondary_impls(db_session, monkeypatch
         Contract(address=core, chain="ethereum", is_proxy=False, contract_name="LRTSquaredCore", job_id=impl_job.id)
     )
     db_session.commit()
-    # The cached contract_analysis carries the detected pointer (copy_static_cache copies it).
-    store_artifact(
-        db_session,
-        impl_job.id,
-        "contract_analysis",
-        data={
-            "schema_version": "0.1",
-            "subject": {"name": "LRTSquaredCore"},
-            "secondary_impl_pointers": [{"name": "adminImplPosition", "slot": slot, "offset": 0}],
-        },
-    )
+    # Assessment evidence carries the cached static pointer.
+    from tests.support.assessment_artifacts import store_test_assessment
+    from tests.support.policy_builders import _minimal_static_facts
+
+    facts = _minimal_static_facts(address=core, name="LRTSquaredCore")
+    facts["secondary_impl_pointers"] = [{"name": "adminImplPosition", "slot": slot, "offset": 0}]
+    store_test_assessment(db_session, impl_job.id, address=core, static_facts=facts)
     db_session.commit()
 
     def fake_rpc(rpc_url, method, params, retries=1, **_):

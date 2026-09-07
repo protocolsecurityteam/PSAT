@@ -4,7 +4,7 @@
 Within a single cascade the BFS already dedupes by address (``processed``
 set). The persistent cache exists for *cross-cascade* reuse: when a
 sibling job walks the same OZ library / common implementation, we skip
-the scaffold + ``collect_contract_analysis`` + ``build_control_tracking_plan``
+the scaffold + ``collect_static_inputs`` + ``build_observation_plan``
 trio.
 
 What we pin here:
@@ -12,7 +12,7 @@ What we pin here:
    ``(chain, bytecode_keccak)`` and reused on the second call → only one
    scaffold run.
 2. Snapshot + permissions are rebuilt fresh on every call (they depend
-   on RPC state via build_control_snapshot) → never served stale.
+   on RPC state via observe_controllers) → never served stale.
 3. Returns deepcopies — mutating the returned dict must NOT poison the
    next call.
 4. Concurrent requests serialize on a Postgres advisory lock so the
@@ -94,7 +94,14 @@ def _patch_pipeline(monkeypatch, *, scaffold_calls, collect_calls, snapshot_call
             "functions": [],
             "state_vars": [],
         }
-        return analysis, None, None
+        return (
+            analysis,
+            {"schema_version": "semantic", "trees": {}},
+            {
+                "schema_version": "semantic",
+                "functions": {},
+            },
+        )
 
     def _build_plan(_analysis):
         return {"contract_address": "0xabc", "controllers": []}
@@ -103,16 +110,16 @@ def _patch_pipeline(monkeypatch, *, scaffold_calls, collect_calls, snapshot_call
         snapshot_calls.append(_plan)
         return {"controllers": []}
 
-    def _build_perms(_analysis, _snapshot):
+    def _build_perms(_analysis, _snapshot, _effects, _trees):
         return None
 
     monkeypatch.setattr("services.discovery.classifier.classify_single", _classify)
     monkeypatch.setattr(recursive, "fetch", _fetch)
     monkeypatch.setattr(recursive, "scaffold", _scaffold)
-    monkeypatch.setattr(recursive, "collect_contract_analysis_with_artifacts", _collect_with_artifacts)
-    monkeypatch.setattr(recursive, "build_control_tracking_plan", _build_plan)
-    monkeypatch.setattr(recursive, "build_control_snapshot", _build_snapshot)
-    monkeypatch.setattr(recursive, "_build_effective_permissions", _build_perms)
+    monkeypatch.setattr(recursive, "collect_static_inputs", _collect_with_artifacts)
+    monkeypatch.setattr(recursive, "build_observation_plan", _build_plan)
+    monkeypatch.setattr(recursive, "observe_controllers", _build_snapshot)
+    monkeypatch.setattr(recursive, "_build_permission_index", _build_perms)
     # _materialize_contract_artifacts now calls services.clients.rpc.get_code_with_keccak
     # to populate the bytecode-keccak secondary cache index. Stub it so
     # tests don't make real eth_getCode RPCs (was making each test ~20s
@@ -139,7 +146,7 @@ def test_second_call_serves_static_artifacts_from_cache(monkeypatch):
     _materialize_contract_artifacts("0xABC", "http://rpc", workspace_prefix="test", chain="ethereum")
 
     assert len(scaffold_calls) == 1, "second call should skip scaffold"
-    assert len(collect_calls) == 1, "second call should skip collect_contract_analysis"
+    assert len(collect_calls) == 1, "second call should skip collect_static_inputs"
 
 
 def test_snapshot_always_rebuilt(monkeypatch):
@@ -176,12 +183,12 @@ def test_cached_artifacts_are_deep_copied(monkeypatch):
     )
 
     first = _materialize_contract_artifacts("0xABC", "http://rpc", workspace_prefix="test", chain="ethereum")
-    first["analysis"]["functions"].append({"poisoned": True})
-    first["tracking_plan"]["controllers"].append({"poisoned": True})
+    first["static_facts"]["functions"].append({"poisoned": True})
+    first["observation_plan"]["controllers"].append({"poisoned": True})
 
     second = _materialize_contract_artifacts("0xABC", "http://rpc", workspace_prefix="test", chain="ethereum")
-    assert second["analysis"]["functions"] == []
-    assert second["tracking_plan"]["controllers"] == []
+    assert second["static_facts"]["functions"] == []
+    assert second["observation_plan"]["controllers"] == []
 
 
 def test_cache_keyed_by_effective_address_not_input(monkeypatch):
@@ -225,7 +232,7 @@ def test_bytecode_keccak_hit_retargets_plan_to_new_address(monkeypatch):
     cached for a DIFFERENT address with the same bytecode (e.g., two
     UUPSProxy instances pointing to different impls), the cached
     plan["contract_address"] points at the FIRST address. Without
-    retargeting, build_control_snapshot reads controller state from
+    retargeting, observe_controllers reads controller state from
     the wrong contract storage.
 
     Fix: on cache hit, deepcopy the analysis+plan and overwrite
@@ -260,7 +267,7 @@ def test_bytecode_keccak_hit_retargets_plan_to_new_address(monkeypatch):
     # only fires on cache HIT.
     # Second call is a cache HIT via the keccak index — must retarget
     # plan["contract_address"] from "0xabc" to addr_b. Without the fix,
-    # build_control_snapshot would read controller state from the
+    # observe_controllers would read controller state from the
     # cache-populating contract instead of addr_b.
     assert snapshot_calls[1]["contract_address"] == addr_b.lower()
 

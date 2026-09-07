@@ -53,7 +53,7 @@ def throwaway_db_url():
 
 
 def test_w4h_downgrade_unwinds_heuristic_membership(throwaway_db_url):
-    run_alembic_upgrade(throwaway_db_url)
+    run_alembic_upgrade(throwaway_db_url, _REVISION)
     engine = sa.create_engine(throwaway_db_url)
 
     deployer = "0x" + "d1" * 20

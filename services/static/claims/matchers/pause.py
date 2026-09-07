@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from ..context import ClaimContext, abi_selector
 from ..decorator import claim_matcher
-from ..types import ClaimEvidence
+from ..types import MatchedEvidence
 from . import _facts
 
 # OpenZeppelin Pausable's published ABI.
@@ -37,12 +37,14 @@ def _oz_pausable_standard(ctx: ClaimContext) -> bool:
     return ctx.has_selectors(PAUSE, UNPAUSE, PAUSED)
 
 
-def _pause_evidence(ctx: ClaimContext, function: str, want: str) -> ClaimEvidence | None:
+def _pause_evidence(ctx: ClaimContext, function: str, want: str) -> MatchedEvidence | None:
     targets = _facts.function_pause_targets(ctx, function)
     if not targets:
         return None
     tree = ctx.predicate_tree(function)
-    if tree is None or not _facts.tree_is_authority_gated(tree) or _facts.tree_is_one_shot(tree):
+    # Effect detection is independent of authority. An unguarded pauser is a
+    # public capability, not an absence. Authority resolution is a later claim.
+    if tree is not None and _facts.tree_is_one_shot(tree):
         return None
 
     fn = _facts.contract_function(ctx, function)
@@ -55,12 +57,22 @@ def _pause_evidence(ctx: ClaimContext, function: str, want: str) -> ClaimEvidenc
         # the assignment touched.
         aliases = frozenset(m for v, m in gate_reads if v == var and m) if member is None else frozenset()
         polarity = _facts.toggle_polarity(fn, var, member, alias_members=aliases) if fn is not None else "both"
-        if var in namespaced and polarity == "both":
-            # An ERC-7201 slot holds the whole struct, so writing it proves
-            # nothing about a boolean latch on its own — `transferOwnership`
-            # writes the same slot the owner gate reads. Only a definite
-            # constant-bool toggle of a guard-read member is a pause; anything
-            # else fails closed.
+        if var in namespaced and member is None:
+            # Resolve the exact member written through the local storage
+            # pointer. A namespaced slot also carries owner/admin fields; a
+            # memberless witness makes their authority guards look like pause
+            # victims merely because they share the slot.
+            matched.extend(
+                {"var": var, "member": alias}
+                for alias in sorted(aliases)
+                if fn is not None and _facts.toggle_polarity(fn, var, None, alias_members=frozenset({alias})) == want
+            )
+            continue
+        declared_types = _facts.pause_target_declared_types(ctx, function, (var, member))
+        if polarity == "both" and declared_types & {"uint8", "uint256"}:
+            # Parameter-driven bitmap writes need a directional proof. A sibling
+            # constant writer such as pauseAll() can still establish pause.set;
+            # this ambiguous function establishes neither direction by itself.
             continue
         if polarity in (want, "both"):
             matched.append({"var": var, "member": member})
@@ -68,27 +80,30 @@ def _pause_evidence(ctx: ClaimContext, function: str, want: str) -> ClaimEvidenc
         return None
 
     standard = ctx.canonical_selector(function) in _TOGGLE_SELECTORS and _oz_pausable_standard(ctx)
-    return ClaimEvidence(
+    return MatchedEvidence(
         tier="standard_exact" if standard else "idiom_structural",
-        witness={"kind": "pause_flag", "flags": matched, "polarity": want},
+        witness={
+            "kind": "pause_flag",
+            "flags": matched,
+            "polarity": want,
+            "affected_functions": _facts.pause_affected_functions(ctx, targets),
+        },
     )
 
 
 @claim_matcher(
     claim_id="pause.set",
     sentence="sets a flag that blocks other state-changing entry points of this contract (pauses it)",
-    legacy_projection="pause_toggle",
     consumer_family="control_plane",
 )
-def pause_set(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
+def pause_set(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
     return _pause_evidence(ctx, function, "set")
 
 
 @claim_matcher(
     claim_id="pause.unset",
     sentence="clears a flag that blocks other state-changing entry points of this contract (unpauses it)",
-    legacy_projection="pause_toggle",
     consumer_family="control_plane",
 )
-def pause_unset(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
+def pause_unset(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
     return _pause_evidence(ctx, function, "unset")

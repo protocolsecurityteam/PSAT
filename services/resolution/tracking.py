@@ -12,13 +12,13 @@ from typing import Any
 
 from eth_abi.abi import decode
 
-from schemas.contract_analysis import ControllerReadSpec
-from schemas.control_tracking import (
-    ControlSnapshot,
-    ControlTrackingPlan,
+from schemas.observations import (
+    ControllerInstruction,
+    ObservationBatch,
+    ObservationPlan,
     ResolvedControllerType,
-    TrackedController,
 )
+from schemas.static_facts import ControllerReadSpec
 from services.clients.rpc import (
     eth_call_batch as _eth_call_batch,
 )
@@ -35,7 +35,7 @@ from services.clients.rpc import (
     selector as _selector,
 )
 from services.monitoring.restaking_reads import decode_word as _decode_word
-from services.resolution.tracking_plan import is_primitive_scalar_read_spec
+from services.resolution.observation_plan import is_primitive_scalar_read_spec
 from utils.evm import EIP1967_IMPL_SLOT, SAFE_GUARD_SLOT, SAFE_MODULES_HEAD_SLOT
 from utils.logging import record_degraded
 from utils.scoring_status import NOT_DETERMINED
@@ -73,18 +73,6 @@ _CLASSIFY_BATCH_ENABLED = os.getenv("PSAT_CLASSIFY_BATCH", "1").lower() in ("1",
 # per-call wire (_rpc_request / _rpc_batch_request_with_status), not Multicall3's eth_call.
 _CLASSIFY_MULTICALL_ENABLED = os.getenv("PSAT_CLASSIFY_MULTICALL", "1").lower() in ("1", "true", "yes")
 _SNAPSHOT_MULTICALL_ENABLED = os.getenv("PSAT_SNAPSHOT_MULTICALL", "1").lower() in ("1", "true", "yes")
-
-
-def type_authority_contract(
-    rpc_url: str, address: str, block_tag: str = "latest", *, chain_id: int | None = None
-) -> dict[str, object]:
-    """Compatibility hook for old callers/tests.
-
-    Runtime authority expansion is now handled by semantic predicate
-    capabilities, not by standard-specific controller probes.
-    """
-    del rpc_url, address, block_tag, chain_id
-    return {}
 
 
 def clear_classify_cache() -> None:
@@ -143,7 +131,7 @@ def _decode_controller_value(
     # Refuse an unstorable value here rather than letting the resolution
     # worker's controller_values INSERT raise StringDataRightTruncation
     # mid-commit (which poisons the worker session). The caller
-    # (build_control_snapshot) turns this into a value=None entry.
+    # (observe_controllers) turns this into a value=None entry.
     if len(decoded) > _CONTROLLER_VALUE_MAX_LEN:
         member_path = read_spec.get("member_path") if isinstance(read_spec, dict) else None
         raise ValueError(
@@ -902,20 +890,6 @@ def _classify_uncached_batched(
         return "eoa", {"address": normalized}, False
 
     # Bytecode-keccak shortcut: skip the batch round trip when bytecode matches a canonical impl.
-    if _KNOWN_BYTECODE_IMPLS:
-        try:
-            from services.clients.rpc import get_code_with_keccak
-
-            _, bytecode_keccak = get_code_with_keccak(rpc_url, normalized, chain_id=chain_id)
-        except Exception:
-            bytecode_keccak = None
-        if bytecode_keccak is not None:
-            hit = _KNOWN_BYTECODE_IMPLS.get(bytecode_keccak)
-            if hit is not None:
-                kind, partial = hit
-                details: dict[str, object] = {"address": normalized}
-                details.update(partial)
-                return kind, details, False
 
     probes = _probe_classify(rpc_url, normalized, block_tag, chain_id=chain_id)
     # Whole-batch failure → fall back to sequential so providers that reject batches don't degrade classification
@@ -975,10 +949,6 @@ def _classify_uncached_batched(
         return kind, details, had_error or uiv_err
 
     details = {"address": normalized}
-    try:
-        details.update(type_authority_contract(rpc_url, normalized, block_tag, chain_id=chain_id))
-    except Exception:
-        had_error = True
     if control_state[0] == "failed":
         # A definitive observation, published so a consumer can tell "plain
         # contract" from "answers every selector, duck typing withheld".
@@ -991,7 +961,6 @@ def _classify_uncached_batched(
 
 # Canonical-impl bytecode keccak registry; matches short-circuit the 6-probe classifier (empty by default — populate via
 # follow-up or test monkeypatch).
-_KNOWN_BYTECODE_IMPLS: dict[str, tuple[ResolvedControllerType, dict[str, object]]] = {}
 
 
 def _classify_uncached(
@@ -1009,20 +978,6 @@ def _classify_uncached(
         return "eoa", {"address": normalized}, False
 
     # Bytecode-keccak shortcut: skip the 6-probe sequence when bytecode matches a registered canonical impl.
-    if _KNOWN_BYTECODE_IMPLS:
-        try:
-            from services.clients.rpc import get_code_with_keccak
-
-            _, bytecode_keccak = get_code_with_keccak(rpc_url, normalized, chain_id=chain_id)
-        except Exception:
-            bytecode_keccak = None
-        if bytecode_keccak is not None:
-            hit = _KNOWN_BYTECODE_IMPLS.get(bytecode_keccak)
-            if hit is not None:
-                kind, partial = hit
-                details: dict[str, object] = {"address": normalized}
-                details.update(partial)
-                return kind, details, False
 
     had_error = False
 
@@ -1076,10 +1031,6 @@ def _classify_uncached(
         return kind, details, had_error or uiv_err
 
     details = {"address": normalized}
-    try:
-        details.update(type_authority_contract(rpc_url, normalized, block_tag, chain_id=chain_id))
-    except Exception:
-        had_error = True
     if control_state[0] == "failed":
         details["duck_type_negative_control"] = "failed"
     elif control_state[0] == "error":
@@ -1130,7 +1081,7 @@ def _read_polling_source(
 
 
 def _prewarm_snapshot_getters(
-    rpc_url: str, plan: ControlTrackingPlan, block_tag: str, *, chain_id: int | None = None
+    rpc_url: str, plan: ObservationPlan, block_tag: str, *, chain_id: int | None = None
 ) -> dict[tuple[str, str], str]:
     """Pre-read every tracked controller's ``{target}()`` getter on the contract in ONE Multicall3, at the
     same ``block_tag`` the per-controller path uses.
@@ -1172,8 +1123,8 @@ def _prewarm_snapshot_getters(
     return prewarm
 
 
-def build_control_snapshot(
-    plan: ControlTrackingPlan,
+def observe_controllers(
+    plan: ObservationPlan,
     rpc_url: str,
     block_tag: str = "latest",
     *,
@@ -1181,7 +1132,7 @@ def build_control_snapshot(
     getter_fallback_address: str | None = None,
     beacon_address: str | None = None,
     chain_id: int | None = None,
-) -> ControlSnapshot:
+) -> ObservationBatch:
     """Resolve every tracked controller's value at the given block.
 
     The classification cache is the process-wide ``_CLASSIFY_CACHE`` (see
@@ -1225,7 +1176,7 @@ def build_control_snapshot(
     )
     controller_values: dict[str, Any] = {}
 
-    def _compute_controller(controller: TrackedController) -> tuple[str, dict[str, Any] | None]:
+    def _compute_controller(controller: ControllerInstruction) -> tuple[str, dict[str, Any] | None]:
         """Pure function: compute one controller's value dict, or None to skip."""
         controller_id = controller["controller_id"]
         source = controller["source"]

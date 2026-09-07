@@ -18,10 +18,10 @@ import pytest
 slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
 
-from services.static.contract_analysis_pipeline.predicates import (  # noqa: E402
+from services.static.static_analysis.predicates import (  # noqa: E402
     build_predicate_tree,
 )
-from services.static.contract_analysis_pipeline.writer_gate import (  # noqa: E402
+from services.static.static_analysis.writer_gate import (  # noqa: E402
     apply_writer_gate_pass,
 )
 

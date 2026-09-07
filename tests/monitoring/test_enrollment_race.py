@@ -33,6 +33,10 @@ from sqlalchemy.orm import Session
 
 from db.models import Contract, Job, JobStage, JobStatus, MonitoredContract, Protocol
 from tests.conftest import DATABASE_URL, requires_postgres
+from tests.support.policy_builders import (
+    _assessment,
+    _minimal_static_facts,
+)
 
 pytestmark = requires_postgres
 
@@ -134,25 +138,16 @@ def _stub_policy_internals(monkeypatch, job_address):
     from workers.policy_worker import PolicyWorker
 
     artifacts = {
-        "contract_analysis": {"contract_address": job_address, "contract_name": "TestContract", "functions": []},
-        "control_snapshot": {"contract_address": job_address, "controller_values": {}},
-        "resolved_control_graph": {"nodes": [], "edges": []},
-        "control_tracking_plan": {"schema_version": "0.1", "contract_address": job_address},
+        "assessment": _assessment(static_facts=_minimal_static_facts(address=job_address)),
     }
     monkeypatch.setattr("workers.policy_worker.get_artifact", lambda _s, _j, name: artifacts.get(name))
     monkeypatch.setattr("workers.policy_worker.store_artifact", lambda *a, **kw: None)
-    monkeypatch.setattr("workers.policy_worker._load_nested_artifacts", lambda *a, **kw: {})
     monkeypatch.setattr(
-        "workers.policy_worker.build_effective_permissions",
+        "workers.policy_worker.build_permission_index",
         lambda *a, **kw: {"schema_version": "1", "functions": []},
     )
     monkeypatch.setattr("workers.policy_worker.resolve_control_graph", lambda **kw: ({}, {}))
-    monkeypatch.setattr("workers.policy_worker.build_principal_labels", lambda *a, **kw: {"principals": []})
-    monkeypatch.setattr(
-        PolicyWorker,
-        "_resolve_authority",
-        lambda self, *a, **kw: {"principal_resolution": {"status": "no_authority"}, "authority_snapshot": None},
-    )
+    monkeypatch.setattr("workers.policy_worker.build_principal_index", lambda *a, **kw: [])
     monkeypatch.setattr(PolicyWorker, "_enrich_cross_contract", lambda self, *a, **kw: {})
     monkeypatch.setattr("services.monitoring.enrollment.maybe_enroll_protocol", _poisoning_enroll)
 

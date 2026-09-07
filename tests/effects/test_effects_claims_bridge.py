@@ -1,11 +1,10 @@
 """Effects → claims bridge.
 
 Pure-mapping honesty per effect class, the two fail-closed directions,
-idempotent double-merge, behavioral_observed precedence over a static claim, and
-legacy effect_labels re-projection staying in sync. The DB-backed writer
-regression (call site 2 preserves observed claims across a policy rewrite) and
+idempotent double-merge, and behavioral_observed precedence over a static claim.
+The DB-backed writer regression (call site 2 preserves observed claims across a policy rewrite) and
 the end-to-end worker labeling (call site 1) live in
-``test_effective_permissions_semantic``-style / ``test_effects_worker_integration``
+``test_permission_index_semantic``-style / ``test_effects_worker_integration``
 files respectively; this file owns the bridge's own contract.
 """
 
@@ -27,11 +26,10 @@ from services.effects.config import (
     VERDICT_PROVEN,
     VERDICT_UNKNOWN,
 )
-from services.static.claims.registry import resolve_claim_precedence
-from services.static.claims.types import Claim
+from services.static.claims.types import EffectMatch
 
 
-def _static(claim_id: str, tier: str = "standard_exact", **witness: Any) -> Claim:
+def _static(claim_id: str, tier: str = "standard_exact", **witness: Any) -> EffectMatch:
     return {"claim_id": claim_id, "tier": tier, "witness": witness}  # pyright: ignore[reportReturnType]
 
 
@@ -332,11 +330,9 @@ def test_authority_change_maps_to_registered_authority_grant():
     # for a mechanism-agnostic gate-open; the bridge mints its own registered id.
     claim = claims_bridge.verdict_to_claim(_verdict(EFFECT_CLASS_AUTHORITY_CHANGE, witness={"gate_mutation": True}))
     assert claim is not None and claim["claim_id"] == claims_bridge.AUTHORITY_GRANT
-    # Registered, so it can be rendered / projected like any static claim.
-    from services.static.claims.registry import is_registered, legacy_projections
+    from services.static.claims.registry import is_registered
 
     assert is_registered(claims_bridge.AUTHORITY_GRANT)
-    assert legacy_projections()[claims_bridge.AUTHORITY_GRANT] == "authority_update"
 
 
 # ---------------------------------------------------------------------------
@@ -372,71 +368,12 @@ def test_historical_with_null_current_check_mints_nothing():
 # ---------------------------------------------------------------------------
 
 
-def test_double_merge_is_a_noop():
-    verdicts = [_verdict(EFFECT_CLASS_VALUE_OUT)]
-    once = claims_bridge.merge_observed_claims([], verdicts)
-    twice = claims_bridge.merge_observed_claims(once, verdicts)
-    assert once == twice
-    assert [c["claim_id"] for c in once] == ["flow.out"]
-
-
-def test_behavioral_observed_supersedes_static_same_id():
-    static = _static("flow.out", "idiom_structural", static=True)
-    merged = claims_bridge.merge_observed_claims([static], [_verdict(EFFECT_CLASS_VALUE_OUT)])
-    flow = [c for c in merged if c["claim_id"] == "flow.out"]
-    assert len(flow) == 1
-    assert flow[0]["tier"] == "behavioral_observed"  # observed (rank 4) beats idiom (rank 2)
-
-
-def test_distinct_sibling_claims_are_both_kept():
-    static_burn = _static("supply.burn", "idiom_structural")
-    merged = claims_bridge.merge_observed_claims(
-        [static_burn], [_verdict(EFFECT_CLASS_SUPPLY, witness={"supply_delta_sign": "mint"})]
-    )
-    ids = sorted(c["claim_id"] for c in merged)
-    assert ids == ["supply.burn", "supply.mint"]
-
-
-def test_reproject_effect_labels_stays_in_sync():
-    merged = claims_bridge.merge_observed_claims([], [_verdict(EFFECT_CLASS_VALUE_OUT)])
-    labels = claims_bridge.reproject_effect_labels(["some_prior_label"], merged)
-    # flow.out projects the legacy "asset_send"; prior labels are preserved (union).
-    assert "asset_send" in labels
-    assert "some_prior_label" in labels
-
-
-def test_merge_into_function_identity_when_no_verdict_mints():
-    # No mintable verdict ⇒ None, so the caller leaves the row byte-identical.
-    assert (
-        claims_bridge.merge_into_function([], [], [_verdict(EFFECT_CLASS_VALUE_OUT, verdict=VERDICT_UNKNOWN)]) is None
-    )
-
-
-def test_merge_into_function_returns_claims_and_labels():
-    result = claims_bridge.merge_into_function(
-        [], ["prior"], [_verdict(EFFECT_CLASS_SUPPLY, witness={"supply_delta_sign": "mint"})]
-    )
-    assert result is not None
-    claims, labels = result
-    assert [c["claim_id"] for c in claims] == ["supply.mint"]
-    assert "mint" in labels and "prior" in labels
-
-
-def test_merge_preserves_unrelated_static_claims():
-    static = _static("ownership.transfer")
-    merged = claims_bridge.merge_observed_claims([static], [_verdict(EFFECT_CLASS_VALUE_OUT)])
-    assert merged == resolve_claim_precedence(
-        [static, *claims_bridge.claims_from_verdicts([_verdict(EFFECT_CLASS_VALUE_OUT)])]
-    )
-    assert any(c["claim_id"] == "ownership.transfer" for c in merged)
-
-
 # ---------------------------------------------------------------------------
 # Call site 2 (DB): a policy rewrite of the rows preserves observed claims.
 # ---------------------------------------------------------------------------
 
 from db.models import Contract, EffectiveFunction, EffectVerdict  # noqa: E402
-from services.policy.effective_permissions_writer import write_effective_function_rows  # noqa: E402
+from services.policy.permission_index_writer import write_permission_rows  # noqa: E402
 from tests.conftest import requires_postgres  # noqa: E402
 
 _SELECTOR = "0x40c10f19"
@@ -459,7 +396,6 @@ def _seed_contract_with_observed_function(session, *, with_verdict: bool):
         function_name="mint",
         selector=_SELECTOR,
         abi_signature="mint(address,uint256)",
-        effect_labels=["mint"],
         claims=[observed],
         authority_public=False,
     )
@@ -490,9 +426,6 @@ def _fn_record() -> dict[str, Any]:
         "function": "mint(address,uint256)",
         "abi_signature": "mint(address,uint256)",
         "selector": _SELECTOR,
-        "effect_labels": [],
-        "effect_targets": [],
-        "action_summary": "stub",
         "authority_public": False,
         "authority_roles": [],
         "claims": [],
@@ -500,43 +433,34 @@ def _fn_record() -> dict[str, Any]:
 
 
 @requires_postgres
-def test_policy_rewrite_preserves_observed_claims_from_verdicts(db_session):
-    """Call site 2, verdict path: proven effect_verdicts survive the capture and
-    re-merge onto the re-created row."""
+def test_policy_rewrite_relinks_verdict_without_recreating_claims(db_session):
+    """Verdict facts survive, but claims come only from the Assessment projection."""
     contract_id = _seed_contract_with_observed_function(db_session, with_verdict=True)
-    write_effective_function_rows(
+    write_permission_rows(
         db_session,
         contract_id=contract_id,
         function_records=[_fn_record()],
-        capability_by_function=None,
         deployment_address=_DEPLOY,
     )
     db_session.commit()
     ef = db_session.query(EffectiveFunction).filter(EffectiveFunction.contract_id == contract_id).one()
-    ids = [c["claim_id"] for c in (ef.claims or [])]
-    assert "supply.mint" in ids
-    assert any(c["tier"] == "behavioral_observed" for c in ef.claims)
-    assert "mint" in (ef.effect_labels or [])
+    assert (ef.claims or []) == []
+    verdict = db_session.query(EffectVerdict).filter(EffectVerdict.function_id == ef.id).one()
+    assert verdict.effect_class == EFFECT_CLASS_SUPPLY
 
 
 @requires_postgres
-def test_policy_rewrite_preserves_observed_claims_without_surviving_verdict(db_session):
-    """Call site 2, durable path: even when the proven verdict was already cascade-
-    deleted by an earlier replace, the observed claims on the outgoing rows are
-    carried forward — so repeated policy-only re-runs never blank the labels."""
+def test_policy_rewrite_retracts_outgoing_claims_not_in_assessment_projection(db_session):
     contract_id = _seed_contract_with_observed_function(db_session, with_verdict=False)
-    write_effective_function_rows(
+    write_permission_rows(
         db_session,
         contract_id=contract_id,
         function_records=[_fn_record()],
-        capability_by_function=None,
         deployment_address=_DEPLOY,
     )
     db_session.commit()
     ef = db_session.query(EffectiveFunction).filter(EffectiveFunction.contract_id == contract_id).one()
-    ids = [c["claim_id"] for c in (ef.claims or [])]
-    assert "supply.mint" in ids
-    assert "mint" in (ef.effect_labels or [])
+    assert (ef.claims or []) == []
 
 
 @requires_postgres
@@ -548,17 +472,15 @@ def test_policy_rewrite_leaves_claimless_functions_byte_identical(db_session):
     db_session.flush()
     cid = contract.id
     db_session.commit()
-    write_effective_function_rows(
+    write_permission_rows(
         db_session,
         contract_id=cid,
-        function_records=[dict(_fn_record(), effect_labels=["some_label"])],
-        capability_by_function=None,
+        function_records=[_fn_record()],
         deployment_address="0x" + "cd" * 20,
     )
     db_session.commit()
     ef = db_session.query(EffectiveFunction).filter(EffectiveFunction.contract_id == cid).one()
     assert (ef.claims or []) == []
-    assert ef.effect_labels == ["some_label"]
     _cleanup(db_session, cid)
 
 
@@ -587,7 +509,6 @@ def _seed_with_real_verdict(session):
         function_name="mint",
         selector=_SELECTOR,
         abi_signature="mint(address,uint256)",
-        effect_labels=["mint"],
         claims=[],
         authority_public=False,
     )
@@ -620,14 +541,12 @@ def _purge_verdicts(session):
 @requires_postgres
 def test_policy_rewrite_keeps_verdict_row_and_relinks(db_session):
     """The row replace must not delete the deployment's verdicts; the surviving
-    row relinks to the re-created function row and no carried observed claim's
-    witness may point at a dead verdict."""
+    row relinks to the re-created function row without minting relational claims."""
     contract_id, verdict_id = _seed_with_real_verdict(db_session)
-    write_effective_function_rows(
+    write_permission_rows(
         db_session,
         contract_id=contract_id,
         function_records=[_fn_record()],
-        capability_by_function=None,
         deployment_address=_DEPLOY,
     )
     db_session.commit()
@@ -636,11 +555,7 @@ def test_policy_rewrite_keeps_verdict_row_and_relinks(db_session):
     assert verdict is not None
     ef = db_session.query(EffectiveFunction).filter(EffectiveFunction.contract_id == contract_id).one()
     assert verdict.function_id == ef.id
-    for claim in ef.claims or []:
-        if claim.get("tier") == "behavioral_observed":
-            vid = (claim.get("witness") or {}).get("effect_verdict_id")
-            assert vid is not None
-            assert db_session.query(EffectVerdict).filter(EffectVerdict.id == vid).count() == 1
+    assert (ef.claims or []) == []
     _purge_verdicts(db_session)
 
 
@@ -649,11 +564,10 @@ def test_row_delete_without_recreate_nulls_function_id(db_session):
     """A function dropped from the new surface keeps its verdict rows (identity =
     deployment coordinates) with the convenience join nulled, not cascaded away."""
     contract_id, verdict_id = _seed_with_real_verdict(db_session)
-    write_effective_function_rows(
+    write_permission_rows(
         db_session,
         contract_id=contract_id,
         function_records=[],
-        capability_by_function=None,
         deployment_address=_DEPLOY,
     )
     db_session.commit()
@@ -669,7 +583,7 @@ def test_row_delete_without_recreate_nulls_function_id(db_session):
 # ---------------------------------------------------------------------------
 
 
-def _static_flow_out() -> Claim:
+def _static_flow_out() -> EffectMatch:
     return {
         "claim_id": "flow.out",
         "tier": "standard_exact",
@@ -690,57 +604,13 @@ def _static_flow_out() -> Claim:
     }
 
 
-def test_an_observed_flow_claim_keeps_the_static_destination_and_amount():
-    """Precedence is about TIER — how well we know the claim is true. A fork
-    observation is the strongest evidence that value MOVED; it is no evidence at
-    all about where it can go or how much, which are universals the static
-    lattice derived from the code and the probe never measured.
-
-    Replacing the witness wholesale made succeeding at the probe COST a function
-    its lattice: of four sibling ``redeem*`` with identical static flows, the one
-    whose probe executed was the only one to lose its destination and amount."""
-    merged = claims_bridge.merge_observed_claims(
-        [_static_flow_out()],
-        [_verdict(EFFECT_CLASS_VALUE_OUT, witness={"observation": "executed", "value_moved": True})],
-    )
-    flow_out = next(c for c in merged if c["claim_id"] == "flow.out")
-    witness = flow_out["witness"]
-
-    # The tier really is upgraded — the observation is the stronger evidence.
-    assert flow_out["tier"] == "behavioral_observed"
-    # ...and the structural facts survive it.
-    assert witness["direction"] == "out"
-    assert witness["flows"][0]["target_kind"] == {"kind": "immutable", "tier": "dispositive_ast"}
-    assert witness["flows"][0]["amount_param_index"] == 1
-    # ...alongside the observed pointer.
-    assert witness["effect_verdict_id"] == 1
-
-
-def test_carrying_the_static_witness_forward_is_idempotent():
-    """The bridge re-merges on every job, so a second pass must be a no-op."""
-    verdicts = [_verdict(EFFECT_CLASS_VALUE_OUT, witness={"observation": "executed", "value_moved": True})]
-    once = claims_bridge.merge_observed_claims([_static_flow_out()], verdicts)
-    twice = claims_bridge.merge_observed_claims(once, verdicts)
-    assert once == twice
-
-
-def test_an_observed_claim_with_no_static_counterpart_is_unchanged():
-    """Nothing to carry forward, and nothing invented."""
-    merged = claims_bridge.merge_observed_claims(
-        [], [_verdict(EFFECT_CLASS_VALUE_OUT, witness={"observation": "executed", "value_moved": True})]
-    )
-    witness = next(c for c in merged if c["claim_id"] == "flow.out")["witness"]
-    assert "flows" not in witness
-    assert witness["effect_verdict_id"] == 1
-
-
 # ---------------------------------------------------------------------------
 # ...and the repair must reach the seam the effects worker actually calls,
 # on rows that are ALREADY damaged.
 # ---------------------------------------------------------------------------
 
 
-def _damaged_observed_flow_out() -> Claim:
+def _damaged_observed_flow_out() -> EffectMatch:
     """A ``flow.out`` claim as the bug left it on disk: the observed pointer, and
     nothing else. 19 rows in the preview DB look exactly like this."""
     return {
@@ -759,119 +629,12 @@ def _executed() -> Any:
     return _verdict(EFFECT_CLASS_VALUE_OUT, witness={"observation": "executed", "value_moved": True})
 
 
-def test_merge_into_function_keeps_the_static_lattice():
-    """``effects_worker`` merges through ``merge_into_function``, and that is the
-    only path that MINTS observed claims — so a carry-forward the other seam does
-    and this one does not is a carry-forward that never runs in production."""
-    result = claims_bridge.merge_into_function([_static_flow_out()], [], [_executed()])
-    assert result is not None
-    claims, _labels = result
-    flow_out = next(c for c in claims if c["claim_id"] == "flow.out")
-    assert flow_out["tier"] == "behavioral_observed"
-    assert flow_out["witness"]["flows"][0]["target_kind"] == {"kind": "immutable", "tier": "dispositive_ast"}
-    assert flow_out["witness"]["direction"] == "out"
-
-
-def test_a_damaged_row_is_repaired_by_the_next_policy_rerun():
-    """The stage order is policy → effects: policy re-creates the row with a fresh
-    static claim and carries the old observed one back. That only heals the row if
-    the stripped observed claim neither becomes its own donor nor outranks its own
-    replacement — which is why a fix that only repairs pristine rows leaves every
-    row already on disk damaged forever."""
-    prior = [_static_flow_out(), _damaged_observed_flow_out()]
-    result = claims_bridge.merge_into_function(prior, [], [_executed()])
-    assert result is not None
-    claims, _labels = result
-    flow_out = [c for c in claims if c["claim_id"] == "flow.out"]
-    assert len(flow_out) == 1
-    witness = flow_out[0]["witness"]
-    assert witness["flows"][0]["target_kind"] == {"kind": "immutable", "tier": "dispositive_ast"}
-    assert witness["sink_ids"] == ["sink-1"]
-    assert witness["effect_verdict_id"] == 1
-
-
-def test_repairing_a_damaged_row_is_idempotent():
-    """Three passes, because the second is where a naive donor rule starts
-    re-stamping ``static_tier`` with the merged claim's own observed tier."""
-    verdicts = [_executed()]
-    once = claims_bridge.merge_observed_claims([_static_flow_out(), _damaged_observed_flow_out()], verdicts)
-    twice = claims_bridge.merge_observed_claims(once, verdicts)
-    thrice = claims_bridge.merge_observed_claims(twice, verdicts)
-    assert once == twice == thrice
-    assert next(c for c in once if c["claim_id"] == "flow.out")["witness"]["static_tier"] == "standard_exact"
-
-
-def test_a_pause_claim_keeps_its_flags_and_polarity():
-    """The erasure was never flow-specific. ``pause.set`` witnesses carry
-    ``flags``/``polarity`` — which flags, and whether this is the set or the unset
-    direction — and a per-family allowlist named for flows carried neither."""
-    static: Claim = {
-        "claim_id": "pause.set",
-        "tier": "idiom_structural",
-        "witness": {"kind": "pause", "flags": ["deposit", "withdraw"], "polarity": "set"},
-    }
-    merged = claims_bridge.merge_observed_claims([static], [_verdict(EFFECT_CLASS_FREEZE_PAUSE)])
-    witness = next(c for c in merged if c["claim_id"] == "pause.set")["witness"]
-    assert witness["flags"] == ["deposit", "withdraw"]
-    assert witness["polarity"] == "set"
-    assert witness["static_tier"] == "idiom_structural"
-
-
-def test_a_supply_claim_keeps_its_supply_and_selector():
-    static: Claim = {
-        "claim_id": "supply.mint",
-        "tier": "standard_exact",
-        "witness": {"kind": "supply", "supply": "increase", "selector": "0x40c10f19"},
-    }
-    merged = claims_bridge.merge_observed_claims(
-        [static], [_verdict(EFFECT_CLASS_SUPPLY, witness={"supply_delta_sign": "mint"})]
-    )
-    witness = next(c for c in merged if c["claim_id"] == "supply.mint")["witness"]
-    assert witness["supply"] == "increase"
-    assert witness["selector"] == "0x40c10f19"
-    assert witness["static_tier"] == "standard_exact"
-
-
-def test_a_policy_derived_donor_is_stamped_as_such():
-    """The carry's real risk is tier laundering: a ``policy_derived`` destination
-    riding on a ``behavioral_observed`` claim reads as observed-quality unless the
-    witness says where it came from. The scorer discounts on ``static_tier``, so
-    the stamp has to be the donor's tier and not the claim's."""
-    static: Claim = {
-        "claim_id": "flow.out",
-        "tier": "policy_derived",
-        "witness": {
-            "kind": "value_flow",
-            "callee": "0x" + "cd" * 20,
-            "sink_id": "sink-9",
-            "source_tier": "standard_exact",
-        },
-    }
-    merged = claims_bridge.merge_observed_claims([static], [_executed()])
-    witness = next(c for c in merged if c["claim_id"] == "flow.out")["witness"]
-    assert witness["static_tier"] == "policy_derived"
-    # ``sink_id`` singular: the allowlist this replaced only knew ``sink_ids``.
-    assert witness["sink_id"] == "sink-9"
-    assert witness["callee"] == "0x" + "cd" * 20
-    # ``source_tier`` already means something else and must survive untouched.
-    assert witness["source_tier"] == "standard_exact"
-
-
-def test_no_static_donor_stamps_no_provenance():
-    """No fabrication, and no stamp implying a static witness that never existed."""
-    merged = claims_bridge.merge_observed_claims([], [_executed()])
-    witness = next(c for c in merged if c["claim_id"] == "flow.out")["witness"]
-    assert "flows" not in witness
-    assert "static_tier" not in witness
-
-
 @requires_postgres
 def test_destination_shape_survives_the_writer_onto_the_function_row(db_session):
     """End of the forwarding chain. ``destination_shape`` / ``shape_proved_by`` are
     the fork's answer to "where can this outflow go", and the scorer reads them off
-    ``EffectiveFunction.claims`` — so the projection reaching ``verdict_to_claim``
-    is only half the trip. This pins the other half: the policy rewrite re-merges
-    the proven verdict and both fields land on the persisted row, for the adverse
+    ``EffectiveFunction.claims`` — so the Assessment projection reaching the
+    row writer must retain both fields, for the adverse
     answer and for the ``('unknown', 'none')`` non-observation alike (they are
     different facts and the consumer must keep telling them apart)."""
     for shape, proved_by, address in (
@@ -887,7 +650,6 @@ def test_destination_shape_survives_the_writer_onto_the_function_row(db_session)
             function_name="manage",
             selector="0xf6e715d0",
             abi_signature="manage(address,bytes,uint256)",
-            effect_labels=[],
             claims=[],
             authority_public=False,
         )
@@ -913,7 +675,7 @@ def test_destination_shape_survives_the_writer_onto_the_function_row(db_session)
         )
         db_session.commit()
 
-        write_effective_function_rows(
+        write_permission_rows(
             db_session,
             contract_id=contract.id,
             function_records=[
@@ -921,15 +683,17 @@ def test_destination_shape_survives_the_writer_onto_the_function_row(db_session)
                     "function": "manage(address,bytes,uint256)",
                     "abi_signature": "manage(address,bytes,uint256)",
                     "selector": "0xf6e715d0",
-                    "effect_labels": [],
-                    "effect_targets": [],
-                    "action_summary": "stub",
                     "authority_public": False,
                     "authority_roles": [],
-                    "claims": [],
+                    "claims": [
+                        {
+                            "claim_id": "flow.out",
+                            "tier": "behavioral_observed",
+                            "witness": {"observed": {"destination_shape": shape, "shape_proved_by": proved_by}},
+                        }
+                    ],
                 }
             ],
-            capability_by_function=None,
             deployment_address=address,
         )
         db_session.commit()

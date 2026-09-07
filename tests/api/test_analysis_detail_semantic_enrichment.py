@@ -1,8 +1,7 @@
 """Pin semantic enrichment of ``GET /api/analyses/{run_name}``.
 
-The endpoint adds two keys when a predicate-tree artifact exists:
+The endpoint enriches a stored Assessment with:
 
-  - ``predicate_trees`` — raw trees-by-function dict
   - ``semantic_capabilities`` — resolved CapabilityExpr per function
 """
 
@@ -18,7 +17,6 @@ pytestmark = pytest.mark.usefixtures("_stub_live_authority")
 
 
 from tests.conftest import requires_postgres  # noqa: E402
-from tests.support.overview_builders import _addr  # noqa: E402
 
 
 def _seed_completed_job(db_session, *, address: str):
@@ -62,28 +60,39 @@ def _semantic_artifact() -> dict:
     }
 
 
+def _store_assessment(db_session, job, address: str, predicate_trees: dict) -> None:
+    from db.queue import store_artifact
+    from tests.support.policy_builders import _assessment, _minimal_static_facts
+
+    store_artifact(
+        db_session,
+        job.id,
+        "assessment",
+        data=_assessment(
+            static_facts=_minimal_static_facts(address=address, name="T"),
+            predicate_trees=predicate_trees,
+        ),
+    )
+
+
 @requires_postgres
 def test_endpoint_includes_semantic_keys_when_artifact_present(api_client, db_session):
-    from db.queue import store_artifact
-
     address = "0x" + uuid.uuid4().hex[:8] + "11" * 16
     job = _seed_completed_job(db_session, address=address)
-    store_artifact(db_session, job.id, "predicate_trees", data=_semantic_artifact())
+    _store_assessment(db_session, job, address, _semantic_artifact())
     db_session.commit()
 
     resp = api_client.get(f"/api/analyses/{address}")
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    # Both semantic enrichment keys present.
-    assert "predicate_trees" in body
-    assert body["predicate_trees"]["schema_version"] == "semantic"
+    assert "assessment" in body
     assert "semantic_capabilities" in body
     assert "f()" in body["semantic_capabilities"]
     cap = body["semantic_capabilities"]["f()"]
     assert "kind" in cap
     assert "confidence" in cap
     # available_artifacts surface lists the artifact name too.
-    assert "predicate_trees" in body["available_artifacts"]
+    assert "assessment" in body["available_artifacts"]
 
 
 @requires_postgres
@@ -107,11 +116,9 @@ def test_endpoint_includes_predicate_trees_even_when_resolver_fails(api_client, 
     """A semantic resolution failure must not break the endpoint. The
     raw ``predicate_trees`` artifact stays inlined; only the
     resolved ``semantic_capabilities`` is dropped."""
-    from db.queue import store_artifact
-
     address = "0x" + uuid.uuid4().hex[:8] + "33" * 16
     job = _seed_completed_job(db_session, address=address)
-    store_artifact(db_session, job.id, "predicate_trees", data=_semantic_artifact())
+    _store_assessment(db_session, job, address, _semantic_artifact())
     db_session.commit()
 
     # Force the resolver import to raise.
@@ -125,8 +132,7 @@ def test_endpoint_includes_predicate_trees_even_when_resolver_fails(api_client, 
     resp = api_client.get(f"/api/analyses/{address}")
     assert resp.status_code == 200
     body = resp.json()
-    # Raw trees still present.
-    assert "predicate_trees" in body
+    assert "assessment" in body
     # Resolved capabilities dropped because resolution exploded.
     assert "semantic_capabilities" not in body
 
@@ -136,22 +142,20 @@ def test_endpoint_handles_unguarded_only_contract_with_empty_caps(api_client, db
     """Contract with only public functions: predicate_trees has
     trees={}. semantic_capabilities resolves to {} — both keys present
     but empty, signaling 'analyzed, every function public'."""
-    from db.queue import store_artifact
-
     address = "0x" + uuid.uuid4().hex[:8] + "44" * 16
     job = _seed_completed_job(db_session, address=address)
-    store_artifact(
+    _store_assessment(
         db_session,
-        job.id,
-        "predicate_trees",
-        data={"schema_version": "semantic", "contract_name": "T", "trees": {}},
+        job,
+        address,
+        {"schema_version": "semantic", "contract_name": "T", "trees": {}},
     )
     db_session.commit()
 
     resp = api_client.get(f"/api/analyses/{address}")
     assert resp.status_code == 200
     body = resp.json()
-    assert body["predicate_trees"]["trees"] == {}
+    assert "assessment" in body
     assert body["semantic_capabilities"] == {}
 
 
@@ -174,8 +178,8 @@ def test_endpoint_names_artifacts_it_could_not_read_instead_of_omitting_them(api
     def _partial(_session, _job_id):
         raise StorageContentNotDetermined(
             "bucket unreachable",
-            values={"predicate_trees": _semantic_artifact()},
-            not_determined={"effective_permissions": "could not read artifacts/j/effective_permissions"},
+            values={"dependencies": {"items": []}},
+            not_determined={"assessment": "could not read artifacts/j/assessment"},
         )
 
     monkeypatch.setattr(deps, "get_all_artifacts", _partial)
@@ -184,10 +188,10 @@ def test_endpoint_names_artifacts_it_could_not_read_instead_of_omitting_them(api
     assert resp.status_code == 200, resp.text
     body = resp.json()
     # What did read is still rendered.
-    assert body["predicate_trees"]["schema_version"] == "semantic"
+    assert body["dependencies"] == {"items": []}
     # What did not is named, rather than reading as "the analysis has none".
-    assert "effective_permissions" in body["artifacts_not_determined"]
-    assert "effective_permissions" not in body["available_artifacts"]
+    assert "assessment" in body["artifacts_not_determined"]
+    assert "assessment" not in body["available_artifacts"]
 
 
 @requires_postgres
@@ -210,8 +214,8 @@ def test_endpoint_keeps_a_lost_body_apart_from_one_it_could_not_ask_about(api_cl
     def _partial(_session, _job_id):
         raise StorageContentAbsent(
             "1/2 artifact bodies proven absent",
-            values={"predicate_trees": _semantic_artifact()},
-            proven_absent={"effective_permissions": "no object at any candidate for artifacts/j/eff"},
+            values={"dependencies": {"items": []}},
+            proven_absent={"assessment": "no object at any candidate for artifacts/j/eff"},
         )
 
     monkeypatch.setattr(deps, "get_all_artifacts", _partial)
@@ -219,54 +223,7 @@ def test_endpoint_keeps_a_lost_body_apart_from_one_it_could_not_ask_about(api_cl
     resp = api_client.get(f"/api/analyses/{address}")
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert body["predicate_trees"]["schema_version"] == "semantic"
-    assert "effective_permissions" in body["artifacts_body_absent"]
+    assert body["dependencies"] == {"items": []}
+    assert "assessment" in body["artifacts_body_absent"]
     assert "artifacts_not_determined" not in body
-    assert "effective_permissions" not in body["available_artifacts"]
-
-
-def test_principal_label_payload_narrows_confidence_and_the_duplicate_label():
-    """``principal_labels.confidence`` carries no epistemic content: it is a
-    naming-branch label, two-valued in practice (high 1,376 / medium 180 / low 0
-    — ``low`` needs ``resolved_type == "unknown"`` and no such row exists), ~97%
-    a restatement of ``resolved_type``, and cannot say "I did not
-    determine this". ``label`` is byte-identical to ``display_name`` on 1,556/1,556
-    rows, so a consumer reading both believed there were two facts.
-    """
-    from db.models import PrincipalLabel
-    from services.aggregations.analysis_detail import _principal_label_payload
-
-    identical = PrincipalLabel(
-        contract_id=1,
-        address=_addr("plc1"),
-        label="EtherFi admin Safe",
-        display_name="EtherFi admin Safe",
-        resolved_type="safe",
-        labels=["etherfi_admin"],
-        confidence="high",
-        details={},
-        graph_context=[],
-    )
-    out = _principal_label_payload(identical)
-    assert out["naming_rule"] == "high"
-    assert "confidence" not in out
-    # One fact, published once.
-    assert "label" not in out
-    assert out["display_name"] == "EtherFi admin Safe"
-
-    # POSITIVE CONTROL: when the two really differ, both ship.
-    differing = PrincipalLabel(
-        contract_id=1,
-        address=_addr("plc2"),
-        label="raw-label",
-        display_name="Pretty Name",
-        resolved_type="contract",
-        labels=[],
-        confidence="medium",
-        details={},
-        graph_context=[],
-    )
-    out = _principal_label_payload(differing)
-    assert out["label"] == "raw-label"
-    assert out["display_name"] == "Pretty Name"
-    assert out["naming_rule"] == "medium"
+    assert "assessment" not in body["available_artifacts"]

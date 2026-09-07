@@ -123,7 +123,7 @@ def maybe_queue_reanalysis(
     2. No queued or processing job already exists for this address+chain.
 
     The job starts at the ``discovery`` stage so the caching system can
-    copy static artifacts (source files, contract_analysis, etc.) and the
+    copy static artifacts (source files, static_facts, etc.) and the
     static worker can detect implementation changes via
     ``_check_proxy_cache``.
 

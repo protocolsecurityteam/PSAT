@@ -332,7 +332,7 @@ def proven_param_destination_call_identities(ctx: ClaimContext, signature: str) 
     # sink-derived set did.
     from slither.slithir.operations import HighLevelCall, LibraryCall, LowLevelCall
 
-    from ...contract_analysis_pipeline.effects import _callee_signature, _selector_for
+    from ...static_analysis.effects import _callee_signature, _selector_for
 
     parameters = list(getattr(function, "parameters", None) or [])
     definitions = _definitions(function)

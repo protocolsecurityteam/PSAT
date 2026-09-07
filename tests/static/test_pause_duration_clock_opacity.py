@@ -34,7 +34,7 @@ pytest.importorskip("slither")
 from slither import Slither
 
 from services.effects import calldata as cd
-from services.static.contract_analysis_pipeline.predicate_artifacts import (
+from services.static.static_analysis.predicate_artifacts import (
     build_predicate_artifacts,
 )
 

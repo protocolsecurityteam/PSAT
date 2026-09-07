@@ -116,7 +116,7 @@ def _probe_responses_for(scenario: str) -> dict[str, str]:
     raise AssertionError(f"unknown scenario {scenario!r}")
 
 
-def _mock_sequential(monkeypatch, probe_map, *, code="0x60", get_code_raises=False, type_authority_raises=False):
+def _mock_sequential(monkeypatch, probe_map, *, code="0x60", get_code_raises=False):
     """Wire the sequential code path: _get_code returns `code`,
     _try_eth_call_decoded routes to `probe_map`."""
 
@@ -131,17 +131,11 @@ def _mock_sequential(monkeypatch, probe_map, *, code="0x60", get_code_raises=Fal
             raise RuntimeError("execution reverted")
         return raw
 
-    def _fake_type_authority(*_a, **_kw):
-        if type_authority_raises:
-            raise RuntimeError("type_authority blew up")
-        return {}
-
     monkeypatch.setattr(tracking, "_get_code", _fake_get_code)
     monkeypatch.setattr(tracking, "_eth_call_raw", _fake_eth_call_raw)
     # ERC-1967 slot read (the UIV-arm discriminator): zero word unless the
     # scenario provides one under the "storage" key.
     monkeypatch.setattr(tracking, "_get_storage_at", lambda *_a, **_k: probe_map.get("storage", "0x" + "0" * 64))
-    monkeypatch.setattr(tracking, "type_authority_contract", _fake_type_authority)
 
 
 def _mock_batched(
@@ -150,7 +144,6 @@ def _mock_batched(
     *,
     code="0x60",
     get_code_raises=False,
-    type_authority_raises=False,
     batch_errors=False,
 ):
     """Wire the batched code path. ``probe_map`` is keyed by selector;
@@ -170,11 +163,6 @@ def _mock_batched(
             out.append((raw, False))
         return out
 
-    def _fake_type_authority(*_a, **_kw):
-        if type_authority_raises:
-            raise RuntimeError("type_authority blew up")
-        return {}
-
     # The lazy negative-control probe rides _eth_call_raw on every path.
     def _fake_eth_call_raw(_rpc_url, _addr, signature, _block, chain_id=None):
         raw = probe_map.get(signature, "0x")
@@ -186,7 +174,6 @@ def _mock_batched(
     monkeypatch.setattr(tracking, "_rpc_batch_request_with_status", _fake_batch_with_status)
     monkeypatch.setattr(tracking, "_eth_call_raw", _fake_eth_call_raw)
     monkeypatch.setattr(tracking, "_get_storage_at", lambda *_a, **_k: probe_map.get("storage", "0x" + "0" * 64))
-    monkeypatch.setattr(tracking, "type_authority_contract", _fake_type_authority)
 
 
 def _both_paths(monkeypatch, probe_map, **kwargs):
@@ -266,15 +253,6 @@ def test_generic_contract_branch_parity(monkeypatch):
     assert seq[2] is False  # no errors in this scenario
 
 
-def test_generic_contract_with_type_authority_failure_parity(monkeypatch):
-    """type_authority_contract raised → both paths set had_error=True
-    even though no probe returned _PROBE_ERROR."""
-    seq, batch = _both_paths(monkeypatch, _probe_responses_for("contract_no_probes"), type_authority_raises=True)
-    assert seq == batch
-    assert seq[0] == "contract"
-    assert seq[2] is True
-
-
 def test_whole_batch_failure_marks_had_error(monkeypatch):
     """If the batch helper returns (None, True) for every slot (network
     or provider rejection), the batched path must classify as 'contract'
@@ -290,12 +268,8 @@ def test_whole_batch_failure_marks_had_error(monkeypatch):
     def _fake_get_code(_rpc_url, _addr, _block, chain_id=None):
         return "0x60"  # contract present
 
-    def _fake_type_authority(*_a, **_kw):
-        return {}
-
     monkeypatch.setattr(tracking, "_get_code", _fake_get_code)
     monkeypatch.setattr(tracking, "_eth_call_raw", _seq_all_raise)
-    monkeypatch.setattr(tracking, "type_authority_contract", _fake_type_authority)
     seq = _classify_uncached("https://rpc", "0xab", "latest")
 
     monkeypatch.setattr(
@@ -320,9 +294,6 @@ def test_partial_per_call_error_preserves_had_error(monkeypatch):
     def _fake_get_code(_rpc_url, _addr, _block, chain_id=None):
         return "0x60"
 
-    def _fake_type_authority(*_a, **_kw):
-        return {}
-
     def _fake_batch(_rpc_url, calls, chain_id=None):
         # Slot 0 (getOwners), 1 (getThreshold) success → Safe.
         # Slot 2 (getMinDelay) errors. Wouldn't affect Safe dispatch.
@@ -340,7 +311,6 @@ def test_partial_per_call_error_preserves_had_error(monkeypatch):
     monkeypatch.setattr(tracking, "_rpc_batch_request_with_status", _fake_batch)
     # Negative control (lazy _eth_call_raw): empty return → control passes.
     monkeypatch.setattr(tracking, "_eth_call_raw", lambda *_a, **_k: "0x")
-    monkeypatch.setattr(tracking, "type_authority_contract", _fake_type_authority)
     kind, details, had_error = _classify_uncached_batched("https://rpc", "0xab", "latest")
     assert kind == "safe"
     assert had_error is True, "an errored probe in the batch must still set had_error"
@@ -411,9 +381,6 @@ def test_whole_batch_failure_falls_back_to_sequential_path(monkeypatch):
     def _fake_get_code(_rpc_url, _addr, _block, chain_id=None):
         return "0x60"
 
-    def _fake_type_authority(*_a, **_kw):
-        return {}
-
     # Batch helper: simulates a provider that rejects every JSON-RPC batch.
     def _failing_batch(*_a, **_kw):
         return [(None, True)] * len(tracking._CLASSIFY_PROBE_SIGS)
@@ -432,7 +399,6 @@ def test_whole_batch_failure_falls_back_to_sequential_path(monkeypatch):
     monkeypatch.setattr(tracking, "_get_code", _fake_get_code)
     monkeypatch.setattr(tracking, "_rpc_batch_request_with_status", _failing_batch)
     monkeypatch.setattr(tracking, "_eth_call_raw", _safe_seq_eth_call)
-    monkeypatch.setattr(tracking, "type_authority_contract", _fake_type_authority)
 
     kind, details, had_error = _classify_uncached_batched("https://rpc", "0xab", "latest")
 
@@ -455,9 +421,6 @@ def test_partial_batch_failure_does_not_trigger_fallback(monkeypatch):
     def _fake_get_code(_rpc_url, _addr, _block, chain_id=None):
         return "0x60"
 
-    def _fake_type_authority(*_a, **_kw):
-        return {}
-
     def _partial_batch(*_a, **_kw):
         # Only slot 2 (getMinDelay) errored — the rest "succeeded" with
         # empty results. NOT a whole-batch failure.
@@ -477,7 +440,6 @@ def test_partial_batch_failure_does_not_trigger_fallback(monkeypatch):
     monkeypatch.setattr(tracking, "_get_code", _fake_get_code)
     monkeypatch.setattr(tracking, "_rpc_batch_request_with_status", _partial_batch)
     monkeypatch.setattr(tracking, "_eth_call_raw", _seq_should_not_run)
-    monkeypatch.setattr(tracking, "type_authority_contract", _fake_type_authority)
 
     kind, _details, had_error = _classify_uncached_batched("https://rpc", "0xab", "latest")
     assert kind == "contract"
@@ -502,7 +464,6 @@ def _run_multicall(
     *,
     code="0x60",
     get_code_raises=False,
-    type_authority_raises=False,
     revert_sigs: frozenset[str] | set[str] = frozenset(),
 ):
     """Drive _classify_uncached_batched through the real Multicall3 probe path.
@@ -520,11 +481,6 @@ def _run_multicall(
         if get_code_raises:
             raise RuntimeError("getCode failed")
         return code
-
-    def _fake_type_authority(*_a, **_kw):
-        if type_authority_raises:
-            raise RuntimeError("type_authority blew up")
-        return {}
 
     def _fake_rpc_request(_rpc_url, method, params, **_kw):
         assert method == "eth_call"
@@ -556,7 +512,6 @@ def _run_multicall(
         return raw
 
     monkeypatch.setattr(tracking, "_get_code", _fake_get_code)
-    monkeypatch.setattr(tracking, "type_authority_contract", _fake_type_authority)
     monkeypatch.setattr(tracking, "_eth_call_raw", _fake_eth_call_raw)
     monkeypatch.setattr(tracking, "_get_storage_at", lambda *_a, **_k: probe_map.get("storage", "0x" + "0" * 64))
     monkeypatch.setattr(tracking, "_CLASSIFY_MULTICALL_ENABLED", True)
@@ -607,7 +562,6 @@ def test_multicall_failure_falls_back_to_batch(monkeypatch):
 
     monkeypatch.setattr(tracking, "_CLASSIFY_MULTICALL_ENABLED", True)
     monkeypatch.setattr(tracking, "_get_code", lambda *_a, **_k: "0x60")
-    monkeypatch.setattr(tracking, "type_authority_contract", lambda *_a, **_k: {})
     # Negative control (lazy _eth_call_raw): empty return → control passes.
     monkeypatch.setattr(tracking, "_eth_call_raw", lambda *_a, **_k: "0x")
     monkeypatch.setattr(rpc_mod, "rpc_request", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no multicall")))

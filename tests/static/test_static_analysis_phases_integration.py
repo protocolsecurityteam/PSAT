@@ -1,11 +1,9 @@
-"""Integration tests for StaticWorker._run_analysis_phase.
+"""Integration tests for StaticWorker._run_static_facts_phase.
 
-The Slither CLI subprocess + its slither_results / analysis_report
+The Slither CLI subprocess + its slither_results / static_facts_report
 artifacts were removed when vulnerability-detector triage was split
-out of PSAT's cascade pipeline. The structured ``contract_analysis``
-artifact (built from Slither's Python IR) is what every downstream
-stage reads, so its phase is the only one with integration coverage
-here.
+out of PSAT's cascade pipeline. Static facts and the canonical Assessment are
+the only outputs covered here.
 """
 
 from __future__ import annotations
@@ -44,21 +42,21 @@ def _capture_store_artifact(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# _run_analysis_phase
+# _run_static_facts_phase
 # ---------------------------------------------------------------------------
 
 
 class TestAnalysisPhaseSuccess:
-    """Mock collect_contract_analysis() to return a dict; verify artifact is stored."""
+    """Mock collect_static_inputs() to return a dict; verify artifact is stored."""
 
-    def test_stores_contract_analysis_artifact(self, monkeypatch, tmp_path):
+    def test_stores_static_facts_and_assessment(self, monkeypatch, tmp_path):
         worker = StaticWorker()
         monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
-        monkeypatch.setattr(worker, "_write_analysis_tables", lambda *a, **kw: None)
+        monkeypatch.setattr(worker, "_write_static_fact_indexes", lambda *a, **kw: None)
         session = MagicMock()
         job = _job()
 
-        analysis_data = {
+        static_facts_data = {
             "schema_version": "0.1",
             "subject": {"name": "TestContract"},
             "summary": {"control_model": "ownable"},
@@ -67,74 +65,76 @@ class TestAnalysisPhaseSuccess:
         effects = {"schema_version": "semantic", "functions": {}}
 
         monkeypatch.setattr(
-            "workers.static_worker.collect_contract_analysis_with_artifacts",
-            lambda project_dir: (analysis_data, predicate_trees, effects),
+            "workers.static_worker.collect_static_inputs",
+            lambda project_dir: (static_facts_data, predicate_trees, effects),
         )
         calls = _capture_store_artifact(monkeypatch)
 
-        result = worker._run_analysis_phase(session, job, tmp_path, "TestContract", job.address)
+        result = worker._run_static_facts_phase(session, job, tmp_path, "TestContract", job.address)
 
-        assert result == analysis_data
+        assert result == static_facts_data
         names = [call["name"] for call in calls]
-        assert names == ["contract_analysis", "predicate_trees", "effects"]
-        assert calls[0]["data"] == analysis_data
-        assert calls[1]["data"] == predicate_trees
-        assert calls[2]["data"] == effects
+        assert names == ["assessment"]
+        assert calls[0]["data"]["schema_version"] == "assessment/5"
 
-    def test_stores_predicate_trees_and_effects_side_artifacts(self, monkeypatch, tmp_path):
+        from services.assessment import static_inputs
+
+        assert static_inputs(calls[0]["data"]) == (static_facts_data, predicate_trees, effects)
+
+    def test_embeds_semantic_inputs_only_in_assessment(self, monkeypatch, tmp_path):
         worker = StaticWorker()
         monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
-        monkeypatch.setattr(worker, "_write_analysis_tables", lambda *a, **kw: None)
+        monkeypatch.setattr(worker, "_write_static_fact_indexes", lambda *a, **kw: None)
         session = MagicMock()
         job = _job()
 
-        analysis_data = {
+        static_facts_data = {
             "schema_version": "0.1",
             "subject": {"name": "TestContract"},
             "summary": {"control_model": "ownable"},
         }
         predicate_trees = {"schema_version": "semantic", "trees": {}}
         effects = {"schema_version": "semantic", "functions": {}}
-        analysis_path = tmp_path / "contract_analysis.json"
-        analysis_path.write_text(json.dumps(analysis_data))
+        analysis_path = tmp_path / "static_facts.json"
+        analysis_path.write_text(json.dumps(static_facts_data))
 
         monkeypatch.setattr(
-            "workers.static_worker.collect_contract_analysis_with_artifacts",
-            lambda project_dir: (analysis_data, predicate_trees, effects),
+            "workers.static_worker.collect_static_inputs",
+            lambda project_dir: (static_facts_data, predicate_trees, effects),
         )
         calls = _capture_store_artifact(monkeypatch)
 
-        result = worker._run_analysis_phase(session, job, tmp_path, "TestContract", job.address)
+        result = worker._run_static_facts_phase(session, job, tmp_path, "TestContract", job.address)
 
-        assert result == analysis_data
-        assert [call["name"] for call in calls] == ["contract_analysis", "predicate_trees", "effects"]
+        assert result == static_facts_data
+        assert [call["name"] for call in calls] == ["assessment"]
 
     def test_skips_predicate_trees_for_vyper(self, monkeypatch, tmp_path):
         """Vyper projects return ``None`` for predicate_trees + effects;
-        only contract_analysis is stored."""
+        the failed semantic inputs are represented inside Assessment."""
         worker = StaticWorker()
         monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
-        monkeypatch.setattr(worker, "_write_analysis_tables", lambda *a, **kw: None)
+        monkeypatch.setattr(worker, "_write_static_fact_indexes", lambda *a, **kw: None)
         session = MagicMock()
         job = _job()
 
         monkeypatch.setattr(
-            "workers.static_worker.collect_contract_analysis_with_artifacts",
+            "workers.static_worker.collect_static_inputs",
             lambda project_dir: ({"schema_version": "0.1"}, None, None),
         )
         calls = _capture_store_artifact(monkeypatch)
 
-        result = worker._run_analysis_phase(session, job, tmp_path, "TestContract", job.address)
+        result = worker._run_static_facts_phase(session, job, tmp_path, "TestContract", job.address)
 
         assert result == {"schema_version": "0.1"}
-        assert [call["name"] for call in calls] == ["contract_analysis"]
+        assert [call["name"] for call in calls] == ["assessment"]
 
 
 class TestAnalysisPhaseFailure:
-    """Mock ``collect_contract_analysis_with_artifacts()`` to raise;
-    verify error artifact and return value."""
+    """Mock ``collect_static_inputs()`` to raise;
+    verify failure recording does not mint a side artifact."""
 
-    def test_stores_analysis_error_on_exception(self, monkeypatch, tmp_path):
+    def test_records_static_failure_without_a_side_artifact(self, monkeypatch, tmp_path):
         worker = StaticWorker()
         monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
         session = MagicMock()
@@ -143,17 +143,15 @@ class TestAnalysisPhaseFailure:
         def _raise(project_dir):
             raise RuntimeError("LLM analysis timed out")
 
-        monkeypatch.setattr("workers.static_worker.collect_contract_analysis_with_artifacts", _raise)
+        monkeypatch.setattr("workers.static_worker.collect_static_inputs", _raise)
         calls = _capture_store_artifact(monkeypatch)
 
-        result = worker._run_analysis_phase(session, job, tmp_path, "TestContract", job.address)
+        result = worker._run_static_facts_phase(session, job, tmp_path, "TestContract", job.address)
 
         assert result is None
-        assert len(calls) == 1
-        assert calls[0]["name"] == "analysis_error"
-        assert "LLM analysis timed out" in calls[0]["data"]["error"]
+        assert calls == []
 
-    def test_stores_analysis_error_on_generic_exception(self, monkeypatch, tmp_path):
+    def test_records_generic_failure_without_a_side_artifact(self, monkeypatch, tmp_path):
         worker = StaticWorker()
         monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
         session = MagicMock()
@@ -162,11 +160,10 @@ class TestAnalysisPhaseFailure:
         def _raise(project_dir):
             raise ValueError("bad json from model")
 
-        monkeypatch.setattr("workers.static_worker.collect_contract_analysis_with_artifacts", _raise)
+        monkeypatch.setattr("workers.static_worker.collect_static_inputs", _raise)
         calls = _capture_store_artifact(monkeypatch)
 
-        result = worker._run_analysis_phase(session, job, tmp_path, "TestContract", job.address)
+        result = worker._run_static_facts_phase(session, job, tmp_path, "TestContract", job.address)
 
         assert result is None
-        assert calls[0]["name"] == "analysis_error"
-        assert "bad json from model" in calls[0]["data"]["error"]
+        assert calls == []

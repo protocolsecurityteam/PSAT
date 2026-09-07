@@ -14,10 +14,10 @@ import pytest
 slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
 
-from services.static.contract_analysis_pipeline.predicates import (  # noqa: E402
+from services.static.static_analysis.predicates import (  # noqa: E402
     build_predicate_tree,
 )
-from services.static.contract_analysis_pipeline.reentrancy_pause import (  # noqa: E402
+from services.static.static_analysis.reentrancy_pause import (  # noqa: E402
     PauseAnalyzer,
     ReentrancyAnalyzer,
     apply_reentrancy_pause_pass,
@@ -181,9 +181,8 @@ def test_renamed_pause_detected(tmp_path):
     assert "flag" in pause_vars
 
 
-def test_unauth_writer_does_not_trigger_pause(tmp_path):
-    """A bool toggled by anyone isn't a pause flag — needs an
-    auth-gated writer."""
+def test_unguarded_writer_is_a_public_pause_capability(tmp_path):
+    """Effect detection is independent of authority; no guard means public."""
     sl = _compile(
         tmp_path,
         """
@@ -191,7 +190,7 @@ def test_unauth_writer_does_not_trigger_pause(tmp_path):
         contract C {
             bool public _paused;
             function pause() external { _paused = true; }
-            function someAction() external view {
+            function someAction() external {
                 require(!_paused);
             }
         }
@@ -200,7 +199,29 @@ def test_unauth_writer_does_not_trigger_pause(tmp_path):
     contract = sl.contracts[0]
     trees = _build_trees(contract)
     pause_vars = PauseAnalyzer(contract, trees).run()
-    assert pause_vars == set()
+    assert pause_vars == {"_paused"}
+
+
+def test_flag_that_only_blocks_a_view_is_not_a_pause_effect(tmp_path):
+    """The claimed effect is blocking state-changing entry points."""
+
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            bool public _paused;
+            function pause() external { _paused = true; }
+            function status() external view returns (bool) {
+                require(!_paused);
+                return true;
+            }
+        }
+    """,
+    )
+    contract = sl.contracts[0]
+    trees = _build_trees(contract)
+    assert PauseAnalyzer(contract, trees).run() == set()
 
 
 # ---------------------------------------------------------------------------
@@ -428,7 +449,7 @@ def test_detect_pausability_consumes_pause_info(tmp_path):
     """_detect_pausability now takes a ``pause_info`` dict and surfaces
     the structural pause vars + toggle functions without relying on
     modifier names."""
-    from services.static.contract_analysis_pipeline.summaries import _detect_pausability
+    from services.static.static_analysis.summaries import _detect_pausability
 
     sl = _compile(
         tmp_path,
@@ -468,7 +489,7 @@ def test_detect_pausability_consumes_pause_info(tmp_path):
 def test_detect_pausability_renamed_pause_modifier(tmp_path):
     """A non-standard modifier name still gets surfaced as gating because
     it READS the pause var."""
-    from services.static.contract_analysis_pipeline.summaries import _detect_pausability
+    from services.static.static_analysis.summaries import _detect_pausability
 
     sl = _compile(
         tmp_path,
@@ -515,9 +536,9 @@ def _pause_inputs(tmp_path: Path, source: str):
     when nothing raises vs when only the claims block raises: identical
     ``functions`` maps, one carrying the ``claims`` key and one not.
     ``trees_artifact`` is the third, independently degradable input."""
-    from services.static.claims import attach_claims_to_effects, build_claims, project_effect_labels
-    from services.static.contract_analysis_pipeline.effects import build_effects
-    from services.static.contract_analysis_pipeline.predicate_artifacts import (
+    from services.static.claims import attach_claims_to_effects, build_claims
+    from services.static.static_analysis.effects import build_effects
+    from services.static.static_analysis.predicate_artifacts import (
         build_predicate_artifacts_with_pause_info,
     )
 
@@ -525,7 +546,6 @@ def _pause_inputs(tmp_path: Path, source: str):
     trees_artifact, pause_info = build_predicate_artifacts_with_pause_info(contract)
     with_claims = build_effects(contract)
     attach_claims_to_effects(with_claims, build_claims(contract, with_claims, trees_artifact))
-    project_effect_labels(with_claims)
     return contract, pause_info, trees_artifact, with_claims, build_effects(contract)
 
 
@@ -538,12 +558,50 @@ def test_detect_pausability_empty_when_no_pause(tmp_path):
     detectors could see: passing either degraded input would pin ``False`` on
     a run where the discriminating evidence was never computed (and, since the
     fix, answers ``None``)."""
-    from services.static.contract_analysis_pipeline.summaries import _detect_pausability
+    from services.static.static_analysis.summaries import _detect_pausability
 
     contract, pause_info, trees, with_claims, _ = _pause_inputs(tmp_path, _NO_PAUSE)
     pausability = _detect_pausability(contract, tmp_path, pause_info, with_claims, trees)
     assert pausability["is_pausable"] is False
     assert pausability["pause_variables"] == []
+
+
+def test_public_pause_emits_a_claim_and_publishes_true(tmp_path):
+    """An unguarded pause path is public authority, not an absent effect."""
+
+    from services.static.static_analysis.summaries import _detect_pausability, _pause_claims
+
+    source = """
+        pragma solidity ^0.8.19;
+        contract C {
+            bool private stopped;
+            function stop() external { stopped = true; }
+            function act() external { require(!stopped, "stopped"); }
+        }
+    """
+    contract, pause_info, trees, with_claims, _ = _pause_inputs(tmp_path, source)
+    assert _pause_claims(with_claims) == ({"stop()"}, set(), {"stopped"})
+    assert _detect_pausability(contract, tmp_path, pause_info, with_claims, trees)["is_pausable"] is True
+
+
+def test_unpause_only_does_not_claim_that_pausing_is_possible(tmp_path):
+    """A callable unset path describes recovery, not a pause capability."""
+
+    from services.static.static_analysis.summaries import _detect_pausability, _pause_claims
+
+    source = """
+        pragma solidity ^0.8.19;
+        contract C {
+            bool private stopped = true;
+            function resume() external { stopped = false; }
+            function act() external { require(!stopped, "stopped"); }
+        }
+    """
+    contract, pause_info, trees, with_claims, _ = _pause_inputs(tmp_path, source)
+    assert _pause_claims(with_claims) == (set(), {"resume()"}, {"stopped"})
+    result = _detect_pausability(contract, tmp_path, pause_info, with_claims, trees)
+    assert result["is_pausable"] is False
+    assert result["unpause_functions"] == ["resume()"]
 
 
 def test_detect_pausability_is_not_determined_without_the_claims_plane(tmp_path):
@@ -556,7 +614,7 @@ def test_detect_pausability_is_not_determined_without_the_claims_plane(tmp_path)
     block raises, every function record is present and every record is
     claim-free — so "the effects map is non-empty" is not evidence that the
     only detector able to see a struct-member latch ever looked."""
-    from services.static.contract_analysis_pipeline.summaries import _detect_pausability
+    from services.static.static_analysis.summaries import _detect_pausability
 
     contract, pause_info, trees, _, claim_free = _pause_inputs(tmp_path, _NO_PAUSE)
     degraded = {"schema_version": "semantic", "error": "boom"}
@@ -580,7 +638,7 @@ def test_detect_pausability_is_not_determined_without_the_trees_plane(tmp_path):
 
     The shapes here are the two ways that input can arrive wrong — the stub
     ``core`` actually builds, and an omitted argument."""
-    from services.static.contract_analysis_pipeline.summaries import _detect_pausability
+    from services.static.static_analysis.summaries import _detect_pausability
 
     contract, _pause_info, _trees, with_claims, _ = _pause_inputs(tmp_path, _NO_PAUSE)
     degraded_trees = {"schema_version": "semantic", "error": "boom"}
@@ -651,7 +709,7 @@ def test_timelock_min_delay_detect_pausability_false_end_to_end(tmp_path):
     """With all three planes demonstrably run, the timelock publishes the
     affirmative ``is_pausable=False`` — not ``true`` (the refuted claim) and
     not ``None`` (the planes did run)."""
-    from services.static.contract_analysis_pipeline.summaries import _detect_pausability
+    from services.static.static_analysis.summaries import _detect_pausability
 
     contract, pause_info, trees, with_claims, _ = _pause_inputs(tmp_path, _TIMELOCK_MIN_DELAY)
     pausability = _detect_pausability(contract, tmp_path, pause_info, with_claims, trees)
@@ -695,7 +753,7 @@ def test_modifier_hosted_relational_bound_publishes_false_end_to_end(tmp_path):
     """With all three planes run, the modifier-hosted bounds shape
     publishes the affirmative ``is_pausable=False`` — not ``true`` and
     not ``None``."""
-    from services.static.contract_analysis_pipeline.summaries import _detect_pausability
+    from services.static.static_analysis.summaries import _detect_pausability
 
     contract, pause_info, trees, with_claims, _ = _pause_inputs(tmp_path, _MODIFIER_RELATIONAL_BOUND)
     pausability = _detect_pausability(contract, tmp_path, pause_info, with_claims, trees)
@@ -867,7 +925,7 @@ def test_uint_latch_parameter_written_inline_require_publishes_true(tmp_path):
     inline uint latch publishes the affirmative ``is_pausable=True`` —
     not ``False`` (a proven-absence claim the detector cannot make here)
     and not ``None``."""
-    from services.static.contract_analysis_pipeline.summaries import _detect_pausability
+    from services.static.static_analysis.summaries import _detect_pausability
 
     contract, pause_info, trees, with_claims, _ = _pause_inputs(tmp_path, _UINT_INLINE_LATCH)
     pausability = _detect_pausability(contract, tmp_path, pause_info, with_claims, trees)
@@ -905,7 +963,7 @@ def test_uint_latch_custom_error_if_revert_publishes_true(tmp_path):
     """End-to-end on the published surface for the custom-error shape:
     ``is_pausable=True`` with the latch var — not the fabricated
     proven-absence ``False``."""
-    from services.static.contract_analysis_pipeline.summaries import _detect_pausability
+    from services.static.static_analysis.summaries import _detect_pausability
 
     contract, pause_info, trees, with_claims, _ = _pause_inputs(tmp_path, _UINT_CUSTOM_ERROR_LATCH)
     pausability = _detect_pausability(contract, tmp_path, pause_info, with_claims, trees)
@@ -1018,10 +1076,10 @@ def test_private_latch_declared_in_abstract_base_publishes_true(tmp_path):
     """End-to-end on the published surface for the inherited-latch shape:
     ``is_pausable=True`` earned with the latch var — not the fabricated
     proven-absence ``False`` the accessible-only lookup produced."""
-    from services.static.contract_analysis_pipeline.predicate_artifacts import (
+    from services.static.static_analysis.predicate_artifacts import (
         build_predicate_artifacts_with_pause_info,
     )
-    from services.static.contract_analysis_pipeline.summaries import _detect_pausability
+    from services.static.static_analysis.summaries import _detect_pausability
 
     sl = _compile(tmp_path, _PRIVATE_BASE_LATCH)
     contract = next(c for c in sl.contracts if c.name == "DerivedStrategy")

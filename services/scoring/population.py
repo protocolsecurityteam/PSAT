@@ -199,7 +199,7 @@ def replace_contract_signals(
     guard below makes the wrong grouping raise instead of silently truncating.
 
     Wholesale per contract, in the caller's transaction, mirroring
-    ``write_effective_function_rows``. Wholesale because a distillation's rows
+    ``write_permission_rows``. Wholesale because a distillation's rows
     ARE the set it derived: a capability the contract no longer has must
     disappear, and an upsert would leave the stale row behind to keep charging
     exposure forever.

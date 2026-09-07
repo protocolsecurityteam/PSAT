@@ -17,6 +17,15 @@ import {
   collectIndirectCallers,
 } from "./controlGraph.js";
 import { guardSummary } from "./guardSummary.js";
+import { hasClaims } from "../../vocab/claimProjection.js";
+
+export function membershipKind(contract) {
+  const witnesses = Array.isArray(contract?.membership_witnesses)
+    ? contract.membership_witnesses
+    : [];
+  if (contract?.membership_state !== "member" || witnesses.length === 0) return "not-stated";
+  return witnesses.every((witness) => witness?.heuristic === true) ? "heuristic" : "supported";
+}
 
 export function buildMachines(companyData, functionData, { functionsLoading = false, activeChain = null } = {}) {
   // Node-type index over every contract's control_graph; used to flag
@@ -26,7 +35,7 @@ export function buildMachines(companyData, functionData, { functionsLoading = fa
   return companyData.contracts
     .map((contract) => {
       const rawFunctions = (functionData[entityKey(contract.chain, contract.address)] || [])
-        .filter((fn) => !isRoleConstant(functionName(fn.function)));
+        .filter((fn) => !isRoleConstant(functionName(fn.function)) && hasClaims(fn));
       const lanes = { top: [], left: [], right: [], ops: [] };
 
       for (const fn of rawFunctions) {
@@ -42,7 +51,6 @@ export function buildMachines(companyData, functionData, { functionsLoading = fa
           lane,
           tone: toneForFunction(fn, lane),
           action: compactActionSummary(fn),
-          effectLabels: fn.effect_labels || [],
           claims: fn.claims || [],
           guard: guardSummary(fn, companyData),
           // `principals` is the direct-callers list — exactly who can fire
@@ -58,8 +66,7 @@ export function buildMachines(companyData, functionData, { functionsLoading = fa
 
       for (const lane of Object.keys(lanes)) {
         lanes[lane].sort((left, right) => {
-          const score = lanePriority({ effect_labels: left.effectLabels, claims: left.claims })
-            - lanePriority({ effect_labels: right.effectLabels, claims: right.claims });
+          const score = lanePriority({ claims: left.claims }) - lanePriority({ claims: right.claims });
           if (score !== 0) return score;
           return left.name.localeCompare(right.name);
         });
@@ -70,6 +77,7 @@ export function buildMachines(companyData, functionData, { functionsLoading = fa
       const isTimelock = tlNode?.type === "timelock";
       return {
         ...contract,
+        membershipKind: membershipKind(contract),
         totalFunctions,
         lanes,
         // Passthrough timelock contracts: typed "timelock" in the control

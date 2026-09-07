@@ -110,6 +110,21 @@
   flex-shrink: 0;
 }
 
+.ps-node-membership {
+  width: fit-content;
+  margin-top: 5px;
+  padding: 2px 5px;
+  border: 1px solid rgb(217 154 78 / 35%);
+  border-radius: 4px;
+  background: rgb(217 154 78 / 10%);
+  color: #d9a869;
+  font-size: 8px;
+  font-weight: 700;
+  line-height: 1.35;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
 /* Lane indicator tags on node edges */
 .ps-node-lane-tag {
   position: absolute;
@@ -382,4 +397,3 @@
   color: #f59e0b;
   letter-spacing: 0.02em;
 }
-

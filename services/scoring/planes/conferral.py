@@ -59,7 +59,7 @@ from services.scoring.schema import coalesce_chain, entity_key
 #                intermediate node's own functions (``effective_functions``
 #                at A, gated by the authority the capability seizes) against its
 #                outbound targets (``effective_functions.sinks`` /
-#                ``effect_targets``, and the ``external_call_target`` edges
+#                sink evidence and the ``external_call_target`` edges
 #                CONTROL_RELATIONS excludes): does a function of A that the
 #                seized gate lets its holder call exercise A's authority over B.
 #                Until that runs, the hop is not_determined — withheld and

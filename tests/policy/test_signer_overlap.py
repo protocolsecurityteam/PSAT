@@ -1,4 +1,4 @@
-"""C1: signer-overlap attribution fact + A4 terminal wiring in build_principal_labels.
+"""C1: signer-overlap attribution fact + A4 terminal wiring in build_principal_index.
 
 SCORING plan §2 (signer overlap) and §4 (contract-principal terminal walk). The
 DB-backed test exercises the exact/lower_bound owner-quality gate in
@@ -12,9 +12,9 @@ import pytest
 
 from db.models import Contract, EffectiveFunction, FunctionPrincipal, Protocol
 from services.concurrency import RpcExecutor
-from services.policy.principal_enrichment import (
+from services.policy.principal_index import (
     _compute_signer_overlap,
-    build_principal_labels,
+    build_principal_index,
     load_protocol_safe_owner_sets,
 )
 
@@ -183,21 +183,20 @@ def test_load_protocol_safe_owner_sets_scoped_to_protocol(db_session):
     assert set(load_protocol_safe_owner_sets(db_session, p2.id)) == {PAUSER.lower()}
 
 
-# --- build_principal_labels integration --------------------------------------
+# --- build_principal_index integration --------------------------------------
 
 TARGET = "0x1111111111111111111111111111111111111111"
 CONTRACT_PRINCIPAL = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 TERMINAL_SAFE = "0x" + "a" * 40
 
 
-def _effective_permissions_with_principal(principal_addr, resolved_type):
+def _permission_index_with_principal(principal_addr, resolved_type):
     return {
         "contract_address": TARGET,
         "contract_name": "BoringVault",
         "functions": [
             {
                 "function": "manage(address,bytes,uint256)",
-                "effect_labels": ["arbitrary_external_call"],
                 "authority_public": False,
                 "authority_roles": [
                     {
@@ -221,7 +220,7 @@ def _graph_with_leaf_principal(principal_addr, resolved_type):
                 "resolved_type": "contract",
                 "label": "BoringVault",
                 "depth": 0,
-                "analyzed": True,
+                "analysis_state": "analyzed",
                 "details": {"address": TARGET},
             },
             {
@@ -231,7 +230,7 @@ def _graph_with_leaf_principal(principal_addr, resolved_type):
                 "resolved_type": resolved_type,
                 "label": "manager",
                 "depth": 1,
-                "analyzed": False,
+                "analysis_state": None,
                 "details": {"address": principal_addr},
             },
         ],
@@ -250,17 +249,17 @@ def _graph_with_leaf_principal(principal_addr, resolved_type):
 
 def test_signer_overlap_lands_on_safe_profile(monkeypatch):
     monkeypatch.setattr(
-        "services.policy.principal_enrichment.classify_resolved_address_with_status",
+        "services.policy.principal_index.classify_resolved_address_with_status",
         lambda rpc_url, address, **_kw: ("eoa", {"address": address}, True),
     )
     registry = _registry((OPS, OPS_OWNERS), (PAUSER, PAUSER_OWNERS))
-    payload = build_principal_labels(
-        _effective_permissions_with_principal(PAUSER, "safe"),
-        resolved_control_graph=_graph_with_leaf_principal(PAUSER, "safe"),
+    payload = build_principal_index(
+        _permission_index_with_principal(PAUSER, "safe"),
+        resolution_graph=_graph_with_leaf_principal(PAUSER, "safe"),
         rpc_url="http://rpc.example",
         protocol_safe_owner_sets=registry,
     )
-    profiles = {p["address"]: cast(Any, p) for p in payload["principals"]}
+    profiles = {p["address"]: cast(Any, p) for p in payload}
     safe_profile = profiles[PAUSER.lower()]
     overlap = safe_profile["details"]["signer_overlap"]
     assert overlap["overlaps"][0]["subset"] is True
@@ -269,7 +268,7 @@ def test_signer_overlap_lands_on_safe_profile(monkeypatch):
 
 def test_contract_principal_gets_terminal_chain(monkeypatch):
     monkeypatch.setattr(
-        "services.policy.principal_enrichment.classify_resolved_address_with_status",
+        "services.policy.principal_index.classify_resolved_address_with_status",
         lambda rpc_url, address, **_kw: ("contract", {"address": address}, True),
     )
 
@@ -278,13 +277,13 @@ def test_contract_principal_gets_terminal_chain(monkeypatch):
             return [{"address": TERMINAL_SAFE, "resolved_type": "safe", "details": {"threshold": 3}}]
         return None
 
-    payload = build_principal_labels(
-        _effective_permissions_with_principal(CONTRACT_PRINCIPAL, "contract"),
-        resolved_control_graph=_graph_with_leaf_principal(CONTRACT_PRINCIPAL, "contract"),
+    payload = build_principal_index(
+        _permission_index_with_principal(CONTRACT_PRINCIPAL, "contract"),
+        resolution_graph=_graph_with_leaf_principal(CONTRACT_PRINCIPAL, "contract"),
         rpc_url="http://rpc.example",
         resolve_controllers=_resolve_controllers,
     )
-    profiles = {p["address"]: cast(Any, p) for p in payload["principals"]}
+    profiles = {p["address"]: cast(Any, p) for p in payload}
     contract_profile = profiles[CONTRACT_PRINCIPAL]
     assert contract_profile["details"]["terminal"] is False  # the way-point is not a settled key
     terminal = contract_profile["details"]["terminal_principal"]
@@ -295,16 +294,16 @@ def test_contract_principal_gets_terminal_chain(monkeypatch):
 
 def test_contract_principal_without_resolver_stays_non_terminal(monkeypatch):
     monkeypatch.setattr(
-        "services.policy.principal_enrichment.classify_resolved_address_with_status",
+        "services.policy.principal_index.classify_resolved_address_with_status",
         lambda rpc_url, address, **_kw: ("contract", {"address": address}, True),
     )
-    payload = build_principal_labels(
-        _effective_permissions_with_principal(CONTRACT_PRINCIPAL, "contract"),
-        resolved_control_graph=_graph_with_leaf_principal(CONTRACT_PRINCIPAL, "contract"),
+    payload = build_principal_index(
+        _permission_index_with_principal(CONTRACT_PRINCIPAL, "contract"),
+        resolution_graph=_graph_with_leaf_principal(CONTRACT_PRINCIPAL, "contract"),
         rpc_url="http://rpc.example",
         resolve_controllers=None,
     )
-    profiles = {p["address"]: cast(Any, p) for p in payload["principals"]}
+    profiles = {p["address"]: cast(Any, p) for p in payload}
     contract_profile = profiles[CONTRACT_PRINCIPAL]
     assert contract_profile["details"]["terminal"] is False
     assert "terminal_principal" not in contract_profile["details"]

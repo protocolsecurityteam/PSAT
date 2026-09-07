@@ -7,7 +7,7 @@ from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:  # typing-only: the effects plane stays off static's runtime import graph
-    from services.static.contract_analysis_pipeline.predicate_types import (
+    from services.static.static_analysis.predicate_types import (
         StateVarTargetKind,
     )
 
@@ -137,7 +137,7 @@ def _selector_of(signature: str) -> str | None:
     """The 4-byte selector, or ``None`` when ``signature`` is not a fully lowered
     ABI signature. A residual user-defined type name means the hash is not a
     dispatch value, and a probe keyed on it would call the wrong function."""
-    from services.static.contract_analysis_pipeline.predicate_artifacts import is_canonical_abi_signature
+    from services.static.static_analysis.predicate_artifacts import is_canonical_abi_signature
 
     if not signature or not is_canonical_abi_signature(signature):
         return None

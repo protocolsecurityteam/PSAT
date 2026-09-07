@@ -1,7 +1,9 @@
-"""Job / snapshot / graph builders for the policy worker.
+"""Minimal schema-complete artifact fixtures for policy tests.
 
-Extracted verbatim from ``test_policy_worker_integration``, which
-``test_effects_stage`` imported these from cross-module.
+Every builder produces a document that passes the typed artifact loaders
+(``db.queue.typed``) — partial dicts used to slip through because reads were
+untyped; validation is now fail-closed, so fixtures carry every required
+field, populated with the schema's own "nothing determined" values.
 """
 
 from __future__ import annotations
@@ -9,6 +11,8 @@ from __future__ import annotations
 import uuid
 from types import SimpleNamespace
 from typing import Any
+
+from schemas.assessment import Assessment
 
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 AUTH_ADDRESS = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -28,37 +32,214 @@ def _job(**overrides: Any) -> SimpleNamespace:
     return SimpleNamespace(**payload)
 
 
-def _minimal_snapshot(controller_values: dict | None = None) -> dict:
-    """Return a minimal control_snapshot dict."""
-    return {
-        "contract_address": TARGET_ADDRESS,
-        "controller_values": controller_values or {},
+def _snapshot_value(**overrides: Any) -> dict:
+    """One ``ControllerObservation`` entry; callers override any field."""
+    entry: dict[str, Any] = {
+        "source": "state_variable:test",
+        "value": None,
+        "block_number": 1,
+        "observed_via": "eth_call",
+        "resolved_type": "unknown",
+        "details": {},
     }
+    entry.update(overrides)
+    return entry
 
 
-def _graph_with_nodes(nodes: list[dict]) -> dict:
-    return {"nodes": nodes, "edges": []}
-
-
-def _minimal_contract_analysis() -> dict:
+def _minimal_snapshot(controller_values: dict | None = None, address: str = TARGET_ADDRESS) -> dict:
+    """A minimal ``observation_batch`` document. Partial per-controller dicts
+    are completed with the schema defaults (a bare ``{"value": ...}`` entry
+    becomes a complete value read)."""
+    values: dict[str, Any] = {}
+    for controller_id, cv in (controller_values or {}).items():
+        complete = {"source", "value", "block_number", "observed_via", "resolved_type", "details"}
+        values[controller_id] = cv if set(cv) >= complete else _snapshot_value(**cv)
     return {
-        "contract_address": TARGET_ADDRESS,
+        "schema_version": "1",
+        "contract_address": address,
         "contract_name": "TestContract",
-        "functions": [],
+        "block_number": 1,
+        "controller_values": values,
     }
+
+
+def _graph_with_nodes(nodes: list[dict], address: str = TARGET_ADDRESS) -> dict:
+    return {
+        "schema_version": "1",
+        "root_contract_address": address,
+        "max_depth": 6,
+        "nodes": nodes,
+        "edges": [],
+    }
+
+
+def _minimal_static_facts(address: str = TARGET_ADDRESS, name: str = "TestContract") -> dict:
+    """A ``StaticFacts`` document carrying no findings: every analysis
+    section reports its schema's nothing-determined shape."""
+    return {
+        "schema_version": "2",
+        "subject": {
+            "address": address,
+            "name": name,
+            "compiler_version": "unknown",
+            "source_verified": None,
+        },
+        "static_status": {"static_analysis_completed": True, "errors": []},
+        "summary": {
+            "control_model": "unknown",
+            "is_upgradeable": False,
+            "is_pausable": None,
+            "has_timelock": None,
+            "standards": None,
+            "is_factory": None,
+            "is_nft": None,
+        },
+        "contract_classification": {
+            "standards": [],
+            "is_erc20": False,
+            "is_erc721": False,
+            "is_erc1155": False,
+            "is_nft": False,
+            "is_factory": False,
+            "factory_functions": None,
+            "evidence": [],
+        },
+        "semantic_control": {
+            "pattern": "unknown",
+            "owner_variables": [],
+            "admin_variables": [],
+            "role_definitions": [],
+            "semantic_functions": [],
+            "current_holders": {"status": "unknown_static_only"},
+        },
+        "upgradeability": {
+            "is_upgradeable": False,
+            "is_upgradeable_proxy": False,
+            "pattern": "none",
+            "upgradeable_version": None,
+            "implementation_slots": [],
+            "admin_paths": [],
+            "evidence": [],
+        },
+        "pausability": {
+            "is_pausable": None,
+            "pause_functions": [],
+            "unpause_functions": [],
+            "gating_modifiers": [],
+            "pause_variables": [],
+            "authorized_roles": [],
+            "evidence": [],
+        },
+        "timelock": {
+            "has_timelock": None,
+            "pattern": "none",
+            "delay": None,
+            "delay_source": "not_read",
+            "delay_variables": [],
+            "queue_execute_functions": [],
+            "authorized_roles": [],
+            "evidence": [],
+        },
+        "audit_alignment": {"status": "not_checked", "bytecode_match": "unknown", "notes": []},
+        "tracking_hints": [],
+        "controller_tracking": [],
+    }
+
+
+def _observation_plan(address: str = TARGET_ADDRESS, name: str = "TestContract") -> dict:
+    return {
+        "schema_version": "1",
+        "contract_address": address,
+        "contract_name": name,
+        "tracking_strategy": "event_first_with_polling_fallback",
+        "tracked_controllers": [],
+    }
+
+
+def _assessment(
+    *,
+    static_facts: dict | None = None,
+    predicate_trees: dict | None = None,
+    effects: dict | None = None,
+    snapshot: dict | None = None,
+    graph: dict | None = None,
+    chain_id: int = 1,
+) -> Assessment:
+    """Canonical worker handoff fixture built from the old algorithm inputs."""
+
+    from services.assessment import add_observations, add_resolution, build_static_assessment
+
+    facts = static_facts or _minimal_static_facts()
+    snapshot = snapshot or _minimal_snapshot()
+    if snapshot.get("controller_values"):
+        facts = {**facts, "controller_tracking": list(facts.get("controller_tracking") or [])}
+        known = {item.get("controller_id") for item in facts["controller_tracking"]}
+        for key, value in snapshot["controller_values"].items():
+            if key in known:
+                continue
+            facts["controller_tracking"].append(
+                {
+                    "controller_id": key,
+                    "label": key,
+                    "source": value.get("source") or key,
+                    "kind": "state_variable",
+                    "read_spec": {"strategy": "getter_call", "target": key},
+                    "confidence": "exact",
+                    "tracking_mode": "state_only",
+                    "writer_functions": [],
+                    "associated_events": [],
+                    "polling_sources": [],
+                    "notes": [],
+                }
+            )
+    subject = facts["subject"]
+    result = build_static_assessment(
+        chain_id=chain_id,
+        address=subject["address"],
+        contract_name=subject["name"],
+        code_hash=None,
+        source_hash="test-source",
+        static_facts=facts,
+        effects=effects
+        or {
+            "schema_version": "semantic-3",
+            "contract_name": subject["name"],
+            "functions": {},
+            "claims_schema_version": "claims/1",
+            "claim_analyses": {},
+            "claim_diagnostics": [],
+        },
+        predicate_trees=predicate_trees or {"schema_version": "semantic", "trees": {}},
+    )
+    result = add_observations(result, snapshot)
+    if graph is not None:
+        result = add_resolution(result, graph, chain_id=chain_id)
+    return result
 
 
 def _authority_bundle(snapshot: dict | None = None) -> dict:
+    """A nested ``LoadedArtifacts`` bundle for the authority contract."""
+    analysis = _minimal_static_facts(address=AUTH_ADDRESS, name="Authority")
     return {
-        "analysis": {
-            "subject": {"address": AUTH_ADDRESS, "name": "Authority"},
-        },
-        "tracking_plan": {
-            "schema_version": "0.1",
-            "contract_address": AUTH_ADDRESS,
-            "contract_name": "Authority",
-            "tracking_strategy": "event_first_with_polling_fallback",
-            "tracked_controllers": [],
-        },
-        "snapshot": snapshot or {"contract_address": AUTH_ADDRESS, "controller_values": {}},
+        "analysis": analysis,
+        "observation_plan": _observation_plan(address=AUTH_ADDRESS, name="Authority"),
+        "snapshot": snapshot or _minimal_snapshot({}, address=AUTH_ADDRESS),
     }
+
+
+def resolved_records(records, capabilities):
+    """Build writer inputs from resolver results using the production projection."""
+    from services.policy.capability_surface import capability_role_grants
+    from services.policy.permission_index import _column_values_for_capability
+    from services.resolution.capabilities import CapabilityExpr
+    from services.resolution.capability_resolver import capability_to_dict
+
+    out = []
+    for record in records:
+        cap = capabilities.get(record.get("function") or record.get("abi_signature"))
+        if cap is None:
+            out.append(dict(record))
+            continue
+        cap = capability_to_dict(cap) if isinstance(cap, CapabilityExpr) else cap
+        out.append({**record, **_column_values_for_capability(cap), "authority_roles": capability_role_grants(cap)})
+    return out

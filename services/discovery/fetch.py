@@ -105,11 +105,11 @@ def fetch(address: str, *, chain_id: int) -> dict:
 def source_content_hash(result: dict) -> str:
     """Deterministic content hash of the verified-source *code plane* inputs.
 
-    The static pipeline (``collect_contract_analysis_with_artifacts`` →
-    ``build_control_tracking_plan``) is a pure function of the scaffolded
+    The static pipeline (``collect_static_inputs`` →
+    ``build_observation_plan``) is a pure function of the scaffolded
     project: it runs Slither over the source AST and never reads chain state or
     bytecode. So two deployments with the same hash produce a byte-identical
-    analysis / tracking_plan / predicate_trees bundle and can share it, even on
+    analysis / observation_plan / predicate_trees bundle and can share it, even on
     different chains and at different addresses.
 
     The hash therefore covers exactly the inputs that determine that bundle:

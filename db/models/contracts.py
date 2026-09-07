@@ -214,9 +214,6 @@ class ControlGraphNode(Base):
     label: Mapped[str | None] = mapped_column(String(255), nullable=True)
     contract_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     depth: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    # Kept for compatibility; ``False`` on it is four different populations at
-    # once. ``analysis_state`` is what a consumer must read.
-    analyzed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     # 'analyzed' | 'not_analyzable' | 'attempt_failed' | 'beyond_depth_horizon'
     # | NULL (not determined). ``beyond_depth_horizon`` is a fact about OUR
     # walk, not about the address, and is the one the bool could never express:
@@ -225,7 +222,7 @@ class ControlGraphNode(Base):
     # ``services.governance.control_graph_types.reconcile_control_graph_types``,
     # which fills NULL (only NULL) with the walk's own derivation after a type
     # fold determines analyzability the walk could not.
-    # See ``schemas.resolved_control_graph.ResolvedAnalysisState``.
+    # See ``schemas.resolution_graph.ResolutionState``.
     analysis_state: Mapped[str | None] = mapped_column(String(32), nullable=True)
     # The ``max_depth`` of the walk that produced this row. NULL = not
     # determined. Without it ``depth`` alone cannot say whether an unanalysed
@@ -698,9 +695,6 @@ class EffectiveFunction(Base):
     function_name: Mapped[str] = mapped_column(String(255), nullable=False)
     selector: Mapped[str | None] = mapped_column(String(10), nullable=True)
     abi_signature: Mapped[str | None] = mapped_column(Text, nullable=True)
-    effect_labels: Mapped[list[str] | None] = mapped_column(ARRAY(String(100)), nullable=True)
-    effect_targets: Mapped[list[str] | None] = mapped_column(ARRAY(String(255)), nullable=True)
-    action_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     authority_public: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
@@ -741,13 +735,12 @@ class EffectiveFunction(Base):
     capability_expr: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
     conditions: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
     status: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    # Plane-1 claims: list of {claim_id, tier, witness}, dual-written alongside
-    # the legacy effect_labels. NULL/[] on rows written before the claims plane.
+    # Supported claims: list of {claim_id, tier, witness}.
     claims: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
 
     # State-mutability witness, carried from the effects stage's ``EffectInfo``.
     # Before these columns the only way to ask "does this function write state"
-    # was ``effect_targets``, which concatenates state-write variable names with
+    # Earlier display projections concatenated state-write variable names with
     # dotted external-call heads: 501 of its 1642 populated rows carry only call
     # heads, so a populated value asserted a write that was never proven.
     #

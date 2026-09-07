@@ -41,6 +41,8 @@ from services.monitoring.restaking_enrollment import (
     node_addresses_from_fold,
 )
 from services.resolution.role_holder_plane import ROLE_GRANTED_TOPIC0, ROLE_REVOKED_TOPIC0
+from tests.support.policy_builders import _assessment
+from tests.support.resolution_worker_stubs import _minimal_static_facts
 from workers.resolution_worker import ResolutionWorker
 
 # The measured EtherFiNodesManager PROXY. Its ``contracts`` row is keyed at the
@@ -329,19 +331,21 @@ class TestRoleHolderPlaneColdCursor:
 
 
 def _stub_stage(monkeypatch, **overrides: Any) -> None:
-    tracking_plan = {"contract_address": REGISTRY, "controllers": []}
-    contract_analysis = {"subject": {"address": REGISTRY}, "contract_name": "Registry", "functions": []}
+    static_facts = {
+        **_minimal_static_facts(),
+        "subject": {"address": REGISTRY, "name": "Registry", "compiler_version": "unknown", "source_verified": None},
+    }
+    assessment = _assessment(static_facts=static_facts)
     snapshot = {"contract_address": REGISTRY, "controller_values": {}, "block_number": BLOCK}
 
     monkeypatch.setattr(
         "workers.resolution_worker.get_artifact",
         lambda _s, _j, name: {
-            "control_tracking_plan": tracking_plan,
-            "contract_analysis": contract_analysis,
+            "assessment": assessment,
         }.get(name),
     )
     monkeypatch.setattr("workers.resolution_worker.store_artifact", lambda *a, **kw: None)
-    monkeypatch.setattr("workers.resolution_worker.build_control_snapshot", lambda *a, **kw: snapshot)
+    monkeypatch.setattr("workers.resolution_worker.observe_controllers", lambda *a, **kw: snapshot)
     monkeypatch.setattr(
         "workers.resolution_worker.resolve_control_graph",
         lambda **_kw: ({"root_contract_address": REGISTRY, "nodes": [], "edges": []}, {}),

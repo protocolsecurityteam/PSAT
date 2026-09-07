@@ -1,4 +1,4 @@
-"""Static analysis worker — runs Slither and contract analysis in a temp directory."""
+"""Static static_facts worker — runs Slither and contract static_facts in a temp directory."""
 
 from __future__ import annotations
 
@@ -9,11 +9,11 @@ import shutil
 import tempfile
 import textwrap
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from sqlalchemy import select
 
-from db.models import Contract, ContractSummary, Job, JobDependency, JobStage, RoleDefinition, derive_job_chain_id
+from db.models import Contract, ContractSummary, Job, JobDependency, JobStage, RoleDefinition
 from db.queue import (
     _MUTABLE_CONTRACT_FIELDS,
     create_job,
@@ -22,7 +22,9 @@ from db.queue import (
     reconcile_impl_job_for_proxy,
     store_artifact,
 )
-from schemas.contract_analysis import ContractAnalysis
+from db.queue._chains import job_chain_id
+from schemas.assessment import Assessment
+from schemas.static_facts import StaticFacts
 from services.clients.rpc import default_rpc_url, normalize_hex  # used for address comparison
 from services.discovery import (
     build_dependency_visualization,
@@ -35,8 +37,7 @@ from services.discovery import (
 from services.discovery.dynamic_dependencies import NoNewTransactionsError
 from services.discovery.fetch import _confine, sanitize_evm_version
 from services.monitoring.proxy_watcher import resolve_current_implementation
-from services.resolution.tracking_plan import build_control_tracking_plan
-from services.static.contract_analysis_pipeline import collect_contract_analysis_with_artifacts
+from services.static.static_analysis import collect_static_inputs
 from utils.chains import UnknownChainError, chain_by_id, chain_enabled, require_chain
 from utils.logging import log_timed_phase, record_degraded, record_stage_metric
 from workers.base import BaseWorker, JobHandledDirectly
@@ -99,24 +100,12 @@ def _request_rpc_url(job: Job) -> str | None:
     )
 
 
-def _parent_chain_id(job: Job) -> int:
-    """The parent job's first-class ``chain_id`` (inv. 6): the populated
-    ``jobs.chain_id`` column, else derived from ``request["chain"]`` via the
-    registry, else mainnet. Threaded into RPC reads so the inv-7 URL↔chain_id
-    guard is armed."""
-    chain_id = getattr(job, "chain_id", None)
-    if isinstance(chain_id, int):
-        return chain_id
-    request = job.request if isinstance(job.request, dict) else {}
-    return derive_job_chain_id(request.get("chain"), job.address) or 1
-
-
 def _parent_chain_name(job: Job) -> str:
     """Canonical chain name of the parent job, for stamping onto a spawned impl
     child so chain never cascades as ``None`` (inv. 6). Uses the first-class
     ``jobs.chain_id`` column, else derives from ``request["chain"]`` via the
     registry; mainnet resolves to ``"ethereum"`` so mainnet spawns are unchanged."""
-    chain_id = _parent_chain_id(job)
+    chain_id = job_chain_id(job)
     try:
         return chain_by_id(chain_id).name
     except UnknownChainError as exc:
@@ -598,7 +587,7 @@ def _check_proxy_cache(session, job, contract_row) -> dict | None:
     # (slot reads, getter calls, fallback discovery).
     try:
         current_impl = resolve_current_implementation(
-            contract_row.address, rpc_url, proxy_type=proxy_type, chain_id=_parent_chain_id(job)
+            contract_row.address, rpc_url, proxy_type=proxy_type, chain_id=job_chain_id(job)
         )
         if not current_impl:
             return None
@@ -731,14 +720,14 @@ class StaticWorker(BaseWorker):
             target_classification = self._resolve_proxy(session, job, address, contract_name)
 
         # Check if proxy classification marked this as a proxy — if so,
-        # skip Slither/analysis on the proxy source (it's just a thin wrapper).
+        # skip Slither/static_facts on the proxy source (it's just a thin wrapper).
         # Dependency discovery still runs because proxy-address deps are useful.
         session.refresh(contract_row)
         is_proxy = contract_row.is_proxy
         record_stage_metric("is_proxy", bool(is_proxy))
 
         # Check if the discovery worker flagged this job as using cached static
-        # data.  When set, we skip the expensive Slither / contract-analysis /
+        # data.  When set, we skip the expensive Slither / contract-static_facts /
         # tracking-plan phases but still run the dependency phase (resolution
         # needs it).
         has_cached_static = bool(request.get("static_cached"))
@@ -755,48 +744,48 @@ class StaticWorker(BaseWorker):
 
             secondary_analysis: Any = None
             if is_proxy:
-                self.update_detail(session, job, "Proxy detected — impl job handles analysis")
+                self.update_detail(session, job, "Proxy detected — impl job handles static_facts")
                 logger.info(
-                    "Static stage skipping analysis for proxy job %s (%s) — impl child job will analyze",
+                    "Static stage skipping static_facts for proxy job %s (%s) — impl child job will analyze",
                     job_id_str,
                     contract_name,
                 )
                 # Proxy jobs skip resolution/policy — complete directly
                 from db.queue import complete_job
 
-                complete_job(session, job.id, f"Proxy {contract_name} — impl child job queued for full analysis")
+                complete_job(session, job.id, f"Proxy {contract_name} — impl child job queued for full static_facts")
                 raise JobHandledDirectly()
             elif has_cached_static:
-                # Static artifacts already present from cache — skip analysis phases.
+                # Static artifacts already present from cache — skip static_facts phases.
                 logger.info(
-                    "Static stage cache hit for job %s (%s) — skipping Slither/analysis/tracking plan",
+                    "Static stage cache hit for job %s (%s) — skipping Slither/static_facts/tracking plan",
                     job_id_str,
                     contract_name,
                 )
-                self.update_detail(session, job, "Static analysis complete (cached)")
-                # The cached contract_analysis still carries secondary_impl_pointers
-                # (copy_static_cache copies it), so secondaries get resolved on the
-                # cache path too — not only on a fresh (Slither) analysis.
-                cached_analysis = get_artifact(session, job.id, "contract_analysis")
-                secondary_analysis = cached_analysis if isinstance(cached_analysis, dict) else None
+                self.update_detail(session, job, "Static static_facts complete (cached)")
+                # Assessment evidence carries the cached static inputs, so
+                # secondaries resolve without a parallel static_facts artifact.
+                from db.queue.typed import load_assessment
+                from services.assessment import static_inputs
+
+                cached_assessment = load_assessment(get_artifact, session, job.id)
+                if cached_assessment is not None:
+                    secondary_analysis, _cached_trees, _cached_effects = static_inputs(cached_assessment)
             else:
-                # Phase 1: Contract analysis (uses Slither's Python IR — the
+                # Phase 1: Contract static_facts (uses Slither's Python IR — the
                 # CLI subprocess that produced detector findings was removed;
                 # vulnerability triage is now an out-of-band concern, not part
                 # of the cascade pipeline).
-                with log_timed_phase(logger, "contract_analysis"):
-                    analysis_data = self._run_analysis_phase(session, job, project_dir, contract_name, address)
+                with log_timed_phase(logger, "static_facts"):
+                    static_facts_data = self._run_static_facts_phase(session, job, project_dir, contract_name, address)
 
-                if analysis_data is None:
-                    raise RuntimeError(f"Contract analysis failed for {contract_name} ({address}).")
+                if static_facts_data is None:
+                    raise RuntimeError(f"Contract static_facts failed for {contract_name} ({address}).")
 
-                # Phase 2: Control tracking plan
-                with log_timed_phase(logger, "tracking_plan"):
-                    self._run_tracking_plan_phase(session, job, analysis_data, contract_name, address)
-                secondary_analysis = analysis_data if isinstance(analysis_data, dict) else None
+                secondary_analysis = static_facts_data if isinstance(static_facts_data, dict) else None
 
             # 1A: queue split-proxy secondary implementations (best-effort). SINGLE
-            # call site reached by BOTH the fresh-analysis and cache-hit paths, so
+            # call site reached by BOTH the fresh-static_facts and cache-hit paths, so
             # an impl re-seen in proxy context never silently skips secondary-impl
             # linkage just because its static artifacts were cached.
             if secondary_analysis is not None:
@@ -806,8 +795,8 @@ class StaticWorker(BaseWorker):
             # path copies them), so supply is published from one call site.
             self._publish_materialization(session, job, address, contract_name)
 
-            self.update_detail(session, job, "Static analysis complete")
-            logger.info("Static analysis complete for job %s (%s)", job_id_str, contract_name)
+            self.update_detail(session, job, "Static static_facts complete")
+            logger.info("Static static_facts complete for job %s (%s)", job_id_str, contract_name)
 
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -837,7 +826,7 @@ class StaticWorker(BaseWorker):
             return None
 
         try:
-            classification = classify_single(address, rpc_url, chain_id=_parent_chain_id(job))
+            classification = classify_single(address, rpc_url, chain_id=job_chain_id(job))
         except ClassificationIncompleteError as exc:
             # #121: the proxy-detection slots could not be read (transient RPC).
             # Storing is_proxy=False here and analyzing the address as-is would
@@ -970,7 +959,7 @@ class StaticWorker(BaseWorker):
             impl_address or "unknown",
         )
 
-        # Queue implementation addresses for analysis
+        # Queue implementation addresses for static_facts
         impl_entries: list[tuple[str, str]] = []  # (address, label)
         if impl_address:
             impl_entries.append((impl_address, "impl"))
@@ -1054,7 +1043,7 @@ class StaticWorker(BaseWorker):
             child_request["chain"] = impl_chain
             # Defense in depth (inv. 14): the impl shares the proxy's chain, so a
             # gated parent implies a gated impl — but a disabled chain must spawn
-            # no analysis work, so the gate is asserted here too.
+            # no static_facts work, so the gate is asserted here too.
             if not chain_enabled(impl_chain):
                 logger.info(
                     "Skipping implementation child: chain not enabled for this deployment",
@@ -1088,7 +1077,7 @@ class StaticWorker(BaseWorker):
 
         return classification
 
-    def _resolve_secondary_impls(self, session, job, address: str, analysis_data) -> None:
+    def _resolve_secondary_impls(self, session, job, address: str, static_facts_data) -> None:
         """1A: detect + queue split-proxy secondary implementations.
 
         When an impl analysed in proxy context (``request.proxy_address`` set)
@@ -1096,7 +1085,7 @@ class StaticWorker(BaseWorker):
         that secondary logic contract against the PROXY's storage and analyse it
         the same way (a proxy-child job) so its admin functions resolve to the
         proxy's controller instead of stranding on an ownerless orphan node.
-        Best-effort — never fails the parent analysis.
+        Best-effort — never fails the parent static_facts.
         """
         request = job.request if isinstance(job.request, dict) else {}
         proxy_address = request.get("proxy_address")
@@ -1105,7 +1094,7 @@ class StaticWorker(BaseWorker):
         # One level only: a secondary impl doesn't itself spawn secondaries.
         if request.get("discovery_relationship") == "secondary_implementation":
             return
-        pointers = (analysis_data or {}).get("secondary_impl_pointers") or []
+        pointers = (static_facts_data or {}).get("secondary_impl_pointers") or []
         if not pointers:
             return
         rpc_url = _request_rpc_url(job)
@@ -1141,7 +1130,7 @@ class StaticWorker(BaseWorker):
                 proxy_address,
                 pointers,
                 implementation=proxy_contract.implementation,
-                chain_id=_parent_chain_id(job),
+                chain_id=job_chain_id(job),
             )
             if not secondary_addrs:
                 return
@@ -1224,7 +1213,7 @@ class StaticWorker(BaseWorker):
         address: str,
         target_classification: dict | None = None,
     ) -> None:
-        """Build dependency artifacts before compile-dependent analysis starts."""
+        """Build dependency artifacts before compile-dependent static_facts starts."""
         self.update_detail(session, job, "Discovering dependencies")
 
         request = job.request if isinstance(job.request, dict) else {}
@@ -1268,7 +1257,7 @@ class StaticWorker(BaseWorker):
         def run_static() -> dict:
             if cached_static_deps is not None:
                 return cached_static_deps
-            return find_dependencies(address, deps_rpc, code_cache={}, chain_id=_parent_chain_id(job))
+            return find_dependencies(address, deps_rpc, code_cache={}, chain_id=job_chain_id(job))
 
         def run_dynamic() -> dict:
             return find_dynamic_dependencies(
@@ -1423,7 +1412,7 @@ class StaticWorker(BaseWorker):
                 prev_cls = get_artifact(session, job.id, "classifications")
                 if isinstance(prev_cls, dict):
                     validated_cls = _validate_cached_dep_classifications(
-                        prev_cls, resolved_rpc, chain_id=_parent_chain_id(job)
+                        prev_cls, resolved_rpc, chain_id=job_chain_id(job)
                     )
                     for cls_addr, cls_info in validated_cls.items():
                         if cls_addr not in pre_classified:
@@ -1436,7 +1425,7 @@ class StaticWorker(BaseWorker):
                         resolved_rpc,
                         dynamic_edges=(dyn_output or {}).get("dependency_graph"),
                         code_cache=None,
-                        chain_id=_parent_chain_id(job),
+                        chain_id=job_chain_id(job),
                         pre_classified=pre_classified or None,
                     )
                     # Store classifications artifact for future cache hits
@@ -1597,23 +1586,40 @@ class StaticWorker(BaseWorker):
                 address,
             )
 
-    def _run_analysis_phase(
+    def _run_static_facts_phase(
         self, session, job, project_dir: Path, contract_name: str, address: str
-    ) -> ContractAnalysis | None:
-        """Run structured contract analysis. Returns the analysis dict or None on failure."""
-        self.update_detail(session, job, "Building structured contract analysis")
+    ) -> StaticFacts | None:
+        """Run structured contract static_facts. Returns the static_facts dict or None on failure."""
+        self.update_detail(session, job, "Building structured contract static_facts")
         try:
-            analysis_data, semantic_predicate_trees, semantic_effects = collect_contract_analysis_with_artifacts(
-                project_dir
+            static_facts_data, semantic_predicate_trees, semantic_effects = collect_static_inputs(project_dir)
+            from services.assessment import build_static_assessment
+
+            assessment = build_static_assessment(
+                chain_id=job_chain_id(job),
+                address=address,
+                contract_name=contract_name,
+                code_hash=None,
+                source_hash=getattr(job, "source_content_hash", None),
+                static_facts=static_facts_data,
+                effects=(
+                    semantic_effects
+                    if isinstance(semantic_effects, dict)
+                    else {"schema_version": "missing", "error": "effects artifact missing"}
+                ),
+                predicate_trees=(
+                    semantic_predicate_trees
+                    if isinstance(semantic_predicate_trees, dict)
+                    else {"schema_version": "missing", "error": "predicate trees unavailable"}
+                ),
             )
         except Exception as exc:
             record_degraded(
-                phase="contract_analysis",
+                phase="static_facts",
                 exc=exc,
                 context={"address": address, "contract_name": contract_name},
             )
-            _log_phase_error(str(job.id), address, contract_name, "contract_analysis", str(exc))
-            store_artifact(session, job.id, "analysis_error", data={"error": str(exc)})
+            _log_phase_error(str(job.id), address, contract_name, "static_facts", str(exc))
             return None
 
         # ``predicate_trees`` and ``effects`` are the semantic artifacts
@@ -1621,7 +1627,8 @@ class StaticWorker(BaseWorker):
         # a stray non-JSON analyzer object (a Slither ``Constant`` reached
         # ``derived_from.callee`` before provenance stringified it) must
         # degrade to its string form rather than kill the whole static job.
-        (project_dir / "contract_analysis.json").write_text(json.dumps(analysis_data, indent=2, default=str) + "\n")
+        (project_dir / "static_facts.json").write_text(json.dumps(static_facts_data, indent=2, default=str) + "\n")
+        (project_dir / "assessment.json").write_text(json.dumps(assessment, indent=2, default=str) + "\n")
         if semantic_predicate_trees is not None:
             (project_dir / "predicate_trees.json").write_text(
                 json.dumps(semantic_predicate_trees, indent=2, default=str) + "\n"
@@ -1629,44 +1636,23 @@ class StaticWorker(BaseWorker):
         if semantic_effects is not None:
             (project_dir / "effects.json").write_text(json.dumps(semantic_effects, indent=2, default=str) + "\n")
 
-        store_artifact(session, job.id, "contract_analysis", data=analysis_data)
-        if semantic_predicate_trees is not None:
-            try:
-                store_artifact(session, job.id, "predicate_trees", data=semantic_predicate_trees)
-            except Exception as exc:
-                record_degraded(
-                    phase="predicate_trees_artifact_store",
-                    exc=exc,
-                    context={"address": address, "contract_name": contract_name, "job_id": str(job.id)},
-                )
-                logger.exception(
-                    "Static stage: predicate_trees artifact store failed for job %s",
-                    job.id,
-                )
-        if semantic_effects is not None:
-            try:
-                store_artifact(session, job.id, "effects", data=semantic_effects)
-            except Exception as exc:
-                record_degraded(
-                    phase="effects_artifact_store",
-                    exc=exc,
-                    context={"address": address, "contract_name": contract_name, "job_id": str(job.id)},
-                )
-                logger.exception(
-                    "Static stage: effects artifact store failed for job %s",
-                    job.id,
-                )
-        self._write_analysis_tables(session, job, analysis_data)
+        store_artifact(session, job.id, "assessment", data=assessment)
+        self._write_static_fact_indexes(session, job, assessment)
         logger.info(
-            "Static stage contract analysis complete for job %s address=%s contract=%s",
+            "Static stage contract static_facts complete for job %s address=%s contract=%s",
             job.id,
             address,
             contract_name,
         )
-        return analysis_data
+        return static_facts_data
 
-    def _write_analysis_tables(self, session, job: Job, analysis: ContractAnalysis | dict) -> None:
-        """Extract structured data from contract_analysis JSON into relational tables."""
+    def _write_static_fact_indexes(
+        self,
+        session,
+        job: Job,
+        assessment: Assessment,
+    ) -> None:
+        """Replace relational indexes from validated Assessment evidence."""
         from sqlalchemy import select as sa_select
 
         contract_row = session.execute(
@@ -1675,12 +1661,12 @@ class StaticWorker(BaseWorker):
         if not contract_row:
             return
 
-        summary = analysis.get("summary", {})
-        subject = analysis.get("subject", {})
+        from services.assessment import static_index_view
 
-        # Update contract name from analysis if available
-        if subject.get("name"):
-            contract_row.contract_name = subject["name"]
+        projection = static_index_view(assessment)
+
+        if projection.get("contract_name"):
+            contract_row.contract_name = projection["contract_name"]
 
         # Write contract_summary
         existing_summary = session.execute(
@@ -1693,22 +1679,20 @@ class StaticWorker(BaseWorker):
         session.add(
             ContractSummary(
                 contract_id=contract_row.id,
-                control_model=summary.get("control_model"),
-                is_upgradeable=summary.get("is_upgradeable"),
-                is_pausable=summary.get("is_pausable"),
-                has_timelock=summary.get("has_timelock"),
-                is_factory=summary.get("is_factory"),
-                is_nft=summary.get("is_nft"),
-                standards=summary.get("standards", []),
-                source_verified=subject.get("source_verified"),
+                control_model=projection.get("control_model"),
+                is_upgradeable=projection.get("is_upgradeable"),
+                is_pausable=projection.get("is_pausable"),
+                has_timelock=projection.get("has_timelock"),
+                is_factory=projection.get("is_factory"),
+                is_nft=projection.get("is_nft"),
+                standards=projection.get("standards", []),
+                source_verified=projection.get("source_verified"),
             )
         )
 
-        semantic_section = analysis.get("semantic_control", {})
-
         # Write role_definitions
         session.query(RoleDefinition).filter(RoleDefinition.contract_id == contract_row.id).delete()
-        for rd in semantic_section.get("role_definitions", []):
+        for rd in projection.get("role_definitions", []):
             session.add(
                 RoleDefinition(
                     contract_id=contract_row.id,
@@ -1720,7 +1704,7 @@ class StaticWorker(BaseWorker):
         session.commit()
 
     def _publish_materialization(self, session, job: Job, address: str, contract_name: str) -> None:
-        """Record this job's analysis bundle in ``contract_materializations`` (F4a).
+        """Record this job's static_facts bundle in ``contract_materializations`` (F4a).
 
         Until now the versioned store had exactly one writer: the authority
         recursion, which materializes whichever dependencies it happens to
@@ -1728,44 +1712,43 @@ class StaticWorker(BaseWorker):
         watched on its real tracking plan or on the baseline registry alone was
         decided by an accident of graph traversal (136 of 183 monitored
         contracts read ``no_current_materialization`` while their own jobs held
-        a substantive plan). Publishing here makes coverage follow from analysis
+        a substantive plan). Publishing here makes coverage follow from static_facts
         having run — invariant 8.
 
-        Reads back the three artifacts this stage just stored rather than taking
-        them as arguments: the artifacts are what the job actually left behind,
-        they are identical on the fresh and the static-cache paths, and a bundle
-        that failed to store is one this row must not claim to hold.
+        Reads the validated Assessment this stage stored and projects its embedded
+        static inputs. Assessment is the only durable analytical artifact on both
+        fresh and cache-hit paths.
 
-        A row is stamped ``ANALYSIS_SCHEMA_VERSION``, so it may only be written
+        A row is stamped ``STATIC_FACTS_SCHEMA_VERSION``, so it may only be written
         for a bundle PROVEN to be of that era. The stamp lives on the job, but
         only the fetch path writes it — a same-address cache hit copies the
         donor's artifacts and returns before it, leaving NULL. NULL is not
-        "current", so ``proven_analysis_schema_version`` follows the cache chain
+        "current", so ``proven_static_facts_schema_version`` follows the cache chain
         to the era that was actually witnessed, and a job whose era stays
         undetermined publishes nothing. Same rule the promotion sweep applies to
         the same fact.
 
-        Best-effort in every arm. Supply is not the analysis: a bucket outage, a
+        Best-effort in every arm. Supply is not the static_facts: a bucket outage, a
         keccak we cannot read, or a row another writer holds must never fail a
-        job whose analysis succeeded. Each refusal is logged with its reason.
+        job whose static_facts succeeded. Each refusal is logged with its reason.
         """
         from db.contract_materializations import (
-            ANALYSIS_SCHEMA_VERSION,
             PRODUCED_BY_PIPELINE,
             PUBLISH_ALREADY_CURRENT,
             PUBLISH_REFRESHED,
             PUBLISH_WRITTEN,
+            STATIC_FACTS_SCHEMA_VERSION,
             build_provenance,
             is_enabled,
             publish_materialization,
         )
-        from db.queue import proven_analysis_schema_version
+        from db.queue import proven_static_facts_schema_version
 
         if not is_enabled():
             return
 
-        era = proven_analysis_schema_version(session, job)
-        if era != ANALYSIS_SCHEMA_VERSION:
+        era = proven_static_facts_schema_version(session, job)
+        if era != STATIC_FACTS_SCHEMA_VERSION:
             record_degraded(
                 phase="materialization_publish",
                 exc=RuntimeError(f"analyzer era not proven current (job era={era})"),
@@ -1780,9 +1763,13 @@ class StaticWorker(BaseWorker):
             return
 
         try:
-            analysis = get_artifact(session, job.id, "contract_analysis")
-            tracking_plan = get_artifact(session, job.id, "control_tracking_plan")
-            predicate_trees = get_artifact(session, job.id, "predicate_trees")
+            from db.queue.typed import load_assessment
+            from services.assessment import static_inputs
+
+            assessment = load_assessment(get_artifact, session, job.id)
+            if assessment is None:
+                raise ValueError("assessment artifact absent")
+            static_facts, predicate_trees, effects = static_inputs(assessment)
         except Exception as exc:
             record_degraded(phase="materialization_publish", exc=exc, context={"address": address})
             logger.warning(
@@ -1792,25 +1779,20 @@ class StaticWorker(BaseWorker):
                 extra={"exc_type": type(exc).__name__},
             )
             return
-        if not isinstance(analysis, dict) or not isinstance(tracking_plan, dict):
-            # The plan phase records its own failure; a row without both halves
-            # would read downstream as a contract with no analysis and no plan.
-            logger.info(
-                "Static stage: no materialization published for %s — analysis or tracking plan absent",
-                address,
-            )
-            return
+        from services.assessment import observation_plan
+
+        observation_plan = observation_plan(assessment)
 
         chain = _parent_chain_name(job)
         request = job.request if isinstance(job.request, dict) else {}
-        # Did THIS job's analysis produce these artifacts, or did it copy an
+        # Did THIS job's static_facts produce these artifacts, or did it copy an
         # ancestor's? The era gate above proves they are of the current era; it
         # says nothing about which of two same-era bundles is the later record.
         produced_here = not request.get("static_cached")
         try:
             from services.clients.rpc import get_code_with_keccak
 
-            _code, keccak = get_code_with_keccak(_request_rpc_url(job) or "", address, chain_id=_parent_chain_id(job))
+            _code, keccak = get_code_with_keccak(_request_rpc_url(job) or "", address, chain_id=job_chain_id(job))
         except Exception as exc:
             # The row is keyed on bytecode. Without the keccak there is no key,
             # and inventing one would key the bundle to code nobody read.
@@ -1829,15 +1811,16 @@ class StaticWorker(BaseWorker):
                 address=address,
                 bytecode_keccak=keccak,
                 contract_name=contract_name,
-                analysis=analysis,
-                tracking_plan=tracking_plan,
+                static_facts=static_facts,
+                observation_plan=dict(observation_plan),
                 predicate_trees=predicate_trees if isinstance(predicate_trees, dict) else None,
+                effects=effects if isinstance(effects, dict) else None,
                 source_content_hash=job.source_content_hash,
                 provenance=build_provenance(PRODUCED_BY_PIPELINE, source_job_id=job.id),
                 # Only a bundle THIS job produced may overwrite a current row.
                 # On the static-cache path these artifacts are an ancestor's,
                 # copied — same era (the gate above proves that), but not the
-                # newer record: a fresh analysis and a later cache hit reproducing
+                # newer record: a fresh static_facts and a later cache hit reproducing
                 # its ancestor would then take turns overwriting each other, and
                 # each flip moves where monitoring watches.
                 refresh_on_differ=produced_here,
@@ -1865,29 +1848,6 @@ class StaticWorker(BaseWorker):
             chain,
             extra={"address": address, "chain": chain, "outcome": outcome},
         )
-
-    def _run_tracking_plan_phase(
-        self, session, job, analysis: ContractAnalysis | dict, contract_name: str, address: str
-    ) -> None:
-        """Build control tracking plan. Non-fatal on failure."""
-        self.update_detail(session, job, "Building control tracking plan")
-        try:
-            tracking_plan = build_control_tracking_plan(cast(ContractAnalysis, analysis))
-            store_artifact(session, job.id, "control_tracking_plan", data=tracking_plan)
-            logger.info(
-                "Static stage tracking plan complete for job %s address=%s contract=%s",
-                job.id,
-                address,
-                contract_name,
-            )
-        except Exception as exc:
-            record_degraded(
-                phase="tracking_plan",
-                exc=exc,
-                context={"address": address, "contract_name": contract_name},
-            )
-            _log_phase_error(str(job.id), address, contract_name, "tracking_plan", str(exc))
-            store_artifact(session, job.id, "tracking_plan_error", data={"error": str(exc)})
 
 
 def main():

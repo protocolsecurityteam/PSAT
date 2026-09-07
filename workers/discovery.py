@@ -1086,11 +1086,11 @@ class DiscoveryWorker(BaseWorker):
         # deployment on another chain can reuse this job's code-plane analysis
         # (invariant 1). Written unconditionally here: a cache-hit job returned
         # before ever reaching this fetch, so every hashed job did real analysis.
-        from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
+        from db.contract_materializations import STATIC_FACTS_SCHEMA_VERSION
 
         this_source_hash = source_content_hash(result)
         job.source_content_hash = this_source_hash
-        job.analysis_schema_version = ANALYSIS_SCHEMA_VERSION
+        job.static_facts_schema_version = STATIC_FACTS_SCHEMA_VERSION
 
         self.update_detail(session, job, "Storing source files")
         store_source_files(session, job.id, sources)

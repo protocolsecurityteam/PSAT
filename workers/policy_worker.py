@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, cast
 
 from sqlalchemy import select
@@ -19,13 +19,15 @@ from db.models import (
     JobStatus,
     PrincipalLabel,
     SessionLocal,
-    derive_job_chain_id,
 )
-from db.nested_artifacts import ARTIFACT_KINDS, KEY_PREFIX, parse_key
-from db.nested_artifacts import store_bundle as store_nested_artifacts
 from db.queue import get_artifact, store_artifact
-from schemas.control_tracking import ControlSnapshot
-from schemas.effective_permissions import PrincipalResolution
+from db.queue._chains import _job_chain_name, job_chain_id
+from db.queue.typed import (
+    ArtifactSchemaError,
+    load_assessment,
+)
+from schemas.observations import ObservationBatch
+from schemas.permission_index import PermissionIndex
 from services.clients.rpc import require_rpc_url
 from services.concurrency import parallel_map
 from services.discovery import membership_gate
@@ -38,17 +40,14 @@ from services.discovery.perimeter import (
 )
 from services.effects.config import effects_stage_enabled
 from services.governance.control_graph_types import FP_MATERIALIZE_LIMIT, materialize_fp_principal_nodes
-from services.policy import build_effective_permissions, build_principal_labels
-from services.policy.effective_permissions_writer import write_effective_function_rows
-from services.policy.principal_enrichment import load_protocol_deployer_groups, load_protocol_safe_owner_sets
-from services.policy.principal_history import build_principal_history
-from services.resolution.capability_resolver import _load_state_var_values
+from services.policy import build_permission_index, build_principal_index
+from services.policy.permission_index_writer import write_permission_rows
+from services.policy.principal_index import load_protocol_deployer_groups, load_protocol_safe_owner_sets
 from services.resolution.cross_chain_authority import make_cross_chain_recognizer
 from services.resolution.graph_tables import replace_control_graph_rows
 from services.resolution.recursive import LoadedArtifacts, resolve_control_graph
 from services.resolution.tracking import classify_resolved_address_with_status, read_contract_controllers
-from services.static.claims import Claim, resolve_claim_precedence
-from utils.chains import UnknownChainError, chain_by_id, chain_by_name, require_chain
+from services.static.claims import EffectMatch, resolve_claim_precedence
 from utils.logging import log_timed_phase, record_degraded, record_stage_metric
 from workers.base import BaseWorker
 
@@ -85,7 +84,7 @@ def _make_principal_type_resolver(
     """Build an ``address -> (resolved_type, details)`` classifier for the FP
     writer. Reuses the resolution stage's classify cache, falling back to a
     live (process-cached) ``classify_resolved_address`` probe for misses — the
-    same path ``build_principal_labels`` uses, so FunctionPrincipal rows carry
+    same path ``build_principal_index`` uses, so FunctionPrincipal rows carry
     the same Safe/Timelock/EOA typing as principal labels.
 
     ``cross_chain_recognizer``, when supplied, takes priority: an
@@ -150,7 +149,7 @@ def _make_terminal_controller_resolver(
     return _resolve
 
 
-def _known_addresses_for_scope(resolved_control_graph: Any, target_address: str | None) -> set[str]:
+def _known_addresses_for_scope(resolution_graph: Any, target_address: str | None) -> set[str]:
     """The run's known-address set for cross-chain alias recognition:
     every resolved control-graph node address plus the target contract. An
     aliased L1 owner is only labelled when its implied L1 address is one of
@@ -158,7 +157,7 @@ def _known_addresses_for_scope(resolved_control_graph: Any, target_address: str 
     known: set[str] = set()
     if target_address:
         known.add(target_address.lower())
-    nodes = resolved_control_graph.get("nodes") if isinstance(resolved_control_graph, dict) else None
+    nodes = resolution_graph.get("nodes") if isinstance(resolution_graph, dict) else None
     for node in nodes or []:
         addr = str((node or {}).get("address", "")).lower()
         if addr.startswith("0x") and len(addr) == 42:
@@ -168,37 +167,16 @@ def _known_addresses_for_scope(resolved_control_graph: Any, target_address: str 
 
 def _rpc_url_for_job(job: Job) -> str:
     """eRPC URL for the job's own chain, resolved via the first-class
-    ``jobs.chain_id`` column (``_chain_id_for_job``), not the request JSONB —
+    ``jobs.chain_id`` column (``job_chain_id``), not the request JSONB —
     a chainless ``/api/analyze`` submission carries the mainnet edge default
     only in the column, so a request-only read fails loud on every such job."""
     request = job.request if isinstance(job.request, dict) else {}
     explicit = request.get("rpc_url")
     return require_rpc_url(
         explicit_rpc_url=explicit if isinstance(explicit, str) else None,
-        chain_id=_chain_id_for_job(job),
+        chain_id=job_chain_id(job),
         context=f"policy rpc for job {job.id}",
     )
-
-
-def _chain_id_for_job(job: Job) -> int:
-    """The job's first-class ``chain_id`` (invariant 1): the populated
-    ``jobs.chain_id`` column, else derived from ``request["chain"]`` via the
-    canonical registry, else mainnet for a chain-less row."""
-    chain_id = getattr(job, "chain_id", None)
-    if isinstance(chain_id, int):
-        return chain_id
-    request = job.request if isinstance(job.request, dict) else {}
-    return derive_job_chain_id(request.get("chain"), job.address) or 1
-
-
-def _chain_name_for_job(job: Job) -> str:
-    """Canonical chain name for the job (mainnet → ``"ethereum"``). Used for the
-    ``contract_materializations`` cache key + monitoring enrollment so both agree
-    with the name the resolution stage materialized under."""
-    try:
-        return chain_by_id(_chain_id_for_job(job)).name
-    except UnknownChainError:
-        return "ethereum"
 
 
 def _persist_spawn_summary(
@@ -262,96 +240,14 @@ def _persist_spawn_summary(
 
 
 def _root_artifacts(
-    contract_analysis: dict,
-    tracking_plan: dict,
-    snapshot: ControlSnapshot,
+    static_facts: Mapping[str, Any],
+    observation_plan: Mapping[str, Any],
+    snapshot: ObservationBatch,
 ) -> LoadedArtifacts:
     return {
-        "analysis": contract_analysis,
-        "tracking_plan": tracking_plan,
+        "static_facts": static_facts,
+        "observation_plan": observation_plan,
         "snapshot": snapshot,
-    }
-
-
-def _load_nested_artifacts(session: Session, job_id, *, chain: str) -> dict[str, LoadedArtifacts]:
-    """Hydrate ``recursive.*`` artifacts written by the resolution stage.
-
-    Resolution writes only the runtime-state slices (snapshot,
-    effective_permissions) to ``recursive.*`` rows. The static slices
-    (analysis, tracking_plan) live in ``contract_materializations``
-    (content-addressed by ``(chain, bytecode_keccak)``); we hydrate them
-    here per-address so the rest of policy still sees a full
-    ``LoadedArtifacts`` bundle. A bundle missing analysis/snapshot is
-    dropped — ``_resolve_authority`` and the post-policy
-    ``resolve_control_graph`` refresh both require both fields.
-    """
-    import copy
-
-    from db import contract_materializations as cm
-    from db.models import Artifact
-
-    prefix = f"{KEY_PREFIX}."
-    rows = (
-        session.execute(select(Artifact).where(Artifact.job_id == job_id, Artifact.name.like(f"{prefix}%")))
-        .scalars()
-        .all()
-    )
-    bundles: dict[str, dict] = {}
-    for row in rows:
-        parsed = parse_key(row.name)
-        if parsed is None:
-            continue
-        address, kind = parsed
-        if kind not in ARTIFACT_KINDS:
-            continue
-        payload = get_artifact(session, job_id, row.name)
-        if payload is None:
-            continue
-        bundles.setdefault(address, {})[kind] = payload
-
-    # Hydrate analysis + tracking_plan from contract_materializations.
-    # Address-keyed lookup keyed on the job's chain (the same name the resolution
-    # stage materialized under); on a row miss we drop the bundle below since the
-    # downstream consumers can't operate without analysis. ``chain`` is the job's
-    # resolved chain name — a chainless call is a data bug, so fail loud
-    # rather than defaulting to mainnet via the old PSAT_DEFAULT_CHAIN env read.
-    require_chain(chain=chain, context="policy nested-artifact hydration")
-    for address, bundle in bundles.items():
-        try:
-            mrow = cm.find_by_address(session, chain=chain, address=address)
-        except Exception as exc:
-            # A failed query leaves the session pending-rollback; roll back before
-            # the next address's lookup so one DB hiccup doesn't drop every
-            # remaining bundle. The bundle is dropped either way, but a row miss
-            # is an expected outcome (silent, above) and a DB error is not.
-            session.rollback()
-            # ``bundle_*``, not ``address``/``chain``: the job's own address and
-            # chain are already bound as context fields, and the formatter drops
-            # an ``extra`` whose key collides with one of them.
-            record_degraded(
-                phase="nested_artifact_hydration",
-                exc=exc,
-                context={"job_id": str(job_id), "bundle_address": address, "bundle_chain": chain},
-            )
-            logger.warning(
-                "Materialization hydration failed for %s on %s; bundle dropped from policy analysis",
-                address,
-                chain,
-                extra={"exc_type": type(exc).__name__, "bundle_address": address, "bundle_chain": chain},
-            )
-            mrow = None
-        if mrow is None:
-            continue
-        if mrow.analysis:
-            bundle["analysis"] = copy.deepcopy(mrow.analysis)
-        if mrow.tracking_plan:
-            bundle["tracking_plan"] = copy.deepcopy(mrow.tracking_plan)
-
-    # Only keep bundles that have the minimum fields resolve_control_graph needs.
-    return {
-        addr: cast(LoadedArtifacts, bundle)
-        for addr, bundle in bundles.items()
-        if {"analysis", "snapshot"} <= bundle.keys()
     }
 
 
@@ -460,26 +356,7 @@ def _safe_address_lookup_from_graph(
     return out
 
 
-def _semantic_controller_context_address(
-    snapshot: dict,
-    nested_artifacts: dict[str, LoadedArtifacts],
-) -> str | None:
-    addresses: set[str] = set()
-    for value in snapshot.get("controller_values", {}).values():
-        if not isinstance(value, dict):
-            continue
-        address = str(value.get("value", "")).lower()
-        if address == "0x0000000000000000000000000000000000000000":
-            continue
-        if not (address.startswith("0x") and len(address) == 42):
-            continue
-        bundle = nested_artifacts.get(address)
-        if isinstance(bundle, dict):
-            addresses.add(address)
-    return sorted(addresses)[0] if addresses else None
-
-
-def _selector_by_function_key(function_records: list[dict] | None) -> dict[str, str]:
+def _selector_by_function_key(function_records: Sequence[Mapping[str, Any]] | None) -> dict[str, str]:
     """``{function key -> selector}`` from the effective-permissions payload, so a
     consumer holding either signature can find the row that payload produced.
 
@@ -525,37 +402,10 @@ class PolicyWorker(BaseWorker):
             job.name or "Contract",
         )
         rpc_url = _rpc_url_for_job(job)
-        chain_id = _chain_id_for_job(job)
-        chain_name = _chain_name_for_job(job)
+        chain_id = job_chain_id(job)
+        chain_name = _job_chain_name(job)
         durations_ms: dict[str, int] = {}
 
-        # Load required artifacts from DB
-        contract_analysis = get_artifact(session, job.id, "contract_analysis")
-        control_snapshot = get_artifact(session, job.id, "control_snapshot")
-        resolved_control_graph = get_artifact(session, job.id, "resolved_control_graph")
-        # ``predicate_trees`` and ``effects`` are the semantic inputs to
-        # ``build_effective_permissions``.
-        predicate_trees = get_artifact(session, job.id, "predicate_trees")
-        effects_artifact = get_artifact(session, job.id, "effects")
-        missing_semantic_inputs = [
-            name
-            for name, artifact in (("predicate_trees", predicate_trees), ("effects", effects_artifact))
-            if not isinstance(artifact, dict)
-        ]
-        if missing_semantic_inputs:
-            exc = RuntimeError("missing semantic input artifact(s): " + ", ".join(sorted(missing_semantic_inputs)))
-            record_degraded(
-                phase="effective_permissions_semantic_inputs",
-                exc=exc,
-                context={"job_id": str(job.id), "missing_artifacts": sorted(missing_semantic_inputs)},
-            )
-            logger.warning(
-                "Policy stage missing semantic inputs for job %s: %s",
-                job.id,
-                ", ".join(sorted(missing_semantic_inputs)),
-                extra={"missing_artifacts": sorted(missing_semantic_inputs)},
-            )
-        tracking_plan = get_artifact(session, job.id, "control_tracking_plan")
         # Optional: classify cache populated by the resolution stage. Lets the
         # refresh + labeling passes skip 6-10 RPCs per address.
         classify_cache_raw = get_artifact(session, job.id, "classified_addresses")
@@ -565,40 +415,26 @@ class PolicyWorker(BaseWorker):
                 if isinstance(val, list) and len(val) == 2:
                     classify_cache[addr] = (str(val[0]), dict(val[1]) if isinstance(val[1], dict) else {})
 
-        if not isinstance(contract_analysis, dict):
-            raise RuntimeError("contract_analysis artifact not found")
-        if not isinstance(control_snapshot, dict):
-            raise RuntimeError("control_snapshot artifact not found")
+        try:
+            assessment = load_assessment(get_artifact, session, job.id)
+        except ArtifactSchemaError as exc:
+            raise RuntimeError(f"{exc.artifact_name} artifact failed validation") from exc
+        if assessment is None:
+            raise RuntimeError("assessment artifact not found")
 
-        nested_artifacts = _load_nested_artifacts(session, job.id, chain=chain_name)
+        from services.assessment import (
+            contract_subject,
+            control_graph,
+            controller_observations,
+            observation_plan,
+            static_inputs,
+        )
 
-        # Determine nested controller context for effective-permission enrichment.
-        authority_snapshot: dict | None = None
-        principal_resolution: PrincipalResolution = {
-            "status": "no_authority",
-            "reason": "No nested controller context resolved",
-        }
-        if isinstance(resolved_control_graph, dict):
-            authority_result = self._resolve_authority(
-                session,
-                job,
-                resolved_control_graph,
-                control_snapshot,
-                nested_artifacts,
-            )
-            authority_snapshot = authority_result.get("authority_snapshot")
-            principal_resolution = authority_result.get("principal_resolution", principal_resolution)
-            authority_status = principal_resolution.get("status", "unknown")
-            record_stage_metric("authority_status", authority_status)
-            logger.info(
-                "Policy stage authority resolution complete for job %s",
-                job.id,
-                extra={
-                    "address": (job.address or "0x0"),
-                    "authority_status": authority_status,
-                    "authority_reason": principal_resolution.get("reason"),
-                },
-            )
+        _embedded_static_facts, predicate_trees, effects_artifact = static_inputs(assessment)
+        static_facts = contract_subject(assessment)
+        observation_batch = controller_observations(assessment)
+        resolution_graph = control_graph(assessment)
+        observation_plan = observation_plan(assessment)
 
         # Build effective permissions
         self.update_detail(session, job, "Computing effective permissions")
@@ -620,20 +456,35 @@ class PolicyWorker(BaseWorker):
                 )
                 ph["function_count"] = len(capability_resolver_output or {})
 
-        with log_timed_phase(logger, "effective_permissions", durations_ms=durations_ms) as ph:
-            ep_data: dict = cast(
-                dict,
-                build_effective_permissions(
-                    contract_analysis,
-                    target_snapshot=control_snapshot,
-                    authority_snapshot=authority_snapshot,
-                    principal_resolution=principal_resolution,
-                    predicate_trees=predicate_trees if isinstance(predicate_trees, dict) else None,
-                    capability_resolver_output=capability_resolver_output,
-                    effects=effects_artifact if isinstance(effects_artifact, dict) else None,
-                ),
+        with log_timed_phase(logger, "permission_index", durations_ms=durations_ms) as ph:
+            ep_data: PermissionIndex = build_permission_index(
+                static_facts,
+                target_snapshot=observation_batch,
+                predicate_trees=predicate_trees if isinstance(predicate_trees, dict) else None,
+                capability_resolver_output=capability_resolver_output,
+                effects=effects_artifact if isinstance(effects_artifact, dict) else None,
             )
-            ph["function_count"] = len(ep_data.get("functions", [])) if isinstance(ep_data, dict) else 0
+            ph["function_count"] = len(ep_data["functions"])
+
+        # Cross-contract claims must land before row materialization so the DB
+        # remains a projection of the canonical assessment rather than an older
+        # pre-enrichment vocabulary.
+        with log_timed_phase(logger, "cross_contract_enrichment", durations_ms=durations_ms):
+            enriched = self._enrich_cross_contract(
+                session,
+                job,
+                static_facts,
+                observation_batch,
+                function_records=ep_data.get("functions"),
+            )
+            if enriched:
+                self._apply_cross_contract_claims(ep_data, enriched)
+
+        from services.assessment import add_policy, project_permission_index
+
+        assessment = add_policy(assessment, ep_data, chain_id=chain_id)
+        ep_data = cast(PermissionIndex, project_permission_index(assessment))
+        store_artifact(session, job.id, "assessment", data=assessment)
 
         # Write to effective_functions and function_principals tables from
         # resolver-native semantic capability rows only.
@@ -643,8 +494,7 @@ class PolicyWorker(BaseWorker):
             (job.request if isinstance(job.request, dict) else {}).get("proxy_address")
         )
         contract_row = session.execute(select(Contract).where(Contract.job_id == job.id).limit(1)).scalar_one_or_none()
-        # All three DB writes below (effective_functions, principal_history,
-        # principal_labels) are gated on contract_row. A missing row means the
+        # The relational index writes below are gated on contract_row. A missing row means the
         # job completes green while writing zero rows — DB and artifacts then
         # disagree. Make that explicit and chartable rather than silent.
         record_stage_metric("rows_written", contract_row is not None)
@@ -664,10 +514,10 @@ class PolicyWorker(BaseWorker):
         # Uses the first-class job chain id (not the local ``chain_id``, which a
         # later block re-derives from request JSONB and can clobber to 1).
         cross_chain_recognizer = make_cross_chain_recognizer(
-            _chain_id_for_job(job), _known_addresses_for_scope(resolved_control_graph, job.address)
+            job_chain_id(job), _known_addresses_for_scope(resolution_graph, job.address)
         )
         if contract_row and isinstance(ep_data, dict):
-            graph_nodes = resolved_control_graph.get("nodes") if isinstance(resolved_control_graph, dict) else None
+            graph_nodes = resolution_graph.get("nodes") if isinstance(resolution_graph, dict) else None
             safe_lookup = _safe_address_lookup_from_graph(graph_nodes if isinstance(graph_nodes, list) else None)
 
             # The pre-image is captured before the rewrite: a principal this
@@ -675,14 +525,13 @@ class PolicyWorker(BaseWorker):
             # and after reaches the membership witnesses resting on it.
             principals_before = membership_gate.principal_addresses(session, [contract_row.id])
             with log_timed_phase(logger, "effective_function_rows", durations_ms=durations_ms) as ph:
-                fp_added = write_effective_function_rows(
+                fp_added = write_permission_rows(
                     session,
                     contract_id=contract_row.id,
                     function_records=ep_data.get("functions", []),
-                    capability_by_function=capability_resolver_output,
                     safe_address_lookup=safe_lookup or None,
                     resolve_principal_type=_make_principal_type_resolver(
-                        classify_cache, rpc_url, cross_chain_recognizer, chain_id=_chain_id_for_job(job)
+                        classify_cache, rpc_url, cross_chain_recognizer, chain_id=job_chain_id(job)
                     ),
                     deployment_address=deployment_address,
                 )
@@ -696,59 +545,7 @@ class PolicyWorker(BaseWorker):
                 context=f"policy_function_principals:{job.id}",
             )
 
-        store_artifact(session, job.id, "effective_permissions", data=ep_data)
         record_stage_metric("effective_functions", len(ep_data.get("functions", [])))
-        if contract_row and isinstance(predicate_trees, dict):
-            job_chain = job.request.get("chain") if isinstance(job.request, dict) else None
-            # Derive the int chain id from the registry. Non-mainnet
-            # names now map to their real ids instead of collapsing to 1 (the
-            # old hand map only knew ethereum/mainnet); an unknown chain still
-            # tolerantly falls back to mainnet rather than raising.
-            try:
-                chain_id = chain_by_name(job_chain).chain_id if job_chain else 1
-            except UnknownChainError:
-                chain_id = 1
-            with log_timed_phase(logger, "principal_history", durations_ms=durations_ms):
-                try:
-                    state_var_values = _load_state_var_values(
-                        session,
-                        contract_row.address,
-                        job_id=job.id,
-                        chain=job_chain if isinstance(job_chain, str) else None,
-                    )
-                    principal_history = build_principal_history(
-                        contract_address=contract_row.address,
-                        chain_id=chain_id,
-                        predicate_trees=predicate_trees,
-                        state_var_values=state_var_values,
-                    )
-                except Exception as exc:
-                    record_degraded(
-                        phase="principal_history",
-                        exc=exc,
-                        context={"job_id": str(job.id), "address": contract_row.address},
-                    )
-                    logger.warning(
-                        "principal history skipped for job %s address=%s: %s",
-                        job.id,
-                        contract_row.address,
-                        exc,
-                        extra={"exc_type": type(exc).__name__},
-                    )
-                    principal_history = {
-                        "schema_version": "principal_history.v1",
-                        "contract_address": contract_row.address.lower(),
-                        "chain_id": chain_id,
-                        "status": "error",
-                        "reason": str(exc),
-                        "sources": [],
-                        "role_membership": [],
-                        "capability_roles": [],
-                        "function_permissions": [],
-                        "public_capabilities": [],
-                    }
-                store_artifact(session, job.id, "principal_history", data=principal_history)
-
         logger.info(
             "Policy stage effective permissions complete for job %s address=%s name=%s",
             job.id,
@@ -756,44 +553,41 @@ class PolicyWorker(BaseWorker):
             job.name or "Contract",
         )
 
-        # Rebuild the resolved graph now that effective_permissions exists,
+        # Rebuild the resolved graph now that permission_index exists,
         # so semantic role/controller principals can be projected into the graph.
         # The refresh reuses the nested artifacts persisted during resolution.
         self.update_detail(session, job, "Refreshing resolved control graph")
-        if not isinstance(tracking_plan, dict):
-            tracking_plan = {}
-        # Attach the target contract's updated effective_permissions to the
+        # Attach the target contract's updated permission_index to the
         # root bundle so role/controller principals can be projected when
         # re-traversing the graph.
-        root_bundle = _root_artifacts(contract_analysis, tracking_plan, cast(ControlSnapshot, control_snapshot))
-        root_bundle["effective_permissions"] = ep_data
+        root_bundle = _root_artifacts(static_facts, observation_plan, cast(ObservationBatch, observation_batch))
+        root_bundle["permission_index"] = ep_data
         with log_timed_phase(logger, "graph_refresh", durations_ms=durations_ms) as ph:
-            refreshed_graph, refreshed_nested = resolve_control_graph(
+            refreshed_graph, _ = resolve_control_graph(
                 root_artifacts=root_bundle,
                 rpc_url=rpc_url,
                 chain_id=chain_id,
                 max_depth=RECURSION_MAX_DEPTH,
                 workspace_prefix="recursive",
-                nested_artifacts_override=nested_artifacts,
+                materialized_contracts_override={},
                 # Reuse the resolution stage's classification results — every
                 # entry here saves one classify_resolved_address call (6-10 RPCs).
                 classify_cache=classify_cache,
                 # Pre-seed with the resolution stage's graph: every nested
                 # contract was already analyzed in the first walk and has
-                # its effective_permissions baked in. The refresh's only job
+                # its permission_index baked in. The refresh's only job
                 # is projecting the root's now-computed role principals onto
                 # the existing graph, which the BFS handles by re-walking
                 # ONLY the root and any newly-discovered downstream nodes.
-                initial_graph=cast(Any, resolved_control_graph) if isinstance(resolved_control_graph, dict) else None,
+                initial_graph=cast(Any, resolution_graph) if isinstance(resolution_graph, dict) else None,
             )
             if refreshed_graph:
-                resolved_control_graph = refreshed_graph
-                store_artifact(session, job.id, "resolved_control_graph", data=refreshed_graph)
+                resolution_graph = refreshed_graph
                 # Rewrite the CGN/CGE tables to the refreshed graph too — the
                 # same scoped replace the resolution stage used. Rewriting only
                 # the artifact left the table plane a strict subset: every
                 # ``role_principal`` edge (projected here, because it needs the
-                # effective_permissions computed this stage) and a set of
+                # permission_index computed this stage) and a set of
                 # refresh-only ``controller_value`` edges were structurally
                 # unreachable in ``control_graph_edges``, so the effects value
                 # closure (both relations are in CONTROL_EDGE_RELATIONS — a
@@ -811,18 +605,7 @@ class PolicyWorker(BaseWorker):
                         resolved_graph=refreshed_graph,
                     )
                     session.commit()
-                # Persist any newly materialized nested artifacts (rare — most come
-                # from resolution stage already).
-                new_addresses = set(refreshed_nested) - set(nested_artifacts)
-                if new_addresses:
-                    store_nested_artifacts(
-                        session,
-                        job.id,
-                        {addr: refreshed_nested[addr] for addr in new_addresses},
-                    )
-            ph["graph_nodes"] = (
-                len(resolved_control_graph.get("nodes", [])) if isinstance(resolved_control_graph, dict) else 0
-            )
+            ph["graph_nodes"] = len(resolution_graph.get("nodes", [])) if isinstance(resolution_graph, dict) else 0
         # Materialize the ``function_principals`` rows that never reached the
         # graph at all. The walk's only principal ingresses are
         # ``authority_roles[].principals`` and ``controllers[].principals``; an
@@ -839,7 +622,7 @@ class PolicyWorker(BaseWorker):
         #     pass documents is guaranteed, not hoped for.
         #  2. It is strictly BEFORE the perimeter, so a minted node is a
         #     candidate in the SAME job rather than one run later.
-        #  3. ``write_effective_function_rows`` committed this contract's FP
+        #  3. ``write_permission_rows`` committed this contract's FP
         #     rows earlier in this same stage, so the input plane is populated.
         #     Enrollment runs later still, is protocol-scoped, and only fires
         #     for protocol jobs.
@@ -863,9 +646,9 @@ class PolicyWorker(BaseWorker):
             finally:
                 _persist_spawn_summary(session, job, fp_ledger, artifact_name="fp_materialization_summary")
 
-        # Bring the refresh's newly-discovered contracts inside the analysis
+        # Bring the refresh's newly-discovered contracts inside the static_facts
         # perimeter. Without this, a node FIRST seen here — every role principal,
-        # since role principals need the effective_permissions computed this
+        # since role principals need the permission_index computed this
         # stage — could never be analysed: the only other spawn site runs
         # earlier, in the resolution stage. Budgeted, because this path is
         # recursive (an analysed manager projects its own role principals and
@@ -881,18 +664,18 @@ class PolicyWorker(BaseWorker):
         # record of them at all.
         spawn_result = new_spawn_result(site="policy_refresh", budget=PERIMETER_SPAWN_LIMIT)
         try:
-            if isinstance(resolved_control_graph, dict):
+            if isinstance(resolution_graph, dict):
                 # A LOCAL view, not the artifact. The minted nodes must reach
                 # the walker (that is the whole point), but the persisted
-                # ``resolved_control_graph`` is the WALK's output and must not
+                # ``resolution_graph`` is the WALK's output and must not
                 # acquire nodes no walk produced — every artifact consumer would
                 # then read a minted node as walk-witnessed. The nodes' own
                 # plane is ``control_graph_nodes`` plus the
                 # ``fp_materialization_summary`` ledger.
                 perimeter_graph: Mapping[str, Any] = (
-                    {**resolved_control_graph, "nodes": [*(resolved_control_graph.get("nodes") or []), *fp_nodes]}
+                    {**resolution_graph, "nodes": [*(resolution_graph.get("nodes") or []), *fp_nodes]}
                     if fp_nodes
-                    else resolved_control_graph
+                    else resolution_graph
                 )
                 queue_discovered_contracts(
                     session,
@@ -900,7 +683,7 @@ class PolicyWorker(BaseWorker):
                     perimeter_graph,
                     rpc_url,
                     site="policy_refresh",
-                    chain_name=_chain_name_for_job(job),
+                    chain_name=_job_chain_name(job),
                     budget=PERIMETER_SPAWN_LIMIT,
                     depth_cap=PERIMETER_SPAWN_DEPTH_CAP,
                     result=spawn_result,
@@ -916,13 +699,11 @@ class PolicyWorker(BaseWorker):
         # Label principals
         self.update_detail(session, job, "Labeling principals")
         with log_timed_phase(logger, "principal_labels", durations_ms=durations_ms) as ph:
-            pl_data = build_principal_labels(
+            pl_data = build_principal_index(
                 ep_data,
-                resolved_control_graph=(
-                    cast(dict, resolved_control_graph) if isinstance(resolved_control_graph, dict) else None
-                ),
+                resolution_graph=(cast(dict, resolution_graph) if isinstance(resolution_graph, dict) else None),
                 rpc_url=rpc_url,
-                chain_id=_chain_id_for_job(job),
+                chain_id=job_chain_id(job),
                 # Same cache the resolution stage populated. Without this, labeling
                 # re-runs classify_resolved_address (6-10 RPCs each) for every
                 # principal — the dominant cost on big protocols (etherfi LP impl
@@ -931,10 +712,10 @@ class PolicyWorker(BaseWorker):
                 # Rebuilt against the refreshed graph so the alias-of-known scope
                 # reflects every node the refresh added.
                 cross_chain_recognizer=make_cross_chain_recognizer(
-                    _chain_id_for_job(job), _known_addresses_for_scope(resolved_control_graph, job.address)
+                    job_chain_id(job), _known_addresses_for_scope(resolution_graph, job.address)
                 ),
                 # Protocol-wide exact-owner Safe registry for signer-overlap.
-                # Only populated for protocol-scoped jobs; a bare contract analysis
+                # Only populated for protocol-scoped jobs; a bare contract static_facts
                 # has no sibling Safes to compare against.
                 protocol_safe_owner_sets=(
                     load_protocol_safe_owner_sets(session, job.protocol_id) if job.protocol_id else None
@@ -944,9 +725,9 @@ class PolicyWorker(BaseWorker):
                     load_protocol_deployer_groups(session, job.protocol_id) if job.protocol_id else None
                 ),
                 # Contract-principal -> ultimate Safe/EOA terminal walk.
-                resolve_controllers=_make_terminal_controller_resolver(rpc_url, chain_id=_chain_id_for_job(job)),
+                resolve_controllers=_make_terminal_controller_resolver(rpc_url, chain_id=job_chain_id(job)),
             )
-            ph["principal_count"] = len(pl_data.get("principals", []))
+            ph["principal_count"] = len(pl_data)
 
         # Write to principal_labels table
         if contract_row:
@@ -954,7 +735,7 @@ class PolicyWorker(BaseWorker):
                 PrincipalLabel.contract_id == contract_row.id,
                 deployment_scope(PrincipalLabel.deployment_address, deployment_address),
             ).delete(synchronize_session=False)
-            for p in pl_data.get("principals", []):
+            for p in pl_data:
                 if p.get("address"):
                     session.add(
                         PrincipalLabel(
@@ -972,8 +753,7 @@ class PolicyWorker(BaseWorker):
                     )
             session.commit()
 
-        store_artifact(session, job.id, "principal_labels", data=pl_data)
-        record_stage_metric("principals_labeled", len(pl_data.get("principals", [])))
+        record_stage_metric("principals_labeled", len(pl_data))
 
         logger.info(
             "Policy stage principal labels complete for job %s address=%s name=%s",
@@ -982,24 +762,18 @@ class PolicyWorker(BaseWorker):
             job.name or "Contract",
         )
 
-        # Cross-contract enrichment: mint policy-derived claims from sibling facts.
-        with log_timed_phase(logger, "cross_contract_enrichment", durations_ms=durations_ms):
-            enriched = self._enrich_cross_contract(
-                session,
-                job,
-                contract_analysis,
-                control_snapshot,
-                function_records=ep_data.get("functions") if isinstance(ep_data, dict) else None,
-            )
-            if enriched and ep_data is not None:
-                self._apply_cross_contract_claims(ep_data, enriched)
-                store_artifact(session, job.id, "effective_permissions", data=ep_data)
+        # Canonical cutover: graph relations and effective permissions enrich
+        # the same assessment rather than becoming new sources of truth.
+        from services.assessment import add_resolution
+
+        if isinstance(resolution_graph, dict):
+            assessment = add_resolution(assessment, resolution_graph, chain_id=chain_id)
+        store_artifact(session, job.id, "assessment", data=assessment)
 
         self.update_detail(
             session,
             job,
-            f"Policy analysis complete: {len(ep_data.get('functions', []))} functions, "
-            f"{len(pl_data.get('principals', []))} principals",
+            f"Policy static_facts complete: {len(ep_data.get('functions', []))} functions, {len(pl_data)} principals",
         )
         logger.info(
             "Policy stage complete for job %s address=%s name=%s",
@@ -1091,7 +865,7 @@ class PolicyWorker(BaseWorker):
                         extra={"exc_type": type(exc).__name__},
                     )
 
-        # Send completion webhook for re-analysis jobs
+        # Send completion webhook for re-static_facts jobs
         request = job.request if isinstance(job.request, dict) else {}
         if request.get("reanalysis_trigger"):
             try:
@@ -1119,7 +893,7 @@ class PolicyWorker(BaseWorker):
             },
         )
 
-    def _apply_cross_contract_claims(self, payload: dict, enriched: dict[str, list[Claim]]) -> None:
+    def _apply_cross_contract_claims(self, payload: Mapping[str, Any], enriched: dict[str, list[EffectMatch]]) -> None:
         for fn in payload.get("functions", []):
             fn_sig = fn.get("function") or fn.get("abi_signature")
             additions = enriched.get(fn_sig) if fn_sig else None
@@ -1132,10 +906,10 @@ class PolicyWorker(BaseWorker):
         self,
         session,
         job: Job,
-        contract_analysis: dict,
-        control_snapshot: dict,
-        function_records: list[dict] | None = None,
-    ) -> dict[str, list[Claim]]:
+        static_facts: Mapping[str, Any],
+        observation_batch: Mapping[str, Any],
+        function_records: Sequence[Mapping[str, Any]] | None = None,
+    ) -> dict[str, list[EffectMatch]]:
         """Mint policy-derived claims from sibling facts.
 
         Replaces propagate-every-label with the four typed derivations in
@@ -1149,7 +923,7 @@ class PolicyWorker(BaseWorker):
         so the two only meet through a key both sides derive identically — the
         selector, taken from that same payload rather than re-derived here.
         """
-        del contract_analysis
+        del static_facts
         from services.static.cross_contract import (
             build_callee_claim_map,
             derive_cross_contract_claims,
@@ -1192,8 +966,14 @@ class PolicyWorker(BaseWorker):
         ) -> tuple[str, dict | None, dict | None]:
             sj_id, addr = target
             with SessionLocal() as s:
-                effects_payload = get_artifact(s, sj_id, "effects")
-                snapshot_payload = get_artifact(s, sj_id, "control_snapshot")
+                assessment_payload = load_assessment(get_artifact, s, sj_id)
+            snapshot_payload = None
+            effects_payload = None
+            if assessment_payload is not None:
+                from services.assessment import controller_observations, static_inputs
+
+                _facts, _trees, effects_payload = static_inputs(assessment_payload)
+                snapshot_payload = controller_observations(assessment_payload)
             return (
                 addr,
                 effects_payload if isinstance(effects_payload, dict) else None,
@@ -1221,9 +1001,13 @@ class PolicyWorker(BaseWorker):
             return {}
 
         callee_claim_map = build_callee_claim_map(sibling_effects)
-        controller_values = control_snapshot.get("controller_values", {})
-        target_effects = get_artifact(session, job.id, "effects")
-        target_effects = target_effects if isinstance(target_effects, dict) else None
+        controller_values = observation_batch.get("controller_values", {})
+        target_assessment = load_assessment(get_artifact, session, job.id)
+        target_effects = None
+        if target_assessment is not None:
+            from services.assessment import static_inputs
+
+            _facts, _trees, target_effects = static_inputs(target_assessment)
         target_address = (job.address or "").lower()
 
         hook_links = sibling_transfer_hook_links(target_address, sibling_effects, sibling_snapshots)
@@ -1291,48 +1075,6 @@ class PolicyWorker(BaseWorker):
                         )
                 session.commit()
         return enriched
-
-    def _resolve_authority(
-        self,
-        session: Session,
-        job: Job,
-        resolved_graph: dict,
-        snapshot: dict,
-        nested_artifacts: dict[str, LoadedArtifacts],
-    ) -> dict:
-        """Locate nested controller context from resolution-stage DB bundles.
-
-        The resolution worker persists per-sub-contract artifacts as
-        ``recursive:<address>:<kind>`` rows. This method fetches the
-        first nested snapshot referenced by the target's controller values.
-        Semantic capability resolution is responsible for function-level
-        principals; this snapshot only enriches controller labels/details.
-        """
-        del session, job, resolved_graph
-
-        authority_address = _semantic_controller_context_address(snapshot, nested_artifacts)
-
-        if not authority_address or authority_address == "0x0000000000000000000000000000000000000000":
-            return {"principal_resolution": {"status": "no_authority", "reason": "No non-zero authority found"}}
-
-        authority_bundle = nested_artifacts.get(authority_address)
-        if authority_bundle is None or "snapshot" not in authority_bundle:
-            return {
-                "principal_resolution": {
-                    "status": "no_authority_snapshot",
-                    "reason": "Authority contract found but snapshot artifact missing",
-                }
-            }
-
-        authority_snapshot = cast(dict, authority_bundle["snapshot"])
-
-        return {
-            "authority_snapshot": authority_snapshot,
-            "principal_resolution": {
-                "status": "complete",
-                "reason": "Nested controller snapshot joined into semantic permission view",
-            },
-        }
 
 
 def main():
