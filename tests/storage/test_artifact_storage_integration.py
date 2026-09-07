@@ -622,7 +622,8 @@ def test_end_to_end_stubbed_worker(api_with, db_session, storage_bucket):
     payload = detail.json()
     assert payload["run_name"] == "e2e-test"
     assert "assessment" in payload["available_artifacts"]
-    assert payload["assessment"]["contract"]["name"] == "Main"
+    assert payload["assessment_url"].endswith("/artifact/assessment.json")
+    assert "assessment" not in payload
 
     artifact = client.get(
         "/api/analyses/e2e-test/artifact/assessment.json",
@@ -630,7 +631,10 @@ def test_end_to_end_stubbed_worker(api_with, db_session, storage_bucket):
         follow_redirects=True,
     )
     assert artifact.status_code == 200
-    assert artifact.json()["contract"]["name"] == "Main"
+    assessment = artifact.json()
+    root = assessment["view"]["subject"]
+    root_subject = next(row for row in assessment["subjects"] if row["id"] == root)
+    assert root_subject["identity"]["address"] == job.address
 
 
 # ---------------------------------------------------------------------------

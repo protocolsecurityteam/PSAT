@@ -421,10 +421,4 @@ def analysis_detail(run_name: str) -> dict:
             ) from None
         if payload is None:
             raise HTTPException(status_code=404, detail="Analysis not found")
-        if "assessment" in payload:
-            job_id = payload.get("job_id")
-            if job_id is not None:
-                temporal = deps.load_temporal_assessment(session, job_id)
-                if temporal is not None:
-                    payload["assessment"] = temporal
         return payload

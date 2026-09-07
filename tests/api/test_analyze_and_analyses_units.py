@@ -456,7 +456,7 @@ def test_analysis_detail_falls_back_to_proxy_artifacts(mock_session_cls, mock_ge
     # get_all_artifacts is called once per job — return impl's artifacts for
     # the impl job's job.id and proxy's artifacts for the proxy job's job.id
     # (matches the batched proxy-fallback in analysis_detail).
-    def fake_get_all_artifacts(session, jid):
+    def fake_get_all_artifacts(session, jid, **_kwargs):
         if str(jid) == str(proxy_job_id):
             return proxy_artifacts
         return impl_artifacts

@@ -204,7 +204,7 @@ def get_legacy_artifact(session: Session, job_id: Any, name: str) -> dict | list
     return _artifact_row_to_value(artifact)
 
 
-def get_all_artifacts(session: Session, job_id: Any) -> dict[str, Any]:
+def get_all_artifacts(session: Session, job_id: Any, *, include_assessment: bool = True) -> dict[str, Any]:
     """Read all artifacts for a job. Returns {name: data_or_text}.
 
     Storage-backed bodies are fetched in parallel via
@@ -235,8 +235,8 @@ def get_all_artifacts(session: Session, job_id: Any) -> dict[str, Any]:
     """
     from services.assessment.repository import load_legacy_assessment, load_principal_history
 
-    temporal = load_legacy_assessment(session, job_id)
-    temporal_history = load_principal_history(session, job_id)
+    temporal = load_legacy_assessment(session, job_id) if include_assessment else None
+    temporal_history = load_principal_history(session, job_id) if include_assessment else None
     stmt = select(Artifact).where(Artifact.job_id == job_id, Artifact.name.notin_(("assessment", "principal_history")))
     artifacts = session.execute(stmt).scalars().all()
     result: dict[str, Any] = {"assessment": temporal} if temporal is not None else {}

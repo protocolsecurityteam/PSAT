@@ -8,7 +8,7 @@ import FastAPI.
 from __future__ import annotations
 
 import logging
-from typing import Any, cast
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -19,7 +19,6 @@ from db.queue.typed import validate_assessment
 # Indirect through ``routers.deps`` so tests get a single patch point for
 # ``SessionLocal``/``get_all_artifacts``.
 from routers import deps
-from schemas.assessment import Assessment
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +52,7 @@ def _artifacts_or_degrade(
     consumers; the SPA's equivalent distinction is served by the header.
     """
     try:
-        artifacts = deps.get_all_artifacts(session, job_id)
+        artifacts = deps.get_all_artifacts(session, job_id, include_assessment=False)
     except deps.StorageContentIncomplete as exc:
         logger.error(
             "analysis detail for job %s is missing %d artifact bodies (%d not determined, %d proven absent)",
@@ -94,6 +93,7 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
     not_determined: dict[str, str] = {}
     body_absent: dict[str, str] = {}
     all_artifacts = _artifacts_or_degrade(session, job.id, not_determined, body_absent)
+    has_assessment = deps.has_assessment_publication(session, job.id)
 
     # Fall back to address lookup when copy_static_cache has reassigned
     # the Contract row to a newer job. Chain-scoped so we don't pick up
@@ -127,11 +127,12 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
         "contract_id": contract_row.id if contract_row else None,
         "company": _company_for(job),
         "deployer": contract_row.deployer if contract_row else None,
-        "available_artifacts": sorted(all_artifacts.keys()),
+        "available_artifacts": sorted([*all_artifacts.keys(), *(["assessment"] if has_assessment else [])]),
     }
+    if has_assessment:
+        payload["assessment_url"] = f"/api/analyses/{job.name or job.id}/artifact/assessment.json"
 
     for artifact_name in (
-        "assessment",
         "dependencies",
         "dependency_graph_viz",
         "upgrade_history",
@@ -139,49 +140,11 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
         if artifact_name in all_artifacts and isinstance(all_artifacts[artifact_name], dict):
             payload[artifact_name] = all_artifacts[artifact_name]
 
-    # Resolved semantic capabilities. Computed lazily from Assessment evidence;
-    # resolving predicate trees to the typed
-    # CapabilityExpr requires the AdapterRegistry + repos. Defensive: a
-    # capability-resolution failure MUST NOT fail the whole analysis_detail
-    # response; the rest of the detail payload is still useful.
-    if "assessment" in all_artifacts and job.address:
-        try:
-            from services.resolution.capability_resolver import resolve_contract_capabilities
-
-            # Per C.1 cutover: scope by (job_id, chain) so a re-analysis
-            # on a different chain or a follow-up job on the same address
-            # doesn't leak controller rows into this job's resolution.
-            # Chain comes from the Contract row when present, falling
-            # back to job.request['chain'].
-            req_chain = job.request.get("chain") if isinstance(job.request, dict) else None
-            chain = (contract_row.chain if contract_row and contract_row.chain else None) or req_chain
-            # chain_id is required: bind the resolver's live reads to the
-            # job's first-class chain_id, falling back to the registry-backed
-            # derivation from the job's chain string (mirrors the M0.2 backfill).
-            from db.models import derive_job_chain_id
-
-            chain_id = getattr(job, "chain_id", None)
-            if not isinstance(chain_id, int):
-                chain_id = derive_job_chain_id(chain if isinstance(chain, str) else req_chain, job.address)
-                # ``job.address`` is truthy here (guarded above), so the
-                # derivation never hits its address-less ``None`` case.
-                assert chain_id is not None
-            semantic_caps = resolve_contract_capabilities(
-                session,
-                address=job.address.lower(),
-                chain_id=chain_id,
-                job_id=job.id,
-                chain=chain if isinstance(chain, str) else None,
-            )
-            if semantic_caps is not None:
-                payload["semantic_capabilities"] = semantic_caps
-        except Exception as exc:
-            logger.warning(
-                "semantic capability resolution failed for job %s; omitting capability enrichment: %s",
-                job.id,
-                exc,
-                extra={"exc_type": type(exc).__name__},
-            )
+    # Large canonical records and semantic resolution have dedicated filtered
+    # endpoints. Embedding both here duplicated the Assessment read and turned
+    # this summary endpoint into 58 SQL statements.
+    if has_assessment and job.address:
+        payload["semantic_capabilities_url"] = f"/api/contract/{job.address.lower()}/capabilities"
 
     if contract_row:
         _populate_from_contract(session, payload, contract_row)
@@ -210,17 +173,6 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
         impl_job = session.execute(impl_stmt).scalar_one_or_none()
         if impl_job:
             _inherit_from_impl(session, payload, job, impl_job, impl_addr, not_determined, body_absent)
-
-    # Canonical claims + detector coverage own the compatibility boolean.
-    if isinstance(all_artifacts.get("assessment"), dict):
-        from services.assessment import effect_presence
-
-        assessment = cast(Assessment, all_artifacts["assessment"])
-        payload["assessment"] = assessment
-        summary = payload.get("summary")
-        summary = dict(summary) if isinstance(summary, dict) else {}
-        summary["is_pausable"] = effect_presence(assessment, "pause.set")
-        payload["summary"] = summary
 
     # Synthesis fallback for upgrade_history. Mirrors the per-artifact
     # endpoint at /api/analyses/{job}/artifact/upgrade_history. Runs after

@@ -85,12 +85,9 @@ def test_endpoint_includes_semantic_keys_when_artifact_present(api_client, db_se
     resp = api_client.get(f"/api/analyses/{address}")
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert "assessment" in body
-    assert "semantic_capabilities" in body
-    assert "f()" in body["semantic_capabilities"]
-    cap = body["semantic_capabilities"]["f()"]
-    assert "kind" in cap
-    assert "confidence" in cap
+    assert body["assessment_url"].endswith("/artifact/assessment.json")
+    assert body["semantic_capabilities_url"] == f"/api/contract/{address}/capabilities"
+    assert "semantic_capabilities" not in body
     # available_artifacts surface lists the artifact name too.
     assert "assessment" in body["available_artifacts"]
 
@@ -107,6 +104,7 @@ def test_endpoint_omits_semantic_keys_when_artifact_missing(api_client, db_sessi
     body = resp.json()
     assert "predicate_trees" not in body
     assert "semantic_capabilities" not in body
+    assert "semantic_capabilities_url" not in body
     # available_artifacts doesn't list it either.
     assert "predicate_trees" not in body["available_artifacts"]
 
@@ -132,9 +130,9 @@ def test_endpoint_includes_predicate_trees_even_when_resolver_fails(api_client, 
     resp = api_client.get(f"/api/analyses/{address}")
     assert resp.status_code == 200
     body = resp.json()
-    assert "assessment" in body
-    # Resolved capabilities dropped because resolution exploded.
+    assert body["assessment_url"].endswith("/artifact/assessment.json")
     assert "semantic_capabilities" not in body
+    assert body["semantic_capabilities_url"] == f"/api/contract/{address}/capabilities"
 
 
 @requires_postgres
@@ -155,8 +153,9 @@ def test_endpoint_handles_unguarded_only_contract_with_empty_caps(api_client, db
     resp = api_client.get(f"/api/analyses/{address}")
     assert resp.status_code == 200
     body = resp.json()
-    assert "assessment" in body
-    assert body["semantic_capabilities"] == {}
+    assert body["assessment_url"].endswith("/artifact/assessment.json")
+    assert "semantic_capabilities" not in body
+    assert body["semantic_capabilities_url"] == f"/api/contract/{address}/capabilities"
 
 
 @requires_postgres
@@ -175,7 +174,7 @@ def test_endpoint_names_artifacts_it_could_not_read_instead_of_omitting_them(api
     _seed_completed_job(db_session, address=address)
     db_session.commit()
 
-    def _partial(_session, _job_id):
+    def _partial(_session, _job_id, **_kwargs):
         raise StorageContentNotDetermined(
             "bucket unreachable",
             values={"dependencies": {"items": []}},
@@ -211,7 +210,7 @@ def test_endpoint_keeps_a_lost_body_apart_from_one_it_could_not_ask_about(api_cl
     _seed_completed_job(db_session, address=address)
     db_session.commit()
 
-    def _partial(_session, _job_id):
+    def _partial(_session, _job_id, **_kwargs):
         raise StorageContentAbsent(
             "1/2 artifact bodies proven absent",
             values={"dependencies": {"items": []}},
