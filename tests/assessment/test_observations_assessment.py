@@ -171,9 +171,7 @@ def test_controller_update_retracts_dependent_authority_until_policy_rederives()
             },
         },
     )
-    assert not any(
-        claim["proposition"]["kind"] == "function_authority" for claim in refreshed["claims"].values()
-    )
+    assert not any(claim["proposition"]["kind"] == "function_authority" for claim in refreshed["claims"].values())
     policy = next(receipt for receipt in refreshed["analyses"] if receipt["detector"] == "policy.capabilities")
     assert policy["status"] == "partial"
     assert policy["targets_completed"] == 0

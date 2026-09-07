@@ -16,7 +16,9 @@ def upgrade() -> None:
             "Use the manual maintenance cutover; ordinary rolling deployment is refused."
         )
     bind = op.get_bind()
-    remaining = bind.exec_driver_sql("SELECT count(*) FROM artifacts WHERE name IN ('assessment', 'principal_history')").scalar()
+    remaining = bind.exec_driver_sql(
+        "SELECT count(*) FROM artifacts WHERE name IN ('assessment', 'principal_history')"
+    ).scalar()
     if remaining:
         raise RuntimeError(
             f"Temporal Assessment import is incomplete: {remaining} legacy analytical artifact row(s) remain"

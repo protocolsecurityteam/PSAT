@@ -88,9 +88,7 @@ def effect_matches_by_function(assessment: Assessment) -> dict[str, list[dict[st
             }
         )
     for signature in out:
-        out[signature] = [
-            dict(item) for item in resolve_claim_precedence(cast(list[EffectMatch], out[signature]))
-        ]
+        out[signature] = [dict(item) for item in resolve_claim_precedence(cast(list[EffectMatch], out[signature]))]
         out[signature].sort(key=lambda item: (str(item["claim_id"]), str(item["tier"])))
     return out
 

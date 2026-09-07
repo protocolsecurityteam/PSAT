@@ -46,17 +46,21 @@ def import_legacy_artifacts(session: Session) -> dict[str, Any]:
     manifest before the mutable Artifact row is removed. A failed comparison
     rolls back the publication, manifest, and deletion together.
     """
-    rows = session.execute(
-        select(Artifact)
-        .where(Artifact.name.in_(("assessment", "principal_history")))
-        .order_by(
-            # Principal history extends an Assessment publication, so its
-            # source must be converted second for every database-wide pass.
-            (Artifact.name == "principal_history"),
-            Artifact.created_at,
-            Artifact.id,
+    rows = (
+        session.execute(
+            select(Artifact)
+            .where(Artifact.name.in_(("assessment", "principal_history")))
+            .order_by(
+                # Principal history extends an Assessment publication, so its
+                # source must be converted second for every database-wide pass.
+                (Artifact.name == "principal_history"),
+                Artifact.created_at,
+                Artifact.id,
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     imported = {"assessment": 0, "principal_history": 0}
     manifests: list[dict[str, Any]] = []
     for artifact in rows:
@@ -129,4 +133,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

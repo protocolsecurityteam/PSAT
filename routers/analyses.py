@@ -167,9 +167,13 @@ def analyses(response: Response) -> list[AnalysisListEntry]:
         # at production scale.
         artifact_names_by_job: dict[Any, list[str]] = {}
         if job_ids:
-            artifact_inventory = select(Artifact.job_id, Artifact.name).where(Artifact.job_id.in_(job_ids)).union(
-                select(AssessmentPublication.job_id, literal("assessment")).where(
-                    AssessmentPublication.job_id.in_(job_ids)
+            artifact_inventory = (
+                select(Artifact.job_id, Artifact.name)
+                .where(Artifact.job_id.in_(job_ids))
+                .union(
+                    select(AssessmentPublication.job_id, literal("assessment")).where(
+                        AssessmentPublication.job_id.in_(job_ids)
+                    )
                 )
             )
             for row in session.execute(artifact_inventory).all():

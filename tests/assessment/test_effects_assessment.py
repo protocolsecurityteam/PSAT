@@ -86,11 +86,7 @@ def test_proven_verdict_adds_execution_evidence_to_the_effect_claim() -> None:
         and (effect := claim["proposition"].get("effect")) is not None
         and effect["kind"] == "pause.set"
     ]
-    methods = {
-        assessment["evidence"][key]["method"]
-        for claim in pause_claims
-        for key in claim["evidence"]
-    }
+    methods = {assessment["evidence"][key]["method"] for claim in pause_claims for key in claim["evidence"]}
     assert methods == {"static_ir", "execution"}
     assert {claim["rule"] for claim in pause_claims} == {
         "pause.set/idiom_structural",

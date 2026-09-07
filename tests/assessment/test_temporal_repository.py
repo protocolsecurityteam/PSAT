@@ -120,9 +120,12 @@ def test_assessment_artifact_is_a_projection_of_canonical_rows(db_session):
     expected = _assessment(ALICE, 100)
     store_artifact(db_session, job.id, "assessment", data=expected)
 
-    assert db_session.scalar(
-        select(func.count()).select_from(Artifact).where(Artifact.job_id == job.id, Artifact.name == "assessment")
-    ) == 0
+    assert (
+        db_session.scalar(
+            select(func.count()).select_from(Artifact).where(Artifact.job_id == job.id, Artifact.name == "assessment")
+        )
+        == 0
+    )
     assert get_artifact(db_session, job.id, "assessment") == expected
     temporal = load_temporal_assessment(db_session, job.id)
     assert temporal is not None
@@ -157,7 +160,7 @@ def test_owner_update_keeps_history_and_latest_projection(db_session):
 
     latest = cast(Assessment, get_artifact(db_session, job.id, "assessment"))
     authorities = [
-        claim["proposition"]["authority"]
+        claim["proposition"].get("authority")
         for claim in latest["claims"].values()
         if claim["proposition"]["kind"] == "function_authority"
     ]
@@ -175,9 +178,7 @@ def test_a_to_b_to_a_preserves_occurrences_without_duplicate_subjects(db_session
         store_artifact(db_session, job.id, "assessment", data=_assessment(owner, block))
     history = publication_history(db_session, job.id)
     assert [row["block_number"] for row in history] == ["100", "200", "300"]
-    address_subjects = db_session.scalars(
-        select(AssessmentSubject).where(AssessmentSubject.kind == "address")
-    ).all()
+    address_subjects = db_session.scalars(select(AssessmentSubject).where(AssessmentSubject.kind == "address")).all()
     identities = {(row.identity.get("chain_id"), row.identity.get("address")) for row in address_subjects}
     assert (1, ALICE) in identities and (1, BOB) in identities
     assert len([item for item in identities if item[1] == ALICE]) == 1
@@ -255,11 +256,14 @@ def test_reorg_correction_preserves_rows_but_removes_dependent_answers(db_sessio
     assert current["corrections"][0]["reason"] == CorrectionReason.reorg
     assert db_session.scalar(select(func.count()).select_from(AssessmentClaim)) == claim_count
     assert db_session.scalar(select(func.count()).select_from(AssessmentEvidence)) == evidence_count
-    assert db_session.scalar(
-        select(func.count()).select_from(AssessmentClaimEvidence).where(
-            AssessmentClaimEvidence.evidence_id == observed_evidence
+    assert (
+        db_session.scalar(
+            select(func.count())
+            .select_from(AssessmentClaimEvidence)
+            .where(AssessmentClaimEvidence.evidence_id == observed_evidence)
         )
-    ) >= 1
+        >= 1
+    )
 
 
 @requires_postgres
@@ -287,11 +291,12 @@ def test_legacy_import_archives_source_and_is_idempotent(db_session):
 
     assert first["imported"] == {"assessment": 1, "principal_history": 1}
     assert second["imported"] == {"assessment": 0, "principal_history": 0}
-    assert db_session.scalar(
-        select(func.count()).select_from(Artifact).where(
-            Artifact.name.in_(("assessment", "principal_history"))
+    assert (
+        db_session.scalar(
+            select(func.count()).select_from(Artifact).where(Artifact.name.in_(("assessment", "principal_history")))
         )
-    ) == 0
+        == 0
+    )
     manifests = db_session.scalars(select(AssessmentImportManifest)).all()
     assert {row.artifact_id for row in manifests} == {assessment_row.id, history_row.id}
     assert all(db_session.get(AssessmentPayload, row.source_payload_id) is not None for row in manifests)

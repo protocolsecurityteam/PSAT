@@ -380,9 +380,7 @@ class AssessmentImportManifest(Base):
     source: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     imported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
-    __table_args__ = (
-        Index("ix_assessment_import_manifest_job", "job_id", "artifact_name"),
-    )
+    __table_args__ = (Index("ix_assessment_import_manifest_job", "job_id", "artifact_name"),)
 
 
 __all__ = [

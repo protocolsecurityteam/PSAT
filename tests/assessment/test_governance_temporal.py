@@ -13,6 +13,7 @@ from schemas.temporal_assessment import (
     CorrectionTargetKind,
 )
 from services.assessment.governance import (
+    ChainPoint,
     record_applied_configuration,
     record_configuration,
     record_scenario_configuration,
@@ -23,7 +24,7 @@ from tests.assessment.test_temporal_repository import ADDRESS, _assessment, _job
 from tests.conftest import requires_postgres
 
 
-def _point(block: int) -> dict:
+def _point(block: int) -> ChainPoint:
     return {"chain_id": 1, "block_number": block, "block_hash": "0x" + f"{block:064x}"}
 
 

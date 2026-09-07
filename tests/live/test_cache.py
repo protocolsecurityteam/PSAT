@@ -57,9 +57,7 @@ def test_second_run_completed_faster(analyzed_weth, cached_weth, live_client: Li
     t2 = live_client.job_duration_seconds(cached_weth)
     # Below 30s fixed overhead dominates and the assertion flaps.
     if t1 > 30:
-        assert t2 <= t1 * 0.75, (
-            f"Second run ({t2:.1f}s) should be at least 25% faster than first ({t1:.1f}s)"
-        )
+        assert t2 <= t1 * 0.75, f"Second run ({t2:.1f}s) should be at least 25% faster than first ({t1:.1f}s)"
 
 
 @pytest.fixture(scope="module")
