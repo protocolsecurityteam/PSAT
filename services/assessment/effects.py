@@ -18,7 +18,6 @@ from schemas.assessment import (
 from services.effects.claims_bridge import verdict_to_claim
 from services.effects.config import VERDICT_PROVEN
 from services.static.claims.registry import entry_for
-from services.static.claims.types import TIER_PRECEDENCE
 
 from .functions import resolve_function
 from .keys import content_key
@@ -27,15 +26,15 @@ from .slices import remove_analysis_slice
 from .validation import checked
 
 
-def _existing_effect_claim(assessment: Assessment, function: str, kind: str) -> tuple[str, Any] | None:
-    for claim_key, claim in assessment["claims"].items():
+def _existing_effect(assessment: Assessment, function: str, kind: str) -> Effect | None:
+    for claim in assessment["claims"].values():
         proposition = claim["proposition"]
         if (
             proposition["kind"] == "function_effect"
             and proposition.get("function") == function
             and proposition.get("effect", {}).get("kind") == kind
         ):
-            return claim_key, claim
+            return proposition.get("effect")
     return None
 
 
@@ -49,23 +48,6 @@ def add_effects(
 
     result = cast(Assessment, copy.deepcopy(assessment))
     remove_analysis_slice(result, "effects.execution")
-    tier_rank = TIER_PRECEDENCE
-    for claim in result["claims"].values():
-        current_proposition = claim["proposition"]
-        if current_proposition["kind"] != "function_effect":
-            continue
-        tiers: list[str] = []
-        for evidence_key in claim["evidence"]:
-            current_evidence = result["evidence"].get(evidence_key)
-            locator = current_evidence["locator"] if current_evidence is not None else None
-            tier = locator.get("tier") if isinstance(locator, Mapping) else None
-            if isinstance(tier, str) and tier in tier_rank:
-                tiers.append(tier)
-        if tiers:
-            strongest = max(tiers, key=lambda tier: tier_rank[tier])
-            current_effect = current_proposition.get("effect")
-            if current_effect is not None:
-                claim["rule"] = f"{current_effect['kind']}/{strongest}"
     verdict_items = list(verdicts)
     omissions: list[dict[str, str]] = []
     claim_keys: list[str] = []
@@ -141,31 +123,31 @@ def add_effects(
         result["evidence"][evidence_key] = evidence
         evidence_keys.append(evidence_key)
 
-        existing = _existing_effect_claim(result, function, kind)
-        if existing is not None:
-            claim_key, claim = existing
-            if evidence_key not in claim["evidence"]:
-                claim["evidence"].append(evidence_key)
-            claim["rule"] = f"{kind}/behavioral_observed"
-            claim_keys.append(claim_key)
-            continue
-
         entry = entry_for(kind)
-        effect: Effect = {
-            "kind": cast(EffectKind, kind),
-            "family": cast(EffectFamily, entry.consumer_family),
-            "targets": [],
-            "affected_functions": [],
-        }
+        prior_effect = _existing_effect(result, function, kind)
+        effect: Effect = (
+            copy.deepcopy(prior_effect)
+            if prior_effect is not None
+            else {
+                "kind": cast(EffectKind, kind),
+                "family": cast(EffectFamily, entry.consumer_family),
+                "targets": [],
+                "affected_functions": [],
+            }
+        )
         proposition: Proposition = {
             "kind": "function_effect",
             "function": function,
             "effect": effect,
         }
-        claim_key = content_key("claim", {"contract": result["contract"], "proposition": proposition})
+        rule = f"{kind}/behavioral_observed"
+        claim_key = content_key(
+            "claim",
+            {"contract": result["contract"], "proposition": proposition, "evidence": [evidence_key], "rule": rule},
+        )
         result["claims"][claim_key] = {
             "proposition": proposition,
-            "rule": f"{kind}/behavioral_observed",
+            "rule": rule,
             "evidence": [evidence_key],
             "claims": [],
         }

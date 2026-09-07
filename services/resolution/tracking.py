@@ -1045,6 +1045,18 @@ def _current_block_number(rpc_url: str, *, chain_id: int | None = None) -> int:
     return int(raw, 16)
 
 
+def _block_hash(rpc_url: str, block_number: int, *, chain_id: int | None = None) -> str | None:
+    """Canonical hash for a pinned snapshot block; absence keeps scope reported."""
+    try:
+        raw = _rpc_request(rpc_url, "eth_getBlockByNumber", [hex(block_number), False], chain_id=chain_id)
+    except Exception:
+        return None
+    if not isinstance(raw, dict):
+        return None
+    value = raw.get("hash")
+    return value.lower() if isinstance(value, str) and len(value) == 66 and value.startswith("0x") else None
+
+
 def _getter_target(source: str, read_spec: ControllerReadSpec | None) -> str:
     """Getter base name ``_read_polling_source`` reads a controller through: ``source`` unless a
     ``getter_call`` read_spec overrides the target. Shared with the snapshot Multicall3 prewarm so the two
@@ -1169,6 +1181,7 @@ def observe_controllers(
         if block_tag == "latest"
         else int(block_tag, 16)
     )
+    block_hash = _block_hash(rpc_url, block_number, chain_id=chain_id)
     # One Multicall3 of all controller getters up front; _read_polling_source consumes it (successful reads
     # only). Empty {} when disabled or on any failure → per-controller reads, identical results.
     prewarm = (
@@ -1341,13 +1354,18 @@ def observe_controllers(
         if beacon_entry is not None:
             controller_values["beacon_owner"] = beacon_entry
 
-    return {
+    result: ObservationBatch = {
         "schema_version": "0.1",
         "contract_address": plan["contract_address"],
         "contract_name": plan["contract_name"],
         "block_number": block_number,
         "controller_values": controller_values,
     }
+    if block_hash is not None:
+        result["block_hash"] = block_hash
+        for observation in result["controller_values"].values():
+            observation["block_hash"] = block_hash
+    return result
 
 
 def _read_beacon_owner(

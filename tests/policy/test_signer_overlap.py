@@ -12,11 +12,8 @@ import pytest
 
 from db.models import Contract, EffectiveFunction, FunctionPrincipal, Protocol
 from services.concurrency import RpcExecutor
-from services.policy.principal_index import (
-    _compute_signer_overlap,
-    build_principal_index,
-    load_protocol_safe_owner_sets,
-)
+from services.policy.principal_index import _compute_signer_overlap, load_protocol_safe_owner_sets
+from tests.support.policy_builders import principal_profiles as build_principal_index
 
 # Ops Safe (4/7) and pauser Safe (1/5) — the pauser's owners are a strict subset,
 # the exact etherfi shape the plan cites.

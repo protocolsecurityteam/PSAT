@@ -165,7 +165,7 @@ def _assessment(
     graph: dict | None = None,
     chain_id: int = 1,
 ) -> Assessment:
-    """Canonical worker handoff fixture built from the old algorithm inputs."""
+    """Canonical worker handoff fixture built from semantic inputs."""
 
     from services.assessment import add_observations, add_resolution, build_static_assessment
 
@@ -230,7 +230,7 @@ def _authority_bundle(snapshot: dict | None = None) -> dict:
 def resolved_records(records, capabilities):
     """Build writer inputs from resolver results using the production projection."""
     from services.policy.capability_surface import capability_role_grants
-    from services.policy.permission_index import _column_values_for_capability
+    from services.policy.observations import _column_values_for_capability
     from services.resolution.capabilities import CapabilityExpr
     from services.resolution.capability_resolver import capability_to_dict
 
@@ -243,3 +243,52 @@ def resolved_records(records, capabilities):
         cap = capability_to_dict(cap) if isinstance(cap, CapabilityExpr) else cap
         out.append({**record, **_column_values_for_capability(cap), "authority_roles": capability_role_grants(cap)})
     return out
+
+
+def assessed_permissions(
+    target_analysis,
+    *,
+    target_snapshot=None,
+    predicate_trees=None,
+    capability_resolver_output=None,
+    effects=None,
+):
+    """Fixture entry point exercising derivation and the canonical projection."""
+    from services.assessment import derive_policy, project_permission_index
+
+    effect_inputs = dict(effects or {})
+    functions = dict(effect_inputs.get("functions") or {})
+    for signature in capability_resolver_output or {}:
+        functions.setdefault(signature, {})
+    effect_inputs["functions"] = functions
+    assessment = _assessment(
+        static_facts=target_analysis, snapshot=target_snapshot, predicate_trees=predicate_trees, effects=effect_inputs
+    )
+    return project_permission_index(derive_policy(assessment, capability_resolver_output=capability_resolver_output))
+
+
+def principal_assessment(permission_index, *, resolution_graph=None, chain_id=1):
+    """Build a real ledger from a compact principal test specimen."""
+    from services.assessment import add_policy
+
+    rows = [dict(row) for row in permission_index.get("functions", [])]
+    effects = {"functions": {row["function"]: {"abi_signature": row.get("abi_signature")} for row in rows}}
+    assessment = _assessment(
+        static_facts=_minimal_static_facts(
+            address=permission_index["contract_address"], name=permission_index["contract_name"]
+        ),
+        effects=effects,
+        graph=resolution_graph,
+        chain_id=chain_id or 1,
+    )
+    for row in rows:
+        row["selector"] = assessment["functions"][row["function"]]["selector"]
+    return add_policy(assessment, rows, chain_id=chain_id or 1)
+
+
+def principal_profiles(permission_index, *, resolution_graph=None, chain_id=1, **observations):
+    """Exercise observation ingestion followed by a pure principal projection."""
+    from services.policy.principal_index import build_principal_index, observe_principals
+
+    assessment = principal_assessment(permission_index, resolution_graph=resolution_graph, chain_id=chain_id)
+    return build_principal_index(observe_principals(assessment, **observations))

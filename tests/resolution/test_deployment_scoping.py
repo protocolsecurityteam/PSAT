@@ -21,7 +21,6 @@ import uuid
 from datetime import datetime, timezone
 
 from tests.conftest import requires_postgres
-from tests.support.policy_builders import resolved_records
 
 
 def _addr() -> str:
@@ -302,6 +301,15 @@ def test_controller_values_scoped_to_job_deployment(db_session):
     db_session.commit()
 
     try:
+        from db.queue import store_artifact
+        from tests.support.policy_builders import _assessment, _minimal_snapshot, _minimal_static_facts
+
+        assessment = _assessment(
+            static_facts=_minimal_static_facts(address=impl),
+            snapshot=_minimal_snapshot({"state_variable:owner": {"value": "0x" + "a" * 40}}),
+        )
+        assessment["contract"]["deployment_address"] = p1
+        store_artifact(db_session, job.id, "assessment", data=assessment)
         vals = _load_state_var_values(db_session, impl, job_id=job.id, chain="ethereum")
         # The job's deployment is p1 → it reads p1's value, not the sibling p2's.
         assert vals.get("owner") == "0x" + "a" * 40
@@ -447,15 +455,21 @@ def _gate_status_and_principal(db_session, job, contract, deployment):
     """Run the REAL policy resolve + writer for ``job`` and return
     ``(status, principal_addresses)`` for the governor-gated function."""
     from db.models import EffectiveFunction, FunctionPrincipal
+    from db.queue import get_artifact
+    from db.queue.typed import load_assessment
+    from services.assessment import derive_policy, project_permission_index
     from services.policy.permission_index_writer import write_permission_rows
     from services.resolution.capability_resolver import resolve_contract_capabilities
 
     caps = resolve_contract_capabilities(db_session, address=contract.address, chain_id=1, job_id=job.id)
     assert caps is not None and _GATE_FN in caps, f"resolver returned no capability for {_GATE_FN}: {caps}"
+    assessment = load_assessment(get_artifact, db_session, job.id)
+    assert assessment is not None
+    assessment = derive_policy(assessment, capability_resolver_output=caps)
     write_permission_rows(
         db_session,
         contract_id=contract.id,
-        function_records=resolved_records([_gate_fn_record()], caps),
+        function_records=project_permission_index(assessment)["functions"],
         deployment_address=deployment,
     )
     db_session.commit()
@@ -487,7 +501,7 @@ def test_end_to_end_heal_standalone_impl_resolves_after_backpatch(db_session, mo
     """
     from db.models import Contract, JobStage, JobStatus
     from db.queue import reconcile_impl_job_for_proxy, store_artifact
-    from tests.support.policy_builders import _assessment, _minimal_static_facts
+    from tests.support.policy_builders import _assessment, _minimal_snapshot, _minimal_static_facts
     from workers.resolution_worker import ResolutionWorker
 
     impl, proxy = _addr(), _addr()
@@ -506,6 +520,7 @@ def test_end_to_end_heal_standalone_impl_resolves_after_backpatch(db_session, mo
         "assessment",
         data=_assessment(
             static_facts=facts,
+            snapshot=_minimal_snapshot({"state_variable:governor": {"value": None}}),
             predicate_trees={
                 "schema_version": "semantic",
                 "contract_name": "Core",

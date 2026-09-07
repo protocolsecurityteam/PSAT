@@ -721,7 +721,7 @@ def test_materialize_contract_artifacts_no_impl_proxy_fails_closed(monkeypatch):
     )
 
     with pytest.raises(UnresolvedProxyError):
-        _materialize_contract_artifacts(diamond, "http://rpc.example", workspace_prefix="t")
+        _materialize_contract_artifacts(diamond, "http://rpc.example", workspace_prefix="t", chain="ethereum")
 
 
 def test_materialize_contract_artifacts_propagates_classification_incomplete(monkeypatch):
@@ -737,7 +737,7 @@ def test_materialize_contract_artifacts_propagates_classification_incomplete(mon
     monkeypatch.setattr("services.discovery.classifier.classify_single", _raise)
 
     with pytest.raises(ClassificationIncompleteError):
-        _materialize_contract_artifacts("0x" + "11" * 20, "http://rpc.example", workspace_prefix="t")
+        _materialize_contract_artifacts("0x" + "11" * 20, "http://rpc.example", workspace_prefix="t", chain="ethereum")
 
 
 def test_materialize_contract_artifacts_resolved_proxy_retargets_to_impl(monkeypatch):
@@ -761,9 +761,9 @@ def test_materialize_contract_artifacts_resolved_proxy_retargets_to_impl(monkeyp
 
     monkeypatch.setattr(recursive, "_materialize_with_cross_process_cache", fake_cache)
     monkeypatch.setattr(recursive, "observe_controllers", lambda _plan, _rpc, **_kw: {"controllers": []})
-    monkeypatch.setattr(recursive, "_build_permission_index", lambda _a, _s, _e, _t: {"functions": []})
+    monkeypatch.setattr(recursive, "_build_permission_index", lambda _a, _s, _e, _t, **_kw: {"functions": []})
 
-    loaded = _materialize_contract_artifacts(proxy, "http://rpc.example", workspace_prefix="t")
+    loaded = _materialize_contract_artifacts(proxy, "http://rpc.example", workspace_prefix="t", chain="ethereum")
 
     assert captured["effective_address"] == impl  # retargeted to the logic contract
     assert loaded["static_facts"]["subject"]["address"] == impl
@@ -790,9 +790,9 @@ def test_materialize_contract_artifacts_swallows_generic_classify_error(monkeypa
 
     monkeypatch.setattr(recursive, "_materialize_with_cross_process_cache", fake_cache)
     monkeypatch.setattr(recursive, "observe_controllers", lambda _plan, _rpc, **_kw: {"controllers": []})
-    monkeypatch.setattr(recursive, "_build_permission_index", lambda _a, _s, _e, _t: None)
+    monkeypatch.setattr(recursive, "_build_permission_index", lambda _a, _s, _e, _t, **_kw: None)
 
-    loaded = _materialize_contract_artifacts(addr, "http://rpc.example", workspace_prefix="t")
+    loaded = _materialize_contract_artifacts(addr, "http://rpc.example", workspace_prefix="t", chain="ethereum")
 
     # Swallowed → analyze the address as-is (no retarget, no raise).
     assert captured["effective_address"] == addr

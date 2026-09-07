@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Any, cast
+import time
+from typing import Any
 
 import pytest
 
-from schemas.assessment import Assessment
-from services.assessment import static_inputs
-from tests.live.conftest import LiveClient
+from db.queue.typed import validate_assessment
+from services.assessment import project_permission_index, static_inputs
+from tests.live.conftest import DEFAULT_COMPANY_TIMEOUT, DEFAULT_POLL_INTERVAL, LiveClient
 
 EXPECTED_LEAF_KINDS = {
     "membership",
@@ -65,20 +66,48 @@ def _leaves_from_artifact(artifact: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 @pytest.fixture(scope="module")
-def guarded_contract(analyzed_veda_teller, live_client: LiveClient) -> dict[str, Any]:
-    """Load the known-guarded Veda Teller's predicate evidence from Assessment."""
-
-    job = analyzed_veda_teller
-    assessment = live_client.artifact(job["name"], "assessment")
-    assert isinstance(assessment, dict), "Veda Teller analysis must publish Assessment"
-    _static_facts, predicate_trees, _effects = static_inputs(cast(Assessment, assessment))
-    trees = predicate_trees.get("trees")
-    assert isinstance(trees, dict) and trees, "Veda Teller Assessment must embed guarded predicate trees"
-    leaves = _leaves_from_artifact(predicate_trees)
-    assert any(leaf.get("authority_role") in AUTHORITY_LEAF_ROLES for leaf in leaves), (
-        "Veda Teller predicate evidence must contain an authority leaf"
+def guarded_contract(analyzed_company, live_client: LiveClient) -> dict[str, Any]:
+    """Exercise discovery through a guarded descendant, on a fresh preview DB."""
+    deadline = time.monotonic() + DEFAULT_COMPANY_TIMEOUT
+    descendants: list[dict[str, Any]] = []
+    while time.monotonic() < deadline:
+        jobs = live_client.jobs()
+        parents = {analyzed_company["job_id"]}
+        descendants = []
+        for _ in range(len(jobs)):
+            children = [
+                job
+                for job in jobs
+                if (job.get("request") or {}).get("parent_job_id") in parents and job["job_id"] not in parents
+            ]
+            if not children:
+                break
+            descendants.extend(children)
+            parents.update(job["job_id"] for job in children)
+        if all(job["status"] in {"completed", "failed", "failed_terminal"} for job in descendants):
+            break
+        time.sleep(DEFAULT_POLL_INTERVAL * 2)
+    else:
+        pytest.fail("Company descendants did not finish before the integration timeout")
+    diagnostics = []
+    for job in descendants:
+        if job.get("status") != "completed" or not job.get("address") or not job.get("name"):
+            continue
+        raw = live_client.artifact(job["name"], "assessment")
+        if raw is None:
+            diagnostics.append(f"{job['name']}: no Assessment")
+            continue
+        assessment = validate_assessment(raw)
+        _facts, predicate_trees, _effects = static_inputs(assessment)
+        leaves = _leaves_from_artifact(predicate_trees)
+        if any(leaf.get("authority_role") in AUTHORITY_LEAF_ROLES for leaf in leaves):
+            return {"job": job, "assessment": assessment, "predicate_trees": predicate_trees, "leaves": leaves}
+        diagnostics.append(f"{job['name']}: no authority leaves")
+    pytest.fail(
+        "Company discovery produced no guarded Assessment descendant. "
+        "This integration requires a fresh preview DB with eligible discovery candidates; "
+        f"descendants={len(descendants)} diagnostics={diagnostics[:10]}"
     )
-    return {"job": job, "assessment": assessment, "predicate_trees": predicate_trees, "leaves": leaves}
 
 
 def test_predicate_trees_are_embedded_in_assessment(guarded_contract):
@@ -137,3 +166,27 @@ def test_capability_resolution_returns_non_empty(guarded_contract, live_client: 
         assert kind in EXPECTED_CAPABILITY_KINDS, (
             f"CapabilityExpr.kind {kind!r} for {fn_sig} not in closed CapKind set ({sorted(EXPECTED_CAPABILITY_KINDS)})"
         )
+
+
+def test_assessment_permissions_preserve_capabilities_and_principals(guarded_contract):
+    functions = project_permission_index(guarded_contract["assessment"])["functions"]
+    assert functions, "Guarded descendant must publish policy evidence in Assessment"
+    checked = 0
+    for function in functions:
+        capability = function.get("capability_expr")
+        if not isinstance(capability, dict):
+            continue
+        principals = [p for controller in function.get("controllers", []) for p in controller.get("principals", [])]
+        kind = capability.get("kind")
+        if kind == "finite_set":
+            assert len(principals) == len(capability.get("members", []))
+        elif kind == "threshold_group":
+            assert len(principals) == 1
+            assert principals[0]["resolved_type"] == "safe"
+            assert "threshold" in principals[0].get("details", {})
+        elif kind in {"cofinite_blacklist", "external_check_only", "conditional_universal"}:
+            assert principals == []
+        else:
+            continue
+        checked += 1
+    assert checked, "No Assessment permission contained an asserted capability kind"

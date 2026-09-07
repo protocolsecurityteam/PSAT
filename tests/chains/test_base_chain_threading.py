@@ -240,7 +240,7 @@ def test_materialize_contract_artifacts_threads_chain(monkeypatch):
     monkeypatch.setattr(recursive, "_materialize_with_cross_process_cache", _fake_cache)
     monkeypatch.setattr("services.discovery.classifier.classify_single", lambda address, rpc_url, **_kw: None)
     monkeypatch.setattr(recursive, "observe_controllers", lambda _plan, _rpc, **_kw: {"controller_values": {}})
-    monkeypatch.setattr(recursive, "_build_permission_index", lambda _a, _s, _e, _t: {"functions": []})
+    monkeypatch.setattr(recursive, "_build_permission_index", lambda _a, _s, _e, _t, **_kw: {"functions": []})
 
     recursive._materialize_contract_artifacts(
         "0x" + "22" * 20, "http://127.0.0.1:8545", workspace_prefix="t", chain="base"

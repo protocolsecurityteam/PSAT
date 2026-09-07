@@ -52,6 +52,10 @@ function installDefaultApiMocks() {
     (url) => /^\/api\/company\/[^/]+\/functions$/.test(url.pathname),
     () => ({ functions: {} }),
   );
+  setFetchHandler(
+    (url) => /^\/api\/company\/[^/]+\/proposal-impact$/.test(url.pathname),
+    () => ({ proposals: [], changes: [], limitations: [] }),
+  );
   setFetchHandler(/^\/api\/monitored-contracts/, () => ({ items: [] }));
   setFetchHandler(/^\/api\/address_labels$/, () => ({ labels: {} }));
   setFetchHandler(
@@ -108,6 +112,13 @@ describe("App router smoke tests", () => {
     await waitFor(() => {
       expect(document.querySelector(".fullscreen-surface")).toBeInTheDocument();
     });
+    expectNoCrash();
+  });
+
+  it("renders the proposal impact tab at /company/:name/proposals", async () => {
+    navigateTo("/company/etherfi/proposals");
+    render(<App />);
+    expect(await screen.findByRole("heading", { name: "Proposal impact" })).toBeInTheDocument();
     expectNoCrash();
   });
 

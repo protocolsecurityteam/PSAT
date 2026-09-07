@@ -139,7 +139,7 @@ def test_role_trace_cannot_restore_a_caller_removed_by_intersection() -> None:
         ],
     )
     capability = capability_to_dict(intersect(role, CapabilityExpr.finite_set([alice])))
-    result = add_policy(_base(), _permission(capability_expr=capability), chain_id=1)
+    result = add_policy(_base(), _permission(capability_expr=capability)["functions"], chain_id=1)
     authority = function_authority_claims(result)[0]["proposition"].get("authority")
     assert authority == {"kind": "role", "role": "8", "entities": [f"1:{alice}"]}
 
@@ -151,7 +151,7 @@ def test_rejected_function_cannot_escape_into_permission_rows() -> None:
             function="invented()",
             abi_signature="invented()",
             capability_expr={"kind": "conditional_universal"},
-        ),
+        )["functions"],
         chain_id=1,
     )
     assert project_permission_index(result)["functions"] == []
@@ -160,14 +160,14 @@ def test_rejected_function_cannot_escape_into_permission_rows() -> None:
 def test_permission_projection_round_trips_without_original_resolver_output() -> None:
     import json
 
-    result = add_policy(_base(), _permission(authority_public=True, authority_openness="open"), chain_id=1)
+    result = add_policy(_base(), _permission(authority_public=True, authority_openness="open")["functions"], chain_id=1)
     assert project_permission_index(json.loads(json.dumps(result))) == project_permission_index(result)
 
 
 def test_public_authority_produces_a_capability_claim() -> None:
     assessment = add_policy(
         _base(),
-        _permission(authority_public=True, authority_openness="open"),
+        _permission(authority_public=True, authority_openness="open")["functions"],
         chain_id=1,
     )
     TypeAdapter(Assessment).validate_python(assessment)
@@ -193,7 +193,7 @@ def test_policy_records_call_authority_without_a_classified_effect() -> None:
             selector="0x3ccfd60b",
             authority_public=True,
             authority_openness="open",
-        ),
+        )["functions"],
         chain_id=1,
     )
 
@@ -227,7 +227,7 @@ def test_policy_uses_source_signature_when_abi_signature_differs() -> None:
             selector="0x8456cb59",
             authority_public=True,
             authority_openness="open",
-        ),
+        )["functions"],
         chain_id=1,
     )
 
@@ -251,7 +251,7 @@ def test_policy_falls_back_to_a_unique_selector_and_refuses_a_collision() -> Non
             selector="0x8456cb59",
             authority_public=True,
             authority_openness="open",
-        ),
+        )["functions"],
         chain_id=1,
     )
     assert any(
@@ -261,7 +261,7 @@ def test_policy_falls_back_to_a_unique_selector_and_refuses_a_collision() -> Non
 
     collision = _base()
     collision["functions"]["otherPause()"] = {
-        "abi_signature": "otherPause()",
+        "abi_signature": None,
         "selector": "0x8456cb59",
         "state_changing": True,
     }
@@ -273,7 +273,7 @@ def test_policy_falls_back_to_a_unique_selector_and_refuses_a_collision() -> Non
             selector="0x8456cb59",
             authority_public=True,
             authority_openness="open",
-        ),
+        )["functions"],
         chain_id=1,
     )
     receipt = next(item for item in refused["analyses"] if item["detector"] == "policy.capabilities")
@@ -284,7 +284,7 @@ def test_policy_falls_back_to_a_unique_selector_and_refuses_a_collision() -> Non
 def test_unresolved_authority_is_an_omission_not_a_claim() -> None:
     assessment = add_policy(
         _base(),
-        _permission(authority_openness="not_determined", authority_roles=None),
+        _permission(authority_openness="not_determined", authority_roles=None)["functions"],
         chain_id=1,
     )
 
@@ -295,7 +295,7 @@ def test_unresolved_authority_is_an_omission_not_a_claim() -> None:
 
 
 def test_permission_claims_are_projected_from_the_assessment() -> None:
-    assessment = add_policy(_base(), _permission(authority_public=True), chain_id=1)
+    assessment = add_policy(_base(), _permission(authority_public=True)["functions"], chain_id=1)
     projected = project_permission_index(assessment)
     claims = projected["functions"][0]["claims"]
     assert [claim["claim_id"] for claim in claims] == ["pause.set"]
@@ -306,7 +306,7 @@ def test_permission_claims_are_projected_from_the_assessment() -> None:
 def test_permission_authority_is_projected_from_assessment_evidence() -> None:
     assessment = add_policy(
         _base(),
-        _permission(authority_public=True, authority_openness="open"),
+        _permission(authority_public=True, authority_openness="open")["functions"],
         chain_id=1,
     )
     projected = project_permission_index(assessment)
@@ -320,7 +320,7 @@ def test_permission_authority_is_projected_from_assessment_evidence() -> None:
 def test_resolved_empty_permission_keeps_projection_evidence_without_a_claim() -> None:
     assessment = add_policy(
         _base(),
-        _permission(status="resolved_empty", authority_roles=[]),
+        _permission(status="resolved_empty", authority_roles=[])["functions"],
         chain_id=1,
     )
 
@@ -335,12 +335,12 @@ def test_resolved_empty_permission_keeps_projection_evidence_without_a_claim() -
 def test_policy_refresh_retracts_a_superseded_public_capability() -> None:
     public = add_policy(
         _base(),
-        _permission(authority_public=True, authority_openness="open"),
+        _permission(authority_public=True, authority_openness="open")["functions"],
         chain_id=1,
     )
     refreshed = add_policy(
         public,
-        _permission(authority_public=False, authority_openness="restricted", status="resolved_empty"),
+        _permission(authority_public=False, authority_openness="restricted", status="resolved_empty")["functions"],
         chain_id=1,
     )
 
@@ -354,7 +354,7 @@ def test_policy_refresh_retracts_a_superseded_public_capability() -> None:
 
 
 def _capability_authority(permission: dict) -> Any:
-    assessment = add_policy(_base(), permission, chain_id=1)
+    assessment = add_policy(_base(), permission["functions"], chain_id=1)
     capability = next(
         claim for claim in assessment["claims"].values() if claim["proposition"]["kind"] == "authority_capability"
     )

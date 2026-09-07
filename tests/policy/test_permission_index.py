@@ -1,6 +1,6 @@
 from typing import Any, cast
 
-from services.policy.permission_index import build_permission_index
+from tests.support.policy_builders import assessed_permissions as build_permission_index
 
 
 def _effect(
@@ -407,7 +407,8 @@ def test_build_permission_index_handles_vyper_dynarray_signatures():
         target_snapshot=target_snapshot,
         predicate_trees=_predicate_trees(
             **{"seal(DynArray[address,MAX_SEALABLES])": _state_var_tree("SEALING_COMMITTEE")}
-        ),
+        )
+        | {"canonical_signatures": {"seal(DynArray[address,MAX_SEALABLES])": "seal(address[])"}},
         capability_resolver_output={
             "seal(DynArray[address,MAX_SEALABLES])": _finite_cap("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
         },

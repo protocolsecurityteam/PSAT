@@ -110,7 +110,7 @@ def _patch_pipeline(monkeypatch, *, scaffold_calls, collect_calls, snapshot_call
         snapshot_calls.append(_plan)
         return {"controllers": []}
 
-    def _build_perms(_analysis, _snapshot, _effects, _trees):
+    def _build_perms(_analysis, _snapshot, _effects, _trees, **_kw):
         return None
 
     monkeypatch.setattr("services.discovery.classifier.classify_single", _classify)

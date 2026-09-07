@@ -33,13 +33,13 @@ import pytest
 
 import services.resolution.tracking as tracking
 from services.concurrency import RpcExecutor
-from services.policy.principal_index import build_principal_index
 from services.resolution.cross_chain_authority import (
     CROSS_CHAIN_AUTHORITY_TYPE,
     make_cross_chain_recognizer,
     undo_l1_to_l2_alias,
 )
 from services.resolution.tracking import clear_classify_cache
+from tests.support.policy_builders import principal_profiles as build_principal_index
 from workers.policy_worker import (
     _known_addresses_for_scope,
     _make_principal_type_resolver,

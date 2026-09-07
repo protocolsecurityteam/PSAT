@@ -37,9 +37,9 @@ def _has_deploy_claim(claims: object) -> bool:
 def test_claims_flow_from_static_pipeline_to_effective_function_row(tmp_path, db_session):
     from db.models import Contract, EffectiveFunction
     from services.governance.principals import _build_company_function_entry
-    from services.policy.permission_index import build_permission_index
     from services.policy.permission_index_writer import write_permission_rows
     from services.static.static_analysis import collect_static_inputs
+    from tests.support.policy_builders import assessed_permissions as build_permission_index
 
     source = (FIXTURES_DIR / "composed" / "upgrade_factory_uups.sol").read_text()
     project_dir = write_foundry_project(tmp_path, "UpgradeFactory", source)

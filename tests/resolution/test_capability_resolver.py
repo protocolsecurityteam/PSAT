@@ -96,6 +96,47 @@ def _seed_contract(session, *, address: str):
     return contract
 
 
+def _publish_controller_observations(session):
+    """Materialize compact controller fixtures as canonical observation evidence."""
+    from db.models import Contract, ControllerValue, Job
+    from db.queue import get_artifact, store_artifact
+    from services.assessment import static_inputs
+    from tests.support.policy_builders import _assessment, _minimal_snapshot
+
+    for job in session.query(Job).all():
+        stored = get_artifact(session, job.id, "assessment")
+        if not isinstance(stored, dict):
+            continue
+        contract = session.query(Contract).filter_by(job_id=job.id).first()
+        if contract is None:
+            contract = session.query(Contract).filter_by(address=job.address, chain="ethereum").first()
+        if contract is None:
+            continue
+        values = {
+            row.controller_id: {
+                "value": row.value,
+                "resolved_type": row.resolved_type,
+                "source": row.source,
+                "details": row.details or {},
+            }
+            for row in session.query(ControllerValue).filter_by(contract_id=contract.id)
+        }
+        from db.queue.typed import validate_assessment
+
+        facts, trees, effects = static_inputs(validate_assessment(stored))
+        assessment = _assessment(
+            static_facts=facts,
+            predicate_trees=trees,
+            effects=effects,
+            snapshot=_minimal_snapshot(values, address=job.address),
+        )
+        proxies = session.query(Contract).filter_by(implementation=job.address).all()
+        if len(proxies) == 1:
+            assessment["contract"]["deployment_address"] = proxies[0].address.lower()
+        store_artifact(session, job.id, "assessment", data=assessment)
+    session.commit()
+
+
 def _address_topic(address: str) -> str:
     return "0x" + address.lower()[2:].rjust(64, "0")
 
@@ -108,6 +149,7 @@ def _bytes4_topic(selector: str) -> str:
 def test_resolve_returns_none_when_no_completed_job(session):
     from services.resolution.capability_resolver import resolve_contract_capabilities
 
+    _publish_controller_observations(session)
     out = resolve_contract_capabilities(session, address="0x" + "ee" * 20, chain_id=1)
     assert out is None
 
@@ -118,6 +160,7 @@ def test_resolve_returns_none_when_no_artifact(session):
 
     address = "0x" + "ab" * 20
     _seed_job_with_artifact(session, address=address, predicate_trees=None)
+    _publish_controller_observations(session)
     out = resolve_contract_capabilities(session, address=address, chain_id=1)
     assert out is None
 
@@ -151,6 +194,7 @@ def test_resolve_returns_per_function_capabilities(session):
     }
     _seed_job_with_artifact(session, address=address, predicate_trees=artifact)
 
+    _publish_controller_observations(session)
     out = resolve_contract_capabilities(session, address=address, chain_id=1)
     assert out is not None
     assert "f()" in out
@@ -241,6 +285,7 @@ def test_resolve_yields_finite_set_with_indexed_event_repo(session):
     }
     _seed_job_with_artifact(session, address=address, predicate_trees=artifact)
 
+    _publish_controller_observations(session)
     out = resolve_contract_capabilities(session, address=address, chain_id=1)
     assert out is not None
     cap = out["guardedFn()"]
@@ -278,6 +323,7 @@ def test_resolve_serializes_unsupported_with_reason(session):
     }
     _seed_job_with_artifact(session, address=address, predicate_trees=artifact)
 
+    _publish_controller_observations(session)
     out = resolve_contract_capabilities(session, address=address, chain_id=1)
     assert out is not None
     cap = out["tryFn()"]
@@ -297,6 +343,7 @@ def test_resolve_returns_empty_dict_for_unguarded_only_contract(session):
     artifact = {"schema_version": "semantic", "contract_name": "T", "trees": {}}
     _seed_job_with_artifact(session, address=address, predicate_trees=artifact)
 
+    _publish_controller_observations(session)
     out = resolve_contract_capabilities(session, address=address, chain_id=1)
     assert out == {}
 
@@ -387,6 +434,7 @@ def test_state_variable_owner_resolved_via_controller_values(session):
     }
     _seed_job_with_artifact(session, address=address, predicate_trees=artifact)
 
+    _publish_controller_observations(session)
     out = resolve_contract_capabilities(session, address=address, chain_id=1)
     assert out is not None
     cap = out["transferOwnership(address)"]
@@ -466,6 +514,7 @@ def test_signature_auth_signer_state_variable_resolved_via_controller_values(ses
     }
     _seed_job_with_artifact(session, address=address, predicate_trees=artifact)
 
+    _publish_controller_observations(session)
     out = resolve_contract_capabilities(session, address=address, chain_id=1)
     assert out is not None
     cap = out["claim(bytes32,uint8,bytes32,bytes32)"]
@@ -546,6 +595,7 @@ def test_signature_auth_signer_zero_address_collapses_to_empty_exact(session):
     }
     _seed_job_with_artifact(session, address=address, predicate_trees=artifact)
 
+    _publish_controller_observations(session)
     out = resolve_contract_capabilities(session, address=address, chain_id=1)
     assert out is not None
     cap = out["claim(bytes32,uint8,bytes32,bytes32)"]
@@ -655,6 +705,7 @@ def test_external_set_resolves_to_indexed_event_members(session):
     }
     _seed_job_with_artifact(session, address=address, predicate_trees=artifact)
 
+    _publish_controller_observations(session)
     out = resolve_contract_capabilities(session, address=address, chain_id=1)
     assert out is not None
     cap = out["upgradeTo(address)"]
@@ -834,6 +885,7 @@ def test_external_authority_inlining_follows_proxy_to_impl_predicate_trees(sessi
     )
     session.commit()
 
+    _publish_controller_observations(session)
     out = resolve_contract_capabilities(session, address=target_addr, chain_id=1, job_id=target_job.id)
     assert out is not None
     cap = out["upgradeTo(address)"]
@@ -909,6 +961,7 @@ def test_unscanned_event_cursor_defers_pending_index(session, monkeypatch):
     }
     _seed_job_with_artifact(session, address=address, predicate_trees=artifact)
 
+    _publish_controller_observations(session)
     out = resolve_contract_capabilities(session, address=address, chain_id=1)
     assert out is not None
     cap = out["pause()"]
@@ -1040,6 +1093,7 @@ def test_external_authority_inlining_binds_msg_sender_argument(session):
     )
     session.commit()
 
+    _publish_controller_observations(session)
     out = resolve_contract_capabilities(session, address=target_addr, chain_id=1, job_id=target_job.id)
     assert out is not None
     cap = out["upgradeTo(address)"]
@@ -1200,6 +1254,7 @@ def test_external_authority_inlining_through_empty_proxy_artifact(session):
     )
     session.commit()
 
+    _publish_controller_observations(session)
     out = resolve_contract_capabilities(session, address=target_addr, chain_id=1, job_id=target_job.id)
     assert out is not None
     cap = out["upgradeTo(address)"]
@@ -1356,6 +1411,7 @@ def test_external_authority_inlining_uses_check_trees_and_call_frame(session):
     )
     session.commit()
 
+    _publish_controller_observations(session)
     out = resolve_contract_capabilities(session, address=target_addr, chain_id=1, job_id=target_job.id)
     assert out is not None
     cap = out["guarded()"]
@@ -1369,155 +1425,85 @@ def test_external_authority_inlining_uses_check_trees_and_call_frame(session):
 # ---------------------------------------------------------------------------
 
 
-@requires_postgres
-def test_load_state_var_values_scoped_by_chain(session):
-    """Two Contract rows for the same address, different chains. The
-    resolver, given chain='ethereum', must read only the ethereum
-    Contract's ControllerValue — not the optimism row's stale value."""
-    from db.models import Contract, ControllerValue, Protocol
-    from services.resolution.capability_resolver import _load_state_var_values
+def _store_controller_assessment(session, job, address, owner, chain_id=1):
+    from db.queue import store_artifact
+    from tests.support.policy_builders import _assessment, _minimal_snapshot, _minimal_static_facts
 
-    address = "0x" + uuid.uuid4().hex[:8] + "c1" * 16
-    eth_owner = "0x" + "ee" * 20
-    op_owner = "0x" + "ff" * 20
-
-    proto = Protocol(name=f"capres_chain_{uuid.uuid4().hex[:8]}")
-    session.add(proto)
-    session.flush()
-
-    eth_contract = Contract(address=address, chain="ethereum", protocol_id=proto.id)
-    op_contract = Contract(address=address, chain="optimism", protocol_id=proto.id)
-    session.add_all([eth_contract, op_contract])
-    session.flush()
-
-    session.add(
-        ControllerValue(
-            contract_id=eth_contract.id,
-            controller_id="state_variable:_owner",
-            value=eth_owner,
-            resolved_type="eoa",
-            source="state_variable",
-        )
-    )
-    session.add(
-        ControllerValue(
-            contract_id=op_contract.id,
-            controller_id="state_variable:_owner",
-            value=op_owner,
-            resolved_type="eoa",
-            source="state_variable",
-        )
+    store_artifact(
+        session,
+        job.id,
+        "assessment",
+        data=_assessment(
+            static_facts=_minimal_static_facts(address=address),
+            chain_id=chain_id,
+            snapshot=_minimal_snapshot({"state_variable:_owner": {"value": owner, "resolved_type": "eoa"}}),
+        ),
     )
     session.commit()
 
-    # No Contract.job_id here, so this exercises the legacy address/chain fallback.
-    job = _seed_job_with_artifact(session, address=address, predicate_trees=None)
 
-    eth_values = _load_state_var_values(session, address, job_id=job.id, chain="ethereum")
-    assert eth_values.get("_owner") == eth_owner, (
-        f"expected ethereum-chain owner ({eth_owner}); got {eth_values.get('_owner')} "
-        f"(would have been the optimism row {op_owner} without chain scoping)"
-    )
+@requires_postgres
+def test_load_state_var_values_scoped_by_chain(session):
+    from services.resolution.capability_resolver import _load_state_var_values, find_analysis_job_for_address
 
-    op_values = _load_state_var_values(session, address, job_id=job.id, chain="optimism")
-    assert op_values.get("_owner") == op_owner, (
-        f"expected optimism-chain owner ({op_owner}); got {op_values.get('_owner')}"
-    )
+    address = "0x" + uuid.uuid4().hex[:8] + "c1" * 16
+    eth_owner, op_owner = "0x" + "ee" * 20, "0x" + "ff" * 20
+    eth_job = _seed_job_with_artifact(session, address=address, predicate_trees=None)
+    op_job = _seed_job_with_artifact(session, address=address, predicate_trees=None)
+    op_job.chain_id = 10
+    _store_controller_assessment(session, eth_job, address, eth_owner, 1)
+    _store_controller_assessment(session, op_job, address, op_owner, 10)
+    eth_lookup = find_analysis_job_for_address(session, address, chain="ethereum")
+    op_lookup = find_analysis_job_for_address(session, address, chain="optimism")
+    assert eth_lookup is not None and eth_lookup.analysis_job.id == eth_job.id
+    assert op_lookup is not None and op_lookup.analysis_job.id == op_job.id
+    assert _load_state_var_values(session, address, job_id=eth_job.id, chain="ethereum") == {"_owner": eth_owner}
+    assert _load_state_var_values(session, address, job_id=op_job.id, chain="optimism") == {"_owner": op_owner}
+    assert _load_state_var_values(session, address, job_id=eth_job.id, chain="optimism") == {}
 
 
 @requires_postgres
-def test_load_state_var_values_prefers_exact_job_contract_over_created_at(session):
-    """A Contract row tied to the analysis job must be selected even if its
-    ``created_at`` is later than the Job row.
-
-    Static/resolution can create or update the Contract row after the Job
-    record exists. Filtering on ``Contract.created_at <= Job.created_at``
-    drops the very ControllerValue rows the current job just wrote."""
-    from datetime import timedelta
-
-    from db.models import Contract, ControllerValue, Job, JobStage, JobStatus, Protocol
+def test_load_state_var_values_ignores_conflicting_controller_indexes(session):
+    from db.models import ControllerValue
     from services.resolution.capability_resolver import _load_state_var_values
 
     address = "0x" + uuid.uuid4().hex[:8] + "c2" * 16
-    late_owner = "0x" + "22" * 20
-
-    proto = Protocol(name=f"capres_temporal_{uuid.uuid4().hex[:8]}")
-    session.add(proto)
-    session.flush()
-
-    base_time = datetime.now(timezone.utc) - timedelta(hours=2)
-    job_time = base_time + timedelta(minutes=30)
-
-    # Job at job_time (30 minutes after base).
-    job = Job(
-        address=address,
-        request={"address": address, "name": "T", "chain": "ethereum"},
-        status=JobStatus.completed,
-        stage=JobStage.done,
-        created_at=job_time,
-        updated_at=job_time,
-    )
-    session.add(job)
-    session.commit()
-
-    # Contract row created AFTER job_time, but explicitly owned by this job.
-    late_contract = Contract(address=address, chain="ethereum", protocol_id=proto.id, job_id=job.id)
-    late_contract.created_at = job_time + timedelta(hours=1)
-    session.add(late_contract)
-    session.flush()
-    session.add(
-        ControllerValue(
-            contract_id=late_contract.id,
-            controller_id="state_variable:_owner",
-            value=late_owner,
-            resolved_type="eoa",
-            source="state_variable",
-        )
-    )
-    session.commit()
-
-    values = _load_state_var_values(session, address, job_id=job.id, chain="ethereum")
-    assert values.get("_owner") == late_owner
-
-
-@requires_postgres
-def test_load_state_var_values_falls_back_when_job_id_missing(session, caplog):
-    """Legacy behavior: when job_id is None, fall back to the latest
-    Contract by address (today's behavior). MUST WARN-log the
-    fallback so callers can audit the regression risk."""
-    import logging
-
-    from db.models import Contract, ControllerValue, Protocol
-    from services.resolution.capability_resolver import _load_state_var_values
-
-    address = "0x" + uuid.uuid4().hex[:8] + "c3" * 16
-    owner = "0x" + "33" * 20
-
-    proto = Protocol(name=f"capres_fallback_{uuid.uuid4().hex[:8]}")
-    session.add(proto)
-    session.flush()
-    contract = Contract(address=address, chain="ethereum", protocol_id=proto.id)
-    session.add(contract)
-    session.flush()
+    owner, stale = "0x" + "11" * 20, "0x" + "22" * 20
+    contract = _seed_contract(session, address=address)
+    job = _seed_job_with_artifact(session, address=address, predicate_trees=None)
+    contract.job_id = job.id
     session.add(
         ControllerValue(
             contract_id=contract.id,
             controller_id="state_variable:_owner",
-            value=owner,
+            value=stale,
             resolved_type="eoa",
             source="state_variable",
         )
     )
     session.commit()
+    _store_controller_assessment(session, job, address, owner)
+    assert _load_state_var_values(session, address, job_id=job.id, chain="ethereum") == {"_owner": owner}
 
-    with caplog.at_level(logging.WARNING, logger="services.resolution.capability_resolver"):
-        values = _load_state_var_values(session, address, job_id=None, chain=None)
 
-    assert values.get("_owner") == owner, "legacy address-only fallback should still resolve"
-    # WARN-log fired so an operator can spot the unscoped path.
-    assert any("without job_id" in rec.message for rec in caplog.records), (
-        f"expected a warn-log about job_id=None fallback; got {[r.message for r in caplog.records]}"
+@requires_postgres
+def test_load_state_var_values_does_not_fall_back_to_controller_indexes(session):
+    from db.models import ControllerValue
+    from services.resolution.capability_resolver import _load_state_var_values
+
+    address = "0x" + uuid.uuid4().hex[:8] + "c3" * 16
+    contract = _seed_contract(session, address=address)
+    session.add(
+        ControllerValue(
+            contract_id=contract.id,
+            controller_id="state_variable:_owner",
+            value="0x" + "33" * 20,
+            resolved_type="eoa",
+            source="state_variable",
+        )
     )
+    session.commit()
+    assert _load_state_var_values(session, address) == {}
 
 
 def test_capability_kind_label_buckets_and_lowercases():

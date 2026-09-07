@@ -21,14 +21,17 @@ def remove_analysis_slice(assessment: Assessment, detector: str) -> None:
 
     shared_evidence = {key for analysis in other_receipts for key in analysis["evidence"]}
     withdrawn_evidence = owned_evidence - shared_evidence
+    removed: set[str] = {
+        key for key, claim in assessment["claims"].items() if withdrawn_evidence.intersection(claim["evidence"])
+    }
     for claim in assessment["claims"].values():
         claim["evidence"] = [key for key in claim["evidence"] if key not in withdrawn_evidence]
 
-    removed: set[str] = set()
+    for key in removed:
+        assessment["claims"].pop(key, None)
     for key in owned_claims - shared_claims:
-        claim = assessment["claims"].get(key)
-        if claim is not None and not claim["evidence"]:
-            assessment["claims"].pop(key, None)
+        if key in assessment["claims"]:
+            assessment["claims"].pop(key)
             removed.add(key)
 
     # A derivation requires all of its premises. Retract dependents transitively

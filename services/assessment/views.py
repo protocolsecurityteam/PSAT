@@ -7,6 +7,8 @@ from collections.abc import Mapping
 from typing import Any, cast
 
 from schemas.assessment import Assessment, Claim
+from services.static.claims import EffectMatch
+from services.static.claims.registry import resolve_claim_precedence
 
 
 def function_effect_claims(assessment: Assessment, effect_kind: str | None = None) -> list[Claim]:
@@ -86,6 +88,9 @@ def effect_matches_by_function(assessment: Assessment) -> dict[str, list[dict[st
             }
         )
     for signature in out:
+        out[signature] = [
+            dict(item) for item in resolve_claim_precedence(cast(list[EffectMatch], out[signature]))
+        ]
         out[signature].sort(key=lambda item: (str(item["claim_id"]), str(item["tier"])))
     return out
 
@@ -108,7 +113,7 @@ def project_permission_index(assessment: Assessment) -> dict[str, Any]:
             {
                 **copy.deepcopy(dict(observation)),
                 "function": signature,
-                "abi_signature": identity["abi_signature"] or signature,
+                "abi_signature": identity["abi_signature"],
                 "selector": identity["selector"],
                 "claims": list(claims.get(signature, [])),
             }

@@ -112,11 +112,19 @@ a job in Postgres; the worker pool (see `deploy/start_workers.sh`) advances it
 through the stages defined in `db.models.JobStage`:
 
 1. `discovery` — fetch verified source, scaffold Foundry project, seed dependency graph
-2. `static` — Slither + `contract_analysis.json` structured analysis
-3. `resolution` — `control_tracking_plan.json`, `control_snapshot.json`, `resolved_control_graph.json`
-4. `policy` — HyperSync policy backfill, `effective_permissions.json`, `principal_labels.json`
-5. `coverage` — link contracts to their audit reports
-6. `done`
+2. `static` — build Assessment from Slither facts, predicate trees, and effect evidence
+3. `resolution` — add observations, resolved entities, and authority relationships to Assessment
+4. `policy` — record calling authority and principal observations in Assessment, then project indexes
+5. `effects` — record execution evidence and detector coverage in Assessment
+6. `coverage` — link contracts to their audit reports
+7. `done`
+
+See [Assessment architecture](docs/ASSESSMENT.md) for the durable model and
+[the cutover guide](docs/ASSESSMENT_CUTOVER.md) for the required maintenance
+deployment of an existing database. The `/company/{name}/proposals` surface
+shows observed-versus-scenario comparisons. Governance getter collection is opt-in through
+`collect_governance`, `proposal_ids`, or `operation_ids` in an analysis request;
+unsupported contract families produce diagnostics rather than inferred claims.
 
 The unified protocol monitor (`workers.protocol_monitor`) runs separately
 and drives live upgrade / event / TVL tracking.

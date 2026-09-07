@@ -73,6 +73,7 @@ def add_observations(assessment: Assessment, snapshot: Mapping[str, Any]) -> Ass
                 "value": raw.get("value"),
                 "resolved_type": raw.get("resolved_type"),
                 "block_number": raw.get("block_number", snapshot.get("block_number")),
+                "block_hash": raw.get("block_hash", snapshot.get("block_hash")),
                 "observed_via": observed_via,
                 "details": raw.get("details") or {},
                 "authority_provenance": raw.get("authority_provenance"),

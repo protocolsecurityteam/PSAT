@@ -154,6 +154,9 @@ def _seed_contract(session, *, address: str, job_id, controllers: dict[str, str]
     session.flush()
     for cid, value in controllers.items():
         session.add(ControllerValue(contract_id=contract.id, controller_id=cid, value=value, source="test"))
+    from tests.support.assessment_artifacts import store_test_observations
+
+    store_test_observations(session, job_id, controllers)
     session.commit()
     return contract
 

@@ -72,6 +72,28 @@ class AnalyzeRequest(BaseModel):
         default=False,
         description="Bench-only: skip the static-cache discovery shortcut so every stage re-runs cold.",
     )
+    collect_governance: bool = False
+    proposal_ids: list[int] | None = Field(default=None, max_length=100)
+    operation_ids: list[str] | None = Field(default=None, max_length=100)
+
+    @field_validator("proposal_ids")
+    @classmethod
+    def _validate_proposal_ids(cls, values: list[int] | None) -> list[int] | None:
+        if values is None:
+            return None
+        if any(value < 0 or value >= 2**256 for value in values):
+            raise ValueError("proposal_ids must be uint256 values")
+        return list(dict.fromkeys(values))
+
+    @field_validator("operation_ids")
+    @classmethod
+    def _validate_operation_ids(cls, values: list[str] | None) -> list[str] | None:
+        if values is None:
+            return None
+        normalized = [value.lower() for value in values]
+        if any(not re.fullmatch(r"0x[a-f0-9]{64}", value) for value in normalized):
+            raise ValueError("operation_ids must be 32-byte hex values")
+        return list(dict.fromkeys(normalized))
 
     @model_validator(mode="after")
     def _validate_target(self) -> "AnalyzeRequest":

@@ -22,6 +22,24 @@ from tests.support.policy_builders import (
 )
 from workers.policy_worker import PolicyWorker
 
+
+def _policy_stub(observation_fixture):
+    """Keep orchestration fixtures small while returning a real Assessment."""
+    from services.assessment import add_policy, static_inputs
+
+    def derive(assessment, *, capability_resolver_output=None, extra_claims=None):
+        facts, trees, effects = static_inputs(assessment)
+        observations = observation_fixture(
+            facts, predicate_trees=trees, effects=effects, capability_resolver_output=capability_resolver_output
+        )
+        rows = [dict(row) for row in observations["functions"]]
+        for row in rows:
+            row["claims"] = [*(row.get("claims") or []), *(extra_claims or {}).get(row["function"], [])]
+        return add_policy(assessment, rows, chain_id=assessment["contract"]["chain_id"])
+
+    return derive
+
+
 # ---------------------------------------------------------------------------
 # process() integration tests
 # ---------------------------------------------------------------------------
@@ -60,8 +78,8 @@ class TestProcessStoresAssessment:
         monkeypatch.setattr("workers.policy_worker.get_artifact", fake_get_artifact)
         monkeypatch.setattr("workers.policy_worker.store_artifact", fake_store_artifact)
         monkeypatch.setattr(
-            "workers.policy_worker.build_permission_index",
-            lambda *a, **kw: {"schema_version": "1", "functions": []},
+            "workers.policy_worker.derive_policy",
+            _policy_stub(lambda *a, **kw: {"schema_version": "1", "functions": []}),
         )
         monkeypatch.setattr(
             "workers.policy_worker.resolve_control_graph",
@@ -117,7 +135,7 @@ class TestProcessSemanticInputs:
         monkeypatch.setattr("workers.policy_worker.get_artifact", fake_get_artifact)
         monkeypatch.setattr("workers.policy_worker.store_artifact", lambda *a, **kw: None)
         monkeypatch.setattr("workers.policy_worker.record_degraded", fake_record_degraded)
-        monkeypatch.setattr("workers.policy_worker.build_permission_index", fake_build_ep)
+        monkeypatch.setattr("workers.policy_worker.derive_policy", _policy_stub(fake_build_ep))
         monkeypatch.setattr(
             "workers.policy_worker.resolve_control_graph",
             lambda **kw: ({"nodes": [], "edges": []}, {}),
@@ -129,7 +147,7 @@ class TestProcessSemanticInputs:
         monkeypatch.setattr(
             PolicyWorker,
             "_enrich_cross_contract",
-            lambda self, session, job, static_facts, observation_batch, **kw: {},
+            lambda self, session, job, assessment, **kw: {},
         )
 
         worker.process(session, cast(Any, job))
@@ -172,7 +190,7 @@ class TestGraphRefreshAfterPermissionIndex:
 
         monkeypatch.setattr("workers.policy_worker.get_artifact", fake_get_artifact)
         monkeypatch.setattr("workers.policy_worker.store_artifact", lambda *a, **kw: None)
-        monkeypatch.setattr("workers.policy_worker.build_permission_index", fake_build_ep)
+        monkeypatch.setattr("workers.policy_worker.derive_policy", _policy_stub(fake_build_ep))
         monkeypatch.setattr("workers.policy_worker.resolve_control_graph", fake_resolve_graph)
         monkeypatch.setattr("workers.policy_worker.build_principal_index", fake_build_labels)
 
@@ -226,19 +244,21 @@ class TestCrossContractEnrichmentAssessmentSync:
         monkeypatch.setattr("workers.policy_worker.get_artifact", fake_get_artifact)
         monkeypatch.setattr("workers.policy_worker.store_artifact", fake_store_artifact)
         monkeypatch.setattr(
-            "workers.policy_worker.build_permission_index",
-            lambda *a, **kw: {
-                "schema_version": "1",
-                "functions": [
-                    {
-                        "function": "mintRewards()",
-                        "claims": [],
-                        "controllers": [],
-                        "authority_roles": [],
-                        "direct_owner": None,
-                    }
-                ],
-            },
+            "workers.policy_worker.derive_policy",
+            _policy_stub(
+                lambda *a, **kw: {
+                    "schema_version": "1",
+                    "functions": [
+                        {
+                            "function": "mintRewards()",
+                            "claims": [],
+                            "controllers": [],
+                            "authority_roles": [],
+                            "direct_owner": None,
+                        }
+                    ],
+                }
+            ),
         )
         monkeypatch.setattr(
             "workers.policy_worker.resolve_control_graph",
@@ -252,7 +272,7 @@ class TestCrossContractEnrichmentAssessmentSync:
         monkeypatch.setattr(
             PolicyWorker,
             "_enrich_cross_contract",
-            lambda self, session, job, static_facts, observation_batch, **kw: {"mintRewards()": [policy_claim]},
+            lambda self, session, job, assessment, **kw: {"mintRewards()": [policy_claim]},
         )
 
         worker.process(session, cast(Any, job))
@@ -336,6 +356,9 @@ class TestProcessFanoutParity:
             ]
         )
         for function in ep_data["functions"]:
+            from eth_utils.crypto import keccak
+
+            function["selector"] = "0x" + keccak(text=function["abi_signature"]).hex()[:8]
             grant = function["authority_roles"][0]
             members = [principal["address"] for principal in grant["principals"]]
             function["capability_expr"] = {
@@ -391,8 +414,8 @@ class TestProcessFanoutParity:
         monkeypatch.setattr("workers.policy_worker.get_artifact", fake_get_artifact)
         monkeypatch.setattr("workers.policy_worker.store_artifact", fake_store_artifact)
         monkeypatch.setattr(
-            "workers.policy_worker.build_permission_index",
-            lambda *a, **kw: ep_data,
+            "workers.policy_worker.derive_policy",
+            _policy_stub(lambda *a, **kw: ep_data),
         )
         monkeypatch.setattr(
             "workers.policy_worker.resolve_control_graph",
@@ -405,7 +428,7 @@ class TestProcessFanoutParity:
         monkeypatch.setattr(
             PolicyWorker,
             "_enrich_cross_contract",
-            lambda self, session, job, static_facts, observation_batch, **kw: {},
+            lambda self, session, job, assessment, **kw: {},
         )
         from workers import policy_worker as policy_worker_module
 
@@ -464,7 +487,26 @@ class TestGraphRefreshRewritesTables:
             "schema_version": "0.1",
             "root_contract_address": TARGET_ADDRESS,
             "max_depth": 6,
-            "nodes": [],
+            "nodes": [
+                {
+                    "id": f"address:{TARGET_ADDRESS}",
+                    "address": TARGET_ADDRESS,
+                    "node_type": "contract",
+                    "resolved_type": "contract",
+                    "depth": 0,
+                    "details": {},
+                    "artifacts": {},
+                },
+                {
+                    "id": "address:" + "0x" + "ee" * 20,
+                    "address": "0x" + "ee" * 20,
+                    "node_type": "principal",
+                    "resolved_type": "eoa",
+                    "depth": 1,
+                    "details": {},
+                    "artifacts": {},
+                },
+            ],
             "edges": [
                 {
                     "from_id": f"address:{TARGET_ADDRESS}",
@@ -497,8 +539,8 @@ class TestGraphRefreshRewritesTables:
         monkeypatch.setattr("workers.policy_worker.get_artifact", fake_get_artifact)
         monkeypatch.setattr("workers.policy_worker.store_artifact", lambda *a, **kw: None)
         monkeypatch.setattr(
-            "workers.policy_worker.build_permission_index",
-            lambda *a, **kw: {"schema_version": "1", "functions": []},
+            "workers.policy_worker.derive_policy",
+            _policy_stub(lambda *a, **kw: {"schema_version": "1", "functions": []}),
         )
         monkeypatch.setattr("workers.policy_worker.resolve_control_graph", lambda **kw: (refreshed_graph, {}))
         monkeypatch.setattr("workers.policy_worker.build_principal_index", lambda *a, **kw: [])
@@ -507,7 +549,7 @@ class TestGraphRefreshRewritesTables:
         monkeypatch.setattr(
             PolicyWorker,
             "_enrich_cross_contract",
-            lambda self, session, job, static_facts, observation_batch, **kw: {},
+            lambda self, session, job, assessment, **kw: {},
         )
 
         worker.process(session, cast(Any, job))
@@ -522,7 +564,9 @@ class TestGraphRefreshRewritesTables:
         assert call["contract_id"] == 42
         # The impl-in-proxy-context deployment scoping the row writes use.
         assert call["deployment_address"] == "0x" + "77" * 20
-        assert call["resolved_graph"] is refreshed_graph
+        # The relational graph is a fresh projection of canonical Assessment,
+        # not the mutable walker dictionary itself.
+        assert call["resolved_graph"] is not refreshed_graph
         assert any(edge["relation"] == "role_principal" for edge in call["resolved_graph"]["edges"])
 
     def test_no_contract_row_skips_the_table_rewrite(self, monkeypatch: pytest.MonkeyPatch) -> None:

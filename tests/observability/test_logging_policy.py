@@ -97,8 +97,8 @@ def _drive_process_with_missing_contract_row(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr("workers.policy_worker.get_artifact", fake_get_artifact)
     monkeypatch.setattr("workers.policy_worker.store_artifact", lambda *a, **kw: None)
     monkeypatch.setattr(
-        "workers.policy_worker.build_permission_index",
-        lambda *a, **kw: {"schema_version": "1", "functions": []},
+        "workers.policy_worker.derive_policy",
+        lambda assessment, **kw: assessment,
     )
     monkeypatch.setattr(
         "workers.policy_worker.resolve_control_graph",
@@ -111,7 +111,7 @@ def _drive_process_with_missing_contract_row(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(
         PolicyWorker,
         "_enrich_cross_contract",
-        lambda self, session, job, static_facts, observation_batch, **kw: {},
+        lambda self, session, job, assessment, **kw: {},
     )
 
     worker.process(session, cast(Any, job))

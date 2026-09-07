@@ -1,4 +1,4 @@
-"""Build frontend-friendly principal labels from effective permissions and resolved control graphs."""
+"""Observe principal facts into Assessment and project their display labels."""
 
 from __future__ import annotations
 
@@ -19,9 +19,13 @@ from db.models import (
     EffectiveFunction,
     FunctionPrincipal,
 )
+from schemas.assessment import Assessment
 from schemas.observations import ResolvedControllerType, coerce_resolved_controller_type
 from schemas.permission_index import role_number
 from schemas.principal_index import LabelConfidence, PrincipalPermission, PrincipalProfile
+from services.assessment.principals import PRODUCER, add_principal_observations
+from services.assessment.runtime import control_graph
+from services.assessment.views import project_permission_index
 from services.concurrency import parallel_map
 from services.governance.principals import is_terminal_principal_type, resolve_terminal_principal
 from services.resolution.tracking import classify_resolved_address_with_status
@@ -527,63 +531,31 @@ def _display_name(
     return _display_from_type(resolved_type), "high" if resolved_type != "unknown" else "low"
 
 
-def build_principal_index(
-    permission_index: Mapping[str, Any],
+def observe_principals(
+    assessment: Assessment,
     *,
-    resolution_graph: Mapping[str, Any] | None = None,
     rpc_url: str | None = None,
-    chain_id: int | None = None,
     classify_cache: dict[str, tuple[str, dict[str, object]]] | None = None,
     cross_chain_recognizer: Callable[[str], tuple[str, dict[str, object]] | None] | None = None,
     protocol_safe_owner_sets: Mapping[str, Mapping[str, Any]] | None = None,
     protocol_deployer_groups: Mapping[str, Mapping[str, Any]] | None = None,
     resolve_controllers: Callable[[str], Sequence[Mapping[str, Any]] | None] | None = None,
-) -> list[PrincipalProfile]:
-    """Construct principal records for every authority address.
+) -> Assessment:
+    """Observe principal classifications and relationships into Assessment.
 
-    ``classify_cache`` is mutated in place. When supplied, classification
-    results from prior pipeline stages (resolution, policy graph refresh)
-    are reused and any new classifications discovered here are added to
-    the same dict — so a caller threading the same cache through the whole
-    job sees fan-out of 6-10 RPCs per address collapse to one lookup.
-
-    ``cross_chain_recognizer`` is an ``address -> (resolved_type,
-    details) | None`` classifier that takes priority over the generic
-    EOA/contract typing: an aliased L1 owner reads as a codeless EOA and a
-    bridge predeploy as a generic contract, yet both are cross-chain
-    authorities, never anonymous principals. ``None`` (the mainnet path, and
-    every chain without bridge constants) leaves classification byte-identical.
-
-    ``protocol_safe_owner_sets`` — the protocol's
-    exact-owner Safe registry (``load_protocol_safe_owner_sets``). When present,
-    each Safe principal gains a ``details.signer_overlap`` attribution fact
-    against every other protocol Safe. ``None`` omits the fact (no guessing).
-
-    ``protocol_deployer_groups`` — the protocol's shared-deployer
-    groups (``load_protocol_deployer_groups``). When present, a principal whose
-    address co-shares a deployer with other protocol contracts gains a witnessed
-    (heuristic-tagged) ``details.shared_deployer`` fact. ``None`` omits it.
-
-    ``resolve_controllers`` — an
-    ``address -> [{"address","resolved_type","details"}, ...] | None`` step
-    function (backed by on-chain owner reads). When present, each
-    ``resolved_type=contract`` principal is walked to its ultimate Safe/EOA and
-    the result stored in ``details.terminal_principal``. ``None`` skips the walk;
-    the non-terminal
-    ``details.terminal`` marking is still stamped on every principal so a
-    contract way-point never reads as a settled key.
+    Cache hits reuse successful earlier reads. A failed probe becomes an
+    omission, never a supported classification or a settled principal label.
     """
-    nodes_by_id = _node_by_id(resolution_graph or {})
+    resolution_graph = control_graph(assessment)
+    permission_index = project_permission_index(assessment)
+    chain_id = assessment["contract"]["chain_id"]
     nodes_by_address = {node["address"].lower(): node for node in (resolution_graph or {}).get("nodes", [])}
-    incoming_by_id = _incoming_edges(resolution_graph or {})
-    outgoing_by_id = _outgoing_edges(resolution_graph or {})
-    permissions_by_address, permission_label_hints = _collect_permissions(permission_index)
+    permissions_by_address, _permission_label_hints = _collect_permissions(permission_index)
 
     addresses = set(nodes_by_address)
     addresses.update(permissions_by_address)
 
     target_address = permission_index["contract_address"].lower()
-    contract_name = permission_index["contract_name"]
     # The per-job classify_cache is shared read+write across worker threads.
     # Fast path is the cache hit (artifact pre-populated by resolution stage),
     # so the lock is uncontended in the common case.
@@ -594,11 +566,12 @@ def build_principal_index(
     # the regression to watch.
     classify_stats: dict[str, int] = {"hits": 0, "misses": 0}
 
-    def _per_address(address: str) -> PrincipalProfile | None:
+    def _per_address(address: str) -> dict[str, Any] | None:
         if not address.startswith("0x") or len(address) != 42:
             return None
         if address == target_address:
             return None
+        complete = True
         node = nodes_by_address.get(address)
         resolved_type = coerce_resolved_controller_type(node.get("resolved_type")) if node else "unknown"
         details = dict(node.get("details", {})) if node else {}
@@ -635,43 +608,10 @@ def build_principal_index(
                 # Skip per-job cache write if any underlying probe errored —
                 # otherwise a transient blip during labeling would persist
                 # a wrong "contract" classification for the rest of the job.
+                complete = cacheable
                 if classify_cache is not None and cacheable:
                     with classify_cache_lock:
                         classify_cache[cache_key] = (resolved_type, dict(details))
-
-        if resolved_type == "contract" and node:
-            if str(details.get("controller_label", "")).strip() == "permissionController":
-                return None
-            outgoing_edges = outgoing_by_id.get(node.get("id", ""), [])
-            if any(edge.get("to_id") != node.get("id") for edge in outgoing_edges):
-                return None
-
-        labels, graph_context = _graph_labels_for_node(
-            node or {"resolved_type": resolved_type}, incoming_by_id.get((node or {}).get("id", ""), []), nodes_by_id
-        )
-        hint_string = permission_label_hints.get(address)
-        if hint_string:
-            labels.update(hint_string.split(","))
-
-        permissions = sorted(
-            permissions_by_address.get(address, []),
-            key=lambda item: (item["function"], -1 if item["role"] is None else item["role"]),
-        )
-        display_name, confidence = _display_name(
-            address,
-            resolved_type,
-            labels,
-            graph_context,
-            permissions,
-            contract_name,
-            _node_display_name(node),
-        )
-        if resolved_type == "cross_chain_authority":
-            display_name, confidence = _cross_chain_display_name(details), "high"
-            labels.add("cross_chain_authority")
-            role = str(details.get("role") or "")
-            if role:
-                labels.add(role)
 
         # Non-terminal marking: a contract/unresolved principal is a
         # way-point, never a settled controlling key. Stamped on every principal
@@ -701,19 +641,17 @@ def build_principal_index(
         return {
             "address": address,
             "resolved_type": resolved_type,
-            "display_name": display_name,
-            "labels": sorted(label for label in labels if label),
-            "confidence": confidence,
+            "complete": complete and resolved_type != "unknown",
             "details": details,
-            "graph_context": graph_context,
         }
 
     sorted_addresses = sorted(addresses)
     results = parallel_map(_per_address, sorted_addresses, max_workers=8)
-    principals: list[PrincipalProfile] = []
+    principals: list[dict[str, Any]] = []
     for _addr, outcome in results:
         if isinstance(outcome, BaseException):
-            raise outcome
+            principals.append({"address": _addr, "complete": False, "resolved_type": "unknown", "error": str(outcome)})
+            continue
         if outcome is not None:
             principals.append(outcome)
 
@@ -732,4 +670,110 @@ def build_principal_index(
     record_stage_metric("label_classify_hits", classify_stats["hits"])
     record_stage_metric("label_classify_misses", classify_stats["misses"])
 
-    return principals
+    return add_principal_observations(assessment, principals)
+
+
+def build_principal_index(assessment: Assessment) -> list[PrincipalProfile]:
+    """Pure projection: no RPC, database, controller walk, or classification."""
+    resolution_graph = control_graph(assessment)
+    permission_index = project_permission_index(assessment)
+    nodes_by_id = _node_by_id(resolution_graph)
+    nodes_by_address = {node["address"].lower(): node for node in resolution_graph["nodes"]}
+    incoming_by_id = _incoming_edges(resolution_graph)
+    outgoing_by_id = _outgoing_edges(resolution_graph)
+    permissions_by_address, permission_label_hints = _collect_permissions(permission_index)
+    contract_name = assessment["contract"]["name"]
+    observations = {
+        assessment["entities"][evidence["subject"]]["address"]: evidence["observation"]
+        for evidence in assessment["evidence"].values()
+        if evidence["producer"] == PRODUCER
+        and evidence["subject_kind"] == "entity"
+        and isinstance(evidence["observation"], Mapping)
+    }
+    profiles: list[PrincipalProfile] = []
+    for address in sorted(set(nodes_by_address) | set(permissions_by_address)):
+        if (
+            address == assessment["contract"]["deployment_address"]
+            or not address.startswith("0x")
+            or len(address) != 42
+        ):
+            continue
+        node = nodes_by_address.get(address)
+        observation = observations.get(address)
+        if observation is not None:
+            complete = observation.get("complete") is True
+            resolved_type = coerce_resolved_controller_type(observation.get("resolved_type")) if complete else "unknown"
+            raw_details = observation.get("details")
+            details: dict[str, Any] = dict(raw_details) if complete and isinstance(raw_details, Mapping) else {}
+        else:
+            resolved_type = coerce_resolved_controller_type(node.get("resolved_type")) if node else "unknown"
+            details = dict(node.get("details") or {}) if node else {}
+        if resolved_type == "contract" and node:
+            if str(details.get("controller_label", "")).strip() == "permissionController":
+                continue
+            outgoing_edges = outgoing_by_id.get(node.get("id", ""), [])
+            if any(edge.get("to_id") != node.get("id") for edge in outgoing_edges):
+                continue
+
+        labels, graph_context = _graph_labels_for_node(
+            node or {"resolved_type": resolved_type}, incoming_by_id.get((node or {}).get("id", ""), []), nodes_by_id
+        )
+        hint_string = permission_label_hints.get(address)
+        if hint_string:
+            labels.update(hint_string.split(","))
+
+        permissions = sorted(
+            permissions_by_address.get(address, []),
+            key=lambda item: (item["function"], -1 if item["role"] is None else item["role"]),
+        )
+        display_name, confidence = _display_name(
+            address,
+            resolved_type,
+            labels,
+            graph_context,
+            permissions,
+            contract_name,
+            _node_display_name(node),
+        )
+        if resolved_type == "cross_chain_authority":
+            display_name, confidence = _cross_chain_display_name(details), "high"
+            labels.add("cross_chain_authority")
+            role = str(details.get("role") or "")
+            if role:
+                labels.add(role)
+
+        details["terminal"] = is_terminal_principal_type(resolved_type)
+        profiles.append(
+            {
+                "address": address,
+                "resolved_type": resolved_type,
+                "details": details,
+                "display_name": display_name,
+                "labels": sorted(label for label in labels if label),
+                "confidence": confidence,
+                "graph_context": graph_context,
+            }
+        )
+    return profiles
+
+
+def principal_type_projection(assessment: Assessment) -> dict[str, tuple[str | None, dict[str, Any] | None]]:
+    """Pure address classification lookup for relational materialization."""
+    out: dict[str, tuple[str | None, dict[str, Any] | None]] = {}
+    for evidence in assessment["evidence"].values():
+        if evidence["producer"] != PRODUCER or evidence["subject_kind"] != "entity":
+            continue
+        observation = evidence["observation"]
+        entity = assessment["entities"].get(evidence["subject"])
+        if not isinstance(observation, Mapping) or entity is None:
+            continue
+        if observation.get("complete") is not True:
+            out[entity["address"].lower()] = (None, None)
+            continue
+        resolved_type = observation.get("resolved_type")
+        details = observation.get("details")
+        out[entity["address"].lower()] = (
+            str(resolved_type) if isinstance(resolved_type, str) else None,
+            dict(details) if isinstance(details, Mapping) else {},
+        )
+    return out

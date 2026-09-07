@@ -11,11 +11,8 @@ import pytest
 
 from db.models import Contract, Protocol
 from services.concurrency import RpcExecutor
-from services.policy.principal_index import (
-    _shared_deployer_fact,
-    build_principal_index,
-    load_protocol_deployer_groups,
-)
+from services.policy.principal_index import _shared_deployer_fact, load_protocol_deployer_groups
+from tests.support.policy_builders import principal_profiles as build_principal_index
 
 DEPLOYER = "0x" + "d" * 40
 A = "0x" + "1" * 40

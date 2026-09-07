@@ -7,7 +7,6 @@ FunctionPrincipal type resolver, and the mainnet byte-identity guarantee.
 import pytest
 
 from services.concurrency import RpcExecutor
-from services.policy.principal_index import build_principal_index
 from services.resolution.cross_chain_authority import (
     CROSS_CHAIN_AUTHORITY_TYPE,
     L1_TO_L2_ALIAS_OFFSET,
@@ -15,6 +14,7 @@ from services.resolution.cross_chain_authority import (
     make_cross_chain_recognizer,
     undo_l1_to_l2_alias,
 )
+from tests.support.policy_builders import principal_profiles as build_principal_index
 from utils.chains import chain_by_id
 from workers.policy_worker import _make_principal_type_resolver
 

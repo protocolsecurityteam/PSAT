@@ -143,8 +143,8 @@ def _stub_policy_internals(monkeypatch, job_address):
     monkeypatch.setattr("workers.policy_worker.get_artifact", lambda _s, _j, name: artifacts.get(name))
     monkeypatch.setattr("workers.policy_worker.store_artifact", lambda *a, **kw: None)
     monkeypatch.setattr(
-        "workers.policy_worker.build_permission_index",
-        lambda *a, **kw: {"schema_version": "1", "functions": []},
+        "workers.policy_worker.derive_policy",
+        lambda assessment, **kw: assessment,
     )
     monkeypatch.setattr("workers.policy_worker.resolve_control_graph", lambda **kw: ({}, {}))
     monkeypatch.setattr("workers.policy_worker.build_principal_index", lambda *a, **kw: [])

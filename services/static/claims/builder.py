@@ -8,7 +8,7 @@ valid and common).
 
 :func:`attach_claims_to_effects` merges that artifact back onto the ``effects``
 artifact's per-function records. The policy stage already carries ``effects``
-end to end, so claims reach ``build_permission_index`` with no new
+end to end, so claims reach Assessment policy derivation with no new
 artifact plumbing. Both functions fail soft on a degraded (errored) artifact.
 """
 

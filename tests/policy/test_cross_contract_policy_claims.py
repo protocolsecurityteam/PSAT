@@ -16,7 +16,6 @@ unit-tested in ``tests/static/test_cross_contract_effects.py``.
 from __future__ import annotations
 
 import uuid
-from typing import Any
 
 import pytest
 from eth_utils.crypto import keccak
@@ -39,6 +38,39 @@ TRANSFER_SELECTOR = "0xa9059cbb"  # transfer(address,uint256)
 
 def _selector(signature: str) -> str:
     return "0x" + keccak(text=signature).hex()[:8]
+
+
+def _run_cross_contract(session, job, snapshot, *, function_records=None):
+    """Assert read-only enrichment, then run canonical derivation/materialization."""
+    from db.queue.typed import load_assessment
+    from services.assessment import derive_policy, project_permission_index, static_inputs
+    from services.policy.permission_index_writer import write_permission_rows
+
+    stored = load_assessment(get_artifact, session, job.id)
+    assert stored is not None
+    facts, trees, effects = static_inputs(stored)
+    for row in function_records or []:
+        effects["functions"][row["function"]]["abi_signature"] = row["abi_signature"]
+    assessment = _assessment(static_facts=facts, predicate_trees=trees, effects=effects, snapshot=snapshot)
+    deployment = (job.request or {}).get("proxy_address")
+    if deployment:
+        assessment["contract"]["deployment_address"] = deployment.lower()
+    before = {row.id: row.claims for row in session.query(EffectiveFunction).all()}
+    enriched = PolicyWorker()._enrich_cross_contract(session, job, assessment)
+    session.expire_all()
+    assert {row.id: row.claims for row in session.query(EffectiveFunction).all()} == before
+    assessment = derive_policy(assessment, extra_claims=enriched)
+    store_artifact(session, job.id, "assessment", data=assessment)
+    contract = session.query(Contract).filter_by(job_id=job.id).one_or_none()
+    if contract:
+        write_permission_rows(
+            session,
+            contract_id=contract.id,
+            deployment_address=deployment,
+            function_records=project_permission_index(assessment)["functions"],
+        )
+        session.commit()
+    return enriched
 
 
 def _std(claim_id: str) -> dict:
@@ -167,7 +199,7 @@ def test_value_flow_claim_propagates_to_effective_function(db_session, _repoint_
     contract = _make_target_functions(db_session, target_job, ["sweep(address)"])
     observation_batch = {"controller_values": {"state_variable:token": {"value": TOKEN}}}
 
-    enriched = PolicyWorker()._enrich_cross_contract(db_session, target_job, {}, observation_batch)
+    enriched = _run_cross_contract(db_session, target_job, observation_batch)
 
     assert "sweep(address)" in enriched
     claim = enriched["sweep(address)"][0]
@@ -231,8 +263,8 @@ def test_no_claims_without_matching_evidence(db_session, _repoint_session_local)
     )
     _make_target_functions(db_session, target_job, ["sweep(address)"])
 
-    enriched = PolicyWorker()._enrich_cross_contract(
-        db_session, target_job, {}, {"controller_values": {"state_variable:token": {"value": TOKEN}}}
+    enriched = _run_cross_contract(
+        db_session, target_job, {"controller_values": {"state_variable:token": {"value": TOKEN}}}
     )
     assert enriched == {}
 
@@ -242,27 +274,26 @@ def test_no_claims_without_matching_evidence(db_session, _repoint_session_local)
 # ---------------------------------------------------------------------------
 
 
-def test_apply_cross_contract_claims_merges_and_dedups():
-    payload: dict[str, Any] = {
-        "functions": [
-            {
-                "function": "sweep(address)",
-                "abi_signature": "sweep(address)",
-                "claims": [{"claim_id": "flow.out", "tier": "standard_exact", "witness": {"static": True}}],
-            },
-            {"function": "noop()", "abi_signature": "noop()", "claims": []},
-        ]
-    }
-    enriched: dict[str, list[EffectMatch]] = {
-        "sweep(address)": [{"claim_id": "flow.out", "tier": "policy_derived", "witness": {"policy": True}}],
-    }
-    PolicyWorker()._apply_cross_contract_claims(payload, enriched)
+def test_cross_contract_claims_merge_in_assessment():
+    from services.assessment import derive_policy, project_permission_index
 
-    sweep = payload["functions"][0]
-    # Same claim id at two tiers collapses to the strongest (standard_exact wins).
+    assessment = _assessment(
+        effects={
+            "functions": {
+                "sweep(address)": {
+                    "state_changing": True,
+                    "claims": [{"claim_id": "flow.out", "tier": "standard_exact", "witness": {"static": True}}],
+                },
+                "noop()": {"state_changing": True},
+            }
+        }
+    )
+    enriched = {"sweep(address)": [{"claim_id": "flow.out", "tier": "policy_derived", "witness": {"policy": True}}]}
+    rows = project_permission_index(derive_policy(assessment, extra_claims=enriched))["functions"]
+    sweep = next(row for row in rows if row["function"] == "sweep(address)")
     assert len(sweep["claims"]) == 1
     assert sweep["claims"][0]["tier"] == "standard_exact"
-    assert payload["functions"][1]["claims"] == []
+    assert next(row for row in rows if row["function"] == "noop()")["claims"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -412,10 +443,9 @@ def test_struct_param_function_still_matches_its_row(db_session, _repoint_sessio
     db_session.commit()
 
     observation_batch = {"controller_values": {"state_variable:token": {"value": TOKEN}}}
-    enriched = PolicyWorker()._enrich_cross_contract(
+    enriched = _run_cross_contract(
         db_session,
         target_job,
-        {},
         observation_batch,
         function_records=[{"function": full_name, "abi_signature": canonical, "selector": selector}],
     )
@@ -501,7 +531,7 @@ def test_enrichment_lands_only_on_this_job_s_deployment(db_session, _repoint_ses
     db_session.commit()
 
     observation_batch = {"controller_values": {"state_variable:token": {"value": TOKEN}}}
-    PolicyWorker()._enrich_cross_contract(db_session, target_job, {}, observation_batch)
+    _run_cross_contract(db_session, target_job, observation_batch)
 
     def _claims_for(deployment: str) -> set[str]:
         row = (
@@ -583,10 +613,11 @@ def test_ambiguous_row_match_is_skipped_not_raised(db_session, _repoint_session_
 
     observation_batch = {"controller_values": {"state_variable:token": {"value": TOKEN}}}
     with caplog.at_level("WARNING", logger="workers.policy_worker"):
-        enriched = PolicyWorker()._enrich_cross_contract(db_session, target_job, {}, observation_batch)
+        enriched = _run_cross_contract(db_session, target_job, observation_batch)
 
-    # The derivation still ran; only the placement was declined.
+    # Enrichment never chooses an existing row; projection replaces the scope.
     assert "sweep(address)" in enriched
-    assert any("matched 2 effective_function rows" in r.getMessage() for r in caplog.records)
     rows = db_session.query(EffectiveFunction).filter(EffectiveFunction.contract_id == contract.id).all()
-    assert [r.claims for r in rows] == [None, None]
+    assert len(rows) == 1
+    assert rows[0].deployment_address == D1
+    assert any(claim["claim_id"] == "flow.out" for claim in rows[0].claims)

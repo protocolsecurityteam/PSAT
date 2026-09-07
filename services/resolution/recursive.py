@@ -192,6 +192,8 @@ def _build_permission_index(
     snapshot: ObservationBatch,
     effects: Mapping[str, Any] | None,
     predicate_trees: Mapping[str, Any] | None,
+    *,
+    chain_id: int,
 ) -> dict[str, Any] | None:
     """Compute the effective-permissions payload for nested resolution."""
     # Function-scope import: the module-level form is the back-edge of the
@@ -200,18 +202,22 @@ def _build_permission_index(
     # here), which import-crashes any process that touches services.policy
     # first — policy_worker died on boot and took the whole worker pool with
     # it (deploy/start_workers.sh exits on first death).
-    from services.policy.permission_index import build_permission_index
+    from services.assessment import add_observations, build_static_assessment, derive_policy, project_permission_index
 
     try:
-        return cast(
-            dict,
-            build_permission_index(
-                static_facts,
-                target_snapshot=cast(dict, snapshot),
-                effects=effects,
-                predicate_trees=predicate_trees,
-            ),
+        assessment = build_static_assessment(
+            chain_id=chain_id,
+            address=static_facts["subject"]["address"],
+            contract_name=static_facts["subject"]["name"],
+            code_hash=None,
+            source_hash=None,
+            static_facts=static_facts,
+            effects=effects or {},
+            predicate_trees=predicate_trees or {},
         )
+        assessment["contract"]["deployment_address"] = snapshot["contract_address"].lower()
+        assessment = add_observations(assessment, snapshot)
+        return project_permission_index(derive_policy(assessment))
     except Exception as exc:
         # A nested contract whose effective-permissions build fails silently drops
         # its role principals from the graph (consumed below in
@@ -445,6 +451,9 @@ def _materialize_contract_artifacts(
     chain_id: int | None = None,
 ) -> LoadedArtifacts:
     """Build static_facts + plan + snapshot + effective permissions in memory (tempdir cleaned up before return)."""
+    from utils.chains import require_chain
+
+    chain_id = require_chain(chain_id, chain=chain, context="recursive Assessment").chain_id
     # Proxy check — analyze the implementation but read storage from the proxy.
     effective_address = address
     snapshot_address = address
@@ -530,7 +539,7 @@ def _materialize_contract_artifacts(
         plan = {**plan, "contract_address": snapshot_address}
 
     snapshot = observe_controllers(cast(ObservationPlan, plan), rpc_url, chain_id=chain_id)
-    permission_index = _build_permission_index(static_facts, snapshot, effects, predicate_trees)
+    permission_index = _build_permission_index(static_facts, snapshot, effects, predicate_trees, chain_id=chain_id)
 
     return {
         "static_facts": static_facts,

@@ -11,11 +11,31 @@ from __future__ import annotations
 
 from db.models import Base
 
-EXPECTED_TABLE_COUNT = 59
+EXPECTED_TABLE_COUNT = 79
 
 EXPECTED_TABLES = [
     "address_labels",
     "artifacts",
+    "assessment_analyses",
+    "assessment_analysis_inputs",
+    "assessment_analysis_outputs",
+    "assessment_claim_dependencies",
+    "assessment_claim_evidence",
+    "assessment_claims",
+    "assessment_contexts",
+    "assessment_corrections",
+    "assessment_coverage",
+    "assessment_diagnostics",
+    "assessment_evidence",
+    "assessment_implementations",
+    "assessment_import_manifests",
+    "assessment_payloads",
+    "assessment_publication_analyses",
+    "assessment_publication_claims",
+    "assessment_publication_evidence",
+    "assessment_publication_subjects",
+    "assessment_publications",
+    "assessment_subjects",
     "audit_contract_coverage",
     "audit_reports",
     "bytecode_cache",

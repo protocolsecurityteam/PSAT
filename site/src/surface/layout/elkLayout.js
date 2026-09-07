@@ -219,11 +219,9 @@ export function buildGraphLayout(machines, fundFlows, principals, bandHeights = 
   }
 
   const nameByAddr = new Map();
-  const machineByAddr = new Map();
   for (const m of sorted) {
     if (m.address) {
       nameByAddr.set(m.address.toLowerCase(), m.name || m.address);
-      machineByAddr.set(m.address.toLowerCase(), m);
     }
   }
 
@@ -257,7 +255,6 @@ export function buildGraphLayout(machines, fundFlows, principals, bandHeights = 
         childCount: kids.length,
         directCount,
         viaGovernanceCount: kids.length - directCount,
-        heuristicCount: kids.filter((address) => machineByAddr.get(address)?.membershipKind === "heuristic").length,
         totalUsd: groupTotalUsd.get(principalAddr) || 0,
         controllers,
         headerHeight,

@@ -1596,8 +1596,8 @@ def test_uncertain_marker_reaches_artifact_and_policy_routes_unsupported(tmp_pat
     the truthful reason, while a genuinely gate-less public function on the
     same contract stays public."""
     import services.static.static_analysis.predicates.tree as predicates_mod
-    from services.policy.permission_index import build_permission_index
     from services.static.static_analysis.predicate_artifacts import build_predicate_artifacts
+    from tests.support.policy_builders import assessed_permissions as build_permission_index
 
     sl = _compile(
         tmp_path,

@@ -19,9 +19,9 @@ from typing import Any, cast
 from sqlalchemy import text
 
 from db.models import Contract
-from services.policy.permission_index import build_permission_index
 from services.policy.permission_index_writer import write_permission_rows
 from tests.conftest import requires_postgres
+from tests.support.policy_builders import assessed_permissions as build_permission_index
 from tests.support.policy_builders import resolved_records
 
 _TARGET = {"subject": {"address": "0x" + "ce" * 20, "name": "CensusTarget"}}

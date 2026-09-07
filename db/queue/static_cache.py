@@ -301,10 +301,14 @@ def find_completed_static_cache(
         # which proxies do write (is_proxy + proxy_type). Without this
         # branch, re-discovered proxies would miss the cache and do a full
         # fresh Etherscan fetch + slither run every time.
-        required_artifact = "contract_flags" if contract_row.is_proxy else "assessment"
-        has_required = session.execute(
-            select(Artifact).where(Artifact.job_id == candidate.id, Artifact.name == required_artifact).limit(1)
-        ).scalar_one_or_none()
+        if contract_row.is_proxy:
+            has_required = session.execute(
+                select(Artifact).where(Artifact.job_id == candidate.id, Artifact.name == "contract_flags").limit(1)
+            ).scalar_one_or_none()
+        else:
+            from services.assessment.repository import has_publication
+
+            has_required = has_publication(session, candidate.id)
         if not has_required:
             continue
 
@@ -376,9 +380,9 @@ def _find_static_cache_by_source_hash(session: Session, source_content_hash: str
         ).scalar_one_or_none()
         if not donor_contract:
             continue
-        has_analysis = session.execute(
-            select(Artifact).where(Artifact.job_id == candidate.id, Artifact.name == "assessment").limit(1)
-        ).scalar_one_or_none()
+        from services.assessment.repository import has_publication
+
+        has_analysis = has_publication(session, candidate.id)
         if not has_analysis:
             continue
         return candidate

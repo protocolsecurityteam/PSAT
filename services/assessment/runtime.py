@@ -75,12 +75,32 @@ def controller_observations(assessment: Assessment) -> dict[str, Any]:
     }
 
 
+def controller_state_values(assessment: Assessment) -> dict[str, str]:
+    """Successful controller observations keyed for predicate evaluation."""
+    state_variables: dict[str, str] = {}
+    other: dict[str, str] = {}
+    for key, observation in controller_observations(assessment)["controller_values"].items():
+        value = observation.get("value")
+        if not isinstance(value, str) or not value:
+            continue
+        kind, separator, name = key.partition(":")
+        name = name if separator else kind
+        if kind == "state_variable":
+            state_variables[name] = value
+        else:
+            other.setdefault(name, value)
+    return {**other, **state_variables}
+
+
 def control_graph(assessment: Assessment) -> dict[str, Any]:
     """Project resolved entities and relationships for graph algorithms."""
 
     entity_nodes: dict[str, dict[str, Any]] = {}
     for evidence in assessment["evidence"].values():
-        if evidence["subject_kind"] != "entity" or evidence["producer"] != "resolution.graph":
+        if evidence["subject_kind"] != "entity" or evidence["producer"] not in {
+            "resolution.graph",
+            "policy.principal_graph",
+        }:
             continue
         observation = evidence["observation"]
         locator = evidence["locator"]
@@ -104,21 +124,29 @@ def control_graph(assessment: Assessment) -> dict[str, Any]:
 
     edges: list[dict[str, Any]] = []
     for evidence in assessment["evidence"].values():
-        if evidence["producer"] != "resolution.graph":
+        if evidence["producer"] not in {"resolution.graph", "policy.principal_graph"}:
             continue
         observation = evidence["observation"]
-        if not isinstance(observation, Mapping) or "from_entity" not in observation:
+        if not isinstance(observation, Mapping):
             continue
-        source = entity_nodes.get(str(observation.get("from_entity")))
-        target = entity_nodes.get(str(observation.get("to_entity")))
-        if source is None or target is None:
-            continue
+        if "from_entity" in observation:
+            source = entity_nodes.get(str(observation.get("from_entity")))
+            target = entity_nodes.get(str(observation.get("to_entity")))
+            if source is None or target is None:
+                continue
+            from_id = source["id"]
+            to_id = target["id"]
+        else:
+            from_id = observation.get("from_node_id")
+            to_id = observation.get("to_node_id")
+            if not isinstance(from_id, str) or not isinstance(to_id, str):
+                continue
         edges.append(
             {
-                "from_id": source["id"],
-                "to_id": target["id"],
+                "from_id": from_id,
+                "to_id": to_id,
                 "relation": observation.get("relation"),
-                "label": observation.get("relation"),
+                "label": observation.get("label") or observation.get("relation"),
                 "source_controller_id": observation.get("source_controller_id"),
                 "notes": _list(observation.get("notes")),
             }

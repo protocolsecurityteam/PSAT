@@ -457,11 +457,11 @@ def test_policy_worker_marks_dirty(qsession, monkeypatch):
     monkeypatch.setattr("workers.policy_worker.get_artifact", lambda _s, _j, name: artifacts.get(name))
     monkeypatch.setattr("workers.policy_worker.store_artifact", lambda *a, **kw: None)
     monkeypatch.setattr(
-        "workers.policy_worker.build_permission_index",
-        lambda *a, **kw: {"schema_version": "1", "functions": []},
+        "workers.policy_worker.derive_policy",
+        lambda assessment, **kw: assessment,
     )
     monkeypatch.setattr("workers.policy_worker.resolve_control_graph", lambda **kw: ({}, {}))
-    monkeypatch.setattr("workers.policy_worker.build_principal_index", lambda *a, **kw: {"principals": []})
+    monkeypatch.setattr("workers.policy_worker.build_principal_index", lambda *a, **kw: [])
     monkeypatch.setattr(PolicyWorker, "_enrich_cross_contract", lambda self, *a, **kw: {})
     monkeypatch.setattr("services.monitoring.enrollment.rpc_request", lambda *a, **kw: "0x100")
     # Stub the DeFiLlama fetch so the initial-TVL block doesn't touch the network.

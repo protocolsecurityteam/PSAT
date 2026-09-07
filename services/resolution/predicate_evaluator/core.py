@@ -605,20 +605,26 @@ def _maybe_inline_cross_contract_call(
     # Look up the registry's semantic artifacts. If the registry address is
     # a proxy, predicate_trees live on its implementation child job.
     from db.queue import get_artifact
-    from db.queue.typed import load_assessment_inputs
+    from db.queue.typed import load_assessment
+    from services.assessment.runtime import controller_state_values
+    from services.assessment.views import static_inputs
     from services.resolution.capability_resolver import find_analysis_job_for_address
+    from utils.chains import require_chain
 
     lookup = find_analysis_job_for_address(
         session,
         registry_addr,
+        chain=require_chain(chain_id, context="inlined Assessment").name,
         completed_only=False,
     )
     if lookup is None:
         return None
-    inputs = load_assessment_inputs(get_artifact, session, lookup.analysis_job.id)
-    if inputs is None:
+    assessment = load_assessment(get_artifact, session, lookup.analysis_job.id)
+    if assessment is None or assessment["contract"]["chain_id"] != chain_id:
         return None
-    _static_facts, artifact, _effects = inputs
+    if assessment["contract"]["deployment_address"] != registry_addr.lower():
+        return None
+    _static_facts, artifact, _effects = static_inputs(assessment)
     from services.resolution.adapters import CallFrame
 
     parent_frame = getattr(outer_ctx, "call_frame", None)
@@ -663,6 +669,11 @@ def _maybe_inline_cross_contract_call(
             tree_map,
             callee_signature=callee_signature,
             callee_selector=callee_selector,
+            canonical_signatures={
+                key: value["abi_signature"]
+                for key, value in assessment["functions"].items()
+                if value["abi_signature"] is not None
+            },
         )
         if callee_tree is not None:
             break
@@ -686,15 +697,7 @@ def _maybe_inline_cross_contract_call(
     # globals inside the callee get the child frame: msg.sender is
     # the calling contract, address(this) is the registry, and
     # msg.sig is the callee selector.
-    from services.resolution.capability_resolver import _load_state_var_values
-
-    state_var_values = _load_state_var_values(
-        session,
-        lookup.analysis_job.address or registry_addr,
-        job_id=lookup.analysis_job.id,
-    )
-    if not state_var_values and lookup.runtime_job.id != lookup.analysis_job.id:
-        state_var_values = _load_state_var_values(session, registry_addr, job_id=lookup.runtime_job.id)
+    state_var_values = controller_state_values(assessment)
 
     parent_this = getattr(parent_frame, "current_address_this", None) or getattr(
         parent_frame, "executing_contract_address", None

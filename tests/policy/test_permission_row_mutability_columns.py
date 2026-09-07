@@ -20,13 +20,13 @@ from sqlalchemy import case, func, select, text
 
 from db.jsonb import JSONB_UNSET, JSONB_WRITTEN_NULL, jsonb_state
 from db.models import Contract, EffectiveFunction
-from services.policy.permission_index import (
+from services.policy.observations import (
     MUTABILITY_FIELDS,
     _function_records_from_semantic_artifacts,
     _mutability_fields,
-    build_permission_index,
 )
 from services.policy.permission_index_writer import write_permission_rows
+from tests.support.policy_builders import assessed_permissions as build_permission_index
 
 # ---------------------------------------------------------------------------
 # Production shapes.

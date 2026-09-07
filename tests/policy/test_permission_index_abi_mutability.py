@@ -22,12 +22,12 @@ from eth_utils.crypto import keccak
 slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
 
-from services.policy.permission_index import build_permission_index  # noqa: E402
 from services.static.claims import attach_claims_to_effects, build_claims  # noqa: E402
 from services.static.static_analysis.effects import build_effects  # noqa: E402
 from services.static.static_analysis.predicate_artifacts import (  # noqa: E402
     build_predicate_artifacts,
 )
+from tests.support.policy_builders import assessed_permissions as build_permission_index  # noqa: E402
 
 # A self-contained Solady EnumerableRoles-style contract. The role-storage
 # mutation and the owner gate are entirely inline assembly, exactly as in

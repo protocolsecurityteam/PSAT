@@ -5,7 +5,7 @@ from db.models import (
     EDGE_RELATION_CONTROLLER_VALUE_UNATTRIBUTED,
 )
 from services.concurrency import RpcExecutor
-from services.policy.principal_index import build_principal_index
+from tests.support.policy_builders import principal_profiles as build_principal_index
 
 
 @pytest.fixture(autouse=True)
@@ -814,12 +814,14 @@ def test_build_principal_index_parallel_handles_per_address_runtimeerror(monkeyp
         fake_classify,
     )
 
-    with pytest.raises(RuntimeError, match="classify boom"):
-        build_principal_index(
-            permission_index,
-            resolution_graph=resolved_graph,
-            rpc_url="http://rpc.example",
-        )
+    profiles = build_principal_index(
+        permission_index,
+        resolution_graph=resolved_graph,
+        rpc_url="http://rpc.example",
+    )
+    bad = next(profile for profile in profiles if profile["address"] == bad_address)
+    assert bad["resolved_type"] == "unknown"
+    assert bad["details"]["terminal"] is False
 
 
 def test_callee_edge_does_not_mint_controller_labels():

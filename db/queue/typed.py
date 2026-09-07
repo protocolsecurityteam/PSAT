@@ -27,7 +27,7 @@ from pydantic import ValidationError
 
 from schemas.assessment import Assessment
 
-__all__ = ["ArtifactSchemaError", "load_assessment", "load_assessment_inputs"]
+__all__ = ["ArtifactSchemaError", "load_assessment", "load_assessment_inputs", "validate_assessment"]
 
 
 class ArtifactSchemaError(RuntimeError):
@@ -45,11 +45,16 @@ def _problem_list(exc: ValidationError) -> list[str]:
 
 def load_assessment(read: Any, session: Any, job_id: Any) -> Assessment | None:
     """Read and strictly validate the canonical analytical document."""
-    from services.assessment.validation import checked
-
     raw = read(session, job_id, "assessment")
     if raw is None:
         return None
+    return validate_assessment(raw)
+
+
+def validate_assessment(raw: object) -> Assessment:
+    """Validate an already-loaded body through the same storage boundary."""
+    from services.assessment.validation import checked
+
     if not isinstance(raw, dict):
         raise ArtifactSchemaError("assessment", [f"expected a JSON object, got {type(raw).__name__}"])
     try:

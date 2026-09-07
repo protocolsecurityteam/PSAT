@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from typing import Any, cast
 
 from pydantic import JsonValue
@@ -178,6 +178,45 @@ def _authorities(
     return None, "authority_not_determined"
 
 
+def _authority_evidence(
+    assessment: Assessment,
+    permission: Mapping[str, Any],
+    authority: Authority | None,
+) -> list[str]:
+    """Exact controller observations required by this authority derivation."""
+    controller_ids = {
+        str(item.get("controller_id"))
+        for item in permission.get("controllers") or []
+        if isinstance(item, Mapping) and item.get("controller_id") is not None
+    }
+    addresses: set[str] = set()
+
+    def visit(value: object) -> None:
+        if not isinstance(value, Mapping):
+            return
+        entity = value.get("entity")
+        if isinstance(entity, str) and entity in assessment["entities"]:
+            addresses.add(assessment["entities"][entity]["address"].lower())
+        for referenced_entity in value.get("entities") or []:
+            if isinstance(referenced_entity, str) and referenced_entity in assessment["entities"]:
+                addresses.add(assessment["entities"][referenced_entity]["address"].lower())
+        for child in value.get("children") or []:
+            visit(child)
+
+    visit(authority)
+    keys: list[str] = []
+    for key, evidence in assessment["evidence"].items():
+        if evidence["producer"] != "resolution.observation" or evidence["subject_kind"] != "controller":
+            continue
+        observation = evidence["observation"]
+        observed_address = observation.get("value") if isinstance(observation, Mapping) else None
+        if evidence["subject"] in controller_ids or (
+            isinstance(observed_address, str) and observed_address.lower() in addresses
+        ):
+            keys.append(key)
+    return sorted(set(keys))
+
+
 def _effect_claims(assessment: Assessment, function: str) -> list[tuple[str, Claim]]:
     out: list[tuple[str, Claim]] = []
     for claim_key, claim in assessment["claims"].items():
@@ -254,10 +293,14 @@ def _ensure_embedded_effect_claims(
             "function": function,
             "effect": effect,
         }
-        claim_key = content_key("claim", {"contract": result["contract"], "proposition": proposition})
+        rule = f"{kind}/{tier}"
+        claim_key = content_key(
+            "claim",
+            {"contract": result["contract"], "proposition": proposition, "evidence": [evidence_key], "rule": rule},
+        )
         result["claims"][claim_key] = {
             "proposition": proposition,
-            "rule": f"{kind}/{tier}",
+            "rule": rule,
             "evidence": [evidence_key],
             "claims": [],
         }
@@ -265,14 +308,31 @@ def _ensure_embedded_effect_claims(
     return claim_keys, evidence_keys
 
 
-def add_policy(assessment: Assessment, permissions: Mapping[str, Any], *, chain_id: int) -> Assessment:
+def derive_policy(
+    assessment: Assessment,
+    *,
+    capability_resolver_output: Mapping[str, Any] | None = None,
+    extra_claims: Mapping[str, list[Any]] | None = None,
+) -> Assessment:
+    """Derive policy into the ledger; indexes are produced only afterwards."""
+    from services.policy.observations import policy_observations
+
+    return add_policy(
+        assessment,
+        policy_observations(
+            assessment, capability_resolver_output=capability_resolver_output, extra_claims=extra_claims
+        ),
+        chain_id=assessment["contract"]["chain_id"],
+    )
+
+
+def add_policy(assessment: Assessment, permissions: Iterable[Mapping[str, Any]], *, chain_id: int) -> Assessment:
     """Add current authority-capability claims to ``assessment``."""
 
     discover()
     result = cast(Assessment, copy.deepcopy(assessment))
     remove_analysis_slice(result, "policy.capabilities")
-    raw_functions = permissions.get("functions")
-    permission_items = raw_functions if isinstance(raw_functions, list) else []
+    permission_items = list(permissions)
     omissions: list[dict[str, str]] = []
     claim_keys: list[str] = []
     evidence_keys: list[str] = []
@@ -297,6 +357,7 @@ def add_policy(assessment: Assessment, permissions: Mapping[str, Any], *, chain_
         evidence_keys.extend(embedded_evidence_keys)
         effects = _effect_claims(result, function)
         authority, unresolved_reason = _authorities(result, chain_id, permission)
+        authority_evidence = _authority_evidence(result, permission, authority)
         observation_source: dict[str, Any] = {
             "authority_openness": permission.get("authority_openness"),
             "authority_public": permission.get("authority_public"),
@@ -333,7 +394,7 @@ def add_policy(assessment: Assessment, permissions: Mapping[str, Any], *, chain_
             "subject": function,
             "observation": observation,
             "producer": "policy.capability",
-            "version": str(permissions.get("schema_version") or "policy/1"),
+            "version": "policy/1",
             "locator": _json(
                 {
                     "function": function,
@@ -361,14 +422,21 @@ def add_policy(assessment: Assessment, permissions: Mapping[str, Any], *, chain_
             "authority": authority,
             "function": function,
         }
+        authority_basis = [evidence_key, *authority_evidence]
+        authority_rule = "policy.function_authority/v1"
         authority_claim_key = content_key(
             "claim",
-            {"contract": result["contract"], "proposition": authority_proposition},
+            {
+                "contract": result["contract"],
+                "proposition": authority_proposition,
+                "evidence": authority_basis,
+                "rule": authority_rule,
+            },
         )
         result["claims"][authority_claim_key] = {
             "proposition": authority_proposition,
-            "rule": "policy.function_authority/v1",
-            "evidence": [evidence_key],
+            "rule": authority_rule,
+            "evidence": authority_basis,
             "claims": [],
         }
         claim_keys.append(authority_claim_key)
@@ -384,19 +452,30 @@ def add_policy(assessment: Assessment, permissions: Mapping[str, Any], *, chain_
                 "function": function,
                 "effect": effect,
             }
-            claim_key = content_key("claim", {"contract": result["contract"], "proposition": proposition})
+            dependency_claims = [authority_claim_key, effect_claim_key]
+            capability_rule = "policy.authority_capability/v1"
+            claim_key = content_key(
+                "claim",
+                {
+                    "contract": result["contract"],
+                    "proposition": proposition,
+                    "evidence": [evidence_key],
+                    "claims": dependency_claims,
+                    "rule": capability_rule,
+                },
+            )
             result["claims"][claim_key] = {
                 "proposition": proposition,
-                "rule": "policy.authority_capability/v1",
+                "rule": capability_rule,
                 "evidence": [evidence_key],
-                "claims": [authority_claim_key, effect_claim_key],
+                "claims": dependency_claims,
             }
             claim_keys.append(claim_key)
 
     status = "completed" if not omissions else ("partial" if completed else "failed")
     receipt: Analysis = {
         "detector": "policy.capabilities",
-        "version": str(permissions.get("schema_version") or "policy/1"),
+        "version": "policy/1",
         "status": status,
         "targets_total": len(permission_items),
         "targets_completed": completed,
@@ -410,4 +489,4 @@ def add_policy(assessment: Assessment, permissions: Mapping[str, Any], *, chain_
     return checked(result)
 
 
-__all__ = ["add_policy"]
+__all__ = ["add_policy", "derive_policy"]

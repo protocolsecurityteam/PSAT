@@ -140,7 +140,6 @@ export function GroupNode({ data }) {
               <span className="ps-group-count">
                 {data.childCount} contract{data.childCount === 1 ? "" : "s"}
                 {data.viaGovernanceCount ? ` · ${data.viaGovernanceCount} via governance` : ""}
-                {data.heuristicCount ? ` · ${data.heuristicCount} likely` : ""}
                 {tvl ? ` · ${tvl}` : ""}
               </span>
             </div>

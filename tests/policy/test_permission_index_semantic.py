@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 
 from db.models import Contract, EffectiveFunction, FunctionPrincipal
-from services.policy.permission_index import _column_values_for_capability
+from services.policy.observations import _column_values_for_capability
 from services.policy.permission_index_writer import (
     _principal_rows_for_capability,
     write_permission_rows,
@@ -648,7 +648,7 @@ def test_row_abi_signature_is_the_canonical_one(db_session) -> None:
     assert ef.function_name == "requestWithdrawWithPermit"
 
 
-def test_row_abi_signature_falls_back_to_the_full_name(db_session) -> None:
+def test_row_abi_signature_preserves_unknown_identity(db_session) -> None:
     """Older test metadata and degraded records carry no ``abi_signature``; the
     row must still name the function rather than going empty."""
     write_permission_rows(
@@ -657,7 +657,7 @@ def test_row_abi_signature_falls_back_to_the_full_name(db_session) -> None:
         function_records=[{"function": "doThing()", "selector": "0xdeadbeef"}],
     )
     db_session.commit()
-    assert _ef_row(db_session).abi_signature == "doThing()"
+    assert _ef_row(db_session).abi_signature is None
 
 
 # ---------------------------------------------------------------------------

@@ -28,25 +28,38 @@ from .keys import json_value as _json
 from .validation import checked
 
 
-def _selector(info: Mapping[str, Any]) -> str | None:
-    value = info.get("abi_selector") or info.get("selector")
-    return value if isinstance(value, str) and value else None
+def _functions(effects: Mapping[str, Any], predicate_trees: Mapping[str, Any]) -> dict[str, Function]:
+    from services.abi import is_canonical_abi_signature, selector_for_signature
 
-
-def _functions(effects: Mapping[str, Any]) -> dict[str, Function]:
     raw_functions = effects.get("functions")
     if not isinstance(raw_functions, Mapping):
-        return {}
+        raw_functions = {}
+    trees = predicate_trees.get("trees")
+    canonical = predicate_trees.get("canonical_signatures")
+    trees = trees if isinstance(trees, Mapping) else {}
+    canonical = canonical if isinstance(canonical, Mapping) else {}
     functions: dict[str, Function] = {}
-    for signature, raw in sorted(raw_functions.items(), key=lambda item: str(item[0])):
-        if not isinstance(signature, str) or not isinstance(raw, Mapping):
-            continue
-        selector = _selector(raw)
-        abi_signature = raw.get("abi_signature")
+    for signature in sorted(
+        key for key in raw_functions.keys() | trees.keys() | canonical.keys() if isinstance(key, str)
+    ):
+        raw = raw_functions.get(signature)
+        raw = raw if isinstance(raw, Mapping) else {}
+        abi_signature = next(
+            (
+                value
+                for value in (canonical.get(signature), raw.get("abi_signature"), signature)
+                if isinstance(value, str) and is_canonical_abi_signature(value)
+            ),
+            None,
+        )
+        # Source spellings of user-defined types do not identify an EVM dispatch.
+        # Only the ABI selector stamped by the analyzer is reliable without a
+        # canonical signature. Missing effects must not erase predicate inventory.
+        selector = selector_for_signature(abi_signature) if abi_signature else raw.get("abi_selector")
         state_changing = raw.get("state_changing")
         functions[signature] = {
-            "abi_signature": abi_signature if isinstance(abi_signature, str) and abi_signature else None,
-            "selector": selector,
+            "abi_signature": abi_signature,
+            "selector": selector if isinstance(selector, str) and selector else None,
             "state_changing": state_changing if isinstance(state_changing, bool) else None,
         }
     return functions
@@ -262,10 +275,14 @@ def _claims_and_evidence(
                 "function": signature,
                 "effect": effect,
             }
-            claim_key = content_key("claim", {"contract": contract, "proposition": proposition})
+            rule = f"{kind}/{tier}"
+            claim_key = content_key(
+                "claim",
+                {"contract": contract, "proposition": proposition, "evidence": [evidence_key], "rule": rule},
+            )
             claims[claim_key] = {
                 "proposition": proposition,
-                "rule": f"{kind}/{tier}",
+                "rule": rule,
                 "evidence": [evidence_key],
                 "claims": [],
             }
@@ -380,7 +397,7 @@ def build_static_assessment(
         "code_hash": code_hash,
         "source_hash": source_hash,
     }
-    functions = _functions(effects)
+    functions = _functions(effects, predicate_trees)
     controllers = _controllers(static_facts)
     root_entity_key = entity_key(chain_id, normalized_address)
     claims, evidence, claim_keys_by_kind = _claims_and_evidence(

@@ -1,9 +1,9 @@
 """Policy package."""
 
-from .permission_index import build_permission_index
+from .observations import policy_observations
 from .principal_index import build_principal_index
 
 __all__ = [
-    "build_permission_index",
+    "policy_observations",
     "build_principal_index",
 ]

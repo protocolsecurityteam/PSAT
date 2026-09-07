@@ -220,6 +220,7 @@ class ResolutionWorker(BaseWorker):
         )
         from services.assessment import add_observations
 
+        assessment["contract"]["deployment_address"] = observation_plan["contract_address"].lower()
         assessment = add_observations(assessment, snapshot)
         store_artifact(session, job.id, "assessment", data=assessment)
         # A reverting controller read is recorded as an ``eth_call_error`` NULL

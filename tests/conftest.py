@@ -40,6 +40,16 @@ _STORAGE_ENV_KEYS = (
 )
 
 from db.models import (  # noqa: E402
+    AssessmentAnalysis,
+    AssessmentClaim,
+    AssessmentClaimDependency,
+    AssessmentContext,
+    AssessmentEvidence,
+    AssessmentImplementation,
+    AssessmentImportManifest,
+    AssessmentPayload,
+    AssessmentPublication,
+    AssessmentSubject,
     AuditContractCoverage,
     Contract,
     ContractBalance,
@@ -712,6 +722,18 @@ def db_session():
         # AuditContractCoverage references Contract + AuditReport + Protocol;
         # delete it before those get cascaded away via Protocol cleanup.
         for model in [
+            # Canonical Assessment roots first. Publication/analysis children
+            # cascade; shared immutable records are swept explicitly below.
+            AssessmentImportManifest,
+            AssessmentPublication,
+            AssessmentAnalysis,
+            AssessmentClaimDependency,
+            AssessmentClaim,
+            AssessmentEvidence,
+            AssessmentImplementation,
+            AssessmentContext,
+            AssessmentPayload,
+            AssessmentSubject,
             AuditContractCoverage,
             MonitoredEvent,
             MonitoredContract,

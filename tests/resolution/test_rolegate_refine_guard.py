@@ -389,6 +389,9 @@ def _seed_two_hop(
 
     caller_job, caller_contract = _seed(caller_addr, caller_trees)
     _seed(registry_addr, callee_trees)
+    from tests.support.assessment_artifacts import store_test_observations
+
+    store_test_observations(session, caller_job.id, {"external_contract:registry": registry_addr})
     session.add(
         ControllerValue(
             contract_id=caller_contract.id,

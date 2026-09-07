@@ -121,6 +121,7 @@ class ControllerObservation(TypedDict):
     source: str
     value: str | None
     block_number: int
+    block_hash: NotRequired[str]
     observed_via: str
     resolved_type: ResolvedControllerType
     details: dict[str, object]
@@ -138,4 +139,5 @@ class ObservationBatch(TypedDict):
     # (``.get``), never as this type.
     contract_name: str
     block_number: int
+    block_hash: NotRequired[str]
     controller_values: dict[str, ControllerObservation]

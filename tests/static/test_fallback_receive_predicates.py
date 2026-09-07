@@ -30,14 +30,11 @@ import pytest
 pytest.importorskip("slither")
 from slither import Slither
 
-from services.policy.permission_index import _abi_signature_and_selector
+from services.abi import function_identity as _abi_signature_and_selector
+from services.abi import has_no_selector, is_canonical_abi_signature
 from services.resolution.predicate_evaluator import evaluate_tree
 from services.static.static_analysis.effects import build_effects
-from services.static.static_analysis.predicate_artifacts import (
-    build_predicate_artifacts,
-    has_no_selector,
-    is_canonical_abi_signature,
-)
+from services.static.static_analysis.predicate_artifacts import build_predicate_artifacts
 
 SOURCE = """
     pragma solidity ^0.8.19;
@@ -136,12 +133,14 @@ def test_fallback_state_write_publishes_no_writer_selector(contract):
 
 
 @pytest.mark.parametrize("signature", ["fallback()", "receive()"])
-def test_persisted_selector_is_the_empty_sentinel_not_a_fabricated_hash(signature):
-    """Three states at the persistence boundary: ``""`` proven-absent (here),
-    ``None`` not-determined (an unlowered signature), a hash when it is real."""
+def test_selectorless_entry_point_has_no_fabricated_abi_identity(signature):
+    """The exact source signature identifies a selectorless entry point."""
+    from services.abi import has_no_selector
+
     abi_sig, selector = _abi_signature_and_selector(signature, {})
-    assert abi_sig == signature
-    assert selector == "", f"{signature} must carry the no-selector sentinel, got {selector!r}"
+    assert abi_sig is None
+    assert selector is None
+    assert has_no_selector(signature)
 
     assert _abi_signature_and_selector("setAuthority(IFoo.Bar)", {})[1] is None
     assert _abi_signature_and_selector("contribute()", {})[1] == "0xd7bb99ba"
@@ -185,5 +184,5 @@ def test_no_named_function_can_receive_the_selectorless_sentinel():
     assert _abi_signature_and_selector("fallbackHandler()", {})[1] == "0xeed2f252"
     assert _abi_signature_and_selector("setAuthority(IFoo.Bar)", {})[1] is None
     # Negative control: the two signatures that DO earn the sentinel still do.
-    assert _abi_signature_and_selector("fallback()", {})[1] == ""
-    assert _abi_signature_and_selector("receive()", {})[1] == ""
+    assert _abi_signature_and_selector("fallback()", {})[1] is None
+    assert _abi_signature_and_selector("receive()", {})[1] is None

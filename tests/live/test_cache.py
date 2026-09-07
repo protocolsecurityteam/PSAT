@@ -19,7 +19,8 @@ def test_first_run_completes(analyzed_weth):
 def test_first_run_has_artifacts(analyzed_weth, live_client: LiveClient):
     analysis = live_client.artifact(analyzed_weth["name"], "assessment")
     assert isinstance(analysis, dict)
-    assert analysis.get("schema_version") == "assessment/5"
+    assert "schema_version" not in analysis
+    assert all(isinstance(analysis.get(table), list) for table in ("subjects", "evidence", "claims", "analyses"))
 
 
 def test_second_run_uses_cache(analyzed_weth, cached_weth, live_client: LiveClient):
@@ -40,7 +41,25 @@ def test_second_run_uses_cache(analyzed_weth, cached_weth, live_client: LiveClie
     a1 = live_client.artifact(analyzed_weth["name"], "assessment")
     a2 = live_client.artifact(cached_weth["name"], "assessment")
     assert isinstance(a1, dict) and isinstance(a2, dict)
-    assert a1["contract"]["name"] == a2["contract"]["name"]
+    root1 = a1["view"]["subject"]
+    root2 = a2["view"]["subject"]
+    subject1 = next(row for row in a1["subjects"] if row["id"] == root1)
+    subject2 = next(row for row in a2["subjects"] if row["id"] == root2)
+    assert subject1["identity"]["address"] == subject2["identity"]["address"]
+    static1 = {row["id"] for row in a1["claims"] if row["scope_kind"] == "code"}
+    static2 = {row["id"] for row in a2["claims"] if row["scope_kind"] == "code"}
+    assert static1
+    assert static1 == static2
+
+
+def test_second_run_completed_faster(analyzed_weth, cached_weth, live_client: LiveClient):
+    t1 = live_client.job_duration_seconds(analyzed_weth)
+    t2 = live_client.job_duration_seconds(cached_weth)
+    # Below 30s fixed overhead dominates and the assertion flaps.
+    if t1 > 30:
+        assert t2 <= t1 * 0.75, (
+            f"Second run ({t2:.1f}s) should be at least 25% faster than first ({t1:.1f}s)"
+        )
 
 
 @pytest.fixture(scope="module")

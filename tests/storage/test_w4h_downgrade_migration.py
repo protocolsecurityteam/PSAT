@@ -144,6 +144,19 @@ def test_w4h_downgrade_unwinds_heuristic_membership(throwaway_db_url):
         trust_classes = set(conn.execute(sa.text("SELECT DISTINCT trust_class FROM protocol_deployers")).scalars())
         assert "H" not in trust_classes
 
-    # Round-trip back to head must succeed on the unwound data.
-    run_alembic_upgrade(throwaway_db_url)
+    # This throwaway database has no application processes. The final
+    # contraction still requires the same explicit maintenance acknowledgement
+    # as a real existing database, even though the test knows it is isolated.
+    with pytest.raises(RuntimeError, match="all old processes stopped"):
+        run_alembic_upgrade(throwaway_db_url)
+    from argparse import Namespace
+
+    from alembic.config import Config
+
+    from alembic import command
+
+    cfg = Config(str(Path(__file__).resolve().parents[2] / "alembic.ini"))
+    cfg.set_main_option("sqlalchemy.url", throwaway_db_url)
+    cfg.cmd_opts = Namespace(x=["assessment_cutover=stopped"])
+    command.upgrade(cfg, "head")
     engine.dispose()

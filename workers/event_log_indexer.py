@@ -13,7 +13,7 @@ from threading import Event, Lock, Thread
 from typing import Any, Mapping, MutableMapping, Protocol, Sequence, TypeGuard, cast
 
 from eth_utils.crypto import keccak
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -322,6 +322,31 @@ def _heartbeat_status_for_pass(status: str, summary: ScanSummary) -> str:
     return status
 
 
+def _promote_cursor_basis(session: Session, chain_id: int, address: str, topic0: str, basis: str | None) -> None:
+    """Preserve independent enrollment without resetting any scan progress.
+
+    Predicate evidence takes precedence over asserted enrollment. Any independent
+    producer also protects a tracked-topic cursor from plan reconciliation.
+    """
+    if basis in (None, BASIS_NOT_DETERMINED, ENROLLMENT_BASIS_TRACKED_TOPICS):
+        return
+    eligible = [ENROLLMENT_BASIS_TRACKED_TOPICS, BASIS_NOT_DETERMINED]
+    if basis == ENROLLMENT_BASIS_PREDICATE_HINT:
+        predicate = IndexedEventCursor.enrollment_basis != ENROLLMENT_BASIS_PREDICATE_HINT
+    else:
+        predicate = IndexedEventCursor.enrollment_basis.in_(eligible)
+    session.execute(
+        update(IndexedEventCursor)
+        .where(
+            IndexedEventCursor.chain_id == chain_id,
+            IndexedEventCursor.event_address == address.lower(),
+            IndexedEventCursor.topic0 == topic0.lower(),
+            predicate,
+        )
+        .values(enrollment_basis=basis)
+    )
+
+
 def enroll_event_cursor(
     session: Session,
     *,
@@ -359,7 +384,10 @@ def enroll_event_cursor(
         .on_conflict_do_nothing(index_elements=["chain_id", "event_address", "topic0"])
     )
     result = session.execute(stmt)
-    return bool(getattr(result, "rowcount", 0))
+    inserted = bool(getattr(result, "rowcount", 0))
+    if not inserted:
+        _promote_cursor_basis(session, chain_id, event_address, topic0, enrollment_basis)
+    return inserted
 
 
 def _is_empty_code(code: object) -> bool:
@@ -449,22 +477,19 @@ def _witness_seed_block(
     return graded
 
 
-def _cursor_exists(session: Session, chain_id: int, event_address: str, topic0: str) -> bool:
+def _cursor_exists(session: Session, chain_id: int, event_address: str, topic0: str, *, lock: bool = False) -> bool:
     """Whether this exact cursor is already enrolled.
 
-    Enrollment is conflict-ignoring, so this changes no outcome — it only keeps
-    the three-read witness off addresses that would no-op, which is what makes the
-    probe's steady-state RPC cost zero rather than two calls per address per pass.
+    Lock when promoting provenance so concurrent reconciliation cannot remove
+    the row between finding it and recording its independent enrollment.
     """
-    return (
-        session.execute(
-            select(IndexedEventCursor.chain_id)
-            .where(IndexedEventCursor.chain_id == chain_id)
-            .where(func.lower(IndexedEventCursor.event_address) == event_address.lower())
-            .where(func.lower(IndexedEventCursor.topic0) == topic0.lower())
-        ).first()
-        is not None
+    statement = (
+        select(IndexedEventCursor.chain_id)
+        .where(IndexedEventCursor.chain_id == chain_id)
+        .where(func.lower(IndexedEventCursor.event_address) == event_address.lower())
+        .where(func.lower(IndexedEventCursor.topic0) == topic0.lower())
     )
+    return session.execute(statement.with_for_update() if lock else statement).first() is not None
 
 
 _FETCHER_ACCEPTS_WINDOW_STATS: dict[type, bool] = {}
@@ -902,7 +927,8 @@ def _enroll_witnessed(
     creation block inserts NOTHING, so a transient Etherscan failure can never pin
     a cursor to a full-chain backfill.
     """
-    if _cursor_exists(session, chain_id, address, topic0):
+    if _cursor_exists(session, chain_id, address, topic0, lock=True):
+        _promote_cursor_basis(session, chain_id, address, topic0, enrollment_basis)
         return False
     seed = _seed_block(address, seed_cache, chain_id=chain_id)
     if seed is None:
@@ -1082,7 +1108,9 @@ def enroll_from_tracked_topics(session: Session, *, limit: int = 500) -> int:
 
     removed = 0
     tracked_cursors = session.execute(
-        select(IndexedEventCursor).where(IndexedEventCursor.enrollment_basis == ENROLLMENT_BASIS_TRACKED_TOPICS)
+        select(IndexedEventCursor)
+        .where(IndexedEventCursor.enrollment_basis == ENROLLMENT_BASIS_TRACKED_TOPICS)
+        .with_for_update()
     ).scalars()
     for cursor in tracked_cursors:
         key = (cursor.chain_id, cursor.event_address.lower(), cursor.topic0.lower())

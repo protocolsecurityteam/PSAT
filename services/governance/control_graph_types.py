@@ -342,6 +342,7 @@ def materialize_fp_principal_nodes(
     deployment_address: str | None,
     budget: int | None = FP_MATERIALIZE_LIMIT,
     result: FpMaterializationResult | None = None,
+    persist: bool = True,
 ) -> tuple[FpMaterializationResult, list[dict[str, Any]]]:
     """Mint the ``control_graph_nodes`` rows ``function_principals`` implies.
 
@@ -555,44 +556,46 @@ def materialize_fp_principal_nodes(
             "fp_origins": sorted(agg["origins"]),
             "fp_principal_types": sorted(agg["principal_types"]),
         }
-        session.add(
-            ControlGraphNode(
-                contract_id=contract_id,
-                deployment_address=deployment_address,
-                address=addr,
-                node_type=node_type,
-                resolved_type=resolved_type,
-                # NULL, deliberately. A label is display copy, and this plane
-                # has none to witness — but ``Job.name`` and the overview's
-                # display sites fall back to it, so any constant here would be
-                # published as the principal's IDENTITY on every spawned child.
-                # ``resolved_type`` already carries the only noun that is proven.
-                label=None,
-                contract_name=None,
-                depth=minted_depth,
-                analysis_state=None,
-                graph_max_depth=None,
-                details=details,
+        if persist:
+            session.add(
+                ControlGraphNode(
+                    contract_id=contract_id,
+                    deployment_address=deployment_address,
+                    address=addr,
+                    node_type=node_type,
+                    resolved_type=resolved_type,
+                    # NULL, deliberately. A label is display copy, and this plane
+                    # has none to witness — but ``Job.name`` and the overview's
+                    # display sites fall back to it, so any constant here would be
+                    # published as the principal's IDENTITY on every spawned child.
+                    # ``resolved_type`` already carries the only noun that is proven.
+                    label=None,
+                    contract_name=None,
+                    depth=minted_depth,
+                    analysis_state=None,
+                    graph_max_depth=None,
+                    details=details,
+                )
             )
-        )
-        session.add(
-            ControlGraphEdge(
-                contract_id=contract_id,
-                deployment_address=deployment_address,
-                from_node_id=_address_node_id(anchor_address),
-                to_node_id=_address_node_id(addr),
-                relation=EDGE_RELATION_CAPABILITY_PRINCIPAL,
-                label=None,
-                source_controller_id=None,
-                notes=[f"functions={agg['functions']}"],
+            session.add(
+                ControlGraphEdge(
+                    contract_id=contract_id,
+                    deployment_address=deployment_address,
+                    from_node_id=_address_node_id(anchor_address),
+                    to_node_id=_address_node_id(addr),
+                    relation=EDGE_RELATION_CAPABILITY_PRINCIPAL,
+                    label=None,
+                    source_controller_id=None,
+                    notes=[f"functions={agg['functions']}"],
+                )
             )
-        )
 
         # Commit BEFORE the ledger records the mint. The ledger is persisted
         # from the caller's ``finally``, on a fresh session if this one is
         # poisoned, so recording first would let a rollback publish a row that
         # does not exist.
-        session.commit()
+        if persist:
+            session.commit()
 
         # Budget is spent HERE and only here — at the committed INSERT — so
         # every earlier gate provably consumes none of it.

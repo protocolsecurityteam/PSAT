@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping
 from typing import Any, cast
 
 from sqlalchemy import select
@@ -13,7 +13,6 @@ from sqlalchemy.orm import Session
 from db.deployment import deployment_scope, normalize_deployment
 from db.models import (
     Contract,
-    EffectiveFunction,
     Job,
     JobStage,
     JobStatus,
@@ -26,8 +25,10 @@ from db.queue.typed import (
     ArtifactSchemaError,
     load_assessment,
 )
+from schemas.assessment import Assessment
 from schemas.observations import ObservationBatch
 from schemas.permission_index import PermissionIndex
+from services.assessment.policy import derive_policy
 from services.clients.rpc import require_rpc_url
 from services.concurrency import parallel_map
 from services.discovery import membership_gate
@@ -40,14 +41,19 @@ from services.discovery.perimeter import (
 )
 from services.effects.config import effects_stage_enabled
 from services.governance.control_graph_types import FP_MATERIALIZE_LIMIT, materialize_fp_principal_nodes
-from services.policy import build_permission_index, build_principal_index
+from services.policy import build_principal_index
 from services.policy.permission_index_writer import write_permission_rows
-from services.policy.principal_index import load_protocol_deployer_groups, load_protocol_safe_owner_sets
+from services.policy.principal_index import (
+    load_protocol_deployer_groups,
+    load_protocol_safe_owner_sets,
+    observe_principals,
+    principal_type_projection,
+)
 from services.resolution.cross_chain_authority import make_cross_chain_recognizer
 from services.resolution.graph_tables import replace_control_graph_rows
 from services.resolution.recursive import LoadedArtifacts, resolve_control_graph
 from services.resolution.tracking import classify_resolved_address_with_status, read_contract_controllers
-from services.static.claims import EffectMatch, resolve_claim_precedence
+from services.static.claims import EffectMatch
 from utils.logging import log_timed_phase, record_degraded, record_stage_metric
 from workers.base import BaseWorker
 
@@ -258,16 +264,14 @@ def _resolve_semantic_capabilities(
     job_id: Any,
     chain: str | None = None,
     chain_id: int,
+    assessment: Assessment,
 ) -> dict[str, dict[str, Any]] | None:
     """Run the semantic capability resolver for ``contract_address`` against
     the in-progress job. Returns ``{function_signature: capability_dict}``
     or None on miss / failure.
 
-    ``chain`` (e.g. ``"ethereum"``) plumbs through to the resolver's
-    ``_load_state_var_values`` so the controller-value lookup is
-    scoped by ``(job_id, chain)``. The resolver also
-    derives this from ``job.request['chain']`` when None is passed,
-    so passing it here is belt-and-suspenders.
+    The current Assessment supplies controller observations and function
+    identities. The resolver validates its chain and deployment scope.
 
     ``chain_id`` is required: it binds the resolver's RPC/event reads
     to the job's real chain. Without it the predicate-eval tree would run as
@@ -296,6 +300,7 @@ def _resolve_semantic_capabilities(
             job_id=job_id,
             chain=chain,
             chain_id=chain_id,
+            assessment=assessment,
         )
         if result is None:
             exc = RuntimeError("semantic capability resolver produced no output")
@@ -353,29 +358,6 @@ def _safe_address_lookup_from_graph(
             out.setdefault(controller_label, address)
     if safes and "default" not in out:
         out["default"] = safes[0]
-    return out
-
-
-def _selector_by_function_key(function_records: Sequence[Mapping[str, Any]] | None) -> dict[str, str]:
-    """``{function key -> selector}`` from the effective-permissions payload, so a
-    consumer holding either signature can find the row that payload produced.
-
-    Both keys are indexed because the two planes name a function differently: the
-    effects artifact and the predicate trees use Slither's ``full_name``, while
-    the row stores the canonical ABI signature — the same function under two
-    strings whenever a parameter is a contract, struct or enum. The selector is
-    the one value both sides agree on, and it is taken from the payload rather
-    than re-derived so it is byte-identical to what the writer stored."""
-    out: dict[str, str] = {}
-    for record in function_records or []:
-        if not isinstance(record, dict):
-            continue
-        selector = record.get("selector")
-        if not isinstance(selector, str) or not selector:
-            continue
-        for key in (record.get("function"), record.get("abi_signature")):
-            if isinstance(key, str) and key:
-                out.setdefault(key, selector.lower())
     return out
 
 
@@ -453,39 +435,23 @@ class PolicyWorker(BaseWorker):
                     job_id=job.id,
                     chain=job_chain if isinstance(job_chain, str) else None,
                     chain_id=chain_id,
+                    assessment=assessment,
                 )
                 ph["function_count"] = len(capability_resolver_output or {})
 
-        with log_timed_phase(logger, "permission_index", durations_ms=durations_ms) as ph:
-            ep_data: PermissionIndex = build_permission_index(
-                static_facts,
-                target_snapshot=observation_batch,
-                predicate_trees=predicate_trees if isinstance(predicate_trees, dict) else None,
-                capability_resolver_output=capability_resolver_output,
-                effects=effects_artifact if isinstance(effects_artifact, dict) else None,
-            )
-            ph["function_count"] = len(ep_data["functions"])
-
-        # Cross-contract claims must land before row materialization so the DB
-        # remains a projection of the canonical assessment rather than an older
-        # pre-enrichment vocabulary.
         with log_timed_phase(logger, "cross_contract_enrichment", durations_ms=durations_ms):
-            enriched = self._enrich_cross_contract(
-                session,
-                job,
-                static_facts,
-                observation_batch,
-                function_records=ep_data.get("functions"),
+            enriched = self._enrich_cross_contract(session, job, assessment)
+
+        from services.assessment import project_permission_index
+
+        with log_timed_phase(logger, "policy_derivation", durations_ms=durations_ms) as ph:
+            assessment = derive_policy(
+                assessment,
+                capability_resolver_output=capability_resolver_output,
+                extra_claims=enriched,
             )
-            if enriched:
-                self._apply_cross_contract_claims(ep_data, enriched)
-
-        from services.assessment import add_policy, project_permission_index
-
-        assessment = add_policy(assessment, ep_data, chain_id=chain_id)
-        ep_data = cast(PermissionIndex, project_permission_index(assessment))
-        store_artifact(session, job.id, "assessment", data=assessment)
-
+            ep_data = cast(PermissionIndex, project_permission_index(assessment))
+            ph["function_count"] = len(ep_data["functions"])
         # Write to effective_functions and function_principals tables from
         # resolver-native semantic capability rows only.
         # An impl analyzed in proxy context resolves against the proxy's storage;
@@ -517,6 +483,21 @@ class PolicyWorker(BaseWorker):
             job_chain_id(job), _known_addresses_for_scope(resolution_graph, job.address)
         )
         if contract_row and isinstance(ep_data, dict):
+            assessment = observe_principals(
+                assessment,
+                rpc_url=rpc_url,
+                classify_cache=classify_cache,
+                cross_chain_recognizer=cross_chain_recognizer,
+                protocol_safe_owner_sets=(
+                    load_protocol_safe_owner_sets(session, job.protocol_id) if job.protocol_id else None
+                ),
+                protocol_deployer_groups=(
+                    load_protocol_deployer_groups(session, job.protocol_id) if job.protocol_id else None
+                ),
+                resolve_controllers=_make_terminal_controller_resolver(rpc_url, chain_id=job_chain_id(job)),
+            )
+            store_artifact(session, job.id, "assessment", data=assessment)
+            projected_types = principal_type_projection(assessment)
             graph_nodes = resolution_graph.get("nodes") if isinstance(resolution_graph, dict) else None
             safe_lookup = _safe_address_lookup_from_graph(graph_nodes if isinstance(graph_nodes, list) else None)
 
@@ -530,9 +511,7 @@ class PolicyWorker(BaseWorker):
                     contract_id=contract_row.id,
                     function_records=ep_data.get("functions", []),
                     safe_address_lookup=safe_lookup or None,
-                    resolve_principal_type=_make_principal_type_resolver(
-                        classify_cache, rpc_url, cross_chain_recognizer, chain_id=job_chain_id(job)
-                    ),
+                    resolve_principal_type=lambda address: projected_types.get(address.lower(), (None, None)),
                     deployment_address=deployment_address,
                 )
                 session.commit()
@@ -544,6 +523,8 @@ class PolicyWorker(BaseWorker):
                 addresses=principals_before | membership_gate.principal_addresses(session, [contract_row.id]),
                 context=f"policy_function_principals:{job.id}",
             )
+        else:
+            store_artifact(session, job.id, "assessment", data=assessment)
 
         record_stage_metric("effective_functions", len(ep_data.get("functions", [])))
         logger.info(
@@ -552,6 +533,43 @@ class PolicyWorker(BaseWorker):
             job.address or "0x0",
             job.name or "Contract",
         )
+
+        if contract_row:
+            from services.assessment.runtime import controller_state_values
+            from services.policy.principal_history import build_principal_history
+
+            with log_timed_phase(logger, "principal_history", durations_ms=durations_ms):
+                history = build_principal_history(
+                    contract_address=(
+                        contract_row.address if isinstance(contract_row.address, str) else (job.address or "")
+                    ),
+                    chain_id=chain_id,
+                    predicate_trees=predicate_trees,
+                    state_var_values=controller_state_values(assessment),
+                )
+                store_artifact(session, job.id, "principal_history", data=history)
+
+        request_data = job.request if isinstance(job.request, dict) else {}
+        proposal_ids = request_data.get("proposal_ids")
+        operation_ids = request_data.get("operation_ids")
+        governance_requested = (
+            request_data.get("collect_governance") is True
+            or isinstance(proposal_ids, list)
+            or isinstance(operation_ids, list)
+        )
+        if governance_requested and job.address:
+            from services.assessment.governance_collectors import collect_governance
+
+            with log_timed_phase(logger, "governance_collection", durations_ms=durations_ms):
+                collect_governance(
+                    session,
+                    job.id,
+                    rpc_url=rpc_url,
+                    chain_id=chain_id,
+                    address=job.address,
+                    proposal_ids=[int(value) for value in proposal_ids or []],
+                    operation_ids=[str(value) for value in operation_ids or []],
+                )
 
         # Rebuild the resolved graph now that permission_index exists,
         # so semantic role/controller principals can be projected into the graph.
@@ -583,28 +601,6 @@ class PolicyWorker(BaseWorker):
             )
             if refreshed_graph:
                 resolution_graph = refreshed_graph
-                # Rewrite the CGN/CGE tables to the refreshed graph too — the
-                # same scoped replace the resolution stage used. Rewriting only
-                # the artifact left the table plane a strict subset: every
-                # ``role_principal`` edge (projected here, because it needs the
-                # permission_index computed this stage) and a set of
-                # refresh-only ``controller_value`` edges were structurally
-                # unreachable in ``control_graph_edges``, so the effects value
-                # closure (both relations are in CONTROL_EDGE_RELATIONS — a
-                # scorer input; the value movement rides the controller_value
-                # edges, the role_principal rows carry authority structure),
-                # Surface, chat, and enrollment all read a graph missing
-                # authority the artifact plane asserted — while every row
-                # still carried ``graph_max_depth`` as if the walk that
-                # produced it were the complete one.
-                if contract_row:
-                    replace_control_graph_rows(
-                        session,
-                        contract_id=contract_row.id,
-                        deployment_address=deployment_address,
-                        resolved_graph=refreshed_graph,
-                    )
-                    session.commit()
             ph["graph_nodes"] = len(resolution_graph.get("nodes", [])) if isinstance(resolution_graph, dict) else 0
         # Materialize the ``function_principals`` rows that never reached the
         # graph at all. The walk's only principal ingresses are
@@ -616,10 +612,8 @@ class PolicyWorker(BaseWorker):
         #
         # HERE, and not at the enrollment call site, for three reasons that are
         # all data-flow, not preference:
-        #  1. It is strictly AFTER the ``replace_control_graph_rows`` above —
-        #     the last wholesale delete+insert of this (contract, deployment)
-        #     scope in the job's stage sequence — so the re-mint strategy the
-        #     pass documents is guaranteed, not hoped for.
+        #  1. It is built after the refresh, then Assessment is published and
+        #     the entire graph index is projected once from that publication.
         #  2. It is strictly BEFORE the perimeter, so a minted node is a
         #     candidate in the SAME job rather than one run later.
         #  3. ``write_permission_rows`` committed this contract's FP
@@ -630,8 +624,8 @@ class PolicyWorker(BaseWorker):
         # spawn is: a refresh that produced no graph must not silently skip the
         # mint, and an absent ledger must keep meaning "predates the ledger".
         fp_nodes: list[dict[str, Any]] = []
+        fp_ledger = new_fp_materialization_result(budget=FP_MATERIALIZE_LIMIT)
         if contract_row is not None:
-            fp_ledger = new_fp_materialization_result(budget=FP_MATERIALIZE_LIMIT)
             try:
                 _, fp_nodes = materialize_fp_principal_nodes(
                     session,
@@ -639,12 +633,34 @@ class PolicyWorker(BaseWorker):
                     deployment_address=deployment_address,
                     budget=FP_MATERIALIZE_LIMIT,
                     result=fp_ledger,
+                    # Build candidates from FunctionPrincipal rows, then put
+                    # them through Assessment before rebuilding graph tables.
+                    persist=False,
                 )
-                # No commit here: the pass commits each mint before recording
-                # it, so the ledger written below can never name a row a
-                # rollback removed.
-            finally:
+            except Exception:
+                # Preserve the incomplete attempt, but never label unprojected
+                # candidates as successfully materialized.
                 _persist_spawn_summary(session, job, fp_ledger, artifact_name="fp_materialization_summary")
+                raise
+
+        from services.assessment import add_principal_graph_nodes, add_resolution, control_graph
+
+        if isinstance(resolution_graph, dict):
+            assessment = add_resolution(assessment, resolution_graph, chain_id=chain_id)
+        assessment = add_principal_graph_nodes(assessment, fp_nodes)
+        # Publish the derivation before updating its disposable graph index.
+        # A crash can therefore rebuild rows from Assessment without rerunning
+        # discovery or principal classification.
+        store_artifact(session, job.id, "assessment", data=assessment)
+        if contract_row is not None:
+            replace_control_graph_rows(
+                session,
+                contract_id=contract_row.id,
+                deployment_address=deployment_address,
+                resolved_graph=control_graph(assessment),
+            )
+            session.commit()
+            _persist_spawn_summary(session, job, fp_ledger, artifact_name="fp_materialization_summary")
 
         # Bring the refresh's newly-discovered contracts inside the static_facts
         # perimeter. Without this, a node FIRST seen here — every role principal,
@@ -696,14 +712,12 @@ class PolicyWorker(BaseWorker):
         finally:
             _persist_spawn_summary(session, job, spawn_result)
 
-        # Label principals
+        # Observe first; principal rows are pure projections of durable evidence.
         self.update_detail(session, job, "Labeling principals")
         with log_timed_phase(logger, "principal_labels", durations_ms=durations_ms) as ph:
-            pl_data = build_principal_index(
-                ep_data,
-                resolution_graph=(cast(dict, resolution_graph) if isinstance(resolution_graph, dict) else None),
+            assessment = observe_principals(
+                assessment,
                 rpc_url=rpc_url,
-                chain_id=job_chain_id(job),
                 # Same cache the resolution stage populated. Without this, labeling
                 # re-runs classify_resolved_address (6-10 RPCs each) for every
                 # principal — the dominant cost on big protocols (etherfi LP impl
@@ -727,6 +741,8 @@ class PolicyWorker(BaseWorker):
                 # Contract-principal -> ultimate Safe/EOA terminal walk.
                 resolve_controllers=_make_terminal_controller_resolver(rpc_url, chain_id=job_chain_id(job)),
             )
+            store_artifact(session, job.id, "assessment", data=assessment)
+            pl_data = build_principal_index(assessment)
             ph["principal_count"] = len(pl_data)
 
         # Write to principal_labels table
@@ -761,14 +777,6 @@ class PolicyWorker(BaseWorker):
             job.address or "0x0",
             job.name or "Contract",
         )
-
-        # Canonical cutover: graph relations and effective permissions enrich
-        # the same assessment rather than becoming new sources of truth.
-        from services.assessment import add_resolution
-
-        if isinstance(resolution_graph, dict):
-            assessment = add_resolution(assessment, resolution_graph, chain_id=chain_id)
-        store_artifact(session, job.id, "assessment", data=assessment)
 
         self.update_detail(
             session,
@@ -893,37 +901,17 @@ class PolicyWorker(BaseWorker):
             },
         )
 
-    def _apply_cross_contract_claims(self, payload: Mapping[str, Any], enriched: dict[str, list[EffectMatch]]) -> None:
-        for fn in payload.get("functions", []):
-            fn_sig = fn.get("function") or fn.get("abi_signature")
-            additions = enriched.get(fn_sig) if fn_sig else None
-            if not additions:
-                continue
-            existing = list(fn.get("claims") or [])
-            fn["claims"] = resolve_claim_precedence([*existing, *additions])
-
     def _enrich_cross_contract(
         self,
-        session,
+        session: Session,
         job: Job,
-        static_facts: Mapping[str, Any],
-        observation_batch: Mapping[str, Any],
-        function_records: Sequence[Mapping[str, Any]] | None = None,
+        assessment: Assessment,
     ) -> dict[str, list[EffectMatch]]:
-        """Mint policy-derived claims from sibling facts.
+        """Derive sibling evidence without mutating any analytical indexes."""
+        from services.assessment import controller_observations, static_inputs
 
-        Replaces propagate-every-label with the four typed derivations in
-        ``services.static.cross_contract``: value-flow propagation, transfer-policy
-        configuration, beacon upgrade, and proxy-verified upgrade provenance. The
-        returned claims merge onto each function's existing claim list.
-
-        ``function_records`` is the effective-permissions payload the rows were
-        just written from. The derivations key on the Slither full_name the
-        effects artifact uses, while the row stores the canonical ABI signature,
-        so the two only meet through a key both sides derive identically — the
-        selector, taken from that same payload rather than re-derived here.
-        """
-        del static_facts
+        observation_batch = controller_observations(assessment)
+        _facts, _trees, target_effects = static_inputs(assessment)
         from services.static.cross_contract import (
             build_callee_claim_map,
             derive_cross_contract_claims,
@@ -1002,12 +990,6 @@ class PolicyWorker(BaseWorker):
 
         callee_claim_map = build_callee_claim_map(sibling_effects)
         controller_values = observation_batch.get("controller_values", {})
-        target_assessment = load_assessment(get_artifact, session, job.id)
-        target_effects = None
-        if target_assessment is not None:
-            from services.assessment import static_inputs
-
-            _facts, _trees, target_effects = static_inputs(target_assessment)
         target_address = (job.address or "").lower()
 
         hook_links = sibling_transfer_hook_links(target_address, sibling_effects, sibling_snapshots)
@@ -1029,51 +1011,6 @@ class PolicyWorker(BaseWorker):
                 job.id,
                 {fn_sig: [c["claim_id"] for c in claims] for fn_sig, claims in enriched.items()},
             )
-            contract_row = session.execute(
-                select(Contract).where(Contract.job_id == job.id).limit(1)
-            ).scalar_one_or_none()
-            if contract_row:
-                selector_for = _selector_by_function_key(function_records)
-                # The same impl row can back N proxy deployments, each with its
-                # own set of function rows. These claims were derived against
-                # THIS job's control snapshot, so they belong to the deployment
-                # the writer tagged — mirroring its scope derivation exactly,
-                # not the local ``deployment_address`` below, which falls back to
-                # the job's own address for a different purpose.
-                row_deployment = normalize_deployment(request.get("proxy_address"))
-                for fn_sig, new_claims in enriched.items():
-                    stmt = select(EffectiveFunction).where(
-                        EffectiveFunction.contract_id == contract_row.id,
-                        deployment_scope(EffectiveFunction.deployment_address, row_deployment),
-                    )
-                    selector = selector_for.get(fn_sig)
-                    if selector:
-                        stmt = stmt.where(EffectiveFunction.selector == selector)
-                    else:
-                        stmt = stmt.where(EffectiveFunction.abi_signature == fn_sig)
-                    # Exactly one row, or nothing. The scope above still ORs in
-                    # legacy untagged rows by design, so a tagged row and a NULL
-                    # one can both answer — and reading a single row from that
-                    # raises inside a stage that does not catch it, losing the
-                    # whole policy run over an enrichment detail. Ambiguity is
-                    # not an answer: skip it, say so, and leave the row alone.
-                    matches = session.execute(stmt).scalars().all()
-                    if len(matches) == 1:
-                        ef = matches[0]
-                        ef.claims = resolve_claim_precedence([*(ef.claims or []), *new_claims])
-                    else:
-                        logger.warning(
-                            "Job %s: cross-contract claims for %s matched %d effective_function rows; skipped",
-                            job.id,
-                            fn_sig,
-                            len(matches),
-                            extra={
-                                "phase": "cross_contract_enrichment",
-                                "function": fn_sig,
-                                "matched_rows": len(matches),
-                            },
-                        )
-                session.commit()
         return enriched
 
 

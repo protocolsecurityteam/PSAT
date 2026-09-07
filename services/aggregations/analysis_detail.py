@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from db.models import Contract, Job, JobStatus
+from db.queue.typed import validate_assessment
 
 # Indirect through ``routers.deps`` so tests get a single patch point for
 # ``SessionLocal``/``get_all_artifacts``.
@@ -52,7 +53,7 @@ def _artifacts_or_degrade(
     consumers; the SPA's equivalent distinction is served by the header.
     """
     try:
-        return deps.get_all_artifacts(session, job_id)
+        artifacts = deps.get_all_artifacts(session, job_id)
     except deps.StorageContentIncomplete as exc:
         logger.error(
             "analysis detail for job %s is missing %d artifact bodies (%d not determined, %d proven absent)",
@@ -63,7 +64,10 @@ def _artifacts_or_degrade(
         )
         not_determined.update(exc.not_determined)
         proven_absent.update(exc.proven_absent)
-        return dict(exc.values or {})
+        artifacts = dict(exc.values or {})
+    if "assessment" in artifacts:
+        artifacts["assessment"] = validate_assessment(artifacts["assessment"])
+    return artifacts
 
 
 def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | None:

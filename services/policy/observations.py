@@ -3,170 +3,32 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
 from dataclasses import is_dataclass
 from typing import Any, Mapping, cast
 
-from eth_utils.crypto import keccak
-
-from schemas.observations import ObservationBatch, ResolvedControllerType, coerce_resolved_controller_type
+from schemas.assessment import Assessment
+from schemas.observations import ResolvedControllerType, coerce_resolved_controller_type
 from schemas.permission_index import (
     AuthorityRoleGrant,
-    PermissionIndex,
     PermissionRow,
     ResolvedControllerGrant,
     ResolvedPrincipal,
 )
-from schemas.static_facts import StaticFacts
 from services.policy.capability_surface import (
     capability_role_grants,
     capability_surface_openness,
     capability_surface_status,
     project_capability_surface,
 )
-from services.static.static_analysis.predicate_artifacts import (
-    _split_top_level,
-    has_no_selector,
-    is_canonical_abi_signature,
-)
+from services.static.claims import EffectMatch, resolve_claim_precedence
 from utils.logging import record_degraded
 
 logger = logging.getLogger(__name__)
 
-ELEMENTARY_TYPE_PREFIXES = (
-    "address",
-    "uint",
-    "int",
-    "bool",
-    "bytes",
-    "string",
-    "fixed",
-    "ufixed",
-    "tuple",
-)
-
 
 def _lower_string(value: Any) -> str:
-    if value is None:
-        return ""
-    return str(value).lower()
-
-
-def _normalize_abi_type(type_name: str) -> str:
-    stripped = type_name.strip()
-    if not stripped:
-        return stripped
-
-    if stripped.startswith("DynArray[") and stripped.endswith("]"):
-        inner = stripped[len("DynArray[") : -1]
-        parts = inner.split(",", 1)
-        return f"{_normalize_abi_type(parts[0])}[]"
-    if stripped.startswith("HashMap[") and stripped.endswith("]"):
-        return "mapping"
-    if stripped.startswith("String[") and stripped.endswith("]"):
-        return "string"
-    if stripped.startswith("Bytes[") and stripped.endswith("]"):
-        return "bytes"
-    if stripped.endswith("]"):
-        if "[" not in stripped:
-            return "address"
-        base, suffix = stripped.split("[", 1)
-        return f"{_normalize_abi_type(base)}[{suffix}"
-
-    # An already-lowered tuple is canonical ABI; collapsing it to ``address``
-    # would destroy an arity a caller had already recovered. Parentheses are not
-    # legal in a user-defined type name, so this test cannot misfire.
-    if stripped.startswith("(") and stripped.endswith(")"):
-        members = [m for m in _split_top_level(stripped[1:-1]) if m.strip()]
-        return "(" + ",".join(_normalize_abi_type(m) for m in members) + ")"
-
-    if stripped.startswith(ELEMENTARY_TYPE_PREFIXES):
-        return stripped
-
-    # ``A.B`` is a struct / enum / user-defined value type declared inside ``A``.
-    # Solidity has no nested contracts, so a qualified token is provably NOT a
-    # contract reference and ``address`` is the wrong lowering — while the right
-    # one (a struct's field layout, an enum's width) is not recoverable from a
-    # name. Leave it un-lowered so a selector derived from this string fails
-    # closed instead of naming a dispatch that does not exist.
-    if "." in stripped:
-        return stripped
-
-    # A bare user-defined name stays ``address``: it is a contract reference more
-    # often than not, and a name alone cannot tell a contract from a file-level
-    # struct or enum. The canonical map above is what resolves it properly.
-    return "address"
-
-
-def _abi_signature(function_signature: str) -> str:
-    if "(" not in function_signature or not function_signature.endswith(")"):
-        return function_signature
-    name, args = function_signature.split("(", 1)
-    args = args[:-1]
-    if not args:
-        return f"{name}()"
-    raw_args: list[str] = []
-    current: list[str] = []
-    depth = 0
-    for char in args:
-        if char in "([{":
-            depth += 1
-        elif char in ")]}":
-            depth = max(depth - 1, 0)
-        if char == "," and depth == 0:
-            piece = "".join(current).strip()
-            if piece:
-                raw_args.append(piece)
-            current = []
-            continue
-        current.append(char)
-    piece = "".join(current).strip()
-    if piece:
-        raw_args.append(piece)
-    normalized_args = ",".join(_normalize_abi_type(arg) for arg in raw_args)
-    return f"{name}({normalized_args})"
-
-
-def _canonical_signature_map(predicate_trees: Mapping[str, Any] | None) -> dict[str, str]:
-    """``full_name -> EVM-canonical ABI signature`` from the predicate artifact.
-
-    The static stage precomputes this from Slither's ``solidity_signature`` (see
-    ``predicate_artifacts._canonical_signature``) so the selector here keys on
-    the true ``msg.sig`` for contract/enum/struct params. ``_abi_signature``'s
-    string-level normalization can only recover contract params (→ ``address``);
-    enums (→ ``uint8``) and structs (→ tuple) need the type info this map carries."""
-    if not isinstance(predicate_trees, dict):
-        return {}
-    canonical = predicate_trees.get("canonical_signatures")
-    if not isinstance(canonical, dict):
-        return {}
-    return {
-        str(name): str(sig)
-        for name, sig in canonical.items()
-        if isinstance(sig, str) and "(" in sig and sig.endswith(")")
-    }
-
-
-def _abi_signature_and_selector(
-    function_signature: str, canonical_signatures: Mapping[str, str]
-) -> tuple[str, str | None]:
-    """``(abi_signature, selector)`` preferring the precomputed canonical ABI
-    signature; falls back to the full_name string normalization when absent.
-
-    The selector is ``None`` when the fallback could not fully lower the
-    signature. Hashing a string that still names a user-defined type publishes a
-    4-byte value the chain will never dispatch on, and the row's own signature
-    column would then disagree with its selector — a wrong answer where no
-    answer is the honest one.
-
-    It is ``""`` for ``fallback()`` / ``receive()``: those PROVABLY have no
-    selector, which is a different answer from "we could not derive one", and
-    ``""`` is the sentinel ``db/effect_cache.py`` already fixes for them."""
-    abi_sig = canonical_signatures.get(function_signature) or _abi_signature(function_signature)
-    if has_no_selector(abi_sig):
-        return abi_sig, ""
-    if not is_canonical_abi_signature(abi_sig):
-        return abi_sig, None
-    return abi_sig, "0x" + keccak(text=abi_sig).hex()[:8]
+    return "" if value is None else str(value).lower()
 
 
 def _resolved_principal(
@@ -642,29 +504,21 @@ def _column_values_for_capability(cap_dict: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def build_permission_index(
-    target_analysis: Mapping[str, Any] | StaticFacts,
+def policy_observations(
+    assessment: Assessment,
     *,
-    target_snapshot: Mapping[str, Any] | ObservationBatch | None = None,
-    predicate_trees: Mapping[str, Any] | None = None,
     capability_resolver_output: Mapping[str, Any] | None = None,
-    effects: Mapping[str, Any] | None = None,
-) -> PermissionIndex:
-    """Build the ``permission_index`` artifact from semantic resolver/effects
-    inputs only.
+    extra_claims: Mapping[str, list[EffectMatch]] | None = None,
+) -> Iterator[PermissionRow]:
+    """Derive per-function policy observations directly from Assessment inputs."""
+    from services.assessment.runtime import controller_observations
+    from services.assessment.views import effect_matches_by_function, static_inputs
 
-    ``capability_resolver_output`` is the per-function CapabilityExpr
-    dict the resolver produces. Tests typically supply it directly to
-    avoid spinning up Slither + the full adapter chain.
-
-    ``effects`` is the semantic ``effects`` artifact keyed by function full-name.
-    """
-    contract_address = target_analysis["subject"]["address"].lower()
-    contract_name = target_analysis["subject"]["name"]
-
+    _facts, predicate_trees, effects = static_inputs(assessment)
+    target_snapshot = controller_observations(assessment)
+    claim_matches = effect_matches_by_function(assessment)
     known = _known_principals(target_snapshot)
     controller_lookup = _controller_lookup(target_snapshot)
-    canonical_signatures = _canonical_signature_map(predicate_trees)
     capability_dicts = _normalize_capability_output(capability_resolver_output)
     effects_by_function = _effects_by_function(effects)
     predicate_tree_functions = _predicate_trees_by_function(predicate_trees)
@@ -677,9 +531,10 @@ def build_permission_index(
         guard_uncertain_signatures=guard_uncertain_signatures,
     )
 
-    functions: list[PermissionRow] = []
     for function_record in function_records:
-        abi_signature, selector = _abi_signature_and_selector(function_record["function"], canonical_signatures)
+        identity = assessment["functions"].get(function_record["function"])
+        abi_signature = identity["abi_signature"] if identity else None
+        selector = identity["selector"] if identity else None
         controller_refs = sorted(set(function_record.get("controller_refs", [])))
         direct_owner = None
 
@@ -693,10 +548,11 @@ def build_permission_index(
         # The ``effects`` artifact is the source of truth for claims.
         fn_signature = function_record["function"]
         effects_record = effects_by_function.get(fn_signature) or {}
-        semantic_claims = effects_record.get("claims") if effects_record else None
-
-        claims_out = (
-            list(semantic_claims) if isinstance(semantic_claims, list) else list(function_record.get("claims", []))
+        claims_out = resolve_claim_precedence(
+            [
+                *cast(list[EffectMatch], claim_matches.get(fn_signature, [])),
+                *(extra_claims or {}).get(fn_signature, []),
+            ]
         )
 
         # Three-state role half (see ``capability_role_grants``): the
@@ -729,12 +585,11 @@ def build_permission_index(
             "authority_public": False,
             "authority_roles": authority_roles_out,
             "controllers": controller_grants,
-            "claims": claims_out,
+            "claims": [dict(match) for match in claims_out],
             "notes": notes,
         }
-        # The artifact is what ``policy_worker`` hands the row writer, so the
-        # mutability witness has to survive this hop or the columns are NULL in
-        # production while every record-layer test passes.
+        # Preserve mutability evidence in the ledger observation so the final
+        # permission projection can populate the relational index consistently.
         mutability = _mutability_fields(effects_record)
         function_permission["state_changing"] = mutability["state_changing"]
         function_permission["state_writes"] = mutability["state_writes"]
@@ -785,11 +640,4 @@ def build_permission_index(
                     minted_capability, minted_surface
                 )
 
-        functions.append(function_permission)
-
-    return {
-        "schema_version": "0.1",
-        "contract_address": contract_address,
-        "contract_name": contract_name,
-        "functions": functions,
-    }
+        yield function_permission

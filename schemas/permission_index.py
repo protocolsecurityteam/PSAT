@@ -39,7 +39,7 @@ class ResolvedControllerGrant(TypedDict):
 
 class PermissionRow(TypedDict):
     function: str
-    abi_signature: str
+    abi_signature: str | None
     # ``None`` when the signature could not be fully lowered to elementary ABI
     # types: a hash of a string still naming a user-defined type is not a
     # selector the chain dispatches on, and no answer beats a wrong one.

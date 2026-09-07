@@ -707,7 +707,7 @@ class TestEnrollmentBasis:
             )
         ).scalar_one()
         assert cursor.enrollment_basis == RESTAKING_FOLD_ENROLLMENT_BASIS
-        assert cursor.enrollment_basis == "tracked_topics_asserted"
+        assert cursor.enrollment_basis == "restaking_fold_asserted"
         # The basis records provenance; it still licenses no exact empty.
         assert cursor.first_indexed_block_basis == "not_determined"
         db_session.rollback()

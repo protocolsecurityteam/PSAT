@@ -95,10 +95,14 @@ def add_resolution(assessment: Assessment, graph: Mapping[str, Any], *, chain_id
                 "entity_kind": entity["kind"],
                 "tags": entity["tags"],
             }
-            claim_key = content_key("claim", {"contract": result["contract"], "proposition": proposition})
+            rule = "resolution.entity_classification/v1"
+            claim_key = content_key(
+                "claim",
+                {"contract": result["contract"], "proposition": proposition, "evidence": [evidence_key], "rule": rule},
+            )
             result["claims"][claim_key] = {
                 "proposition": proposition,
-                "rule": "resolution.entity_classification/v1",
+                "rule": rule,
                 "evidence": [evidence_key],
                 "claims": [],
             }
@@ -129,6 +133,7 @@ def add_resolution(assessment: Assessment, graph: Mapping[str, Any], *, chain_id
                 "from_entity": from_entity,
                 "to_entity": to_entity,
                 "relation": relation,
+                "label": edge.get("label"),
                 "source_controller_id": edge.get("source_controller_id"),
                 "notes": edge.get("notes") or [],
             }
@@ -156,10 +161,14 @@ def add_resolution(assessment: Assessment, graph: Mapping[str, Any], *, chain_id
                 "target": from_entity,
                 "relationship": relation,
             }
-            claim_key = content_key("claim", {"contract": result["contract"], "proposition": proposition})
+            rule = f"resolution.{relation}/v1"
+            claim_key = content_key(
+                "claim",
+                {"contract": result["contract"], "proposition": proposition, "evidence": [evidence_key], "rule": rule},
+            )
             claim: Claim = {
                 "proposition": cast(Proposition, proposition),
-                "rule": f"resolution.{relation}/v1",
+                "rule": rule,
                 "evidence": [evidence_key],
                 "claims": [],
             }

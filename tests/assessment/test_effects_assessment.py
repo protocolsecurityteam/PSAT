@@ -79,16 +79,23 @@ def test_proven_verdict_adds_execution_evidence_to_the_effect_claim() -> None:
     assessment = add_effects(_base(), [_verdict(VERDICT_PROVEN)], signatures_by_function_row={42: "pause()"})
     TypeAdapter(Assessment).validate_python(assessment)
 
-    pause_claim = next(
+    pause_claims = [
         claim
         for claim in assessment["claims"].values()
         if claim["proposition"]["kind"] == "function_effect"
         and (effect := claim["proposition"].get("effect")) is not None
         and effect["kind"] == "pause.set"
-    )
-    methods = {assessment["evidence"][key]["method"] for key in pause_claim["evidence"]}
+    ]
+    methods = {
+        assessment["evidence"][key]["method"]
+        for claim in pause_claims
+        for key in claim["evidence"]
+    }
     assert methods == {"static_ir", "execution"}
-    assert pause_claim["rule"] == "pause.set/behavioral_observed"
+    assert {claim["rule"] for claim in pause_claims} == {
+        "pause.set/idiom_structural",
+        "pause.set/behavioral_observed",
+    }
     projection = effect_matches_by_function(assessment)["pause()"][0]
     assert projection["witness"]["observed"]["observed_blast_radius"] == ["withdraw()"]
 
@@ -140,7 +147,7 @@ def test_withdrawn_execution_retracts_dependent_capability() -> None:
                     "capability_expr": {"kind": "conditional_universal"},
                 }
             ]
-        },
+        }["functions"],
         chain_id=1,
     )
     assert any(c["proposition"]["kind"] == "authority_capability" for c in authorized["claims"].values())
@@ -153,6 +160,9 @@ def test_execution_uses_canonical_function_identity() -> None:
     base = _base()
     identity = base["functions"].pop("pause()")
     identity["abi_signature"] = "pause(address)"
+    from eth_utils.crypto import keccak
+
+    identity["selector"] = "0x" + keccak(text="pause(address)").hex()[:8]
     base["functions"]["pause(Authority)"] = identity
     base["claims"].clear()
     for receipt in base["analyses"]:

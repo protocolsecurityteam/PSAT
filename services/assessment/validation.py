@@ -17,6 +17,16 @@ def checked(value: object) -> Assessment:
     _ADAPTER.validate_python(value, strict=True)
     assessment = cast(Assessment, value)
     problems = assessment_problems(assessment)
+    from services.abi import is_canonical_abi_signature, selector_for_signature
+
+    for signature, function in assessment["functions"].items():
+        abi_signature = function["abi_signature"]
+        selector = function["selector"]
+        if abi_signature is not None:
+            if not is_canonical_abi_signature(abi_signature):
+                problems.append(f"functions.{signature}.abi_signature: not a canonical ABI signature")
+            elif selector is not None and selector != selector_for_signature(abi_signature):
+                problems.append(f"functions.{signature}.selector: does not match ABI signature")
     if problems:
         raise ValueError("invalid assessment: " + "; ".join(problems))
     return assessment

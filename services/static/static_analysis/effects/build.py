@@ -49,6 +49,8 @@ def _effect_info_for_function(function: Any) -> EffectInfo:
     attach_record_ordering(value_flows, function, assembly_state_access=assembly_state_access)
     effects: list[str] = []
 
+    from services.abi import _canonical_signature
+
     signature = _function_full_name(function)
     # "" is the no-selector sentinel (fallback/receive), matching the
     # ``effect_verdicts`` identity key in ``db/effect_cache.py``.
@@ -56,7 +58,7 @@ def _effect_info_for_function(function: Any) -> EffectInfo:
     return {
         "function": signature,
         "selector": selector,
-        "abi_signature": signature,
+        "abi_signature": _canonical_signature(function) or signature,
         "sinks": sinks,
         "state_writes": state_writes,
         "value_flows": value_flows,

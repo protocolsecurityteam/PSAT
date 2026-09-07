@@ -34,7 +34,7 @@ import pytest
 slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
 
-from services.policy.permission_index import _column_values_for_capability  # noqa: E402
+from services.policy.observations import _column_values_for_capability  # noqa: E402
 from services.resolution.capability_resolver import capability_to_dict  # noqa: E402
 from services.resolution.predicate_evaluator import evaluate_tree  # noqa: E402
 from services.static.static_analysis.predicates import build_predicate_tree  # noqa: E402

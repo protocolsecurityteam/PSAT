@@ -137,7 +137,7 @@ def _selector_of(signature: str) -> str | None:
     """The 4-byte selector, or ``None`` when ``signature`` is not a fully lowered
     ABI signature. A residual user-defined type name means the hash is not a
     dispatch value, and a probe keyed on it would call the wrong function."""
-    from services.static.static_analysis.predicate_artifacts import is_canonical_abi_signature
+    from services.abi import is_canonical_abi_signature
 
     if not signature or not is_canonical_abi_signature(signature):
         return None

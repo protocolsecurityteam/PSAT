@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from services.assessment import add_observations, build_static_assessment
+from services.assessment import add_observations, add_policy, build_static_assessment, project_permission_index
 from services.assessment.runtime import controller_observations
 
 
@@ -30,7 +30,16 @@ def _base():
                 }
             ]
         },
-        effects={"schema_version": "semantic", "functions": {}},
+        effects={
+            "schema_version": "semantic",
+            "functions": {
+                "ownerOnly()": {
+                    "abi_signature": "ownerOnly()",
+                    "state_changing": True,
+                    "claims": [],
+                }
+            },
+        },
         predicate_trees={"schema_version": "semantic", "trees": {}},
     )
 
@@ -115,3 +124,56 @@ def test_failed_refresh_retracts_the_previous_controller_observation() -> None:
 
     assert controller_observations(failed)["controller_values"] == {}
     assert not any(evidence["producer"] == "resolution.observation" for evidence in failed["evidence"].values())
+
+
+def test_controller_update_retracts_dependent_authority_until_policy_rederives() -> None:
+    alice = "0x" + "aa" * 20
+    bob = "0x" + "bb" * 20
+    observed = add_observations(
+        _base(),
+        {
+            "block_number": 100,
+            "controller_values": {
+                "state:owner": {
+                    "value": alice,
+                    "resolved_type": "eoa",
+                    "block_number": 100,
+                    "observed_via": "eth_call",
+                    "details": {},
+                }
+            },
+        },
+    )
+    authorized = add_policy(
+        observed,
+        [
+            {
+                "function": "ownerOnly()",
+                "controllers": [{"controller_id": "state:owner", "principals": [{"address": alice}]}],
+                "capability_expr": {"kind": "finite_set", "members": [alice], "membership_quality": "exact"},
+            }
+        ],
+        chain_id=1,
+    )
+    assert project_permission_index(authorized)["functions"]
+    refreshed = add_observations(
+        authorized,
+        {
+            "block_number": 200,
+            "controller_values": {
+                "state:owner": {
+                    "value": bob,
+                    "resolved_type": "eoa",
+                    "block_number": 200,
+                    "observed_via": "eth_call",
+                    "details": {},
+                }
+            },
+        },
+    )
+    assert not any(
+        claim["proposition"]["kind"] == "function_authority" for claim in refreshed["claims"].values()
+    )
+    policy = next(receipt for receipt in refreshed["analyses"] if receipt["detector"] == "policy.capabilities")
+    assert policy["status"] == "partial"
+    assert policy["targets_completed"] == 0

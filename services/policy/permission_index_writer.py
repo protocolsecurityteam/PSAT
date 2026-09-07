@@ -41,7 +41,7 @@ from db.models import EffectiveFunction, EffectVerdict, FunctionPrincipal
 from services.policy.capability_surface import (
     project_capability_surface,
 )
-from services.policy.permission_index import MUTABILITY_FIELDS
+from services.policy.observations import MUTABILITY_FIELDS
 from utils.logging import record_degraded
 
 logger = logging.getLogger(__name__)
@@ -177,7 +177,7 @@ def write_permission_rows(
     fallback). ``None`` preserves the prior write-time-untyped behavior.
 
     ``function_records`` is the list of per-function dicts emitted by
-    ``build_permission_index``. Each must carry at minimum
+    ``project_permission_index``. Each must carry at minimum
     ``function`` / ``abi_signature`` and the column overrides
     (``capability_expr``, ``conditions``, ``status``,
     ``authority_public``); optional authority fields ride
@@ -223,7 +223,7 @@ def write_permission_rows(
             # the row whose keccak is not that row's own selector. For a struct
             # param the full_name has lost the tuple layout entirely, so nothing
             # downstream can encode a call or recompute the selector from it.
-            "abi_signature": fn.get("abi_signature") or fn_signature,
+            "abi_signature": fn.get("abi_signature"),
             "authority_public": cap_columns["authority_public"],
             "authority_roles": fn.get("authority_roles"),
             **cap_columns,

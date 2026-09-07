@@ -1012,9 +1012,9 @@ def test_scaffold_project_writes_expected_files(tmp_path):
 # ===================================================================
 
 
-@patch("routers.deps.get_artifact")
+@patch("routers.deps.load_temporal_assessment")
 @patch("routers.deps.SessionLocal")
-def test_artifact_endpoint_strips_json_extension(mock_session_cls, mock_get_artifact):
+def test_artifact_endpoint_strips_json_extension(mock_session_cls, mock_load_assessment):
     """The artifact endpoint should strip .json and .txt extensions when
     looking up artifacts, since workers store artifacts without extensions
     but the frontend requests them with extensions."""
@@ -1030,23 +1030,24 @@ def test_artifact_endpoint_strips_json_extension(mock_session_cls, mock_get_arti
     mock_session.execute.return_value.scalar_one_or_none.return_value = fake_job
     _mock_session_ctx(mock_session_cls, mock_session)
 
-    call_names: list[str] = []
-
-    def _get_artifact(_session, _job_id, name):
-        call_names.append(name)
-        if name == "assessment":
-            return _assessment()
-        return None
-
-    mock_get_artifact.side_effect = _get_artifact
+    mock_load_assessment.return_value = {
+        "view": {},
+        "subjects": [],
+        "evidence": [],
+        "claims": [],
+        "analyses": [],
+        "corrections": [],
+        "contexts": [],
+        "implementations": [],
+        "payloads": [],
+    }
 
     resp = client.get(
         "/api/analyses/test_run/artifact/assessment.json",
         headers={"X-PSAT-Admin-Key": deps.ADMIN_KEY or ""},
     )
     assert resp.status_code == 200
-    # First call should be with stripped name
-    assert call_names[0] == "assessment"
+    mock_load_assessment.assert_called_once()
 
 
 # ===================================================================

@@ -51,7 +51,9 @@ def _own_selector(fn: Any) -> str | None:
     this case; this is that convention, not a second one."""
     if _is_fallback_or_receive(fn):
         return None
-    return _selector_for(_function_full_name(fn))
+    from services.abi import _canonical_signature, selector_for_signature
+
+    return selector_for_signature(_canonical_signature(fn) or _function_full_name(fn))
 
 
 def _callee_signature(ir: Any) -> str | None:
@@ -66,7 +68,7 @@ def _callee_signature(ir: Any) -> str | None:
     # no external selector and nothing joins against it, so it keeps the string
     # form (its selector is notional and ubiquitous — not worth churning).
     if type(ir).__name__ == "HighLevelCall" and fn is not None:
-        from ..predicate_artifacts import _canonical_signature
+        from services.abi import _canonical_signature
 
         canonical = _canonical_signature(fn)
         if canonical:

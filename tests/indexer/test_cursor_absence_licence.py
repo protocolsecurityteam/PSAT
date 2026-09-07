@@ -409,6 +409,62 @@ def test_activity_reconciliation_preserves_predicate_hint_cursors(db_session):
 
 
 @requires_postgres
+@pytest.mark.parametrize("through_witness", [False, True])
+def test_tracked_first_predicate_later_preserves_progress(db_session, through_witness):
+    from workers.event_log_indexer import _enroll_witnessed
+
+    _monitored(db_session, [_TOPIC_DENY_TO], witness_tier="activity")
+    enroll_event_cursor(
+        db_session,
+        chain_id=1,
+        event_address=_ADDR,
+        topic0=_TOPIC_DENY_TO,
+        start_block=12345,
+        first_indexed_block=100,
+        first_indexed_block_basis=FIRST_INDEXED_BASIS_CREATION,
+        enrollment_basis=ENROLLMENT_BASIS_TRACKED_TOPICS,
+    )
+    if through_witness:
+        assert not _enroll_witnessed(
+            db_session,
+            chain_id=1,
+            address=_ADDR,
+            topic0=_TOPIC_DENY_TO,
+            seed_cache={},
+            witness_cache={},
+            enrollment_basis=ENROLLMENT_BASIS_PREDICATE_HINT,
+        )
+    else:
+        assert not enroll_event_cursor(
+            db_session,
+            chain_id=1,
+            event_address=_ADDR,
+            topic0=_TOPIC_DENY_TO,
+            enrollment_basis=ENROLLMENT_BASIS_PREDICATE_HINT,
+        )
+    enroll_from_tracked_topics(db_session)
+    cursor = _row(db_session, topic0=_TOPIC_DENY_TO)
+    assert cursor.enrollment_basis == ENROLLMENT_BASIS_PREDICATE_HINT
+    assert cursor.last_indexed_block == 12345
+    assert cursor.first_indexed_block == 100
+    assert cursor.first_indexed_block_basis == FIRST_INDEXED_BASIS_CREATION
+
+
+@requires_postgres
+def test_restaking_enrollment_survives_plan_reconciliation(db_session, monkeypatch):
+    from db.models import enrollment_basis_permits_exactness
+    from services.monitoring import restaking_enrollment as restaking
+
+    monkeypatch.setattr(restaking, "get_contract_creation_block", lambda *_a, **_kw: 100)
+    assert restaking.enroll_restaking_fold(db_session, chain_id=1, emitters=[_ADDR]) == 1
+    enroll_from_tracked_topics(db_session)
+    cursor = _row(db_session, topic0=restaking.PUBKEY_LINKED_TOPIC0)
+    assert cursor.enrollment_basis == restaking.RESTAKING_FOLD_ENROLLMENT_BASIS
+    assert not enrollment_basis_permits_exactness(cursor.enrollment_basis)
+    assert cursor.last_indexed_block == 99
+
+
+@requires_postgres
 def test_tracked_topics_enrolment_skips_unresolvable_and_inactive_rows(db_session, stub_rpc):
     """Arm 9 fail-closed. An unresolvable chain is skipped rather than guessed as
     mainnet, and an inactive row is not a monitoring surface."""

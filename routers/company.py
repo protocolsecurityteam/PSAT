@@ -26,6 +26,7 @@ from services.aggregations.company_overview import (
     build_functions_for_protocol,
     resolve_company_jobs,
 )
+from services.assessment.impact import build_proposal_impact
 from services.audits.serializers import _audit_brief, _audit_report_to_dict
 
 from . import deps
@@ -170,6 +171,32 @@ def company_functions(company_name: str, response: Response) -> dict[str, Any]:
         function_count=sum(len(v) for v in functions_by_entity.values()),
     )
     return {"functions": functions_by_entity}
+
+
+@router.get("/api/company/{company_name}/proposal-impact", response_model=None)
+def company_proposal_impact(company_name: str) -> dict[str, Any]:
+    """Observed proposal facts and scenario deltas from canonical Assessment."""
+    started = time.monotonic()
+    with deps.SessionLocal() as session:
+        protocol_row, jobs = resolve_company_jobs(session, company_name)
+        if protocol_row is None and not jobs:
+            _log_endpoint(
+                "/api/company/{name}/proposal-impact",
+                company=company_name,
+                started=started,
+                outcome="not_found",
+            )
+            raise HTTPException(status_code=404, detail="Company not found")
+        payload = build_proposal_impact(session, company_name, jobs)
+    _log_endpoint(
+        "/api/company/{name}/proposal-impact",
+        company=company_name,
+        started=started,
+        outcome="success",
+        proposal_count=len(payload["proposals"]),
+        change_count=len(payload["changes"]),
+    )
+    return payload
 
 
 @router.get("/api/company/{company_name}/audits", response_model=None)

@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from db.queue import get_artifact
 from db.queue.typed import load_assessment_inputs
-from services.policy.permission_index import _abi_signature
+from services.abi import canonical_signature
 from utils.logging import record_degraded
 
 from .flows import _selector_of
@@ -48,7 +48,7 @@ class ContractFacts:
     token_slots: tuple[Mapping[str, Any], ...] = ()
 
     def canonical_signature(self, full_name: str) -> str:
-        return self.canonical_signatures.get(full_name) or _abi_signature(full_name)
+        return canonical_signature(full_name, self.canonical_signatures) or full_name
 
 
 @dataclass(frozen=True)
@@ -138,7 +138,7 @@ def _load_contract_facts_uncached(session: Session, address: str) -> ContractFac
             by_selector.setdefault(artifact_selector.lower(), str(full_name))
         # The canonical selector wins: the artifact's own value is derived from the
         # Slither full_name, which is lossy for contract/enum/struct params.
-        sig = canonical.get(str(full_name)) or _abi_signature(str(full_name))
+        sig = canonical_signature(str(full_name), canonical) or str(full_name)
         computed = _selector_of(sig)
         if computed:
             by_selector[computed] = str(full_name)

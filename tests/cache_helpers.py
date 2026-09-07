@@ -192,6 +192,14 @@ FAKE_UH_NEW = {
 # Keep this export for test files that still import it
 def _sqlite_compatible_store_artifact(session, job_id, name, data=None, text_data=None):
     """ORM-based store_artifact (works with both SQLite and PostgreSQL)."""
+    if name in {"assessment", "principal_history"}:
+        # These names are canonical temporal publications after the cutover;
+        # bypassing the production writer would manufacture a legacy row that
+        # no production process can create.
+        from db.queue import store_artifact
+
+        store_artifact(session, job_id, name, data=data, text_data=text_data)
+        return
     from db.models import Artifact
 
     existing = session.query(Artifact).filter(Artifact.job_id == job_id, Artifact.name == name).first()
