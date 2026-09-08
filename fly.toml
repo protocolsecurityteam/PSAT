@@ -14,6 +14,7 @@ kill_timeout = 30
   PYTHONUNBUFFERED = "1"
   PSAT_EDGE_MODE = "cloudflare"
   PSAT_SITE_ORIGIN = "https://snif.sh"
+  PSAT_SUPPORTED_CHAIN_IDS = "1,8453"
   # Bumped from deploy/start_workers.sh defaults (2/1/1). Sized for the workers VM
   # (shared-cpu-8x:16GB) — 8 cores fit ~12 always-on Python procs plus
   # forge subprocess bursts without queueing. Policy bumped to 3 procs ×
