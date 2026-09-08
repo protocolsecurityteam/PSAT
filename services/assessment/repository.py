@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, cast
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -1439,6 +1439,50 @@ def publish_principal_history(session: Session, job_id: Any, history: Mapping[st
     if source_publication is None:
         raise ValueError("principal history requires an existing Assessment publication")
     publication = _clone_publication(session, source_publication)
+    # A new principal-history result replaces that slice in the latest view;
+    # prior publications retain the earlier slice. Flush the cloned links so
+    # the deletes cover both database and ORM-pending state before we publish
+    # the new immutable evidence/claims below.
+    session.flush()
+    prior_history_analyses = (
+        select(AssessmentPublicationAnalysis.analysis_id)
+        .join(
+            AssessmentAnalysis,
+            AssessmentAnalysis.id == AssessmentPublicationAnalysis.analysis_id,
+        )
+        .where(
+            AssessmentPublicationAnalysis.publication_id == publication.id,
+            AssessmentAnalysis.receipt["kind"].astext == "principal_history",
+        )
+    )
+    session.execute(
+        delete(AssessmentPublicationAnalysis).where(
+            AssessmentPublicationAnalysis.publication_id == publication.id,
+            AssessmentPublicationAnalysis.analysis_id.in_(prior_history_analyses),
+        )
+    )
+    session.execute(
+        delete(AssessmentPublicationEvidence).where(
+            AssessmentPublicationEvidence.publication_id == publication.id,
+            AssessmentPublicationEvidence.natural_key.like("principal_history:%"),
+        )
+    )
+    session.execute(
+        delete(AssessmentPublicationClaim).where(
+            AssessmentPublicationClaim.publication_id == publication.id,
+            AssessmentPublicationClaim.natural_key.like("principal_history:%"),
+        )
+    )
+    session.execute(
+        delete(AssessmentPublicationSubject).where(
+            AssessmentPublicationSubject.publication_id == publication.id,
+            (
+                AssessmentPublicationSubject.natural_key.like("authority:%")
+                | AssessmentPublicationSubject.natural_key.like("principal:%")
+                | AssessmentPublicationSubject.natural_key.like("role:%")
+            ),
+        )
+    )
     now = datetime.now(timezone.utc)
     root = source_publication.root_subject_id
     context_id = source_publication.context_id
@@ -1571,16 +1615,24 @@ def publish_principal_history(session: Session, job_id: Any, history: Mapping[st
                 AssessmentEvidence,
                 id=evidence_id,
                 subject_id=principal_subject or function_subject or root,
-                kind=(EvidenceKind.chain_event if interval.get("granted_at_block_hash") else EvidenceKind.artifact),
+                # This payload is a derived history interval, not the raw log.
+                # One RoleGranted occurrence can support several intervals
+                # (membership plus one or more function permissions), so filing
+                # every derived row as the chain-event occurrence collides with
+                # uq_assessment_chain_event_occurrence and loses the later row.
+                # Keep the complete event coordinates in the immutable payload
+                # and exact claim scope below; reserve the event-coordinate
+                # columns for a canonical raw-event evidence record.
+                kind=EvidenceKind.artifact,
                 payload_id=payload_id,
                 source={"kind": "artifact", "component": "principal_history", "section": section},
                 obtained_at=now,
-                chain_id=chain_id,
-                block_number=interval.get("granted_at_block"),
-                block_hash=interval.get("granted_at_block_hash"),
-                transaction_hash=interval.get("granted_at_tx"),
-                transaction_index=interval.get("granted_at_transaction_index"),
-                log_index=interval.get("granted_at_log_index"),
+                chain_id=None,
+                block_number=None,
+                block_hash=None,
+                transaction_hash=None,
+                transaction_index=None,
+                log_index=None,
             )
             natural_key = f"principal_history:{section}:{index}"
             session.add(

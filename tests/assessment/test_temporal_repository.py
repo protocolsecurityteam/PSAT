@@ -349,3 +349,100 @@ def test_closed_permission_update_keeps_exact_event_ordered_interval(db_session)
     assert historical_claim.scope["from_log_index"] == 3
     assert historical_claim.scope["through_transaction_index"] == 4
     assert historical_claim.scope["through_log_index"] == 5
+
+
+@requires_postgres
+def test_one_role_event_can_support_membership_and_function_history(db_session):
+    """One emitted grant can legitimately produce several derived history rows."""
+    job = _job(db_session)
+    store_artifact(db_session, job.id, "assessment", data=_assessment(ALICE, 100))
+    occurrence = {
+        "authority_address": ADDRESS,
+        "principal": ALICE,
+        "role": 1,
+        "granted_at_block": 100,
+        "granted_at_block_hash": "0x" + "10" * 32,
+        "granted_at_tx": "0x" + "a1" * 32,
+        "granted_at_transaction_index": 2,
+        "granted_at_log_index": 3,
+        "status": "active",
+    }
+    history = {
+        "contract_address": ADDRESS,
+        "chain_id": 1,
+        "status": "ok",
+        "sources": [{"authority_address": ADDRESS, "status": "ok"}],
+        "role_membership": [{**occurrence}],
+        "capability_roles": [],
+        "function_permissions": [
+            {
+                **occurrence,
+                "function": "setOwner(address)",
+                "selector": "0x13af4035",
+                "roles": [1],
+            }
+        ],
+        "public_capabilities": [],
+    }
+
+    store_artifact(db_session, job.id, "principal_history", data=history)
+    projected = get_artifact(db_session, job.id, "principal_history")
+
+    assert isinstance(projected, dict)
+    assert len(projected["role_membership"]) == 1
+    assert len(projected["function_permissions"]) == 1
+    assert projected["function_permissions"][0]["granted_at_block_hash"] == occurrence["granted_at_block_hash"]
+
+    historical_claims = db_session.scalars(
+        select(AssessmentClaim).where(AssessmentClaim.rule == "historical_interval")
+    ).all()
+    assert len(historical_claims) == 2
+    assert all(claim.scope["from_block_hash"] == occurrence["granted_at_block_hash"] for claim in historical_claims)
+    history_evidence = db_session.scalars(
+        select(AssessmentEvidence).where(AssessmentEvidence.source["component"].astext == "principal_history")
+    ).all()
+    assert len(history_evidence) == 2
+    assert all(row.kind.value == "artifact" and row.block_hash is None for row in history_evidence)
+
+    updated_occurrence = {
+        **occurrence,
+        "principal": BOB,
+        "granted_at_block": 110,
+        "granted_at_block_hash": "0x" + "11" * 32,
+        "granted_at_tx": "0x" + "b1" * 32,
+        "granted_at_log_index": 4,
+    }
+    updated_history = {
+        **history,
+        "role_membership": [],
+        "function_permissions": [
+            {
+                **updated_occurrence,
+                "function": "setOwner(address)",
+                "selector": "0x13af4035",
+                "roles": [1],
+            }
+        ],
+    }
+    store_artifact(db_session, job.id, "principal_history", data=updated_history)
+
+    latest = get_artifact(db_session, job.id, "principal_history")
+    assert isinstance(latest, dict)
+    assert latest["role_membership"] == []
+    assert [row["principal"] for row in latest["function_permissions"]] == [BOB]
+    current = load_temporal_assessment(db_session, job.id)
+    assert current is not None
+    current_history = [claim for claim in current["claims"] if claim["rule"].value == "historical_interval"]
+    assert len(current_history) == 1
+    assert current_history[0]["scope"]["from_block_hash"] == updated_occurrence["granted_at_block_hash"]
+    assert len(publication_history(db_session, job.id)) == 3
+    # Old immutable proof rows remain reachable from the earlier publication;
+    # the current publication selects only the replacement slice.
+    assert (
+        db_session.scalar(
+            select(func.count())
+            .select_from(AssessmentEvidence)
+            .where(AssessmentEvidence.source["component"].astext == "principal_history")
+        )
+        == 3
+    )
