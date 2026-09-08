@@ -75,6 +75,12 @@ Assessment/principal-history rows, one source manifest per imported row,
 contraction to `a8c2d4e6f901`, and a clean `alembic check`. The rehearsal does
 not authorize the production cutover.
 
+Private PR previews use the same loss-preserving order through
+`deploy.preview.assessment_release`. The workflow stops only that preview app's
+old stateless machines before the release command. A preview already containing
+the contraction uses an ordinary `alembic upgrade head`; it is not reset on
+reruns.
+
 ## Review scope
 
 The cache timing assertion is retained alongside cache reuse and source checks:

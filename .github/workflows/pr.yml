@@ -184,6 +184,14 @@ jobs:
             --app-prefix "$PSAT_PREVIEW_APP_PREFIX" \
             --template deploy/preview/fly.preview.toml.template --output "$GITHUB_WORKSPACE/fly-preview.toml"
 
+      - name: Stop old preview writers before schema release
+        run: |
+          mapfile -t machines < <(flyctl machines list -a "${{ steps.plan.outputs.app }}" --json \
+            | jq -r '.[] | select(.state == "started" or .state == "starting") | .id')
+          for machine in "${machines[@]}"; do
+            flyctl machines stop "$machine" -a "${{ steps.plan.outputs.app }}"
+          done
+
       - name: Deploy private preview
         run: |
           flyctl deploy -a "${{ steps.plan.outputs.app }}" --config "$GITHUB_WORKSPACE/fly-preview.toml" \
