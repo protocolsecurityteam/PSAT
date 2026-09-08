@@ -757,20 +757,24 @@ class StaticWorker(BaseWorker):
                 raise JobHandledDirectly()
             elif has_cached_static:
                 # Static artifacts already present from cache — skip static_facts phases.
-                logger.info(
-                    "Static stage cache hit for job %s (%s) — skipping Slither/static_facts/tracking plan",
-                    job_id_str,
-                    contract_name,
-                )
-                self.update_detail(session, job, "Static static_facts complete (cached)")
-                # Assessment evidence carries the cached static inputs, so
-                # secondaries resolve without a parallel static_facts artifact.
-                from db.queue.typed import load_assessment
-                from services.assessment import static_inputs
+                # Time the replacement operation separately from dependency
+                # discovery, which deliberately stays fresh because deployed
+                # dependencies can change independently of source code.
+                with log_timed_phase(logger, "static_cache_restore"):
+                    logger.info(
+                        "Static stage cache hit for job %s (%s) — skipping Slither/static_facts/tracking plan",
+                        job_id_str,
+                        contract_name,
+                    )
+                    self.update_detail(session, job, "Static static_facts complete (cached)")
+                    # Assessment evidence carries the cached static inputs, so
+                    # secondaries resolve without a parallel static_facts artifact.
+                    from db.queue.typed import load_assessment
+                    from services.assessment import static_inputs
 
-                cached_assessment = load_assessment(get_artifact, session, job.id)
-                if cached_assessment is not None:
-                    secondary_analysis, _cached_trees, _cached_effects = static_inputs(cached_assessment)
+                    cached_assessment = load_assessment(get_artifact, session, job.id)
+                    if cached_assessment is not None:
+                        secondary_analysis, _cached_trees, _cached_effects = static_inputs(cached_assessment)
             else:
                 # Phase 1: Contract static_facts (uses Slither's Python IR — the
                 # CLI subprocess that produced detector findings was removed;

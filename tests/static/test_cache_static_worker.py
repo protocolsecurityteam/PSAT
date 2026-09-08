@@ -29,6 +29,7 @@ def test_static_worker_cache_hit_skips_analysis(db_session, monkeypatch):
     """Job flagged as static_cached skips Slither/analysis but runs deps."""
     from db.models import Contract
     from db.queue import create_job, store_artifact, store_source_files
+    from utils.logging import stage_metrics_var
     from workers.static_worker import StaticWorker
 
     # Create a new job with the explicit cache flag set by discovery worker
@@ -57,7 +58,12 @@ def test_static_worker_cache_hit_skips_analysis(db_session, monkeypatch):
     worker = StaticWorker()
     phases_run = _patch_static_worker_phases(monkeypatch, worker)
 
-    worker.process(db_session, job)
+    metrics: dict[str, object] = {}
+    token = stage_metrics_var.set(metrics)
+    try:
+        worker.process(db_session, job)
+    finally:
+        stage_metrics_var.reset(token)
 
     # Dependency phase and proxy resolution should run; Slither/analysis/tracking should NOT
     assert "resolve_proxy" in phases_run
@@ -65,6 +71,8 @@ def test_static_worker_cache_hit_skips_analysis(db_session, monkeypatch):
     assert "slither" not in phases_run
     assert "analysis" not in phases_run
     assert "observation_plan" not in phases_run
+    assert isinstance(metrics.get("phase_ms_static_cache_restore"), int)
+    assert "phase_ms_static_facts" not in metrics
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +84,7 @@ def test_static_worker_cache_miss_runs_analysis(db_session, monkeypatch):
     """Job without cached artifacts runs all analysis phases normally."""
     from db.models import Contract
     from db.queue import create_job, store_source_files
+    from utils.logging import stage_metrics_var
     from workers.static_worker import StaticWorker
 
     job = create_job(db_session, {"address": ADDR_A, "rpc_url": "https://rpc.example"})
@@ -100,13 +109,20 @@ def test_static_worker_cache_miss_runs_analysis(db_session, monkeypatch):
     worker = StaticWorker()
     phases_run = _patch_static_worker_phases(monkeypatch, worker)
 
-    worker.process(db_session, job)
+    metrics: dict[str, object] = {}
+    token = stage_metrics_var.set(metrics)
+    try:
+        worker.process(db_session, job)
+    finally:
+        stage_metrics_var.reset(token)
 
     # All phases should run (slither CLI subprocess removed in commit 438a11c).
     assert "resolve_proxy" in phases_run
     assert "dependency" in phases_run
     assert "analysis" in phases_run
     assert "observation_plan" not in phases_run
+    assert isinstance(metrics.get("phase_ms_static_facts"), int)
+    assert "phase_ms_static_cache_restore" not in metrics
 
 
 # ---------------------------------------------------------------------------
