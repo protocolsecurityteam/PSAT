@@ -35,6 +35,7 @@ from routers import (
     protocols,
     spa,
 )
+from utils.company_limit import CompanyReadLimit
 from utils.edge import CloudflareBoundary, EdgeConfig
 from utils.logging import bind_trace_context, configure_logging, trace_id_var
 from utils.ratelimit import SlidingWindowRateLimiter, client_ip
@@ -166,7 +167,10 @@ class BodySizeLimitMiddleware:
             if not replayed:
                 replayed = True
                 return {"type": "http.request", "body": body, "more_body": False}
-            return {"type": "http.disconnect"}
+            # Body completion is not a client disconnect. In particular, an
+            # ordinary GET has no Content-Length; the admission queue must
+            # continue waiting for the real connection rather than discard it.
+            return await receive()
 
         await self.app(scope, replay_receive, send)
 
@@ -325,6 +329,9 @@ async def trace_id_middleware(request: Request, call_next):
 # 1-3 MB of nested control-graph data; gzip cuts it ~5-10x and is the single
 # largest win for the company page's perceived load time.
 app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=6)
+# Outside gzip so a slot covers the entire serialized/compressed response;
+# the Cloudflare boundary registered below authenticates before admission.
+app.add_middleware(CompanyReadLimit)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,

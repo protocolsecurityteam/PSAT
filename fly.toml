@@ -15,6 +15,9 @@ kill_timeout = 30
   PSAT_EDGE_MODE = "cloudflare"
   PSAT_SITE_ORIGIN = "https://snif.sh"
   PSAT_SUPPORTED_CHAIN_IDS = "1,8453"
+  PSAT_COMPANY_MAX_INFLIGHT = "2"
+  PSAT_COMPANY_MAX_QUEUED = "8"
+  PSAT_COMPANY_QUEUE_TIMEOUT = "30"
   # Bumped from deploy/start_workers.sh defaults (2/1/1). Sized for the workers VM
   # (shared-cpu-8x:16GB) — 8 cores fit ~12 always-on Python procs plus
   # forge subprocess bursts without queueing. Policy bumped to 3 procs ×
@@ -66,13 +69,13 @@ kill_timeout = 30
     hard_limit = 100
     soft_limit = 80
 
-  [[http_service.http_checks]]
+  [[http_service.checks]]
     method = "get"
     path = "/api/health"
     interval = "30s"
     timeout = "5s"
     grace_period = "60s"
-    [http_service.http_checks.headers]
+    [http_service.checks.headers]
       # main.yml replaces this in a protected temporary config before deploy.
       # Leaving the placeholder intact fails the production health check closed.
       X-PSAT-Health-Secret = "REPLACE_WITH_PSAT_HEALTH_SECRET"
@@ -82,7 +85,8 @@ kill_timeout = 30
 [[vm]]
   processes = ["web"]
   size = "shared-cpu-1x"
-  memory = "512mb"
+  # Company JSON construction is memory-heavy even with bounded concurrency.
+  memory = "1gb"
 
 [[vm]]
   processes = ["workers"]
