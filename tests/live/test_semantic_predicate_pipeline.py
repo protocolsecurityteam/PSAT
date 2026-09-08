@@ -7,30 +7,7 @@ from typing import Any
 
 import pytest
 
-from db.queue.typed import validate_assessment
-from services.assessment import project_permission_index, static_inputs
 from tests.live.conftest import DEFAULT_COMPANY_TIMEOUT, DEFAULT_POLL_INTERVAL, LiveClient
-
-EXPECTED_LEAF_KINDS = {
-    "membership",
-    "equality",
-    "comparison",
-    "external_bool",
-    "signature_auth",
-    "unsupported",
-}
-TYPED_LEAF_KINDS = {"equality", "membership", "external_bool", "signature_auth"}
-AUTHORITY_LEAF_ROLES = {"caller_authority", "delegated_authority"}
-
-EXPECTED_AUTHORITY_ROLES = {
-    "caller_authority",
-    "delegated_authority",
-    "time",
-    "reentrancy",
-    "pause",
-    "business",
-    "one_shot",
-}
 
 EXPECTED_CAPABILITY_KINDS = {
     "finite_set",
@@ -43,31 +20,27 @@ EXPECTED_CAPABILITY_KINDS = {
     "AND",
     "OR",
 }
+EXPECTED_AUTHORITY_KINDS = {"public", "entity", "role", "any", "all", "expression"}
+PRINCIPAL_CAPABILITY_KINDS = {"finite_set", "threshold_group", "signature_witness"}
 
 
-def _iter_leaves(tree: dict[str, Any]):
-    if not isinstance(tree, dict):
-        return
-    if tree.get("op") == "LEAF":
-        leaf = tree.get("leaf")
-        if isinstance(leaf, dict):
-            yield leaf
-        return
-    for child in tree.get("children", []) or []:
-        yield from _iter_leaves(child)
+def _iter_capabilities(expression: dict[str, Any]):
+    yield expression
+    for child in expression.get("children", []) or []:
+        if isinstance(child, dict):
+            yield from _iter_capabilities(child)
 
 
-def _leaves_from_artifact(artifact: dict[str, Any]) -> list[dict[str, Any]]:
-    trees = artifact.get("trees") or {}
-    leaves: list[dict[str, Any]] = []
-    for tree in trees.values():
-        leaves.extend(_iter_leaves(tree))
-    return leaves
+def _iter_authorities(authority: dict[str, Any]):
+    yield authority
+    for child in authority.get("children", []) or []:
+        if isinstance(child, dict):
+            yield from _iter_authorities(child)
 
 
 @pytest.fixture(scope="module")
 def guarded_contract(analyzed_company, live_client: LiveClient) -> dict[str, Any]:
-    """Exercise discovery through a guarded descendant, on a fresh preview DB."""
+    """Exercise canonical policy rows through a guarded company descendant."""
     deadline = time.monotonic() + DEFAULT_COMPANY_TIMEOUT
     descendants: list[dict[str, Any]] = []
     while time.monotonic() < deadline:
@@ -94,53 +67,80 @@ def guarded_contract(analyzed_company, live_client: LiveClient) -> dict[str, Any
         if job.get("status") != "completed" or not job.get("address") or not job.get("name"):
             continue
         raw = live_client.artifact(job["name"], "assessment")
-        if raw is None:
-            diagnostics.append(f"{job['name']}: no Assessment")
+        if not isinstance(raw, dict):
+            diagnostics.append(f"{job['name']}: no row-shaped Assessment")
             continue
-        assessment = validate_assessment(raw)
-        _facts, predicate_trees, _effects = static_inputs(assessment)
-        leaves = _leaves_from_artifact(predicate_trees)
-        if any(leaf.get("authority_role") in AUTHORITY_LEAF_ROLES for leaf in leaves):
-            return {"job": job, "assessment": assessment, "predicate_trees": predicate_trees, "leaves": leaves}
-        diagnostics.append(f"{job['name']}: no authority leaves")
+        response = live_client._session.get(
+            live_client._url(f"/api/contract/{job['address'].lower()}/capabilities"),
+            timeout=30,
+        )
+        if response.status_code != 200:
+            diagnostics.append(f"{job['name']}: capabilities returned {response.status_code}")
+            continue
+        capabilities = response.json().get("capabilities")
+        if not isinstance(capabilities, dict) or not capabilities:
+            diagnostics.append(f"{job['name']}: no capabilities")
+            continue
+        expressions = [
+            node
+            for capability in capabilities.values()
+            if isinstance(capability, dict)
+            for node in _iter_capabilities(capability)
+        ]
+        if not any(node.get("kind") in PRINCIPAL_CAPABILITY_KINDS for node in expressions):
+            diagnostics.append(f"{job['name']}: no principal-bearing capabilities")
+            continue
+        claims = raw.get("claims")
+        analyses = raw.get("analyses")
+        if not isinstance(claims, list) or not isinstance(analyses, list):
+            diagnostics.append(f"{job['name']}: malformed canonical Assessment rows")
+            continue
+        authority_claims = [row for row in claims if row.get("kind") == "function_authority"]
+        if not authority_claims:
+            diagnostics.append(f"{job['name']}: no canonical authority claims")
+            continue
+        return {
+            "job": job,
+            "assessment": raw,
+            "capabilities": capabilities,
+            "authority_claims": authority_claims,
+        }
     pytest.fail(
         "Company discovery produced no guarded Assessment descendant. "
-        "This integration requires a fresh preview DB with eligible discovery candidates; "
+        "This integration requires an eligible guarded discovery candidate; "
         f"descendants={len(descendants)} diagnostics={diagnostics[:10]}"
     )
 
 
-def test_predicate_trees_are_embedded_in_assessment(guarded_contract):
-    artifact = guarded_contract["predicate_trees"]
-    trees = artifact.get("trees")
+def test_policy_outputs_are_linked_in_canonical_assessment(guarded_contract):
+    assessment = guarded_contract["assessment"]
+    claim_ids = {row["id"] for row in assessment["claims"]}
+    policy_runs = [row for row in assessment["analyses"] if row.get("producer") == "policy"]
+    assert policy_runs, "guarded child must retain policy analysis receipts"
+    outputs = {claim_id for row in policy_runs for claim_id in row.get("outputs", [])}
+    assert outputs, "policy analyses must identify their canonical claim outputs"
+    assert outputs <= claim_ids, "policy analysis outputs must reference published claim rows"
+    assert {row["id"] for row in guarded_contract["authority_claims"]} <= outputs
 
-    assert artifact.get("schema_version") == "semantic", (
-        f"predicate_trees.schema_version must be 'semantic', got {artifact.get('schema_version')!r}"
-    )
-    assert isinstance(trees, dict) and trees, "guarded child predicate_trees.trees must be non-empty"
 
-
-def test_predicate_trees_has_typed_leaves(guarded_contract):
-    leaves = guarded_contract["leaves"]
-    assert leaves, "guarded child predicate_trees must contain at least one leaf"
-
-    saw_typed_leaf = False
-    saw_authority_leaf = False
-    for leaf in leaves:
-        kind = leaf.get("kind")
-        role = leaf.get("authority_role")
-        assert kind in EXPECTED_LEAF_KINDS, (
-            f"Leaf kind {kind!r} is not in the closed semantic LeafKind set ({sorted(EXPECTED_LEAF_KINDS)})"
-        )
-        assert role in EXPECTED_AUTHORITY_ROLES, (
-            f"Leaf authority_role {role!r} is not in the closed semantic AuthorityRole set "
-            f"({sorted(EXPECTED_AUTHORITY_ROLES)})"
-        )
-        saw_typed_leaf = saw_typed_leaf or kind in TYPED_LEAF_KINDS
-        saw_authority_leaf = saw_authority_leaf or role in AUTHORITY_LEAF_ROLES
-
-    assert saw_typed_leaf, f"No leaf with kind in {sorted(TYPED_LEAF_KINDS)} found"
-    assert saw_authority_leaf, f"No authority leaf with role in {sorted(AUTHORITY_LEAF_ROLES)} found"
+def test_authority_claims_are_typed_and_proven(guarded_contract):
+    assessment = guarded_contract["assessment"]
+    subject_ids = {row["id"] for row in assessment["subjects"]}
+    evidence_ids = {row["id"] for row in assessment["evidence"]}
+    for claim in guarded_contract["authority_claims"]:
+        proposition = claim.get("proposition") or {}
+        assert proposition.get("kind") == "function_authority"
+        assert proposition.get("function") in subject_ids
+        assert claim.get("evidence"), "authority claims need an evidence basis"
+        assert set(claim["evidence"]) <= evidence_ids
+        authority = proposition.get("authority")
+        assert isinstance(authority, dict)
+        for node in _iter_authorities(authority):
+            assert node.get("kind") in EXPECTED_AUTHORITY_KINDS
+            entity = node.get("entity")
+            if entity is not None:
+                assert entity in subject_ids
+            assert set(node.get("entities", [])) <= subject_ids
 
 
 def test_capability_resolution_returns_non_empty(guarded_contract, live_client: LiveClient):
@@ -169,24 +169,19 @@ def test_capability_resolution_returns_non_empty(guarded_contract, live_client: 
 
 
 def test_assessment_permissions_preserve_capabilities_and_principals(guarded_contract):
-    functions = project_permission_index(guarded_contract["assessment"])["functions"]
-    assert functions, "Guarded descendant must publish policy evidence in Assessment"
-    checked = 0
-    for function in functions:
-        capability = function.get("capability_expr")
-        if not isinstance(capability, dict):
-            continue
-        principals = [p for controller in function.get("controllers", []) for p in controller.get("principals", [])]
-        kind = capability.get("kind")
-        if kind == "finite_set":
-            assert len(principals) == len(capability.get("members", []))
-        elif kind == "threshold_group":
-            assert len(principals) == 1
-            assert principals[0]["resolved_type"] == "safe"
-            assert "threshold" in principals[0].get("details", {})
-        elif kind in {"cofinite_blacklist", "external_check_only", "conditional_universal"}:
-            assert principals == []
-        else:
-            continue
-        checked += 1
-    assert checked, "No Assessment permission contained an asserted capability kind"
+    capabilities = guarded_contract["capabilities"]
+    expressions = [
+        node
+        for capability in capabilities.values()
+        if isinstance(capability, dict)
+        for node in _iter_capabilities(capability)
+    ]
+    assert any(node.get("kind") in PRINCIPAL_CAPABILITY_KINDS for node in expressions)
+
+    assessment = guarded_contract["assessment"]
+    claims_by_id = {row["id"]: row for row in assessment["claims"]}
+    authority_capabilities = [row for row in assessment["claims"] if row.get("kind") == "authority_capability"]
+    for claim in authority_capabilities:
+        dependency_kinds = {claims_by_id[key]["kind"] for key in claim.get("claims", []) if key in claims_by_id}
+        assert dependency_kinds == {"function_authority", "function_effect"}
+    assert guarded_contract["authority_claims"], "principal-bearing capabilities must survive as authority claims"

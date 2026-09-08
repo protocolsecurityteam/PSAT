@@ -14,6 +14,11 @@ COMPANY_LIMIT = 2
 
 def test_first_run_completes(analyzed_weth):
     assert analyzed_weth["status"] == "completed"
+    request = analyzed_weth.get("request") or {}
+    assert request.get("force") is True, f"timing baseline was not forced cold: request={request}"
+    assert request.get("static_cached") is not True, (
+        f"forced cold run unexpectedly used static cache: request={request}"
+    )
 
 
 def test_first_run_has_artifacts(analyzed_weth, live_client: LiveClient):

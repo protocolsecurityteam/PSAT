@@ -92,8 +92,12 @@ class LiveClient:
 
     # -- analyze -------------------------------------------------------------
 
-    def analyze(self, address: str) -> dict[str, Any]:
-        r = self._session.post(self._url("/api/analyze"), json={"address": address}, timeout=15)
+    def analyze(self, address: str, *, force: bool = False) -> dict[str, Any]:
+        r = self._session.post(
+            self._url("/api/analyze"),
+            json={"address": address, "force": force},
+            timeout=15,
+        )
         r.raise_for_status()
         return r.json()
 
@@ -424,8 +428,10 @@ class LiveClient:
         self,
         address: str,
         timeout: float = DEFAULT_SINGLE_TIMEOUT,
+        *,
+        force: bool = False,
     ) -> dict[str, Any]:
-        return self.poll_job_until_done(self.analyze(address)["job_id"], timeout=timeout)
+        return self.poll_job_until_done(self.analyze(address, force=force)["job_id"], timeout=timeout)
 
     def submit_company_and_wait(
         self,
@@ -514,8 +520,14 @@ def _require_live_api(live_base_url: str):
 
 @pytest.fixture(scope="session")
 def analyzed_weth(live_client: LiveClient) -> dict[str, Any]:
-    """Submit WETH once per session; dependent tests reuse the result."""
-    job = live_client.submit_and_wait(WETH_ADDRESS)
+    """Submit one deliberately cold WETH run; dependent tests reuse it.
+
+    Preview data survives PR reruns, so an ordinary first submission can itself
+    hit a prior run's static cache. ``force`` is the API's bench-only cold-run
+    switch and makes the timing comparison below measure cold versus cached
+    work without resetting the shared preview database.
+    """
+    job = live_client.submit_and_wait(WETH_ADDRESS, force=True)
     if job["status"] != "completed":
         pytest.fail(f"WETH analysis did not complete on {live_client.base_url}: {job.get('error')}")
     return job
