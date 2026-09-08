@@ -303,6 +303,28 @@ def test_company_payload_equality_and_cache_matrix(edge_client, signing_keys, mo
     assert edge_client.get(path, headers={**ORIGIN, "X-PSAT-Admin-Key": "test-admin-key"}).status_code == 403
 
 
+def test_company_admission_is_after_authentication_and_includes_operator_alias(edge_client, signing_keys, monkeypatch):
+    import api
+    from utils.company_limit import CompanyReadLimit
+
+    assert edge_client.get("/api/version", headers=ORIGIN).status_code == 200
+    middleware = api.app.middleware_stack
+    while not isinstance(middleware, CompanyReadLimit):
+        middleware = getattr(middleware, "app")
+    # Exercise the real middleware ordering with a saturated gate; the gate's
+    # concurrent lifecycle is tested separately without a second TestClient loop.
+    monkeypatch.setattr(middleware, "admitted", middleware.capacity)
+    for path in ("/api/company/Example", "/api/company/Example/functions", "/operator/api/company/Example"):
+        assert edge_client.get(path).status_code == 403
+        headers = {**ORIGIN, "CF-Access-Jwt-Assertion": token(signing_keys)}
+        response = edge_client.get(path, headers=headers)
+        assert response.status_code == 503
+        assert response.headers["cache-control"] == PRIVATE
+        assert response.headers["retry-after"] == "2"
+        assert response.headers["x-content-type-options"] == "nosniff"
+    assert edge_client.get("/api/version", headers=ORIGIN).status_code == 200
+
+
 @pytest.mark.parametrize("status", [200, 302, 400, 401, 403, 404, 422, 429, 500, 503])
 @pytest.mark.parametrize("set_cookie", [False, True])
 def test_errors_and_set_cookie_never_cache(status, set_cookie, jwks_wire):

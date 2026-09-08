@@ -7,7 +7,7 @@
 
 import React from "react";
 import { describe, it, expect, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import CompanyOverview from "./CompanyOverview.jsx";
 import { setFetchHandler } from "../test/fetchMock.js";
@@ -67,6 +67,75 @@ function coveredStatValue() {
   const stat = label.closest(".company-hero-stat");
   return stat.querySelector(".company-hero-stat-value").textContent;
 }
+
+describe("CompanyOverview — recovery and navigation", () => {
+  it("offers recovery when functions are overloaded instead of leaving the surface loading forever", async () => {
+    installTwinMocks();
+    let attempts = 0;
+    setFetchHandler((url) => url.pathname === "/api/company/twinco/functions", () => {
+      attempts += 1;
+      return attempts === 1
+        ? new Response(JSON.stringify({ detail: "Company data is busy." }), {
+            status: 503, headers: { "Content-Type": "application/json" },
+          })
+        : { functions: {} };
+    });
+    render(<CompanyOverview companyName="twinco" />);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Failed to load control surface functions");
+    expect(screen.getByText("Covered")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Retry", exact: true }));
+    await screen.findByText("Covered");
+    await waitFor(() => expect(attempts).toBe(2));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("retries a gateway failure and clears the error on success", async () => {
+    installTwinMocks();
+    let attempts = 0;
+    setFetchHandler((url) => url.pathname === "/api/company/twinco", () => {
+      attempts += 1;
+      if (attempts === 1) return new Response("<!DOCTYPE html>gateway failure", {
+        status: 502, headers: { "Content-Type": "text/html" },
+      });
+      return { contracts: [], principals: [], fund_flows: [], ownership_hierarchy: [] };
+    });
+    render(<CompanyOverview companyName="twinco" />);
+    expect(await screen.findByRole("alert")).toHaveTextContent("temporarily unavailable");
+    expect(screen.queryByText(/DOCTYPE/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Retry", exact: true }));
+    await screen.findByText("Covered");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(attempts).toBe(2);
+  });
+
+  it("aborts obsolete requests and ignores late results after company navigation", async () => {
+    installTwinMocks();
+    let resolveOld;
+    let oldSignal;
+    setFetchHandler((url) => url.pathname === "/api/company/oldco", (_url, init) => {
+      oldSignal = init.signal;
+      return new Promise((resolve) => { resolveOld = resolve; });
+    });
+    const view = render(<CompanyOverview companyName="oldco" />);
+    await waitFor(() => expect(oldSignal).toBeDefined());
+    view.rerender(<CompanyOverview companyName="twinco" />);
+    await screen.findByText("Covered");
+    expect(oldSignal.aborted).toBe(true);
+    await act(async () => resolveOld(new Response("Old request failed", { status: 503 })));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(coveredStatValue()).toBe("2");
+  });
+
+  it("clears a previous company's failure on navigation", async () => {
+    installTwinMocks();
+    setFetchHandler((url) => url.pathname === "/api/company/badco", () => new Response("unavailable", { status: 503 }));
+    const view = render(<CompanyOverview companyName="badco" />);
+    await screen.findByRole("alert");
+    view.rerender(<CompanyOverview companyName="twinco" />);
+    await screen.findByText("Covered");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+});
 
 describe("CompanyOverview — cross-chain same-address twins", () => {
   beforeEach(() => {

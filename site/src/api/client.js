@@ -55,7 +55,22 @@ export async function api(path, options = {}) {
     // tell "the server says this does not exist" (404) from "the server could
     // not find out" (503) — collapsing them into a message string is how a
     // storage outage got drawn as an empty timeline.
-    const err = new Error(await response.text());
+    const type = response.headers.get("content-type") || "";
+    let message = response.status >= 500
+      ? "The server is temporarily unavailable. Please try again."
+      : `Request failed (${response.status}). Please try again.`;
+    if (type.includes("application/json")) {
+      try {
+        const body = await response.json();
+        if (typeof body.detail === "string" && body.detail.length <= 300 && !/<[^>]+>/.test(body.detail)) {
+          message = body.detail;
+        }
+      } catch { /* malformed gateway responses use the safe fallback */ }
+    } else if (type.includes("text/plain") && response.status < 500) {
+      const body = await response.text();
+      if (body.length <= 300 && !/<[^>]+>/.test(body)) message = body;
+    }
+    const err = new Error(message);
     err.status = response.status;
     throw err;
   }

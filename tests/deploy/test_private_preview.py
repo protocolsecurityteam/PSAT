@@ -65,7 +65,7 @@ def test_generated_config_is_private_flycast_http_with_idle_wake() -> None:
         "min_machines_running": 0,
         "processes": ["web"],
         "concurrency": {"type": "connections", "hard_limit": 100, "soft_limit": 80},
-        "http_checks": [
+        "checks": [
             {
                 "method": "get",
                 "path": "/api/health",
@@ -286,8 +286,12 @@ def test_production_deploy_injects_private_health_secret_and_uses_cloudflare() -
     config = tomli.loads((ROOT / "fly.toml").read_text())
     assert config["env"]["PSAT_EDGE_MODE"] == "cloudflare"
     assert config["env"]["PSAT_SITE_ORIGIN"] == "https://snif.sh"
-    check = config["http_service"]["http_checks"][0]
+    assert "http_checks" not in config["http_service"]
+    check = config["http_service"]["checks"][0]
+    assert check["path"] == "/api/health"
     assert check["headers"]["X-PSAT-Health-Secret"] == "REPLACE_WITH_PSAT_HEALTH_SECRET"
+    web_vm = next(vm for vm in config["vm"] if vm["processes"] == ["web"])
+    assert web_vm["memory"] == "1gb"
 
     main = (WORKFLOWS / "main.yml").read_text()
     assert "PSAT_HEALTH_SECRET: ${{ secrets.PSAT_HEALTH_SECRET }}" in main
