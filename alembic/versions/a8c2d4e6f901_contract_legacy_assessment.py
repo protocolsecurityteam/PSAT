@@ -1,5 +1,7 @@
 """Contract legacy analytical storage after the temporal import is complete."""
 
+from sqlalchemy import inspect
+
 from alembic import context, op
 
 revision = "a8c2d4e6f901"
@@ -33,7 +35,7 @@ def upgrade() -> None:
     ).scalar()
     if unarchived:
         raise RuntimeError(f"Temporal Assessment source archive is incomplete: {unarchived} payload(s) missing")
-    for table, columns in {
+    retired = {
         "jobs": ("analysis_schema_version",),
         "contract_materializations": (
             "analysis_schema_version",
@@ -45,13 +47,19 @@ def upgrade() -> None:
         "effect_behavior_cache": ("analysis_schema_version",),
         "effective_functions": ("effect_labels", "effect_targets", "action_summary"),
         "control_graph_nodes": ("analyzed",),
-    }.items():
+    }
+    inspector = inspect(bind)
+    present_columns = {table: {column["name"] for column in inspector.get_columns(table)} for table in retired}
+    for table, columns in retired.items():
         for column in columns:
-            op.drop_column(table, column)
+            if column in present_columns[table]:
+                op.drop_column(table, column)
     op.execute(
         "UPDATE monitored_contracts SET contract_type = 'regular' WHERE contract_type IN ('role_control', 'contract')"
     )
-    op.drop_constraint("ck_monitored_contracts_contract_type", "monitored_contracts", type_="check")
+    constraints = {row["name"] for row in inspector.get_check_constraints("monitored_contracts")}
+    if "ck_monitored_contracts_contract_type" in constraints:
+        op.drop_constraint("ck_monitored_contracts_contract_type", "monitored_contracts", type_="check")
     op.create_check_constraint(
         "ck_monitored_contracts_contract_type",
         "monitored_contracts",
