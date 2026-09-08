@@ -14,7 +14,6 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from db.models import Contract, Job, JobStatus
-from db.queue.typed import validate_assessment
 
 # Indirect through ``routers.deps`` so tests get a single patch point for
 # ``SessionLocal``/``get_all_artifacts``.
@@ -64,8 +63,10 @@ def _artifacts_or_degrade(
         not_determined.update(exc.not_determined)
         proven_absent.update(exc.proven_absent)
         artifacts = dict(exc.values or {})
-    if "assessment" in artifacts:
-        artifacts["assessment"] = validate_assessment(artifacts["assessment"])
+    # Defense in depth for alternate implementations/test doubles: this
+    # summary endpoint never embeds either canonical analytical view.
+    artifacts.pop("assessment", None)
+    artifacts.pop("principal_history", None)
     return artifacts
 
 

@@ -1,33 +1,37 @@
-"""Public consumers receive validated Assessment or a structured failure."""
+"""Public consumers receive only the row-shaped canonical Assessment."""
 
-from unittest.mock import MagicMock
+import uuid
 
 import pytest
-from fastapi.testclient import TestClient
 
-import api
-from routers import deps
+from db.models import Artifact, Job, JobStage, JobStatus
+from tests.conftest import requires_postgres
 
 
 @pytest.mark.parametrize("body", [{"schema_version": "assessment/5"}, {"schema_version": "assessment/4"}, []])
-def test_public_detail_rejects_invalid_internal_projection(monkeypatch, body):
-    session = MagicMock()
-    job = MagicMock()
-    job.name = "test"
-    session.execute.return_value.scalar_one_or_none.return_value = job
-    factory = MagicMock()
-    factory.return_value.__enter__.return_value = session
-    monkeypatch.setattr(deps, "SessionLocal", factory)
-    monkeypatch.setattr(deps, "get_artifact", lambda *_: body)
-    monkeypatch.setattr(deps, "get_all_artifacts", lambda *_: {"assessment": body})
-    response = TestClient(api.app).get("/api/analyses/test")
-    assert response.status_code == 500
-    assert response.headers["X-PSAT-Artifact-State"] == "invalid"
-    assert response.json()["detail"] == {"code": "invalid_assessment", "artifact": "assessment"}
+@requires_postgres
+def test_public_detail_never_embeds_a_legacy_assessment(api_client, db_session, body):
+    job = Job(
+        id=uuid.uuid4(),
+        address="0x" + "13" * 20,
+        chain_id=1,
+        name=f"legacy-{uuid.uuid4()}",
+        request={"chain": "ethereum"},
+        status=JobStatus.completed,
+        stage=JobStage.done,
+    )
+    db_session.add(job)
+    db_session.flush()
+    db_session.add(Artifact(job_id=job.id, name="assessment", data=body))
+    db_session.commit()
+
+    response = api_client.get(f"/api/analyses/{job.name}")
+    assert response.status_code == 200
+    assert "assessment" not in response.json()
+    assert "assessment_url" not in response.json()
 
 
 def test_public_assessment_is_row_shaped_and_has_no_schema_version(api_client, db_session):
-    from db.models import Job, JobStage, JobStatus
     from tests.support.assessment_artifacts import store_test_assessment
 
     address = "0x" + "12" * 20
