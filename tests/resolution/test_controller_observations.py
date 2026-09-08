@@ -182,6 +182,10 @@ def test_observe_controllers_heartbeats_while_reading_latest_block(monkeypatch):
         release.set()
 
     monkeypatch.setattr("services.resolution.tracking._current_block_number", slow_current_block)
+    monkeypatch.setattr(
+        "services.resolution.tracking._block_hash",
+        lambda _rpc_url, block_number, *, chain_id=None: "0x" + f"{block_number:064x}",
+    )
 
     snapshot = observe_controllers(plan, "https://rpc.example", heartbeat=heartbeat)
 
