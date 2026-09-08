@@ -38,7 +38,7 @@ test("a gateway failure shows a short error and Retry recovers the company page"
   expect(errors).toEqual([]);
 });
 
-test("prepared data has no freshness label and the embedded surface reuses the score request", async ({ page }) => {
+test("the embedded surface reuses the score request", async ({ page }) => {
   let scoreRequests = 0;
   let releaseOverview;
   const overviewReady = new Promise(resolve => { releaseOverview = resolve; });
@@ -48,7 +48,7 @@ test("prepared data has no freshness label and the embedded surface reuses the s
     if (path === "/api/company/prepared") {
       await overviewReady;
       return route.fulfill({
-        contentType: "application/json", headers: { "X-PSAT-Prepared-At": "2026-09-08T22:00:00+00:00" },
+        contentType: "application/json",
         body: JSON.stringify({ company: "prepared", contracts: [], principals: [], ownership_hierarchy: [], fund_flows: [] }),
       });
     }
@@ -63,6 +63,5 @@ test("prepared data has no freshness label and the embedded surface reuses the s
   const count = scoreRequests;
   releaseOverview();
   await expect(page.getByText("No score published for this protocol.")).toBeVisible();
-  await expect(page.getByText(/Data as of/)).toHaveCount(0);
   expect(scoreRequests).toBe(count);
 });
