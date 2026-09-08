@@ -125,6 +125,10 @@ deployment of an existing database. The `/company/{name}/proposals` surface
 shows observed-versus-scenario comparisons. Governance getter collection is opt-in through
 `collect_governance`, `proposal_ids`, or `operation_ids` in an analysis request;
 unsupported contract families produce diagnostics rather than inferred claims.
+Field-level definitions remain authoritative in
+[`schemas/temporal_assessment.py`](schemas/temporal_assessment.py) and
+[`db/models/assessment.py`](db/models/assessment.py); the architecture document
+explains their relationships instead of duplicating the type catalogue.
 
 The unified protocol monitor (`workers.protocol_monitor`) runs separately
 and drives live upgrade / event / TVL tracking.
@@ -143,5 +147,12 @@ docker compose up --build api site
 Run the non-live suite:
 
 ```bash
-uv run pytest -k "not live"
+uv run pytest -m "not live"
 ```
+
+PR previews retain their database across ordinary reruns. The live
+company-discovery gate intentionally requires a fresh inventory so it proves
+discovery reaches a newly analyzed guarded descendant. Before resubmitting that
+gate on an exhausted preview, an authorized repository writer must comment
+`/reset-db` on the PR and wait for the scoped reset workflow to finish. Resets
+are explicit; normal PR runs never erase the preview database.

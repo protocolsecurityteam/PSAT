@@ -12,9 +12,11 @@ Principal-history behavior is retained through temporal evidence and claims.
 Reports that lack block hashes remain explicitly `reported`; hash-anchored
 grant/revoke events can establish ordered bounded intervals.
 
-The public wire has no schema-version tag. Use a fresh preview database for
-the company-discovery live integration: a warm inventory can have no eligible
-new candidates and therefore cannot exercise discovery-to-analysis traversal.
+The public wire has no schema-version tag. The company-discovery live
+integration requires a fresh preview inventory: a warm inventory can have no
+eligible new candidates and therefore cannot exercise discovery-to-analysis
+traversal. Resetting remains an explicit operator action through the scoped
+`/reset-db` PR comment command; ordinary reruns retain the preview database.
 
 ## Existing production database
 
@@ -83,8 +85,11 @@ reruns.
 
 ## Review scope
 
-The cache timing assertion is retained alongside cache reuse and source checks:
-when the first run exceeds 30 seconds, the cached run must finish faster.
-Company-discovery and capability/principal consistency checks
-are retained through Assessment. The new membership-strength labels are
-deferred until standing membership witnesses are refreshed consistently.
+The cache timing assertion is retained alongside cache reuse and source checks.
+The forced-cold run must finish after the cached run, and Assessment cache
+restore must be at least 25% faster than the fresh static-facts work it replaces.
+Fresh dependency discovery is excluded from that ratio because deployed
+dependencies can change. Company-discovery-to-guarded-descendant and
+capability/principal consistency checks are retained through Assessment. The
+new membership-strength labels are deferred until standing membership witnesses
+are refreshed consistently.
