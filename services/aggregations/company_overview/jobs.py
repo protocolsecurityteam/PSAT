@@ -49,6 +49,14 @@ class GovernanceView:
     fund_flows: list[dict[str, Any]] = field(default_factory=list)
 
 
+def _contract_chain_id(contract_chain: str | None) -> int:
+    """Resolve the overview's legacy/alias contract chain semantics."""
+    try:
+        return chain_by_name(contract_chain).chain_id if contract_chain else 1
+    except UnknownChainError:
+        return 1
+
+
 def _job_matches_contract_chain(job: Job, contract_chain: str | None) -> bool:
     """Whether ``job`` and a Contract row (its ``chain`` name) are on the same
     chain. Both sides resolve to a registry chain id — the job from its
@@ -60,11 +68,25 @@ def _job_matches_contract_chain(job: Job, contract_chain: str | None) -> bool:
     if job_cid is None:
         request = job.request if isinstance(job.request, dict) else {}
         job_cid = derive_job_chain_id(request.get("chain"), job.address) or 1
-    try:
-        contract_cid = chain_by_name(contract_chain).chain_id if contract_chain else 1
-    except UnknownChainError:
-        contract_cid = 1
-    return job_cid == contract_cid
+    return job_cid == _contract_chain_id(contract_chain)
+
+
+def eligible_company_protocol_ids(session: Session) -> list[int]:
+    """Find modern company pages using the live resolver's membership rules.
+
+    Reanalysis may repoint Contract.job_id before it completes. Match historical
+    completed jobs by address and chain instead. Address-bearing jobs have a
+    non-null chain_id enforced by ck_jobs_chain_id_required_for_address.
+    Project distinct scalar chain pairs, never job requests or ORM graphs.
+    Legacy company-only pages without a Protocol row continue to use live reads.
+    """
+    rows = session.execute(
+        select(Contract.protocol_id, Contract.chain, Job.chain_id)
+        .join(Job, Contract.address == func.lower(Job.address))
+        .where(Contract.protocol_id.is_not(None), Job.status == JobStatus.completed, Job.address.is_not(None))
+        .distinct()
+    )
+    return sorted({pid for pid, chain, job_chain_id in rows if job_chain_id == _contract_chain_id(chain)})
 
 
 def _job_chain_name(job: Job) -> str:

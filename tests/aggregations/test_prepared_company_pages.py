@@ -12,8 +12,10 @@ from sqlalchemy import event, select, text, update
 from sqlalchemy.orm import sessionmaker
 
 from db.models import CompanyPageSnapshot as Page
-from db.models import Protocol
+from db.models import Contract, Job, JobStatus, Protocol
 from services import company_pages as pages
+from services.aggregations.company_overview import resolve_company_jobs
+from services.aggregations.company_overview.jobs import eligible_company_protocol_ids
 from tests.conftest import requires_postgres
 from tests.support.overview_builders import _add_contract, _add_job, _add_protocol, _addr
 from workers import company_pages as worker
@@ -194,6 +196,65 @@ def test_unanalyzed_protocol_hints_do_not_spend_the_build_budget(prepared):
     assert worker.refresh_one(factory) == "prepared"
     assert worker.refresh_one(factory) == "idle"
     assert session.execute(select(Page.attempts).where(Page.protocol_id == empty.id)).scalar_one() == 0
+
+
+@pytest.mark.parametrize(
+    "status", [JobStatus.queued, JobStatus.processing, JobStatus.failed, JobStatus.failed_terminal]
+)
+@pytest.mark.parametrize("already_prepared", [False, True])
+def test_reanalysis_pointer_preserves_preparation_eligibility(prepared, status, already_prepared):
+    session, protocol, factory = prepared
+    if already_prepared:
+        assert worker.refresh_one(factory) == "prepared"
+        make_due(session)
+    contract = session.execute(select(Contract).where(Contract.protocol_id == protocol.id)).scalar_one()
+    previous_job_id = contract.job_id
+    # Jobs may store checksummed addresses, unlike the canonical contract key.
+    session.execute(update(Job).where(Job.id == previous_job_id).values(address=contract.address.upper()))
+    replacement = _add_job(session, address=contract.address, protocol_id=protocol.id, status=status)
+    contract.job_id = replacement.id
+    session.commit()
+    _, jobs = resolve_company_jobs(session, protocol.name)
+    assert [job.id for job in jobs] == [previous_job_id]
+    assert worker.refresh_one(factory) == "prepared"
+    overview, functions = bodies(session)
+    assert overview == worker.build_company_overview(session, protocol.name)
+    assert functions == {"functions": worker.build_functions_for_protocol(session, protocol.name)}
+
+
+@pytest.mark.parametrize(
+    "contract_chain,job_chain_id,eligible",
+    [
+        (None, 1, True),
+        ("MAINNET", 1, True),
+        ("unknown", 1, True),
+        ("base", 8453, True),
+        ("base", 1, False),
+        ("ethereum", 8453, False),
+    ],
+)
+def test_preparation_eligibility_matches_live_chain_rules(prepared, contract_chain, job_chain_id, eligible):
+    session, protocol, factory = prepared
+    session.execute(update(Contract).where(Contract.protocol_id == protocol.id).values(chain=contract_chain))
+    # Job.protocol_id is not the membership authority; the contract is.
+    session.execute(update(Job).where(Job.protocol_id == protocol.id).values(chain_id=job_chain_id, protocol_id=None))
+    pages.mark_dirty(session, protocol.id)
+    session.commit()
+    _, jobs = resolve_company_jobs(session, protocol.name)
+    assert bool(jobs) is eligible
+    assert (protocol.id in eligible_company_protocol_ids(session)) is eligible
+    assert worker.refresh_one(factory) == ("prepared" if eligible else "idle")
+
+
+def test_unfinished_member_and_completed_nonmember_do_not_qualify(prepared):
+    session, protocol, factory = prepared
+    session.execute(update(Job).where(Job.protocol_id == protocol.id).values(status=JobStatus.queued))
+    address = _addr("nonmember")
+    job = _add_job(session, address=address, protocol_id=protocol.id)
+    _add_contract(session, address=address, job=job, protocol_id=None)
+    assert resolve_company_jobs(session, protocol.name)[1] == []
+    assert protocol.id not in eligible_company_protocol_ids(session)
+    assert worker.refresh_one(factory) == "idle"
 
 
 def test_dirty_hint_rolls_back_with_producer(prepared):

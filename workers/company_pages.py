@@ -15,9 +15,10 @@ from sqlalchemy import func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from db.models import CompanyPageSnapshot as Page
-from db.models import Contract, Job, JobStatus, Protocol, SessionLocal
+from db.models import Protocol, SessionLocal
 from db.queue import record_heartbeat
 from services.aggregations.company_overview import build_company_overview, build_functions_for_protocol
+from services.aggregations.company_overview.jobs import eligible_company_protocol_ids
 from services.company_pages import MAX_AGE_SECONDS, enabled, encode, version
 from utils.logging import configure_logging
 
@@ -31,13 +32,7 @@ def refresh_one(session_factory=SessionLocal) -> str:
         # preparer across all worker machines, without long-lived session locks.
         if not write.execute(text("SELECT pg_try_advisory_xact_lock(210031, 0)")).scalar():
             return "leased"
-        candidates = (
-            select(Protocol.id)
-            .join(Contract, Contract.protocol_id == Protocol.id)
-            .join(Job, Job.id == Contract.job_id)
-            .where(Job.status == JobStatus.completed)
-            .distinct()
-        )
+        candidates = select(Protocol.id).where(Protocol.id.in_(eligible_company_protocol_ids(write)))
         write.execute(pg_insert(Page).from_select(["protocol_id"], candidates).on_conflict_do_nothing())
         now = write.execute(select(func.clock_timestamp())).scalar_one()
         row = write.execute(
@@ -126,9 +121,14 @@ def run(stop: Event | None = None) -> None:
                 "company_pages", status="error" if outcome == "failed" else "running", detail={"outcome": outcome}
             )
         except Exception:
+            outcome = "error"
             logger.exception("Company page worker pass failed")
             record_heartbeat("company_pages", status="error")
-        stop.wait(5)
+        # Drain due protocols immediately. A failed build has already advanced
+        # its own retry deadline, so it must not delay other ready companies.
+        # Idle/disabled/leased and unexpected errors still wait to avoid a spin.
+        if outcome not in {"prepared", "failed"}:
+            stop.wait(5)
 
 
 if __name__ == "__main__":
