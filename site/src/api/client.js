@@ -38,7 +38,7 @@ export async function api(path, options = {}) {
   // detail panel refreshing every 2.5s) use this so a missing/wrong admin
   // key doesn't surface a modal prompt on every tick — the caller catches
   // the thrown error and degrades the UI instead.
-  const { silent, onResponse, ...fetchOptions } = options;
+  const { silent, ...fetchOptions } = options;
   let response = await fetch(path, { ...fetchOptions, headers: buildHeadersWithKey(fetchOptions, getAdminKey()) });
   if (response.status === 401 && !silent) {
     const entered = window.prompt(
@@ -75,7 +75,6 @@ export async function api(path, options = {}) {
     throw err;
   }
   const type = response.headers.get("content-type") || "";
-  onResponse?.(response);
   if (type.includes("application/json")) {
     return response.json();
   }

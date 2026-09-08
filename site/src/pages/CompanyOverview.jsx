@@ -35,7 +35,6 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
   const [requestAttempt, setRequestAttempt] = useState(0);
-  const [preparedAt, setPreparedAt] = useState(null);
   const [auditCoverage, setAuditCoverage] = useState(null);
   const [functionData, setFunctionData] = useState(null);
   const [functionError, setFunctionError] = useState(null);
@@ -119,7 +118,6 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
     const controller = new AbortController();
     const options = { signal: controller.signal };
     setData(null);
-    setPreparedAt(null);
     setError(null);
     setAuditCoverage(null);
     setFunctionData(null);
@@ -129,12 +127,7 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
     setSelectMiss(null);
     setAddressesModalOpen(false);
     setAuditsAdminOpen(false);
-    api(`/api/company/${encodeURIComponent(companyName)}`, {
-      ...options,
-      onResponse: (response) => {
-        if (!cancelled) setPreparedAt(response.headers.get("X-PSAT-Prepared-At"));
-      },
-    })
+    api(`/api/company/${encodeURIComponent(companyName)}`, options)
       .then((d) => { if (!cancelled) setData(d); })
       .catch((e) => { if (!cancelled) setError(e.message); });
     // Audit coverage is a separate concern — fetching it in parallel means
@@ -254,11 +247,6 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
         </div>
       </section>
 
-      {preparedAt && Number.isFinite(Date.parse(preparedAt)) && (
-        <p className="muted" title="Prepared data expires within one minute of its source snapshot.">
-          Data as of <time dateTime={preparedAt}>{new Date(preparedAt).toLocaleTimeString()}</time>
-        </p>
-      )}
       <ScoreBand
         companyName={companyName}
         contracts={contracts}

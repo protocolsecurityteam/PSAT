@@ -38,7 +38,7 @@ test("a gateway failure shows a short error and Retry recovers the company page"
   expect(errors).toEqual([]);
 });
 
-test("prepared data shows its source time and the embedded surface reuses the score request", async ({ page }) => {
+test("prepared data has no freshness label and the embedded surface reuses the score request", async ({ page }) => {
   let scoreRequests = 0;
   let releaseOverview;
   const overviewReady = new Promise(resolve => { releaseOverview = resolve; });
@@ -62,7 +62,7 @@ test("prepared data shows its source time and the embedded surface reuses the sc
   // can mount. StrictMode may have aborted/restarted the owner in dev.
   const count = scoreRequests;
   releaseOverview();
-  await expect(page.getByText(/Data as of/)).toBeVisible();
   await expect(page.getByText("No score published for this protocol.")).toBeVisible();
+  await expect(page.getByText(/Data as of/)).toHaveCount(0);
   expect(scoreRequests).toBe(count);
 });
