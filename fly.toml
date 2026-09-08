@@ -18,6 +18,7 @@ kill_timeout = 30
   PSAT_COMPANY_MAX_INFLIGHT = "2"
   PSAT_COMPANY_MAX_QUEUED = "8"
   PSAT_COMPANY_QUEUE_TIMEOUT = "30"
+  PSAT_PREPARED_COMPANY_PAGES = "1"
   # Bumped from deploy/start_workers.sh defaults (2/1/1). Sized for the workers VM
   # (shared-cpu-8x:16GB) — 8 cores fit ~12 always-on Python procs plus
   # forge subprocess bursts without queueing. Policy bumped to 3 procs ×

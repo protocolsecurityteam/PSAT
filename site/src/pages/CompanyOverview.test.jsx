@@ -69,6 +69,23 @@ function coveredStatValue() {
 }
 
 describe("CompanyOverview — recovery and navigation", () => {
+  it("shows the prepared source time and clears it on navigation to live data", async () => {
+    installTwinMocks();
+    const preparedAt = "2026-09-08T22:00:00+00:00";
+    setFetchHandler((url) => url.pathname === "/api/company/twinco", () => new Response(JSON.stringify({
+      company: "twinco", contracts: [], principals: [], fund_flows: [], ownership_hierarchy: [],
+    }), { headers: { "Content-Type": "application/json", "X-PSAT-Prepared-At": preparedAt } }));
+    const { rerender } = render(<CompanyOverview companyName="twinco" />);
+    await screen.findByText(/Data as of/);
+    expect(document.querySelector("time[datetime]").getAttribute("datetime")).toBe(preparedAt);
+    setFetchHandler((url) => url.pathname === "/api/company/liveco", () => ({
+      company: "liveco", contracts: [], principals: [], fund_flows: [], ownership_hierarchy: [],
+    }));
+    rerender(<CompanyOverview companyName="liveco" />);
+    await screen.findByRole("heading", { name: "liveco", exact: true });
+    expect(screen.queryByText(/Data as of/)).not.toBeInTheDocument();
+  });
+
   it("offers recovery when functions are overloaded instead of leaving the surface loading forever", async () => {
     installTwinMocks();
     let attempts = 0;

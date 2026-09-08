@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hmac
 import ipaddress
+import math
 import os
 import re
 import threading
@@ -214,10 +215,14 @@ class CloudflareBoundary:
         operator = operator or (target.startswith("/api/") and not public_read(request.method, target))
         operator = operator or "x-psat-admin-key" in request.headers or "authorization" in request.headers
         scope.setdefault("state", {})["edge_visitor_ip"] = None
+        scope["state"]["edge_operator"] = operator
 
         async def response_send(message):
             if message["type"] == "http.response.start":
                 headers = MutableHeaders(scope=message)
+                fresh_until = headers.get("x-psat-fresh-until")
+                if fresh_until is not None:
+                    del headers["x-psat-fresh-until"]
                 cacheable = (
                     request.method == "GET"
                     and not operator
@@ -234,6 +239,14 @@ class CloudflareBoundary:
                 )
                 if cacheable:
                     headers["Cache-Control"] = PUBLIC_CACHE
+                    if fresh_until is not None:
+                        # A prepared result already spent part of the 60s
+                        # budget before this request. Do not add a second TTL.
+                        try:
+                            ttl = max(0, min(60, math.floor(float(fresh_until) - time.time())))
+                        except (ValueError, OverflowError):
+                            ttl = 0
+                        headers["Cache-Control"] = f"public, max-age=0, s-maxage={ttl}, must-revalidate"
                 elif target.startswith("/api/") or operator or message["status"] >= 400 or has_credentials(request):
                     headers["Cache-Control"] = PRIVATE
                 # Credentials are never response headers.

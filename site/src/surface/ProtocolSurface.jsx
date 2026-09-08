@@ -35,6 +35,7 @@ function ProtocolSurface({
   initialData = null,
   initialCoverage = null,
   initialFunctions = null,
+  initialScore = undefined,
   embedded = false,
 }, ref) {
   const isAdmin = useIsAdmin();
@@ -676,6 +677,7 @@ function ProtocolSurface({
           {sidebarMode === "detail" && !selectedPrincipal && !selectedMachine && (
             <DetailEmptyState
               companyName={companyName}
+              initialScore={initialScore}
               companyData={scopedCompanyData}
               machines={allMachines}
               principals={visiblePrincipals}
