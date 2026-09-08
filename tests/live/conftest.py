@@ -177,6 +177,14 @@ class LiveClient:
         r.raise_for_status()
         return r.json()
 
+    def stage_timings(self, job_id: str) -> dict[str, dict[str, Any]]:
+        r = self._session.get(self._url(f"/api/jobs/{job_id}/stage_timings"), timeout=30)
+        r.raise_for_status()
+        body = r.json()
+        timings = body.get("stage_timings")
+        assert isinstance(timings, dict), f"stage timings response malformed: {body}"
+        return timings
+
     # -- company -------------------------------------------------------------
 
     def company_overview(self, company: str) -> dict[str, Any]:
@@ -555,9 +563,9 @@ def analyzed_veda_teller(live_client: LiveClient) -> dict[str, Any]:
     try:
         job = live_client.submit_and_wait(VEDA_TELLER_ADDRESS)
     except TimeoutError as exc:
-        pytest.skip(f"Veda Teller analysis did not finish in time on {live_client.base_url}: {exc}")
+        pytest.fail(f"Veda Teller analysis did not finish in time on {live_client.base_url}: {exc}")
     if job["status"] != "completed":
-        pytest.skip(f"Veda Teller analysis did not complete (status={job['status']})")
+        pytest.fail(f"Veda Teller analysis did not complete (status={job['status']}): {job.get('error')}")
     return job
 
 

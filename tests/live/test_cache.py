@@ -57,12 +57,22 @@ def test_second_run_uses_cache(analyzed_weth, cached_weth, live_client: LiveClie
     assert static1 == static2
 
 
-def test_second_run_completed_faster(analyzed_weth, cached_weth, live_client: LiveClient):
+def test_cached_static_path_is_substantially_faster(analyzed_weth, cached_weth, live_client: LiveClient):
     t1 = live_client.job_duration_seconds(analyzed_weth)
     t2 = live_client.job_duration_seconds(cached_weth)
-    # Below 30s fixed overhead dominates and the assertion flaps.
-    if t1 > 30:
-        assert t2 <= t1 * 0.75, f"Second run ({t2:.1f}s) should be at least 25% faster than first ({t1:.1f}s)"
+    assert t2 < t1, f"Cached run ({t2:.1f}s) should finish before the cold run ({t1:.1f}s)"
+
+    cold_timings = live_client.stage_timings(analyzed_weth["job_id"])
+    cached_timings = live_client.stage_timings(cached_weth["job_id"])
+    cache_path = ("discovery", "static")
+    missing = [stage for stage in cache_path if stage not in cold_timings or stage not in cached_timings]
+    assert not missing, f"cache timing comparison is missing stage telemetry: {missing}"
+    cold_seconds = sum(float(cold_timings[stage]["elapsed_s"]) for stage in cache_path)
+    cached_seconds = sum(float(cached_timings[stage]["elapsed_s"]) for stage in cache_path)
+    assert cached_seconds <= cold_seconds * 0.75, (
+        f"Cached discovery+static ({cached_seconds:.1f}s) should be at least 25% faster "
+        f"than cold discovery+static ({cold_seconds:.1f}s)"
+    )
 
 
 @pytest.fixture(scope="module")
