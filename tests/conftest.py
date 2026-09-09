@@ -41,6 +41,8 @@ _STORAGE_ENV_KEYS = (
 
 from db.models import (  # noqa: E402
     AuditContractCoverage,
+    CompanyPagePurge,
+    CompanyPageRevision,
     Contract,
     ContractBalance,
     ContractBalanceFetch,
@@ -769,6 +771,10 @@ def db_session():
             # not-due, so both arms are swept together.
             RoleHolderPlane,
             RoleHolderPlaneRefresh,
+            # Revision/outbox records intentionally survive source deletion.
+            # Clear after every source-table teardown trigger has fired.
+            CompanyPagePurge,
+            CompanyPageRevision,
         ]:
             session.query(model).delete()
         session.commit()

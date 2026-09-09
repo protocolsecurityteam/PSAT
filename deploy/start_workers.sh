@@ -163,6 +163,12 @@ PIDS+=($!)
 "${PYTHON_CMD[@]}" -m workers.protocol_monitor --reconcile &
 PIDS+=($!)
 
+# Prepared public company JSON belongs on this worker VM, not the web VM.
+if [[ "${PSAT_PREPARED_COMPANY_PAGES:-0}" == "1" ]]; then
+  "${PYTHON_CMD[@]}" -m workers.company_pages &
+  PIDS+=($!)
+fi
+
 log_json INFO "All workers started: ${PIDS[*]}"
 # Exit on first death — Fly restarts the machine so every worker
 # relaunches. Silent-dead-worker is worse than a 30s restart.

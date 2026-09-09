@@ -514,8 +514,10 @@ def load_delivery_evidence(
     reference corpus, all of it spent on a column the caller never sees.
     """
     from db.models import TokenDeliveryEvidence
+    from services.company_page_dependencies import track
 
     pairs = sorted({(int(chain_id), str(address or "").lower()) for chain_id, address in holders})
+    track(session, "holder", (address for _, address in pairs))
     if not pairs:
         return {}
     out: dict[tuple[int, str, str], DeliveryFact] = {}

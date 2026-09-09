@@ -7,7 +7,7 @@ import time
 from collections.abc import Iterable
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Response
+from fastapi import APIRouter, HTTPException, Request, Response
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import aliased
 
@@ -29,6 +29,7 @@ from services.aggregations.company_overview import (
     resolve_company_jobs,
 )
 from services.audits.serializers import _audit_brief, _audit_report_to_dict
+from services.company_pages import cache_tag, read_response
 
 from . import deps
 
@@ -95,10 +96,15 @@ def _log_endpoint(route: str, *, company: str, started: float, **extras: Any) ->
 
 
 @router.get("/api/company/{company_name}", response_model=None)
-def company_overview(company_name: str, response: Response) -> CompanyOverviewResponse:
+def company_overview(company_name: str, response: Response, request: Request) -> CompanyOverviewResponse | Response:
     """Aggregated governance overview for all contracts in a company."""
     started = time.monotonic()
+    response.headers["X-PSAT-Fresh-Until"] = str(time.time() + 60)
+    response.headers["Cache-Tag"] = cache_tag(company_name)
     with deps.SessionLocal() as session:
+        if prepared := read_response(session, request, company_name):
+            return prepared
+        response.headers["X-PSAT-Response-Source"] = "live"
         try:
             # cast: assemble_company_payload provably builds exactly this
             # shape; the annotation belongs on the producer once
@@ -126,6 +132,8 @@ def company_addresses(company_name: str, response: Response) -> CompanyAddresses
     fetches this lazily when the user opens it.
     """
     started = time.monotonic()
+    response.headers["X-PSAT-Fresh-Until"] = str(time.time() + 60)
+    response.headers["Cache-Tag"] = cache_tag(company_name)
     with deps.SessionLocal() as session:
         protocol_row, jobs = resolve_company_jobs(session, company_name)
         if protocol_row is None and not jobs:
@@ -143,7 +151,7 @@ def company_addresses(company_name: str, response: Response) -> CompanyAddresses
 
 
 @router.get("/api/company/{company_name}/functions", response_model=None)
-def company_functions(company_name: str, response: Response) -> CompanyFunctionsResponse:
+def company_functions(company_name: str, response: Response, request: Request) -> CompanyFunctionsResponse | Response:
     """Per-contract function entries for a protocol, keyed by the composite
     ``"<chain>::<address>"`` entity token (invariant 13) so a same-address
     cross-chain pair keeps each chain's own analysis. The frontend indexes this
@@ -158,6 +166,11 @@ def company_functions(company_name: str, response: Response) -> CompanyFunctions
     """
     started = time.monotonic()
     with deps.SessionLocal() as session:
+        if prepared := read_response(session, request, company_name, functions=True):
+            return prepared
+        response.headers["X-PSAT-Response-Source"] = "live"
+        response.headers["X-PSAT-Fresh-Until"] = str(time.time() + 60)
+        response.headers["Cache-Tag"] = cache_tag(company_name)
         try:
             functions_by_entity = build_functions_for_protocol(session, company_name)
         except CompanyNotFound:

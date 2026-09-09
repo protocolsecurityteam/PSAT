@@ -336,6 +336,7 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
               initialData={data}
               initialCoverage={auditCoverage}
               initialFunctions={functionData}
+              initialScore={{ data: score, error: scoreError }}
               embedded
             />
           </Suspense>}

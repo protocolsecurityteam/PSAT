@@ -65,6 +65,21 @@ describe("lastUpgradeBatch", () => {
 });
 
 describe("DetailEmptyState — score card", () => {
+  it("uses the overview-owned score through pending, failure, and recovery without fetching again", async () => {
+    const fetchScore = vi.fn(() => SCORE_ETHERFI);
+    setFetchHandler(/\/api\/company\/owned-score\/score$/, fetchScore);
+    const props = { companyName: "owned-score", companyData: companyData() };
+    const { rerender } = render(<DetailEmptyState {...props} initialScore={{ data: null, error: null }} />);
+    expect(await screen.findByText("Score loading…")).toBeInTheDocument();
+    rerender(<DetailEmptyState {...props} initialScore={{ data: null, error: { status: 503 } }} />);
+    expect(await screen.findByText("Score not available right now.")).toBeInTheDocument();
+    rerender(<DetailEmptyState {...props} initialScore={{ data: SCORE_ETHERFI, error: null }} />);
+    expect(await screen.findByText("B+")).toBeInTheDocument();
+    expect(fetchScore).not.toHaveBeenCalled();
+    rerender(<DetailEmptyState {...props} initialScore={{ data: null, error: { status: 404 } }} />);
+    expect(await screen.findByText("No score published for this protocol.")).toBeInTheDocument();
+  });
+
   it("renders the calibrated grade, ledger and fix-first from the published document", async () => {
     setFetchHandler(/\/api\/company\/scored\/score$/, () => SCORE_ETHERFI);
     renderPanel({ companyName: "scored" });

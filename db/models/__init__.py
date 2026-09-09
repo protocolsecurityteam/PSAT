@@ -47,6 +47,7 @@ from .base import (
     derive_job_chain_id,
     include_object,
 )
+from .company_pages import CompanyPagePurge, CompanyPageRevision, CompanyPageSnapshot
 from .contracts import (
     ADMITTING_WITNESS_RULES,
     CONTROL_EDGE_RELATIONS,
@@ -162,6 +163,9 @@ __all__ = [
     "CONTROLLER_OBSERVED_VIA_STORAGE_POLL",
     "CONTROL_EDGE_RELATIONS",
     "CURSOR_BASIS_NOT_DETERMINED",
+    "CompanyPageSnapshot",
+    "CompanyPageRevision",
+    "CompanyPagePurge",
     "Contract",
     "ContractBalance",
     "ContractBalanceFetch",

@@ -9,7 +9,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable
 
-from sqlalchemy import and_, exists, func, or_, select
+from sqlalchemy import and_, exists, func, or_, select, text
 from sqlalchemy.orm import Session, aliased
 
 from db.jsonb import jsonb_has_payload
@@ -605,6 +605,10 @@ def _prefetch_child_tables(
     ) -> tuple[str, str, Any, int, int]:
         start = time.monotonic()
         with Session(bind=engine, expire_on_commit=False) as s:
+            if snapshot := session.info.get("company_page_snapshot"):
+                s.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
+                s.execute(text("SET TRANSACTION SNAPSHOT :snapshot"), {"snapshot": snapshot})
+                s.execute(text("SET LOCAL statement_timeout = '25s'"))
             data, rows = runner(s)
         return timing_key, out_key, data, rows, int((time.monotonic() - start) * 1000)
 
