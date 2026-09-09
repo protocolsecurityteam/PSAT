@@ -29,7 +29,7 @@ from services.aggregations.company_overview import (
     resolve_company_jobs,
 )
 from services.audits.serializers import _audit_brief, _audit_report_to_dict
-from services.company_pages import read_response
+from services.company_pages import cache_tag, read_response
 
 from . import deps
 
@@ -99,6 +99,8 @@ def _log_endpoint(route: str, *, company: str, started: float, **extras: Any) ->
 def company_overview(company_name: str, response: Response, request: Request) -> CompanyOverviewResponse | Response:
     """Aggregated governance overview for all contracts in a company."""
     started = time.monotonic()
+    response.headers["X-PSAT-Fresh-Until"] = str(time.time() + 60)
+    response.headers["Cache-Tag"] = cache_tag(company_name)
     with deps.SessionLocal() as session:
         if prepared := read_response(session, request, company_name):
             return prepared
@@ -130,6 +132,8 @@ def company_addresses(company_name: str, response: Response) -> CompanyAddresses
     fetches this lazily when the user opens it.
     """
     started = time.monotonic()
+    response.headers["X-PSAT-Fresh-Until"] = str(time.time() + 60)
+    response.headers["Cache-Tag"] = cache_tag(company_name)
     with deps.SessionLocal() as session:
         protocol_row, jobs = resolve_company_jobs(session, company_name)
         if protocol_row is None and not jobs:
@@ -165,6 +169,8 @@ def company_functions(company_name: str, response: Response, request: Request) -
         if prepared := read_response(session, request, company_name, functions=True):
             return prepared
         response.headers["X-PSAT-Response-Source"] = "live"
+        response.headers["X-PSAT-Fresh-Until"] = str(time.time() + 60)
+        response.headers["Cache-Tag"] = cache_tag(company_name)
         try:
             functions_by_entity = build_functions_for_protocol(session, company_name)
         except CompanyNotFound:

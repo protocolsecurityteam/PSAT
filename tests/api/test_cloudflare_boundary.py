@@ -25,6 +25,14 @@ CONFIG = EdgeConfig(
 ORIGIN = {"X-PSAT-Origin-Secret": CONFIG.secret, "X-PSAT-Visitor-IP": "192.0.2.1"}
 
 
+def assert_bounded_company_cache(response):
+    value = response.headers["cache-control"]
+    ttl = int(value.split("s-maxage=")[1].split(",")[0])
+    assert 0 < ttl <= 60
+    assert re.sub(r"s-maxage=\d+", "s-maxage=60", value) == PUBLIC_CACHE
+    assert "x-psat-fresh-until" not in response.headers
+
+
 @pytest.fixture(scope="module")
 def signing_keys():
     return [rsa.generate_private_key(public_exponent=65537, key_size=2048) for _ in range(2)]
@@ -286,7 +294,7 @@ def test_company_payload_equality_and_cache_matrix(edge_client, signing_keys, mo
     path = "/api/company/Example"
     anonymous = edge_client.get(path, headers=ORIGIN)
     assert anonymous.status_code == 200
-    assert anonymous.headers["cache-control"] == PUBLIC_CACHE
+    assert_bounded_company_cache(anonymous)
     for extra in (
         {"Cookie": "any=1"},
         {"Origin": "https://snif.sh"},
@@ -429,7 +437,7 @@ def test_other_cacheable_payloads_equal_across_callers(edge_client, signing_keys
     )
     assert anonymous.status_code == authenticated.status_code == 200
     assert anonymous.json() == authenticated.json()
-    assert anonymous.headers["cache-control"] == PUBLIC_CACHE
+    assert_bounded_company_cache(anonymous)
     assert authenticated.headers["cache-control"] == PRIVATE
 
 

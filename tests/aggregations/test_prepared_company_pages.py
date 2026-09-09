@@ -2,7 +2,6 @@
 
 import gzip
 import json
-import uuid
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
@@ -89,30 +88,25 @@ def test_prepared_get_reads_one_blob_and_never_writes(prepared, functions, encod
     assert response.headers["x-psat-response-source"] == "prepared"
     assert response.headers["vary"] == "Accept-Encoding"
     assert response.headers["x-psat-prepared-at"]
+    assert response.headers["cache-tag"] == pages.cache_tag(protocol.name)
 
 
 @pytest.mark.parametrize(
     "headers,query,operator",
     [
-        ({"Cookie": "session=x"}, b"", False),
-        ({"X-PSAT-Admin-Key": "x"}, b"", False),
-        ({"Authorization": "Bearer x"}, b"", False),
-        ({"CF-Access-Jwt-Assertion": "x"}, b"", False),
-        ({"Origin": "https://snif.sh"}, b"", False),
         ({"Cache-Control": "no-cache"}, b"", False),
         ({}, b"fresh=1", False),
-        ({}, b"", True),
     ],
 )
-def test_credentialed_and_explicit_fresh_reads_bypass_without_db_access(headers, query, operator, monkeypatch):
+def test_explicit_fresh_reads_bypass_without_db_access(headers, query, operator, monkeypatch):
     monkeypatch.setenv("PSAT_PREPARED_COMPANY_PAGES", "1")
     session = MagicMock()
     assert pages.read_response(session, request(headers, query, operator), "example") is None
     session.execute.assert_not_called()
 
 
-@pytest.mark.parametrize("change", ["age", "future", "version", "rename", "missing", "disabled"])
-def test_invalid_or_expired_preparations_fall_back(prepared, monkeypatch, change):
+@pytest.mark.parametrize("change", ["untracked", "future", "version", "rename", "missing", "disabled"])
+def test_invalid_preparations_fall_back(prepared, monkeypatch, change):
     session, protocol, factory = prepared
     assert worker.refresh_one(factory) == "prepared"
     if change == "disabled":
@@ -121,7 +115,7 @@ def test_invalid_or_expired_preparations_fall_back(prepared, monkeypatch, change
         session.execute(update(Protocol).where(Protocol.id == protocol.id).values(name="renamed"))
     else:
         values = {
-            "age": {"source_started_at": datetime.now(timezone.utc) - timedelta(seconds=61)},
+            "untracked": {"source_revisions": None},
             "future": {"source_started_at": datetime.now(timezone.utc) + timedelta(seconds=60)},
             "version": {"version": "old-deploy"},
             "missing": {"overview_gzip": None},
@@ -132,9 +126,8 @@ def test_invalid_or_expired_preparations_fall_back(prepared, monkeypatch, change
 
 
 def make_due(session):
-    session.execute(
-        update(Page).values(next_attempt_at=datetime.now(timezone.utc) - timedelta(seconds=1), dirty_token=uuid.uuid4())
-    )
+    session.execute(update(Protocol).values(official_domain=Protocol.official_domain))
+    session.execute(update(Page).values(next_attempt_at=datetime.now(timezone.utc) - timedelta(seconds=1)))
     session.commit()
 
 
@@ -162,17 +155,18 @@ def test_mark_during_build_survives_atomic_publication(prepared, monkeypatch):
 
     def build(source, name):
         with factory() as concurrent:
-            pages.mark_dirty(concurrent, protocol.id)
+            concurrent.execute(
+                update(Protocol).where(Protocol.id == protocol.id).values(official_domain="changed.example")
+            )
             concurrent.commit()
         return original(source, name)
 
     monkeypatch.setattr(worker, "build_functions_for_protocol", build)
     assert worker.refresh_one(factory) == "prepared"
-    dirty, built = session.execute(select(Page.dirty_token, Page.built_token)).one()
-    assert dirty != built
+    assert pages.read_response(session, request(), protocol.name) is None
 
 
-def test_worker_is_single_flight_and_refreshes_periodically(prepared):
+def test_worker_is_single_flight_and_never_rebuilds_unchanged_data(prepared, monkeypatch):
     session, protocol, factory = prepared
     with factory() as lease:
         lease.execute(text("SELECT pg_advisory_xact_lock(210031, 0)"))
@@ -180,22 +174,26 @@ def test_worker_is_single_flight_and_refreshes_periodically(prepared):
     assert worker.refresh_one(factory) == "prepared"
     session.execute(
         update(Page).values(
-            source_started_at=datetime.now(timezone.utc) - timedelta(seconds=35),
+            source_started_at=datetime.now(timezone.utc) - timedelta(days=1),
             next_attempt_at=datetime.now(timezone.utc) - timedelta(seconds=1),
         )
     )
     session.commit()
-    assert worker.refresh_one(factory) == "prepared"
+    builder = MagicMock(side_effect=AssertionError("Unchanged data must not rebuild"))
+    monkeypatch.setattr(worker, "build_company_overview", builder)
+    for _ in range(30):
+        assert worker.refresh_one(factory) == "idle"
+        assert pages.read_response(session, request(), protocol.name) is not None
+    builder.assert_not_called()
 
 
 def test_unanalyzed_protocol_hints_do_not_spend_the_build_budget(prepared):
     session, protocol, factory = prepared
     empty = _add_protocol(session, "not-analyzed")
-    pages.mark_dirty(session, empty.id)
     session.commit()
     assert worker.refresh_one(factory) == "prepared"
     assert worker.refresh_one(factory) == "idle"
-    assert session.execute(select(Page.attempts).where(Page.protocol_id == empty.id)).scalar_one() == 0
+    assert session.execute(select(Page).where(Page.protocol_id == empty.id)).first() is None
 
 
 @pytest.mark.parametrize(
@@ -238,7 +236,6 @@ def test_preparation_eligibility_matches_live_chain_rules(prepared, contract_cha
     session.execute(update(Contract).where(Contract.protocol_id == protocol.id).values(chain=contract_chain))
     # Job.protocol_id is not the membership authority; the contract is.
     session.execute(update(Job).where(Job.protocol_id == protocol.id).values(chain_id=job_chain_id, protocol_id=None))
-    pages.mark_dirty(session, protocol.id)
     session.commit()
     _, jobs = resolve_company_jobs(session, protocol.name)
     assert bool(jobs) is eligible
@@ -257,11 +254,13 @@ def test_unfinished_member_and_completed_nonmember_do_not_qualify(prepared):
     assert worker.refresh_one(factory) == "idle"
 
 
-def test_dirty_hint_rolls_back_with_producer(prepared):
+def test_dirty_revision_rolls_back_with_producer(prepared):
     session, protocol, factory = prepared
-    pages.mark_dirty(session, protocol.id)
+    assert worker.refresh_one(factory) == "prepared"
+    session.execute(update(Protocol).where(Protocol.id == protocol.id).values(official_domain="rolled-back.example"))
+    assert pages.read_response(session, request(), protocol.name) is None
     session.rollback()
-    assert session.execute(select(Page)).first() is None
+    assert pages.read_response(session, request(), protocol.name) is not None
 
 
 @pytest.mark.parametrize("encoding", ["gzip", "identity", "gzip;q=0", "*;q=1"])
@@ -292,7 +291,7 @@ def test_full_api_serves_prepared_bytes_without_building_and_falls_back(prepared
         assert 0 < ttl < 60
     overview.assert_not_called()
     functions.assert_not_called()
-    session.execute(update(Page).values(source_started_at=datetime.now(timezone.utc) - timedelta(seconds=61)))
+    session.execute(update(Protocol).where(Protocol.id == protocol.id).values(official_domain="dirty.example"))
     session.commit()
     response = client.get(f"/api/company/{protocol.name}")
     assert response.status_code == 200
@@ -372,31 +371,17 @@ def test_identity_decode_corruption_or_oversize_falls_back(prepared, monkeypatch
     assert pages.read_response(session, request({"Accept-Encoding": "identity"}), protocol.name) is None
 
 
-def test_failed_hint_does_not_abort_producer_transaction(prepared):
-    session, protocol, factory = prepared
-    pages.mark_dirty(session, -1)  # deliberately violates the cache's FK
-    session.execute(update(Protocol).where(Protocol.id == protocol.id).values(official_domain="valid.example"))
-    session.commit()
-    assert (
-        session.execute(select(Protocol.official_domain).where(Protocol.id == protocol.id)).scalar_one()
-        == "valid.example"
-    )
-
-
-def test_producer_hints_are_connected_and_disabled_flag_is_safe(prepared, monkeypatch):
+def test_scheduling_hints_alone_do_not_rebuild_unchanged_data(prepared):
     from services.monitoring.enrollment import mark_enrollment_dirty
     from services.scoring.dirty import mark_protocol_score_dirty
 
     session, protocol, factory = prepared
+    assert worker.refresh_one(factory) == "prepared"
     assert mark_protocol_score_dirty(session, protocol.id, "manual")
-    first = session.execute(select(Page.dirty_token)).scalar_one()
     mark_enrollment_dirty(session, protocol.id, "governance_rotation")
-    second = session.execute(select(Page.dirty_token)).scalar_one()
-    assert first != second
-    monkeypatch.setenv("PSAT_PREPARED_COMPANY_PAGES", "0")
-    pages.mark_dirty(session, protocol.id)
-    assert session.execute(select(Page.dirty_token)).scalar_one() == second
-    session.rollback()
+    session.commit()
+    assert pages.read_response(session, request(), protocol.name) is not None
+    assert worker.refresh_one(factory) == "idle"
 
 
 @pytest.mark.parametrize("mode", ["prepared", "disabled", "failure"])

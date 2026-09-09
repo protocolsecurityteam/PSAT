@@ -240,8 +240,8 @@ class CloudflareBoundary:
                 if cacheable:
                     headers["Cache-Control"] = PUBLIC_CACHE
                     if fresh_until is not None:
-                        # A prepared result already spent part of the 60s
-                        # budget before this request. Do not add a second TTL.
+                        # Count from source-read/revision-validation start,
+                        # including origin processing; never add a second TTL.
                         try:
                             ttl = max(0, min(60, math.floor(float(fresh_until) - time.time())))
                         except (ValueError, OverflowError):

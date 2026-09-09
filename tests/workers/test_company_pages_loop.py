@@ -30,6 +30,7 @@ def test_drains_due_work_including_backed_off_failures_before_waiting(monkeypatc
     heartbeat = MagicMock()
     monkeypatch.setattr(worker, "enabled", lambda: True)
     monkeypatch.setattr(worker, "refresh_one", refresh)
+    monkeypatch.setattr(worker, "purge_one", lambda: "disabled")
     monkeypatch.setattr(worker, "record_heartbeat", heartbeat)
     monkeypatch.setattr(stop, "wait", wait)
     worker.run(stop)
@@ -68,3 +69,43 @@ def test_stop_interrupts_a_busy_queue_between_builds(monkeypatch):
     worker.run(stop)
     refresh.assert_called_once()
     wait.assert_not_called()
+
+
+def test_builds_take_priority_and_purges_drain_without_delaying_new_work(monkeypatch):
+    stop = Event()
+    events = []
+    builds = iter(["prepared", "prepared", "idle", "prepared", "idle", "idle"])
+    purges = iter(["failed", "purged", "idle"])
+
+    def refresh():
+        result = next(builds)
+        events.append(("build", result))
+        return result
+
+    def purge():
+        result = next(purges)
+        events.append(("purge", result))
+        return result
+
+    def wait(seconds):
+        events.append(("wait", seconds))
+        stop.set()
+
+    monkeypatch.setattr(worker, "enabled", lambda: True)
+    monkeypatch.setattr(worker, "refresh_one", refresh)
+    monkeypatch.setattr(worker, "purge_one", purge)
+    monkeypatch.setattr(worker, "record_heartbeat", MagicMock())
+    monkeypatch.setattr(stop, "wait", wait)
+    worker.run(stop)
+    assert events == [
+        ("build", "prepared"),
+        ("build", "prepared"),
+        ("build", "idle"),
+        ("purge", "failed"),
+        ("build", "prepared"),
+        ("build", "idle"),
+        ("purge", "purged"),
+        ("build", "idle"),
+        ("purge", "idle"),
+        ("wait", 5),
+    ]

@@ -76,9 +76,6 @@ def mark_protocol_score_dirty(session: Session, protocol_id: Any, reason: str) -
     # failing — it would raise at commit regardless, so letting it through here
     # keeps it from being logged as a dirty-mark failure it is not.
     session.flush()
-    from services.company_pages import mark_dirty
-
-    mark_dirty(session, protocol_id)
     try:
         # SAVEPOINT, not a bare try: a failed statement aborts the whole
         # Postgres transaction, so swallowing the Python exception without one

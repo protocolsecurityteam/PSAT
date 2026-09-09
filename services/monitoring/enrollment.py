@@ -98,10 +98,6 @@ def mark_enrollment_dirty(session: Session, protocol_id: int, reason: str, *, de
     (or right after) the action that triggered it. Callers mark *after* the
     triggering write commits, so a dirty row never references rolled-back work.
     """
-    if reason not in {"sweep", "manual"}:
-        from services.company_pages import mark_dirty
-
-        mark_dirty(session, protocol_id)
     dirty_at = func.now() if delay_s <= 0 else text(f"NOW() + INTERVAL '{int(delay_s)} seconds'")
     session.execute(
         pg_insert(MonitoringEnrollmentQueue)

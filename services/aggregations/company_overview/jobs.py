@@ -12,6 +12,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from db.models import Contract, Job, JobStatus, Protocol, derive_job_chain_id
+from services.company_page_dependencies import track
 from utils.chains import UnknownChainError, chain_by_id, chain_by_name
 
 from .entity_keys import _entity_key
@@ -135,6 +136,7 @@ def resolve_company_jobs(session: Session, name: str) -> tuple[Protocol | None, 
     protocol_row = session.execute(select(Protocol).where(Protocol.name == name)).scalar_one_or_none()
 
     if protocol_row:
+        track(session, "protocol", [protocol_row.id])
         # Join Jobs to Contracts on the natural key. The address column on
         # contracts is already stored lowercased (see db/queue/discovery.py); jobs
         # store the address as-provided, so lowercase the job side for the
@@ -284,6 +286,7 @@ def resolve_implementation_contracts(
                 impl_addrs_needed.add(impl.lower())
 
     impl_job_by_entity: dict[str, Job] = {}
+    track(session, "address", impl_addrs_needed)
     if impl_addrs_needed:
         # Deterministic pick: newest completed job per impl (chain, address),
         # preferring the one linked to a proxy we're rendering
@@ -315,6 +318,12 @@ def resolve_implementation_contracts(
         ).scalars():
             contracts_by_job_id[c.job_id] = c
 
+    # Includes borrowed implementations and their protocol-wide reach inputs.
+    # Missing implementations were registered above, so their later insertion
+    # also invalidates the page that previously could not resolve them.
+    track(session, "contract", (c.id for c in contracts_by_job_id.values()))
+    track(session, "address", (c.address for c in contracts_by_job_id.values()))
+    track(session, "protocol", (c.protocol_id for c in contracts_by_job_id.values()))
     return impl_job_by_entity, contracts_by_job_id
 
 
