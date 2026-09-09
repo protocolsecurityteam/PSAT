@@ -33,6 +33,7 @@ class CompanyPageRevision(Base):
     __tablename__ = "company_page_revisions"
 
     key: Mapped[str] = mapped_column(String(200), primary_key=True)
+    scope: Mapped[str | None] = mapped_column(String(200), index=True)
     token: Mapped[PyUUID] = mapped_column(UUID(as_uuid=True), server_default=func.gen_random_uuid())
     transaction_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
 

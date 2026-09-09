@@ -1,6 +1,8 @@
 """Collect bounded dependency scopes only during prepared snapshot builds.
 
-Protocol scopes include member/candidate changes and member child rows. Contract
+Protocol scopes are read-only fingerprints of per-contract/source revisions,
+including member/candidate changes and member child rows. Producers never lock
+a shared protocol revision to update independent contracts. Contract
 scopes cover borrowed implementations. Address scopes include implementations
 that do not exist yet; holder scopes cover the independently stored delivery
 evidence. Address scopes intentionally over-invalidate same-address chain twins,

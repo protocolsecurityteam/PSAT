@@ -40,27 +40,52 @@ TABLES = (
     "token_delivery_evidence",
 )
 
+# Compare source values, not UPDATE events. In particular a reconciler stamp,
+# worker lease/heartbeat, or an unchanged value is not new page data. Project
+# the large bookkeeping-only JSONB columns out before comparing transition
+# tables; never serialize whole rows with to_jsonb(). Other source tables use
+# typed whole-row equality (including their response-bearing JSONB).
+UPDATE_FIELDS = {
+    "protocols": "id, name",
+    "jobs": "id, address, status, chain_id, request, name, is_proxy, created_at, updated_at",
+    "contracts": "id, job_id, protocol_id, nominated_protocol_id, address, chain, contract_name, "
+    "is_proxy, proxy_type, implementation, secondary_implementations, beacon, admin, deployer",
+    "contract_balance_fetches": "id, contract_id, chain_id, native_status, asset_set_status, fetched_at",
+    "token_delivery_evidence": "id, chain_id, holder_address, token_address, delivery_shape, delivery_count, "
+    "unreadable_deliveries, min_fan_out, fan_out_threshold_k, scanned_from_block, measured_through_block, "
+    "basis, caught_up, observed_balance_raw",
+}
+
 
 def _keys(table: str, rows: str) -> str:
     if table == "contracts":
         return f"""SELECT unnest(ARRAY['contract:' || r.id, 'address:' || lower(r.address),
-            'protocol:' || r.protocol_id, 'protocol:' || r.nominated_protocol_id]) AS key FROM {rows} r"""
+            'protocol:' || r.protocol_id || ':contract:' || r.id,
+            'protocol:' || r.nominated_protocol_id || ':contract:' || r.id]) AS key FROM {rows} r"""
     if table == "protocols":
-        return f"SELECT 'protocol:' || r.id AS key FROM {rows} r"
+        return f"SELECT 'protocol:' || r.id || ':' || 'metadata' AS key FROM {rows} r"
     if table == "jobs":
         return f"""SELECT unnest(ARRAY['address:' || lower(r.address),
-            'protocol:' || c.protocol_id, 'protocol:' || c.nominated_protocol_id]) AS key
+            'protocol:' || c.protocol_id || ':contract:' || c.id,
+            'protocol:' || c.nominated_protocol_id || ':contract:' || c.id]) AS key
             FROM {rows} r LEFT JOIN contracts c ON c.address = lower(r.address)
             WHERE r.status = 'completed' AND r.address IS NOT NULL"""
     if table == "token_delivery_evidence":
         return f"SELECT 'holder:' || lower(r.holder_address) AS key FROM {rows} r"
-    if table in PROTOCOL_CHILDREN:
-        return f"SELECT 'protocol:' || r.protocol_id AS key FROM {rows} r"
+    if table == "function_score_signals":
+        return f"SELECT 'protocol:' || r.protocol_id || ':contract:' || r.contract_id AS key FROM {rows} r"
+    if table == "tvl_snapshots":
+        return f"SELECT 'protocol:' || r.protocol_id || ':' || 'tvl' AS key FROM {rows} r"
+    if table == "token_protocol_reference":
+        return f"""SELECT 'protocol:' || r.protocol_id || ':reference:' || r.chain_id || ':' ||
+            lower(r.token_address) AS key FROM {rows} r"""
     if table == "function_principals":
-        return f"""SELECT unnest(ARRAY['contract:' || f.contract_id, 'protocol:' || c.protocol_id]) AS key
+        return f"""SELECT unnest(ARRAY['contract:' || f.contract_id,
+            'protocol:' || c.protocol_id || ':contract:' || c.id]) AS key
             FROM {rows} r JOIN effective_functions f ON f.id = r.function_id
             LEFT JOIN contracts c ON c.id = f.contract_id"""
-    return f"""SELECT unnest(ARRAY['contract:' || r.contract_id, 'protocol:' || c.protocol_id]) AS key
+    return f"""SELECT unnest(ARRAY['contract:' || r.contract_id,
+        'protocol:' || c.protocol_id || ':contract:' || c.id]) AS key
         FROM {rows} r LEFT JOIN contracts c ON c.id = r.contract_id"""
 
 
@@ -71,9 +96,11 @@ def upgrade() -> None:
     op.create_table(
         "company_page_revisions",
         sa.Column("key", sa.String(200), primary_key=True),
+        sa.Column("scope", sa.String(200)),
         sa.Column("token", pg.UUID(as_uuid=True), server_default=sa.func.gen_random_uuid(), nullable=False),
         sa.Column("transaction_id", sa.BigInteger(), nullable=False),
     )
+    op.create_index("ix_company_page_revisions_scope", "company_page_revisions", ["scope"])
     op.create_table(
         "company_page_purges",
         sa.Column("company_name", sa.String(255), primary_key=True),
@@ -85,11 +112,24 @@ def upgrade() -> None:
     # too, and commit publishes the data and invalidation together. No producer
     # catches/drops these changes, and no periodic expensive sweep is required.
     op.execute("""CREATE FUNCTION psat_page_touch(scopes text[]) RETURNS void LANGUAGE sql AS $$
-        INSERT INTO company_page_revisions (key, transaction_id)
-        SELECT DISTINCT scope, txid_current() FROM unnest(scopes) scope
-        WHERE scope IS NOT NULL ORDER BY scope
+        INSERT INTO company_page_revisions (key, scope, transaction_id)
+        SELECT DISTINCT key,
+            CASE WHEN key LIKE 'protocol:%' THEN split_part(key, ':', 1) || ':' || split_part(key, ':', 2) END,
+            txid_current() FROM unnest(scopes) key
+        WHERE key IS NOT NULL ORDER BY key
         ON CONFLICT (key) DO UPDATE SET token = gen_random_uuid(), transaction_id = excluded.transaction_id
         WHERE company_page_revisions.transaction_id <> excluded.transaction_id
+    $$""")
+    # The protocol token is a read-only fingerprint of per-contract/source
+    # tokens, NOT a shared producer lock. Include keys as well as tokens so
+    # membership additions/removals and independently attributed signals are
+    # visible even when the page never read that contract before. Scope is
+    # indexed; no graph/JSONB source payload is read to validate the fingerprint.
+    op.execute("""CREATE FUNCTION psat_page_revision(dependency text) RETURNS text LANGUAGE sql STABLE AS $$
+        SELECT CASE WHEN dependency LIKE 'protocol:%' THEN
+            (SELECT md5(string_agg(key || '=' || token::text, ',' ORDER BY key))
+             FROM company_page_revisions WHERE scope = dependency)
+        ELSE (SELECT token::text FROM company_page_revisions WHERE key = dependency) END
     $$""")
     op.execute("""CREATE FUNCTION psat_page_truncate() RETURNS trigger LANGUAGE plpgsql AS $$
         BEGIN PERFORM psat_page_touch(ARRAY['all']); RETURN NULL; END
@@ -100,7 +140,14 @@ def upgrade() -> None:
             ("update", ("old_rows", "new_rows")),
             ("delete", ("old_rows",)),
         ):
-            query = " UNION ALL ".join(_keys(table, rows) for rows in relations)
+            if event == "update":
+                columns = UPDATE_FIELDS.get(table, "*")
+                query = " UNION ALL ".join(
+                    _keys(table, f"(SELECT {columns} FROM {rows} EXCEPT SELECT {columns} FROM {other})")
+                    for rows, other in (("old_rows", "new_rows"), ("new_rows", "old_rows"))
+                )
+            else:
+                query = " UNION ALL ".join(_keys(table, rows) for rows in relations)
             purge = ""
             if table == "protocols" and event != "insert":
                 # Preserve retired names even though their prepared row is
@@ -132,6 +179,7 @@ def downgrade() -> None:
             op.execute(f"DROP FUNCTION psat_page_{table}_{event}()")
     op.execute("DROP FUNCTION psat_page_truncate()")
     op.execute("DROP FUNCTION psat_page_touch(text[])")
+    op.execute("DROP FUNCTION psat_page_revision(text)")
     op.drop_table("company_page_purges")
     op.drop_table("company_page_revisions")
     op.drop_column("company_page_snapshots", "source_revisions")

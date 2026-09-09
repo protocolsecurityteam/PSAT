@@ -2,6 +2,7 @@
 
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
+from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -17,6 +18,8 @@ from db.models import (
     ContractSummary,
     EffectiveFunction,
     FunctionPrincipal,
+    Job,
+    JobStatus,
     TokenDeliveryEvidence,
     TvlSnapshot,
 )
@@ -37,6 +40,153 @@ def ready(session):
 
 def root_contract(session, protocol):
     return session.execute(select(Contract).where(Contract.protocol_id == protocol.id)).scalar_one()
+
+
+def test_reconciler_bookkeeping_never_rebuilds_or_enqueues_a_purge(prepared, monkeypatch):
+    from db.models import CompanyPagePurge
+    from services.monitoring.reconciler import EnrollmentClaim, _finish_success
+
+    session, protocol, factory = prepared
+    assert worker.refresh_one(factory) == "prepared"
+    session.execute(delete(CompanyPagePurge))
+    ready(session)
+    response = pages.read_response(session, request(), protocol.name)
+    assert response is not None
+    original = response.body
+    tokens = session.execute(select(Revision.key, Revision.token).order_by(Revision.key)).all()
+    builder = MagicMock(side_effect=AssertionError("Bookkeeping must not rebuild"))
+    monkeypatch.setattr(worker, "build_company_overview", builder)
+    for _ in range(3):
+        _finish_success(session, EnrollmentClaim(protocol.id, datetime.now(timezone.utc), 0, uuid4()))
+        assert worker.refresh_one(factory) == "idle"
+        response = pages.read_response(session, request(), protocol.name)
+        assert response is not None and response.body == original
+    assert session.execute(select(Revision.key, Revision.token).order_by(Revision.key)).all() == tokens
+    assert session.execute(select(CompanyPagePurge)).first() is None
+    builder.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "UPDATE protocols SET name=name",
+        "UPDATE contracts SET contract_name=contract_name, job_id=job_id",
+        "UPDATE jobs SET request=request, updated_at=updated_at",
+        "UPDATE contract_summaries SET has_timelock=has_timelock",
+        "UPDATE protocols SET official_domain='bookkeeping.example'",
+        "UPDATE jobs SET detail='heartbeat only'",
+        "UPDATE contracts SET rank_score=0.25, compiler_version='bookkeeping'",
+    ],
+)
+def test_irrelevant_or_identical_updates_leave_revision_tokens_unchanged(prepared, sql):
+    session, protocol, factory = prepared
+    contract = root_contract(session, protocol)
+    session.add(ContractSummary(contract_id=contract.id, has_timelock=False))
+    session.commit()
+    assert worker.refresh_one(factory) == "prepared"
+    ready(session)
+    tokens = session.execute(select(Revision.key, Revision.token).order_by(Revision.key)).all()
+    session.execute(text(sql))
+    session.commit()
+    assert session.execute(select(Revision.key, Revision.token).order_by(Revision.key)).all() == tokens
+    assert worker.refresh_one(factory) == "idle"
+    assert pages.read_response(session, request(), protocol.name) is not None
+
+
+@pytest.mark.parametrize("operation", ["contract", "child", "completed_job", "signals"])
+def test_independent_contract_writers_do_not_share_a_protocol_lock(prepared, operation):
+    session, protocol, factory = prepared
+    first = root_contract(session, protocol)
+    address = _addr("independent")
+    job = _add_job(session, address=address, protocol_id=protocol.id)
+    second = _add_contract(session, address=address, job=job, protocol_id=protocol.id)
+    reanalysis = _add_job(session, address=first.address, protocol_id=protocol.id, status=JobStatus.queued)
+    assert worker.refresh_one(factory) == "prepared"
+    # Match static-cache copying: flush the pointer change, then retain that
+    # transaction while external work would run. No external call in this test.
+    with factory() as copying, factory() as independent:
+        copying.execute(update(Contract).where(Contract.id == first.id).values(job_id=reanalysis.id))
+        copying.flush()
+        independent.execute(text("SET LOCAL lock_timeout = '500ms'"))
+        if operation == "contract":
+            independent.execute(update(Contract).where(Contract.id == second.id).values(contract_name="Changed"))
+        elif operation == "child":
+            independent.add(ContractSummary(contract_id=second.id, has_timelock=True))
+        elif operation == "signals":
+            from types import SimpleNamespace
+
+            from tests.scoring.test_scoring_schema import _row
+
+            independent.add(
+                _row(SimpleNamespace(job=job, protocol=protocol, contract=second), deployment_address=second.address)
+            )
+        else:
+            independent.execute(update(Job).where(Job.id == job.id).values(name="Changed job"))
+        independent.commit()  # Must finish while copying is still uncommitted.
+        assert pages.read_response(session, request(), protocol.name) is None
+        copying.rollback()
+    # The company check is a read-only digest, never a producer-written row.
+    assert session.get(Revision, f"protocol:{protocol.id}") is None
+    ready(session)
+    assert worker.refresh_one(factory) == "prepared"
+    assert pages.read_response(session, request(), protocol.name) is not None
+
+
+def test_new_member_committed_during_build_is_not_lost_from_protocol_fingerprint(prepared, monkeypatch):
+    session, protocol, factory = prepared
+    assert worker.refresh_one(factory) == "prepared"
+    session.execute(update(Contract).values(contract_name="Start new build"))
+    ready(session)
+    original = worker.build_functions_for_protocol
+
+    def build(source, name):
+        with factory() as concurrent:
+            concurrent.add(Contract(address=_addr("new-member"), nominated_protocol_id=protocol.id))
+            concurrent.commit()
+        return original(source, name)
+
+    monkeypatch.setattr(worker, "build_functions_for_protocol", build)
+    assert worker.refresh_one(factory) == "prepared"
+    assert pages.read_response(session, request(), protocol.name) is None
+    monkeypatch.setattr(worker, "build_functions_for_protocol", original)
+    ready(session)
+    assert worker.refresh_one(factory) == "prepared"
+    assert pages.read_response(session, request(), protocol.name) is not None
+
+
+def test_mixed_bulk_update_only_touches_actually_changed_rows(prepared):
+    session, protocol, factory = prepared
+    first = root_contract(session, protocol)
+    address = _addr("unchanged")
+    job = _add_job(session, address=address, protocol_id=protocol.id)
+    second = _add_contract(session, address=address, job=job, protocol_id=protocol.id)
+    key = f"protocol:{protocol.id}:contract:{second.id}"
+    before = session.get(Revision, key).token
+    session.execute(
+        text("UPDATE contracts SET contract_name=CASE WHEN id=:id THEN 'Changed' ELSE contract_name END"),
+        {"id": first.id},
+    )
+    session.commit()
+    assert session.execute(select(Revision.token).where(Revision.key == key)).scalar_one() == before
+
+
+def test_response_bearing_deployer_change_invalidates_and_rebuilds(prepared):
+    import json
+
+    session, protocol, factory = prepared
+    contract = root_contract(session, protocol)
+    assert worker.refresh_one(factory) == "prepared"
+    deployer = _addr("new-deployer")
+    contract.deployer = deployer
+    session.commit()
+    assert pages.read_response(session, request(), protocol.name) is None
+    ready(session)
+    assert worker.refresh_one(factory) == "prepared"
+    response = pages.read_response(session, request(), protocol.name)
+    assert response is not None
+    data = json.loads(bytes(response.body))
+    assert data["contracts"][0]["deployer"] == deployer
+    assert data == worker.build_company_overview(session, protocol.name)
 
 
 @pytest.mark.parametrize("header", ["Cookie", "X-PSAT-Admin-Key", "Authorization", "CF-Access-Jwt-Assertion", "Origin"])
@@ -79,7 +229,7 @@ def test_bulk_updates_coalesce_and_unrelated_protocol_does_not_dirty(prepared, m
     job = _add_job(session, address=address, protocol_id=other.id)
     _add_contract(session, address=address, job=job, protocol_id=other.id)
     assert pages.read_response(session, request(), protocol.name) is not None
-    key = f"protocol:{protocol.id}"
+    key = f"protocol:{protocol.id}:contract:{root_contract(session, protocol).id}"
     before = session.get(Revision, key).token
     for i in range(20):
         session.execute(

@@ -126,7 +126,7 @@ def test_invalid_preparations_fall_back(prepared, monkeypatch, change):
 
 
 def make_due(session):
-    session.execute(update(Protocol).values(official_domain=Protocol.official_domain))
+    session.execute(update(Contract).values(contract_name=Contract.contract_name + " changed"))
     session.execute(update(Page).values(next_attempt_at=datetime.now(timezone.utc) - timedelta(seconds=1)))
     session.commit()
 
@@ -156,7 +156,7 @@ def test_mark_during_build_survives_atomic_publication(prepared, monkeypatch):
     def build(source, name):
         with factory() as concurrent:
             concurrent.execute(
-                update(Protocol).where(Protocol.id == protocol.id).values(official_domain="changed.example")
+                update(Contract).where(Contract.protocol_id == protocol.id).values(contract_name="Changed")
             )
             concurrent.commit()
         return original(source, name)
@@ -257,7 +257,7 @@ def test_unfinished_member_and_completed_nonmember_do_not_qualify(prepared):
 def test_dirty_revision_rolls_back_with_producer(prepared):
     session, protocol, factory = prepared
     assert worker.refresh_one(factory) == "prepared"
-    session.execute(update(Protocol).where(Protocol.id == protocol.id).values(official_domain="rolled-back.example"))
+    session.execute(update(Contract).where(Contract.protocol_id == protocol.id).values(contract_name="Rolled back"))
     assert pages.read_response(session, request(), protocol.name) is None
     session.rollback()
     assert pages.read_response(session, request(), protocol.name) is not None
@@ -291,7 +291,7 @@ def test_full_api_serves_prepared_bytes_without_building_and_falls_back(prepared
         assert 0 < ttl < 60
     overview.assert_not_called()
     functions.assert_not_called()
-    session.execute(update(Protocol).where(Protocol.id == protocol.id).values(official_domain="dirty.example"))
+    session.execute(update(Contract).where(Contract.protocol_id == protocol.id).values(contract_name="Dirty"))
     session.commit()
     response = client.get(f"/api/company/{protocol.name}")
     assert response.status_code == 200
