@@ -34,6 +34,7 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
   const isAdmin = useIsAdmin();
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
+  const [requestAttempt, setRequestAttempt] = useState(0);
   const [auditCoverage, setAuditCoverage] = useState(null);
   const [functionData, setFunctionData] = useState(null);
   const [functionError, setFunctionError] = useState(null);
@@ -114,37 +115,53 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
 
   useEffect(() => {
     let cancelled = false;
-    setScore(null);
-    setScoreError(null);
+    const controller = new AbortController();
+    const options = { signal: controller.signal };
+    setData(null);
+    setError(null);
+    setAuditCoverage(null);
     setFunctionData(null);
     setFunctionError(null);
-    api(`/api/company/${encodeURIComponent(companyName)}`)
+    setScore(null);
+    setScoreError(null);
+    setSelectMiss(null);
+    setAddressesModalOpen(false);
+    setAuditsAdminOpen(false);
+    api(`/api/company/${encodeURIComponent(companyName)}`, options)
       .then((d) => { if (!cancelled) setData(d); })
       .catch((e) => { if (!cancelled) setError(e.message); });
     // Audit coverage is a separate concern — fetching it in parallel means
     // the overview still renders even if the audits pipeline hasn't been
     // wired up yet for this protocol. 404 / 500 / network errors are
     // swallowed; the audit column just stays empty.
-    api(`/api/company/${encodeURIComponent(companyName)}/audit_coverage`)
+    api(`/api/company/${encodeURIComponent(companyName)}/audit_coverage`, options)
       .then((c) => { if (!cancelled) setAuditCoverage(c); })
       .catch(() => { /* audits optional — keep the page usable */ });
     // Functions moved out of /api/company so the main payload could
     // drop from ~3.3 MB to ~1.2 MB. Fetched in parallel and threaded
     // through to ProtocolSurface as initialFunctions so the embedded
     // surface doesn't have to re-fetch.
-    api(`/api/company/${encodeURIComponent(companyName)}/functions`)
+    api(`/api/company/${encodeURIComponent(companyName)}/functions`, options)
       .then((d) => { if (!cancelled) setFunctionData(d?.functions || {}); })
       .catch((e) => { if (!cancelled) setFunctionError(e.message || "Failed to load function analysis"); });
     // Fetched here rather than inside ScoreBand so it travels in parallel with
     // the company payload: mounting the band only after /api/company answered
     // would serialise the two.
-    api(`/api/company/${encodeURIComponent(companyName)}/score`)
+    api(`/api/company/${encodeURIComponent(companyName)}/score`, options)
       .then((d) => { if (!cancelled) setScore(d); })
       .catch((e) => { if (!cancelled) setScoreError({ status: e.status, message: e.message }); });
-    return () => { cancelled = true; };
-  }, [companyName]);
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [companyName, requestAttempt]);
 
-  if (error) return <div className="page"><section className="panel"><p className="empty">Failed to load company overview: {error}</p></section></div>;
+  if (error) return (
+    <div className="page"><section className="panel">
+      <p className="empty" role="alert">Failed to load company overview: {error}</p>
+      <button type="button" onClick={() => setRequestAttempt((attempt) => attempt + 1)}>Retry</button>
+    </section></div>
+  );
   if (!data) return <div className="page"><section className="panel"><p className="empty">Loading...</p></section></div>;
 
   const { contracts, ownership_hierarchy: hierarchy } = data;
@@ -307,7 +324,12 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
               embedded surface skips its own /api/company and
               /audit_coverage fetches — both were previously fired a
               second time on every overview page-load. */}
-          <Suspense fallback={<LoadingFallback label="Loading control surface..." />}>
+          {functionError ? (
+            <div className="panel">
+              <p role="alert">Failed to load control surface functions: {functionError}</p>
+              <button type="button" onClick={() => setRequestAttempt((attempt) => attempt + 1)}>Retry</button>
+            </div>
+          ) : <Suspense fallback={<LoadingFallback label="Loading control surface..." />}>
             <ProtocolSurface
               ref={surfaceRef}
               companyName={companyName}
@@ -317,7 +339,7 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
               initialFunctionsError={functionError}
               embedded
             />
-          </Suspense>
+          </Suspense>}
         </div>
       </section>
 

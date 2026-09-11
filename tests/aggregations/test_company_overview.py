@@ -16,7 +16,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from sqlalchemy import select
+from sqlalchemy import event, select
 
 from db.models import (
     Contract,
@@ -62,6 +62,66 @@ from utils.balance_status import (
 )
 
 pytestmark = requires_postgres
+
+
+def test_prefetch_balance_provenance_is_narrow_and_keeps_both_current_fetches(db_session):
+    """Different successful native/token reads must retain their own provenance.
+
+    Large historical NFT inventories must never be decoded for the overview.
+    """
+    p = _add_protocol(db_session, f"fetch-projection-{uuid.uuid4().hex[:8]}")
+    addr = _addr("fetch-projection")
+    job = _add_job(db_session, address=addr, protocol_id=p.id)
+    contract = _add_contract(db_session, address=addr, job=job, protocol_id=p.id)
+    start = datetime.now(timezone.utc) - timedelta(hours=1)
+
+    def fetch(index, native, assets):
+        row = ContractBalanceFetch(
+            contract_id=contract.id,
+            chain_id=8453,
+            observed_address=addr,
+            native_status=native,
+            asset_set_status=assets,
+            writer=BALANCE_WRITER_TVL,
+            fetched_at=start + timedelta(minutes=index),
+            typed_assets=[{"address": _addr("nft"), "ids": list(range(10000))}],
+        )
+        db_session.add(row)
+        db_session.flush()
+        return row
+
+    historical = fetch(0, "proven_nonzero", "returned_assets")
+    tokens = fetch(1, "fetch_failed", "at_page_cap")
+    native = fetch(2, "proven_nonzero", "fetch_failed")
+    failed = fetch(3, "fetch_failed", "fetch_failed")
+    db_session.add_all(
+        [
+            ContractBalance(
+                contract_id=contract.id, fetch_id=historical.id, token_address=_addr("old"), raw_balance="1"
+            ),
+            ContractBalance(contract_id=contract.id, fetch_id=tokens.id, token_address=_addr("token"), raw_balance="2"),
+            ContractBalance(contract_id=contract.id, fetch_id=native.id, token_address=None, raw_balance="3"),
+        ]
+    )
+    db_session.commit()
+    statements = []
+    engine = db_session.get_bind()
+
+    def capture(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", capture)
+    try:
+        children = _prefetch_child_tables(db_session, {contract.id})
+    finally:
+        event.remove(engine, "before_cursor_execute", capture)
+    provenance = children["balance_fetches"]
+    assert set(provenance) == {tokens.id, native.id}
+    assert historical.id not in provenance and failed.id not in provenance
+    assert provenance[tokens.id].asset_set_status == "at_page_cap"
+    assert provenance[native.id].chain_id == 8453
+    assert not any("typed_assets" in sql or "asset_set_basis" in sql for sql in statements)
+    assert {b.fetch_id for b in children["balances"][contract.id]} == {tokens.id, native.id}
 
 
 def test_resolve_company_jobs_protocol_path(db_session):

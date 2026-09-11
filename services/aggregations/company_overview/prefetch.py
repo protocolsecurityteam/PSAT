@@ -476,7 +476,19 @@ def _prefetch_child_tables(
         """
         local: dict[int, Any] = {}
         rows = 0
-        for f in s.execute(select(ContractBalanceFetch).where(ContractBalanceFetch.contract_id.in_(id_list))).scalars():
+        # This view needs provenance, not the potentially enormous typed_assets
+        # inventory. Scalar rows also prevent accidental lazy loads downstream.
+        # Native and token balances may reference different successful fetches;
+        # retain every referenced id, never just the newest fetch per contract.
+        referenced = select(ContractBalanceLatest.fetch_id).where(
+            ContractBalanceLatest.contract_id.in_(id_list),
+            ContractBalanceLatest.fetch_id.is_not(None),
+        )
+        for f in s.execute(
+            select(ContractBalanceFetch.id, ContractBalanceFetch.chain_id, ContractBalanceFetch.asset_set_status).where(
+                ContractBalanceFetch.contract_id.in_(id_list), ContractBalanceFetch.id.in_(referenced)
+            )
+        ):
             local[f.id] = f
             rows += 1
         return local, rows
