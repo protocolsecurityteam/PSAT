@@ -47,7 +47,6 @@ def _stub_batch_probe_rpc(monkeypatch):
 def test_clear_empties_process_cache(monkeypatch):
     monkeypatch.setattr(tracking, "_get_code", lambda *a, **k: "0x60")
     monkeypatch.setattr(tracking, "_try_eth_call_decoded", lambda *a, **k: None)
-    monkeypatch.setattr(tracking, "type_authority_contract", lambda *a, **k: {})
     classify_resolved_address("https://rpc", "0x" + "a" * 40)
     assert _CLASSIFY_CACHE
     clear_classify_cache()
@@ -58,11 +57,6 @@ def test_transient_rpc_error_does_not_poison_cache(monkeypatch):
     """The dominant correctness bug v4/v5 fixed: a transient probe failure
     must not cement a wrong 'contract' classification process-wide."""
     monkeypatch.setattr(tracking, "_get_code", lambda *a, **k: "0x60")
-    monkeypatch.setattr(
-        tracking,
-        "type_authority_contract",
-        lambda *a, **k: {},
-    )
 
     # Force every probe to look like a transient RPC error (the sentinel path).
     def boom(*a, **k):
@@ -80,7 +74,6 @@ def test_with_status_reports_uncacheable_on_error(monkeypatch):
     must use _with_status to avoid persisting transient-error fallbacks
     via the classified_addresses artifact."""
     monkeypatch.setattr(tracking, "_get_code", lambda *a, **k: "0x60")
-    monkeypatch.setattr(tracking, "type_authority_contract", lambda *a, **k: {})
     monkeypatch.setattr(tracking, "_try_eth_call_decoded", lambda *a, **k: tracking._PROBE_ERROR)
 
     _kind, _details, cacheable = classify_resolved_address_with_status("https://rpc", "0x" + "c" * 40)
@@ -89,7 +82,6 @@ def test_with_status_reports_uncacheable_on_error(monkeypatch):
 
 def test_clean_classification_is_cacheable(monkeypatch):
     monkeypatch.setattr(tracking, "_get_code", lambda *a, **k: "0x60")
-    monkeypatch.setattr(tracking, "type_authority_contract", lambda *a, **k: {})
     monkeypatch.setattr(tracking, "_try_eth_call_decoded", lambda *a, **k: None)
 
     _kind, _details, cacheable = classify_resolved_address_with_status("https://rpc", "0x" + "d" * 40)
@@ -101,7 +93,6 @@ def test_cached_details_are_isolated_from_caller_mutation(monkeypatch):
     """Codex iter-2 fix: cached details must not be poisoned by callers
     mutating the returned dict (or its nested lists like Safe.owners)."""
     monkeypatch.setattr(tracking, "_get_code", lambda *a, **k: "0x60")
-    monkeypatch.setattr(tracking, "type_authority_contract", lambda *a, **k: {})
 
     # Simulate a Safe: owners + threshold both succeed.
     def fake_call(_rpc, _addr, signature, _abi, *_a, **_k):
@@ -138,7 +129,6 @@ def test_immutable_classification_keeps_long_ttl(monkeypatch):
     TTL must NOT re-probe — the long TTL still applies."""
     monkeypatch.setattr(tracking, "_CLASSIFY_BATCH_ENABLED", False)
     monkeypatch.setattr(tracking, "_get_code", lambda *a, **k: "0x60")
-    monkeypatch.setattr(tracking, "type_authority_contract", lambda *a, **k: {})
     monkeypatch.setattr(tracking, "_try_eth_call_decoded", lambda *a, **k: None)  # all probes empty → "contract"
 
     addr = "0x" + "b" * 40
@@ -168,7 +158,6 @@ def test_mutable_safe_details_use_short_ttl(monkeypatch):
     it past the short TTL (still within the long TTL) forces a re-probe."""
     monkeypatch.setattr(tracking, "_CLASSIFY_BATCH_ENABLED", False)
     monkeypatch.setattr(tracking, "_get_code", lambda *a, **k: "0x60")
-    monkeypatch.setattr(tracking, "type_authority_contract", lambda *a, **k: {})
 
     owners = {"v": ["0x" + "1" * 40]}
 
@@ -208,7 +197,6 @@ def test_pinned_block_mutable_details_keep_long_ttl(monkeypatch):
     long TTL — only block_tag='latest' reads use the short TTL."""
     monkeypatch.setattr(tracking, "_CLASSIFY_BATCH_ENABLED", False)
     monkeypatch.setattr(tracking, "_get_code", lambda *a, **k: "0x60")
-    monkeypatch.setattr(tracking, "type_authority_contract", lambda *a, **k: {})
 
     owners = {"v": ["0x" + "1" * 40]}
 
@@ -243,7 +231,6 @@ def test_concurrent_classify_consistent_under_8_threads(monkeypatch):
     # actually intercepts every probe (the batched path bypasses it).
     monkeypatch.setattr(tracking, "_CLASSIFY_BATCH_ENABLED", False)
     monkeypatch.setattr(tracking, "_get_code", lambda *a, **k: "0x60")
-    monkeypatch.setattr(tracking, "type_authority_contract", lambda *a, **k: {})
 
     # Per-address signature: a few addresses look like Safes, the rest fall
     # through to "contract". The fake call records every probe so we can

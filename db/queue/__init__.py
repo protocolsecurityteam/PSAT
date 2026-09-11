@@ -14,6 +14,7 @@ from .artifacts import (
     count_analysis_children,
     get_all_artifacts,
     get_artifact,
+    get_legacy_artifact,
     get_source_files,
     store_artifact,
     store_source_files,
@@ -71,7 +72,7 @@ from .static_cache import (
     find_existing_job_for_address,
     find_previous_company_inventory,
     is_known_proxy,
-    proven_analysis_schema_version,
+    proven_static_facts_schema_version,
 )
 
 __all__ = [
@@ -116,11 +117,12 @@ __all__ = [
     "find_previous_company_inventory",
     "get_all_artifacts",
     "get_artifact",
+    "get_legacy_artifact",
     "get_or_create_protocol",
     "get_source_files",
     "heartbeat_job",
     "is_known_proxy",
-    "proven_analysis_schema_version",
+    "proven_static_facts_schema_version",
     "reclaim_stuck_jobs",
     "reconcile_impl_job_for_proxy",
     "record_heartbeat",

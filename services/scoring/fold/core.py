@@ -344,7 +344,7 @@ def compute_protocol_score(
                 "therefore a join not performed, and nothing in it says the surface that would "
                 "answer the question is absent. The join that would decide it is the intermediate "
                 "node's own functions against its outbound targets "
-                "(effective_functions.sinks/effect_targets and the external_call_target edges "
+                "(effective_functions.sinks and the external_call_target edges "
                 "CONTROL_RELATIONS excludes). Until it runs the hop is withheld as "
                 "not_determined. That join NOW RUNS, under act_as_composition, and it is worth "
                 "being exact about what it decides: it bounds the MAGNITUDE of a licensed hop, "

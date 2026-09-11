@@ -69,9 +69,7 @@ def test_build_company_function_entry_filters_generic_authority_contract_when_sp
         abi_signature="pauseContract()",
         function_name="pauseContract",
         selector="0x439766ce",
-        effect_labels=["pause_toggle"],
-        effect_targets=["paused"],
-        action_summary="Changes the contract pause state.",
+        claims=[{"claim_id": "pause.set"}],
         authority_public=False,
         authority_roles=[],
     )
@@ -136,9 +134,7 @@ def test_build_company_function_entry_enriches_principal_type_from_company_looku
         abi_signature="transferOwnership(address)",
         function_name="transferOwnership",
         selector="0xf2fde38b",
-        effect_labels=["ownership_transfer"],
-        effect_targets=["owner"],
-        action_summary="Transfers ownership.",
+        claims=[{"claim_id": "ownership.transfer"}],
         authority_public=False,
         authority_roles=[],
     )
@@ -340,7 +336,7 @@ def test_analyses_detail(mock_session_cls, mock_get_all_artifacts) -> None:
     mock_session_cls.return_value.__exit__ = MagicMock(return_value=False)
 
     mock_get_all_artifacts.return_value = {
-        "contract_analysis": {"subject": {"name": "Demo"}, "summary": {"control_model": "ownable"}},
+        "static_facts": {"subject": {"name": "Demo"}, "summary": {"control_model": "ownable"}},
     }
 
     detail = client.get("/api/analyses/demo_run")
@@ -398,8 +394,8 @@ def test_artifact_endpoint_serves_json_and_text(mock_session_cls) -> None:
     mock_session_cls.return_value.__enter__ = MagicMock(return_value=mock_session)
     mock_session_cls.return_value.__exit__ = MagicMock(return_value=False)
 
-    json_response = client.get("/api/analyses/demo_run/artifact/contract_analysis.json", headers=_admin_headers())
-    txt_response = client.get("/api/analyses/demo_run/artifact/analysis_report.txt", headers=_admin_headers())
+    json_response = client.get("/api/analyses/demo_run/artifact/static_facts.json", headers=_admin_headers())
+    txt_response = client.get("/api/analyses/demo_run/artifact/static_facts_report.txt", headers=_admin_headers())
 
     assert json_response.status_code == 200, json_response.text
     assert json_response.json()["summary"]["control_model"] == "ownable"
@@ -662,9 +658,9 @@ def test_analyses_listing_does_not_touch_object_storage(mock_session_cls) -> Non
     # Two artifact NAMES per job — proves the row goes through without
     # any storage fetch happening.
     artifact_names_result.all.return_value = [
-        (j_good.id, "contract_analysis"),
+        (j_good.id, "static_facts"),
         (j_good.id, "contract_flags"),
-        (j_bad.id, "contract_analysis"),
+        (j_bad.id, "static_facts"),
         (j_bad.id, "contract_flags"),
     ]
 
@@ -687,4 +683,4 @@ def test_analyses_listing_does_not_touch_object_storage(mock_session_cls) -> Non
     assert "run_bad" in by_run
     assert "contract_name" not in by_run["run_bad"]
     # Artifact names are still listed (no body fetch needed).
-    assert sorted(by_run["run_good"]["available_artifacts"]) == ["contract_analysis", "contract_flags"]
+    assert by_run["run_good"]["available_artifacts"] == ["contract_flags"]

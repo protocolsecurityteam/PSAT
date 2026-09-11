@@ -28,7 +28,7 @@ import pytest
 slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
 
-from services.static.contract_analysis_pipeline.effects import build_effects  # noqa: E402
+from services.static.static_analysis.effects import build_effects  # noqa: E402
 
 
 def _compile(tmp_path: Path, source: str, name: str):

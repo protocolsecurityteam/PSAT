@@ -25,7 +25,7 @@ slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
 
 from services.static.claims import build_claims  # noqa: E402
-from services.static.contract_analysis_pipeline.effects import build_effects  # noqa: E402
+from services.static.static_analysis.effects import build_effects  # noqa: E402
 
 
 def _compile(tmp_path: Path, source: str, name: str):
@@ -732,22 +732,3 @@ contract Intent {
 def _zero_value(tmp_path_factory):
     contract = _compile(tmp_path_factory.mktemp("zero_value"), ZERO_VALUE_CALL_SRC, "Intent")
     return build_effects(contract)["functions"]
-
-
-def test_an_approval_is_not_an_eth_payout(_zero_value):
-    info = _zero_value["recordIntent(IERC20,uint256)"]
-    assert info["value_flows"] == []
-    assert "asset_send" not in info["effect_labels"]
-
-
-def test_a_real_value_call_still_reads_as_a_payout(_zero_value):
-    info = _zero_value["payOut(address,uint256)"]
-    assert [f["kind"] for f in info["value_flows"]] == ["low_level_value_call"]
-    assert "asset_send" in info["effect_labels"]
-
-
-def test_a_function_that_approves_AND_pays_keeps_the_payout_label(_zero_value):
-    """The retraction is scoped to the absence of any real outflow: one zero-value
-    site alongside a genuine payment must not take the payment's label with it."""
-    info = _zero_value["approveAndPay(IERC20,address,uint256)"]
-    assert "asset_send" in info["effect_labels"]

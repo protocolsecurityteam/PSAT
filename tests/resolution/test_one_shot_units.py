@@ -20,13 +20,13 @@ from services.resolution.one_shot_probe import (
     collect_one_shot_latches,
     detect_proxy_standard,
 )
-from services.static.contract_analysis_pipeline.one_shot import (
+from services.static.static_analysis.one_shot import (
     _is_monotonic_ascent_latch,
     _parse_constant,
     _scalar_candidate,
     _write_falsifies_guard,
 )
-from services.static.contract_analysis_pipeline.predicate_types import LeafPredicate
+from services.static.static_analysis.predicate_types import LeafPredicate
 
 _ZERO = "0x" + "0" * 64
 PROXY = "0x" + "11" * 20

@@ -69,7 +69,6 @@ def _protocol_with_functions(session, addresses: list[str]) -> tuple[int, dict[s
             function_name="f",
             selector="0x40c10f19",
             authority_public=False,
-            effect_targets=["slot0"],
         )
         session.add(fn)
         session.flush()

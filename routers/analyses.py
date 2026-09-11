@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
-from sqlalchemy import select
+from sqlalchemy import literal, select
 
-from db.models import Artifact, Contract, Job, JobStatus
+from db.models import Artifact, AssessmentPublication, Contract, Job, JobStatus
 from db.storage import StorageContentAbsent, StorageKeyAbsent, StorageKeyMissing
 from schemas.api_responses import AnalysisListEntry
 from services.aggregations import build_analysis_detail
@@ -27,11 +28,13 @@ router = APIRouter()
 # Artifact names the consumer frontend fetches via ``/artifact/``. Any other
 # name is operator/internal and gated behind a valid admin key. Compared
 # against the requested name after extension-stripping and lower-casing.
-_CONSUMER_SAFE_ARTIFACTS = frozenset({"upgrade_history", "dependencies", "dependency_graph_viz", "policy_state"})
+_CONSUMER_SAFE_ARTIFACTS = frozenset(
+    {"assessment", "upgrade_history", "dependencies", "dependency_graph_viz", "policy_state"}
+)
 
 # Internal/operator artifacts excluded from the public ``/api/analyses``
 # listing so their existence isn't enumerable to anonymous callers.
-_INTERNAL_ARTIFACT_NAMES = frozenset({"stage_errors", "stage_timings", "predicate_trees", "control_tracking_plan"})
+_INTERNAL_ARTIFACT_NAMES = frozenset({"stage_errors", "stage_timings", "predicate_trees", "static_facts"})
 
 
 def _is_internal_artifact_name(name: str) -> bool:
@@ -154,7 +157,7 @@ def analyses(response: Response) -> list[AnalysisListEntry]:
                     contracts_by_key.setdefault((_coalesce_chain(c.chain), addr_lower), c)
 
         job_ids = [job.id for job in jobs]
-        # Earlier code fetched every job's ``contract_analysis`` artifact body
+        # Earlier code fetched every job's ``static_facts`` artifact body
         # from object storage just to read ``subject.name`` and ``summary``.
         # Both were redundant: ``contract_name`` is on the prefetched
         # ``Contract`` row and ``summary`` is never consumed by the frontend
@@ -164,9 +167,16 @@ def analyses(response: Response) -> list[AnalysisListEntry]:
         # at production scale.
         artifact_names_by_job: dict[Any, list[str]] = {}
         if job_ids:
-            for row in session.execute(
-                select(Artifact.job_id, Artifact.name).where(Artifact.job_id.in_(job_ids))
-            ).all():
+            artifact_inventory = (
+                select(Artifact.job_id, Artifact.name)
+                .where(Artifact.job_id.in_(job_ids))
+                .union(
+                    select(AssessmentPublication.job_id, literal("assessment")).where(
+                        AssessmentPublication.job_id.in_(job_ids)
+                    )
+                )
+            )
+            for row in session.execute(artifact_inventory).all():
                 artifact_names_by_job.setdefault(row[0], []).append(row[1])
 
     def company_for_job(job: Job) -> str | None:
@@ -240,6 +250,9 @@ def analysis_artifact(
     artifact_name: str,
     request: Request,
     chain: str | None = Query(default=None),
+    at_block: int | None = Query(default=None, ge=0),
+    known_at: datetime | None = Query(default=None),
+    context_id: str | None = Query(default=None),
     x_psat_admin_key: str | None = Header(default=None),
 ):
     """Get a specific artifact for an analysis.
@@ -307,6 +320,18 @@ def analysis_artifact(
             job = session.execute(stmt).scalar_one_or_none()
         if job is None:
             raise HTTPException(status_code=404, detail="Analysis not found")
+
+        if lookup_name == "assessment":
+            assessment = deps.load_temporal_assessment(
+                session,
+                job.id,
+                at_block=at_block,
+                known_at=known_at,
+                context_id=context_id,
+            )
+            if assessment is None:
+                raise HTTPException(status_code=404, detail="Assessment not found for the requested view")
+            return JSONResponse(content=assessment)
 
         artifact: Any = None
         not_determined: str | None = None
@@ -384,7 +409,16 @@ def analysis_artifact(
 def analysis_detail(run_name: str) -> dict:
     """Get analysis detail by job name (run_name) or job_id."""
     with deps.SessionLocal() as session:
-        payload = build_analysis_detail(session, run_name)
+        from db.queue.typed import ArtifactSchemaError
+
+        try:
+            payload = build_analysis_detail(session, run_name)
+        except ArtifactSchemaError:
+            raise HTTPException(
+                status_code=500,
+                detail={"code": "invalid_assessment", "artifact": "assessment"},
+                headers={"X-PSAT-Artifact-State": "invalid"},
+            ) from None
         if payload is None:
             raise HTTPException(status_code=404, detail="Analysis not found")
         return payload

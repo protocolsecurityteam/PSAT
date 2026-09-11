@@ -8,13 +8,11 @@ The policy->effects transition is feature-flagged (``PSAT_EFFECTS_STAGE``,
 default-off, read in ``PolicyWorker.next_stage``); with the flag off no job ever
 enters this stage and the worker simply idles.
 
-**Consumption boundary: labels-observable, scoring-deferred.** Verdicts persist
+**Consumption boundary: Assessment-projected, scoring-deferred.** Verdicts persist
 to ``effect_behavior_cache`` / ``effect_verdicts`` and static-vs-witness
 discrepancies to the warning channel (``record_degraded``). Beyond that,
-*proven* verdicts are minted into registry claims on the matching
-``effective_functions`` rows through ``services.effects.claims_bridge`` (after
-``verdict_write``), so the frontend renders them as labels through the one
-shared claims vocabulary. The **score** still does not consume verdicts — that
+*proven* verdicts update Assessment, and relational function claims are then
+replaced from that validated document. The **score** still does not consume verdicts — that
 integration is deliberately unwired; the frontend score path neutralises the
 ``behavioral_observed`` tier so it stays byte-identical.
 
@@ -58,9 +56,10 @@ from db.effect_cache import (
     record_effect_verdict,
     upsert_cached_verdict,
 )
-from db.models import EffectBehaviorCache, EffectiveFunction, EffectVerdict, Job, JobStage
-from db.queue import advance_job, store_artifact
-from services.effects import claims_bridge
+from db.models import Contract, EffectBehaviorCache, EffectiveFunction, EffectVerdict, Job, JobStage
+from db.queue import advance_job, get_artifact, store_artifact
+from db.queue._chains import job_chain_id
+from db.queue.typed import ArtifactSchemaError, load_assessment
 from services.effects.config import (
     EFFECT_CLASS_VALUE_OUT,
     SCOPE_KERNEL,
@@ -518,7 +517,7 @@ class EffectsWorker(BaseWorker):
         from services.clients.rpc import eth_call_batch, require_rpc_url
         from services.effects.simulate import eth_simulate_v1
 
-        chain_id = _chain_id_for_job(job)
+        chain_id = job_chain_id(job)
         request = job.request if isinstance(job.request, dict) else {}
         explicit = request.get("rpc_url")
         rpc_url = require_rpc_url(
@@ -701,13 +700,11 @@ class EffectsWorker(BaseWorker):
         self._run_probes(items, durations_ms, counters, seams)
 
         # verdict_write → cache + state-plane persistence + discrepancy routing,
-        # then mint proven verdicts into registry claims on the matching
-        # effective_functions rows — same job, same rows, same phase span so the
-        # /monitor timeline gains no new stage.
+        # then update Assessment and replace its relational projection.
         with log_timed_phase(logger, "verdict_write", durations_ms=durations_ms) as ph:
             self._write_verdicts(session, job, items, seams, counters)
             ph["verdicts_written"] = counters.verdicts_written
-            ph["labeled"] = self._bridge_claims(session, items)
+            ph["assessments_updated"] = self._update_assessments(session, items)
 
         # Layer-1 distillation, after the bridge so it reads the
         # ``behavioral_observed`` claims this job just merged. Deliberately
@@ -768,7 +765,7 @@ class EffectsWorker(BaseWorker):
         scope = (
             JobScope(
                 address=address,
-                chain_id=_chain_id_for_job(job),
+                chain_id=job_chain_id(job),
                 # Only an empty-planning marker at least as new as this job counts
                 # as ownership — see ``_scope_predicate`` rule 4.
                 planned_since=getattr(job, "created_at", None),
@@ -1211,36 +1208,110 @@ class EffectsWorker(BaseWorker):
             counters.verdicts_written += 1
             self._route_section9(it, verdict, tier, transcript_ptr, discrepancy, counters)
 
-    def _bridge_claims(self, session: Session, items: list[_Item]) -> int:
-        """Fold this job's *proven* verdicts into registry claims
-        on the matching ``effective_functions`` rows. Reads the verdicts back from
-        the DB (authoritative — includes cache-hit proven verdicts, not only fresh
-        probes) and merges through the pure bridge. Fail-closed is the bridge's
-        job; this only touches rows that actually mint. Returns the row count
-        labeled."""
+    def _update_assessments(self, session: Session, items: list[_Item]) -> int:
+        """Attach verdict evidence to each affected contract's assessment.
+
+        Effects jobs may be protocol-wide, so the current job is not always the
+        owner of the functions being probed. Group through EffectiveFunction ->
+        Contract and update the originating contract job instead of writing one
+        incoherent multi-contract document on the effects job.
+        """
+
         fn_ids = {it.candidate.function_id for it in items if it.candidate.function_id is not None}
         if not fn_ids:
             return 0
-        verdicts = (
-            session.query(EffectVerdict)
-            .filter(EffectVerdict.function_id.in_(fn_ids), EffectVerdict.verdict == VERDICT_PROVEN)
-            .all()
-        )
-        by_fn: dict[int, list[EffectVerdict]] = {}
+        rows = session.query(EffectiveFunction).filter(EffectiveFunction.id.in_(fn_ids)).all()
+        contract_ids = {row.contract_id for row in rows}
+        # Assessment replaces the contract's execution receipt as a whole.
+        # Include prior verdicts for functions outside this scheduling batch.
+        rows = session.query(EffectiveFunction).filter(EffectiveFunction.contract_id.in_(contract_ids)).all()
+        row_by_id = {row.id: row for row in rows if row.id is not None}
+        verdicts = session.query(EffectVerdict).filter(EffectVerdict.function_id.in_(row_by_id)).all()
+        contracts = session.query(Contract).filter(Contract.id.in_(contract_ids)).all()
+        contract_by_id = {contract.id: contract for contract in contracts}
+
+        verdicts_by_contract: dict[int, list[EffectVerdict]] = {}
+        signatures_by_contract: dict[int, dict[int, str]] = {}
         for verdict in verdicts:
-            if verdict.function_id is not None:
-                by_fn.setdefault(verdict.function_id, []).append(verdict)
-        if not by_fn:
-            return 0
-        rows = session.query(EffectiveFunction).filter(EffectiveFunction.id.in_(by_fn)).all()
-        labeled = 0
-        for ef in rows:
-            merged = claims_bridge.merge_into_function(ef.claims, ef.effect_labels, by_fn.get(ef.id, ()))
-            if merged is None:
+            if verdict.function_id is None:
                 continue
-            ef.claims, ef.effect_labels = merged
-            labeled += 1
-        return labeled
+            row = row_by_id.get(verdict.function_id)
+            if row is None:
+                continue
+            verdicts_by_contract.setdefault(row.contract_id, []).append(verdict)
+            signatures_by_contract.setdefault(row.contract_id, {})[row.id] = row.abi_signature or row.function_name
+
+        updated = 0
+        ownerless = 0
+        for contract_id, contract_verdicts in verdicts_by_contract.items():
+            contract = contract_by_id.get(contract_id)
+            if contract is None or contract.job_id is None:
+                # No canonical Assessment owns a claim projection here. Keep the
+                # function identity so verdict facts remain linked, but retract
+                # any independently carried relational claims.
+                for row in rows:
+                    if row.contract_id == contract_id:
+                        row.claims = None
+                ownerless += 1
+                continue
+            try:
+                assessment = load_assessment(get_artifact, session, contract.job_id)
+            except ArtifactSchemaError as exc:
+                record_degraded(
+                    phase="effects_assessment",
+                    exc=exc,
+                    context={"contract_id": contract_id, "job_id": str(contract.job_id)},
+                )
+                continue
+            if assessment is None:
+                record_degraded(
+                    phase="effects_assessment",
+                    exc=RuntimeError("assessment artifact missing for effect verdict contract"),
+                    context={"contract_id": contract_id, "job_id": str(contract.job_id)},
+                )
+                continue
+
+            deployment = assessment["contract"]["deployment_address"]
+            owned_rows = [
+                row
+                for row in rows
+                if row.contract_id == contract_id and (row.deployment_address or contract.address).lower() == deployment
+            ]
+            owned_ids = {row.id for row in owned_rows}
+            if not owned_ids.intersection(fn_ids):
+                record_degraded(
+                    phase="effects_assessment",
+                    exc=RuntimeError("selected deployment has no matching Assessment owner"),
+                    context={"contract_id": contract_id, "job_id": str(contract.job_id)},
+                )
+                continue
+            contract_verdicts = [verdict for verdict in contract_verdicts if verdict.function_id in owned_ids]
+
+            from services.assessment import add_effects, effect_matches_by_function
+            from services.assessment.functions import resolve_function
+
+            assessment = add_effects(
+                assessment,
+                contract_verdicts,
+                signatures_by_function_row=signatures_by_contract.get(contract_id, {}),
+            )
+            store_artifact(session, contract.job_id, "assessment", data=assessment)
+            projected_claims = effect_matches_by_function(assessment)
+            for row in owned_rows:
+                signature, _problem = resolve_function(
+                    assessment,
+                    {
+                        "function": row.function_name,
+                        "abi_signature": row.abi_signature,
+                        "selector": row.selector,
+                    },
+                )
+                row_claims = projected_claims.get(signature, []) if signature is not None else []
+                row.claims = row_claims
+            updated += 1
+        if ownerless:
+            record_stage_metric("assessment_owner_missing", ownerless)
+        return updated
 
     def _distill_score_signals(self, session: Session, job: Job) -> None:
         """Distil this job's contracts into ``function_score_signals`` + mark the
@@ -1259,7 +1330,7 @@ class EffectsWorker(BaseWorker):
         nothing.
 
         The whole pass runs in the job's transaction rather than committing:
-        the ``_bridge_claims`` writes above are uncommitted at this point, and a
+        Assessment projection writes above are uncommitted at this point, and a
         DB error outside a savepoint would abort the transaction carrying them —
         an abort the stage would not notice until its own commit silently became
         a rollback and the job advanced as a success with its verdicts gone.
@@ -1719,18 +1790,6 @@ def _transcript_artifact_name(transcript: dict[str, Any]) -> str:
     body = json.dumps(transcript, sort_keys=True, default=str)
     digest = hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
     return f"effect_transcript_{effect_class}_{digest}"
-
-
-def _chain_id_for_job(job: Job) -> int:
-    """The job's first-class ``chain_id`` (invariant 1), else derived from
-    ``request['chain']``, else mainnet — mirrors ``policy_worker``."""
-    from db.models import derive_job_chain_id
-
-    chain_id = getattr(job, "chain_id", None)
-    if isinstance(chain_id, int):
-        return chain_id
-    request = job.request if isinstance(job.request, dict) else {}
-    return derive_job_chain_id(request.get("chain"), getattr(job, "address", None)) or 1
 
 
 def main() -> None:

@@ -11,87 +11,14 @@ Two layers:
 
 from __future__ import annotations
 
-import textwrap
-from pathlib import Path
-
 import pytest
 
 from services.effects.hashing import (
     bytecode_fallback_hash,
     contract_surface_hash,
-    resolved_function_hash,
 )
-from tests.support.effects_ir import _fn, _ir, _node, _var
 
 pytestmark = pytest.mark.compile
-
-
-def test_override_hashes_differently_from_mixin_structural():
-    """inv. 2: a stricter override (extra require gate) MUST hash apart from the
-    mixin default even though names are stripped — the divergence is structural,
-    not name-based."""
-    latch = _var("StateVariable", "_pausedUntil")
-    sender = _var("SolidityVariableComposed", "msg.sender")
-    guardian = _var("StateVariable", "guardian")
-    admin = _var("StateVariable", "admin")
-
-    mixin = _fn(
-        "Base.pauseUntil(uint256)",
-        nodes=[
-            _node("EXPRESSION", [_ir("Binary", read=[sender, guardian])]),
-            _node("EXPRESSION", [_ir("Assignment", lvalue=latch)]),
-        ],
-    )
-    override = _fn(
-        "Strict.pauseUntil(uint256)",
-        nodes=[
-            _node("EXPRESSION", [_ir("Binary", read=[sender, guardian])]),
-            _node("EXPRESSION", [_ir("Binary", read=[sender, admin])]),  # stricter gate
-            _node("EXPRESSION", [_ir("Assignment", lvalue=latch)]),
-        ],
-    )
-    assert resolved_function_hash(mixin) != resolved_function_hash(override)
-
-
-def test_variable_names_do_not_change_the_hash():
-    """Renaming a local/state var (same structure) must not move the hash —
-    names are stripped, only roles remain."""
-    a = _fn("A.f()", nodes=[_node("EXPRESSION", [_ir("Assignment", lvalue=_var("StateVariable", "paused"))])])
-    b = _fn("B.g()", nodes=[_node("EXPRESSION", [_ir("Assignment", lvalue=_var("StateVariable", "frozen"))])])
-    assert resolved_function_hash(a) == resolved_function_hash(b)
-
-
-def test_internal_callee_is_inlined():
-    """An internal call to a body with structure hashes differently from an
-    internal call to an empty callee — the callee's IR is inlined."""
-    rich_callee = _fn("H.helper()", nodes=[_node("EXPRESSION", [_ir("Assignment", lvalue=_var("StateVariable"))])])
-    empty_callee = _fn("H.noop()", nodes=[])
-    caller_rich = _fn("C.f()", nodes=[_node("EXPRESSION", [_ir("InternalCall", function=rich_callee)])])
-    caller_empty = _fn("C.f()", nodes=[_node("EXPRESSION", [_ir("InternalCall", function=empty_callee)])])
-    assert resolved_function_hash(caller_rich) != resolved_function_hash(caller_empty)
-
-
-def test_recursion_terminates():
-    """A self-recursive internal call must not blow the stack."""
-    fn = _fn("R.loop()", nodes=[])
-    fn.nodes = [_node("EXPRESSION", [_ir("InternalCall", function=fn)])]  # pyright: ignore[reportAttributeAccessIssue]
-    assert isinstance(resolved_function_hash(fn), str)
-
-
-def test_modifier_gate_participates():
-    """Two identical bodies gated by different modifiers hash apart."""
-    body = [_node("EXPRESSION", [_ir("Assignment", lvalue=_var("StateVariable"))])]
-    mod_a = _fn("m.onlyGuardian()", nodes=[_node("EXPRESSION", [_ir("Binary", read=[_var("StateVariable")])])])
-    mod_b = _fn(
-        "m.onlyAdmin()",
-        nodes=[
-            _node("EXPRESSION", [_ir("Binary", read=[_var("StateVariable")])]),
-            _node("EXPRESSION", [_ir("Binary", read=[_var("StateVariable")])]),
-        ],
-    )
-    fn_a = _fn("A.f()", nodes=body, modifiers=[mod_a])
-    fn_b = _fn("A.f()", nodes=body, modifiers=[mod_b])
-    assert resolved_function_hash(fn_a) != resolved_function_hash(fn_b)
 
 
 # ---------------------------------------------------------------------------
@@ -199,42 +126,3 @@ def _solc_086() -> str:
     if best is None:
         pytest.skip("no installed solc >=0.8.26 (run `solc-select install 0.8.27`)")
     return str(ss.artifact_path(".".join(str(x) for x in best)))
-
-
-def test_override_vs_mixin_resolved_hashes_differ_real_slither(tmp_path: Path):
-    """inv. 2 on real IR: the mixin `pauseUntil` default and a stricter override
-    resolve to different functions and MUST hash apart (the exact weETH hazard —
-    same name, same inherited file, different gate)."""
-    from slither.slither import Slither
-
-    src = textwrap.dedent(
-        """
-        pragma solidity ^0.8.26;
-        contract Base {
-            uint256 internal _pausedUntil;
-            address internal guardian;
-            modifier onlyGuardian() { require(msg.sender == guardian); _; }
-            function pauseUntil(uint256 t) public virtual onlyGuardian {
-                _pausedUntil = t;
-            }
-        }
-        contract Strict is Base {
-            address internal admin;
-            function pauseUntil(uint256 t) public override onlyGuardian {
-                require(msg.sender == admin);
-                _pausedUntil = t;
-            }
-        }
-        """
-    ).strip()
-    f = tmp_path / "P.sol"
-    f.write_text(src + "\n")
-    sl = Slither(str(f), solc=_solc_086())
-
-    base = next(c for c in sl.contracts if c.name == "Base")
-    strict = next(c for c in sl.contracts if c.name == "Strict")
-    base_fn = base.get_function_from_signature("pauseUntil(uint256)")
-    strict_fn = strict.get_function_from_signature("pauseUntil(uint256)")
-    assert base_fn is not None and strict_fn is not None
-
-    assert resolved_function_hash(base_fn) != resolved_function_hash(strict_fn)

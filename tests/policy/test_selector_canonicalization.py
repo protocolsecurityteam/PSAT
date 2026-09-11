@@ -32,16 +32,12 @@ from eth_utils.crypto import keccak
 slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
 
+from services.abi import _canonical_signature  # noqa: E402
+from services.abi import function_identity as _abi_signature_and_selector  # noqa: E402
 from services.effects.calldata import _selector_of  # noqa: E402
-from services.policy.effective_permissions import (  # noqa: E402
-    _abi_signature_and_selector,
-    build_effective_permissions,
-)
 from services.resolution.capability_resolver import _selector_for_signature  # noqa: E402
-from services.static.contract_analysis_pipeline.predicate_artifacts import (  # noqa: E402
-    _canonical_signature,
-    build_predicate_artifacts,
-)
+from services.static.static_analysis.predicate_artifacts import build_predicate_artifacts  # noqa: E402
+from tests.support.policy_builders import assessed_permissions as build_permission_index  # noqa: E402
 
 
 def _sel(signature: str) -> str:
@@ -171,10 +167,9 @@ def test_resolver_selector_uses_artifact_canonical_map(predicate_artifact):
     assert _selector_for_signature(exec_key) != EXECUTE_ADDRESS_BUG
 
 
-def test_selector_for_signature_falls_back_for_contracts_without_map():
-    """No regression to the #104 contract-type fix: with no canonical map, a
-    contract/interface param still lowers to ``address`` via the fallback."""
-    assert _selector_for_signature("addAsset(ERC20)") == _sel("addAsset(address)")
+def test_selector_for_signature_requires_type_evidence_for_user_types():
+    """A name alone cannot distinguish a contract, enum, or struct."""
+    assert _selector_for_signature("addAsset(ERC20)") is None
     # A bare elementary signature is unaffected with or without a map.
     assert _selector_for_signature("setNum(uint256)") == SET_NUM_CANONICAL
     # Non-signatures return None (guard), with or without a map.
@@ -183,11 +178,11 @@ def test_selector_for_signature_falls_back_for_contracts_without_map():
     assert _selector_for_signature("f(uint8)", {"f(uint8)": "bogus-no-parens"}) == _sel("f(uint8)")
 
 
-def test_build_effective_permissions_selector_column_is_canonical(predicate_artifact):
+def test_build_permission_index_selector_column_is_canonical(predicate_artifact):
     """Policy stage: ``effective_functions.selector`` / ``abi_signature`` come
     from the canonical map, not the address-collapse, for struct/enum params."""
     analysis = {"subject": {"address": "0x" + "11" * 20, "name": "C"}}
-    ep = build_effective_permissions(
+    ep = build_permission_index(
         analysis,
         predicate_trees=predicate_artifact,
         capability_resolver_output={},  # marks resolver output available
@@ -225,11 +220,7 @@ def test_abi_signature_and_selector_helper_prefers_map():
         "execute((uint256,address))",
         EXECUTE_CANONICAL,
     )
-    # Not in the map → lossy fallback (address collapse) — the documented gap.
-    assert _abi_signature_and_selector("execute(Order)", {}) == (
-        "execute(address)",
-        EXECUTE_ADDRESS_BUG,
-    )
+    assert _abi_signature_and_selector("execute(Order)", {}) == (None, None)
 
 
 # --- nested / repeated user-defined type lowering -------------------------
@@ -310,11 +301,11 @@ def test_repeated_and_nested_user_types_lower_at_every_occurrence(nested_artifac
     assert _sel(params) == PARAMS_CANONICAL
 
 
-def test_nested_canonical_flows_to_effective_permissions_selector(nested_artifact):
+def test_nested_canonical_flows_to_permission_index_selector(nested_artifact):
     """The corrected canonical signature reaches the policy stage's
     ``effective_functions.selector`` column for the struct-param rows."""
     analysis = {"subject": {"address": "0x" + "22" * 20, "name": "D"}}
-    ep = build_effective_permissions(
+    ep = build_permission_index(
         analysis,
         predicate_trees=nested_artifact,
         capability_resolver_output={},
@@ -419,15 +410,16 @@ def test_fallback_refuses_to_hash_a_qualified_struct_or_enum():
     The fallback used to answer ``address`` anyway, so the selector it published
     named a dispatch that does not exist. 92 of the corpus's 250 non-canonical
     parameter tokens have this shape. No answer is the honest one."""
-    from services.policy.effective_permissions import _abi_signature, _abi_signature_and_selector
+    from services.abi import canonical_signature as _abi_signature
+    from services.abi import function_identity as _abi_signature_and_selector
 
     qualified = "requestWithdrawWithPermit(uint256,address,IWeETHWithdrawAdapter.PermitInput)"
-    assert _abi_signature(qualified) == qualified  # left un-lowered, not collapsed
+    assert _abi_signature(qualified) is None
     assert _abi_signature(qualified) != "requestWithdrawWithPermit(uint256,address,address)"
 
     abi_sig, selector = _abi_signature_and_selector(qualified, {})
     assert selector is None
-    assert abi_sig == qualified
+    assert abi_sig is None
     # ...and every selector consumer of the fallback agrees.
     assert _selector_for_signature(qualified) is None
     assert _selector_of(qualified) is None
@@ -437,7 +429,8 @@ def test_fallback_preserves_an_already_lowered_tuple():
     """A canonical tuple token is ABI, not a user-defined name: collapsing
     ``(uint256,address)`` to ``address`` destroys an arity the caller had already
     recovered and yields a selector for a different function."""
-    from services.policy.effective_permissions import _abi_signature, _abi_signature_and_selector
+    from services.abi import canonical_signature as _abi_signature
+    from services.abi import function_identity as _abi_signature_and_selector
 
     canonical = "execute((uint256,address),bytes)"
     assert _abi_signature(canonical) == canonical
@@ -445,22 +438,18 @@ def test_fallback_preserves_an_already_lowered_tuple():
     assert _abi_signature_and_selector(canonical, {})[1] == _sel(canonical)
 
 
-def test_fallback_still_lowers_a_bare_contract_param():
-    """No regression to the #104 contract-type fix: a bare user-defined name is a
-    contract reference far more often than not, and a name alone cannot tell one
-    from a file-level struct or enum, so it stays ``address``. That residual
-    ambiguity is exactly what the canonical map exists to resolve — this test
-    pins the compromise, not a correct lowering."""
-    from services.policy.effective_permissions import _abi_signature_and_selector
+def test_unknown_bare_type_is_not_guessed_to_be_a_contract():
+    """Canonical type evidence is required for every user-defined name."""
+    from services.abi import function_identity as _abi_signature_and_selector
 
     abi_sig, selector = _abi_signature_and_selector("addAsset(ERC20)", {})
-    assert abi_sig == "addAsset(address)"
-    assert selector == _sel("addAsset(address)")
+    assert abi_sig is None
+    assert selector is None
 
 
 def test_canonical_map_still_wins_over_the_fallback():
     """The fallback is only ever reached when the map has no entry."""
-    from services.policy.effective_permissions import _abi_signature_and_selector
+    from services.abi import function_identity as _abi_signature_and_selector
 
     canonical = "f((uint256,uint8))"
     abi_sig, selector = _abi_signature_and_selector("f(IFoo.Bar)", {"f(IFoo.Bar)": canonical})

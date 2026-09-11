@@ -40,6 +40,16 @@ _STORAGE_ENV_KEYS = (
 )
 
 from db.models import (  # noqa: E402
+    AssessmentAnalysis,
+    AssessmentClaim,
+    AssessmentClaimDependency,
+    AssessmentContext,
+    AssessmentEvidence,
+    AssessmentImplementation,
+    AssessmentImportManifest,
+    AssessmentPayload,
+    AssessmentPublication,
+    AssessmentSubject,
     AuditContractCoverage,
     Contract,
     ContractBalance,
@@ -626,7 +636,7 @@ def _can_connect() -> bool:
 requires_postgres = pytest.mark.skipif(not _can_connect(), reason="PostgreSQL not available (set TEST_DATABASE_URL)")
 
 
-def run_alembic_upgrade(url: str) -> None:
+def run_alembic_upgrade(url: str, revision: str = "head") -> None:
     """Run ``alembic upgrade head`` against ``url``. Idempotent."""
     from alembic.config import Config
 
@@ -636,7 +646,7 @@ def run_alembic_upgrade(url: str) -> None:
     cfg = Config(str(repo_root / "alembic.ini"))
     cfg.set_main_option("script_location", str(repo_root / "alembic"))
     cfg.set_main_option("sqlalchemy.url", url)
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, revision)
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -712,6 +722,18 @@ def db_session():
         # AuditContractCoverage references Contract + AuditReport + Protocol;
         # delete it before those get cascaded away via Protocol cleanup.
         for model in [
+            # Canonical Assessment roots first. Publication/analysis children
+            # cascade; shared immutable records are swept explicitly below.
+            AssessmentImportManifest,
+            AssessmentPublication,
+            AssessmentAnalysis,
+            AssessmentClaimDependency,
+            AssessmentClaim,
+            AssessmentEvidence,
+            AssessmentImplementation,
+            AssessmentContext,
+            AssessmentPayload,
+            AssessmentSubject,
             AuditContractCoverage,
             MonitoredEvent,
             MonitoredContract,

@@ -148,7 +148,9 @@ def test_openness_is_total_and_three_valued():
 # ---------------------------------------------------------------------------
 
 
-def _solmate_cap(roles, members):
+def _solmate_cap(roles, members, *, role_members=None):
+    if role_members is None:
+        role_members = {str(role): list(members) for role in roles}
     return {
         "kind": "finite_set",
         "members": list(members),
@@ -158,6 +160,7 @@ def _solmate_cap(roles, members):
             {
                 "step": "solmate_roles_authority",
                 "roles": list(roles),
+                "role_members": role_members,
                 "authority": "0x" + "1" * 40,
                 "target": "0x" + "2" * 40,
                 "selector": "0xdeadbeef",
@@ -181,12 +184,36 @@ def test_role_grants_witnessed_for_single_role_capability():
     ]
 
 
-def test_role_grants_not_determined_for_multi_role_capability():
-    """Two roles carry the capability, so WHICH role each member holds is not
-    recoverable — attributing every member to every role is the over-claim."""
+def test_role_grants_preserve_members_per_role_for_multi_role_capability():
     from services.policy.capability_surface import capability_role_grants
 
-    assert capability_role_grants(_solmate_cap([1, 2], [ADDR_A])) is None
+    cap = _solmate_cap(
+        [1, 2],
+        [ADDR_A, ADDR_B],
+        role_members={"1": [ADDR_A], "2": [ADDR_B]},
+    )
+    assert capability_role_grants(cap) == [
+        {
+            "role": 1,
+            "principals": [
+                {"address": ADDR_A, "resolved_type": None, "details": {"source": "semantic_capability:role_grant"}}
+            ],
+        },
+        {
+            "role": 2,
+            "principals": [
+                {"address": ADDR_B, "resolved_type": None, "details": {"source": "semantic_capability:role_grant"}}
+            ],
+        },
+    ]
+
+
+def test_role_grants_refuse_flattened_members_without_per_role_provenance():
+    from services.policy.capability_surface import capability_role_grants
+
+    cap = _solmate_cap([1], [ADDR_A, ADDR_B], role_members={})
+    del cap["trace"][0]["role_members"]
+    assert capability_role_grants(cap) is None
 
 
 def test_role_grants_not_determined_when_role_identity_is_dissolved():
@@ -408,47 +435,6 @@ def test_cofinite_denylist_quality_is_stated_never_inferred_from_absence():
     assert "not exhaustive" in project_capability_surface(partial).public_paths[0][-1]["description"]
     legacy = {"kind": "cofinite_blacklist", "blacklist": [ADDR_A], "membership_quality": "exact"}
     assert "completeness not recorded" in project_capability_surface(legacy).public_paths[0][-1]["description"]
-
-
-def test_capability_currency_three_states():
-    """``last_indexed_block`` was present on 240 rows and read by nothing.
-    Deciding whether a persisted verdict still holds needs exactly
-    "is this statement current?"."""
-    from services.policy.capability_surface import CAPABILITY_INDEX_STALE_BLOCKS, capability_currency
-
-    fresh = {"kind": "finite_set", "members": [ADDR_A], "last_indexed_block": 25_619_235}
-    assert capability_currency(fresh, index_head=25_619_300)["verdict"] == "current"
-    assert capability_currency(fresh, index_head=25_619_300)["lag_blocks"] == 65
-
-    stale = capability_currency(fresh, index_head=25_619_235 + CAPABILITY_INDEX_STALE_BLOCKS)
-    assert stale["verdict"] == "stale"
-
-    # ABSENT fact -> not_determined, and lag is None (never 0: a zero lag is the
-    # strongest currency claim available and has to be earned).
-    absent = capability_currency({"kind": "finite_set", "members": [ADDR_A]}, index_head=25_619_300)
-    assert absent == {
-        "verdict": "not_determined",
-        "last_indexed_block": None,
-        "index_head": 25_619_300,
-        "lag_blocks": None,
-    }
-    # No frontier to compare against is equally not-determined.
-    assert capability_currency(fresh, index_head=None)["verdict"] == "not_determined"
-
-
-def test_capability_currency_composite_takes_the_least_current_conjunct():
-    from services.policy.capability_surface import capability_currency
-
-    composite = {
-        "kind": "AND",
-        "children": [
-            {"kind": "finite_set", "members": [ADDR_A], "last_indexed_block": 25_619_235},
-            {"kind": "finite_set", "members": [ADDR_B], "last_indexed_block": 25_000_000},
-        ],
-    }
-    verdict = capability_currency(composite, index_head=25_619_300)
-    assert verdict["last_indexed_block"] == 25_000_000
-    assert verdict["verdict"] == "stale"
 
 
 def test_resolver_path_is_recorded_on_every_principal_row_shape():

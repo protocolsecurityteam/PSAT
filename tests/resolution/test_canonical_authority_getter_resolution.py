@@ -278,14 +278,14 @@ def test_owner_slot_without_rpc_stays_placeholder(monkeypatch: pytest.MonkeyPatc
 slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
 
-from services.static.contract_analysis_pipeline.effects import build_effects  # noqa: E402
-from services.static.contract_analysis_pipeline.predicate_artifacts import (  # noqa: E402
+from services.static.static_analysis.effects import build_effects  # noqa: E402
+from services.static.static_analysis.predicate_artifacts import (  # noqa: E402
     build_predicate_artifacts,
 )
-from services.static.contract_analysis_pipeline.summaries import (  # noqa: E402
+from services.static.static_analysis.summaries import (  # noqa: E402
     _build_semantic_control_summary,
 )
-from services.static.contract_analysis_pipeline.tracking import build_controller_tracking  # noqa: E402
+from services.static.static_analysis.tracking import build_controller_tracking  # noqa: E402
 from tests.support.solc import solc_path_for as _solc_path_for  # noqa: E402
 
 pytestmark = pytest.mark.compile

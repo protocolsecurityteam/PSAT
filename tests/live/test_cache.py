@@ -14,12 +14,18 @@ COMPANY_LIMIT = 2
 
 def test_first_run_completes(analyzed_weth):
     assert analyzed_weth["status"] == "completed"
+    request = analyzed_weth.get("request") or {}
+    assert request.get("force") is True, f"timing baseline was not forced cold: request={request}"
+    assert request.get("static_cached") is not True, (
+        f"forced cold run unexpectedly used static cache: request={request}"
+    )
 
 
 def test_first_run_has_artifacts(analyzed_weth, live_client: LiveClient):
-    analysis = live_client.artifact(analyzed_weth["name"], "contract_analysis")
+    analysis = live_client.artifact(analyzed_weth["name"], "assessment")
     assert isinstance(analysis, dict)
-    assert "subject" in analysis or "summary" in analysis
+    assert "schema_version" not in analysis
+    assert all(isinstance(analysis.get(table), list) for table in ("subjects", "evidence", "claims", "analyses"))
 
 
 def test_second_run_uses_cache(analyzed_weth, cached_weth, live_client: LiveClient):
@@ -37,18 +43,38 @@ def test_second_run_uses_cache(analyzed_weth, cached_weth, live_client: LiveClie
         f"than the second run ({analyzed_weth.get('address')})"
     )
 
-    a1 = live_client.artifact(analyzed_weth["name"], "contract_analysis")
-    a2 = live_client.artifact(cached_weth["name"], "contract_analysis")
+    a1 = live_client.artifact(analyzed_weth["name"], "assessment")
+    a2 = live_client.artifact(cached_weth["name"], "assessment")
     assert isinstance(a1, dict) and isinstance(a2, dict)
-    assert a1.get("subject", {}).get("name") == a2.get("subject", {}).get("name")
+    root1 = a1["view"]["subject"]
+    root2 = a2["view"]["subject"]
+    subject1 = next(row for row in a1["subjects"] if row["id"] == root1)
+    subject2 = next(row for row in a2["subjects"] if row["id"] == root2)
+    assert subject1["identity"]["address"] == subject2["identity"]["address"]
+    static1 = {row["id"] for row in a1["claims"] if row["scope_kind"] == "code"}
+    static2 = {row["id"] for row in a2["claims"] if row["scope_kind"] == "code"}
+    assert static1
+    assert static1 == static2
 
 
-def test_second_run_completed_faster(analyzed_weth, cached_weth, live_client: LiveClient):
+def test_cached_static_path_is_substantially_faster(analyzed_weth, cached_weth, live_client: LiveClient):
     t1 = live_client.job_duration_seconds(analyzed_weth)
     t2 = live_client.job_duration_seconds(cached_weth)
-    # Below 30s fixed overhead dominates and the assertion flaps.
-    if t1 > 30:
-        assert t2 < t1, f"Second run ({t2:.1f}s) should be faster than first ({t1:.1f}s)"
+    assert t2 < t1, f"Cached run ({t2:.1f}s) should finish before the cold run ({t1:.1f}s)"
+
+    cold_timings = live_client.stage_timings(analyzed_weth["job_id"])
+    cached_timings = live_client.stage_timings(cached_weth["job_id"])
+    cold_static = (cold_timings.get("static") or {}).get("metrics") or {}
+    cached_static = (cached_timings.get("static") or {}).get("metrics") or {}
+    cold_ms = cold_static.get("phase_ms_static_facts")
+    cached_ms = cached_static.get("phase_ms_static_cache_restore")
+    assert isinstance(cold_ms, int) and isinstance(cached_ms, int), (
+        f"cache comparison is missing static substitution telemetry: cold={cold_static}, cached={cached_static}"
+    )
+    assert cold_ms > 0, f"fresh static-facts timing must be measurable, got {cold_ms}ms"
+    assert cached_ms <= cold_ms * 0.75, (
+        f"Assessment cache restore ({cached_ms}ms) should be at least 25% faster than fresh static facts ({cold_ms}ms)"
+    )
 
 
 @pytest.fixture(scope="module")

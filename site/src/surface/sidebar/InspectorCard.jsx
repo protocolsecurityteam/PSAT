@@ -201,8 +201,8 @@ export function InspectorCard({ selected, onNavigate, onPreview }) {
       <div className="ps-inspector-badges">
         <span className="ps-badge" style={{ "--badge-accent": LANE_META[selected.lane].tone }}>{LANE_META[selected.lane].label}</span>
         <span className="ps-badge" style={{ "--badge-accent": selected.guard.accent }}>{selected.guard.label}</span>
-        {selected.effectLabels.map((label) => (
-          <span key={label} className="ps-badge" style={{ "--badge-accent": "#475569" }}>{label}</span>
+        {selected.claims.map((claim) => (
+          <span key={claim.claim_id} className="ps-badge" style={{ "--badge-accent": "#475569" }}>{claim.claim_id}</span>
         ))}
       </div>
 

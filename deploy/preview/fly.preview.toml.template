@@ -19,7 +19,7 @@ kill_timeout = 30
   PSAT_POLICY_JOB_CONCURRENCY = "2"
 
 [deploy]
-  release_command = "uv run --no-sync alembic upgrade head"
+  release_command = "uv run --no-sync python -m deploy.preview.assessment_release"
 
 [processes]
   web = "./deploy/start_web.sh"

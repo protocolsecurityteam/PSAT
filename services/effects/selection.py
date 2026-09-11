@@ -7,7 +7,7 @@ facts. Two independent concerns:
 1. **Cascade** — the filter that produces the blank-gated simulation set
    (measured funnel: 756 → gated 406 / facts 691 / blank+facts+gated 265).
    Every row that survives is a distinct behavior we must simulate. The "facts"
-   leg of that funnel was measured when it read ``effect_targets``; it now reads
+   leg of that funnel now reads
    the state-write evidence plane (:func:`_has_effect_evidence`), so the number moves —
    on the local protocol-1 slice the cascade admits 49 more rows once that plane
    is written, and 0 fewer.
@@ -157,7 +157,6 @@ class Candidate:
     selector: str | None
     function_name: str
     authority_public: bool
-    # NO ``effect_targets``. It was carried here write-only — no production code and
     # no test ever read it — and what it carries is the display list that conflates a
     # proven state write with a dotted external-call head, which is exactly what the
     # cascade stopped selecting on (:func:`_has_effect_evidence`). A field the next
@@ -1239,7 +1238,7 @@ def _evidence_not_determined(col: Any):
     """The column holds no array — SQL NULL (never written / withheld), the jsonb
     scalar ``null``, or a malformed shape. All three mean NOT DETERMINED: a value
     that is not the writer's array shape is not evidence of emptiness, exactly as
-    ``policy.effective_permissions._mutability_fields`` treats a wrongly-typed
+    ``policy.permission_index._mutability_fields`` treats a wrongly-typed
     field on the producing side. Total by construction — ``jsonb_state``
     coalesces SQL NULL to a non-type name, so this never evaluates to NULL and
     can never be silently dropped from an ``or_``."""
@@ -1251,9 +1250,9 @@ def _has_effect_evidence():
     or could we not determine that there is not?
 
     Reads the state-write evidence plane — ``state_changing`` /
-    ``state_writes`` / ``sinks``, each three-state — and NOT ``effect_targets``,
+    ``state_writes`` / ``sinks``, each three-state,
     which is a display field that concatenates state-write variable names with
-    dotted external-call heads (``_effect_targets_from_sinks``). Selecting on it
+    dotted external-call heads. Selecting on it
     made a populated value assert a state write nothing had proven: **501 of its
     1,642 populated rows carry only call heads**, and on the local protocol-1
     slice **156 gated functions** entered this cascade on external-call targets
@@ -1351,7 +1350,7 @@ def _has_effect_evidence():
     shape that filter (c) drops anyway.
 
     Origin-agnostic on purpose: ``sinks``/``state_writes`` carry a modifier's
-    ``origin='guard'`` facts as well as body ones, and ``effect_targets`` filtered
+    ``origin='guard'`` facts as well as body ones.
     those out. A probe executes the modifiers too, so a guard-origin write is
     state the simulation really does change; and the difference only ever ADMITS
     (10 of the projected new rows, measured from the raw effects artifacts), which
@@ -1372,7 +1371,7 @@ def _cascade_rows(session: Session, protocol_id: int, scope: JobScope | None = N
 
     (a) has something to simulate — the state-write evidence plane, three
         states kept apart; see :func:`_has_effect_evidence` for the input-shape
-        table. NOT ``effect_targets``, which conflated a proven write with a
+        table.
         call head.
     (c) gated over public — ``authority_public = false``, EXCEPT a public
         function carrying ``flow.out`` or ``supply.mint``.

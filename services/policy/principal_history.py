@@ -489,10 +489,14 @@ def _interval_start(event: dict[str, Any], **fields: Any) -> dict[str, Any]:
     return {
         **{key: value for key, value in fields.items() if value is not None},
         "granted_at_block": event["block_number"],
+        "granted_at_block_hash": event["block_hash"],
         "granted_at_tx": event["tx_hash"],
+        "granted_at_transaction_index": event["transaction_index"],
         "granted_at_log_index": event["log_index"],
         "revoked_at_block": None,
+        "revoked_at_block_hash": None,
         "revoked_at_tx": None,
+        "revoked_at_transaction_index": None,
         "revoked_at_log_index": None,
         "status": "active",
     }
@@ -501,7 +505,9 @@ def _interval_start(event: dict[str, Any], **fields: Any) -> dict[str, Any]:
 def _interval_end(interval: dict[str, Any], event: dict[str, Any]) -> dict[str, Any]:
     out = dict(interval)
     out["revoked_at_block"] = event["block_number"]
+    out["revoked_at_block_hash"] = event["block_hash"]
     out["revoked_at_tx"] = event["tx_hash"]
+    out["revoked_at_transaction_index"] = event["transaction_index"]
     out["revoked_at_log_index"] = event["log_index"]
     out["status"] = "revoked"
     return out
@@ -530,6 +536,7 @@ def _roles_from_mask(mask: int) -> list[int]:
 def _event_base(log: dict[str, Any]) -> dict[str, Any]:
     return {
         "block_number": _hex_int(log.get("blockNumber")),
+        "block_hash": str(log.get("blockHash") or "").lower() or None,
         "transaction_index": _hex_int(log.get("transactionIndex")),
         "log_index": _hex_int(log.get("logIndex")),
         "tx_hash": str(log.get("transactionHash") or "").lower(),

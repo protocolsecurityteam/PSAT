@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from services.static.contract_analysis_pipeline.predicate_types import (
+from services.static.static_analysis.predicate_types import (
     LeafPredicate,
 )
 

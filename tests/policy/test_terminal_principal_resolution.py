@@ -308,10 +308,7 @@ def test_lzcompose_style_permissionless_stays_blank_without_failure():
         abi_signature="lzCompose(address,bytes32,bytes,address,bytes)",
         function_name="lzCompose",
         selector="0x12345678",
-        effect_labels=[],
-        effect_targets=[],
         claims=[],
-        action_summary=None,
         authority_public=True,
         authority_roles=None,
     )

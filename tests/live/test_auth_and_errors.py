@@ -48,7 +48,7 @@ def test_unknown_run_name_returns_404(live_base_url: str, live_admin_key: str):
     # name is operator-gated before any lookup. Either way an authorized caller
     # gets a 404 for a missing run — that not-found contract is what we pin here.
     base = live_base_url + "/api/analyses/psat-live-test-unknown-run/artifact/"
-    gated = base + "contract_analysis.json"
+    gated = base + "static_facts.json"
 
     # Consumer-safe name: no key needed; an unknown run is a clean 404, not a leak.
     pub = requests.get(base + "dependencies.json", timeout=15)

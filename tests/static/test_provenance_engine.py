@@ -31,7 +31,7 @@ import pytest
 slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
 
-from services.static.contract_analysis_pipeline.provenance import (  # noqa: E402
+from services.static.static_analysis.provenance import (  # noqa: E402
     EMPTY,
     TOP,
     ProvenanceEngine,
@@ -683,7 +683,7 @@ def test_env_override_internal_call_depth(monkeypatch):
     changes."""
     from importlib import reload
 
-    import services.static.contract_analysis_pipeline.provenance as prov
+    import services.static.static_analysis.provenance as prov
 
     monkeypatch.setenv("PSAT_PROVENANCE_INTERNAL_CALL_DEPTH", "9")
     monkeypatch.setenv("PSAT_PROVENANCE_WORKLIST_CAP", "37")
@@ -973,7 +973,7 @@ def test_unpack_propagates_tuple_provenance(tmp_path):
 _DIGEST_SNIPPET = """
 import sys
 sys.path.insert(0, {repo!r})
-from services.static.contract_analysis_pipeline.provenance import Source, _digest
+from services.static.static_analysis.provenance import Source, _digest
 a = frozenset({{
     Source(kind="parameter", parameter_index=0, parameter_name="who"),
     Source(kind="state_variable", state_variable_name="owner"),
@@ -1029,8 +1029,8 @@ def test_operand_tie_break_is_seed_independent():
     snippet = """
 import sys
 sys.path.insert(0, {repo!r})
-from services.static.contract_analysis_pipeline.provenance import ProvenanceMap, Source, _digest
-from services.static.contract_analysis_pipeline.predicates import _operand_for_value
+from services.static.static_analysis.provenance import ProvenanceMap, Source, _digest
+from services.static.static_analysis.predicates import _operand_for_value
 
 
 class _Fake:

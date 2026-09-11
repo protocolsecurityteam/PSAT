@@ -19,7 +19,6 @@ from tests.support.resolution_worker_stubs import (
     TARGET_ADDRESS,
     _job,
     _minimal_snapshot,
-    _minimal_tracking_plan,
     _patch_all,
     _resolved_graph,
 )
@@ -73,9 +72,9 @@ def db_session_for_resolution():
 
 
 class TestProcessHappyPath:
-    """Snapshot built, graph resolved, artifacts stored."""
+    """Snapshot and graph enrich the canonical assessment."""
 
-    def test_stores_snapshot_and_graph(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_stores_assessment_only(self, monkeypatch: pytest.MonkeyPatch) -> None:
         worker = ResolutionWorker()
         session = MagicMock()
         # Make scalar_one_or_none return None (no contract row) so DB writes are skipped
@@ -87,8 +86,8 @@ class TestProcessHappyPath:
         worker.process(session, cast(Any, job))
 
         stored_names = [name for name, _ in ctx["store_calls"]]
-        assert "control_snapshot" in stored_names
-        assert "resolved_control_graph" in stored_names
+        assert "assessment" in stored_names
+        assert not {"observation_batch", "resolution_graph"} & set(stored_names)
 
 
 # ---------------------------------------------------------------------------
@@ -105,19 +104,18 @@ class TestProxyAddressOverride:
         session.execute.return_value.scalar_one_or_none.return_value = None
 
         captured_plan: list[Any] = []
-        original_tracking = _minimal_tracking_plan()
 
         def fake_build(plan: Any, rpc_url: str, **_kw: Any) -> dict:
             captured_plan.append(plan)
             return _minimal_snapshot()
 
-        _patch_all(monkeypatch, tracking_plan=original_tracking)
-        monkeypatch.setattr("workers.resolution_worker.build_control_snapshot", fake_build)
+        _patch_all(monkeypatch)
+        monkeypatch.setattr("workers.resolution_worker.observe_controllers", fake_build)
 
         job = _job(request={"rpc_url": "https://rpc.example", "proxy_address": PROXY_ADDRESS})
         worker.process(session, cast(Any, job))
 
-        # The plan passed to build_control_snapshot should have proxy address
+        # The plan passed to observe_controllers should have proxy address
         assert captured_plan[0]["contract_address"] == PROXY_ADDRESS
 
 
@@ -313,7 +311,7 @@ class TestQueueDiscoveredContracts:
                 {
                     "address": CHILD_ADDRESS,
                     "node_type": "contract",
-                    "analyzed": True,
+                    "analysis_state": "analyzed",
                     "contract_name": "ChildContract",
                 },
             ]
@@ -341,7 +339,9 @@ class TestQueueDiscoveredContracts:
         monkeypatch.setattr("workers.resolution_worker.create_job", _fake_create)
         monkeypatch.setattr("services.discovery.perimeter.create_job", _fake_create)
 
-        graph = _resolved_graph(nodes=[{"address": CHILD_ADDRESS, "node_type": "contract", "analyzed": True}])
+        graph = _resolved_graph(
+            nodes=[{"address": CHILD_ADDRESS, "node_type": "contract", "analysis_state": "analyzed"}]
+        )
 
         job = _job(request={"rpc_url": "https://rpc.example", "chain": "ethereum"})
         worker._queue_discovered_contracts(session, cast(Any, job), graph, "https://rpc.example")
@@ -393,7 +393,9 @@ class TestQueueDiscoveredContractsCompanyInheritance:
         # bindings are stubbed and the assertions below are unchanged.
         monkeypatch.setattr("services.discovery.perimeter.create_job", fake_create_job)
 
-        graph = _resolved_graph(nodes=[{"address": CHILD_ADDRESS, "node_type": "contract", "analyzed": True}])
+        graph = _resolved_graph(
+            nodes=[{"address": CHILD_ADDRESS, "node_type": "contract", "analysis_state": "analyzed"}]
+        )
 
         job = _job(company=None, request={"rpc_url": "https://rpc.example", "parent_job_id": parent_id})
         worker._queue_discovered_contracts(session, cast(Any, job), graph, "https://rpc.example")
@@ -420,7 +422,9 @@ class TestQueueDiscoveredContractsCompanyInheritance:
         # bindings are stubbed and the assertions below are unchanged.
         monkeypatch.setattr("services.discovery.perimeter.create_job", fake_create_job)
 
-        graph = _resolved_graph(nodes=[{"address": CHILD_ADDRESS, "node_type": "contract", "analyzed": True}])
+        graph = _resolved_graph(
+            nodes=[{"address": CHILD_ADDRESS, "node_type": "contract", "analysis_state": "analyzed"}]
+        )
 
         job = _job(company="Direct Corp")
         worker._queue_discovered_contracts(session, cast(Any, job), graph, "https://rpc.example")
@@ -435,9 +439,9 @@ class TestQueueDiscoveredContractsCompanyInheritance:
 
 
 class TestMissingArtifactsRaise:
-    """process() raises RuntimeError when required artifacts are missing."""
+    """process() raises RuntimeError when the canonical assessment is missing or invalid."""
 
-    def test_missing_tracking_plan_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_missing_assessment_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         worker = ResolutionWorker()
         session = MagicMock()
         job = _job()
@@ -445,37 +449,21 @@ class TestMissingArtifactsRaise:
         monkeypatch.setattr("workers.resolution_worker.get_artifact", lambda _s, _j, name: None)
         monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
 
-        with pytest.raises(RuntimeError, match="control_tracking_plan artifact not found"):
+        with pytest.raises(RuntimeError, match="assessment artifact not found"):
             worker.process(session, cast(Any, job))
 
-    def test_missing_contract_analysis_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        worker = ResolutionWorker()
-        session = MagicMock()
-        job = _job()
-
-        def fake_get_artifact(_s: Any, _j: Any, name: str) -> Any:
-            if name == "control_tracking_plan":
-                return _minimal_tracking_plan()
-            return None
-
-        monkeypatch.setattr("workers.resolution_worker.get_artifact", fake_get_artifact)
-        monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
-
-        with pytest.raises(RuntimeError, match="contract_analysis artifact not found"):
-            worker.process(session, cast(Any, job))
-
-    def test_non_dict_tracking_plan_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_non_dict_assessment_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         worker = ResolutionWorker()
         session = MagicMock()
         job = _job()
 
         monkeypatch.setattr(
             "workers.resolution_worker.get_artifact",
-            lambda _s, _j, name: "not a dict" if name == "control_tracking_plan" else None,
+            lambda _s, _j, name: "not a dict" if name == "assessment" else None,
         )
         monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
 
-        with pytest.raises(RuntimeError, match="control_tracking_plan artifact not found"):
+        with pytest.raises(RuntimeError, match="assessment artifact failed validation"):
             worker.process(session, cast(Any, job))
 
 
@@ -575,7 +563,9 @@ class TestQueueDiscoveredContractsParentChainEdgeCases:
         monkeypatch.setattr("workers.resolution_worker.create_job", _fake_create)
         monkeypatch.setattr("services.discovery.perimeter.create_job", _fake_create)
 
-        graph = _resolved_graph(nodes=[{"address": CHILD_ADDRESS, "node_type": "contract", "analyzed": True}])
+        graph = _resolved_graph(
+            nodes=[{"address": CHILD_ADDRESS, "node_type": "contract", "analysis_state": "analyzed"}]
+        )
         job = _job(company=None, request={"rpc_url": "https://rpc.example", "parent_job_id": str(uuid.uuid4())})
         worker._queue_discovered_contracts(session, cast(Any, job), graph, "https://rpc.example")
 
@@ -620,7 +610,9 @@ class TestQueueDiscoveredContractsParentChainEdgeCases:
         # bindings are stubbed and the assertions below are unchanged.
         monkeypatch.setattr("services.discovery.perimeter.create_job", fake_create_job)
 
-        graph = _resolved_graph(nodes=[{"address": CHILD_ADDRESS, "node_type": "contract", "analyzed": True}])
+        graph = _resolved_graph(
+            nodes=[{"address": CHILD_ADDRESS, "node_type": "contract", "analysis_state": "analyzed"}]
+        )
         job = _job(company=None, request={"rpc_url": "https://rpc.example", "parent_job_id": parent_id})
         worker._queue_discovered_contracts(session, cast(Any, job), graph, "https://rpc.example")
 
@@ -648,7 +640,14 @@ def test_dependency_emission_walks_check_trees(db_session_for_resolution):
     )
     provider_job.status = JobStatus.queued
     session.commit()
-    store_artifact(session, provider_job.id, "effective_permissions", data={"functions": []})
+    from tests.support.policy_builders import _assessment, _minimal_static_facts
+
+    store_artifact(
+        session,
+        provider_job.id,
+        "assessment",
+        data=_assessment(static_facts=_minimal_static_facts(address=provider_addr, name="Provider")),
+    )
 
     depender_job = create_job(
         session,
@@ -658,33 +657,36 @@ def test_dependency_emission_walks_check_trees(db_session_for_resolution):
     store_artifact(
         session,
         depender_job.id,
-        "predicate_trees",
-        data={
-            "schema_version": "semantic",
-            "contract_name": "Depender",
-            "trees": {},
-            "check_trees": {
-                "canCall(address,address,bytes4)": {
-                    "op": "LEAF",
-                    "leaf": {
-                        "kind": "external_bool",
-                        "operator": "truthy",
-                        "authority_role": "delegated_authority",
-                        "operands": [{"source": "msg_sender"}],
-                        "set_descriptor": {
-                            "kind": "external_set",
-                            "authority_contract": {
-                                "address_source": {
-                                    "source": "state_variable",
-                                    "state_variable_name": "authority",
-                                }
+        "assessment",
+        data=_assessment(
+            static_facts=_minimal_static_facts(address=depender_addr, name="Depender"),
+            predicate_trees={
+                "schema_version": "semantic",
+                "contract_name": "Depender",
+                "trees": {},
+                "check_trees": {
+                    "canCall(address,address,bytes4)": {
+                        "op": "LEAF",
+                        "leaf": {
+                            "kind": "external_bool",
+                            "operator": "truthy",
+                            "authority_role": "delegated_authority",
+                            "operands": [{"source": "msg_sender"}],
+                            "set_descriptor": {
+                                "kind": "external_set",
+                                "authority_contract": {
+                                    "address_source": {
+                                        "source": "state_variable",
+                                        "state_variable_name": "authority",
+                                    }
+                                },
+                                "callee_signature": "canCall(address,address,bytes4)",
                             },
-                            "callee_signature": "canCall(address,address,bytes4)",
                         },
-                    },
-                }
+                    }
+                },
             },
-        },
+        ),
     )
 
     snapshot = {
@@ -735,13 +737,28 @@ def _authority_check_predicate_trees() -> dict:
     }
 
 
+def _store_assessment_with_trees(session, job, address: str, name: str) -> None:
+    from db.queue import store_artifact
+    from tests.support.policy_builders import _assessment, _minimal_static_facts
+
+    store_artifact(
+        session,
+        job.id,
+        "assessment",
+        data=_assessment(
+            static_facts=_minimal_static_facts(address=address, name=name),
+            predicate_trees=_authority_check_predicate_trees(),
+        ),
+    )
+
+
 def test_dependency_emission_records_pending_status_metrics(db_session_for_resolution):
     """A provider with no policy artifacts yet → a 'pending' edge; the emitter
     folds the per-status breakdown into the stage metrics."""
     from sqlalchemy import select
 
     from db.models import JobDependency, JobStage
-    from db.queue import create_job, store_artifact
+    from db.queue import create_job
     from utils.logging import stage_metrics_var
 
     session = db_session_for_resolution
@@ -753,7 +770,7 @@ def test_dependency_emission_records_pending_status_metrics(db_session_for_resol
         {"address": depender_addr, "chain": "ethereum", "name": "Depender"},
         initial_stage=JobStage.resolution,
     )
-    store_artifact(session, depender_job.id, "predicate_trees", data=_authority_check_predicate_trees())
+    _store_assessment_with_trees(session, depender_job, depender_addr, "Depender")
     snapshot = {"controller_values": {"external_contract:authority": {"value": provider_addr}}}
 
     metrics: dict = {}
@@ -781,7 +798,7 @@ def test_dependency_emission_warns_and_records_on_cycle(db_session_for_resolutio
     from sqlalchemy import select
 
     from db.models import JobDependency, JobStage
-    from db.queue import create_job, store_artifact
+    from db.queue import create_job
     from utils.logging import stage_metrics_var
 
     session = db_session_for_resolution
@@ -807,7 +824,7 @@ def test_dependency_emission_warns_and_records_on_cycle(db_session_for_resolutio
     )
     session.commit()
 
-    store_artifact(session, job_a.id, "predicate_trees", data=_authority_check_predicate_trees())
+    _store_assessment_with_trees(session, job_a, a_addr, "A")
     snapshot = {"controller_values": {"external_contract:authority": {"value": b_addr}}}
 
     metrics: dict = {}
@@ -1030,7 +1047,7 @@ class TestStructuralOwnershipPropagation:
         monkeypatch.setattr("workers.resolution_worker.create_job", _fake_create)
         monkeypatch.setattr("services.discovery.perimeter.create_job", _fake_create)
 
-        graph = _resolved_graph(nodes=[{"address": dep_addr, "node_type": "contract", "analyzed": True}])
+        graph = _resolved_graph(nodes=[{"address": dep_addr, "node_type": "contract", "analysis_state": "analyzed"}])
         ResolutionWorker()._queue_discovered_contracts(session, cast(Any, job), graph, "rpc")
 
         assert len(create_calls) == 1
@@ -1064,7 +1081,7 @@ class TestStructuralOwnershipPropagation:
         monkeypatch.setattr("workers.resolution_worker.create_job", _fake_create)
         monkeypatch.setattr("services.discovery.perimeter.create_job", _fake_create)
 
-        graph = _resolved_graph(nodes=[{"address": dep_addr, "node_type": "contract", "analyzed": True}])
+        graph = _resolved_graph(nodes=[{"address": dep_addr, "node_type": "contract", "analysis_state": "analyzed"}])
         ResolutionWorker()._queue_discovered_contracts(session, cast(Any, job), graph, "rpc")
 
         assert len(create_calls) == 1
@@ -1149,7 +1166,7 @@ class TestStructuralOwnershipPropagation:
         monkeypatch.setattr("workers.resolution_worker.create_job", _fake_create)
         monkeypatch.setattr("services.discovery.perimeter.create_job", _fake_create)
 
-        graph = _resolved_graph(nodes=[{"address": dep_addr, "node_type": "contract", "analyzed": True}])
+        graph = _resolved_graph(nodes=[{"address": dep_addr, "node_type": "contract", "analysis_state": "analyzed"}])
         ResolutionWorker()._queue_discovered_contracts(session, cast(Any, job), graph, "rpc")
 
         assert len(create_calls) == 1
@@ -1239,7 +1256,7 @@ class TestStructuralOwnershipPropagation:
         monkeypatch.setattr("workers.resolution_worker.create_job", _fake_create)
         monkeypatch.setattr("services.discovery.perimeter.create_job", _fake_create)
 
-        graph = _resolved_graph(nodes=[{"address": dep_addr, "node_type": "contract", "analyzed": True}])
+        graph = _resolved_graph(nodes=[{"address": dep_addr, "node_type": "contract", "analysis_state": "analyzed"}])
         ResolutionWorker()._queue_discovered_contracts(session, cast(Any, job), graph, "rpc")
 
         assert len(create_calls) == 1
@@ -1281,7 +1298,7 @@ class TestStructuralOwnershipPropagation:
         monkeypatch.setattr("workers.resolution_worker.create_job", _fake_create)
         monkeypatch.setattr("services.discovery.perimeter.create_job", _fake_create)
 
-        graph = _resolved_graph(nodes=[{"address": dep_addr, "node_type": "contract", "analyzed": True}])
+        graph = _resolved_graph(nodes=[{"address": dep_addr, "node_type": "contract", "analysis_state": "analyzed"}])
         ResolutionWorker()._queue_discovered_contracts(session, cast(Any, job), graph, "rpc")
 
         assert len(create_calls) == 1
@@ -1319,7 +1336,7 @@ class TestStructuralOwnershipPropagation:
         monkeypatch.setattr("workers.resolution_worker.create_job", _fake_create)
         monkeypatch.setattr("services.discovery.perimeter.create_job", _fake_create)
 
-        graph = _resolved_graph(nodes=[{"address": dep_addr, "node_type": "contract", "analyzed": True}])
+        graph = _resolved_graph(nodes=[{"address": dep_addr, "node_type": "contract", "analysis_state": "analyzed"}])
         ResolutionWorker()._queue_discovered_contracts(session, cast(Any, job), graph, "rpc")
 
         assert len(create_calls) == 1
@@ -1330,7 +1347,7 @@ class TestStructuralOwnershipPropagation:
 
 
 class TestResolvedGraphEmpty:
-    """When resolve_control_graph returns an empty graph the artifact is skipped."""
+    """An empty graph does not create a second artifact."""
 
     def test_graph_empty_skips_store(self, monkeypatch: pytest.MonkeyPatch) -> None:
         worker = ResolutionWorker()
@@ -1344,7 +1361,7 @@ class TestResolvedGraphEmpty:
             rpc_url: str = "",
             max_depth: int = 6,
             workspace_prefix: str = "",
-            nested_artifacts_override: Any = None,
+            materialized_contracts_override: Any = None,
             **_kw: Any,
         ) -> tuple[dict, dict]:
             return {}, {}
@@ -1355,8 +1372,9 @@ class TestResolvedGraphEmpty:
         worker.process(session, cast(Any, job))
 
         stored_names = [name for name, _ in ctx["store_calls"]]
-        assert "control_snapshot" in stored_names
-        assert "resolved_control_graph" not in stored_names
+        assert "assessment" in stored_names
+        assert "observation_batch" not in stored_names
+        assert "resolution_graph" not in stored_names
 
 
 # ---------------------------------------------------------------------------
@@ -1431,7 +1449,6 @@ def test_three_state_columns_reach_postgres_and_absence_lands_sql_null(
                 "resolved_type": "safe",
                 "label": "Gate",
                 "depth": 1,
-                "analyzed": False,
                 "analysis_state": "not_analyzable",
             },
             {
@@ -1440,7 +1457,7 @@ def test_three_state_columns_reach_postgres_and_absence_lands_sql_null(
                 "resolved_type": "unknown",
                 "label": "Silent",
                 "depth": 1,
-                "analyzed": False,
+                "analysis_state": None,
                 # analysis_state ABSENT — the honest fifth state.
             },
         ],
@@ -1468,20 +1485,17 @@ def test_three_state_columns_reach_postgres_and_absence_lands_sql_null(
     assert cv_rows["silent"] == (None, None, True)
 
     node_rows = {
-        addr: (state, max_depth, analyzed)
-        for addr, state, max_depth, analyzed in db_session.execute(
-            text(
-                "select address, analysis_state, graph_max_depth, analyzed"
-                " from control_graph_nodes where contract_id = :cid"
-            ),
+        addr: (state, max_depth)
+        for addr, state, max_depth in db_session.execute(
+            text("select address, analysis_state, graph_max_depth from control_graph_nodes where contract_id = :cid"),
             {"cid": contract.id},
         ).all()
     }
     # Proven-present, plus the walk's horizon that makes ``depth`` interpretable.
-    assert node_rows[determined] == ("not_analyzable", 6, False)
+    assert node_rows[determined] == ("not_analyzable", 6)
     # Absent in the graph => SQL NULL, never a guessed token. ``graph_max_depth``
     # is a fact about the WALK, so it is present on every node of that walk.
-    assert node_rows[undetermined] == (None, 6, False)
+    assert node_rows[undetermined] == (None, 6)
     assert (
         db_session.execute(
             text("select count(*) from control_graph_nodes where contract_id = :cid and analysis_state = 'null'"),
@@ -1522,7 +1536,6 @@ def test_graph_without_max_depth_persists_sql_null_not_zero(db_session, monkeypa
                 "resolved_type": "eoa",
                 "label": "child",
                 "depth": 1,
-                "analyzed": False,
                 "analysis_state": "not_analyzable",
             }
         ]

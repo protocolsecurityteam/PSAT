@@ -30,7 +30,7 @@ import yaml
 slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
 
-from services.static.contract_analysis_pipeline.predicate_artifacts import (  # noqa: E402
+from services.static.static_analysis.predicate_artifacts import (  # noqa: E402
     build_predicate_artifacts,
 )
 

@@ -116,7 +116,8 @@ def _resolve_with_production_selector(tree_key: str) -> CapabilityExpr:
     (``addAsset(ERC20)``), so this is the path that must canonicalize the
     contract-type param to ``address`` before the Solmate adapter folds canCall.
     """
-    return _resolve(tree_key, _selector_for_signature(tree_key) or "")
+    canonical = {"addAsset(ERC20)": "addAsset(address)"}
+    return _resolve(tree_key, _selector_for_signature(tree_key, canonical) or "")
 
 
 def test_teller_pause_resolves_to_governing_safe_end_to_end():
@@ -140,7 +141,7 @@ def test_contract_type_param_function_folds_cancall_against_canonical_selector()
     # the adapter must fold canCall against the canonical selector, NOT the
     # non-canonical keccak("addAsset(ERC20)") (0x4fdd72aa). Folding the wrong
     # selector was a false-negative on every contract-type-param function.
-    assert _selector_for_signature("addAsset(ERC20)") == ADD_ASSET_CANONICAL
+    assert _selector_for_signature("addAsset(ERC20)", {"addAsset(ERC20)": "addAsset(address)"}) == ADD_ASSET_CANONICAL
     cap = _resolve_with_production_selector("addAsset(ERC20)")
     selectors = _trace_selectors(cap)
     assert ADD_ASSET_CANONICAL in selectors

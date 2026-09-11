@@ -1,8 +1,8 @@
 """``@claim_matcher`` — the ADD-only extension point for matcher agents.
 
 A matcher module declares one claim by decorating its per-function trigger. The
-decorator registers the claim (sentence, contract-level gate, legacy projection,
-consumer family) and the trigger together, so a new matcher is a new module and
+decorator registers the claim (sentence, contract-level gate, consumer family)
+and the trigger together, so a new matcher is a new module and
 nothing else. The ``matchers`` package auto-discovery imports the module, which
 runs the decorator.
 """
@@ -24,7 +24,6 @@ def claim_matcher(
     *,
     claim_id: str,
     sentence: str,
-    legacy_projection: str | None,
     consumer_family: ConsumerFamily,
     gate: Gate | None = None,
 ) -> Callable[[Trigger], Trigger]:
@@ -42,7 +41,6 @@ def claim_matcher(
                 sentence=sentence,
                 gate=gate or _always,
                 trigger=trigger,
-                legacy_projection=legacy_projection,
                 consumer_family=consumer_family,
             )
         )

@@ -106,7 +106,6 @@ def _seed_proxy_protocol(session) -> list[Candidate]:
             function_name="upgradeTo",
             selector=SELECTOR,
             authority_public=False,
-            effect_targets=["impl"],
         )
         session.add(fn)
         session.flush()
@@ -255,9 +254,7 @@ def test_principals_by_selector_prefetch_matches_query(clean):
     session.add(c)
     session.flush()
     for sel, prin in (("0xaaaaaaaa", "0x" + "a0" * 20), ("0xbbbbbbbb", "0x" + "b0" * 20)):
-        fn = EffectiveFunction(
-            contract_id=c.id, function_name="f", selector=sel, authority_public=False, effect_targets=["s"]
-        )
+        fn = EffectiveFunction(contract_id=c.id, function_name="f", selector=sel, authority_public=False)
         session.add(fn)
         session.flush()
         session.add(FunctionPrincipal(function_id=fn.id, address=prin))
@@ -303,9 +300,7 @@ def test_principals_by_selector_is_deterministic_with_two_principals(clean):
     c = Contract(protocol_id=proto.id, address="0x" + "c3" * 20, chain="ethereum", is_proxy=False)
     session.add(c)
     session.flush()
-    fn = EffectiveFunction(
-        contract_id=c.id, function_name="f", selector="0xcccccccc", authority_public=False, effect_targets=["s"]
-    )
+    fn = EffectiveFunction(contract_id=c.id, function_name="f", selector="0xcccccccc", authority_public=False)
     session.add(fn)
     session.flush()
     high, low = "0x" + "f0" * 20, "0x" + "10" * 20
@@ -353,7 +348,6 @@ def test_claim_latch_pairs_prefetch_matches_query(clean):
         function_name="pause",
         selector="0x8456cb59",
         authority_public=False,
-        effect_targets=["paused"],
         claims=_pause_claim("paused", None),
     )
     session.add(fn)
@@ -423,7 +417,6 @@ def test_a_proxy_rows_stub_bytecode_is_never_hashed(clean):
             function_name="upgradeTo",
             selector=SELECTOR,
             authority_public=False,
-            effect_targets=["impl"],
         )
         session.add(fn)
         session.flush()
@@ -471,7 +464,6 @@ def test_a_proxy_rows_stub_bytecode_is_never_hashed(clean):
         function_name="upgradeTo",
         selector=SELECTOR,
         authority_public=False,
-        effect_targets=["impl"],
     )
     session.add(fn)
     session.flush()
@@ -499,7 +491,6 @@ def test_a_proxy_rows_stub_bytecode_is_never_hashed(clean):
         function_name="withdraw",
         selector="0xf3fef3a3",
         authority_public=False,
-        effect_targets=["S"],
     )
     session.add(plain_fn)
     session.flush()

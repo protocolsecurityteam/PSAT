@@ -7,7 +7,7 @@ from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:  # typing-only: the effects plane stays off static's runtime import graph
-    from services.static.contract_analysis_pipeline.predicate_types import (
+    from services.static.static_analysis.predicate_types import (
         OperandAbsorption,
     )
 
@@ -88,7 +88,7 @@ def _latch_pairs(fn: FunctionFacts) -> set[tuple[str, str | None]]:
     hygiene class as the pauser. Admitting those makes each of a pause's VICTIMS
     look like a pauser and puts them on the most expensive tier (measured: 141
     Tier-2 plans instead of 98 on the real candidate set) to probe functions that
-    definitionally cannot flip the latch. ``_effect_targets_from_sinks`` filters
+    definitionally cannot flip the latch. Structured sink origin filters
     to body-origin sinks for exactly this reason."""
     pairs: set[tuple[str, str | None]] = set()
     for write in fn.effect_info.get("state_writes") or []:

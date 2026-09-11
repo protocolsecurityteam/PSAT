@@ -20,8 +20,8 @@ import pytest
 pytest.importorskip("slither")
 from slither import Slither
 
-from services.static.contract_analysis_pipeline.effects import build_effects
-from services.static.contract_analysis_pipeline.summaries import _extract_value_flows
+from services.static.static_analysis.effects import build_effects
+from services.static.static_analysis.summaries import _extract_value_flows
 
 
 def _compile(tmp_path: Path, source: str, name: str):

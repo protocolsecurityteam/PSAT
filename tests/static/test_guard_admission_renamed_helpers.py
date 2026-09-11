@@ -7,7 +7,7 @@ in the UI even though the contract is plainly role-controlled. The
 analyzer admits these functions to ``semantic_functions`` (we
 verified — see ``test_renamed_helpers_dispense_role_is_admitted``
 below). What it does NOT do is bind them to concrete principals, so
-``effective_permissions`` emits an entry with empty
+``permission_index`` emits an entry with empty
 ``direct_owner`` / ``authority_roles`` / ``controllers``, and the UI's
 ``direct.length === 0`` branch ends up rendering 'Unresolved'.
 
@@ -18,7 +18,7 @@ This test pins three claims:
      gate isn't actually the broken layer.)
   2. The Unguarded negative control does NOT admit. (Pin against
      overinclusive future fixes.)
-  3. Both guarded variants emit an ``EffectiveFunctionPermission`` with
+  3. Both guarded variants emit an ``PermissionRow`` with
      EMPTY ``direct_owner``, ``authority_roles``, AND ``controllers``
      resolving to addresses — i.e. the user-facing 'Unresolved' state.
      This is the gap the user wants closed.
@@ -36,7 +36,7 @@ from typing import Any
 
 import pytest
 
-from services.static import collect_contract_analysis
+from services.static import collect_static_inputs
 
 # Three minimal projects, one subject contract each.
 OZ_SOURCE = """
@@ -127,7 +127,7 @@ def _semantic_signatures(analysis: Any) -> set[str]:
 
 def test_oz_style_grant_role_admits(tmp_path: Path):
     project = _write_project(tmp_path, "OZStyle", OZ_SOURCE)
-    analysis = collect_contract_analysis(project)
+    analysis = collect_static_inputs(project)[0]
     assert "grantRole(bytes32,address)" in _semantic_signatures(analysis)
 
 
@@ -139,7 +139,7 @@ def test_renamed_helpers_dispense_role_admits(tmp_path: Path):
     ``_bouncer``'s body. So this passes today — admission isn't the
     broken stage."""
     project = _write_project(tmp_path, "Renamed", RENAMED_SOURCE)
-    analysis = collect_contract_analysis(project)
+    analysis = collect_static_inputs(project)[0]
     assert "dispenseRole(bytes32,address)" in _semantic_signatures(analysis)
 
 
@@ -151,9 +151,9 @@ def test_unguarded_grant_role_does_not_admit(tmp_path: Path):
     asserted on the predicate tree itself, not on semantic_functions.
     """
     project = _write_project(tmp_path, "Unguarded", UNGUARDED_SOURCE)
-    from services.static.contract_analysis_pipeline import collect_contract_analysis_with_artifacts
+    from services.static.static_analysis import collect_static_inputs
 
-    _analysis, predicate_trees, _effects = collect_contract_analysis_with_artifacts(project)
+    _analysis, predicate_trees, _effects = collect_static_inputs(project)
     semantic_trees = ((predicate_trees or {}).get("trees")) or {}
     tree = semantic_trees.get("grantRole(bytes32,address)")
 
@@ -176,7 +176,7 @@ def test_unguarded_grant_role_does_not_admit(tmp_path: Path):
 
 def _function_entry(analysis: Any, signature: str) -> dict | None:
     """Pull the semantic function entry. Resolution-stage output
-    layers (effective_permissions / function_principals) live in a
+    layers (permission_index / function_principals) live in a
     later pipeline pass that this test deliberately skips — the empty
     principal state is observable directly from the semantic function
     entry's controller_refs/guards/sinks before policy join."""
@@ -191,7 +191,7 @@ def _function_entry(analysis: Any, signature: str) -> dict | None:
     reason=(
         "ROOT CAUSE: for parametric admin methods with role as a runtime arg, "
         "no concrete constant exists, so the semantic function entry has an EMPTY "
-        "controller_refs-resolves-to-principals chain. effective_permissions "
+        "controller_refs-resolves-to-principals chain. permission_index "
         "then emits direct_owner=None / authority_roles=[] / controllers=[], "
         "which the UI renders as 'Unresolved'. "
         "FIX: model the guard as a typed parametric predicate "
@@ -216,7 +216,7 @@ def test_renamed_dispense_role_emits_resolvable_principal_signal(tmp_path: Path)
          can say 'role admin' instead of 'unresolved'.
     """
     project = _write_project(tmp_path, "Renamed", RENAMED_SOURCE)
-    analysis = collect_contract_analysis(project)
+    analysis = collect_static_inputs(project)[0]
     entry = _function_entry(analysis, "dispenseRole(bytes32,address)")
     assert entry is not None, "admission already verified above; this should never trip"
 

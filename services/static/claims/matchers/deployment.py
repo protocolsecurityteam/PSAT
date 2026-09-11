@@ -10,20 +10,19 @@ from __future__ import annotations
 
 from ..context import ClaimContext
 from ..decorator import claim_matcher
-from ..types import ClaimEvidence
+from ..types import MatchedEvidence
 
 
 @claim_matcher(
     claim_id="contract_deployment",
     sentence="deploys a new contract",
-    legacy_projection="contract_deployment",
     consumer_family="exec",
 )
-def contract_deployment(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
+def contract_deployment(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
     sink_ids = ctx.sink_ids(function, "contract_creation")
     if not sink_ids:
         return None
-    return ClaimEvidence(
+    return MatchedEvidence(
         tier="standard_exact",
         witness={"kind": "sink", "sink_kind": "contract_creation", "sink_ids": sink_ids},
     )

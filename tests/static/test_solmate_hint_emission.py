@@ -10,10 +10,10 @@ from typing import cast
 
 from eth_utils.crypto import keccak
 
-from services.static.contract_analysis_pipeline.predicate_artifacts import (
+from services.static.static_analysis.predicate_artifacts import (
     apply_solmate_authority_hint_pass,
 )
-from services.static.contract_analysis_pipeline.predicate_types import PredicateTree
+from services.static.static_analysis.predicate_types import PredicateTree
 
 
 def _t0(signature: str) -> str:

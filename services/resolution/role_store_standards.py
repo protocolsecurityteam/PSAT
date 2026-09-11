@@ -285,3 +285,11 @@ def resolve_probe_code(
         addr = impl
         code = _code_at(addr, chain_id, rpc_url) or code
     return code
+
+
+def is_single_address_param_signature(signature: object) -> bool:
+    """Whether a role checker accepts exactly one address argument."""
+    if not isinstance(signature, str) or "(" not in signature or not signature.rstrip().endswith(")"):
+        return False
+    params = signature[signature.index("(") + 1 : signature.rindex(")")]
+    return [part.strip() for part in params.split(",") if part.strip()] == ["address"]

@@ -98,8 +98,9 @@ def test_materialize_does_not_hold_advisory_lock_during_builder(_route_to_test_d
                 probe.rollback()
         return {
             "contract_name": "LockReleaseTest",
-            "analysis": {"controllers": []},
-            "tracking_plan": {"slots": []},
+            "static_facts": {"controllers": []},
+            "observation_plan": {"slots": []},
+            "effects": {"schema_version": "semantic", "functions": {}},
         }
 
     with patch("db.contract_materializations.get_storage_client", return_value=None):

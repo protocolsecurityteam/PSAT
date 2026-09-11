@@ -1,6 +1,6 @@
 """Unit tests for the per-contract tracked-topic extractor + decoder.
 
-Covers ``extract_governance_topics`` (consumes a tracking_plan and produces
+Covers ``extract_governance_topics`` (consumes a observation_plan and produces
 per-contract topic specs) and ``parse_tracked_log`` (generic ABI-driven
 decoder for events not in the hand-rolled global registry), plus the
 hand-rolled ``parse_governance_log`` timelock decode (``TestTimelockEventDecode``).

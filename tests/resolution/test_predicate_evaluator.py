@@ -20,16 +20,25 @@ from services.resolution.predicate_evaluator import (  # noqa: E402
     _bind_callee_parameters,
     evaluate_tree,
 )
-from services.static.contract_analysis_pipeline.predicate_types import PredicateTree  # noqa: E402
-from services.static.contract_analysis_pipeline.predicates import (  # noqa: E402
+from services.static.static_analysis.predicate_types import PredicateTree  # noqa: E402
+from services.static.static_analysis.predicates import (  # noqa: E402
     build_predicate_tree,
 )
-from services.static.contract_analysis_pipeline.reentrancy_pause import (  # noqa: E402
+from services.static.static_analysis.reentrancy_pause import (  # noqa: E402
     apply_reentrancy_pause_pass,
 )
-from services.static.contract_analysis_pipeline.writer_gate import (  # noqa: E402
+from services.static.static_analysis.writer_gate import (  # noqa: E402
     apply_writer_gate_pass,
 )
+
+
+def _assessment_with_trees(address: str, predicate_trees: dict):
+    from tests.support.policy_builders import _assessment, _minimal_static_facts
+
+    return _assessment(
+        static_facts=_minimal_static_facts(address=address, name="Authority"),
+        predicate_trees=predicate_trees,
+    )
 
 
 def _compile(tmp_path: Path, source: str) -> Slither:
@@ -642,7 +651,11 @@ def test_inlined_callee_msg_sender_equality_is_call_edge_condition(monkeypatch):
     monkeypatch.setattr(
         resolver_mod, "_load_state_var_values", lambda *_args, **_kwargs: {"liquidityPool": target_addr}
     )
-    monkeypatch.setattr(queue_mod, "get_artifact", lambda *_args, **_kwargs: authority_artifact)
+    monkeypatch.setattr(
+        queue_mod,
+        "get_artifact",
+        lambda *_args, **_kwargs: _assessment_with_trees(authority_addr, authority_artifact),
+    )
     monkeypatch.setattr(
         materializer_mod,
         "materialize_external_check_from_events",
@@ -813,7 +826,11 @@ def test_delegated_check_conditional_inline_preserves_structural_result(monkeypa
         lambda *_args, **_kwargs: SimpleNamespace(analysis_job=job, runtime_job=job),
     )
     monkeypatch.setattr(resolver_mod, "_load_state_var_values", lambda *_args, **_kwargs: {})
-    monkeypatch.setattr(queue_mod, "get_artifact", lambda *_args, **_kwargs: authority_artifact)
+    monkeypatch.setattr(
+        queue_mod,
+        "get_artifact",
+        lambda *_args, **_kwargs: _assessment_with_trees(authority_addr, authority_artifact),
+    )
 
     materialize_calls = []
 
@@ -924,7 +941,11 @@ def test_delegated_opaque_checker_materializes_with_zero_arg_getter(monkeypatch)
         lambda *_args, **_kwargs: SimpleNamespace(analysis_job=job, runtime_job=job),
     )
     monkeypatch.setattr(resolver_mod, "_load_state_var_values", lambda *_args, **_kwargs: {})
-    monkeypatch.setattr(queue_mod, "get_artifact", lambda *_args, **_kwargs: authority_artifact)
+    monkeypatch.setattr(
+        queue_mod,
+        "get_artifact",
+        lambda *_args, **_kwargs: _assessment_with_trees(authority_addr, authority_artifact),
+    )
 
     rpc_calls = []
 

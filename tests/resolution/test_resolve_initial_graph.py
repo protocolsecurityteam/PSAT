@@ -3,14 +3,14 @@
 
 #5 from todo-no-commit-to-gihub.txt — skip the 2nd resolve_control_graph
 walk that the policy worker triggers after computing
-effective_permissions for the root contract.
+permission_index for the root contract.
 
 Codex flagged this item with: "easy to make incomplete — enumerate every
 node/edge type the second walk adds before shipping". The chosen design
 sidesteps that risk by reusing the SAME BFS code path with a pre-seeded
 ``processed`` set, rather than writing a separate projection function.
 The BFS only re-walks: (a) the root contract (so the now-populated
-effective_permissions is read), and (b) any new addresses discovered
+permission_index is read), and (b) any new addresses discovered
 during that re-walk.
 
 What we pin:
@@ -19,12 +19,12 @@ What we pin:
 2. Every analyzed contract from the prior walk EXCEPT the root is
    marked processed → not re-materialized.
 3. The root IS re-walked (so role principals from the new
-   effective_permissions get projected).
+   permission_index get projected).
 4. New role principals that are EOA addresses get added as principal
    nodes + role_principal edges, no extra materialization needed.
 5. Edges from the prior walk are not duplicated even when the root is
    re-walked (BFS edge-key dedupe).
-6. Without initial_graph, behavior is unchanged (legacy callers).
+6. A first walk without an initial graph remains supported.
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ from unittest.mock import patch
 
 import pytest
 
-from schemas.resolved_control_graph import ResolvedControlGraph
+from schemas.resolution_graph import ResolutionGraph
 from services.resolution import recursive
 from services.resolution.recursive import LoadedArtifacts, resolve_control_graph
 
@@ -66,18 +66,18 @@ def _default_classify(monkeypatch):
 
 def _root_artifacts(*, with_role_principals: bool) -> LoadedArtifacts:
     """Root LoadedArtifacts used for both walks. ``with_role_principals``
-    adds an effective_permissions block referencing ROLE_PRINCIPAL_EOA —
+    adds an permission_index block referencing ROLE_PRINCIPAL_EOA —
     the second walk should pick that up; the first should not see it."""
-    analysis = {"subject": {"address": ROOT_ADDR, "name": "Root"}, "semantic_control": {}}
+    static_facts = {"subject": {"address": ROOT_ADDR, "name": "Root"}, "semantic_control": {}}
     plan = {"contract_address": ROOT_ADDR, "controllers": []}
     snapshot = {"controller_values": {}}
     bundle: dict[str, Any] = {
-        "analysis": analysis,
-        "tracking_plan": plan,
+        "static_facts": static_facts,
+        "observation_plan": plan,
         "snapshot": snapshot,
     }
     if with_role_principals:
-        bundle["effective_permissions"] = {
+        bundle["permission_index"] = {
             "functions": [
                 {
                     "function": "setAdmin(address)",
@@ -101,7 +101,7 @@ def _root_artifacts(*, with_role_principals: bool) -> LoadedArtifacts:
 
 
 def test_first_walk_then_initial_graph_walk_is_no_op_with_no_new_principals():
-    """When the second walk has no new role principals (effective_permissions
+    """When the second walk has no new role principals (permission_index
     is empty), the resulting graph must be identical to the first walk — no
     new nodes, no new edges, no extra materialization."""
     with patch(
@@ -128,7 +128,7 @@ def test_first_walk_then_initial_graph_walk_is_no_op_with_no_new_principals():
 
 def test_initial_graph_walk_projects_new_role_principal():
     """The second walk discovers a role principal from the root's
-    newly-populated effective_permissions and adds it as a node + edge."""
+    newly-populated permission_index and adds it as a node + edge."""
     materialize_calls: list[str] = []
 
     def _no_materialize(addr, *_a, **_kw):
@@ -195,7 +195,7 @@ def test_initial_graph_skips_re_materialization_of_nested_contracts():
         "label": "Nested",
         "contract_name": "Nested",
         "depth": 1,
-        "analyzed": True,
+        "analysis_state": "analyzed",
         "details": {"address": NESTED_ADDR},
         "artifacts": {},
     }
@@ -207,11 +207,11 @@ def test_initial_graph_skips_re_materialization_of_nested_contracts():
         "label": "Root",
         "contract_name": "Root",
         "depth": 0,
-        "analyzed": True,
+        "analysis_state": "analyzed",
         "details": {"address": ROOT_ADDR},
         "artifacts": {},
     }
-    seed_graph = cast(ResolvedControlGraph, {"nodes": [root_node, nested_node], "edges": []})
+    seed_graph = cast(ResolutionGraph, {"nodes": [root_node, nested_node], "edges": []})
 
     materialize_calls: list[str] = []
 
@@ -251,7 +251,7 @@ def test_initial_graph_re_walks_root_so_new_permissions_are_projected():
                 "label": "Root",
                 "contract_name": "Root",
                 "depth": 0,
-                "analyzed": True,
+                "analysis_state": "analyzed",
                 "details": {"address": ROOT_ADDR},
                 "artifacts": {},
             }
@@ -277,7 +277,7 @@ def test_initial_graph_re_walks_root_so_new_permissions_are_projected():
             rpc_url="https://rpc",
             chain_id=1,
             workspace_prefix="test",
-            initial_graph=cast(ResolvedControlGraph, seed_graph),
+            initial_graph=cast(ResolutionGraph, seed_graph),
         )
 
     # The role principal from the root's new permissions made it in.
@@ -308,7 +308,7 @@ def test_initial_graph_dedupes_edges_on_re_walk():
                 "label": "Root",
                 "contract_name": "Root",
                 "depth": 0,
-                "analyzed": True,
+                "analysis_state": "analyzed",
                 "details": {"address": ROOT_ADDR},
                 "artifacts": {},
             },
@@ -320,7 +320,7 @@ def test_initial_graph_dedupes_edges_on_re_walk():
                 "label": "Nested",
                 "contract_name": "Nested",
                 "depth": 1,
-                "analyzed": True,
+                "analysis_state": "analyzed",
                 "details": {"address": NESTED_ADDR},
                 "artifacts": {},
             },
@@ -337,7 +337,7 @@ def test_initial_graph_dedupes_edges_on_re_walk():
             rpc_url="https://rpc",
             chain_id=1,
             workspace_prefix="test",
-            initial_graph=cast(ResolvedControlGraph, seed_graph),
+            initial_graph=cast(ResolutionGraph, seed_graph),
         )
 
     # Same edge appears exactly once.
@@ -349,9 +349,8 @@ def test_initial_graph_dedupes_edges_on_re_walk():
     assert len(matching) == 1
 
 
-def test_no_initial_graph_preserves_legacy_behavior():
-    """Without initial_graph, behavior is identical to before this change.
-    Catches a regression where the new code path leaks into legacy callers."""
+def test_no_initial_graph_runs_a_first_walk():
+    """Without initial_graph, the resolver performs a first walk."""
     with patch(
         "services.resolution.recursive._materialize_contract_artifacts",
         side_effect=AssertionError("nothing nested in this fixture"),

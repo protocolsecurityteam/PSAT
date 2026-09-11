@@ -15,6 +15,8 @@ from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
 from db.models import MonitoredContract, ProxyUpgradeEvent, WatchedProxy
+from schemas.observations import MonitoringConfig
+from services.monitoring.config import load_monitoring_config
 from services.monitoring.event_topics import (
     _HANDROLLED_EVENT_TYPE_TO_TAGS,
     is_member_changed_event_type,
@@ -65,7 +67,12 @@ _WRITE_TARGET_TO_CONFIG_KEYS: dict[str, tuple[str, ...]] = {
 }
 
 
-def _should_watch(mc: MonitoredContract, parsed: dict) -> bool:
+def _should_watch(
+    mc: MonitoredContract,
+    parsed: dict,
+    *,
+    config: MonitoringConfig | None = None,
+) -> bool:
     """Check if the monitoring config allows this event.
 
     Tag-driven: derive the set of monitoring_config flags this event is
@@ -74,7 +81,7 @@ def _should_watch(mc: MonitoredContract, parsed: dict) -> bool:
     without tags synthesize them from event_type via
     ``_HANDROLLED_EVENT_TYPE_TO_TAGS``.
     """
-    config = mc.monitoring_config or {}
+    config = config if config is not None else load_monitoring_config(mc.monitoring_config)
     event_type = parsed.get("event_type", "")
 
     tags = parsed.get("effect_tags") or _HANDROLLED_EVENT_TYPE_TO_TAGS.get(event_type) or {}

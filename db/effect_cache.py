@@ -56,7 +56,7 @@ class EffectVerdictUnlinked(Exception):
 
 # Bump to invalidate every stored verdict when the recipe/verdict output shape
 # changes. Deliberately independent of a git SHA (mirrors
-# ``ANALYSIS_SCHEMA_VERSION``): an unrelated deploy must not cold-miss the whole
+# ``STATIC_FACTS_SCHEMA_VERSION``): an unrelated deploy must not cold-miss the whole
 # behavioral cache.
 # v2: pause probes seed token preconditions (balance/allowance/shares/owner
 # slots, read-back verified). A v1 ``unknown`` row for a surface whose entry
@@ -400,12 +400,12 @@ class EffectVerdictUnlinked(Exception):
 # Three further predicate-tree shape changes (the ``external_set`` self-gate
 # descriptor, ``derived_from`` on view_call/external_call/Unary operands, and the
 # entry-parameter-Phi frame purity) are ALSO covered by this same unreleased span:
-# they are gated by ANALYSIS_SCHEMA_VERSION 3→4 on the materialization plane, the
+# they are gated by STATIC_FACTS_SCHEMA_VERSION 3→4 on the materialization plane, the
 # probe-visible ``gate_ref`` derives from leaf authority_role and so cold-misses
 # rather than serving stale, and every local cache row predates v21 anyway. Noted
 # here per the v10/v20 precedent rather than minting a version nothing can serve.
 # v32: the CANDIDATE POPULATION changed. ``selection._has_effect_evidence``
-# replaced ``array_length(effect_targets,1) > 0`` with the state-write evidence plane, so the
+# selection reads the state-write evidence plane, so the
 # stage now probes every row whose state-write evidence is NOT DETERMINED and every
 # ABI-mutating entry point whose sinks the IR could not see (+49 of 1,179 on the local
 # protocol-1 slice once that plane is written; 0 removed). Two honest halves, kept
@@ -416,7 +416,7 @@ class EffectVerdictUnlinked(Exception):
 # v31 row reached under the narrower population would be transferred onto a function
 # selected by different rules. Unlike v30/v31 no mechanism was demonstrated by which a
 # stored v31 PAYLOAD becomes false — the local plane cannot exhibit a hit at either
-# revision (all 150 rows carry ``analysis_schema_version=5``), so the claim is not
+# revision (all 150 rows carry ``static_facts_schema_version=5``), so the claim is not
 # provable here in either direction. The bump is the fail-closed choice on an
 # unobservable: re-probing costs fork time, serving a verdict selected under retired
 # rules costs a witness.
@@ -432,7 +432,7 @@ class EffectVerdictUnlinked(Exception):
 # introduced on these same keys, and a deployment served from a v32 row sits beside
 # rows whose residue was computed under the retired contract. The bump is the
 # fail-closed choice on a shape the local plane cannot exhibit either way (no row is
-# servable at any revision — all 150 carry ``analysis_schema_version=5``), stated so
+# servable at any revision — all 150 carry ``static_facts_schema_version=5``), stated so
 # the next reader does not mistake it for a demonstrated stale-serve.
 # v34: the pause-window harvest is side- and
 # operator-aware. A v33 row could carry a ``duration_bound_seconds`` that is not a
@@ -447,7 +447,7 @@ class EffectVerdictUnlinked(Exception):
 # A later operand settle (``provenance._digest`` now content-derived, so the
 # PYTHONHASHSEED-dependent tie-break between competing computed sources is gone)
 # DOES move a witness input, and the decision not to bump is recorded here —
-# not only at ANALYSIS_SCHEMA_VERSION — because the moved field feeds this cache's
+# not only at STATIC_FACTS_SCHEMA_VERSION — because the moved field feeds this cache's
 # own probe: ``claims/matchers/_facts.param_constraints`` reads ``derived_from``
 # on the winning ``computed`` operand and mints the constraint fragment published
 # as ``target_constraint`` (flows) / ``destination_constraint``
@@ -472,7 +472,7 @@ class EffectVerdictUnlinked(Exception):
 # diffs attribute to the ``abi_selector`` addition on callee records and the cid-561
 # identity-hash sink-order noise documented at v10).
 # v35: the static classifier's ``external_bool`` authority discriminator
-# (ANALYSIS_SCHEMA_VERSION v5) moves a witness input to this cache's claims:
+# (STATIC_FACTS_SCHEMA_VERSION v5) moves a witness input to this cache's claims:
 # ``claims/matchers/_authcommon`` reads ``authority_role`` and the
 # ``authority_contract`` descriptor off external_bool leaves, and v34 rows
 # were computed from trees in which value-movement calls
@@ -655,7 +655,7 @@ def find_cached_verdict(
 ) -> EffectBehaviorCache | None:
     """Return the current-version cached verdict for this identity, or ``None``.
 
-    A row stamped with a stale ``analysis_schema_version`` reads as a miss so a
+    A row stamped with a stale ``static_facts_schema_version`` reads as a miss so a
     bumped recipe re-simulates rather than transferring a verdict computed under
     different rules — exactly the materialization cache's version gate.
     """
@@ -667,7 +667,7 @@ def find_cached_verdict(
             EffectBehaviorCache.scope == scope,
             EffectBehaviorCache.contract_surface_hash == surface,
             EffectBehaviorCache.gate_ref == gate_ref,
-            EffectBehaviorCache.analysis_schema_version == EFFECT_CACHE_SCHEMA_VERSION,
+            EffectBehaviorCache.static_facts_schema_version == EFFECT_CACHE_SCHEMA_VERSION,
         )
     ).scalar_one_or_none()
 
@@ -685,7 +685,7 @@ def find_cached_verdicts_batch(
     form does) whose value is the current-version cached row, if any.
 
     Semantics match the single-row lookup precisely: the same 5-field identity,
-    the same ``analysis_schema_version`` gate (a stale-version row is a miss),
+    the same ``static_facts_schema_version`` gate (a stale-version row is a miss),
     the same kernel surface-sentinel normalization. The identity UniqueConstraint
     plus the version filter guarantee at most one row per key — so this returns
     the same row the per-plan ``SELECT`` would, in ONE composite ``IN`` query
@@ -707,7 +707,7 @@ def find_cached_verdicts_batch(
                     EffectBehaviorCache.contract_surface_hash,
                     EffectBehaviorCache.gate_ref,
                 ).in_(list(keys)),
-                EffectBehaviorCache.analysis_schema_version == EFFECT_CACHE_SCHEMA_VERSION,
+                EffectBehaviorCache.static_facts_schema_version == EFFECT_CACHE_SCHEMA_VERSION,
             )
         )
         .scalars()
@@ -798,7 +798,7 @@ def upsert_cached_verdict(
         tier=tier,
         transcript_ptr=transcript_ptr,
         details=details,
-        analysis_schema_version=EFFECT_CACHE_SCHEMA_VERSION,
+        static_facts_schema_version=EFFECT_CACHE_SCHEMA_VERSION,
         audit_status=audit_status,
         audit_peer_hash=audit_peer_hash,
         audited_at=now if audit_status is not None else None,
@@ -812,7 +812,7 @@ def upsert_cached_verdict(
         "tier": stmt.excluded.tier,
         "transcript_ptr": stmt.excluded.transcript_ptr,
         "details": stmt.excluded.details,
-        "analysis_schema_version": stmt.excluded.analysis_schema_version,
+        "static_facts_schema_version": stmt.excluded.static_facts_schema_version,
         "updated_at": stmt.excluded.updated_at,
     }
     # Only advance audit bookkeeping when this write carries an audit result;

@@ -10,9 +10,9 @@ the producer module also imports.
 
 from __future__ import annotations
 
-from typing import Literal, TypedDict, get_args
+from typing import Literal, get_args
 
-from typing_extensions import NotRequired, Required
+from typing_extensions import NotRequired, Required, TypedDict
 
 UpgradeEventType = Literal[
     "upgraded",

@@ -127,6 +127,7 @@ def seeded(db_session, storage_bucket):
 
     jobs: list[Job] = []
     contracts: list[Contract] = []
+    from tests.support.assessment_artifacts import store_test_assessment
 
     for i in range(N_CONTRACTS):
         addr = _addr(i + 1)
@@ -194,9 +195,6 @@ def seeded(db_session, storage_bucket):
                 function_name=f"fn_{f:03d}",
                 selector=f"0x{f:08x}",
                 abi_signature=f"fn_{f:03d}(uint256,address)",
-                effect_labels=["asset_pull"] if f % 5 == 0 else [],
-                effect_targets=[],
-                action_summary=f"action {f}",
                 authority_public=False,
                 authority_roles=[],
             )
@@ -228,7 +226,7 @@ def seeded(db_session, storage_bucket):
                     label=f"label_{n}",
                     contract_name=f"Ctl_{n}",
                     depth=n,
-                    analyzed=False,
+                    analysis_state=None,
                     details={},
                 )
             )
@@ -288,17 +286,14 @@ def seeded(db_session, storage_bucket):
                 )
             )
 
-        # contract_analysis / contract_flags / dependencies via store_artifact
+        # Assessment / contract_flags / dependencies via artifact storage
         # so each body lands in object storage (storage_key set, data NULL),
         # matching the prod layout that exposes the per-row GET hotspot.
-        store_artifact(
+        store_test_assessment(
             db_session,
             job.id,
-            "contract_analysis",
-            data={
-                "subject": {"name": f"PerfContract_{i:03d}"},
-                "summary": "perf summary",
-            },
+            address=addr,
+            name=f"PerfContract_{i:03d}",
         )
         store_artifact(db_session, job.id, "contract_flags", data={"is_proxy": False})
         store_artifact(db_session, job.id, "dependencies", data={"deps": []})
@@ -492,8 +487,7 @@ def test_query_count_budgets(seeded, api_client, db_session, monkeypatch, record
     assert len([a for a in analyses if a.get("company") == PROTOCOL_NAME]) >= N_CONTRACTS
     detail = api_client.get(f"/api/analyses/{sample_run}").json()
     assert detail["run_name"] == sample_run
-    assert "effective_permissions" in detail
-    assert len(detail["effective_permissions"]["functions"]) == N_FUNCTIONS_PER_CONTRACT
+    assert "permission_index" not in detail
     timeline = api_client.get(f"/api/contracts/{seeded['proxy_contract_id']}/audit_timeline").json()
     assert timeline["contract"]["is_proxy"] is True
     assert len(timeline["coverage"]) == 1

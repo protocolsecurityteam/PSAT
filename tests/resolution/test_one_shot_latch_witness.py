@@ -511,7 +511,7 @@ slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
 
 from services.resolution.one_shot_probe import collect_one_shot_latches  # noqa: E402
-from services.static.contract_analysis_pipeline.predicate_artifacts import (  # noqa: E402
+from services.static.static_analysis.predicate_artifacts import (  # noqa: E402
     build_predicate_artifacts,
 )
 from tests.support.solc import solc_path_for as _solc_path_for  # noqa: E402

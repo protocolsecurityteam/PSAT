@@ -230,17 +230,18 @@ def build_governance_view(
         ef_contract_ids = [primary_ef_cid] if primary_ef_cid else []
         ef_contract_ids += [sc.id for sc in secondary_impl_contracts]
 
-        # ``value_effects`` stays a Plane-0 fact off legacy labels (it drives the
-        # role classification + fund-flow lane); the capability chips key off
-        # Plane-1 claims per function, legacy labels the claim-less fallback.
+        # Value effects and capability chips come from supported claims.
         value_effects: list[str] = []
         caps_set: set[str] = set()
         for cid in ef_contract_ids:
             for rec in ef_effects_by_cid.get(cid, []):
-                for label in rec["labels"]:
-                    if label in ("asset_pull", "asset_send", "mint", "burn") and label not in value_effects:
-                        value_effects.append(label)
-                caps_set |= _function_capabilities(rec["labels"], rec["claims"])
+                for claim_id in rec["claims"]:
+                    if (
+                        claim_id in ("flow.in", "flow.out", "supply.mint", "supply.burn")
+                        and claim_id not in value_effects
+                    ):
+                        value_effects.append(claim_id)
+                caps_set |= _function_capabilities(rec["claims"])
 
         # Two non-label extras layered on: ``upgradeable`` (it's a proxy shell)
         # and ``pause`` from the summary flag (a contract can be pausable without
@@ -286,7 +287,7 @@ def build_governance_view(
         name_lower = contract_name.lower()
         if "bridge" in name_lower or "gateway" in name_lower:
             role = "bridge"
-        elif any(e in value_effects for e in ("asset_pull", "asset_send")):
+        elif any(e in value_effects for e in ("flow.in", "flow.out")):
             role = "value_handler"
         elif any(s in standards for s in ("ERC20", "ERC721", "ERC1155")):
             role = "token"
@@ -729,9 +730,7 @@ def build_governance_view(
     for caddr, functions in fp_function_detail_by_entity.items():
         for fn in functions:
             fname = fn.get("function")
-            # Capability chips are computed per function (claims-first) then
-            # unioned, so the claims-vs-legacy choice stays per-function.
-            fn_caps = _function_capabilities(fn.get("labels") or (), fn.get("claims") or ())
+            fn_caps = _function_capabilities(fn.get("claims") or ())
             for a in fn.get("callers", ()):
                 la = (a or "").lower()
                 if not la:
@@ -1104,7 +1103,7 @@ def _build_flows_and_principals(
         if c.get("owner") and c["owner"] in contract_addrs:
             flow_type = (
                 "controls_value"
-                if any(e in c.get("value_effects", []) for e in ("asset_pull", "asset_send"))
+                if any(e in c.get("value_effects", []) for e in ("flow.in", "flow.out"))
                 else "controls"
             )
             add_flow(c["owner"], target, flow_type, chain)

@@ -39,15 +39,15 @@ import pytest
 pytest.importorskip("slither")
 from slither import Slither
 
-from services.static.contract_analysis_pipeline.mapping_events import (
+from services.static.static_analysis.mapping_events import (
     discover_mapping_writer_events,
 )
-from services.static.contract_analysis_pipeline.predicate_artifacts import (
+from services.static.static_analysis.predicate_artifacts import (
     apply_mapping_event_hint_pass,
 )
-from services.static.contract_analysis_pipeline.predicate_types import PredicateTree
-from services.static.contract_analysis_pipeline.predicates import build_predicate_tree
-from services.static.contract_analysis_pipeline.writer_gate import apply_writer_gate_pass
+from services.static.static_analysis.predicate_types import PredicateTree
+from services.static.static_analysis.predicates import build_predicate_tree
+from services.static.static_analysis.writer_gate import apply_writer_gate_pass
 
 # Same role storage shape, differing only in HOW `_roles` is reached:
 # v4 declares it as a state variable; v5 reaches it through an ERC-7201

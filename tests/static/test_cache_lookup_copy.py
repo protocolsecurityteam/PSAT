@@ -41,6 +41,19 @@ def test_find_completed_static_cache_case_insensitive(db_session):
     assert found.id == completed.id
 
 
+def test_find_completed_static_cache_rejects_an_old_assessment_era(db_session):
+    """An exact-address hit is still a miss when its Assessment wire is stale."""
+
+    from db.contract_materializations import STATIC_FACTS_SCHEMA_VERSION
+    from db.queue import find_completed_static_cache
+
+    completed = _create_completed_job_with_static_data(db_session)
+    completed.static_facts_schema_version = STATIC_FACTS_SCHEMA_VERSION - 1
+    db_session.commit()
+
+    assert find_completed_static_cache(db_session, ADDR_A) is None
+
+
 def test_find_completed_static_cache_miss_no_job(db_session):
     """No prior jobs for this address returns None."""
     from db.queue import find_completed_static_cache
@@ -61,7 +74,7 @@ def test_find_completed_static_cache_miss_failed_job(db_session):
 
 
 def test_find_completed_static_cache_miss_no_analysis(db_session):
-    """Completed job without contract_analysis artifact is not returned."""
+    """Completed job without an assessment is not returned."""
     from db.models import Contract, ContractSummary, JobStage, JobStatus
     from db.queue import create_job, find_completed_static_cache, store_source_files
 
@@ -80,15 +93,15 @@ def test_find_completed_static_cache_miss_no_analysis(db_session):
     assert find_completed_static_cache(db_session, ADDR_A) is None
 
 
-def test_find_completed_static_cache_hit_for_proxy_without_contract_analysis(db_session):
-    """Regression: proxies never produce ``contract_analysis`` on their
+def test_find_completed_static_cache_hit_for_proxy_without_static_facts(db_session):
+    """Regression: proxies never produce an ``assessment`` on their
     own job — that artifact only shows up on the impl child. The cache
     lookup must still return the proxy's completed job so the next
     company-discovery run can reuse its static data instead of re-
     fetching source from Etherscan and re-running slither for every
     proxy it sees.
 
-    Before the fix, proxies required ``contract_analysis`` to be served
+    Before the fix, proxies required ``static_facts`` to be served
     from cache; none of them met that bar, so every re-discovery of a
     protocol did a full fresh fetch for every proxy row.
     """
@@ -114,7 +127,7 @@ def test_find_completed_static_cache_hit_for_proxy_without_contract_analysis(db_
     db_session.commit()
     store_source_files(db_session, job.id, {"src/Proxy.sol": "contract P {}"})
     # Proxy jobs write contract_flags (is_proxy=True + proxy_type) instead
-    # of contract_analysis — the latter lives on the impl child's job.
+    # of assessment — the latter lives on the impl child's job.
     store_artifact(db_session, job.id, "contract_flags", data={"is_proxy": True, "proxy_type": "eip1967"})
 
     found = find_completed_static_cache(db_session, ADDR_A)
@@ -135,7 +148,9 @@ def test_find_completed_static_cache_miss_no_summary(db_session):
     db_session.add(Contract(job_id=job.id, address=ADDR_A, contract_name="X"))
     db_session.commit()
     store_source_files(db_session, job.id, {"src/X.sol": "contract X {}"})
-    store_artifact(db_session, job.id, "contract_analysis", data={"summary": {}})
+    from tests.support.policy_builders import _assessment
+
+    store_artifact(db_session, job.id, "assessment", data=_assessment())
 
     assert find_completed_static_cache(db_session, ADDR_A) is None
 
@@ -155,6 +170,9 @@ def test_find_completed_static_cache_picks_most_recent(db_session):
     new_job = create_job(db_session, {"address": ADDR_A, "name": "TestContract2"})
     new_job.status = JobStatus.completed
     new_job.stage = JobStage.done
+    from db.contract_materializations import STATIC_FACTS_SCHEMA_VERSION
+
+    new_job.static_facts_schema_version = STATIC_FACTS_SCHEMA_VERSION
     db_session.commit()
 
     contract = Contract(job_id=new_job.id, address=ADDR_A, chain="ethereum", contract_name="TestContract2")
@@ -163,7 +181,10 @@ def test_find_completed_static_cache_picks_most_recent(db_session):
     db_session.add(ContractSummary(contract_id=contract.id))
     db_session.commit()
     store_source_files(db_session, new_job.id, {"src/T.sol": "contract T {}"})
-    store_artifact(db_session, new_job.id, "contract_analysis", data={"summary": {}})
+    from tests.support.policy_builders import _assessment, _minimal_static_facts
+
+    facts = _minimal_static_facts(address=ADDR_A, name="TestContract2")
+    store_artifact(db_session, new_job.id, "assessment", data=_assessment(static_facts=facts))
 
     future = datetime.now(timezone.utc) + timedelta(hours=1)
     db_session.execute(update(Job).where(Job.id == new_job.id).values(updated_at=future))
@@ -189,8 +210,19 @@ def test_copy_static_cache(db_session):
     source_job = _create_completed_job_with_static_data(db_session)
     predicate_trees = {"schema_version": "semantic", "trees": {"pause()": {"node_type": "caller"}}}
     effects = {"schema_version": "semantic", "effects": {"pause()": [{"kind": "external_call"}]}}
-    store_artifact(db_session, source_job.id, "predicate_trees", data=predicate_trees)
-    store_artifact(db_session, source_job.id, "effects", data=effects)
+    from db.queue.typed import load_assessment
+    from services.assessment import static_inputs
+    from tests.support.policy_builders import _assessment
+
+    source_assessment = load_assessment(get_artifact, db_session, source_job.id)
+    assert source_assessment is not None
+    facts, _old_trees, _old_effects = static_inputs(source_assessment)
+    store_artifact(
+        db_session,
+        source_job.id,
+        "assessment",
+        data=_assessment(static_facts=facts, predicate_trees=predicate_trees, effects=effects),
+    )
     target_job = create_job(db_session, {"address": ADDR_A})
 
     new_contract_id = copy_static_cache(db_session, source_job.id, target_job.id)
@@ -220,13 +252,15 @@ def test_copy_static_cache(db_session):
     assert len(rds) == 1
     assert rds[0].role_name == "ADMIN_ROLE"
 
-    assert get_artifact(db_session, target_job.id, "contract_analysis") is not None
-    assert get_artifact(db_session, target_job.id, "predicate_trees") == predicate_trees
-    assert get_artifact(db_session, target_job.id, "effects") == effects
-    # slither_results / analysis_report were removed from the static-artifact
+    target_assessment = load_assessment(get_artifact, db_session, target_job.id)
+    assert target_assessment is not None
+    restamped_facts = {**facts, "subject": {**facts["subject"], "address": ADDR_A.lower()}}
+    assert static_inputs(target_assessment) == (restamped_facts, predicate_trees, effects)
+    for retired in ("static_facts", "predicate_trees", "effects"):
+        assert get_artifact(db_session, target_job.id, retired) is None
+    # slither_results / static_facts_report were removed from the static-artifact
     # cache copy set when the Slither CLI subprocess was excised — they no
     # longer participate in caching since they're no longer produced.
-    assert get_artifact(db_session, target_job.id, "control_tracking_plan") is not None
     assert get_artifact(db_session, target_job.id, "contract_flags") is None
 
 
@@ -263,7 +297,7 @@ def test_data_isolation_after_cache_copy(db_session):
     ).scalar_one_or_none()
     assert summary is not None
 
-    assert get_artifact(db_session, target_job.id, "contract_analysis") is not None
+    assert get_artifact(db_session, target_job.id, "assessment") is not None
 
 
 # ---------------------------------------------------------------------------
@@ -341,9 +375,9 @@ def test_no_duplicate_rows_after_two_runs(db_session, monkeypatch):
     ).scalar()
     assert src_count == 2, f"Expected 2 source files, got {src_count}"
 
-    for artifact_name in ["contract_analysis", "control_tracking_plan"]:
-        art = get_artifact(db_session, new_job.id, artifact_name)
-        assert isinstance(art, dict), f"Missing artifact {artifact_name}"
+    assert isinstance(get_artifact(db_session, new_job.id, "assessment"), dict)
+    for retired in ("static_facts", "predicate_trees", "effects"):
+        assert get_artifact(db_session, new_job.id, retired) is None
 
 
 # ---------------------------------------------------------------------------

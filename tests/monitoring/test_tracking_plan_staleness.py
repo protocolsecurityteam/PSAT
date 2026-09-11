@@ -24,7 +24,8 @@ import pytest
 from sqlalchemy import select
 
 from db.models import Contract, ContractMaterialization, Job, JobStage, JobStatus, MonitoredContract, Protocol
-from services.monitoring.tracking_plan_state import (
+from services.monitoring.config import MonitoringConfigError
+from services.monitoring.observation_plan_state import (
     CONFIG_SUPPLIED_BY_CALLER,
     NO_CURRENT_MATERIALIZATION,
     NOT_DETERMINED_KEY,
@@ -38,7 +39,7 @@ from services.monitoring.tracking_plan_state import (
     TRACKED_TOPICS_STALE_SINCE_KEY,
     UNCLASSIFIED,
     classify_plan_state,
-    merge_stale_tracking_plan,
+    merge_stale_observation_plan,
 )
 
 PROTO_NAME = "__test_plan_staleness__"
@@ -92,59 +93,59 @@ def test_a_read_plan_never_merges():
     older may displace it."""
     new = {"watch_ownership": True, TRACKED_TOPICS_KEY: []}
     existing = {TRACKED_TOPICS_KEY: _TOPICS}
-    assert merge_stale_tracking_plan(new, existing) is new
+    assert merge_stale_observation_plan(new, existing) is new
 
 
 @pytest.mark.parametrize("token", sorted(STALENESS_MERGE_TOKENS))
 def test_every_merging_token_preserves_last_good_topics(token):
-    merged = merge_stale_tracking_plan(_fresh(token), {TRACKED_TOPICS_KEY: _TOPICS}, now=_NOW)
-    assert merged[TRACKED_TOPICS_KEY] == _TOPICS
-    assert merged[NOT_DETERMINED_KEY] == token
-    assert merged[TRACKED_TOPICS_STALE_SINCE_KEY] == _NOW.isoformat()
+    merged = merge_stale_observation_plan(_fresh(token), {TRACKED_TOPICS_KEY: _TOPICS}, now=_NOW)
+    assert merged.get(TRACKED_TOPICS_KEY) == _TOPICS
+    assert merged.get(NOT_DETERMINED_KEY) == token
+    assert merged.get(TRACKED_TOPICS_STALE_SINCE_KEY) == _NOW.isoformat()
 
 
 def test_caller_supplied_config_is_never_resurrected_over():
     """A caller-authored config is a deliberate overwrite. Neither direction of
     the merge may undo it."""
     new = {"watch_ownership": False, NOT_DETERMINED_KEY: CONFIG_SUPPLIED_BY_CALLER}
-    assert merge_stale_tracking_plan(new, {TRACKED_TOPICS_KEY: _TOPICS}) is new
+    assert merge_stale_observation_plan(new, {TRACKED_TOPICS_KEY: _TOPICS}) is new
 
     existing_caller = {NOT_DETERMINED_KEY: CONFIG_SUPPLIED_BY_CALLER, TRACKED_TOPICS_KEY: _TOPICS}
-    assert merge_stale_tracking_plan(_fresh(), existing_caller) == _fresh()
+    assert merge_stale_observation_plan(_fresh(), existing_caller) == _fresh()
 
 
 def test_proven_empty_topics_carry_nothing_forward():
     """``tracked_topics == []`` is a claim about the contract ("read, named
     nothing"). It is not a watch list, and once the plan is unreadable we can no
     longer make that claim — so the not-determined config stands alone."""
-    merged = merge_stale_tracking_plan(_fresh(), {TRACKED_TOPICS_KEY: []})
+    merged = merge_stale_observation_plan(_fresh(), {TRACKED_TOPICS_KEY: []})
     assert TRACKED_TOPICS_KEY not in merged
-    assert merged[NOT_DETERMINED_KEY] == NO_CURRENT_MATERIALIZATION
+    assert merged.get(NOT_DETERMINED_KEY) == NO_CURRENT_MATERIALIZATION
 
 
 def test_pre_discriminant_row_carries_nothing_forward():
     """A row with neither key never had a witnessed plan to preserve."""
-    assert merge_stale_tracking_plan(_fresh(), {"watch_ownership": True}) == _fresh()
-    assert merge_stale_tracking_plan(_fresh(), None) == _fresh()
+    assert merge_stale_observation_plan(_fresh(), {"watch_ownership": True}) == _fresh()
+    assert merge_stale_observation_plan(_fresh(), None) == _fresh()
 
 
 def test_staleness_instant_is_not_refreshed_by_re_enrollment():
     """The topics are as old as the last successful read, not as old as the
     last failure to re-read. Re-running enrollment must not make dated
     knowledge look fresher."""
-    first = merge_stale_tracking_plan(_fresh(), {TRACKED_TOPICS_KEY: _TOPICS}, now=_NOW)
-    later = merge_stale_tracking_plan(_fresh(), first, now=_NOW + timedelta(days=30))
-    assert later[TRACKED_TOPICS_STALE_SINCE_KEY] == first[TRACKED_TOPICS_STALE_SINCE_KEY] == _NOW.isoformat()
+    first = merge_stale_observation_plan(_fresh(), {TRACKED_TOPICS_KEY: _TOPICS}, now=_NOW)
+    later = merge_stale_observation_plan(_fresh(), first, now=_NOW + timedelta(days=30))
+    assert later.get(TRACKED_TOPICS_STALE_SINCE_KEY) == first.get(TRACKED_TOPICS_STALE_SINCE_KEY) == _NOW.isoformat()
 
 
 def test_watch_authority_is_rederived_from_the_carried_topics():
     """The flag is a function of what is being watched, so it follows the watch
     list rather than being left at the not-determined config's default."""
-    merged = merge_stale_tracking_plan(_fresh(), {TRACKED_TOPICS_KEY: _TOPICS}, now=_NOW)
-    assert merged["watch_authority"] is True
+    merged = merge_stale_observation_plan(_fresh(), {TRACKED_TOPICS_KEY: _TOPICS}, now=_NOW)
+    assert merged.get("watch_authority") is True
 
     other = [{"topic0": TOPIC0, "event_type": "guardian_changed"}]
-    assert "watch_authority" not in merge_stale_tracking_plan(_fresh(), {TRACKED_TOPICS_KEY: other}, now=_NOW)
+    assert "watch_authority" not in merge_stale_observation_plan(_fresh(), {TRACKED_TOPICS_KEY: other}, now=_NOW)
 
 
 def test_polling_plan_carries_analyzer_slots_and_yields_to_fresh_entries():
@@ -160,40 +161,34 @@ def test_polling_plan_carries_analyzer_slots_and_yields_to_fresh_entries():
             {"field": "feeRecipient", "kind": "getter_call"},
         ],
     }
-    merged = merge_stale_tracking_plan(new, existing, now=_NOW)
-    assert merged[POLLING_PLAN_KEY] == [
+    merged = merge_stale_observation_plan(new, existing, now=_NOW)
+    assert merged.get(POLLING_PLAN_KEY) == [
         {"field": "implementation", "kind": "storage_slot"},
         {"field": "feeRecipient", "kind": "getter_call"},
     ]
-    assert merged["polling_plan_stale_since"] == _NOW.isoformat()
+    assert merged.get("polling_plan_stale_since") == _NOW.isoformat()
 
 
-def test_carried_polling_entries_are_always_stamped():
-    """Review finding 7: the stamp used to be gated on the merged plan being
-    LONGER than the raw new plan. A new plan holding a malformed entry (dropped
-    by the merge) plus one carried entry gives equal lengths — stale entries
-    would then ride with no staleness mark at all."""
+def test_malformed_polling_entries_fail_at_the_config_boundary():
+    """A malformed stored plan never reaches staleness merging."""
     new = dict(_fresh(), **{POLLING_PLAN_KEY: [{"field": "implementation"}, "not-a-dict"]})
     existing = {TRACKED_TOPICS_KEY: _TOPICS, POLLING_PLAN_KEY: [{"field": "feeRecipient"}]}
 
-    merged = merge_stale_tracking_plan(new, existing, now=_NOW)
-
-    assert len(merged[POLLING_PLAN_KEY]) == len(new[POLLING_PLAN_KEY])  # the shape that used to slip through
-    assert {e["field"] for e in merged[POLLING_PLAN_KEY]} == {"implementation", "feeRecipient"}
-    assert merged["polling_plan_stale_since"] == _NOW.isoformat()
+    with pytest.raises(MonitoringConfigError, match="polling_plan.1"):
+        merge_stale_observation_plan(new, existing, now=_NOW)
 
 
 def test_polling_plan_untouched_when_nothing_to_carry():
     new = dict(_fresh(), **{POLLING_PLAN_KEY: [{"field": "implementation"}]})
-    merged = merge_stale_tracking_plan(new, {TRACKED_TOPICS_KEY: _TOPICS, POLLING_PLAN_KEY: []}, now=_NOW)
-    assert merged[POLLING_PLAN_KEY] == [{"field": "implementation"}]
+    merged = merge_stale_observation_plan(new, {TRACKED_TOPICS_KEY: _TOPICS, POLLING_PLAN_KEY: []}, now=_NOW)
+    assert merged.get(POLLING_PLAN_KEY) == [{"field": "implementation"}]
     assert "polling_plan_stale_since" not in merged
 
 
 def test_merge_does_not_mutate_its_inputs():
     new = _fresh()
     existing = {TRACKED_TOPICS_KEY: _TOPICS}
-    merge_stale_tracking_plan(new, existing, now=_NOW)
+    merge_stale_observation_plan(new, existing, now=_NOW)
     assert new == _fresh()
     assert existing == {TRACKED_TOPICS_KEY: _TOPICS}
 
@@ -247,17 +242,17 @@ def test_scan_plane_facts_survive_every_config_rebuild():
     never covered. Every writer replaces the whole config, so the carry is
     unconditional — including when the plan WAS read (no staleness merge runs)
     and when a caller authored the new config."""
-    from services.monitoring.tracking_plan_state import SCAN_GAPS_KEY, preserve_scan_plane_facts
+    from services.monitoring.observation_plan_state import SCAN_GAPS_KEY, preserve_scan_plane_facts
 
     gaps = [{"from_block": 9_400_001, "to_block": 25_662_000, "reason": "unfloored_runaway"}]
     existing = {TRACKED_TOPICS_KEY: _TOPICS, SCAN_GAPS_KEY: gaps}
 
     fresh_read = preserve_scan_plane_facts({"watch_ownership": True, TRACKED_TOPICS_KEY: []}, existing)
-    assert fresh_read[SCAN_GAPS_KEY] == gaps
-    assert fresh_read[TRACKED_TOPICS_KEY] == []  # unrelated keys untouched
+    assert fresh_read.get(SCAN_GAPS_KEY) == gaps
+    assert fresh_read.get(TRACKED_TOPICS_KEY) == []  # unrelated keys untouched
 
     caller = preserve_scan_plane_facts({NOT_DETERMINED_KEY: CONFIG_SUPPLIED_BY_CALLER}, existing)
-    assert caller[SCAN_GAPS_KEY] == gaps
+    assert caller.get(SCAN_GAPS_KEY) == gaps
 
     assert preserve_scan_plane_facts({"a": 1}, {}) == {"a": 1}
     assert preserve_scan_plane_facts({"a": 1}, None) == {"a": 1}
@@ -309,7 +304,7 @@ def protocol_fixture(db_session):
 
 
 def _materialize(session, address: str, plan: dict) -> ContractMaterialization:
-    from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
+    from db.contract_materializations import STATIC_FACTS_SCHEMA_VERSION
     from utils.chains import chain_cache_token
 
     row = ContractMaterialization(
@@ -318,8 +313,8 @@ def _materialize(session, address: str, plan: dict) -> ContractMaterialization:
         address=address.lower(),
         contract_name="GovernanceToken",
         status="ready",
-        analysis_schema_version=ANALYSIS_SCHEMA_VERSION,
-        tracking_plan=plan,
+        static_facts_schema_version=STATIC_FACTS_SCHEMA_VERSION,
+        observation_plan=plan,
     )
     session.add(row)
     session.commit()

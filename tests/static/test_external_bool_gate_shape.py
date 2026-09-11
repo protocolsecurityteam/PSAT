@@ -27,13 +27,13 @@ import pytest
 slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
 
-from services.static.contract_analysis_pipeline.predicates import (  # noqa: E402
+from services.static.static_analysis.predicates import (  # noqa: E402
     build_predicate_tree,
 )
-from services.static.contract_analysis_pipeline.shared import (  # noqa: E402
+from services.static.static_analysis.shared import (  # noqa: E402
     external_bool_leaf_is_gate_shape,
 )
-from services.static.contract_analysis_pipeline.tracking import (  # noqa: E402
+from services.static.static_analysis.tracking import (  # noqa: E402
     _collect_authority_state_vars,
     _collect_state_var_authority_roles,
     build_controller_tracking,
@@ -290,7 +290,7 @@ def test_const_compare_oracle_view_vs_nonview(tmp_path):
 
 
 def _teller_artifact_and_contract(tmp_path):
-    from services.static.contract_analysis_pipeline.predicate_artifacts import (
+    from services.static.static_analysis.predicate_artifacts import (
         build_predicate_artifacts,
     )
 
@@ -318,7 +318,7 @@ def _teller_artifact_and_contract(tmp_path):
     return build_predicate_artifacts(contract), contract
 
 
-def test_tracking_plan_does_not_mint_caller_gate_for_vault_enter(tmp_path):
+def test_observation_plan_does_not_mint_caller_gate_for_vault_enter(tmp_path):
     """End-to-end through ``build_controller_tracking``: the Teller shape
     (PR-161: 8 Teller deployments published vault + WETH as caller_gate
     controllers) yields NO caller_gate target for ``vault``, while the

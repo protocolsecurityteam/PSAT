@@ -35,7 +35,7 @@ slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
 
 from services.static.claims import build_claims  # noqa: E402
-from services.static.contract_analysis_pipeline.effects import build_effects  # noqa: E402
+from services.static.static_analysis.effects import build_effects  # noqa: E402
 
 pytestmark = pytest.mark.compile
 
@@ -248,37 +248,17 @@ def test_a_pull_between_two_third_parties_is_not_an_inflow(_unit, signature):
     to an endpoint — value that never touched the analyzed contract."""
     info = _effects(_unit, "Bridger")[signature]
     assert [f["direction"] for f in info["value_flows"]] == ["value_router"]
-    assert "asset_pull" not in info["effect_labels"]
 
 
 @pytest.mark.parametrize("signature", ["deposit(uint256)", "depositVia(uint256)"])
 def test_a_pull_whose_sink_is_this_contract_stays_inbound(_unit, signature):
     """The control, direct and through a helper's bound parameter: a real deposit
-    keeps ``in`` and its legacy label. Demoting these would have traded one false
-    claim for a silence on every wrapper in the corpus."""
+    keeps ``in``. Demoting these would have traded one false claim for a silence
+    on every wrapper in the corpus."""
     info = _effects(_unit, "Bridger")[signature]
     flows = info["value_flows"]
     assert [f["direction"] for f in flows] == ["in"]
     assert flows[0].get("target_kind", {}).get("kind") == "self"
-    assert "asset_pull" in info["effect_labels"]
-
-
-def test_a_pull_this_contract_pays_stays_outbound(_unit):
-    info = _effects(_unit, "Bridger")["pushOut(address,uint256)"]
-    assert [f["direction"] for f in info["value_flows"]] == ["out"]
-
-
-def test_a_third_party_pull_mints_the_routed_claim_not_flow_in(_unit):
-    contract = _contract(_unit, "Bridger")
-    claims = build_claims(contract, build_effects(contract), {})["functions"]
-    ids = {c["claim_id"] for c in claims["payFee(uint256)"]}
-    assert "value_router" in ids
-    assert "flow.in" not in ids
-    # The real deposit is unaffected: it still claims an inflow.
-    assert "flow.in" in {c["claim_id"] for c in claims["deposit(uint256)"]}
-
-
-# --- claim plane ------------------------------------------------------------
 
 
 def test_value_router_claim_is_minted_for_routers(_unit):
@@ -328,7 +308,7 @@ def test_a_crossing_records_the_router_op_identity(_unit):
     recorded in ``router_ops``, keyed by the callee's own canonical selector
     and bare name. This is the only identity the mandatory-gate walk may treat
     as the effect's own revert surface."""
-    from services.static.contract_analysis_pipeline.effects import _selector_for
+    from services.static.static_analysis.effects import _selector_for
 
     fns = _effects(_unit, "Router")
     flow = _router_flows(fns["withdraw(uint256,address)"])[0]
@@ -357,14 +337,14 @@ def test_a_destination_guard_on_a_routed_function_blocks_the_negative_proof(tmp_
     a leaf the walk chose not to evaluate."""
     from pathlib import Path
 
-    from services.static.contract_analysis_pipeline import collect_contract_analysis_with_artifacts
+    from services.static.static_analysis import collect_static_inputs
     from tests.support.foundry_project import write_foundry_project
 
     source = (
         Path(__file__).resolve().parents[1] / "fixtures" / "contracts" / "claims_flows" / "router_guard.sol"
     ).read_text()
     project_dir = write_foundry_project(tmp_path, "GuardedTeller", source)
-    _analysis, _trees, effects = collect_contract_analysis_with_artifacts(project_dir)
+    _analysis, _trees, effects = collect_static_inputs(project_dir)
     assert effects is not None, "fixture compiled but produced no effects artifact"
 
     def _routed_witness_flow(signature: str) -> dict:

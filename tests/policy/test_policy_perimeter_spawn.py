@@ -4,15 +4,15 @@ Ten `ManagerWithMerkleVerification` contracts hold the sole `canCall` on a
 BoringVault's `manage` — `exec.arbitrary` — and none of them has an analysis
 job, so the gate terminates at an unanalysed contract and 30
 `contract_gated_unknown_path` warnings stand. They are not missing by policy:
-all ten sit in `control_graph_nodes` with `analyzed=true`, `node_type='contract'`
+all ten sit in `control_graph_nodes` with completed analysis and `node_type='contract'`
 and `details->>'source' = 'semantic_capability:role_grant'`, i.e. they satisfy
 every gate the spawn loop applies. They were never offered to it. The policy
 stage's graph refresh — the only stage that can project role principals, because
-role principals need the `effective_permissions` it computes — rewrote the graph
+role principals need the `permission_index` it computes — rewrote the graph
 and never called the spawn.
 
 Measured on the PR-161 corpus: 32 role-grant contract addresses, **19 jobless**,
-every one `analyzed=true`. Only 10 carry the manager label; the other 9 are
+every one has completed analysis. Only 10 carry the manager label; the other 9 are
 Pausers, BoringSolvers, DelayedWithdraws and an AtomicSolverV3 — which is why
 the spawn keys on the persisted provenance field and never on the label.
 
@@ -99,7 +99,14 @@ def seed(db_session):
         db_session.commit()
 
 
-def _node(address, *, analyzed=True, node_type="contract", source=ROLE_GRANT, label="role principal") -> dict:
+def _node(
+    address,
+    *,
+    analysis_state: str | None = "analyzed",
+    node_type="contract",
+    source=ROLE_GRANT,
+    label="role principal",
+) -> dict:
     return {
         "id": f"n:{address}",
         "address": address,
@@ -108,7 +115,7 @@ def _node(address, *, analyzed=True, node_type="contract", source=ROLE_GRANT, la
         "label": label,
         "contract_name": None,
         "depth": 1,
-        "analyzed": analyzed,
+        "analysis_state": analysis_state,
         "details": {"source": source} if source else {},
     }
 
@@ -206,13 +213,13 @@ def test_spawn_is_idempotent(db_session, seed, monkeypatch):
 
 
 def test_unanalyzed_node_spawns_nothing(db_session, seed, monkeypatch):
-    """``analyzed=false`` ⇒ zero jobs. The walk did not analyse it, so nothing
+    """Missing analysis evidence ⇒ zero jobs. The walk did not analyse it, so nothing
     is known about it — spawning would be acting on an absence."""
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     _protocol_id, parent, address_factory = seed
     addr = address_factory()
 
-    result = _spawn(db_session, parent, _graph(parent.address, [_node(addr, analyzed=False)]), budget=8)
+    result = _spawn(db_session, parent, _graph(parent.address, [_node(addr, analysis_state=None)]), budget=8)
 
     assert _jobs_for(db_session, addr) == []
     assert result["queued"] == []
@@ -357,7 +364,7 @@ def test_dispositions_totally_partition_the_node_list(db_session, seed, monkeypa
         _node(parent.address),  # the root itself
         _node(already_jobbed),
         _node(fresh),
-        _node(unanalyzed, analyzed=False),
+        _node(unanalyzed, analysis_state=None),
         _node(principal, node_type="principal"),
         _node(ZERO_ADDRESS),
     ]

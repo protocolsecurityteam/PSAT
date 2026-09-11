@@ -1,7 +1,7 @@
 """``authority_roles`` keeps its three states across BOTH published surfaces.
 
 ``effective_functions.authority_roles`` is three-state (see
-``schemas/effective_permissions.EffectiveFunctionPermission``): a non-empty list
+``schemas/permission_index.PermissionRow``): a non-empty list
 is a WITNESSED role requirement, jsonb ``null`` is role-gated with the role NOT
 determined, ``[]`` is proven not role-gated. ``[]`` is the NEGATION of what
 ``null`` asserts, not a coarsening of it.
@@ -92,9 +92,6 @@ def three_state_rows(db_session):
             function_name=signature.rstrip("()"),
             selector="0x" + f"{abs(hash(signature)) % (16**8):08x}",
             abi_signature=signature,
-            effect_labels=[],
-            effect_targets=[],
-            action_summary="Performs a contract action.",
             authority_public=False,
             authority_roles=column_value,
         )
@@ -149,51 +146,6 @@ def test_company_functions_serves_all_three_authority_roles_states(api_client, t
     # Unreadable, not witnessed: a non-empty column of non-objects enriches
     # to nothing and must serve the not-determined ``None``.
     assert entries["unreadable()"]["authority_roles"] is None
-
-
-def test_analyses_detail_serves_all_three_authority_roles_states(api_client, three_state_rows):
-    job, _contract = three_state_rows
-
-    body = api_client.get(f"/api/analyses/{job.id}")
-    assert body.status_code == 200
-    entries = _by_signature(body.json()["effective_permissions"]["functions"])
-
-    assert entries["roleGated()"]["authority_roles"] is None
-    assert entries["ownerOnly()"]["authority_roles"] == []
-    assert [g["role"] for g in entries["witnessed()"]["authority_roles"]] == [7]
-    assert entries["unreadable()"]["authority_roles"] is None
-
-
-def test_the_two_surfaces_agree_on_every_row(api_client, three_state_rows):
-    """The contradiction this file exists for: the same DB row served two ways.
-    Compared as the three STATES rather than by deep equality — the company
-    endpoint enriches a witnessed grant's principals with their classified type,
-    which analysis_detail does not do."""
-    job, _contract = three_state_rows
-
-    company = _by_signature(
-        api_client.get(f"/api/company/{COMPANY}/functions").json()["functions"][f"ethereum::{ADDR.lower()}"]
-    )
-    analyses = _by_signature(api_client.get(f"/api/analyses/{job.id}").json()["effective_permissions"]["functions"])
-
-    def state(value: Any) -> str:
-        if value is None:
-            return "not_determined"
-        return "proven_absent" if value == [] else "witnessed"
-
-    for signature in COLUMN_BY_FUNCTION:
-        assert state(company[signature]["authority_roles"]) == state(analyses[signature]["authority_roles"]), signature
-        # …and each equals the expected published state (the column's own
-        # state for the three honest shapes; the unreadable non-object shape
-        # degrades to not-determined on both surfaces).
-        assert state(company[signature]["authority_roles"]) == EXPECTED_STATE[signature], signature
-
-
-# ---------------------------------------------------------------------------
-# The storage encoding the column comment asserts. Both halves are load-bearing:
-# a query written against the wrong one returns an empty result that reads as
-# "nothing is undetermined".
-# ---------------------------------------------------------------------------
 
 
 def test_undetermined_roles_are_jsonb_null_not_sql_null(db_session, three_state_rows):

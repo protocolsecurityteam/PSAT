@@ -36,14 +36,14 @@ import pytest
 slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
 
-from services.static.contract_analysis_pipeline.effects import (  # noqa: E402
+from services.static.static_analysis.effects import (  # noqa: E402
     _build_unit_ctx,
     _element_record_site,
     _element_walk,
     _member_name,
     build_effects,
 )
-from services.static.contract_analysis_pipeline.shared import _all_state_variables  # noqa: E402
+from services.static.static_analysis.shared import _all_state_variables  # noqa: E402
 
 _RECORD_KEYS = (
     "amount_record_variable",

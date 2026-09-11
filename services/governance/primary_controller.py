@@ -86,37 +86,14 @@ CLAIM_CAPABILITY: dict[str, str] = {
     "supply.mint": "mint",
     "supply.burn": "burn",
     "exec.arbitrary": "arbitrary-call",
+    "delegatecall.execute": "delegatecall",
     "contract_deployment": "deploy",
 }
 
-# Legacy effect_labels → chip, the fallback for claim-less rows (stale data /
-# degraded artifact). ``delegatecall_execution`` is a Plane-0 fact with no claim
-# projection, so it only ever surfaces a chip through this path.
-EFFECT_CAPABILITY: dict[str, str] = {
-    "pause_toggle": "pause",
-    "ownership_transfer": "ownership",
-    "role_management": "roles",
-    "implementation_update": "upgrade",
-    "asset_send": "fund-out",
-    "asset_pull": "fund-in",
-    "mint": "mint",
-    "burn": "burn",
-    "delegatecall_execution": "delegatecall",
-    "authority_update": "authority",
-    "contract_deployment": "deploy",
-    "arbitrary_external_call": "arbitrary-call",
-}
 
-
-def function_capabilities(labels: Iterable[str], claim_ids: Iterable[str]) -> set[str]:
-    """Capability chips for ONE function. Plane-1 claims are authoritative when
-    present; a claim-less function falls back to the legacy effect_labels map.
-    Coarse effects with no clean chip drop out — their functions are shown by
-    name instead."""
-    claim_id_set = set(claim_ids)
-    if claim_id_set:
-        return {CLAIM_CAPABILITY[cid] for cid in claim_id_set if cid in CLAIM_CAPABILITY}
-    return {EFFECT_CAPABILITY[label] for label in labels if label in EFFECT_CAPABILITY}
+def function_capabilities(claim_ids: Iterable[str]) -> set[str]:
+    """Capability chips supported by one function's claims."""
+    return {CLAIM_CAPABILITY[cid] for cid in claim_ids if cid in CLAIM_CAPABILITY}
 
 
 # Authority tiers for the primary contest. Tier 3 ("governs"): can replace the
@@ -188,7 +165,7 @@ def assign_primary_controllers(
     every caller is terminal, i.e. the original one-hop behavior.
 
     *fp_function_detail_by_contract* — per contract key (same keyspace as
-    *fp_addrs_by_contract*), the per-function ``{"callers": set, "labels": set,
+    *fp_addrs_by_contract*), the per-function ``{"callers": set,
     "claims": [claim_id, ...]}`` rows (the ``fp_function_detail`` projection).
     Caller values may be bare addresses (what the projection emits) or
     composite entity tokens — both are normalized to bare for the evidence
@@ -207,12 +184,10 @@ def assign_primary_controllers(
     * **Driver gating.** The walk expands through a mediator only to callers
       that can make it act (:func:`_can_inherit_through`): a proven driving
       function — timelock schedule/execute claims, or a governing/granting
-      capability on the mediator — or a claim-less function whose power is
-      not determined. A caller every one of whose mediator functions is
+      capability on the mediator. A caller every one of whose mediator functions is
       proven non-driving (a cancel-only veto, a delay setter) can block the
       mediator but never wield what it owns, so it inherits nothing. Callers
-      with no rows at all expand as before — absence of evidence excludes
-      nothing.
+      with no rows do not inherit control.
 
     * **Significance gating.** A caller whose proven functions on a contract
       are all insignificant — not privileged and shared wider than the
@@ -221,7 +196,8 @@ def assign_primary_controllers(
       applies to inheriting through a mediator (a whitelist on the mediator
       anchors nothing one hop out either). Same two-arm test as
       :func:`assign_co_controllers`, so primary eligibility is a subset of
-      real-authority. Callers with no detail rows stay eligible.
+      real-authority. A direct function-principal row remains a positive
+      authority relation even when its effect classification is unavailable.
 
     Returns ``{principal_address_lc: [contract_address_lc, ...]}`` for every
     eligible principal. Principals that lose every contract still appear in
@@ -274,18 +250,10 @@ def assign_primary_controllers(
         c_lc = contract_addr.lower()
         for fn in functions:
             fn_claims = {c for c in fn.get("claims") or () if isinstance(c, str) and c}
-            labels_lc = {(label or "").lower() for label in fn.get("labels") or ()}
-            fn_caps = function_capabilities(labels_lc, fn_claims)
+            fn_caps = function_capabilities(fn_claims)
             callers = {_addr_of((a or "").lower()) for a in fn.get("callers", ())} - {""}
-            significant = (
-                _function_is_privileged(list(fn_claims), labels_lc, PRIVILEGED_EFFECT_LABELS)
-                or len(callers) <= _MAX_GATE_CALLERS
-            )
-            drives = (
-                not fn_claims  # claim-less row: driving power not determined
-                or bool(fn_claims & _GOVERNING_CLAIMS)
-                or bool(fn_caps & (_GOVERNING_CAPS | _GRANTING_CAPS))
-            )
+            significant = _function_is_privileged(list(fn_claims)) or len(callers) <= _MAX_GATE_CALLERS
+            drives = bool(fn_claims & _GOVERNING_CLAIMS) or bool(fn_caps & (_GOVERNING_CAPS | _GRANTING_CAPS))
             for la in callers:
                 caps_on.setdefault((c_lc, la), set()).update(fn_caps)
                 claims_on.setdefault((c_lc, la), set()).update(fn_claims)
@@ -302,8 +270,8 @@ def assign_primary_controllers(
     def _has_governance_on(contract_lc: str, caller_token: str) -> bool:
         """Whether the caller's authority on the contract can anchor a primary
         claim. Requires a significant function when the caller's rows are in
-        evidence; a caller with no detail rows stays eligible — absence of
-        rows is not proof its authority is a broad whitelist."""
+        evidence. The function-principal relation itself supports direct
+        authority even when effect classification is unavailable."""
         key = (contract_lc, _addr_of(caller_token))
         return key in significant_on or key not in with_rows
 
@@ -311,14 +279,11 @@ def assign_primary_controllers(
         """Whether the caller inherits the mediator's authority over what the
         mediator governs. Needs the same significance a direct primary claim
         needs (a broad whitelist on the mediator anchors nothing one hop out
-        either), plus driving evidence: a proven driver function, or a
-        claim-less one whose power is not determined. A caller whose every
+        either), plus driving evidence. A caller whose every
         function on the mediator is proven non-driving (cancel-only veto,
-        delay setter) can block the mediator, never act through it. No rows
-        at all ⇒ legacy expansion — absence of evidence excludes nothing."""
+        delay setter) can block the mediator, never act through it. Missing
+        rows do not support inheritance."""
         key = (mediator_lc, _addr_of(caller_token))
-        if key not in with_rows:
-            return True
         return key in significant_on and key in driver_on
 
     def _effective_controllers(contract_lc: str) -> dict[str, int]:
@@ -479,30 +444,7 @@ def assign_operand_render_groups(
     return out
 
 
-# Effect labels that mark a function as a governance/admin power on their own.
-# Holding authority on one is enough to treat a non-primary FP caller as a real
-# co-controller worth surfacing/monitoring, no matter how many callers share
-# the function. ``external_contract_call`` / ``hook_update`` are intentionally
-# absent: they're borne by both privileged config setters AND permissionless
-# callers (EtherFi ``createBid`` is ``external_contract_call``), so they don't
-# discriminate — the caller-set-size arm separates those.
-PRIVILEGED_EFFECT_LABELS: frozenset[str] = frozenset(
-    {
-        "pause_toggle",
-        "ownership_transfer",
-        "role_management",
-        "implementation_update",
-        "asset_send",
-        "asset_pull",
-        "mint",
-        "burn",
-        "delegatecall_execution",
-        "authority_update",
-        "contract_deployment",
-    }
-)
-
-# Plane-1 claims mirror of :data:`PRIVILEGED_EFFECT_LABELS` — the claim families
+# Claim families
 # whose presence on a function marks its authorized callers as real
 # co-controllers: control-plane + value-flow + exec. ``callee_pointer.rotate``
 # (the precise hook-pointer rotation) and external-call facts are excluded for
@@ -529,19 +471,13 @@ _PRIVILEGED_CLAIM_IDS: frozenset[str] = frozenset({"contract_deployment"})
 _EXCLUDED_CLAIM_IDS: frozenset[str] = frozenset({"callee_pointer.rotate"})
 
 
-def _function_is_privileged(claims: Any, labels_lc: set[str], privileged_labels: frozenset[str]) -> bool:
-    """Whether a function is a governance/admin power on its own. Plane-1 claims
-    (the ``fp_function_detail`` projection's pre-extracted claim-id strings) are
-    authoritative when present; a claim-less function falls back to the legacy
-    effect_labels."""
+def _function_is_privileged(claims: Any) -> bool:
+    """Whether supported claims establish a governance/admin power."""
     claim_ids = {c for c in claims if isinstance(c, str) and c} if isinstance(claims, list) else set()
-    if claim_ids:
-        return any(
-            cid not in _EXCLUDED_CLAIM_IDS
-            and (cid in _PRIVILEGED_CLAIM_IDS or cid.startswith(_PRIVILEGED_CLAIM_PREFIXES))
-            for cid in claim_ids
-        )
-    return bool(labels_lc & privileged_labels)
+    return any(
+        cid not in _EXCLUDED_CLAIM_IDS and (cid in _PRIVILEGED_CLAIM_IDS or cid.startswith(_PRIVILEGED_CLAIM_PREFIXES))
+        for cid in claim_ids
+    )
 
 
 # A function shared by more than this many distinct authorized callers reads as
@@ -559,7 +495,6 @@ def assign_co_controllers(
     primary_for: Mapping[str, list[str]],
     *,
     max_gate_callers: int = _MAX_GATE_CALLERS,
-    privileged_labels: frozenset[str] = PRIVILEGED_EFFECT_LABELS,
 ) -> dict[str, list[str]]:
     """Per principal, the contracts it *co-controls*: holds real authority on
     without being the canonical primary controller.
@@ -612,10 +547,7 @@ def assign_co_controllers(
         c_lc = (contract_addr or "").lower()
         for fn in functions:
             callers = {(a or "").lower() for a in fn.get("callers", ())}
-            labels = {(label or "").lower() for label in fn.get("labels", ())}
-            significant = (
-                _function_is_privileged(fn.get("claims"), labels, privileged_labels) or len(callers) <= max_gate_callers
-            )
+            significant = _function_is_privileged(fn.get("claims")) or len(callers) <= max_gate_callers
             if not significant:
                 continue
             for caller in callers:

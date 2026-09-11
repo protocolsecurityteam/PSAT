@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from services.resolution.permissionless_shapes import CALLER_GATE_BASIS_TAGS, earned_public_enabled
+from services.resolution.permissionless_shapes import CALLER_GATE_BASIS_TAGS
 from utils.scoring_status import OPENNESS_STATES, TRACE_STEP_ENUMERABLE_ROLE_STORE, TRACE_STEP_SOLMATE_ROLES_AUTHORITY
 
 
@@ -77,42 +77,6 @@ def capability_surface_openness(cap_dict: dict[str, Any], surface: CapabilitySur
 #: 203 blocks, ~40 min of mainnet, presented as equally current): the threshold
 #: must be ABOVE that so ordinary per-address cursor skew is not called stale,
 #: and far below the ~2-week backfill-stall signature ``fleet`` alarms on.
-CAPABILITY_INDEX_STALE_BLOCKS = 1_000
-
-
-def capability_currency(cap_dict: Any, *, index_head: int | None) -> dict[str, Any]:
-    """Is this capability statement CURRENT?
-
-    ``last_indexed_block`` is written on 240+ rows and read by nothing: a bare
-    height is not a currency statement, and two capabilities in ONE job carried
-    heights 203 blocks apart while being presented as equally current. This turns
-    the height into a three-state verdict against the durable index's own
-    frontier (``index_head``, a local read — no wire):
-
-    * ``current``        — the fold covered a height within
-      ``CAPABILITY_INDEX_STALE_BLOCKS`` of the frontier.
-    * ``stale``          — it covered a height further behind than that: members
-      granted or revoked since are not in the set.
-    * ``not_determined`` — the capability records no ``last_indexed_block`` (it
-      was not resolved from an event fold at all, or was resolved before the
-      field existed), or no index frontier is available to compare against.
-      **This is what a consumer sees when the fact is absent**, and it must not
-      be rendered as ``current``.
-
-    ``lag_blocks`` is ``None`` in the not-determined case, never 0 — a zero lag
-    is the strongest currency claim available and must be earned.
-    """
-    heights = _last_indexed_blocks(cap_dict)
-    lowest = min(heights) if heights else None
-    if lowest is None or index_head is None:
-        return {"verdict": "not_determined", "last_indexed_block": lowest, "index_head": index_head, "lag_blocks": None}
-    lag = max(0, int(index_head) - int(lowest))
-    return {
-        "verdict": "stale" if lag >= CAPABILITY_INDEX_STALE_BLOCKS else "current",
-        "last_indexed_block": lowest,
-        "index_head": int(index_head),
-        "lag_blocks": lag,
-    }
 
 
 #: Trace steps whose PRODUCER proves it covered the recording surface it read.
@@ -207,24 +171,6 @@ def _observation_block(cap_dict: dict[str, Any]) -> tuple[int | None, str | None
     return None, None
 
 
-def _last_indexed_blocks(cap_dict: Any) -> list[int]:
-    """Every ``last_indexed_block`` in a capability tree. The LOWEST governs the
-    whole statement: an AND/OR over folds is only as current as its least-current
-    conjunct."""
-    out: list[int] = []
-    if not isinstance(cap_dict, dict):
-        return out
-    height = cap_dict.get("last_indexed_block")
-    if isinstance(height, int) and not isinstance(height, bool):
-        out.append(height)
-    for child in _child_dicts(cap_dict):
-        out.extend(_last_indexed_blocks(child))
-    signer = cap_dict.get("signer")
-    if isinstance(signer, dict):
-        out.extend(_last_indexed_blocks(signer))
-    return out
-
-
 #: Adapter trace steps that resolve a ROLE-keyed authority. ``solmate_roles_authority``
 #: names the role ids that carry the capability, so a single-role read is a witnessed
 #: role requirement; ``enumerable_role_store`` deliberately DISSOLVES role identity
@@ -278,6 +224,7 @@ def capability_role_grants(cap_dict: dict[str, Any]) -> list[dict[str, Any]] | N
     """
     grants: dict[int, list[str]] = {}
     not_determined = False
+    permitted = {row["address"].lower() for row in project_capability_surface(cap_dict).principal_rows}
 
     def visit(node: Any) -> None:
         nonlocal not_determined
@@ -299,19 +246,24 @@ def capability_role_grants(cap_dict: dict[str, Any]) -> list[dict[str, Any]] | N
                 # A public Solmate capability (no role carries it) is not a role
                 # gate — nothing witnessed, nothing undetermined.
                 continue
-            members = node.get("members")
-            if node.get("kind") != "finite_set" or not isinstance(members, list) or not members:
+            role_members = step.get("role_members")
+            if not isinstance(role_members, dict):
+                # A flattened finite-set can contain a direct owner alongside
+                # role holders. Without the adapter's per-role join result,
+                # assigning every set member to every named role overclaims.
                 not_determined = True
                 continue
-            if len(roles) > 1:
-                not_determined = True
-                continue
-            grants.setdefault(roles[0], [])
-            for member in members:
-                if isinstance(member, str) and member.startswith("0x") and len(member) == 42:
-                    lowered = member.lower()
-                    if lowered not in grants[roles[0]]:
-                        grants[roles[0]].append(lowered)
+            for role in roles:
+                members = role_members.get(str(role))
+                if not isinstance(members, list):
+                    not_determined = True
+                    continue
+                grants.setdefault(role, [])
+                for member in members:
+                    if isinstance(member, str) and member.startswith("0x") and len(member) == 42:
+                        lowered = member.lower()
+                        if lowered in permitted and lowered not in grants[role]:
+                            grants[role].append(lowered)
         for child in _child_dicts(node):
             visit(child)
         signer = node.get("signer")
@@ -423,7 +375,7 @@ def _project_node(
                 safe_address_lookup=safe_address_lookup,
                 function_signature=function_signature,
             )
-            if earned_public_enabled() and not _has_valid_path(child_surface) and _is_root_authority_blocker(child):
+            if not _has_valid_path(child_surface) and _is_root_authority_blocker(child):
                 blocked = True
             surface = _and_surface(surface, child_surface)
         surface = _with_node_conditions(surface, node_conditions)

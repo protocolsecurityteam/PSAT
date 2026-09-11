@@ -18,7 +18,6 @@ from schemas.api_responses import (
     CancelQueuedJobsResponse,
     DeleteCompanyAddressResponse,
     JobDict,
-    JobStageTimingsResponse,
     QueuedJobRef,
 )
 from schemas.stage_errors import StageError, StageErrors
@@ -458,7 +457,7 @@ def retry_job(job_id: str) -> JobDict:
 
 
 @router.get("/api/jobs/{job_id}/stage_timings", dependencies=[Depends(deps.require_admin_key)], response_model=None)
-def get_job_stage_timings(job_id: str) -> JobStageTimingsResponse:
+def get_job_stage_timings(job_id: str) -> dict[str, Any]:
     """Return all per-stage timing artifacts the worker fleet wrote for
     this job, keyed by stage name. Schema-v2 layout (one
     ``stage_timing_<stage>`` artifact per stage). Used by the bench

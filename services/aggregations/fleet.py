@@ -47,8 +47,8 @@ from db.queue import (
 )
 from schemas.api_responses import FleetStatusResponse
 from services.monitoring.materialization_reconciler import materialization_backlog
+from services.monitoring.observation_plan_state import plan_coverage_counts
 from services.monitoring.process_meta import PROCESS_META, stale_after_seconds
-from services.monitoring.tracking_plan_state import plan_coverage_counts
 from services.monitoring.verify_status import count_verification_read_gaps
 from utils.chains import UnknownChainError, chain_by_id, chain_cache_token
 

@@ -18,17 +18,17 @@ slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
 
 from services.resolution.predicate_evaluator import evaluate_tree  # noqa: E402
-from services.static.contract_analysis_pipeline.predicates import (  # noqa: E402
+from services.static.static_analysis.predicates import (  # noqa: E402
     build_predicate_tree,
 )
-from services.static.contract_analysis_pipeline.reentrancy_pause import (  # noqa: E402
+from services.static.static_analysis.reentrancy_pause import (  # noqa: E402
     apply_reentrancy_pause_pass,
 )
-from services.static.contract_analysis_pipeline.revert_detect import (  # noqa: E402
+from services.static.static_analysis.revert_detect import (  # noqa: E402
     RevertDetector,
     RevertGate,
 )
-from services.static.contract_analysis_pipeline.writer_gate import (  # noqa: E402
+from services.static.static_analysis.writer_gate import (  # noqa: E402
     apply_writer_gate_pass,
 )
 
@@ -540,7 +540,7 @@ def test_unmodeled_require_fails_closed(tmp_path, monkeypatch):
     emits an ``opaque``/``unsupported`` gate so the tree is non-empty and the
     function resolves gated. Simulated here by forcing ``_ir_is_require`` to
     reject every require — a stand-in for any future unmodeled form."""
-    import services.static.contract_analysis_pipeline.revert_detect as rd
+    import services.static.static_analysis.revert_detect as rd
 
     sl = _compile(
         tmp_path,
@@ -751,7 +751,7 @@ def test_expression_text_cache_is_instance_scoped(tmp_path):
     """The ``str(expr)`` memo lives on the ``RevertDetector`` instance, not at
     module scope — so two detectors don't share an ``id(expr)`` keyspace and
     the cache can't accrete across a long-lived process."""
-    import services.static.contract_analysis_pipeline.revert_detect as rd
+    import services.static.static_analysis.revert_detect as rd
 
     # No process-global memo survives between runs.
     assert not hasattr(rd, "_EXPRESSION_TEXT_CACHE")

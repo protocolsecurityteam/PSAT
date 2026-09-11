@@ -6,6 +6,16 @@ name: Main deploy
 on:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: 'One-time downtime: enter ASSESSMENT CUTOVER to replace all old stateless machines'
+        required: true
+        type: string
+      backup_reference:
+        description: 'Verified pre-cutover database backup or snapshot reference'
+        required: true
+        type: string
 
 # Static group → multiple SHAs queue rather than race flyctl deploy.
 concurrency:
@@ -21,6 +31,7 @@ jobs:
 
   deploy:
     needs: ci
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     # `production` scopes FLY_PROD_API_TOKEN; its deployment branch policy allows only main.
@@ -29,6 +40,8 @@ jobs:
       FLY_API_TOKEN: ${{ secrets.FLY_PROD_API_TOKEN }}
       PSAT_HEALTH_SECRET: ${{ secrets.PSAT_HEALTH_SECRET }}
       PROD_URL: https://snif.sh
+      CUTOVER_CONFIRMATION: ${{ inputs.confirmation }}
+      CUTOVER_BACKUP_REFERENCE: ${{ inputs.backup_reference }}
     steps:
       - uses: actions/checkout@v4
 
@@ -57,8 +70,14 @@ jobs:
               raise SystemExit("fly.toml health-secret marker is missing or repeated")
           Path(sys.argv[1]).write_text(source.replace(marker, secret))
           PY
-          flyctl deploy -a psat --config "$GITHUB_WORKSPACE/fly.production.toml" --remote-only \
-            --build-arg GIT_SHA="${{ github.sha }}"
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            python -m deploy.assessment_cutover \
+              --config "$GITHUB_WORKSPACE/fly.production.toml" --sha "$GITHUB_SHA" \
+              --backup-reference "$CUTOVER_BACKUP_REFERENCE" --confirm "$CUTOVER_CONFIRMATION"
+          else
+            flyctl deploy -a psat --config "$GITHUB_WORKSPACE/fly.production.toml" --remote-only \
+              --build-arg GIT_SHA="$GITHUB_SHA"
+          fi
 
       - name: Wait for /api/health
         # /api/health is the deep probe — DB SELECT 1 + storage head_bucket. 503 on any failure.
@@ -110,7 +129,7 @@ jobs:
         # after deploy (health, SHA, smoke) failed. If flyctl deploy itself fails,
         # release_command aborts before rolling traffic and there is nothing to roll back.
         # `flyctl releases` has no first-class `rollback` subcommand; --image is the canonical path.
-        if: failure() && steps.deploy.outcome == 'success'
+        if: failure() && steps.deploy.outcome == 'success' && github.event_name != 'workflow_dispatch'
         run: |
           echo "::warning::Smoke failed — rolling back psat to previous release"
           PREV_IMAGE=$(flyctl releases -a psat --json \

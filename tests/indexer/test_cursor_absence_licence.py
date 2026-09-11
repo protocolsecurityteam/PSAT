@@ -291,7 +291,12 @@ def _monitored(
     chain: str = "ethereum",
     active: bool = True,
     address: str = _ADDR,
+    witness_tier: str | None = "self_describing",
 ) -> None:
+    tracked_topics = [{"topic0": topic, "signature": "X(address)"} for topic in topics]
+    if witness_tier is not None:
+        for topic in tracked_topics:
+            topic["witness_tier"] = witness_tier
     protocol = Protocol(name=f"d4-{chain}-{int(active)}-{address[-6:]}")
     db_session.add(protocol)
     db_session.flush()
@@ -301,7 +306,7 @@ def _monitored(
             chain=chain,
             protocol_id=protocol.id,
             is_active=active,
-            monitoring_config={"tracked_topics": [{"topic0": t, "signature": "X(address)"} for t in topics]},
+            monitoring_config={"tracked_topics": tracked_topics},
         )
     )
     db_session.commit()
@@ -342,6 +347,121 @@ def test_tracked_topics_enrol_the_writers_no_hint_ever_reached(db_session, stub_
     )
     assert enrolled == {t.lower() for t in _DENYLIST_SURFACE}
     assert _row(db_session).enrollment_basis == ENROLLMENT_BASIS_TRACKED_TOPICS
+
+
+@requires_postgres
+@pytest.mark.parametrize(
+    ("witness_tier", "expected"),
+    [("self_describing", 1), ("hint", 1), ("activity", 0), (None, 0)],
+)
+def test_historical_enrollment_requires_a_resolution_capable_witness(
+    db_session,
+    stub_rpc,
+    witness_tier: str | None,
+    expected: int,
+):
+    stub_rpc()
+    _monitored(db_session, [_TOPIC_DENY_TO], witness_tier=witness_tier)
+
+    assert enroll_from_tracked_topics(db_session) == expected
+    assert db_session.execute(select(func.count()).select_from(IndexedEventCursor)).scalar_one() == expected
+
+
+@requires_postgres
+def test_activity_reconciliation_removes_only_tracked_topic_cursors(db_session):
+    address = "0x" + "ac" * 20
+    _monitored(db_session, [_TOPIC_DENY_TO], address=address, witness_tier="activity")
+    inserted = enroll_event_cursor(
+        db_session,
+        chain_id=1,
+        event_address=address,
+        topic0=_TOPIC_DENY_TO,
+        enrollment_basis=ENROLLMENT_BASIS_TRACKED_TOPICS,
+    )
+    db_session.commit()
+    assert inserted is True
+    assert _row(db_session, address=address, topic0=_TOPIC_DENY_TO).enrollment_basis == ENROLLMENT_BASIS_TRACKED_TOPICS
+
+    assert enroll_from_tracked_topics(db_session) == 0
+    assert (
+        db_session.execute(select(IndexedEventCursor).where(IndexedEventCursor.event_address == address)).first()
+        is None
+    )
+
+
+@requires_postgres
+def test_activity_reconciliation_preserves_predicate_hint_cursors(db_session):
+    address = "0x" + "ad" * 20
+    _monitored(db_session, [_TOPIC_DENY_TO], address=address, witness_tier="activity")
+    inserted = enroll_event_cursor(
+        db_session,
+        chain_id=1,
+        event_address=address,
+        topic0=_TOPIC_DENY_TO,
+        enrollment_basis=ENROLLMENT_BASIS_PREDICATE_HINT,
+    )
+    db_session.commit()
+    assert inserted is True
+    assert _row(db_session, address=address, topic0=_TOPIC_DENY_TO).enrollment_basis == ENROLLMENT_BASIS_PREDICATE_HINT
+
+    assert enroll_from_tracked_topics(db_session) == 0
+    assert _row(db_session, address=address, topic0=_TOPIC_DENY_TO).enrollment_basis == ENROLLMENT_BASIS_PREDICATE_HINT
+
+
+@requires_postgres
+@pytest.mark.parametrize("through_witness", [False, True])
+def test_tracked_first_predicate_later_preserves_progress(db_session, through_witness):
+    from workers.event_log_indexer import _enroll_witnessed
+
+    _monitored(db_session, [_TOPIC_DENY_TO], witness_tier="activity")
+    enroll_event_cursor(
+        db_session,
+        chain_id=1,
+        event_address=_ADDR,
+        topic0=_TOPIC_DENY_TO,
+        start_block=12345,
+        first_indexed_block=100,
+        first_indexed_block_basis=FIRST_INDEXED_BASIS_CREATION,
+        enrollment_basis=ENROLLMENT_BASIS_TRACKED_TOPICS,
+    )
+    if through_witness:
+        assert not _enroll_witnessed(
+            db_session,
+            chain_id=1,
+            address=_ADDR,
+            topic0=_TOPIC_DENY_TO,
+            seed_cache={},
+            witness_cache={},
+            enrollment_basis=ENROLLMENT_BASIS_PREDICATE_HINT,
+        )
+    else:
+        assert not enroll_event_cursor(
+            db_session,
+            chain_id=1,
+            event_address=_ADDR,
+            topic0=_TOPIC_DENY_TO,
+            enrollment_basis=ENROLLMENT_BASIS_PREDICATE_HINT,
+        )
+    enroll_from_tracked_topics(db_session)
+    cursor = _row(db_session, topic0=_TOPIC_DENY_TO)
+    assert cursor.enrollment_basis == ENROLLMENT_BASIS_PREDICATE_HINT
+    assert cursor.last_indexed_block == 12345
+    assert cursor.first_indexed_block == 100
+    assert cursor.first_indexed_block_basis == FIRST_INDEXED_BASIS_CREATION
+
+
+@requires_postgres
+def test_restaking_enrollment_survives_plan_reconciliation(db_session, monkeypatch):
+    from db.models import enrollment_basis_permits_exactness
+    from services.monitoring import restaking_enrollment as restaking
+
+    monkeypatch.setattr(restaking, "get_contract_creation_block", lambda *_a, **_kw: 100)
+    assert restaking.enroll_restaking_fold(db_session, chain_id=1, emitters=[_ADDR]) == 1
+    enroll_from_tracked_topics(db_session)
+    cursor = _row(db_session, topic0=restaking.PUBKEY_LINKED_TOPIC0)
+    assert cursor.enrollment_basis == restaking.RESTAKING_FOLD_ENROLLMENT_BASIS
+    assert not enrollment_basis_permits_exactness(cursor.enrollment_basis)
+    assert cursor.last_indexed_block == 99
 
 
 @requires_postgres

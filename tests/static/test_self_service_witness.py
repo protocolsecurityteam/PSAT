@@ -34,9 +34,9 @@ from services.static.claims import build_claims  # noqa: E402
 from services.static.claims.context import ClaimContext  # noqa: E402
 from services.static.claims.matchers import _facts  # noqa: E402
 from services.static.claims.matchers import flows as flowmod  # noqa: E402
-from services.static.contract_analysis_pipeline.effects import build_effects  # noqa: E402
-from services.static.contract_analysis_pipeline.predicates import build_predicate_tree  # noqa: E402
-from services.static.contract_analysis_pipeline.reentrancy_pause import (  # noqa: E402
+from services.static.static_analysis.effects import build_effects  # noqa: E402
+from services.static.static_analysis.predicates import build_predicate_tree  # noqa: E402
+from services.static.static_analysis.reentrancy_pause import (  # noqa: E402
     verified_guard_verdicts,
 )
 

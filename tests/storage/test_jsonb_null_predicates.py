@@ -145,16 +145,25 @@ def _materializations(db_session: Session):
 
     rows = [
         ContractMaterialization(
-            chain="w0-5-payload", bytecode_keccak="0x" + "1" * 64, address="0x" + "1" * 40, analysis={"trees": 1}
+            chain="w0-5-payload",
+            bytecode_keccak="0x" + "1" * 64,
+            address="0x" + "1" * 40,
+            static_facts={"trees": 1},
         ),
         # A Python ``None`` into a JSONB column: SQLAlchemy's default
         # ``none_as_null=False`` stores the jsonb scalar null, not SQL NULL.
         # This is how 5770/5770 ``artifacts.data`` rows got their value.
         ContractMaterialization(
-            chain="w0-5-written-null", bytecode_keccak="0x" + "2" * 64, address="0x" + "2" * 40, analysis=None
+            chain="w0-5-written-null",
+            bytecode_keccak="0x" + "2" * 64,
+            address="0x" + "2" * 40,
+            static_facts=None,
         ),
         ContractMaterialization(
-            chain="w0-5-unset", bytecode_keccak="0x" + "3" * 64, address="0x" + "3" * 40, analysis=null()
+            chain="w0-5-unset",
+            bytecode_keccak="0x" + "3" * 64,
+            address="0x" + "3" * 40,
+            static_facts=null(),
         ),
     ]
     db_session.add_all(rows)
@@ -173,7 +182,7 @@ def _materializations(db_session: Session):
 def test_jsonb_state_separates_all_three_states(db_session: Session, _materializations: list[str]) -> None:
     scoped = ContractMaterialization.chain.in_(_materializations)
     rows = db_session.execute(
-        select(ContractMaterialization.chain, jsonb_state(ContractMaterialization.analysis)).where(scoped)
+        select(ContractMaterialization.chain, jsonb_state(ContractMaterialization.static_facts)).where(scoped)
     ).all()
     states = {row[0]: row[1] for row in rows}
     assert states == {
@@ -187,7 +196,7 @@ def test_jsonb_has_payload_selects_the_payload_row(db_session: Session, _materia
     """The positive case: a row that really carries a tree stays selected."""
     scoped = ContractMaterialization.chain.in_(_materializations)
     selected = db_session.scalars(
-        select(ContractMaterialization.chain).where(scoped, jsonb_has_payload(ContractMaterialization.analysis))
+        select(ContractMaterialization.chain).where(scoped, jsonb_has_payload(ContractMaterialization.static_facts))
     ).all()
     assert list(selected) == ["w0-5-payload"]
 
@@ -202,12 +211,12 @@ def test_written_null_and_unset_are_separately_addressable(db_session: Session, 
     scoped = ContractMaterialization.chain.in_(_materializations)
     written_null = db_session.scalars(
         select(ContractMaterialization.chain).where(
-            scoped, jsonb_state(ContractMaterialization.analysis) == JSONB_WRITTEN_NULL
+            scoped, jsonb_state(ContractMaterialization.static_facts) == JSONB_WRITTEN_NULL
         )
     ).all()
     unset = db_session.scalars(
         select(ContractMaterialization.chain).where(
-            scoped, jsonb_state(ContractMaterialization.analysis) == JSONB_UNSET
+            scoped, jsonb_state(ContractMaterialization.static_facts) == JSONB_UNSET
         )
     ).all()
     assert list(written_null) == ["w0-5-written-null"]
@@ -220,7 +229,7 @@ def test_the_replaced_predicate_over_counts(db_session: Session, _materializatio
     Bound through a local name so the scan above does not flag this file; that
     binding is also the scan's documented blind spot.
     """
-    column = ContractMaterialization.analysis
+    column = ContractMaterialization.static_facts
     scoped = ContractMaterialization.chain.in_(_materializations)
     naive = db_session.scalars(select(ContractMaterialization.chain).where(scoped, column.is_not(None))).all()
     assert sorted(naive) == ["w0-5-payload", "w0-5-written-null"]

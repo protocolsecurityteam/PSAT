@@ -150,7 +150,7 @@ def session():
 def test_enroll_stamps_cursor_with_jobs_chain(session, monkeypatch):
     import workers.event_log_indexer as eli
     from db.models import Contract, ControllerValue, IndexedEventCursor, Job, JobStage, JobStatus, Protocol
-    from db.queue import store_artifact
+    from tests.support.assessment_artifacts import store_test_assessment
 
     authority = "0x" + "ab" * 20
     deploy = 12_000_000
@@ -175,7 +175,13 @@ def test_enroll_stamps_cursor_with_jobs_chain(session, monkeypatch):
     )
     session.add(job)
     session.flush()
-    store_artifact(session, job.id, "predicate_trees", data=_SOLMATE_CANCALL_TREES)
+    store_test_assessment(
+        session,
+        job.id,
+        address=protected,
+        chain_id=_BASE,
+        predicate_trees=_SOLMATE_CANCALL_TREES,
+    )
 
     proto = Protocol(name=f"base_enroll_{uuid.uuid4().hex[:8]}", chains=["base"])
     session.add(proto)

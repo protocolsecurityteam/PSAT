@@ -5,7 +5,7 @@ A pull written the real-world way — ``IERC20(address(underlying)).safeTransfer
 a DOUBLE cast through a library — binds the receiver to a temporary whose name is
 ``TMP_n``. Emitting ``TMP_n`` as the sink head makes every downstream consumer that
 derives a getter from it (``input_token_hints``, the cross-contract join, the
-persisted ``effect_targets`` display) fabricate ``TMP_n()``, which seeds nothing
+derived sink evidence fabricate ``TMP_n()``, which seeds nothing
 and can seed the WRONG token. These tests compile the shape and drive production
 ``build_effects`` — the only fakes are none; the solc compile is real.
 
@@ -25,8 +25,8 @@ slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
 
 from services.effects.calldata import FunctionFacts, input_token_hints  # noqa: E402
-from services.static.contract_analysis_pipeline.effects import build_effects  # noqa: E402
-from services.static.contract_analysis_pipeline.summaries import _extract_value_flows  # noqa: E402
+from services.static.static_analysis.effects import build_effects  # noqa: E402
+from services.static.static_analysis.summaries import _extract_value_flows  # noqa: E402
 
 # A vault that pulls / reads an ERC-20 it holds, every reference reached through a
 # cast so the receiver is a temporary. Names are generic on purpose.

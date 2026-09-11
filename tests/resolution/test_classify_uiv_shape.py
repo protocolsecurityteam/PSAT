@@ -93,7 +93,6 @@ def _wire(monkeypatch, probe_map, *, storage=_ZERO_WORD, storage_raises=False, b
         return storage
 
     monkeypatch.setattr(tracking, "_get_code", lambda *_a, **_k: "0x6000")
-    monkeypatch.setattr(tracking, "type_authority_contract", lambda *_a, **_k: {})
     monkeypatch.setattr(tracking, "_eth_call_raw", _fake_eth_call_raw)
     monkeypatch.setattr(tracking, "_get_storage_at", _fake_storage)
     monkeypatch.setattr(tracking, "_rpc_batch_request_with_status", _fake_batch_with_status)

@@ -12,6 +12,8 @@ from typing import Any
 
 import pytest
 
+from tests.support.policy_builders import _assessment
+
 TARGET_ADDRESS = "0x1111111111111111111111111111111111111111"
 PROXY_ADDRESS = "0x2222222222222222222222222222222222222222"
 CHILD_ADDRESS = "0x3333333333333333333333333333333333333333"
@@ -33,26 +35,95 @@ def _job(**overrides: Any) -> SimpleNamespace:
     return SimpleNamespace(**payload)
 
 
-def _minimal_tracking_plan() -> dict:
+def _minimal_observation_plan() -> dict:
     return {
+        "schema_version": "1",
         "contract_address": TARGET_ADDRESS,
-        "controllers": [],
+        "contract_name": "TestContract",
+        "tracking_strategy": "event_first_with_polling_fallback",
+        "tracked_controllers": [],
     }
 
 
-def _minimal_contract_analysis() -> dict:
+def _minimal_static_facts(address: str = TARGET_ADDRESS, name: str = "TestContract") -> dict:
+    """A schema-complete ``StaticFacts`` carrying no findings."""
     return {
-        "subject": {"address": TARGET_ADDRESS},
-        "contract_name": "TestContract",
-        "functions": [],
+        "schema_version": "2",
+        "subject": {
+            "address": address,
+            "name": name,
+            "compiler_version": "unknown",
+            "source_verified": None,
+        },
+        "static_status": {"static_analysis_completed": True, "errors": []},
+        "summary": {
+            "control_model": "unknown",
+            "is_upgradeable": False,
+            "is_pausable": None,
+            "has_timelock": None,
+            "standards": None,
+            "is_factory": None,
+            "is_nft": None,
+        },
+        "contract_classification": {
+            "standards": [],
+            "is_erc20": False,
+            "is_erc721": False,
+            "is_erc1155": False,
+            "is_nft": False,
+            "is_factory": False,
+            "factory_functions": None,
+            "evidence": [],
+        },
+        "semantic_control": {
+            "pattern": "unknown",
+            "owner_variables": [],
+            "admin_variables": [],
+            "role_definitions": [],
+            "semantic_functions": [],
+            "current_holders": {"status": "unknown_static_only"},
+        },
+        "upgradeability": {
+            "is_upgradeable": False,
+            "is_upgradeable_proxy": False,
+            "pattern": "none",
+            "upgradeable_version": None,
+            "implementation_slots": [],
+            "admin_paths": [],
+            "evidence": [],
+        },
+        "pausability": {
+            "is_pausable": None,
+            "pause_functions": [],
+            "unpause_functions": [],
+            "gating_modifiers": [],
+            "pause_variables": [],
+            "authorized_roles": [],
+            "evidence": [],
+        },
+        "timelock": {
+            "has_timelock": None,
+            "pattern": "none",
+            "delay": None,
+            "delay_source": "not_read",
+            "delay_variables": [],
+            "queue_execute_functions": [],
+            "authorized_roles": [],
+            "evidence": [],
+        },
+        "audit_alignment": {"status": "not_checked", "bytecode_match": "unknown", "notes": []},
+        "tracking_hints": [],
+        "controller_tracking": [],
     }
 
 
 def _minimal_snapshot() -> dict:
     return {
+        "schema_version": "1",
         "contract_address": TARGET_ADDRESS,
-        "controller_values": {},
+        "contract_name": "TestContract",
         "block_number": 12345,
+        "controller_values": {},
     }
 
 
@@ -66,8 +137,8 @@ def _resolved_graph(nodes: list[dict] | None = None, edges: list[dict] | None = 
 
 def _patch_all(monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> dict[str, Any]:
     """Patch all external dependencies for ResolutionWorker and return tracking dicts."""
-    tracking_plan = overrides.get("tracking_plan", _minimal_tracking_plan())
-    contract_analysis = overrides.get("contract_analysis", _minimal_contract_analysis())
+    static_facts = overrides.get("static_facts", _minimal_static_facts())
+    assessment = overrides.get("assessment", _assessment(static_facts=static_facts))
     snapshot = overrides.get("snapshot", _minimal_snapshot())
     resolved_graph = overrides.get("resolved_graph", _resolved_graph())
     dependencies = overrides.get("dependencies", None)  # None = no artifact
@@ -76,8 +147,7 @@ def _patch_all(monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> dict[str, A
 
     def fake_get_artifact(_session: Any, _job_id: Any, name: str) -> Any:
         lookup: dict[str, Any] = {
-            "control_tracking_plan": tracking_plan,
-            "contract_analysis": contract_analysis,
+            "assessment": assessment,
             "dependencies": dependencies,
         }
         return lookup.get(name)
@@ -94,7 +164,7 @@ def _patch_all(monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> dict[str, A
         create_job_calls.append(request_dict)
         return SimpleNamespace(id=uuid.uuid4(), company=None)
 
-    def fake_build_control_snapshot(plan: Any, rpc_url: str, **_kw: Any) -> dict:
+    def fake_observe_controllers(plan: Any, rpc_url: str, **_kw: Any) -> dict:
         return snapshot
 
     def fake_resolve_control_graph(
@@ -103,7 +173,7 @@ def _patch_all(monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> dict[str, A
         rpc_url: str = "",
         max_depth: int = 6,
         workspace_prefix: str = "",
-        nested_artifacts_override: Any = None,
+        materialized_contracts_override: Any = None,
         **_kw: Any,  # absorb classify_cache, initial_graph, future kwargs
     ) -> tuple[dict, dict]:
         return resolved_graph, {}
@@ -115,7 +185,7 @@ def _patch_all(monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> dict[str, A
     # worker still imports create_job for its dependency-provider spawn, so both
     # bindings are stubbed and the assertions below are unchanged.
     monkeypatch.setattr("services.discovery.perimeter.create_job", fake_create_job)
-    monkeypatch.setattr("workers.resolution_worker.build_control_snapshot", fake_build_control_snapshot)
+    monkeypatch.setattr("workers.resolution_worker.observe_controllers", fake_observe_controllers)
     monkeypatch.setattr("workers.resolution_worker.resolve_control_graph", fake_resolve_control_graph)
     monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
 

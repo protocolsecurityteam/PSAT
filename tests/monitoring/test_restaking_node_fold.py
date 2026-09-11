@@ -62,7 +62,7 @@ class TestTopic:
         assembly without a second literal appearing, and so this unit can never
         claim a descriptor-derived provenance it does not have.
         """
-        assert RESTAKING_FOLD_ENROLLMENT_BASIS == "tracked_topics_asserted"
+        assert RESTAKING_FOLD_ENROLLMENT_BASIS == "restaking_fold_asserted"
 
 
 class TestEmitterDiscovery:

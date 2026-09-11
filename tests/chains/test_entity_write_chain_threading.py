@@ -177,7 +177,7 @@ def test_resolution_child_job_stamped_from_chain_id_not_request(db_session, monk
     resolved_graph = {
         "root_contract_address": parent_addr,
         "nodes": [
-            {"address": child_addr, "analyzed": True, "node_type": "contract", "contract_name": "Child"},
+            {"address": child_addr, "analysis_state": "analyzed", "node_type": "contract", "contract_name": "Child"},
         ],
     }
 
@@ -203,7 +203,7 @@ def test_resolution_child_job_mainnet_chainless_stamps_ethereum(db_session):
     resolved_graph = {
         "root_contract_address": parent_addr,
         "nodes": [
-            {"address": child_addr, "analyzed": True, "node_type": "contract", "contract_name": "Child"},
+            {"address": child_addr, "analysis_state": "analyzed", "node_type": "contract", "contract_name": "Child"},
         ],
     }
 

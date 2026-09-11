@@ -78,8 +78,7 @@ def test_static_deps_stored_on_first_run(db_session, monkeypatch):
     worker = StaticWorker()
     monkeypatch.setattr(worker, "_resolve_proxy", lambda *a, **kw: None)
     monkeypatch.setattr(worker, "_scaffold_project", lambda *a, **kw: None)
-    monkeypatch.setattr(worker, "_run_analysis_phase", lambda *a, **kw: True)
-    monkeypatch.setattr(worker, "_run_tracking_plan_phase", lambda *a, **kw: None)
+    monkeypatch.setattr(worker, "_run_static_facts_phase", lambda *a, **kw: True)
     monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
 
     worker.process(db_session, job)
@@ -130,7 +129,6 @@ def test_static_deps_reused_on_cache_hit(db_session, monkeypatch):
     store_source_files(db_session, job.id, {"src/Test.sol": "contract Test {}"})
     # Copy static artifacts (including static_dependencies)
     store_artifact(db_session, job.id, "static_dependencies", data=FAKE_STATIC_DEPS)
-    store_artifact(db_session, job.id, "contract_analysis", data={"summary": {}})
 
     # find_dependencies should NOT be called
     find_deps_called = []
@@ -164,8 +162,7 @@ def test_static_deps_reused_on_cache_hit(db_session, monkeypatch):
     worker = StaticWorker()
     monkeypatch.setattr(worker, "_resolve_proxy", lambda *a, **kw: None)
     monkeypatch.setattr(worker, "_scaffold_project", lambda *a, **kw: None)
-    monkeypatch.setattr(worker, "_run_analysis_phase", lambda *a, **kw: True)
-    monkeypatch.setattr(worker, "_run_tracking_plan_phase", lambda *a, **kw: None)
+    monkeypatch.setattr(worker, "_run_static_facts_phase", lambda *a, **kw: True)
     monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
 
     worker.process(db_session, job)
@@ -209,7 +206,6 @@ def test_dynamic_deps_still_run_on_cache_hit(db_session, monkeypatch):
     db_session.commit()
     store_source_files(db_session, job.id, {"src/Test.sol": "contract Test {}"})
     store_artifact(db_session, job.id, "static_dependencies", data=FAKE_STATIC_DEPS)
-    store_artifact(db_session, job.id, "contract_analysis", data={"summary": {}})
 
     dynamic_called = []
 
@@ -238,8 +234,7 @@ def test_dynamic_deps_still_run_on_cache_hit(db_session, monkeypatch):
     worker = StaticWorker()
     monkeypatch.setattr(worker, "_resolve_proxy", lambda *a, **kw: None)
     monkeypatch.setattr(worker, "_scaffold_project", lambda *a, **kw: None)
-    monkeypatch.setattr(worker, "_run_analysis_phase", lambda *a, **kw: True)
-    monkeypatch.setattr(worker, "_run_tracking_plan_phase", lambda *a, **kw: None)
+    monkeypatch.setattr(worker, "_run_static_facts_phase", lambda *a, **kw: True)
     monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
 
     worker.process(db_session, job)
@@ -314,8 +309,7 @@ def test_dynamic_deps_artifact_stored_on_first_run(db_session, monkeypatch):
     worker = StaticWorker()
     monkeypatch.setattr(worker, "_resolve_proxy", lambda *a, **kw: None)
     monkeypatch.setattr(worker, "_scaffold_project", lambda *a, **kw: None)
-    monkeypatch.setattr(worker, "_run_analysis_phase", lambda *a, **kw: True)
-    monkeypatch.setattr(worker, "_run_tracking_plan_phase", lambda *a, **kw: None)
+    monkeypatch.setattr(worker, "_run_static_facts_phase", lambda *a, **kw: True)
     monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
 
     worker.process(db_session, job)
@@ -348,8 +342,7 @@ def test_dynamic_deps_append_only_merge_on_rerun(db_session, monkeypatch):
     worker = StaticWorker()
     monkeypatch.setattr(worker, "_resolve_proxy", lambda *a, **kw: None)
     monkeypatch.setattr(worker, "_scaffold_project", lambda *a, **kw: None)
-    monkeypatch.setattr(worker, "_run_analysis_phase", lambda *a, **kw: True)
-    monkeypatch.setattr(worker, "_run_tracking_plan_phase", lambda *a, **kw: None)
+    monkeypatch.setattr(worker, "_run_static_facts_phase", lambda *a, **kw: True)
     monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
 
     worker.process(db_session, job)
@@ -386,8 +379,7 @@ def test_dynamic_deps_no_new_transactions_uses_previous(db_session, monkeypatch)
     worker = StaticWorker()
     monkeypatch.setattr(worker, "_resolve_proxy", lambda *a, **kw: None)
     monkeypatch.setattr(worker, "_scaffold_project", lambda *a, **kw: None)
-    monkeypatch.setattr(worker, "_run_analysis_phase", lambda *a, **kw: True)
-    monkeypatch.setattr(worker, "_run_tracking_plan_phase", lambda *a, **kw: None)
+    monkeypatch.setattr(worker, "_run_static_facts_phase", lambda *a, **kw: True)
     monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
 
     worker.process(db_session, job)
@@ -424,8 +416,7 @@ def test_dynamic_deps_explicit_tx_hashes_skip_merge(db_session, monkeypatch):
     worker = StaticWorker()
     monkeypatch.setattr(worker, "_resolve_proxy", lambda *a, **kw: None)
     monkeypatch.setattr(worker, "_scaffold_project", lambda *a, **kw: None)
-    monkeypatch.setattr(worker, "_run_analysis_phase", lambda *a, **kw: True)
-    monkeypatch.setattr(worker, "_run_tracking_plan_phase", lambda *a, **kw: None)
+    monkeypatch.setattr(worker, "_run_static_facts_phase", lambda *a, **kw: True)
     monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
 
     worker.process(db_session, job)
@@ -468,8 +459,7 @@ def test_dynamic_deps_source_job_fallback(db_session, monkeypatch):
     worker = StaticWorker()
     monkeypatch.setattr(worker, "_resolve_proxy", lambda *a, **kw: None)
     monkeypatch.setattr(worker, "_scaffold_project", lambda *a, **kw: None)
-    monkeypatch.setattr(worker, "_run_analysis_phase", lambda *a, **kw: True)
-    monkeypatch.setattr(worker, "_run_tracking_plan_phase", lambda *a, **kw: None)
+    monkeypatch.setattr(worker, "_run_static_facts_phase", lambda *a, **kw: True)
     monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
 
     worker.process(db_session, job)
@@ -521,8 +511,7 @@ def test_classifications_stored_on_first_run(db_session, monkeypatch):
     worker = StaticWorker()
     monkeypatch.setattr(worker, "_resolve_proxy", lambda *a, **kw: None)
     monkeypatch.setattr(worker, "_scaffold_project", lambda *a, **kw: None)
-    monkeypatch.setattr(worker, "_run_analysis_phase", lambda *a, **kw: True)
-    monkeypatch.setattr(worker, "_run_tracking_plan_phase", lambda *a, **kw: None)
+    monkeypatch.setattr(worker, "_run_static_facts_phase", lambda *a, **kw: True)
     monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
 
     worker.process(db_session, job)
@@ -573,8 +562,7 @@ def test_classifications_reused_via_pre_classified(db_session, monkeypatch):
     worker = StaticWorker()
     monkeypatch.setattr(worker, "_resolve_proxy", lambda *a, **kw: None)
     monkeypatch.setattr(worker, "_scaffold_project", lambda *a, **kw: None)
-    monkeypatch.setattr(worker, "_run_analysis_phase", lambda *a, **kw: True)
-    monkeypatch.setattr(worker, "_run_tracking_plan_phase", lambda *a, **kw: None)
+    monkeypatch.setattr(worker, "_run_static_facts_phase", lambda *a, **kw: True)
     monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
 
     worker.process(db_session, job)
@@ -721,8 +709,7 @@ def test_upgrade_history_append_only_on_rerun(db_session, monkeypatch):
     worker = StaticWorker()
     monkeypatch.setattr(worker, "_resolve_proxy", lambda *a, **kw: None)
     monkeypatch.setattr(worker, "_scaffold_project", lambda *a, **kw: None)
-    monkeypatch.setattr(worker, "_run_analysis_phase", lambda *a, **kw: True)
-    monkeypatch.setattr(worker, "_run_tracking_plan_phase", lambda *a, **kw: None)
+    monkeypatch.setattr(worker, "_run_static_facts_phase", lambda *a, **kw: True)
     monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
 
     worker.process(db_session, job)
@@ -778,8 +765,7 @@ def test_upgrade_history_no_new_events_uses_previous(db_session, monkeypatch):
     worker = StaticWorker()
     monkeypatch.setattr(worker, "_resolve_proxy", lambda *a, **kw: None)
     monkeypatch.setattr(worker, "_scaffold_project", lambda *a, **kw: None)
-    monkeypatch.setattr(worker, "_run_analysis_phase", lambda *a, **kw: True)
-    monkeypatch.setattr(worker, "_run_tracking_plan_phase", lambda *a, **kw: None)
+    monkeypatch.setattr(worker, "_run_static_facts_phase", lambda *a, **kw: True)
     monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
 
     worker.process(db_session, job)
@@ -1101,8 +1087,7 @@ def test_dependency_phase_threads_job_chain_id_to_subphases(db_session, monkeypa
     worker = StaticWorker()
     monkeypatch.setattr(worker, "_resolve_proxy", lambda *a, **kw: None)
     monkeypatch.setattr(worker, "_scaffold_project", lambda *a, **kw: None)
-    monkeypatch.setattr(worker, "_run_analysis_phase", lambda *a, **kw: True)
-    monkeypatch.setattr(worker, "_run_tracking_plan_phase", lambda *a, **kw: None)
+    monkeypatch.setattr(worker, "_run_static_facts_phase", lambda *a, **kw: True)
     monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
 
     worker.process(db_session, job)

@@ -4,7 +4,7 @@ Drives the REAL resolver (``resolve_contract_capabilities`` → AdapterRegistry 
 cross-contract inline → capability algebra → CapabilitySurface) against snapshots of the
 prod etherfi contracts (real ``predicate_trees`` + ``state_var_values`` pulled from the
 analysis artifacts by ``tests/fixtures/cofinite/generate.py``). Seeds Job +
-predicate_trees artifact + Contract/ControllerValue the production path reads, then
+Assessment predicate evidence + Contract/ControllerValue the production path reads, then
 asserts at the surface/status level — so a revert at any layer (negate, membership
 normalization, projection) is caught.
 
@@ -105,7 +105,7 @@ def _no_network(monkeypatch):
 
 def _seed_job_with_trees(session, *, address: str, artifact: dict):
     from db.models import Job, JobStage, JobStatus
-    from db.queue import store_artifact
+    from tests.support.assessment_artifacts import store_test_assessment
 
     job = Job(
         address=address,
@@ -118,11 +118,12 @@ def _seed_job_with_trees(session, *, address: str, artifact: dict):
     session.add(job)
     session.flush()
     # The resolver reads ``artifact["trees"]`` (+ canonical_signatures); store the dump verbatim.
-    store_artifact(
+    store_test_assessment(
         session,
         job.id,
-        "predicate_trees",
-        data={
+        address=address,
+        name="C",
+        predicate_trees={
             "trees": artifact["trees"],
             "canonical_signatures": artifact.get("canonical_signatures"),
             "contract": artifact.get("contract", address),
@@ -143,6 +144,25 @@ def _seed_contract(session, *, address: str, job_id, controllers: dict[str, str]
     session.flush()
     for cid, value in controllers.items():
         session.add(ControllerValue(contract_id=contract.id, controller_id=cid, value=value, source="test"))
+    from db.queue import get_artifact, store_artifact
+    from db.queue.typed import load_assessment
+    from services.assessment import static_inputs
+    from tests.support.policy_builders import _assessment, _minimal_snapshot
+
+    assessment = load_assessment(get_artifact, session, job_id)
+    assert assessment is not None
+    facts, trees, effects = static_inputs(assessment)
+    store_artifact(
+        session,
+        job_id,
+        "assessment",
+        data=_assessment(
+            static_facts=facts,
+            predicate_trees=trees,
+            effects=effects,
+            snapshot=_minimal_snapshot({cid: {"value": value} for cid, value in controllers.items()}, address=address),
+        ),
+    )
     session.commit()
     return contract
 
@@ -151,7 +171,7 @@ def _resolve(session, *, address: str, job_id):
     from services.resolution.capability_resolver import resolve_contract_capabilities
 
     out = resolve_contract_capabilities(session, address=address, chain_id=1, job_id=job_id)
-    assert out is not None, f"resolver returned None for {address} — predicate_trees artifact not found"
+    assert out is not None, f"resolver returned None for {address} — Assessment predicate evidence not found"
     return out
 
 

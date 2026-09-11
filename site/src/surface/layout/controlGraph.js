@@ -40,7 +40,7 @@ export function buildControlNodeIndex(companyData) {
   return nodeInfo;
 }
 
-// Direct callers = exactly what effective_permissions emits for the function:
+// Direct callers = exactly what permission_index emits for the function:
 // direct_owner, authority_roles[].principals, controllers[].principals. Contract
 // principals stay as contracts — we do NOT replace them with "first reachable
 // Safe/timelock/EOA" via the control graph, because that produces false claims

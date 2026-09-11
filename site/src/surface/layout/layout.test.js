@@ -51,6 +51,50 @@ describe("buildMachines", () => {
     const machines = buildMachines(ETHERFI_COMPANY_RICH, functionData);
     expect(machines[0].totalFunctions).toBeGreaterThanOrEqual(machines[1].totalFunctions);
   });
+
+  it("distinguishes direct control from contracts reached through governance", async () => {
+    const machines = buildMachines(ETHERFI_COMPANY_RICH, functionData);
+    const addresses = machines.map((machine) => machine.address);
+    const principal = {
+      address: "0x" + "ab".repeat(20),
+      type: "safe",
+      primary_for: addresses,
+      controls: [addresses[0]],
+      controls_detail: [],
+    };
+    const { nodes } = await buildGraphLayout(machines, [], [principal]);
+    const group = nodes.find((node) => node.type === "group");
+
+    expect(group.data.directCount).toBe(1);
+    expect(group.data.viaGovernanceCount).toBe(addresses.length - 1);
+  });
+
+  it("does not turn missing or unknown claims into blank ops rows", () => {
+    const contract = { address: RICH_ADDRESSES.VAULT, name: "Vault", is_proxy: false };
+    const data = { contracts: [contract], principals: [], fund_flows: [] };
+    const functions = {
+      [entityKey("ethereum", contract.address)]: [
+        { function: "missing()", claims: [] },
+        { function: "unknown()", claims: [{ claim_id: "not.registered", tier: "policy_derived", witness: {} }] },
+      ],
+    };
+    expect(buildMachines(data, functions)).toEqual([]);
+  });
+
+  it("renders transfer-policy configuration as a control claim", () => {
+    const contract = { address: RICH_ADDRESSES.VAULT, name: "Vault", is_proxy: false };
+    const data = { contracts: [contract], principals: [], fund_flows: [] };
+    const functions = {
+      [entityKey("ethereum", contract.address)]: [
+        {
+          function: "setAllowed(address,bool)",
+          claims: [{ claim_id: "transfer_policy.configure", tier: "policy_derived", witness: {} }],
+        },
+      ],
+    };
+    const machine = buildMachines(data, functions)[0];
+    expect(machine.lanes.top[0].action).toBe("configures transfer policy");
+  });
 });
 
 describe("collectDirectCallers", () => {

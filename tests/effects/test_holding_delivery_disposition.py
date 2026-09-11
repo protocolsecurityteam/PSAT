@@ -145,7 +145,7 @@ def test_only_the_fully_disposed_asset_leaves_the_value_holder_set(db_session):
     deployment = ADDR(0x5201)
     c = _contract(db_session, p.id, deployment)
     junk, real, unknown, spared = ADDR(0x5211), ADDR(0x5212), ADDR(0x5213), ADDR(0x5214)
-    fn = _fn(db_session, c.id, name="withdraw", selector="0xdd000001", effect_targets=["S"])
+    fn = _fn(db_session, c.id, name="withdraw", selector="0xdd000001")
     _principal(db_session, fn.id, ADDR(0x5299))
     fetch = _fetch(db_session, c, observed=deployment)
     for token in (junk, real, unknown, spared):

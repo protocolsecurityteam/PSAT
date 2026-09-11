@@ -2,9 +2,7 @@
 contract address, return semantic capabilities per externally-callable
 function.
 
-It loads the persisted ``predicate_trees``
-artifact (written by the static stage's
-``build_predicate_artifacts`` + ``store_artifact``), wires the
+It loads predicate trees from the persisted Assessment, wires the
 Postgres-backed generic event-log repo into an
 ``EvaluationContext``, evaluates each function's PredicateTree
 through ``evaluate_tree_with_registry`` to a ``CapabilityExpr``,
@@ -33,7 +31,7 @@ Usage:
     # }
 
 Returns ``None`` when the contract has no completed analysis or no
-predicate-tree artifact yet. Callers degrade explicitly instead of
+predicate-tree evidence yet. Callers degrade explicitly instead of
 using the old static summary as an authority source.
 """
 
@@ -48,12 +46,15 @@ from typing import Any, Mapping
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from db.deployment import deployment_scope, normalize_deployment
-from db.models import Contract, ControllerValue, Job, JobStatus
+from db.models import Contract, Job, JobStatus
 from db.queue import get_artifact
+from db.queue.typed import load_assessment
+from schemas.assessment import Assessment
+from services.assessment.runtime import controller_state_values
+from services.assessment.views import static_inputs
 from services.clients.rpc import ChainContext, chain_context, eth_call_batch, rpc_request
 from utils.chains import require_chain
-from utils.logging import record_degraded, record_stage_metric
+from utils.logging import record_stage_metric
 
 from .adapters import AdapterRegistry, CallFrame, EvaluationContext
 from .adapters.enumerable_role_store import EnumerableRoleStoreAdapter
@@ -197,21 +198,19 @@ def find_analysis_job_for_address(
     session: Session,
     address: str,
     *,
-    required_artifact: str = "predicate_trees",
     chain: str | None = None,
     completed_only: bool = True,
 ) -> AnalysisJobLookup | None:
     """Find the job whose artifacts should be used for a runtime address.
 
-    Proxies are runtime addresses, but their semantic artifacts usually live
-    on the implementation child job. Prefer a direct artifact when present;
+    Proxies are runtime addresses, but their Assessment usually lives on the
+    implementation child job. Prefer a direct artifact when present;
     otherwise follow the proxy Contract row to the implementation job.
     """
     for runtime_job in _jobs_for_address(session, address, chain=chain, completed_only=completed_only):
         lookup = _analysis_lookup_for_runtime_job(
             session,
             runtime_job,
-            required_artifact=required_artifact,
             chain=chain,
             completed_only=completed_only,
         )
@@ -264,6 +263,7 @@ def resolve_contract_capabilities(
     block: int | None = None,
     job_id: Any = None,
     chain: str | None = None,
+    assessment: Assessment | None = None,
 ) -> dict[str, dict[str, Any]] | None:
     """Return ``{function_signature: capability_dict}`` for the most
     recent completed analysis of ``address``, or ``None`` if there's
@@ -283,13 +283,10 @@ def resolve_contract_capabilities(
     default ``Job.status == completed`` filter would otherwise skip
     the in-progress job and return None or stale prior artifacts.
 
-    ``chain`` is the string chain identifier (e.g. ``"ethereum"``,
-    ``"optimism"``) matching ``Contract.chain``. Together with
-    ``job_id`` it scopes the per-job ``ControllerValue`` lookup so a
-    re-analysis on a different chain (or a follow-up run on the same
-    address) doesn't leak rows back into a completed job's resolved
-    capabilities. Falls back to address-only lookup with a warn-log when
-    ``job_id`` is None.
+    ``assessment`` lets pipeline callers supply their current ledger. Otherwise
+    the selected job's Assessment is loaded. Its chain and deployment must
+    match the requested runtime. Controller observations and canonical function
+    identities come from that document; controller indexes are never a fallback.
     """
     addr = address.lower()
     runtime_addr = addr
@@ -307,7 +304,6 @@ def resolve_contract_capabilities(
         lookup = find_analysis_job_for_address(
             session,
             addr,
-            required_artifact="predicate_trees",
             chain=chain,
             completed_only=True,
         )
@@ -317,12 +313,13 @@ def resolve_contract_capabilities(
         analysis_job = lookup.analysis_job
         runtime_addr = (runtime_job.address or addr).lower()
 
-    artifact = get_artifact(session, analysis_job.id, "predicate_trees")
+    if assessment is None:
+        assessment = load_assessment(get_artifact, session, analysis_job.id)
+    artifact = static_inputs(assessment)[1] if assessment is not None else None
     if not isinstance(artifact, dict) or "trees" not in artifact:
         lookup = _analysis_lookup_for_runtime_job(
             session,
             runtime_job,
-            required_artifact="predicate_trees",
             chain=chain,
             completed_only=True,
         )
@@ -330,7 +327,8 @@ def resolve_contract_capabilities(
             return None
         runtime_job = lookup.runtime_job
         analysis_job = lookup.analysis_job
-        artifact = get_artifact(session, analysis_job.id, "predicate_trees")
+        assessment = load_assessment(get_artifact, session, analysis_job.id)
+        artifact = static_inputs(assessment)[1] if assessment is not None else None
         if not isinstance(artifact, dict) or "trees" not in artifact:
             return None
 
@@ -374,15 +372,16 @@ def resolve_contract_capabilities(
     # Lets adapters confirm a contract's standard from its bytecode — e.g. tell a
     # Solmate RolesAuthority from an OZ AccessManager, which share canCall's selector.
     bytecode_repo = BytecodeSelectorRepo(rpc_url, chain_id)
-    state_var_values = _load_state_var_values(
-        session,
-        analysis_job.address or addr,
-        job_id=analysis_job.id,
-        chain=chain,
-    )
-    if not state_var_values and runtime_job.id != analysis_job.id:
-        state_var_values = _load_state_var_values(session, addr, job_id=runtime_job.id, chain=chain)
-    canonical_signatures = artifact.get("canonical_signatures") if isinstance(artifact, dict) else None
+    if assessment is None or assessment["contract"]["chain_id"] != chain_id:
+        return None
+    if assessment["contract"]["deployment_address"] != runtime_addr:
+        return None
+    state_var_values = controller_state_values(assessment)
+    canonical_signatures = {
+        signature: identity["abi_signature"]
+        for signature, identity in assessment["functions"].items()
+        if identity["abi_signature"] is not None
+    }
     out: dict[str, dict[str, Any]] = {}
     # Per-function profiling + per-job capability-kind tally + work-volume
     # counters. This loop is the resolver-side twin of the static stage's
@@ -512,49 +511,12 @@ def _selector_for_signature(
     signature: str | None,
     canonical_signatures: Mapping[str, str] | None = None,
 ) -> str | None:
-    if not signature or "(" not in signature or not signature.endswith(")"):
-        return None
-    from eth_utils.crypto import keccak
+    from services.abi import function_identity
 
-    # ``trees`` keys are Slither ``full_name`` signatures, which keep user-defined
-    # parameter type names (``addAsset(ERC20)``, ``executeTasks(IFoo.Report)``).
-    # The real EVM selector — and ``effective_functions.selector`` — is keyed on
-    # the canonical ABI signature. The static stage precomputes that per function
-    # (contract→address, enum→uint8, struct→tuple); prefer it so the selector the
-    # Solmate ``canCall`` fold keys on equals the true ``msg.sig``.
-    canonical = (canonical_signatures or {}).get(signature)
-    if isinstance(canonical, str) and "(" in canonical and canonical.endswith(")"):
-        return "0x" + keccak(text=canonical).hex()[:8]
-
-    from services.policy.effective_permissions import _abi_signature
-    from services.static.contract_analysis_pipeline.predicate_artifacts import is_canonical_abi_signature
-
-    # Fallback: string normalization of full_name. Correct for contract/interface
-    # params (→ ``address``); enum/struct params can't be recovered from the name
-    # alone (no tuple layout, no uint width), which is why the map above exists.
-    # When the lowering is provably incomplete we return no selector rather than
-    # one the chain will never dispatch on — a wrong selector silently matches
-    # the wrong function, while a missing one only fails to match.
-    lowered = _abi_signature(signature)
-    if not is_canonical_abi_signature(lowered):
-        return None
-    return "0x" + keccak(text=lowered).hex()[:8]
+    return function_identity(signature, canonical_signatures)[1]
 
 
-# ---------------------------------------------------------------------------
-# Differential probe wiring. Gated behind
-# ``PSAT_DIFFERENTIAL_PROBE`` (default OFF) in the resolution loop above; these
-# helpers run only when the flag is on, so flag-off resolution is byte-identical.
-# ---------------------------------------------------------------------------
-
-# Process-level probe cache: a probe is deterministic given
-# ``(chain, address, selector, block)`` — the random identities are derived from
-# (selector, address) and the block is pinned — so cache the result and skip the
-# wire when the same gated-unknown function is re-resolved in-process. Bounded;
-# only used on the real-wire production path (a stubbed ``call_batch`` bypasses it
-# so tests stay hermetic). Keyed by exact block, never bucketed — a different
-# block may see different allowlist state, so re-probing then is correct.
-_PROBE_CACHE: dict[tuple[int, str, str, int], "ProbeResult"] = {}
+_PROBE_CACHE: dict[tuple[int, str, str, int], ProbeResult] = {}
 _PROBE_CACHE_MAX = 4096
 
 
@@ -800,27 +762,19 @@ def _analysis_lookup_for_runtime_job(
     session: Session,
     runtime_job: Job,
     *,
-    required_artifact: str,
     chain: str | None,
     completed_only: bool,
 ) -> AnalysisJobLookup | None:
-    # A proxy's own predicate_trees artifact is present but *empty* — it has no
-    # logic of its own, so the analyzable functions live on the implementation
-    # child job. Treating that empty artifact as "present" (the old
-    # ``_job_has_artifact`` check) returns the proxy job and shadows the
-    # implementation's real trees, which strands cross-contract authority
-    # inlining with an empty tree set and drops the true controller (e.g. an
-    # upgrade gate delegating to RoleRegistry.onlyProtocolUpgrader never
-    # resolves its owner/timelock). Prefer whichever job carries a *substantive*
-    # artifact; only fall back to a present-but-empty one when neither does (a
-    # contract that genuinely has no gated functions).
-    runtime_artifact = get_artifact(session, runtime_job.id, required_artifact)
-    if _artifact_is_substantive(required_artifact, runtime_artifact):
+    # A proxy's Assessment can contain an empty predicate-tree input because its
+    # logic lives on the implementation child. Prefer whichever Assessment has
+    # substantive trees; fall back to an empty one only when neither does.
+    runtime_artifact = get_artifact(session, runtime_job.id, "assessment")
+    if _assessment_is_substantive(runtime_artifact):
         return AnalysisJobLookup(runtime_job=runtime_job, analysis_job=runtime_job)
 
     impl_job = _implementation_child_job(session, runtime_job, chain=chain, completed_only=completed_only)
-    impl_artifact = get_artifact(session, impl_job.id, required_artifact) if impl_job is not None else None
-    if impl_job is not None and _artifact_is_substantive(required_artifact, impl_artifact):
+    impl_artifact = get_artifact(session, impl_job.id, "assessment") if impl_job is not None else None
+    if impl_job is not None and _assessment_is_substantive(impl_artifact):
         return AnalysisJobLookup(runtime_job=runtime_job, analysis_job=impl_job)
 
     if isinstance(runtime_artifact, dict):
@@ -898,24 +852,26 @@ def _contract_for_job(session: Session, job: Job, *, chain: str | None) -> Contr
 
 
 def _job_chain(job: Job) -> str | None:
-    request = job.request if isinstance(job.request, dict) else {}
-    chain = request.get("chain")
-    return chain if isinstance(chain, str) and chain else None
+    chain_id = job.chain_id
+    return require_chain(chain_id, context="analysis job lookup").name if isinstance(chain_id, int) else None
 
 
-def _artifact_is_substantive(artifact_name: str, artifact: Any) -> bool:
-    """Whether an artifact carries usable content — not merely that a row exists.
+def _assessment_is_substantive(artifact: Any) -> bool:
+    """Whether Assessment embeds at least one predicate or check tree."""
 
-    A proxy contract's ``predicate_trees`` artifact is present but empty (no
-    logic of its own), so ``predicate_trees`` counts as substantive only when it
-    carries at least one ``trees``/``check_trees`` entry. Other artifact kinds
-    count as substantive whenever the row is a dict.
-    """
     if not isinstance(artifact, dict):
         return False
-    if artifact_name == "predicate_trees":
-        return bool(artifact.get("trees") or artifact.get("check_trees"))
-    return True
+    evidence = artifact.get("evidence")
+    if not isinstance(evidence, dict):
+        return False
+    for item in evidence.values():
+        if not isinstance(item, dict) or item.get("producer") != "static.facts":
+            continue
+        observation = item.get("observation")
+        inputs = observation.get("predicate_trees") if isinstance(observation, dict) else None
+        if isinstance(inputs, dict):
+            return bool(inputs.get("trees") or inputs.get("check_trees"))
+    return False
 
 
 def _load_state_var_values(
@@ -925,102 +881,24 @@ def _load_state_var_values(
     job_id: Any = None,
     chain: str | None = None,
 ) -> dict[str, str]:
-    """Read persisted ``controller_values`` rows for ``address`` and key
-    them by the bare state-variable name the predicate evaluator looks
-    up (e.g. ``"_owner"``, ``"roleRegistry"``).
-
-    The static pipeline writes ``controller_id`` with a
-    ``"<kind>:<name>"`` prefix (e.g. ``"state_variable:_owner"``,
-    ``"external_contract:roleRegistry"``). The predicate evaluator
-    queries ``ctx.state_var_values[<name>]`` without the prefix, so we
-    strip it on read and prefer ``state_variable:`` rows when both
-    a state-variable and an external-contract row exist for the same
-    name.
-
-    Scoping rules:
-      - ``Contract.job_id == :job_id`` when ``job_id`` is non-None. Static
-        writes a fresh Contract row per analysis job, and resolution writes
-        the snapshot's ControllerValue rows under that exact row.
-      - ``Contract.chain == :chain`` when ``chain`` is non-None for fallback
-        address lookups.
-
-    Picks the exact job Contract when available. Falls back to the latest
-    address/chain Contract only when callers do not provide job context or
-    rows do not have job_id populated.
-
-    Returns an empty dict when no contract row matches — the evaluator
-    falls back to the lower_bound/partial placeholder."""
-    if job_id is not None:
-        stmt = select(Contract).where(Contract.job_id == job_id)
-        if chain is not None:
-            stmt = stmt.where(Contract.chain == chain)
-        contract = session.execute(stmt.order_by(Contract.created_at.desc()).limit(1)).scalar_one_or_none()
-        if contract is not None:
-            # Scope to this job's deployment so a shared impl (N proxies → 1 impl
-            # row) reads only its own proxy's controller values, not a sibling's.
-            job = session.get(Job, job_id)
-            deployment = (
-                normalize_deployment(job.request.get("proxy_address"))
-                if job is not None and isinstance(job.request, dict)
-                else None
-            )
-            return _controller_values_for_contract(session, contract, deployment, scope_deployment=True)
-    else:
-        # No job context → address-only lookup can surface controller rows from a
-        # different job/chain (cross-tenant leakage). Degrade + breadcrumb.
-        record_degraded(
-            phase="state_var_values_no_job_id",
-            exc=RuntimeError("_load_state_var_values called without job_id"),
-            context={"address": address, "chain": chain},
-        )
-        logger.warning(
-            "_load_state_var_values called without job_id; falling back to address-only lookup",
-            extra={"address": address, "chain": chain},
-        )
-
-    stmt = select(Contract).where(func.lower(Contract.address) == address.lower())
-    if chain is not None:
-        stmt = stmt.where(Contract.chain == chain)
-    stmt = stmt.order_by(Contract.created_at.desc()).limit(1)
-    contract = session.execute(stmt).scalar_one_or_none()
-    if contract is None:
+    """Load controller state only from the selected Assessment, never indexes."""
+    if job_id is None:
+        lookup = find_analysis_job_for_address(session, address.lower(), chain=chain, completed_only=True)
+        if lookup is None:
+            return {}
+        job_id = lookup.analysis_job.id
+    assessment = load_assessment(get_artifact, session, job_id)
+    if assessment is None:
         return {}
-    return _controller_values_for_contract(session, contract)
+    contract = assessment["contract"]
+    if address.lower() not in (contract["address"], contract["deployment_address"]):
+        return {}
+    if chain is not None:
+        from utils.chains import chain_by_name
 
-
-def _controller_values_for_contract(
-    session: Session,
-    contract: Contract,
-    deployment_address: str | None = None,
-    *,
-    scope_deployment: bool = False,
-) -> dict[str, str]:
-    stmt = select(ControllerValue).where(ControllerValue.contract_id == contract.id)
-    if scope_deployment:
-        # One impl row can hold N per-proxy controller sets; read only this
-        # deployment's (plus legacy untagged NULL) rows. No-op for 1:1.
-        stmt = stmt.where(deployment_scope(ControllerValue.deployment_address, deployment_address))
-    rows = session.execute(stmt).scalars()
-    state_var: dict[str, str] = {}
-    other: dict[str, str] = {}
-    for row in rows:
-        cid = row.controller_id or ""
-        value = row.value
-        if not cid or not value:
-            continue
-        if ":" in cid:
-            kind, _, name = cid.partition(":")
-        else:
-            kind, name = "", cid
-        if not name:
-            continue
-        if kind == "state_variable":
-            state_var[name] = value
-        else:
-            other.setdefault(name, value)
-    # state_variable rows win; external_contract / role_identifier rows
-    # fill in only when there's no direct state-variable value.
-    return {**other, **state_var}
+        if contract["chain_id"] != chain_by_name(chain).chain_id:
+            return {}
+    return controller_state_values(assessment)
 
 
 def capability_to_dict(cap: CapabilityExpr) -> dict[str, Any]:

@@ -26,10 +26,10 @@ from services.monitoring.polling_plan import (
     _member_word_index,
     project_entry_return,
 )
-from services.static.contract_analysis_pipeline.tracking import (
+from services.static.static_analysis.tracking import (
     _writer_survives_hygiene,
 )
-from services.static.contract_analysis_pipeline.writer_openness import (
+from services.static.static_analysis.writer_openness import (
     openness_of_write_paths,
     restricted_function_signatures,
 )
@@ -128,14 +128,9 @@ def test_one_unrestricted_path_demotes_the_event():
     assert openness_of_write_paths({"a()"}, set(), restricted) == OPENNESS_NOT_DETERMINED
 
 
-def test_the_kill_switch_cannot_promote(monkeypatch):
-    """``PSAT_AUTHORITY_EARNED_PUBLIC=0`` turns the resolution plane's
-    earned-public projection off, which there NARROWS what publishes. Here the
-    same test only withholds a promotion, so honouring the switch would make it
-    a promoter: a cofinite denylist would read as a proof of restriction."""
-    for value in ("0", "1"):
-        monkeypatch.setenv("PSAT_AUTHORITY_EARNED_PUBLIC", value)
-        assert restricted_function_signatures(_trees(**{"f()": _DENYLIST})) == frozenset()
+def test_permissionless_denylist_cannot_prove_writer_restriction():
+    """A denylist leaves a public path and cannot license membership tracking."""
+    assert restricted_function_signatures(_trees(**{"f()": _DENYLIST})) == frozenset()
 
 
 # ---------------------------------------------------------------------------
@@ -206,7 +201,7 @@ def test_the_latch_class_alone_subtracts_nothing():
 def test_the_opaque_set_reads_both_shapes_the_artifact_records():
     """Inline-assembly storage access and a delegatecall are the two
     unattributable write shapes ``effects`` records per function."""
-    from services.static.contract_analysis_pipeline.tracking import _unattributable_write_functions
+    from services.static.static_analysis.tracking import _unattributable_write_functions
 
     effects = {
         "functions": {

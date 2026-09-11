@@ -103,8 +103,8 @@ def test_deferred_enrollment_is_requeued_not_reported_as_reconciled(db_session, 
     the build": the row stays queued and the next tick re-runs the build.
     """
     from db.models import MonitoringEnrollmentQueue
+    from services.monitoring.observation_plan_state import HEAD_NOT_DETERMINED_REASON
     from services.monitoring.reconciler import EnrollmentClaim, _finish_success
-    from services.monitoring.tracking_plan_state import HEAD_NOT_DETERMINED_REASON
 
     claimed_at = datetime(2026, 8, 4, 1, 0, tzinfo=timezone.utc)
     lease_id = uuid.uuid4()
@@ -142,7 +142,7 @@ def test_deferred_enrollment_is_requeued_not_reported_as_reconciled(db_session, 
 def test_deferred_enrollment_is_visible_in_the_coverage_census(db_session, analyzed_protocol):
     """A deferred contract has no ``monitored_contracts`` row, so a surface that
     counts rows can only see it through the queue."""
-    from services.monitoring.tracking_plan_state import plan_coverage_counts
+    from services.monitoring.observation_plan_state import plan_coverage_counts
 
     assert plan_coverage_counts(db_session)["enrollment_deferred_protocols"] == 0
     _enroll(db_session, analyzed_protocol.id, RuntimeError("upstream down"))

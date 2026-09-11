@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from schemas.control_tracking import MonitoredContractType
+from schemas.observations import MonitoredContractType
 
 #: A 20-byte lowercase-or-checksummed hex address. Shared by every request
 #: model so no ingest path accepts a 42-char string that is not actually hex.
@@ -72,6 +72,28 @@ class AnalyzeRequest(BaseModel):
         default=False,
         description="Bench-only: skip the static-cache discovery shortcut so every stage re-runs cold.",
     )
+    collect_governance: bool = False
+    proposal_ids: list[int] | None = Field(default=None, max_length=100)
+    operation_ids: list[str] | None = Field(default=None, max_length=100)
+
+    @field_validator("proposal_ids")
+    @classmethod
+    def _validate_proposal_ids(cls, values: list[int] | None) -> list[int] | None:
+        if values is None:
+            return None
+        if any(value < 0 or value >= 2**256 for value in values):
+            raise ValueError("proposal_ids must be uint256 values")
+        return list(dict.fromkeys(values))
+
+    @field_validator("operation_ids")
+    @classmethod
+    def _validate_operation_ids(cls, values: list[str] | None) -> list[str] | None:
+        if values is None:
+            return None
+        normalized = [value.lower() for value in values]
+        if any(not re.fullmatch(r"0x[a-f0-9]{64}", value) for value in normalized):
+            raise ValueError("operation_ids must be 32-byte hex values")
+        return list(dict.fromkeys(normalized))
 
     @model_validator(mode="after")
     def _validate_target(self) -> "AnalyzeRequest":
@@ -137,7 +159,7 @@ class ProtocolSubscribeRequest(BaseModel):
 
 #: The ``monitoring_config`` keys ``enrollment._build_monitoring_config`` derives
 #: from analysis and the live monitor then ACTS on. Both are ANALYSIS outputs —
-#: read off the tracking-plan artifact by ``enrollment._load_tracking_plan_artifacts``
+#: read off the tracking-plan artifact by ``enrollment._load_observation_plan_artifacts``
 #: / ``polling_plan.build_polling_plan`` — and a caller has no witnessed value for
 #: either. Rejected rather than dropped: each drives the monitor on the wire, so a
 #: silently discarded value would leave the caller believing the monitor is doing
@@ -146,7 +168,7 @@ class ProtocolSubscribeRequest(BaseModel):
 #: These are the only two analysis-derived keys. The rest of the config splits as:
 #: the ``watch_*`` booleans, which only gate whether an already-detected event
 #: notifies (``unified_watcher._should_watch``) — no wire call, no minted finding,
-#: so a caller preference and settable; ``tracking_plan_not_determined``, which the
+#: so a caller preference and settable; ``observation_plan_not_determined``, which the
 #: route OWNS by overwriting (``routers.monitored._stamp_caller_supplied``),
 #: defeating forgery without breaking a read-modify-write of a stamped row; the two
 #: staleness stamps (``tracked_topics_stale_since`` / ``polling_plan_stale_since``),
@@ -168,7 +190,7 @@ _ANALYZER_OWNED_CONFIG_KEYS = {
 #: Keys the SCANNER owns: records of what monitoring did or did not observe.
 #: ``scan_gaps`` names block intervals a row's scanner never covered — written
 #: only by the operator-run cursor-clamp tooling and carried across every
-#: config rebuild by ``tracking_plan_state.preserve_scan_plane_facts``. That
+#: config rebuild by ``observation_plan_state.preserve_scan_plane_facts``. That
 #: durability is exactly why it cannot be caller-settable: a fabricated entry
 #: would be indistinguishable from a clamp-authored one and would outlive every
 #: subsequent enrollment, asserting a coverage hole (or, by omission, continuous
@@ -204,12 +226,14 @@ def _reject_analyzer_owned_config_keys(value: dict | None) -> dict | None:
     but it fails the same test: it is a claim about what was observed, a caller
     has no witness for it, and it now survives every config rebuild.
     """
-    if not isinstance(value, dict):
-        return value
+    if value is None:
+        return None
     for key, message in {**_ANALYZER_OWNED_CONFIG_KEYS, **_SCANNER_OWNED_CONFIG_KEYS}.items():
         if key in value:
             raise ValueError(message)
-    return value
+    from services.monitoring.config import load_monitoring_config
+
+    return dict(load_monitoring_config(value))
 
 
 class UpsertMonitoredContractRequest(BaseModel):

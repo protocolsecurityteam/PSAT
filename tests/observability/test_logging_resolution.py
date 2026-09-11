@@ -152,7 +152,7 @@ def test_reverting_controller_reads_collapse_to_one_summary_warning(monkeypatch,
         # writes contextvars first), silently misattributing the census.
         with bind_trace_context(job_id="1", stage="resolution", address="0x" + "99" * 20):
             with caplog.at_level(logging.DEBUG, logger="services.resolution.tracking"):
-                snapshot = tracking.build_control_snapshot(
+                snapshot = tracking.observe_controllers(
                     _reverting_plan(["owner", "authority", "admin"]),  # pyright: ignore[reportArgumentType]
                     "https://rpc.example",
                 )
@@ -201,7 +201,7 @@ def test_no_summary_warning_when_every_controller_read_succeeds(monkeypatch, cap
     monkeypatch.setattr(tracking, "_SNAPSHOT_MULTICALL_ENABLED", False)
 
     with caplog.at_level(logging.DEBUG, logger="services.resolution.tracking"):
-        snapshot = tracking.build_control_snapshot(
+        snapshot = tracking.observe_controllers(
             _reverting_plan(["owner"]),  # pyright: ignore[reportArgumentType]
             "https://rpc.example",
         )

@@ -55,8 +55,6 @@ def _facts(sig: str, *, parameter_names: list[str], flows: list[dict[str, Any]] 
         "value_flows": flows
         if flows is not None
         else [{"kind": "native_transfer_send", "direction": "out", "origin": "body"}],
-        "effect_labels": [],
-        "effect_targets": [],
         "state_changing": True,
         "parameter_names": parameter_names,
         "payable": False,

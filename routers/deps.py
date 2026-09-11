@@ -33,6 +33,8 @@ from db.storage import (
     deserialize_artifact,
     get_storage_client,
 )
+from services.assessment.repository import has_publication as has_assessment_publication
+from services.assessment.repository import load_temporal_assessment
 from services.clients.rpc import default_rpc_url
 from utils.logging import trace_id_var
 
@@ -118,6 +120,8 @@ __all__ = [
     "DEFAULT_RPC_URL",
     "MAX_TVL_HISTORY_DAYS",
     "SessionLocal",
+    "load_temporal_assessment",
+    "has_assessment_publication",
     "StorageContentAbsent",
     "StorageContentIncomplete",
     "StorageContentNotDetermined",

@@ -6,7 +6,7 @@ always a positive token, stated in its own docstring:
 
 * ``tracked_topics`` present (possibly ``[]``) — the plan was read; an empty
   list is the witnessed "read and named nothing" finding and may be relied on;
-* ``tracking_plan_not_determined``             — the plan was not read; the
+* ``observation_plan_not_determined``             — the plan was not read; the
   token says why.
 
 The builder never emits neither key; a row carrying neither predates this
@@ -104,7 +104,7 @@ def test_caller_enrolled_row_is_stamped_not_silently_proven_absent(api_client, d
 
     body = resp.json()
     assert body["enrollment_source"] == "surface_alert"
-    assert body["monitoring_config"]["tracking_plan_not_determined"] == CALLER_SUPPLIED_TRACKING_PLAN
+    assert body["monitoring_config"]["observation_plan_not_determined"] == CALLER_SUPPLIED_TRACKING_PLAN
     # The caller's own flags are untouched.
     assert body["monitoring_config"]["watch_upgrades"] is True
     assert body["monitoring_config"]["watch_ownership"] is True
@@ -113,7 +113,7 @@ def test_caller_enrolled_row_is_stamped_not_silently_proven_absent(api_client, d
         select(MonitoredContract).where(MonitoredContract.id == uuid.UUID(body["id"]))
     ).scalar_one()
     db_session.refresh(row)
-    assert row.monitoring_config["tracking_plan_not_determined"] == CALLER_SUPPLIED_TRACKING_PLAN
+    assert row.monitoring_config["observation_plan_not_determined"] == CALLER_SUPPLIED_TRACKING_PLAN
 
 
 def test_null_monitoring_config_is_stamped_too(api_client, protocol_id, admin_headers):
@@ -121,7 +121,14 @@ def test_null_monitoring_config_is_stamped_too(api_client, protocol_id, admin_he
     reads as proven-absent just as loudly as ``{}``."""
     resp = _post(api_client, protocol_id, admin_headers, None)
     assert resp.status_code == 200, resp.text
-    assert resp.json()["monitoring_config"] == {"tracking_plan_not_determined": CALLER_SUPPLIED_TRACKING_PLAN}
+    assert resp.json()["monitoring_config"] == {"observation_plan_not_determined": CALLER_SUPPLIED_TRACKING_PLAN}
+
+
+def test_caller_monitoring_config_uses_the_same_strict_schema(api_client, protocol_id, admin_headers):
+    resp = _post(api_client, protocol_id, admin_headers, {"watch_pause": "yes"})
+
+    assert resp.status_code == 422
+    assert "watch_pause" in resp.text
 
 
 def test_a_forged_reason_token_cannot_survive_the_route(api_client, protocol_id, admin_headers):
@@ -132,10 +139,10 @@ def test_a_forged_reason_token_cannot_survive_the_route(api_client, protocol_id,
         api_client,
         protocol_id,
         admin_headers,
-        {"watch_pause": True, "tracking_plan_not_determined": "plan_not_readable"},
+        {"watch_pause": True, "observation_plan_not_determined": "plan_not_readable"},
     )
     assert resp.status_code == 200, resp.text
-    assert resp.json()["monitoring_config"]["tracking_plan_not_determined"] == CALLER_SUPPLIED_TRACKING_PLAN
+    assert resp.json()["monitoring_config"]["observation_plan_not_determined"] == CALLER_SUPPLIED_TRACKING_PLAN
 
 
 def test_caller_supplied_tracked_topics_are_rejected(api_client, protocol_id, admin_headers):
@@ -210,11 +217,11 @@ def test_patch_applies_the_same_two_rules(api_client, protocol_id, admin_headers
 
     forged = api_client.patch(
         f"/api/monitored-contracts/{contract_id}",
-        json={"monitoring_config": {"watch_pause": True, "tracking_plan_not_determined": "contract_not_analyzed"}},
+        json={"monitoring_config": {"watch_pause": True, "observation_plan_not_determined": "contract_not_analyzed"}},
         headers=admin_headers,
     )
     assert forged.status_code == 200, forged.text
-    assert forged.json()["monitoring_config"]["tracking_plan_not_determined"] == CALLER_SUPPLIED_TRACKING_PLAN
+    assert forged.json()["monitoring_config"]["observation_plan_not_determined"] == CALLER_SUPPLIED_TRACKING_PLAN
     assert forged.json()["monitoring_config"]["watch_pause"] is True
 
     for key, payload in (
@@ -235,7 +242,7 @@ def test_caller_supplied_scan_gaps_are_rejected(api_client, protocol_id, admin_h
     """``scan_gaps`` is the scanner's own record of what it never covered.
 
     It is written only by the cursor-clamp repair and is carried across every
-    subsequent config rebuild (``tracking_plan_state.preserve_scan_plane_facts``),
+    subsequent config rebuild (``observation_plan_state.preserve_scan_plane_facts``),
     so a forged entry would be indistinguishable from a clamp-authored one and
     would outlive every enrollment — asserting a coverage hole nobody observed.
     Rejected rather than dropped, like the analyzer-owned keys: a silently

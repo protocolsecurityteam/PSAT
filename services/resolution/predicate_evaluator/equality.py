@@ -6,7 +6,7 @@ import logging
 from typing import TYPE_CHECKING, Any, cast
 
 from services.resolution.caller_sources import CALLER_SOURCES as _CALLER_SOURCES
-from services.static.contract_analysis_pipeline.predicate_types import (
+from services.static.static_analysis.predicate_types import (
     LeafPredicate,
 )
 
@@ -14,9 +14,6 @@ from ..capabilities import (
     CapabilityExpr,
     Condition,
     ExternalCheck,
-)
-from ..permissionless_shapes import (
-    earned_public_enabled,
 )
 from .authority import (
     _OWNER_SELECTOR,
@@ -182,8 +179,7 @@ def _resolve_equality_principal(
         # calldata, so leave it to the placeholder.
         signature = op.get("callee_signature")
         if (
-            earned_public_enabled()
-            and isinstance(signature, str)
+            isinstance(signature, str)
             and "(" in signature
             and not signature.endswith("()")
             and _view_call_caller_selects_key(op)

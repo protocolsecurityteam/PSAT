@@ -34,12 +34,12 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from db.models import Artifact, Contract, ControllerValue, Job, JobDependency, JobStage, JobStatus
 from db.queue import create_job
-from schemas.control_tracking import ControlTrackingPlan
+from schemas.observations import ObservationPlan
 from services.resolution.tracking import (
     _CONTROLLER_VALUE_MAX_LEN,
     _decode_controller_value,
-    build_control_snapshot,
     clear_classify_cache,
+    observe_controllers,
 )
 from tests.cache_helpers import requires_postgres
 from workers.base import BaseWorker
@@ -138,7 +138,7 @@ def test_decode_controller_value_storable_paths_unchanged():
 # ---------------------------------------------------------------------------
 
 
-def _struct_controller_plan() -> ControlTrackingPlan:
+def _struct_controller_plan() -> ObservationPlan:
     contract_address = "0x1111111111111111111111111111111111111111"
     return {
         "schema_version": "0.1",
@@ -175,7 +175,7 @@ def _struct_controller_plan() -> ControlTrackingPlan:
 
 @requires_postgres
 def test_struct_getter_snapshot_value_is_storable(clean_db, monkeypatch):
-    """build_control_snapshot must not emit a value that overflows
+    """observe_controllers must not emit a value that overflows
     controller_values.value. Persisting the snapshot exactly as
     resolution_worker.process() does must NOT raise (pre-fix it raised
     StringDataRightTruncation; the worker session would then be poisoned).
@@ -198,7 +198,7 @@ def test_struct_getter_snapshot_value_is_storable(clean_db, monkeypatch):
 
     monkeypatch.setattr("services.resolution.tracking._rpc_request", fake_rpc)
 
-    snapshot = build_control_snapshot(plan, "https://rpc.example")
+    snapshot = observe_controllers(plan, "https://rpc.example")
 
     entry = snapshot["controller_values"]["state_variable:accountantState"]
     # The unstorable blob became an honest "couldn't resolve to one value".

@@ -17,7 +17,7 @@ from sqlalchemy import select
 
 from db.models import ContractMaterialization, MonitoredContract
 from services.aggregations import build_fleet_status
-from services.monitoring.tracking_plan_state import (
+from services.monitoring.observation_plan_state import (
     CONFIG_SUPPLIED_BY_CALLER,
     CONTRACT_NOT_ANALYZED,
     NO_CURRENT_MATERIALIZATION,
@@ -140,7 +140,7 @@ def test_failed_analysis_is_reported_as_an_overlay(db_session):
     """A failed build reads as ``no_current_materialization`` at enrollment — the
     reader cannot see why. The census names the reason without double-counting:
     the row stays in its partition bucket and is additionally reported here."""
-    from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
+    from db.contract_materializations import STATIC_FACTS_SCHEMA_VERSION
 
     _mk(db_session, 1, {NOT_DETERMINED_KEY: NO_CURRENT_MATERIALIZATION})
     row = ContractMaterialization(
@@ -149,7 +149,7 @@ def test_failed_analysis_is_reported_as_an_overlay(db_session):
         bytecode_keccak=("0x" + uuid.uuid4().hex * 2)[:66],
         address=_addr(1),
         status="failed",
-        analysis_schema_version=ANALYSIS_SCHEMA_VERSION,
+        static_facts_schema_version=STATIC_FACTS_SCHEMA_VERSION,
     )
     db_session.add(row)
     db_session.commit()
@@ -195,7 +195,7 @@ def test_coverage_alarm_is_silent_until_a_threshold_is_set(fleet, monkeypatch):
 
     monkeypatch.delenv("PSAT_PLAN_COVERAGE_ALERT", raising=False)
     assert ops_alerts._coverage_alert_threshold() == 0
-    assert "tracking_plan_coverage" not in ops_alerts._current_problems({}, _now(), None)
+    assert "observation_plan_coverage" not in ops_alerts._current_problems({}, _now(), None)
 
 
 def test_coverage_alarm_fires_over_the_threshold(fleet, monkeypatch):
@@ -208,11 +208,11 @@ def test_coverage_alarm_fires_over_the_threshold(fleet, monkeypatch):
     # own choice and is NOT paged on, though it stays in the payload.
     problems = ops_alerts._current_problems({}, _now(), coverage)
     assert coverage["not_determined"][CONFIG_SUPPLIED_BY_CALLER] == 1
-    assert problems["tracking_plan_coverage"]["uncovered"] == 3
-    assert problems["tracking_plan_coverage"]["kind"] == "coverage"
+    assert problems["observation_plan_coverage"]["uncovered"] == 3
+    assert problems["observation_plan_coverage"]["kind"] == "coverage"
 
     monkeypatch.setenv("PSAT_PLAN_COVERAGE_ALERT", "3")
-    assert "tracking_plan_coverage" not in ops_alerts._current_problems({}, _now(), coverage)
+    assert "observation_plan_coverage" not in ops_alerts._current_problems({}, _now(), coverage)
 
 
 @pytest.fixture()
@@ -242,7 +242,7 @@ def test_coverage_alarm_posts_and_recovers_through_the_tick(fleet, _clean_heartb
     monkeypatch.setattr(ops_alerts, "_webhook_url", lambda: None)
     first = ops_alerts.run_ops_alert_tick(fleet)
     assert first["posted_down"] >= 1
-    assert any(k == "tracking_plan_coverage" for k in _alert_keys(fleet))
+    assert any(k == "observation_plan_coverage" for k in _alert_keys(fleet))
 
     second = ops_alerts.run_ops_alert_tick(fleet)
     assert second["posted_down"] == 0  # deduped inside the cooldown
