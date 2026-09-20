@@ -39,10 +39,9 @@ from services.monitoring.tracking_plan_state import NOT_DETERMINED_KEY, TRANSIEN
 logger = logging.getLogger(__name__)
 
 
-# Default convergence interval. Configurable via env so an operator can
-# trade staleness for query load without a redeploy. 600s matches the
-# unified watcher's scan cadence — same order of magnitude as
-# "MonitoredContract may be stale for up to ten minutes."
+# Queue cadence for change notifications and due retries. The independent repair
+# age below controls recovery from missed notifications; backlog and build time
+# can add delay to either path.
 DEFAULT_RECONCILE_INTERVAL_S = int(os.getenv("PSAT_ENROLLMENT_RECONCILE_INTERVAL", "600"))
 
 # Daemon-edge fallback chain for the reconciler loop (inv. 6): the base RPC chain

@@ -121,44 +121,6 @@ through the stages defined in `db.models.JobStage`:
 The unified protocol monitor (`workers.protocol_monitor`) runs separately
 and drives live upgrade / event / TVL tracking.
 
-### Monitoring enrollment
-
-The enrollment reconciler runs on the **workers** machine, independently of
-the live monitor. It drains protocols marked dirty by analysis completion,
-membership or governance changes, and other enrollment triggers. An empty
-queue does not rebuild governance views for recently reconciled protocols.
-
-A bounded repair sweep catches missed notifications and manual database changes.
-Never-reconciled protocols are eligible immediately; otherwise the last
-successful reconciliation must be at least 24 hours old. Queue backlog can delay
-repair further. Normal change notifications and incomplete-enrollment retries
-bypass this age requirement.
-
-Temporary tracking-plan storage/read failures retain baseline or last-known-good
-monitoring and retry through the dirty queue with exponential backoff (starting
-at 120 seconds, capped at six hours; attempts run on the next due queue pass).
-They do not stamp a successful reconciliation. Missing artifacts and failures
-classified as `plan_load_error` do not trigger this retry path. Corrupt stored
-blobs classified as `plan_not_readable` do retry with the same cap. A newer
-change notification keeps its own schedule when an older attempt fails.
-
-| Environment variable | Default | Purpose |
-| --- | --- | --- |
-| `PSAT_ENROLLMENT_RECONCILE_INTERVAL` | `600` | Seconds to wait between queue-drain passes. |
-| `PSAT_RECONCILE_SWEEP_MIN_AGE_S` | `86400` | Minimum age in seconds for repair; `0` restores sweeping every pass. |
-| `PSAT_RECONCILE_SWEEP_K` | `2` | Maximum repair candidates per pass; `0` disables repair without disabling dirty work. |
-
-The enrollment heartbeat reports `repair_enqueued`, `drained`, `failures`, and
-`queue_depth`. Disabling the monitor machine does not stop enrollment; reducing
-these rebuilds reduces work but does not change the provisioned Fly VM size.
-
-Validate scheduling and failure recovery locally against an isolated PostgreSQL
-test database with `tests/monitoring/test_enrollment_queue.py`. Before comparing
-production costs, observe at least a full repair interval and an analysis run:
-compare enrollment counts/reasons, failures and queue depth, worker CPU and peak
-RAM, and database/RPC usage. Lower idle CPU alone does not establish that a
-smaller machine can handle analysis peaks.
-
 ## Docker
 
 The monorepo can be run with separate `api` and `site` containers.
