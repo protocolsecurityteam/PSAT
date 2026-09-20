@@ -134,6 +134,14 @@ successful reconciliation must be at least 24 hours old. Queue backlog can delay
 repair further. Normal change notifications and incomplete-enrollment retries
 bypass this age requirement.
 
+Temporary tracking-plan storage/read failures retain baseline or last-known-good
+monitoring and retry through the dirty queue with exponential backoff (starting
+at 120 seconds, capped at six hours; attempts run on the next due queue pass).
+They do not stamp a successful reconciliation. Missing artifacts and failures
+classified as `plan_load_error` do not trigger this retry path. Corrupt stored
+blobs classified as `plan_not_readable` do retry with the same cap. A newer
+change notification keeps its own schedule when an older attempt fails.
+
 | Environment variable | Default | Purpose |
 | --- | --- | --- |
 | `PSAT_ENROLLMENT_RECONCILE_INTERVAL` | `600` | Seconds to wait between queue-drain passes. |
@@ -143,6 +151,13 @@ bypass this age requirement.
 The enrollment heartbeat reports `repair_enqueued`, `drained`, `failures`, and
 `queue_depth`. Disabling the monitor machine does not stop enrollment; reducing
 these rebuilds reduces work but does not change the provisioned Fly VM size.
+
+Validate scheduling and failure recovery locally against an isolated PostgreSQL
+test database with `tests/monitoring/test_enrollment_queue.py`. Before comparing
+production costs, observe at least a full repair interval and an analysis run:
+compare enrollment counts/reasons, failures and queue depth, worker CPU and peak
+RAM, and database/RPC usage. Lower idle CPU alone does not establish that a
+smaller machine can handle analysis peaks.
 
 ## Docker
 

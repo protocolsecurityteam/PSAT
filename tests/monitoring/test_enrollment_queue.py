@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from db.models import (
     Contract,
+    ContractMaterialization,
     ControlGraphNode,
     ControllerValue,
     EffectiveFunction,
@@ -34,6 +35,13 @@ from services.monitoring.reconciler import (
     claim_due_enrollments,
     drain_enrollment_queue,
     sweep_enqueue_stale,
+)
+from services.monitoring.tracking_plan_state import (
+    MATERIALIZATION_LOOKUP_FAILED,
+    NOT_DETERMINED_KEY,
+    PLAN_NOT_READABLE,
+    POLLING_PLAN_KEY,
+    TRACKED_TOPICS_KEY,
 )
 from tests.conftest import DATABASE_URL, requires_postgres
 
@@ -150,6 +158,189 @@ def wired_drain(monkeypatch):
         yield
     finally:
         engine.dispose()
+
+
+@pytest.fixture()
+def materialized_protocol(qsession):
+    from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
+
+    proto = _seed_protocol_with_controller(qsession)
+    row = ContractMaterialization(
+        chain="1",
+        bytecode_keccak="0x" + uuid.uuid4().hex * 2,
+        address=VAULT_ADDR,
+        status="ready",
+        analysis_schema_version=ANALYSIS_SCHEMA_VERSION,
+        tracking_plan={
+            "tracked_controllers": [
+                {
+                    "controller_id": "state_variable:guardian",
+                    "name": "guardian",
+                    "read_spec": {"strategy": "getter_call", "target": "guardian", "type_kind": "address"},
+                    "event_watch": {
+                        "events": [
+                            {
+                                "topic0": "0x" + "ab" * 32,
+                                "signature": "GuardianChanged(address,address)",
+                                "inputs": [{"name": "old", "type": "address", "indexed": True}],
+                            }
+                        ]
+                    },
+                }
+            ]
+        },
+    )
+    qsession.add(row)
+    qsession.commit()
+    try:
+        yield proto, row
+    finally:
+        qsession.rollback()
+        qsession.delete(row)
+        qsession.commit()
+
+
+def _make_retry_due(session, protocol_id):
+    session.execute(
+        text("UPDATE monitoring_enrollment_queue SET dirty_at = NOW() - INTERVAL '1 second' WHERE protocol_id=:pid"),
+        {"pid": protocol_id},
+    )
+    session.commit()
+
+
+@pytest.mark.parametrize("failure", [PLAN_NOT_READABLE, MATERIALIZATION_LOOKUP_FAILED])
+@pytest.mark.parametrize("previously_enrolled", [False, True])
+def test_transient_plan_failure_retries_and_recovers_without_notification(
+    qsession, wired_drain, materialized_protocol, monkeypatch, failure, previously_enrolled
+):
+    from db.storage import StorageContentNotDetermined
+    from services.monitoring import enrollment
+
+    proto, _row = materialized_protocol
+    if previously_enrolled:
+        mark_enrollment_dirty(qsession, proto.id, "analysis_complete")
+        qsession.commit()
+        assert drain_enrollment_queue("http://rpc.invalid", "ethereum") == {"drained": 1, "failed": 0}
+    qsession.expire_all()
+    last_success = proto.last_enrollment_reconcile_at
+
+    target = "hydrate_tracking_plan" if failure == PLAN_NOT_READABLE else "find_by_address"
+    healthy = getattr(enrollment, target)
+
+    def fail_read(*args, **kwargs):
+        raise StorageContentNotDetermined("temporary outage")
+
+    monkeypatch.setattr(enrollment, target, fail_read)
+    mark_enrollment_dirty(qsession, proto.id, "analysis_complete")
+    qsession.commit()
+    assert drain_enrollment_queue("http://rpc.invalid", "ethereum") == {"drained": 0, "failed": 1}
+    qsession.expire_all()
+    queue = qsession.get(MonitoringEnrollmentQueue, proto.id)
+    assert queue is not None and queue.attempts == 1 and queue.lease_id is None
+    assert proto.last_enrollment_reconcile_at == last_success
+    config = qsession.execute(
+        select(MonitoredContract.monitoring_config).where(MonitoredContract.address == VAULT_ADDR)
+    ).scalar_one()
+    assert config[NOT_DETERMINED_KEY] == failure
+    if previously_enrolled:
+        assert config[TRACKED_TOPICS_KEY][0]["topic0"] == "0x" + "ab" * 32
+    else:
+        assert TRACKED_TOPICS_KEY not in config
+    # Neither another queue check nor the repair sweep may defeat the backoff.
+    assert proto.id not in sweep_enqueue_stale(qsession)
+    assert drain_enrollment_queue("http://rpc.invalid", "ethereum") == {"drained": 0, "failed": 0}
+
+    monkeypatch.setattr(enrollment, target, healthy)
+    _make_retry_due(qsession, proto.id)  # elapsed retry delay, without a producer notification
+    assert drain_enrollment_queue("http://rpc.invalid", "ethereum") == {"drained": 1, "failed": 0}
+    qsession.expire_all()
+    assert qsession.get(MonitoringEnrollmentQueue, proto.id) is None
+    assert proto.last_enrollment_reconcile_at is not None
+    config = qsession.execute(
+        select(MonitoredContract.monitoring_config).where(MonitoredContract.address == VAULT_ADDR)
+    ).scalar_one()
+    assert NOT_DETERMINED_KEY not in config
+    assert config[TRACKED_TOPICS_KEY][0]["topic0"] == "0x" + "ab" * 32
+    assert any(entry["field"] == "guardian" for entry in config[POLLING_PLAN_KEY])
+
+
+def test_persistent_plan_outage_backs_off_to_ceiling(qsession, wired_drain, materialized_protocol, monkeypatch):
+    from db.storage import StorageContentNotDetermined
+
+    proto, _row = materialized_protocol
+
+    def fail_read(*args):
+        raise StorageContentNotDetermined("temporary outage")
+
+    monkeypatch.setattr("services.monitoring.enrollment.hydrate_tracking_plan", fail_read)
+    mark_enrollment_dirty(qsession, proto.id, "analysis_complete")
+    qsession.commit()
+    for attempt in range(1, 11):
+        assert drain_enrollment_queue("http://rpc.invalid", "ethereum") == {"drained": 0, "failed": 1}
+        qsession.expire_all()
+        row = qsession.get(MonitoringEnrollmentQueue, proto.id)
+        assert row is not None and row.attempts == attempt
+        remaining = qsession.execute(
+            text("SELECT EXTRACT(EPOCH FROM dirty_at - NOW()) FROM monitoring_enrollment_queue WHERE protocol_id=:pid"),
+            {"pid": proto.id},
+        ).scalar_one()
+        expected = min(2**attempt * 60, 6 * 3600)
+        assert expected - 5 <= remaining <= expected
+        assert drain_enrollment_queue("http://rpc.invalid", "ethereum") == {"drained": 0, "failed": 0}
+        if attempt < 10:
+            _make_retry_due(qsession, proto.id)
+    assert proto.last_enrollment_reconcile_at is None
+
+
+@pytest.mark.parametrize("failure", ["plan_object_absent", "plan_load_error", "no_current_materialization"])
+def test_nontransient_plan_absence_does_not_create_retry_loop(
+    qsession, wired_drain, materialized_protocol, monkeypatch, failure
+):
+    from db.storage import StorageContentAbsent
+
+    proto, row = materialized_protocol
+    if failure == "no_current_materialization":
+        row.status = "building"
+    else:
+
+        def fail_read(*args):
+            if failure == "plan_object_absent":
+                raise StorageContentAbsent("no object")
+            raise ValueError("malformed plan")
+
+        monkeypatch.setattr("services.monitoring.enrollment.hydrate_tracking_plan", fail_read)
+    mark_enrollment_dirty(qsession, proto.id, "analysis_complete")
+    qsession.commit()
+    assert drain_enrollment_queue("http://rpc.invalid", "ethereum") == {"drained": 1, "failed": 0}
+    qsession.expire_all()
+    assert qsession.get(MonitoringEnrollmentQueue, proto.id) is None
+    assert proto.id not in sweep_enqueue_stale(qsession)
+    config = qsession.execute(
+        select(MonitoredContract.monitoring_config).where(MonitoredContract.address == VAULT_ADDR)
+    ).scalar_one()
+    assert config[NOT_DETERMINED_KEY] == failure
+
+
+def test_untouched_monitoring_rows_cannot_keep_enrollment_retrying(qsession, wired_drain):
+    proto = _seed_protocol_with_controller(qsession)
+    manual = MonitoredContract(
+        address="0x" + "c3" * 20,
+        chain="ethereum",
+        protocol_id=proto.id,
+        contract_type="regular",
+        is_active=True,
+        enrollment_source="manual",
+        monitoring_config={NOT_DETERMINED_KEY: PLAN_NOT_READABLE},
+    )
+    qsession.add(manual)
+    mark_enrollment_dirty(qsession, proto.id, "analysis_complete")
+    qsession.commit()
+    assert drain_enrollment_queue("http://rpc.invalid", "ethereum") == {"drained": 1, "failed": 0}
+    qsession.expire_all()
+    assert manual.is_active
+    assert manual.monitoring_config is not None
+    assert manual.monitoring_config[NOT_DETERMINED_KEY] == PLAN_NOT_READABLE
+    assert qsession.get(MonitoringEnrollmentQueue, proto.id) is None
 
 
 # ---------------------------------------------------------------------------
@@ -373,12 +564,59 @@ def test_poisoned_protocol_backoff_pushes_dirty_at_forward(qsession):
         {"pid": proto.id},
     )
     qsession.commit()
+    # The raw SQL clock adjustment bypasses the identity map. Production claims
+    # use a fresh session; refresh here so claim2 captures the actual dirty_at.
+    qsession.expire_all()
     claim2 = claim_due_enrollments(qsession, lease_ttl_s=900, limit=8)[0]
     reconciler._finish_failure(qsession, claim2)
     row2 = qsession.execute(
         select(MonitoringEnrollmentQueue).where(MonitoringEnrollmentQueue.protocol_id == proto.id)
     ).scalar_one()
     assert row2.attempts == 2
+
+
+@pytest.mark.parametrize("delay_s", [0, 3600])
+def test_failure_preserves_notification_received_during_build(qsession, delay_s):
+    proto = _make_protocol(qsession, "failure_redirty")
+    mark_enrollment_dirty(qsession, proto.id, "analysis_complete")
+    qsession.commit()
+    claim = claim_due_enrollments(qsession, lease_ttl_s=900, limit=8)[0]
+
+    mark_enrollment_dirty(qsession, proto.id, "governance_rotation", delay_s=delay_s)
+    qsession.commit()
+    notification = qsession.get(MonitoringEnrollmentQueue, proto.id)
+    assert notification is not None
+    expected_dirty_at = notification.dirty_at
+    reconciler._finish_failure(qsession, claim)
+    qsession.expire_all()
+    row = qsession.get(MonitoringEnrollmentQueue, proto.id)
+    assert row is not None
+    assert row.reason == "governance_rotation"
+    assert row.dirty_at == expected_dirty_at
+    assert row.attempts == 0
+    assert row.lease_id is None and row.lease_expires_at is None
+
+
+def test_failure_cannot_release_a_reclaimed_lease(qsession):
+    proto = _make_protocol(qsession, "failure_reclaimed")
+    mark_enrollment_dirty(qsession, proto.id, "analysis_complete")
+    qsession.commit()
+    old_claim = claim_due_enrollments(qsession, lease_ttl_s=900, limit=8)[0]
+    qsession.execute(
+        text(
+            "UPDATE monitoring_enrollment_queue SET lease_expires_at = NOW() - INTERVAL '1 second' "
+            "WHERE protocol_id=:pid"
+        ),
+        {"pid": proto.id},
+    )
+    qsession.commit()
+    current_claim = claim_due_enrollments(qsession, lease_ttl_s=900, limit=8)[0]
+    reconciler._finish_failure(qsession, old_claim)
+    qsession.expire_all()
+    row = qsession.get(MonitoringEnrollmentQueue, proto.id)
+    assert row is not None
+    assert row.lease_id == current_claim.lease_id
+    assert row.attempts == 0 and row.dirty_at == current_claim.dirty_at
 
 
 # ---------------------------------------------------------------------------

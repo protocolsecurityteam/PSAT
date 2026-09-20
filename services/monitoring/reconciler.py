@@ -21,18 +21,20 @@ from __future__ import annotations
 import logging
 import os
 import uuid
+from collections.abc import Sequence
 from datetime import timedelta
 from threading import Event
 from typing import NamedTuple
 
-from sqlalchemy import delete, func, select, text, update
+from sqlalchemy import case, delete, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
-from db.models import Contract, MonitoringEnrollmentQueue, Protocol, SessionLocal
+from db.models import Contract, MonitoredContract, MonitoringEnrollmentQueue, Protocol, SessionLocal
 from db.queue import HEARTBEAT_ENROLLMENT_RECONCILER, record_heartbeat
 from services.monitoring.chain_rpc import rpc_for_chain
 from services.monitoring.enrollment import enroll_protocol_contracts
+from services.monitoring.tracking_plan_state import NOT_DETERMINED_KEY, TRANSIENT_PLAN_FAILURES
 
 logger = logging.getLogger(__name__)
 
@@ -181,8 +183,14 @@ def _finish_success(session: Session, claim: EnrollmentClaim) -> None:
 
 def _finish_failure(session: Session, claim: EnrollmentClaim) -> None:
     """Bump attempts, clear the lease, and push ``dirty_at`` forward with
-    exponential backoff so a poisoned protocol can't wedge the queue."""
+    exponential backoff so a poisoned protocol can't wedge the queue.
+
+    If a producer re-dirtied the protocol during this attempt, release only our
+    lease. Its notification (including a deliberate delay) supersedes this
+    attempt and must not be postponed by an older failure.
+    """
     delay_s = min(2 ** (claim.attempts + 1) * 60, _BACKOFF_CEILING_S)
+    unchanged = MonitoringEnrollmentQueue.dirty_at == claim.dirty_at
     session.execute(
         update(MonitoringEnrollmentQueue)
         .where(
@@ -190,13 +198,43 @@ def _finish_failure(session: Session, claim: EnrollmentClaim) -> None:
             MonitoringEnrollmentQueue.lease_id == claim.lease_id,
         )
         .values(
-            attempts=MonitoringEnrollmentQueue.attempts + 1,
+            attempts=case(
+                (unchanged, MonitoringEnrollmentQueue.attempts + 1), else_=MonitoringEnrollmentQueue.attempts
+            ),
             lease_id=None,
             lease_expires_at=None,
-            dirty_at=text(f"NOW() + INTERVAL '{int(delay_s)} seconds'"),
+            dirty_at=case(
+                (unchanged, text(f"NOW() + INTERVAL '{int(delay_s)} seconds'")),
+                else_=MonitoringEnrollmentQueue.dirty_at,
+            ),
         )
     )
     session.commit()
+
+
+def _has_transient_plan_failures(session: Session, enrolled: Sequence[MonitoredContract]) -> bool:
+    """Check persisted enrollment results without reloading their ORM graphs.
+
+    Enrollment commits baseline/last-known-good monitoring even when artifact
+    storage cannot answer. That is useful partial work, but not a completed
+    reconcile: storage recovery emits no dirty notification of its own. Only
+    inspect rows this pass enrolled, not unrelated manual or disabled-chain
+    records that it cannot repair.
+    """
+    if not enrolled:
+        return False
+    return (
+        session.execute(
+            select(MonitoredContract.id)
+            .where(
+                MonitoredContract.id.in_([row.id for row in enrolled]),
+                MonitoredContract.is_active.is_(True),
+                MonitoredContract.monitoring_config[NOT_DETERMINED_KEY].as_string().in_(TRANSIENT_PLAN_FAILURES),
+            )
+            .limit(1)
+        ).first()
+        is not None
+    )
 
 
 def drain_enrollment_queue(
@@ -212,7 +250,8 @@ def drain_enrollment_queue(
     each claimed protocol in its **own fresh session** running the full
     ``enroll_protocol_contracts(..., enroll_controllers=True)`` build. Success
     deletes the claimed row (``dirty_at``-guarded) and stamps
-    ``last_enrollment_reconcile_at``; failure backs the row off. Per-protocol
+    ``last_enrollment_reconcile_at``; failure (including a partially enrolled
+    protocol with transiently unreadable tracking plans) backs the row off. Per-protocol
     exceptions are logged and swallowed so one poisoned protocol never aborts
     the drain. Returns ``{"drained", "failed"}`` counts.
     """
@@ -236,13 +275,15 @@ def drain_enrollment_queue(
         try:
             with SessionLocal() as work_session:
                 protocol_chain = _protocol_chain(work_session, claim.protocol_id, chain)
-                enroll_protocol_contracts(
+                enrolled = enroll_protocol_contracts(
                     work_session,
                     claim.protocol_id,
                     rpc_for_chain(protocol_chain, rpc_url),
                     protocol_chain,
                     enroll_controllers=True,
                 )
+                if _has_transient_plan_failures(work_session, enrolled):
+                    raise RuntimeError("Enrollment incomplete: tracking plans temporarily unreadable")
                 _finish_success(work_session, claim)
             drained += 1
         except Exception as exc:
