@@ -418,6 +418,174 @@ def test_sweep_enqueues_k_oldest_nulls_first(qsession):
         assert reason == "sweep"
 
 
+def test_unchanged_protocol_stays_idle_until_repair_due(qsession, wired_drain, monkeypatch):
+    """Real enrollment runs once, not on every idle tick; daily repair remains."""
+    from unittest.mock import Mock
+
+    proto = _seed_protocol_with_controller(qsession)
+    qsession.execute(text("UPDATE protocols SET last_enrollment_reconcile_at = NOW()"))
+    mark_enrollment_dirty(qsession, proto.id, "analysis_complete")
+    qsession.commit()
+    enroll = Mock(wraps=reconciler.enroll_protocol_contracts)
+    monkeypatch.setattr(reconciler, "enroll_protocol_contracts", enroll)
+
+    assert drain_enrollment_queue("http://rpc.invalid", "ethereum") == {"drained": 1, "failed": 0}
+    # Simulate successive idle ticks, including just before the daily cutoff.
+    for age_s in (600, 1200, 3600, 23 * 3600):
+        qsession.execute(
+            text(
+                "UPDATE protocols SET last_enrollment_reconcile_at = NOW() - :age * INTERVAL '1 second' WHERE id=:pid"
+            ),
+            {"age": age_s, "pid": proto.id},
+        )
+        qsession.commit()
+        assert sweep_enqueue_stale(qsession) == []
+        assert drain_enrollment_queue("http://rpc.invalid", "ethereum") == {"drained": 0, "failed": 0}
+    assert enroll.call_count == 1
+
+    qsession.execute(
+        text("UPDATE protocols SET last_enrollment_reconcile_at = NOW() - INTERVAL '25 hours' WHERE id=:pid"),
+        {"pid": proto.id},
+    )
+    qsession.commit()
+    assert sweep_enqueue_stale(qsession) == [proto.id]
+    assert drain_enrollment_queue("http://rpc.invalid", "ethereum") == {"drained": 1, "failed": 0}
+    assert enroll.call_count == 2
+    assert sweep_enqueue_stale(qsession) == []
+
+
+@pytest.mark.parametrize("sweep_k", ["0", "2"])
+def test_dirty_change_bypasses_repair_age(qsession, wired_drain, monkeypatch, sweep_k):
+    monkeypatch.setenv("PSAT_RECONCILE_SWEEP_K", sweep_k)
+    proto = _seed_protocol_with_controller(qsession)
+    qsession.execute(text("UPDATE protocols SET last_enrollment_reconcile_at = NOW()"))
+    mark_enrollment_dirty(qsession, proto.id, "governance_rotation")
+    qsession.commit()
+
+    assert sweep_enqueue_stale(qsession) == []
+    assert drain_enrollment_queue("http://rpc.invalid", "ethereum") == {"drained": 1, "failed": 0}
+
+
+def test_repair_age_configuration_and_disabled_sweep(qsession, monkeypatch):
+    proto = _make_protocol(qsession, "sweep_config")
+    qsession.execute(text("UPDATE protocols SET last_enrollment_reconcile_at = NOW()"))
+    qsession.execute(
+        text("UPDATE protocols SET last_enrollment_reconcile_at = NOW() - INTERVAL '2 hours' WHERE id=:pid"),
+        {"pid": proto.id},
+    )
+    qsession.commit()
+    monkeypatch.setenv("PSAT_RECONCILE_SWEEP_MIN_AGE_S", "invalid")
+    assert sweep_enqueue_stale(qsession) == []  # falls back to 24 hours
+    monkeypatch.setenv("PSAT_RECONCILE_SWEEP_MIN_AGE_S", "3600")
+    monkeypatch.setenv("PSAT_RECONCILE_SWEEP_K", "0")
+    assert sweep_enqueue_stale(qsession) == []
+    monkeypatch.setenv("PSAT_RECONCILE_SWEEP_K", "2")
+    assert sweep_enqueue_stale(qsession) == [proto.id]
+
+
+def test_sweep_preserves_notification_inserted_after_selection(qsession, monkeypatch):
+    """A concurrent producer must not lose its delayed notification to sweep."""
+    proto = _make_protocol(qsession, "sweep_race")
+    qsession.execute(
+        text("UPDATE protocols SET last_enrollment_reconcile_at = NOW() WHERE id != :pid"), {"pid": proto.id}
+    )
+    qsession.commit()
+    execute = qsession.execute
+    selected = False
+    dirty_at = None
+
+    def enqueue_after_select(statement, *args, **kwargs):
+        nonlocal selected, dirty_at
+        result = execute(statement, *args, **kwargs)
+        if not selected:
+            selected = True
+            with Session(qsession.get_bind()) as producer:
+                mark_enrollment_dirty(producer, proto.id, "head_not_determined", delay_s=3600)
+                producer.commit()
+                row = producer.get(MonitoringEnrollmentQueue, proto.id)
+                assert row is not None
+                dirty_at = row.dirty_at
+        return result
+
+    monkeypatch.setattr(qsession, "execute", enqueue_after_select)
+    assert sweep_enqueue_stale(qsession) == []
+    row = qsession.get(MonitoringEnrollmentQueue, proto.id)
+    assert row.reason == "head_not_determined"
+    assert row.dirty_at == dirty_at
+    assert claim_due_enrollments(qsession, lease_ttl_s=900, limit=8) == []
+
+
+def test_final_completion_rearms_enrollment_after_early_drain(qsession, wired_drain):
+    """Policy's mark can drain before the first job is completed/visible."""
+    from db.queue import complete_job
+
+    proto = _seed_protocol_with_controller(qsession)
+    job = qsession.execute(select(Job).where(Job.protocol_id == proto.id)).scalar_one()
+    job.status = JobStatus.processing
+    job.stage = JobStage.coverage
+    mark_enrollment_dirty(qsession, proto.id, "policy_complete")
+    qsession.commit()
+    assert drain_enrollment_queue("http://rpc.invalid", "ethereum") == {"drained": 1, "failed": 0}
+    assert qsession.get(MonitoringEnrollmentQueue, proto.id) is None
+    assert (
+        qsession.execute(select(MonitoredContract.id).where(MonitoredContract.protocol_id == proto.id)).first() is None
+    )
+
+    complete_job(qsession, job.id)
+    row = qsession.get(MonitoringEnrollmentQueue, proto.id)
+    assert row is not None and row.reason == "analysis_complete"
+    assert drain_enrollment_queue("http://rpc.invalid", "ethereum") == {"drained": 1, "failed": 0}
+    ctrl = qsession.execute(select(MonitoredContract).where(MonitoredContract.address == CONTROLLER_ADDR)).scalar_one()
+    assert ctrl.is_active
+
+    # An idempotent completion must not schedule another unchanged build.
+    complete_job(qsession, job.id)
+    qsession.expire_all()
+    assert qsession.get(MonitoringEnrollmentQueue, proto.id) is None
+
+
+def test_completion_and_dirty_notification_are_atomic(qsession, monkeypatch):
+    from db.queue import complete_job
+
+    proto = _make_protocol(qsession, "completion_atomic")
+    job = Job(address=VAULT_ADDR, protocol_id=proto.id, status=JobStatus.processing, stage=JobStage.coverage)
+    qsession.add(job)
+    qsession.commit()
+
+    def fail_after_mark(session, protocol_id, reason):
+        mark_enrollment_dirty(session, protocol_id, reason)
+        raise RuntimeError("notification failed")
+
+    monkeypatch.setattr("services.monitoring.enrollment.mark_enrollment_dirty", fail_after_mark)
+    with pytest.raises(RuntimeError, match="notification failed"):
+        complete_job(qsession, job.id)
+    qsession.rollback()
+    assert job.status == JobStatus.processing
+    assert qsession.get(MonitoringEnrollmentQueue, proto.id) is None
+
+
+@pytest.mark.parametrize("has_address,has_protocol", [(False, True), (True, False)])
+def test_unscoped_completion_does_not_enqueue(qsession, has_address, has_protocol):
+    from db.queue import complete_job
+
+    proto = _make_protocol(qsession, "completion_unscoped")
+    job = Job(
+        address=VAULT_ADDR if has_address else None,
+        protocol_id=proto.id if has_protocol else None,
+        status=JobStatus.processing,
+        stage=JobStage.coverage,
+    )
+    qsession.add(job)
+    qsession.commit()
+    try:
+        complete_job(qsession, job.id)
+        assert job.status == JobStatus.completed
+        assert qsession.get(MonitoringEnrollmentQueue, proto.id) is None
+    finally:
+        qsession.delete(job)
+        qsession.commit()
+
+
 # The NULLS-FIRST-then-oldest ordering is asserted through the real
 # ``sweep_enqueue_stale`` in ``test_sweep_enqueues_k_oldest_nulls_first`` above;
 # a raw ``order_by`` re-assertion here would only re-test SQLAlchemy.
@@ -701,11 +869,12 @@ def test_run_loop_single_tick_sweeps_drains_and_heartbeats(monkeypatch):
 
     stop = Event()
     calls = {"sweep": 0, "hb": None}
-    monkeypatch.setattr(
-        reconciler,
-        "sweep_enqueue_stale",
-        lambda session, *a, **k: calls.__setitem__("sweep", calls["sweep"] + 1),
-    )
+
+    def _fake_sweep(session):
+        calls["sweep"] += 1
+        return [1, 2]
+
+    monkeypatch.setattr(reconciler, "sweep_enqueue_stale", _fake_sweep)
 
     def _fake_drain(*a, **k):
         stop.set()  # end the loop after this single tick
@@ -729,3 +898,4 @@ def test_run_loop_single_tick_sweeps_drains_and_heartbeats(monkeypatch):
     assert detail["drained"] == 3
     assert detail["failures"] == 1
     assert "queue_depth" in detail
+    assert detail["repair_enqueued"] == 2

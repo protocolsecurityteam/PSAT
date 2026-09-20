@@ -399,7 +399,7 @@ def test_reconciler_loop_records_heartbeat(monkeypatch):
     process, kw = beats[0]
     assert process == HEARTBEAT_ENROLLMENT_RECONCILER
     assert kw["status"] == "running"
-    assert kw["detail"] == {"drained": 7, "failures": 0, "queue_depth": 3}
+    assert kw["detail"] == {"drained": 7, "failures": 0, "queue_depth": 3, "repair_enqueued": 0}
 
 
 def test_reconcile_and_heartbeat_run_while_scan_blocks(monkeypatch):

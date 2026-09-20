@@ -284,12 +284,20 @@ def complete_job(
     if job is None:
         return
     _check_lease_or_raise(job, lease_id)
+    newly_completed = job.status != JobStatus.completed
     job.stage = JobStage.done
     job.status = JobStatus.completed
     job.detail = detail
     job.worker_id = None
     job.lease_id = None
     job.lease_expires_at = None
+    if newly_completed and job.protocol_id is not None and job.address:
+        # Enrollment reads completed jobs. A policy-stage notification can be
+        # drained before coverage finishes (or skipped for the first job), so
+        # publish another notification atomically with final completion.
+        from services.monitoring.enrollment import mark_enrollment_dirty
+
+        mark_enrollment_dirty(session, job.protocol_id, "analysis_complete")
     session.commit()
 
 

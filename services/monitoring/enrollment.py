@@ -52,6 +52,7 @@ logger = logging.getLogger(__name__)
 ENROLLMENT_DIRTY_REASONS = frozenset(
     {
         "policy_complete",
+        "analysis_complete",
         "discovery_adoption",
         "audit_added",
         "manual",

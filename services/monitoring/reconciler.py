@@ -1,45 +1,19 @@
-"""Periodic enrollment reconciler — convergence backstop for monitored_contracts.
+"""Drain changed protocols into monitoring, with an infrequent repair sweep.
 
-Background
-----------
-``MonitoredContract`` is derived state computed from ``Contract`` +
-``Job`` + analysis output (``ControlGraphNode`` / ``FunctionPrincipal`` /
-``ContractSummary`` / ``ControllerValue``). The historical write path
-fires once per completed job from ``PolicyWorker.process()`` via
-``maybe_enroll_protocol``. That edge-triggered pattern lets monitoring
-drift from ground truth in two ways:
+Enrollment derives ``MonitoredContract`` rows from analysis and governance
+data. Although the writes are idempotent, deriving the controller set builds
+the full governance view and is expensive even when nothing has changed.
 
-1. The in-flight gate in ``maybe_enroll_protocol`` skips when any
-   sibling job for the protocol is ``queued``/``processing``. When the
-   sibling fails terminally and no later trigger fires, the missed
-   enrollment is never retried.
+Normal work comes from the dirty queue: job completion, policy output,
+membership changes, governance rotations, audit additions, and manual requests.
+The queue is checked every ten minutes by default. An unchanged protocol is
+eligible for the bounded repair sweep only after 24 hours; never-reconciled
+protocols are eligible immediately. The sweep recovers missed notifications
+(including manual DB changes), with additional delay possible under backlog.
 
-2. ``Contract.protocol_id`` is set from several write sites that don't
-   re-trigger enrollment: the deployer-cascade in
-   ``workers/discovery.py:538-545``, the orphan-adoption migrations
-   ``3a8f4d1c9b07`` + ``4d72e9b1f035``, admin DB fix-ups, ``routers/
-   audits.py:282``. A contract adopted by one of these paths after
-   PolicyWorker already ran for its job has no MonitoredContract row
-   until someone hits ``POST /api/protocols/{id}/re-enroll`` by hand.
-
-The general fix is to stop relying on a single trigger moment and
-converge enrollment on a cadence. ``enroll_protocol_contracts`` is
-already idempotent (upsert by ``(address, chain)``, stale-row
-deactivation by enrollment_source). The reconciler walks every
-``Protocol`` row and calls it.
-
-``maybe_enroll_protocol`` stays as a low-latency hint so fresh analyses
-land in ``monitored_contracts`` within milliseconds in the common case.
-This reconciler bounds staleness to ``interval`` for everything else.
-
-Concurrency
------------
-The reconciler and a concurrent ``PolicyWorker``-triggered enrollment
-for the same protocol both upsert ``(address, chain)`` so the second
-writer's UPDATE is a no-op. ``_enroll_controller_addresses`` runs its
-Pass 1 / Pass 2 (promote / demote) inside one ``enroll_protocol_
-contracts`` call, so a single pass converges; a brief inter-pass
-window during overlapping calls self-corrects on the next tick.
+Queue leases and dirty_at-guarded completion preserve concurrent changes and
+retry backoff. The repair sweep only inserts missing queue rows, so it cannot
+overwrite an event notification or pull a retry forward.
 """
 
 from __future__ import annotations
@@ -47,16 +21,18 @@ from __future__ import annotations
 import logging
 import os
 import uuid
+from datetime import timedelta
 from threading import Event
 from typing import NamedTuple
 
 from sqlalchemy import delete, func, select, text, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from db.models import Contract, MonitoringEnrollmentQueue, Protocol, SessionLocal
 from db.queue import HEARTBEAT_ENROLLMENT_RECONCILER, record_heartbeat
 from services.monitoring.chain_rpc import rpc_for_chain
-from services.monitoring.enrollment import enroll_protocol_contracts, mark_enrollment_dirty
+from services.monitoring.enrollment import enroll_protocol_contracts
 
 logger = logging.getLogger(__name__)
 
@@ -77,9 +53,10 @@ RECONCILER_FALLBACK_CHAIN = os.getenv("PSAT_RECONCILER_FALLBACK_CHAIN", "ethereu
 # slow build doesn't hand its row to a competing drainer mid-flight.
 DEFAULT_ENROLLMENT_LEASE_TTL_S = 900
 
-# Slow-sweep width: how many least-recently-reconciled protocols to enqueue per
-# tick as the convergence backstop for drift from unknown write sites.
+# Repair-sweep width and minimum age. The queue drain cadence stays independent
+# so real changes and retries do not wait a day. K=0 disables only the backstop.
 DEFAULT_RECONCILE_SWEEP_K = 2
+DEFAULT_RECONCILE_SWEEP_MIN_AGE_S = 24 * 3600
 
 # Per-drain claim ceiling. Bounds how many heavy builds one tick serializes so a
 # lease can't expire while its protocol waits behind a long backlog.
@@ -294,12 +271,14 @@ def drain_enrollment_queue(
     return {"drained": drained, "failed": failed}
 
 
-def sweep_enqueue_stale(session: Session, k: int | None = None) -> list[int]:
-    """Enqueue the *k* least-recently-reconciled protocols (NULLS FIRST).
+def sweep_enqueue_stale(session: Session, k: int | None = None, *, min_age_s: int | None = None) -> list[int]:
+    """Enqueue up to *k* protocols overdue for repair (NULLS FIRST).
 
     The convergence backstop for drift from write sites that don't mark dirty
-    (psql fix-ups, unknown paths). Marks each with reason ``'sweep'`` and
-    commits. Returns the enqueued protocol ids.
+    (psql fix-ups, unknown paths). A successful reconcile must be at least
+    ``PSAT_RECONCILE_SWEEP_MIN_AGE_S`` old (default 24 hours), unless the
+    protocol has never been reconciled. Inserts with reason ``'sweep'`` and
+    commits. Returns only the protocol ids actually inserted.
 
     Candidates already sitting in the queue are excluded: re-marking them would
     reset ``dirty_at`` to now() and so pull a poisoned row out of its
@@ -310,19 +289,38 @@ def sweep_enqueue_stale(session: Session, k: int | None = None) -> list[int]:
     k = k if k is not None else _env_int("PSAT_RECONCILE_SWEEP_K", DEFAULT_RECONCILE_SWEEP_K)
     if k <= 0:
         return []
+    min_age_s = (
+        min_age_s
+        if min_age_s is not None
+        else _env_int("PSAT_RECONCILE_SWEEP_MIN_AGE_S", DEFAULT_RECONCILE_SWEEP_MIN_AGE_S)
+    )
     pids = list(
         session.execute(
             select(Protocol.id)
             .outerjoin(MonitoringEnrollmentQueue, MonitoringEnrollmentQueue.protocol_id == Protocol.id)
             .where(MonitoringEnrollmentQueue.protocol_id.is_(None))
-            .order_by(Protocol.last_enrollment_reconcile_at.asc().nullsfirst())
+            .where(
+                Protocol.last_enrollment_reconcile_at.is_(None)
+                | (Protocol.last_enrollment_reconcile_at <= func.now() - timedelta(seconds=max(0, min_age_s)))
+            )
+            .order_by(Protocol.last_enrollment_reconcile_at.asc().nullsfirst(), Protocol.id)
             .limit(k)
         ).scalars()
     )
-    for pid in pids:
-        mark_enrollment_dirty(session, pid, "sweep")
+    inserted = []
+    if pids:
+        # A producer or another sweeper may enqueue after the SELECT. Never
+        # replace its reason, dirty timestamp, backoff, or in-flight lease.
+        inserted = list(
+            session.execute(
+                pg_insert(MonitoringEnrollmentQueue)
+                .values([{"protocol_id": pid, "reason": "sweep"} for pid in pids])
+                .on_conflict_do_nothing(index_elements=["protocol_id"])
+                .returning(MonitoringEnrollmentQueue.protocol_id)
+            ).scalars()
+        )
     session.commit()
-    return pids
+    return inserted
 
 
 def _queue_depth(session: Session) -> int:
@@ -346,11 +344,12 @@ def run_enrollment_reconciler_loop(
     logger.info("starting enrollment reconciler interval=%ss", interval)
     while not stop_event.is_set():
         result = {"drained": 0, "failed": 0}
+        swept = []
         depth = 0
         status = "running"
         try:
             with SessionLocal() as session:
-                sweep_enqueue_stale(session)
+                swept = sweep_enqueue_stale(session)
             result = drain_enrollment_queue(rpc_url, chain)
             with SessionLocal() as session:
                 depth = _queue_depth(session)
@@ -369,6 +368,7 @@ def run_enrollment_reconciler_loop(
                 "drained": result["drained"],
                 "failures": result["failed"],
                 "queue_depth": depth,
+                "repair_enqueued": len(swept),
             },
         )
         stop_event.wait(interval)
