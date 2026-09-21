@@ -458,3 +458,39 @@ def test_pipeline_queue_state_and_artifacts_equivalent(lifecycle, monkeypatch, m
         assert get_artifact(lifecycle, job.id, "parity_" + stage.value) == payload
     lifecycle.refresh(job)
     assert (job.status, job.stage, job.retry_count, job.lease_id) == (JobStatus.completed, JobStage.done, 0, None)
+
+
+def test_deployment_readiness_reads_real_indexer_lock_and_controller_heartbeat(lifecycle, monkeypatch):
+    from db.models import WorkerHeartbeat
+    from services.process_singleton import ProcessSingleton
+    from tests.conftest import DATABASE_URL
+    from workers.lifecycle_admin import readiness
+
+    monkeypatch.setenv("FLY_MACHINE_ID", "test-monitor")
+    owner = ProcessSingleton("indexer", DATABASE_URL)
+    lifecycle.merge(
+        WorkerHeartbeat(
+            process="worker_lifecycle",
+            status="running",
+            detail={"mode": "enforce"},
+            beat_at=datetime.now(timezone.utc),
+        )
+    )
+    lifecycle.commit()
+    try:
+        assert readiness(lifecycle)["indexer_owner"] is None
+        assert owner.acquire()
+        result = readiness(lifecycle)
+        assert result["indexer_owner"] == "psat-singleton-indexer:test-monitor"
+        assert result["controller"]["fresh"] is True
+        lifecycle.execute(
+            text(
+                "UPDATE worker_heartbeats SET beat_at=clock_timestamp()-interval '60 seconds' "
+                "WHERE process='worker_lifecycle'"
+            )
+        )
+        lifecycle.commit()
+        assert readiness(lifecycle)["controller"]["fresh"] is False
+    finally:
+        owner.close()
+    assert readiness(lifecycle)["indexer_owner"] is None

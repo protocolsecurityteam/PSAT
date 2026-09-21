@@ -10,10 +10,9 @@ kill_timeout = 30
   dockerfile = "deploy/Dockerfile"
 
 [env]
-  # Rollout stays disabled until healthy-load/cost validation. The production
-  # workflow renders the staged layout from repository variables (see runbook).
-  PSAT_WORKER_LIFECYCLE_MODE = "off"
-  PSAT_INDEXER_GROUP = "workers"
+  # Production deployment installs managed ownership before enabling idle exits.
+  PSAT_WORKER_LIFECYCLE_MODE = "enforce"
+  PSAT_INDEXER_GROUP = "monitor"
   PORT = "8000"
   PYTHONUNBUFFERED = "1"
   PSAT_EDGE_MODE = "cloudflare"
@@ -110,8 +109,8 @@ kill_timeout = 30
 
 [[vm]]
   processes = ["monitor"]
-  size = "shared-cpu-1x"
-  memory = "512mb"
+  size = "shared-cpu-2x"
+  memory = "2048mb"
 
 # The monitor VM must degrade-and-page, never permanently stop. With the
 # boot-reconcile OOM removed and heavy compute off this box, a crash-loop is

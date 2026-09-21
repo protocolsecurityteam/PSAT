@@ -24,7 +24,7 @@ class ProcessSingleton:
         self.connection = psycopg2.connect(
             url,
             connect_timeout=10,
-            application_name=f"psat-singleton-{name}",
+            application_name=f"psat-singleton-{name}:{os.getenv('FLY_MACHINE_ID', 'local')}",
             options="-c statement_timeout=5000",
             keepalives=1,
             keepalives_idle=5,

@@ -3,6 +3,7 @@
 # `fly scale count --process-group workers N`.
 # dapp_crawl_worker lives in `browser`; protocol_monitor in `monitor`.
 set -e
+unset PSAT_WORKER_LIFECYCLE_TOKEN
 
 cd "$(dirname "$0")/.."
 

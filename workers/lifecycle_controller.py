@@ -152,6 +152,7 @@ def run(stop: threading.Event) -> None:
             machine = fly.target(require_split=mode == "enforce") if fly else None
             with SessionLocal() as session:
                 decision = tick(session, machine, mode=mode, grace=grace)
+            decision["controller_machine_id"] = os.getenv("FLY_MACHINE_ID", "local")
             logger.info("worker lifecycle observation", extra={**decision, "sample_seconds": interval})
             record_heartbeat("worker_lifecycle", status="running", detail=decision)
             if decision["action"] == "start":

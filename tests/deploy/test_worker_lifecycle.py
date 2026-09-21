@@ -101,6 +101,7 @@ class FakeFly:
         self.commands = []
         self.lose_start_response = False
         self.start_status = {}
+        self.readiness_overrides = {}
         self.status = {
             "control_version": 1,
             "paused": paused,
@@ -160,7 +161,24 @@ class FakeFly:
         if action == "drain":
             next(row for row in self.rows if row["id"] == "abc")["state"] = "stopped"
             self.status["phase"] = "stopped"
-        return "Connecting to machine...\n" + json.dumps(self.status)
+        result = dict(self.status)
+        if action == "ready":
+            mode, indexer = deploy.layout(self.rows[0])
+            result.update(
+                controller={
+                    "status": "running",
+                    "fresh": True,
+                    "detail": {
+                        "mode": mode,
+                        "paused": self.status["paused"],
+                        "boot_id": self.status["boot_id"],
+                        "controller_machine_id": "monitor",
+                    },
+                },
+                indexer_owner=f"psat-singleton-indexer:{'monitor' if indexer == 'monitor' else 'abc'}",
+            )
+            result.update(self.readiness_overrides)
+        return "Connecting to machine...\n" + json.dumps(result)
 
     def run(self, command, **_kwargs):
         import json
@@ -445,3 +463,108 @@ def test_active_standby_blocks_deployment_before_any_mutation(monkeypatch, tmp_p
     with pytest.raises(RuntimeError, match="active standby"):
         deploy.capture(tmp_path / "state.json", tmp_path / "rollback.json")
     assert fly.events == []
+
+
+def test_first_activation_installs_bridge_then_split_and_enables_sleep(monkeypatch, tmp_path):
+    fly = FakeFly(monkeypatch, mode="off", paused=True)
+    state_path, config_path = tmp_path / "state.json", tmp_path / "rollback.json"
+    state = deploy.capture(state_path, config_path)
+    original_snapshot = state_path.read_bytes(), config_path.read_bytes()
+    fly.update(tmp_path, mode="observe")
+    deploy.restore(timeout=30)
+    bridge_image = deploy.verify(mode="observe", indexer="workers", timeout=15)
+    assert bridge_image.endswith("@sha256:new")
+    assert fly.status["paused"] is True
+    deploy.prepare(mode="enforce", indexer="monitor")
+    fly.update(tmp_path, mode="enforce", indexer="monitor")
+    deploy.restore(timeout=30)
+    assert deploy.verify(mode="enforce", indexer="monitor", timeout=15) == bridge_image
+    assert original_snapshot == (state_path.read_bytes(), config_path.read_bytes())
+    deploy.resume(state, activate=True)
+    assert fly.status["paused"] is False
+
+
+@pytest.mark.parametrize("paused", [False, True])
+def test_activation_preserves_existing_enforce_operator_pause(monkeypatch, tmp_path, paused):
+    fly = FakeFly(monkeypatch, mode="enforce", paused=paused)
+    state = deploy.capture(tmp_path / "state.json", tmp_path / "rollback.json")
+    fly.status["paused"] = True
+    deploy.resume(state, activate=True)
+    assert fly.status["paused"] is paused
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"controller": None},
+        {"controller": {"status": "error", "fresh": True}},
+        {"indexer_owner": None},
+        {"indexer_owner": "psat-singleton-indexer:abc"},
+    ],
+)
+def test_activation_requires_controller_health_and_actual_monitor_indexer_owner(monkeypatch, overrides):
+    fly = FakeFly(monkeypatch, mode="enforce", paused=True)
+    for row in fly.rows:
+        row["config"]["env"]["PSAT_INDEXER_GROUP"] = "monitor"
+    fly.readiness_overrides = overrides
+    with pytest.raises(TimeoutError, match="ownership not ready"):
+        deploy.verify(mode="enforce", indexer="monitor", timeout=10)
+    assert "admin:resume" not in fly.events
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("mode", "observe"),
+        ("paused", False),
+        ("boot_id", "stale"),
+        ("controller_machine_id", "wrong-monitor"),
+    ],
+)
+def test_activation_rejects_stale_or_wrong_controller_observations(monkeypatch, field, value):
+    fly = FakeFly(monkeypatch, paused=True)
+    observation = deploy.admin("ready")["controller"]
+    observation["detail"][field] = value if field != "mode" else "enforce"
+    fly.readiness_overrides = {"controller": observation}
+    with pytest.raises(TimeoutError):
+        deploy.verify(mode="observe", indexer="workers", timeout=10)
+
+
+def test_activation_rejects_partial_group_update(monkeypatch):
+    fly = FakeFly(monkeypatch, paused=True)
+    fly.rows[1]["image_ref"]["digest"] = "sha256:stale-monitor"
+    with pytest.raises(RuntimeError, match="mixed layouts or images"):
+        deploy.verify(mode="observe", indexer="workers", timeout=10)
+
+
+@pytest.mark.parametrize("partial", [False, True])
+def test_legacy_rollback_moves_indexer_back_even_with_failed_controller(monkeypatch, tmp_path, partial):
+    import json
+
+    fly = FakeFly(monkeypatch, mode="off")
+    state = deploy.capture(tmp_path / "state.json", tmp_path / "rollback.json")
+    fly.update(tmp_path, mode="observe")
+    bridge_config = tmp_path / "bridge.json"
+    bridge_config.write_text((tmp_path / "new-release.json").read_text())
+    deploy.prepare(mode="enforce", indexer="monitor")
+    fly.update(tmp_path, mode="enforce", indexer="monitor")
+    if partial:
+        fly.rows[0]["config"]["env"] = json.loads(bridge_config.read_text())["env"]
+    fly.readiness_overrides = {"controller": {"status": "error", "fresh": True}}
+    deploy.rollback(state, bridge_config=bridge_config)
+    deploy.resume(state)
+    assert all(deploy.layout(row) == ("off", "workers") for row in fly.rows)
+    assert fly.rows[0]["state"] == "started"
+    assert fly.rows[0]["config"]["image"] == state["image"]
+    updates = [command for command in fly.commands if command[1] == "deploy"]
+    assert updates[-2][updates[-2].index("--config") + 1] == str(bridge_config)
+    assert updates[-1][updates[-1].index("--config") + 1] == state["config"]
+    assert "admin:resume" not in fly.events
+
+
+def test_production_defaults_enable_split_with_two_gib_monitor():
+    source = Path("fly.toml").read_text()
+    assert 'PSAT_WORKER_LIFECYCLE_MODE = "enforce"' in source
+    assert 'PSAT_INDEXER_GROUP = "monitor"' in source
+    monitor = source.split('processes = ["monitor"]')[1].split("[[restart]]")[0]
+    assert 'size = "shared-cpu-2x"' in monitor and 'memory = "2048mb"' in monitor

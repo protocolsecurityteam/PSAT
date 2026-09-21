@@ -265,17 +265,89 @@ def restore(*, timeout: float = 300, stable_seconds: float = 10) -> None:
     raise TimeoutError("worker did not become ready; lifecycle remains paused")
 
 
-def resume(state: dict) -> None:
+def verify(*, mode: str, indexer: str, timeout: float = 300, require_controller: bool = True) -> str:
+    """Require a coherent release, successful controller pass and indexer lock."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        rows = machines()
+        workers, monitors = group(rows, "workers"), group(rows, "monitor")
+        if len(workers) != 1 or len(monitors) != 1:
+            raise RuntimeError("verification requires one worker and one monitor")
+        target = workers[0]
+        digest = image(target)
+        if any(
+            layout(row) != (mode, indexer) or image(row) != digest
+            for name in ("workers", "monitor", "web", "browser")
+            for row in group(rows, name)
+        ):
+            raise RuntimeError("deployment left mixed layouts or images")
+        status = admin("ready")
+        controller = status.get("controller") or {}
+        decision = controller.get("detail") or {}
+        owner = monitors[0] if indexer == "monitor" else target
+        if (
+            target["state"] == monitors[0]["state"] == "started"
+            and status.get("paused") is True
+            and status.get("phase") == "running"
+            and status.get("machine_id") == target["id"]
+            and status.get("boot_fresh") is True
+            and (
+                not require_controller
+                or (
+                    controller.get("status") == "running"
+                    and controller.get("fresh") is True
+                    and decision.get("mode") == mode
+                    and decision.get("paused") is True
+                    and decision.get("boot_id") == status.get("boot_id")
+                    and decision.get("controller_machine_id") == monitors[0]["id"]
+                )
+            )
+            and status.get("indexer_owner") == f"psat-singleton-indexer:{owner['id']}"
+        ):
+            return digest
+        time.sleep(5)
+    raise TimeoutError("controller or indexer ownership not ready; lifecycle remains paused")
+
+
+def resume(state: dict, *, activate: bool = False) -> None:
     # Restore an operator's pre-existing pause, including an initially paused
     # first bridge. Legacy rollback needs no module on its old monitor image.
-    if layout(worker())[0] != "off":
-        admin("resume" if state.get("paused") is False else "pause")
+    mode = layout(worker())[0]
+    if mode != "off":
+        promote = activate and mode == "enforce" and state["mode"] != "enforce"
+        admin("resume" if promote or state.get("paused") is False else "pause")
 
 
-def rollback(state: dict) -> None:
+def rollback(state: dict, *, bridge_config: Path = Path("fly.bridge.toml")) -> None:
     config = Path(state["config"])
     if hashlib.sha256(config.read_bytes()).hexdigest() != state["config_sha256"]:
         raise RuntimeError("rollback configuration changed after snapshot")
+    rows = machines()
+    owners = [row for name in ("workers", "monitor") for row in group(rows, name)]
+    if state["mode"] == "off" and any(layout(row)[1] == "monitor" for row in owners):
+        # Legacy workers do not take the singleton. First move indexing back
+        # under the NEW image's ownership protocol, including partial rollouts.
+        current_image = image(next(row for row in owners if layout(row)[1] == "monitor"))
+        prepare(indexer="workers", mode="observe")
+        subprocess.run(
+            [
+                "flyctl",
+                "deploy",
+                "-a",
+                APP,
+                "--config",
+                str(bridge_config),
+                "--image",
+                current_image,
+                "--remote-only",
+                "--strategy",
+                "rolling",
+                "--skip-release-command",
+            ],
+            check=True,
+        )
+        restore()
+        verify(mode="observe", indexer="workers", require_controller=False)
     prepare(indexer=state["indexer"], mode=state["mode"])
     subprocess.run(
         [
@@ -301,22 +373,33 @@ def rollback(state: dict) -> None:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("snapshot", "prepare", "restore", "resume", "rollback"))
+    parser.add_argument("action", choices=("snapshot", "prepare", "restore", "verify", "resume", "rollback"))
     parser.add_argument("--state", type=Path, default=os.getenv("PSAT_LIFECYCLE_STATE_FILE", "fly.lifecycle.json"))
     parser.add_argument("--config", type=Path, default="fly.rollback.json")
+    parser.add_argument("--mode", default=os.getenv("PSAT_LIFECYCLE_MODE", "enforce"))
+    parser.add_argument("--indexer", default=os.getenv("PSAT_INDEXER_GROUP", "monitor"))
+    parser.add_argument("--activate", action="store_true")
     args = parser.parse_args()
     if args.action == "snapshot":
-        capture(args.state, args.config)
+        state = capture(args.state, args.config)
+        if os.getenv("GITHUB_OUTPUT"):
+            with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+                output.write(f"bridge_required={str(state['mode'] == 'off' and args.indexer == 'monitor').lower()}\n")
     elif args.action == "prepare":
-        prepare(indexer=os.getenv("PSAT_INDEXER_GROUP", "workers"), mode=os.getenv("PSAT_LIFECYCLE_MODE", "off"))
+        prepare(indexer=args.indexer, mode=args.mode)
     elif args.action == "restore":
         restore()
+    elif args.action == "verify":
+        digest = verify(mode=args.mode, indexer=args.indexer)
+        if os.getenv("GITHUB_OUTPUT"):
+            with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+                output.write(f"image={digest}\n")
     else:
         state = json.loads(args.state.read_text())
         if args.action == "rollback":
             rollback(state)
         else:
-            resume(state)
+            resume(state, activate=args.activate)
 
 
 if __name__ == "__main__":

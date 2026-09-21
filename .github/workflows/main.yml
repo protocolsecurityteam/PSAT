@@ -22,16 +22,16 @@ jobs:
   deploy:
     needs: ci
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    timeout-minutes: 120
     # `production` scopes FLY_PROD_API_TOKEN; its deployment branch policy allows only main.
     environment: production
     env:
       FLY_API_TOKEN: ${{ secrets.FLY_PROD_API_TOKEN }}
       PSAT_HEALTH_SECRET: ${{ secrets.PSAT_HEALTH_SECRET }}
       PROD_URL: https://snif.sh
-      PSAT_LIFECYCLE_MODE: ${{ vars.PSAT_LIFECYCLE_MODE || 'off' }}
-      PSAT_INDEXER_GROUP: ${{ vars.PSAT_INDEXER_GROUP || 'workers' }}
-      PSAT_MONITOR_MEMORY_MB: ${{ vars.PSAT_MONITOR_MEMORY_MB || '512' }}
+      PSAT_LIFECYCLE_MODE: enforce
+      PSAT_INDEXER_GROUP: monitor
+      PSAT_MONITOR_MEMORY_MB: '2048'
     steps:
       - uses: actions/checkout@v4
 
@@ -67,11 +67,34 @@ jobs:
           if source.count(marker) != 1:
               raise SystemExit("fly.toml health-secret marker is missing or repeated")
           Path(sys.argv[1]).write_text(source.replace(marker, secret))
+          bridge = render_config(source, mode="observe", indexer="workers", monitor_mb=2048)
+          Path("fly.bridge.toml").write_text(bridge.replace(marker, secret))
+          PY
+
+      - name: Verify lifecycle credentials are provisioned before changing machines
+        run: |
+          flyctl secrets list -a psat --json > "$RUNNER_TEMP/psat-secret-names.json"
+          python - "$RUNNER_TEMP/psat-secret-names.json" <<'PY'
+          import json
+          import sys
+          names = {row["name"] for row in json.load(open(sys.argv[1]))}
+          required = {"PSAT_LIFECYCLE_DATABASE_URL", "PSAT_WORKER_LIFECYCLE_TOKEN"}
+          if required - names:
+              raise SystemExit("Missing lifecycle secrets: " + ", ".join(sorted(required - names)))
           PY
 
       - name: Capture previous image and configuration for rollback
         id: snapshot
         run: python -m deploy.production.control snapshot --config "$GITHUB_WORKSPACE/fly.rollback.json"
+
+      - name: Install managed ownership for the first activation
+        id: bridge
+        if: steps.snapshot.outputs.bridge_required == 'true'
+        run: |
+          flyctl deploy -a psat --config "$GITHUB_WORKSPACE/fly.bridge.toml" --remote-only \
+            --build-arg GIT_SHA="${{ github.sha }}"
+          python -m deploy.production.control restore
+          python -m deploy.production.control verify --mode observe --indexer workers
 
       - name: Drain managed workers before deployment
         id: lifecycle
@@ -79,12 +102,20 @@ jobs:
 
       - name: Deploy to production
         id: deploy
+        env:
+          BRIDGE_IMAGE: ${{ steps.bridge.outputs.image }}
         run: |
+          image_args=()
+          if [[ -n "$BRIDGE_IMAGE" ]]; then
+            image_args=(--image "$BRIDGE_IMAGE" --skip-release-command)
+          fi
           flyctl deploy -a psat --config "$GITHUB_WORKSPACE/fly.production.toml" --remote-only \
-            --build-arg GIT_SHA="${{ github.sha }}"
+            --build-arg GIT_SHA="${{ github.sha }}" "${image_args[@]}"
 
       - name: Restore workers and verify running boot
-        run: python -m deploy.production.control restore
+        run: |
+          python -m deploy.production.control restore
+          python -m deploy.production.control verify
 
       - name: Wait for /api/health
         # /api/health is the deep probe — DB SELECT 1 + storage head_bucket. 503 on any failure.
@@ -135,11 +166,15 @@ jobs:
         id: rollback
         # A deployment can fail after draining or after updating only some groups.
         # Use the captured image/config pair and skip schema migration on the old image.
-        if: failure() && steps.snapshot.outcome == 'success' && steps.lifecycle.outcome == 'success' && steps.deploy.outcome != 'skipped'
+        if: failure() && steps.snapshot.outcome == 'success' && (steps.bridge.outcome == 'failure' || steps.bridge.outcome == 'success' || (steps.lifecycle.outcome == 'success' && steps.deploy.outcome != 'skipped'))
         run: |
           python -m deploy.production.control rollback
           curl -fsS --retry 12 --retry-delay 5 --retry-all-errors --max-time 10 "$PROD_URL/api/health" >/dev/null
 
-      - name: Resume lifecycle after deployment or successful rollback
-        if: always() && steps.snapshot.outcome == 'success' && (success() || steps.rollback.outcome == 'success')
+      - name: Activate lifecycle after successful deployment
+        if: success()
+        run: python -m deploy.production.control resume --activate
+
+      - name: Restore previous lifecycle pause after successful rollback
+        if: failure() && steps.rollback.outcome == 'success'
         run: python -m deploy.production.control resume
