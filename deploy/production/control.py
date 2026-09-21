@@ -149,15 +149,9 @@ def capture(state_path: Path, config_path: Path) -> dict:
     if config_path.suffix != ".json":
         raise ValueError("rollback configuration must use .json")
     # Config is stored remotely by Fly, so it belongs to the old release, not
-    # this checkout. --image rollback needs no local build section.
-    subprocess.run(
-        ["flyctl", "config", "save", "-a", APP, "--json", "--yes", "--config", str(config_path)],
-        check=True,
-        stdout=subprocess.DEVNULL,
-        timeout=30,
-    )
-    config_path.chmod(0o600)
-    config = json.loads(config_path.read_text())
+    # this checkout. Read JSON from stdout: config save's --config is an input
+    # path and cannot name a backup file that does not exist yet.
+    config = json.loads(subprocess.check_output(["flyctl", "config", "show", "-a", APP], text=True, timeout=30))
     if config.get("app") != APP:
         raise RuntimeError("captured configuration belongs to a different app")
     old_env = config.get("env", {})

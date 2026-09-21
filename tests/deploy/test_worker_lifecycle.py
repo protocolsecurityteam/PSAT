@@ -149,6 +149,10 @@ class FakeFly:
         self.commands.append(command)
         if command[1:3] == ["machines", "list"]:
             return json.dumps(self.rows)
+        if command[1:3] == ["config", "show"]:
+            assert command == ["flyctl", "config", "show", "-a", "psat"]
+            self.events.append("config:show")
+            return json.dumps(self.saved_config)
         assert command[1:3] == ["ssh", "console"]
         target_id = command[command.index("--machine") + 1]
         target = next(row for row in self.rows if row["id"] == target_id)
@@ -183,13 +187,9 @@ class FakeFly:
     def run(self, command, **_kwargs):
         import json
         import subprocess
-        from pathlib import Path
 
         self.commands.append(command)
-        if command[1:3] == ["config", "save"]:
-            self.events.append("config:save")
-            Path(command[command.index("--config") + 1]).write_text(json.dumps(self.saved_config))
-        elif command[1:3] == ["machine", "start"]:
+        if command[1:3] == ["machine", "start"]:
             self.events.append("start")
             assert command[3] == "abc"
             self.rows[0]["state"] = "started"
@@ -292,7 +292,9 @@ def test_snapshot_preserves_immutable_image_remote_config_and_actual_allocations
     fly.rows[1]["config"]["guest"] = {"cpu_kind": "shared", "cpus": 2, "memory_mb": 4096}
     config_path = tmp_path / "rollback.json"
     state_path = tmp_path / "state.json"
+    assert not config_path.exists() and not state_path.exists()
     snapshot = deploy.capture(state_path, config_path)
+    assert ["flyctl", "config", "show", "-a", "psat"] in fly.commands
     assert snapshot["image"] == "registry.fly.io/psat@sha256:old"
     assert snapshot["config_sha256"] == hashlib.sha256(config_path.read_bytes()).hexdigest()
     config = json.loads(config_path.read_text())
@@ -303,6 +305,24 @@ def test_snapshot_preserves_immutable_image_remote_config_and_actual_allocations
     assert allocations["monitor"]["memory_mb"] == 4096
     assert stat.S_IMODE(config_path.stat().st_mode) == stat.S_IMODE(state_path.stat().st_mode) == 0o600
     assert "admin:drain" not in fly.events and "start" not in fly.events
+
+
+def test_snapshot_config_fetch_failure_leaves_no_backup_or_state(monkeypatch, tmp_path):
+    import subprocess
+
+    fly = FakeFly(monkeypatch, mode="off")
+
+    def fail_config_fetch(command, **kwargs):
+        if command[1:3] == ["config", "show"]:
+            raise subprocess.CalledProcessError(1, command)
+        return fly.check_output(command, **kwargs)
+
+    monkeypatch.setattr(deploy.subprocess, "check_output", fail_config_fetch)
+    state_path, config_path = tmp_path / "state.json", tmp_path / "rollback.json"
+    with pytest.raises(subprocess.CalledProcessError):
+        deploy.capture(state_path, config_path)
+    assert not state_path.exists() and not config_path.exists()
+    assert fly.events == []
 
 
 def test_first_bridge_failure_rolls_back_matching_legacy_release_and_can_deploy_again(monkeypatch, tmp_path):
@@ -422,7 +442,7 @@ def test_snapshot_rejects_unresolved_mutable_image(monkeypatch, tmp_path):
     fly.rows[0].pop("image_ref")
     with pytest.raises(RuntimeError, match="immutable image"):
         deploy.capture(tmp_path / "state.json", tmp_path / "rollback.json")
-    assert "config:save" not in fly.events
+    assert "config:show" not in fly.events
 
 
 def add_fly_standbys(fly):
