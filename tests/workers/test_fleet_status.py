@@ -430,7 +430,8 @@ def test_reconcile_and_heartbeat_run_while_scan_blocks(monkeypatch):
         release_scan.wait(timeout=10)  # bounded so a wiring bug can't hang the suite
         return idx.ScanSummary()
 
-    def fake_reconcile(_session):
+    def fake_reconcile(_session, *, stop_event):
+        assert stop_event is stop
         reconcile_called.set()
         return (0, 0)
 

@@ -74,8 +74,8 @@ PIPELINE_SERVICE_GLOBS: tuple[str, ...] = (
 # stops matching a real violation.
 ALLOW_LIST: dict[str, dict[int, str]] = {
     "services/resolution/indexer_scheduler.py": {
-        83: "Indexer daemon has no job accumulator; failed enrollment remains in its durable retry queue.",
-        146: "Indexer daemon has no job accumulator; failed reconciliation remains in its durable retry queue.",
+        88: "Indexer daemon has no job accumulator; failed enrollment remains in its durable retry queue.",
+        155: "Indexer daemon has no job accumulator; failed reconciliation remains in its durable retry queue.",
     },
     "workers/discovery.py": {
         # Boot-time chain-enable sweep in main(): no job is claimed yet, so no
