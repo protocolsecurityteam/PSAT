@@ -10,6 +10,10 @@ kill_timeout = 30
   dockerfile = "deploy/Dockerfile"
 
 [env]
+  # Rollout stays disabled until healthy-load/cost validation. The production
+  # workflow renders the staged layout from repository variables (see runbook).
+  PSAT_WORKER_LIFECYCLE_MODE = "off"
+  PSAT_INDEXER_GROUP = "workers"
   PORT = "8000"
   PYTHONUNBUFFERED = "1"
   PSAT_EDGE_MODE = "cloudflare"
@@ -115,3 +119,10 @@ kill_timeout = 30
 [[restart]]
   policy = "always"
   processes = ["monitor"]
+
+# A successful cooperative idle exit must remain stopped. Unexpected child
+# death exits nonzero and is still restarted by Fly.
+[[restart]]
+  policy = "on-failure"
+  retries = 10
+  processes = ["workers"]

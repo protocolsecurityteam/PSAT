@@ -22,21 +22,23 @@ jobs:
   deploy:
     needs: ci
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     # `production` scopes FLY_PROD_API_TOKEN; its deployment branch policy allows only main.
     environment: production
     env:
       FLY_API_TOKEN: ${{ secrets.FLY_PROD_API_TOKEN }}
       PSAT_HEALTH_SECRET: ${{ secrets.PSAT_HEALTH_SECRET }}
       PROD_URL: https://snif.sh
+      PSAT_LIFECYCLE_MODE: ${{ vars.PSAT_LIFECYCLE_MODE || 'off' }}
+      PSAT_INDEXER_GROUP: ${{ vars.PSAT_INDEXER_GROUP || 'workers' }}
+      PSAT_MONITOR_MEMORY_MB: ${{ vars.PSAT_MONITOR_MEMORY_MB || '512' }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Setup flyctl
         uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1
 
-      - name: Deploy to production
-        id: deploy
+      - name: Render production configuration
         # Runtime secrets are managed manually via `fly secrets set -a psat ...`; this workflow doesn't touch them.
         # GIT_SHA is baked into the image so /api/version can return it for post-deploy smoke checks.
         # Fly resolves relative build paths from the config file, so keep the generated config at the workspace root.
@@ -47,16 +49,30 @@ jobs:
           import re
           import sys
           from pathlib import Path
+          from scripts.worker_lifecycle_config import render
 
           secret = os.environ["PSAT_HEALTH_SECRET"]
           if not re.fullmatch(r"[a-f0-9]{64}", secret):
               raise SystemExit("PSAT_HEALTH_SECRET must be a random 32-byte hex secret")
-          source = Path("fly.toml").read_text()
+          source = render(
+              Path("fly.toml").read_text(),
+              mode=os.environ["PSAT_LIFECYCLE_MODE"],
+              indexer=os.environ["PSAT_INDEXER_GROUP"],
+              monitor_mb=int(os.environ["PSAT_MONITOR_MEMORY_MB"]),
+          )
           marker = "REPLACE_WITH_PSAT_HEALTH_SECRET"
           if source.count(marker) != 1:
               raise SystemExit("fly.toml health-secret marker is missing or repeated")
           Path(sys.argv[1]).write_text(source.replace(marker, secret))
           PY
+
+      - name: Drain managed workers before deployment
+        id: lifecycle
+        run: python scripts/worker_lifecycle_deploy.py prepare
+
+      - name: Deploy to production
+        id: deploy
+        run: |
           flyctl deploy -a psat --config "$GITHUB_WORKSPACE/fly.production.toml" --remote-only \
             --build-arg GIT_SHA="${{ github.sha }}"
 
@@ -106,6 +122,7 @@ jobs:
         run: uv run pytest -m "live and smoke" -q
 
       - name: Rollback prod on smoke failure
+        id: rollback
         # Re-deploy the previous successful release's image. Only fires when one of the steps
         # after deploy (health, SHA, smoke) failed. If flyctl deploy itself fails,
         # release_command aborts before rolling traffic and there is nothing to roll back.
@@ -113,6 +130,7 @@ jobs:
         if: failure() && steps.deploy.outcome == 'success'
         run: |
           echo "::warning::Smoke failed — rolling back psat to previous release"
+          python scripts/worker_lifecycle_deploy.py prepare
           PREV_IMAGE=$(flyctl releases -a psat --json \
             | jq -r '[.[] | select(.Status == "complete")] | .[1].ImageRef // empty')
           if [ -z "$PREV_IMAGE" ]; then
@@ -126,3 +144,7 @@ jobs:
             echo "::error::Rollback deploy failed; manual intervention required"
             exit 1
           }
+
+      - name: Resume lifecycle after deployment or successful rollback
+        if: always() && steps.lifecycle.outputs.drained == 'true' && (success() || steps.rollback.outcome == 'success')
+        run: python scripts/worker_lifecycle_deploy.py resume
