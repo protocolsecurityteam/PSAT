@@ -32,9 +32,11 @@ jobs:
       PSAT_LIFECYCLE_MODE: ${{ vars.PSAT_LIFECYCLE_MODE || 'off' }}
       PSAT_INDEXER_GROUP: ${{ vars.PSAT_INDEXER_GROUP || 'workers' }}
       PSAT_MONITOR_MEMORY_MB: ${{ vars.PSAT_MONITOR_MEMORY_MB || '512' }}
-      PSAT_LIFECYCLE_STATE_FILE: ${{ runner.temp }}/psat-lifecycle.json
     steps:
       - uses: actions/checkout@v4
+
+      - name: Initialize lifecycle state path
+        run: printf 'PSAT_LIFECYCLE_STATE_FILE=%s/psat-lifecycle.json\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
 
       - name: Setup flyctl
         uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1
