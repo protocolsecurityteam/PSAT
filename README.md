@@ -8,10 +8,10 @@ The repo fetches verified contract source, runs static analysis, resolves curren
 
 Backend code is now grouped by domain:
 
-- [`services/discovery/`](/home/gnome2/asu/capstone/PSAT/services/discovery)
-- [`services/static/`](/home/gnome2/asu/capstone/PSAT/services/static)
-- [`services/resolution/`](/home/gnome2/asu/capstone/PSAT/services/resolution)
-- [`services/policy/`](/home/gnome2/asu/capstone/PSAT/services/policy)
+- [`services/discovery/`](services/discovery/)
+- [`services/static/`](services/static/)
+- [`services/resolution/`](services/resolution/)
+- [`services/policy/`](services/policy/)
 
 The codebase now lives under the split service packages in `services/`.
 
