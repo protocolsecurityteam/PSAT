@@ -60,7 +60,7 @@ def test_oz_governor_timelock_and_safe_are_observed_at_one_block(monkeypatch):
         "deadline": 190,
         "eta": 2000,
     }
-    assert all(block_tag == "0x64" for _payload, block_tag in calls)
+    assert all(block_tag == {"blockHash": "0x" + "10" * 32, "requireCanonical": True} for _payload, block_tag in calls)
 
 
 def test_unknown_contract_produces_diagnostic_not_configuration(monkeypatch):

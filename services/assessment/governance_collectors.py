@@ -114,7 +114,9 @@ def probe_governance(
     """Observe supported getters together at one canonical block."""
     point = _chain_point(rpc_url, chain_id)
     target = address.lower()
-    block_tag = hex(point["block_number"])
+    # EIP-1898 binds every read to the hash we record as evidence. A block
+    # number can name a different state if a reorg lands between RPC calls.
+    block_tag = {"blockHash": point["block_hash"], "requireCanonical": True}
     config_results = eth_call_batch(
         rpc_url,
         [{"to": target, "data": _calldata(getter.signature)} for getter in _CONFIG_GETTERS],

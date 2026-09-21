@@ -85,6 +85,17 @@ def test_eth_call_batch_empty_calls():
     assert rpc.eth_call_batch("http://rpc", [], "latest") == []
 
 
+def test_eth_call_batch_preserves_hash_selector(monkeypatch):
+    session = _FakeSession([{"jsonrpc": "2.0", "id": 0, "result": "0x01"}])
+    monkeypatch.setattr(rpc, "_get_session", lambda: session)
+    selector = {"blockHash": "0x" + "ab" * 32, "requireCanonical": True}
+
+    out = rpc.eth_call_batch("http://rpc", [{"to": "0x" + "22" * 20, "data": "0x00"}], selector)
+
+    assert out[0].success is True
+    assert session.posted[0]["params"][1] == selector
+
+
 def test_extract_revert_data_shapes():
     assert rpc._extract_revert_data("0x08c379a0dead") == "0x08c379a0dead"
     assert rpc._extract_revert_data("Reverted 0xdeadbeef") == "0xdeadbeef"

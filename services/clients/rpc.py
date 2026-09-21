@@ -976,7 +976,7 @@ def _eth_call_result_from_rpc_item(item: Mapping[str, Any]) -> EthCallResult:
 def eth_call_batch(
     rpc_url: str,
     calls: Sequence[Mapping[str, str]],
-    block_tag: str = "latest",
+    block_tag: str | Mapping[str, str | bool] = "latest",
     *,
     headers: Mapping[str, str] | None = None,
     chain_id: int | None = None,
