@@ -31,7 +31,9 @@ def fly(monkeypatch):
 
 
 def test_fly_only_starts_the_unique_worker_and_ignores_standby(fly):
-    fly.http.get.return_value.json.return_value = [machine(), machine(standby_for=["abc123"])]
+    standby = machine(standbys=["abc123"])
+    standby["id"] = "def456"
+    fly.http.get.return_value.json.return_value = [standby, machine()]
     assert fly.target()["id"] == "abc123"
     fly.start("abc123")
     assert fly.http.post.call_args.args[0].endswith("/machines/abc123/start")
@@ -61,13 +63,21 @@ def test_failed_fly_read_cannot_stop_workers(fly):
     fly.http.post.assert_not_called()
 
 
-def test_active_standby_inhibits_waking_an_additional_machine(fly):
-    standby = machine(standby_for=["abc123"])
-    standby["state"] = "started"
+@pytest.mark.parametrize("state", ["starting", "started", "stopping", "suspended"])
+def test_active_standby_inhibits_waking_an_additional_machine(fly, state):
+    standby = machine(standbys=["abc123"])
+    standby["id"] = "def456"
+    standby["state"] = state
     fly.http.get.return_value.json.return_value = [machine(), standby]
-    with pytest.raises(RuntimeError, match="standby"):
+    with pytest.raises(RuntimeError, match="standby is active"):
         fly.target()
     fly.http.post.assert_not_called()
+
+
+@pytest.mark.parametrize("standbys", [None, []])
+def test_empty_standbys_does_not_hide_primary(fly, standbys):
+    fly.http.get.return_value.json.return_value = [machine(standbys=standbys)]
+    assert fly.target()["id"] == "abc123"
 
 
 def test_sleep_exemption_requires_fresh_controller_and_no_work():

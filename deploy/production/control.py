@@ -47,7 +47,7 @@ def machines() -> list[dict]:
         subprocess.check_output(["flyctl", "machines", "list", "-a", APP, "--json"], text=True, timeout=30)
     )
     if any(
-        row.get("config", {}).get("standby_for")
+        row.get("config", {}).get("standbys")
         and row.get("config", {}).get("metadata", {}).get("fly_process_group") in {"workers", "monitor"}
         and row.get("state") not in {"stopped", "destroyed"}
         for row in rows
@@ -61,7 +61,7 @@ def group(rows: list[dict], name: str) -> list[dict]:
         row
         for row in rows
         if row.get("config", {}).get("metadata", {}).get("fly_process_group") == name
-        and not row.get("config", {}).get("standby_for")
+        and not row.get("config", {}).get("standbys")
         and row.get("state") != "destroyed"
     ]
 

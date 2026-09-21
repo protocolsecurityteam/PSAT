@@ -44,7 +44,7 @@ class FlyMachines:
         rows = response.json()
         if any(
             m.get("config", {}).get("metadata", {}).get("fly_process_group") == "workers"
-            and m.get("config", {}).get("standby_for")
+            and m.get("config", {}).get("standbys")
             and m.get("state") not in {"stopped", "destroyed"}
             for m in rows
         ):
@@ -53,7 +53,7 @@ class FlyMachines:
             m
             for m in rows
             if m.get("config", {}).get("metadata", {}).get("fly_process_group") == "workers"
-            and not m.get("config", {}).get("standby_for")
+            and not m.get("config", {}).get("standbys")
             and m.get("state") != "destroyed"
         ]
         if len(machines) != 1:

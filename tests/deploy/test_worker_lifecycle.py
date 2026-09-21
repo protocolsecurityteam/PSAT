@@ -158,7 +158,7 @@ class FakeFly:
         if action in {"pause", "drain", "resume"}:
             self.status["paused"] = action != "resume"
         if action == "drain":
-            self.rows[0]["state"] = "stopped"
+            next(row for row in self.rows if row["id"] == "abc")["state"] = "stopped"
             self.status["phase"] = "stopped"
         return "Connecting to machine...\n" + json.dumps(self.status)
 
@@ -405,3 +405,43 @@ def test_snapshot_rejects_unresolved_mutable_image(monkeypatch, tmp_path):
     with pytest.raises(RuntimeError, match="immutable image"):
         deploy.capture(tmp_path / "state.json", tmp_path / "rollback.json")
     assert "config:save" not in fly.events
+
+
+def add_fly_standbys(fly):
+    # Fly's --standby-for flag serializes as config.standbys, not standby_for.
+    # Match the live topology: a stopped standby for each non-service group.
+    for primary in list(fly.rows):
+        if primary["config"]["metadata"]["fly_process_group"] in {"workers", "monitor"}:
+            standby = fly.copy(primary)
+            standby["id"] += "-standby"
+            standby["state"] = "stopped"
+            standby["config"]["standbys"] = [primary["id"]]
+            # A cold spare need not have the same image as the active release.
+            standby["image_ref"]["digest"] = "sha256:older-standby"
+            fly.rows.insert(0, standby)
+
+
+@pytest.mark.parametrize("mode", ["off", "observe"])
+def test_live_standby_shape_allows_snapshot_and_preparation(monkeypatch, tmp_path, mode):
+    fly = FakeFly(monkeypatch, mode=mode)
+    add_fly_standbys(fly)
+    rows = deploy.machines()
+    assert [m["id"] for m in deploy.group(rows, "workers")] == ["abc"]
+    assert [m["id"] for m in deploy.group(rows, "monitor")] == ["monitor"]
+    snapshot = deploy.capture(tmp_path / "state.json", tmp_path / "rollback.json")
+    assert snapshot["image"] == "registry.fly.io/psat@sha256:old"
+    assert snapshot["mode"] == mode
+    assert deploy.prepare(indexer="workers", mode=mode) is (mode != "off")
+    assert all(row["state"] == "stopped" for row in fly.rows if row["config"].get("standbys"))
+    assert not any(command[1:3] == ["machine", "start"] for command in fly.commands)
+
+
+@pytest.mark.parametrize("group", ["workers", "monitor"])
+@pytest.mark.parametrize("state", ["starting", "started", "stopping", "suspended"])
+def test_active_standby_blocks_deployment_before_any_mutation(monkeypatch, tmp_path, group, state):
+    fly = FakeFly(monkeypatch, mode="off")
+    add_fly_standbys(fly)
+    next(row for row in fly.rows if row["id"] == ("abc" if group == "workers" else group) + "-standby")["state"] = state
+    with pytest.raises(RuntimeError, match="active standby"):
+        deploy.capture(tmp_path / "state.json", tmp_path / "rollback.json")
+    assert fly.events == []
