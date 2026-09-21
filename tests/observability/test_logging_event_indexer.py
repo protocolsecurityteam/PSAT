@@ -184,7 +184,7 @@ def test_indexer_loop_binds_worker_id_on_both_threads(monkeypatch):
     seen: dict[str, str | None] = {}
     stop = Event()
 
-    def _fake_enroll_from_completed_jobs(_session):
+    def _fake_enroll_from_completed_jobs(_session, **_kwargs):
         seen["backfill"] = worker_id_var.get()
         return 0
 
@@ -198,11 +198,11 @@ def test_indexer_loop_binds_worker_id_on_both_threads(monkeypatch):
         stop.set()
 
     monkeypatch.setattr(indexer, "SessionLocal", lambda: nullcontext(object()))
-    monkeypatch.setattr(indexer, "enroll_from_completed_jobs", _fake_enroll_from_completed_jobs)
-    monkeypatch.setattr(indexer, "enroll_from_tracked_topics", lambda *_a, **_k: 0)
+    from services.resolution import indexer_scheduler
+
+    monkeypatch.setattr(indexer_scheduler, "drain_enrollment", _fake_enroll_from_completed_jobs)
     monkeypatch.setattr(indexer, "scan_enrolled_events", lambda *_a, **_k: ScanSummary())
-    monkeypatch.setattr(indexer, "reconcile_deferred_resolutions", lambda *_a, **_k: 0)
-    monkeypatch.setattr(indexer, "reconcile_role_set_drift", lambda *_a, **_k: 0)
+    monkeypatch.setattr(indexer_scheduler, "drain_reconciliation", lambda *_a, **_k: (0, 0))
     monkeypatch.setattr(indexer, "_cursor_progress", lambda _s: (0, 0))
     monkeypatch.setattr(indexer, "record_heartbeat", _fake_heartbeat)
 

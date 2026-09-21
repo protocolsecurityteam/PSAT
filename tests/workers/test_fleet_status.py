@@ -430,20 +430,21 @@ def test_reconcile_and_heartbeat_run_while_scan_blocks(monkeypatch):
         release_scan.wait(timeout=10)  # bounded so a wiring bug can't hang the suite
         return idx.ScanSummary()
 
-    def fake_reconcile(_session, *, chain_id=1):
+    def fake_reconcile(_session):
         reconcile_called.set()
-        return 0
+        return (0, 0)
 
     def record(process, **kw):
         with beat_lock:
             beats.append((process, kw))
 
     monkeypatch.setattr(idx, "SessionLocal", lambda: nullcontext(MagicMock()))
-    monkeypatch.setattr(idx, "enroll_from_completed_jobs", lambda _session: 0)
+    from services.resolution import indexer_scheduler
+
+    monkeypatch.setattr(indexer_scheduler, "drain_enrollment", lambda _session, **_kw: 0)
     monkeypatch.setattr(idx, "scan_enrolled_events", blocking_scan)
     monkeypatch.setattr(idx, "_cursor_progress", lambda _session: (0, 0))
-    monkeypatch.setattr(idx, "reconcile_deferred_resolutions", fake_reconcile)
-    monkeypatch.setattr(idx, "reconcile_role_set_drift", lambda _session, *, chain_id=1: 0)
+    monkeypatch.setattr(indexer_scheduler, "drain_reconciliation", fake_reconcile)
     monkeypatch.setattr(idx, "record_heartbeat", record)
 
     t = Thread(

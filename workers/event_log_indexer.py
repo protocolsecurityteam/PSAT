@@ -7,10 +7,10 @@ import logging
 import os
 import signal
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from threading import Event, Lock, Thread
-from typing import Any, Mapping, MutableMapping, Protocol, Sequence, TypeGuard, cast
+from typing import Any, Callable, Mapping, MutableMapping, Protocol, Sequence, TypeGuard, cast
 
 from eth_utils.crypto import keccak
 from sqlalchemy import delete, func, select
@@ -39,7 +39,6 @@ from db.queue import HEARTBEAT_EVENT_INDEXER, get_artifact, record_heartbeat
 from services.clients.etherscan import get_contract_creation_block
 from services.clients.rpc import require_rpc_url, rpc_request
 from services.resolution.caller_sources import CALLER_SOURCES as _CALLER_SOURCES
-from services.resolution.deferred_reconciler import reconcile_deferred_resolutions, reconcile_role_set_drift
 from services.resolution.repos.event_logs_rpc import FetchedEventLog, FetchWindowStat
 from services.resolution.role_store_standards import all_topic0s, detect_standards, resolve_probe_code
 from utils.chains import (
@@ -292,7 +291,7 @@ class GroupStepResult:
 class ScanSummary:
     """What one ``scan_enrolled_events`` pass did, for the fleet heartbeat.
 
-    ``windows_scanned`` (group steps run — one shared getLogs per step, summed
+    ``windows_scanned`` (fetched windows — one shared getLogs per window, summed
     across all address groups) over ``total_cursors`` reveals the from-0
     backfill signature: many windows scanned with 0 inserted and
     ``caught_up_cursors`` < ``total_cursors`` means a cold address is grinding
@@ -807,7 +806,7 @@ def scan_enrolled_events(
                 )
                 session.commit()
                 inserted += result.inserted
-                windows_scanned += 1
+                windows_scanned += int(result.fetched)
                 group_members_at_target = result.members_at_target
                 if result.group_complete:
                     break
@@ -833,12 +832,35 @@ def scan_enrolled_events(
                 },
             )
         caught_up_cursors += group_members_at_target
+    pending_at_budget = False
+    if windows_scanned >= pass_budget:
+        for chain_id, target in targets.items():
+            if (
+                session.execute(
+                    select(IndexedEventCursor.event_address)
+                    .where(
+                        IndexedEventCursor.chain_id == chain_id,
+                        IndexedEventCursor.event_address != _ZERO_ADDRESS,
+                        IndexedEventCursor.last_indexed_block < target,
+                    )
+                    .limit(1)
+                ).first()
+                is not None
+            ):
+                pending_at_budget = True
+                break
+        # A chain not visited because the budget ran out may have work. At most
+        # one extra short pass discovers that it is already warm.
+        pending_at_budget |= any(
+            chain not in targets and chain in fetchers and chain in head_fetchers and chain in block_hash_fetchers
+            for chain, _address in groups
+        )
     return ScanSummary(
         inserted=inserted,
         windows_scanned=windows_scanned,
         caught_up_cursors=caught_up_cursors,
         total_cursors=len(rows),
-        budget_exhausted=windows_scanned >= pass_budget,
+        budget_exhausted=pending_at_budget,
         failed_groups=failed_groups,
     )
 
@@ -899,6 +921,8 @@ def _enroll_witnessed(
     seed_cache: dict[tuple[int, str], int | None],
     witness_cache: dict[tuple[int, str], tuple[int | None, str]],
     enrollment_basis: str,
+    pending: set[tuple[int, str]] | None = None,
+    progress: Callable[[], None] | None = None,
 ) -> bool:
     """Seed, witness-grade, and enrol one cursor. True when a row was inserted.
 
@@ -908,11 +932,15 @@ def _enroll_witnessed(
     """
     if _cursor_exists(session, chain_id, address, topic0):
         return False
+    if progress is not None:
+        progress()
     seed = _seed_block(address, seed_cache, chain_id=chain_id)
     if seed is None:
+        if pending is not None:
+            pending.add((chain_id, address.lower()))
         return False
     first_indexed_block, basis = _witness_seed_block(address, seed, witness_cache, chain_id=chain_id)
-    return enroll_event_cursor(
+    inserted = enroll_event_cursor(
         session,
         chain_id=chain_id,
         event_address=address,
@@ -922,23 +950,45 @@ def _enroll_witnessed(
         first_indexed_block_basis=basis,
         enrollment_basis=enrollment_basis,
     )
+    if progress is not None:
+        progress()
+    return inserted
 
 
-def enroll_from_completed_jobs(session: Session, *, limit: int = 500) -> int:
-    jobs = session.execute(
+@dataclass
+class EnrollmentCaches:
+    """Share lookups, including failures, within one enrollment pass only."""
+
+    seeds: dict[tuple[int, str], int | None] = field(default_factory=dict)
+    witnesses: dict[tuple[int, str], tuple[int | None, str]] = field(default_factory=dict)
+    role_topics: dict[tuple[int, str], list[str]] = field(default_factory=dict)
+
+
+def enroll_from_completed_jobs(
+    session: Session,
+    *,
+    limit: int = 500,
+    job_id: uuid.UUID | None = None,
+    pending: set[tuple[int, str]] | None = None,
+    progress: Callable[[], None] | None = None,
+    commit: bool = True,
+    caches: EnrollmentCaches | None = None,
+) -> int:
+    query = (
         select(Job)
         .where(Job.status == JobStatus.completed)
         .where(Job.address.isnot(None))
         .order_by(Job.updated_at.desc())
         .limit(limit)
-    ).scalars()
+    )
+    if job_id is not None:
+        query = query.where(Job.id == job_id)
+    jobs = session.execute(query).scalars()
     inserted = 0
-    # Caches are keyed by ``(chain_id, address)`` — the enrolled cursor's chain is
-    # the job's own chain, not a single map-wide value, so the same address on two
-    # chains keeps independent creation blocks and role-store standards.
-    seed_cache: dict[tuple[int, str], int | None] = {}
-    witness_cache: dict[tuple[int, str], tuple[int | None, str]] = {}
-    role_store_topic_cache: dict[tuple[int, str], list[str]] = {}
+    caches = caches if caches is not None else EnrollmentCaches()
+    seed_cache = caches.seeds
+    witness_cache = caches.witnesses
+    role_store_topic_cache = caches.role_topics
     for job in jobs:
         artifact = get_artifact(session, job.id, "predicate_trees")
         if not isinstance(artifact, dict):
@@ -976,6 +1026,8 @@ def enroll_from_completed_jobs(session: Session, *, limit: int = 500) -> int:
                     seed_cache=seed_cache,
                     witness_cache=witness_cache,
                     enrollment_basis=ENROLLMENT_BASIS_PREDICATE_HINT,
+                    pending=pending,
+                    progress=progress,
                 ):
                     inserted += 1
             if _is_solmate_cancall_descriptor(descriptor):
@@ -996,6 +1048,8 @@ def enroll_from_completed_jobs(session: Session, *, limit: int = 500) -> int:
                             seed_cache=seed_cache,
                             witness_cache=witness_cache,
                             enrollment_basis=ENROLLMENT_BASIS_PREDICATE_HINT,
+                            pending=pending,
+                            progress=progress,
                         ):
                             inserted += 1
             elif _is_delegated_role_gate_descriptor(descriptor):
@@ -1008,6 +1062,10 @@ def enroll_from_completed_jobs(session: Session, *, limit: int = 500) -> int:
                 if _is_enrollable_event_address(authority) and not _authority_has_role_store_cursor(
                     session, job_chain_id, authority
                 ):
+                    # The fast path accepts any role cursor: commit all topics
+                    # atomically. Caches keep external reads before the first insert.
+                    if progress is not None:
+                        progress()
                     for topic0 in _role_store_topic0s(session, authority, job_chain_id, role_store_topic_cache):
                         if _enroll_witnessed(
                             session,
@@ -1017,14 +1075,26 @@ def enroll_from_completed_jobs(session: Session, *, limit: int = 500) -> int:
                             seed_cache=seed_cache,
                             witness_cache=witness_cache,
                             enrollment_basis=ENROLLMENT_BASIS_PREDICATE_HINT,
+                            pending=pending,
                         ):
                             inserted += 1
-    session.commit()
+                    if progress is not None:
+                        progress()
+    if commit:
+        session.commit()
     return inserted
 
 
 def enroll_from_tracked_topics(
-    session: Session, *, limit: int = 500, scan_limit: int = DEFAULT_TRACKED_TOPIC_SCAN_LIMIT
+    session: Session,
+    *,
+    limit: int = 500,
+    scan_limit: int = DEFAULT_TRACKED_TOPIC_SCAN_LIMIT,
+    monitored_id: uuid.UUID | None = None,
+    pending: set[tuple[int, str]] | None = None,
+    progress: Callable[[], None] | None = None,
+    commit: bool = True,
+    caches: EnrollmentCaches | None = None,
 ) -> int:
     """Enrol durable cursors for the topics a monitoring tracking plan already
     names, which nothing enrolled before.
@@ -1045,12 +1115,15 @@ def enroll_from_tracked_topics(
     is what ``enrollment_basis = tracked_topics_asserted`` records and what the
     resolution-side gate keys on. Enrolment gathers evidence; it licenses nothing.
     """
-    rows = session.execute(
+    query = (
         select(MonitoredContract.address, MonitoredContract.chain, MonitoredContract.monitoring_config)
         .where(MonitoredContract.is_active.is_(True))
         .order_by(MonitoredContract.id.asc())
         .limit(scan_limit)
-    ).all()
+    )
+    if monitored_id is not None:
+        query = query.where(MonitoredContract.id == monitored_id)
+    rows = session.execute(query).all()
     if len(rows) == scan_limit:
         # The scan is truncated, so the tail of the fleet is unreachable this
         # pass AND every later one — the drain counter would read zero while
@@ -1062,8 +1135,9 @@ def enroll_from_tracked_topics(
         )
     inserted = 0
     worked = 0
-    seed_cache: dict[tuple[int, str], int | None] = {}
-    witness_cache: dict[tuple[int, str], tuple[int | None, str]] = {}
+    caches = caches if caches is not None else EnrollmentCaches()
+    seed_cache = caches.seeds
+    witness_cache = caches.witnesses
     for address, chain, config in rows:
         # ``limit`` bounds the addresses that still NEED a cursor, not the rows
         # inspected. Bounding the rows would re-inspect the same head of the
@@ -1099,11 +1173,11 @@ def enroll_from_tracked_topics(
         # An address whose every tracked topic already has a cursor is skipped
         # without spending the budget or a single RPC read, so successive passes
         # advance through the fleet instead of re-walking its head.
-        pending = [t for t in wanted if not _cursor_exists(session, chain_id, address, t)]
-        if not pending:
+        pending_topics = [t for t in wanted if not _cursor_exists(session, chain_id, address, t)]
+        if not pending_topics:
             continue
         worked += 1
-        for topic0 in pending:
+        for topic0 in pending_topics:
             if _enroll_witnessed(
                 session,
                 chain_id=chain_id,
@@ -1112,9 +1186,12 @@ def enroll_from_tracked_topics(
                 seed_cache=seed_cache,
                 witness_cache=witness_cache,
                 enrollment_basis=ENROLLMENT_BASIS_TRACKED_TOPICS,
+                pending=pending,
+                progress=progress,
             ):
                 inserted += 1
-    session.commit()
+    if commit:
+        session.commit()
     return inserted
 
 
@@ -1345,17 +1422,10 @@ def run_event_log_indexer_loop(
                     try:
                         with SessionLocal() as session:
                             with log_timed_phase(logger, "indexer_enroll", record_metric=False) as ph:
-                                from_jobs = enroll_from_completed_jobs(session)
-                                # Bounded per pass: each new cursor is a cold backfill, so
-                                # a large tracking plan is drained over successive passes
-                                # rather than dumping every window into one.
-                                from_tracked = enroll_from_tracked_topics(
-                                    session, limit=DEFAULT_TRACKED_TOPIC_ENROLL_LIMIT
-                                )
-                                enrolled = from_jobs + from_tracked
+                                from services.resolution.indexer_scheduler import drain_enrollment
+
+                                enrolled = drain_enrollment(session, tracked_limit=DEFAULT_TRACKED_TOPIC_ENROLL_LIMIT)
                                 ph["enrolled"] = enrolled
-                                ph["enrolled_from_jobs"] = from_jobs
-                                ph["enrolled_from_tracked_topics"] = from_tracked
                             with log_timed_phase(logger, "indexer_scan", record_metric=False) as ph:
                                 summary = scan_enrolled_events(
                                     session,
@@ -1411,18 +1481,9 @@ def run_event_log_indexer_loop(
                 try:
                     with SessionLocal() as session:
                         with log_timed_phase(logger, "indexer_reconcile", record_metric=False) as ph:
-                            # Reconcile once per chain the indexer serves — the
-                            # reconcilers filter authorities by chain_id, so the old
-                            # single implicit chain_id=1 call left every non-mainnet
-                            # chain's index-cold deferrals un-self-healed. The chain set
-                            # is the registry allowlist (inv. 10/14): mainnet-only
-                            # ({1}) by default, so mainnet behavior is unchanged.
-                            for reconcile_chain_id in sorted(supported_chain_ids()):
-                                reenqueued += reconcile_deferred_resolutions(session, chain_id=reconcile_chain_id)
-                                # Warm-drift arm: re-resolve completed jobs whose
-                                # enumerated role-store set has a grant/revoke indexed
-                                # past its frontier.
-                                drift_reenqueued += reconcile_role_set_drift(session, chain_id=reconcile_chain_id)
+                            from services.resolution.indexer_scheduler import drain_reconciliation
+
+                            reenqueued, drift_reenqueued = drain_reconciliation(session)
                             ph["reenqueued"] = reenqueued
                             ph["drift_reenqueued"] = drift_reenqueued
                     if reenqueued or drift_reenqueued:

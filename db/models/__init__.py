@@ -89,6 +89,7 @@ from .contracts import (
     UpgradeEvent,
     UpgradeTransaction,
 )
+from .indexer import IndexerWork
 from .jobs import (
     Artifact,
     Job,
@@ -209,6 +210,7 @@ __all__ = [
     "HOLDER_SET_EXHAUSTIVE_NOT_DETERMINED",
     "IndexedEventCursor",
     "IndexedEventLog",
+    "IndexerWork",
     "Job",
     "JobDependency",
     "JobStage",
