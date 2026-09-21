@@ -1,9 +1,8 @@
 """Guards against accidental migration branching.
 
-When two PRs each add a revision with the same ``down_revision``, Alembic
-silently produces a branched history. ``alembic upgrade head`` then errors
-with "Multiple head revisions are present" — but only at deploy time. This
-test catches it in CI instead.
+When two PRs add independent revisions, Alembic can produce multiple heads.
+``alembic upgrade head`` then fails at deploy time. A merge revision joins
+both histories while preserving revisions already applied in production.
 """
 
 from __future__ import annotations
@@ -33,10 +32,12 @@ def test_single_head_revision():
     )
 
 
-def test_no_branched_revisions():
+def test_only_intentional_branch_point():
     script = _script_dir()
-    branched = [r.revision for r in script.walk_revisions() if r.is_branch_point]
-    assert not branched, f"Branched revisions found: {branched}. Each revision should have at most one child."
+    branched = {r.revision for r in script.walk_revisions() if r.is_branch_point}
+    assert branched == {"b3d7e1f05a92"}, f"Unexpected Alembic branch points: {branched}"
+    join = script.get_revision("c90d1fe9c8e1")
+    assert set(join.down_revision) == {"a8c2d4e6f901", "c6a10d82e5b7"}
 
 
 @requires_postgres
