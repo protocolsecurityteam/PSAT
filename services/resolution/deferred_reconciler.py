@@ -79,7 +79,7 @@ from db.models import (
     exactness_eligible_cursor_clause,
 )
 from services.resolution.role_store_standards import all_topic0s
-from utils.chains import UnknownChainError, chain_by_id
+from utils.chains import UnknownChainError, chain_by_id, supported_chain_ids
 from utils.scoring_status import TRACE_STEP_ENUMERABLE_ROLE_STORE
 
 logger = logging.getLogger(__name__)
@@ -488,15 +488,23 @@ def reconcile_role_set_drift(session: Session, *, chain_id: int, limit: int = 20
             frontiers[authority] = frontier if prior is None else min(prior, frontier)
 
     reenqueued = 0
+    backfilled: dict[str, bool] = {}
+    drift: dict[tuple[str, int], bool] = {}
+
+    def has_drift(authority: str, frontier: int) -> bool:
+        if authority not in backfilled:
+            backfilled[authority] = _authority_backfilled(session, chain_id, authority)
+        if not backfilled[authority]:
+            return False
+        key = (authority, frontier)
+        if key not in drift:
+            drift[key] = _role_row_past_frontier(session, chain_id, authority, frontier)
+        return drift[key]
+
     for job_id, (address, frontiers) in by_job.items():
         if reenqueued >= limit:
             break
-        drifted = [
-            authority
-            for authority, frontier in frontiers.items()
-            if _authority_backfilled(session, chain_id, authority)
-            and _role_row_past_frontier(session, chain_id, authority, frontier)
-        ]
+        drifted = [authority for authority, frontier in frontiers.items() if has_drift(authority, frontier)]
         if not drifted:
             continue
         job = session.get(Job, job_id)
@@ -518,3 +526,71 @@ def reconcile_role_set_drift(session: Session, *, chain_id: int, limit: int = 20
     else:
         session.rollback()
     return reenqueued
+
+
+def enqueue_reorg_refreshes(session: Session, *, chain_id: int, authority: str) -> int:
+    """Queue per-job refreshes for removed history, even below fold frontiers.
+
+    The caller commits the fanout and reorg acknowledgement together.
+    """
+    from services.resolution.indexer_work import mark_dirty
+
+    rows = session.execute(
+        select(Job.id, EffectiveFunction.capability_expr)
+        .join(Contract, Contract.job_id == Job.id)
+        .join(EffectiveFunction, EffectiveFunction.contract_id == Contract.id)
+        .where(Job.chain_id == chain_id, jsonb_has_payload(EffectiveFunction.capability_expr))
+        .where(cast(EffectiveFunction.capability_expr, Text).ilike(f"%{TRACE_STEP_ENUMERABLE_ROLE_STORE}%"))
+        .execution_options(yield_per=100)
+    )
+    affected = {job_id for job_id, expr in rows if authority in {addr for addr, _ in _iter_role_store_frontiers(expr)}}
+    for job_id in sorted(affected, key=str):
+        mark_dirty(session, "refresh_job", str(job_id))
+    return len(affected)
+
+
+def refresh_invalidated_job(session: Session, job_id: Any) -> int:
+    """Requeue a reorg-invalidated fold once its inputs and execution slot allow."""
+    from services.resolution.indexer_work import WorkPending
+
+    job = session.execute(
+        select(Job).where(Job.id == job_id).with_for_update().execution_options(populate_existing=True)
+    ).scalar_one_or_none()
+    if job is None or job.status == JobStatus.failed_terminal:
+        return 0
+    if job.status != JobStatus.completed or job.stage != JobStage.done:
+        raise WorkPending("invalidated job is not completed")
+    chain_id = job.chain_id
+    if chain_id is None or chain_id not in supported_chain_ids():
+        raise WorkPending("invalidated job has no enabled chain")
+    rows = (
+        session.execute(
+            select(EffectiveFunction.capability_expr)
+            .join(Contract, EffectiveFunction.contract_id == Contract.id)
+            .where(Contract.job_id == job.id)
+        )
+        .scalars()
+        .all()
+    )
+    authorities = {addr for expr in rows for addr, _ in _iter_role_store_frontiers(expr)}
+    if not authorities:
+        return 0  # Deleted/relinked source or a later result no longer uses event folds.
+    if not all(_authority_backfilled(session, chain_id, addr) for addr in authorities):
+        raise WorkPending("invalidated authority is still backfilling")
+    cold = session.execute(
+        select(IndexedEventCursor.event_address)
+        .where(
+            IndexedEventCursor.chain_id == chain_id,
+            func.lower(IndexedEventCursor.event_address).in_(sorted(authorities)),
+            IndexedEventCursor.topic0.in_(_ROLE_STORE_TOPIC0S),
+            IndexedEventCursor.backfill_complete.is_(False),
+        )
+        .limit(1)
+    ).first()
+    if cold is not None:
+        raise WorkPending("a sibling role cursor is still backfilling")
+    if _address_has_active_job(session, job.address, chain_id=chain_id, exclude_job_id=job.id):
+        raise WorkPending("another analysis owns this address")
+    _requeue_policy(job, "Re-resolving: indexed role-store history changed during a reorg")
+    session.flush()
+    return 1

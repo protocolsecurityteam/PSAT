@@ -3,6 +3,7 @@
 # `fly scale count --process-group workers N`.
 # dapp_crawl_worker lives in `browser`; protocol_monitor in `monitor`.
 set -e
+unset PSAT_WORKER_LIFECYCLE_TOKEN
 
 cd "$(dirname "$0")/.."
 
@@ -84,7 +85,8 @@ cleanup() {
   exit $exit_code
 }
 
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 0' INT TERM
 
 if [ -x ".venv/bin/python" ]; then
   PYTHON_CMD=(./.venv/bin/python)
@@ -97,6 +99,10 @@ elif command -v python >/dev/null 2>&1; then
 else
   log_json ERROR "No Python interpreter found. Run 'uv sync' or activate the project virtualenv."
   exit 1
+fi
+
+if [ "${PSAT_WORKER_LIFECYCLE_MODE:-off}" != "off" ] && [ "${PSAT_RUNTIME_CHILD:-0}" != "1" ]; then
+  exec "${PYTHON_CMD[@]}" -m workers.machine_runtime workers
 fi
 
 log_json INFO "Starting PSAT workers with: ${PYTHON_CMD[*]}"
@@ -154,8 +160,14 @@ PIDS+=($!)
 PIDS+=($!)
 # v2 capability resolver indexer. It follows generic event hints
 # discovered by the semantic predicate pipeline.
-"${PYTHON_CMD[@]}" -m workers.event_log_indexer &
-PIDS+=($!)
+if [ "${PSAT_INDEXER_GROUP:-workers}" = "workers" ]; then
+  if [ "${PSAT_WORKER_LIFECYCLE_MODE:-off}" != "off" ]; then
+    "${PYTHON_CMD[@]}" -m workers.machine_runtime indexer &
+  else
+    "${PYTHON_CMD[@]}" -m workers.event_log_indexer &
+  fi
+  PIDS+=($!)
+fi
 # Enrollment reconciler drainer. Moved off the 512MB `monitor` VM: its
 # per-tick governance-view recompute is jobs-pipeline-weight and belongs
 # on this 16GB box. Its loop swallows exceptions, so the shared `wait -n`
@@ -166,4 +178,6 @@ PIDS+=($!)
 log_json INFO "All workers started: ${PIDS[*]}"
 # Exit on first death — Fly restarts the machine so every worker
 # relaunches. Silent-dead-worker is worse than a 30s restart.
-wait -n
+wait -n || true
+# Even an unexpected clean child exit is a failed fleet, not an idle stop.
+exit 1

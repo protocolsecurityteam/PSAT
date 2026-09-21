@@ -446,3 +446,110 @@ def test_budgeted_backfill_is_identical_to_unbudgeted(session):
     for _addr, last_block, complete in budgeted_cursors:
         assert complete is True  # no cursor starved short of completion
         assert last_block == _TARGET  # backfill_complete only at the confirmed head, never premature
+
+
+@requires_postgres
+def test_many_warm_groups_do_not_consume_windows_or_trigger_busy_cadence(session):
+    for i in range(182):
+        enroll_event_cursor(session, chain_id=1, event_address=f"0x{i + 1:040x}", topic0=_TOPIC, start_block=_TARGET)
+    session.commit()
+    fetcher = _RangeCappedFetcher()
+    fetchers, heads, hashes = _maps(fetcher)
+    summary = scan_enrolled_events(
+        session, fetchers=fetchers, head_fetchers=heads, block_hash_fetchers=hashes, max_windows_per_pass=100
+    )
+    assert summary.windows_scanned == 0
+    assert summary.caught_up_cursors == 182
+    assert not summary.budget_exhausted
+    assert not fetcher.requested_spans
+
+
+@requires_postgres
+def test_exact_budget_finishing_last_cold_group_is_not_busy(session):
+    enroll_event_cursor(session, chain_id=1, event_address=_AUTHORITY, topic0=_TOPIC, start_block=_TARGET - 10)
+    session.commit()
+    fetcher = _RangeCappedFetcher()
+    fetchers, heads, hashes = _maps(fetcher)
+    summary = scan_enrolled_events(
+        session, fetchers=fetchers, head_fetchers=heads, block_hash_fetchers=hashes, max_windows_per_pass=1
+    )
+    assert summary.windows_scanned == 1
+    assert not summary.budget_exhausted
+
+
+@requires_postgres
+def test_shutdown_stops_after_current_window_and_preserves_committed_progress(session):
+    from threading import Event
+
+    stop = Event()
+    enroll_event_cursor(session, chain_id=1, event_address=_AUTHORITY, topic0=_TOPIC)
+    session.commit()
+
+    class StopAfterWindow(_RangeCappedFetcher):
+        def fetch_logs(self, **kwargs):
+            logs = super().fetch_logs(**kwargs)
+            stop.set()
+            return logs
+
+    fetcher = StopAfterWindow()
+    fetchers, heads, hashes = _maps(fetcher)
+    summary = scan_enrolled_events(
+        session,
+        fetchers=fetchers,
+        head_fetchers=heads,
+        block_hash_fetchers=hashes,
+        max_block_span=_MAX_SAFE_SPAN,
+        max_windows_per_cursor=100,
+        stop_event=stop,
+    )
+    assert summary.windows_scanned == 1
+    assert len(fetcher.requested_spans) == 1
+    session.rollback()
+    saved_block = _cursor_block(session, _AUTHORITY)
+    assert 0 < saved_block < _TARGET
+    saved_logs = _log_count(session, _AUTHORITY)
+    assert saved_logs > 0
+
+    # A new process can resume from the committed cursor, without losing or
+    # duplicating the window that was in flight when shutdown was requested.
+    normal, heads, hashes = _maps(_RangeCappedFetcher())
+    scan_enrolled_events(
+        session,
+        fetchers=normal,
+        head_fetchers=heads,
+        block_hash_fetchers=hashes,
+        max_block_span=_MAX_SAFE_SPAN,
+        max_windows_per_pass=1,
+    )
+    assert _cursor_block(session, _AUTHORITY) > saved_block
+    assert _log_count(session, _AUTHORITY) > saved_logs
+
+
+@requires_postgres
+def test_shutdown_during_rpc_timeout_does_not_visit_remaining_groups(session):
+    from threading import Event
+
+    stop = Event()
+    for i in range(10):
+        enroll_event_cursor(session, chain_id=1, event_address=f"0x{i + 1:040x}", topic0=_TOPIC)
+    session.commit()
+
+    class TimeoutHead:
+        calls = 0
+
+        def head_block(self):
+            self.calls += 1
+            stop.set()
+            raise TimeoutError("RPC unavailable during shutdown")
+
+    head = TimeoutHead()
+    summary = scan_enrolled_events(
+        session,
+        fetchers={1: _RangeCappedFetcher()},
+        head_fetchers={1: head},
+        block_hash_fetchers={1: _DeterministicBlockHash()},
+        stop_event=stop,
+    )
+    assert head.calls == 1
+    assert summary.failed_groups == 1 and summary.windows_scanned == 0
+    assert _log_count(session, "0x" + "00" * 19 + "01") == 0

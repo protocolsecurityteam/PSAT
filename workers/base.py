@@ -27,7 +27,6 @@ from db.queue import (
     get_artifact,
     heartbeat_job,
     reclaim_stuck_jobs,
-    release_job_lease,
     requeue_job,
     store_artifact,
     update_job_detail,
@@ -53,6 +52,27 @@ STALE_JOB_TIMEOUT = int(os.getenv("PSAT_STALE_JOB_TIMEOUT", "600"))  # seconds
 # Per-worker throttle for the stuck-job sweep; default 30s keeps fleet sweeps well under the 900s stale_timeout while
 # cutting per-poll DB load.
 RECLAIM_INTERVAL_S = float(os.getenv("PSAT_RECLAIM_INTERVAL_S", "30"))
+
+
+class IdlePollDelay:
+    """Back off empty queues; reset as soon as any useful work is claimed."""
+
+    def __init__(self, base: float) -> None:
+        self.base = max(0.0, base)
+        try:
+            ceiling = float(os.getenv("PSAT_WORKER_IDLE_MAX_S", "15"))
+        except ValueError:
+            ceiling = 15.0
+        self.ceiling = max(self.base, ceiling)
+        self.reset()
+
+    def reset(self) -> None:
+        self.delay = self.base
+
+    def next_delay(self) -> float:
+        delay = self.delay
+        self.delay = min(self.ceiling, self.delay * 2)
+        return delay
 
 
 def _job_heartbeat_interval_s() -> float:
@@ -136,19 +156,9 @@ class BaseWorker:
         self._running = True
         # -inf = "never swept; sweep now"; throttles _claim_job to RECLAIM_INTERVAL_S between sweeps.
         self._last_reclaim_at: float = float("-inf")
-        # Currently-claimed job_id → claim-time lease_id. Populated by
-        # ``_execute_job`` for the duration of a single job, drained on
-        # success/failure. ``_handle_sigterm`` reads a snapshot of this
-        # map and explicitly releases each lease via ``release_job_lease``
-        # so a Fly machine drain doesn't strand the row in ``processing``
-        # for the full 15-minute lease TTL — observed on PR-63 as a 16+
-        # minute static-stage wedge after a worker SIGTERM mid-forge-build.
+        # Retain claim identity until execution, subprocesses and uploads finish.
         self._inflight_jobs: dict[uuid.UUID, uuid.UUID] = {}
         self._inflight_lock = threading.Lock()
-        # Set when graceful shutdown has spawned its release thread; idempotent
-        # guard against duplicate handler invocations (Fly sends SIGTERM twice
-        # before SIGKILL).
-        self._shutdown_release_started = False
         signal.signal(signal.SIGTERM, self._handle_sigterm)
         signal.signal(signal.SIGINT, self._handle_sigterm)
 
@@ -188,69 +198,9 @@ class BaseWorker:
     def _handle_sigterm(self, signum: int, frame: object) -> None:
         logger.info("Worker %s received signal %s, shutting down gracefully", self.worker_id, signum)
         self._running = False
-        # Release the currently-claimed job's lease on a daemon thread so a
-        # sibling worker can immediately reclaim. The main thread is likely
-        # blocked in ``subprocess.run`` (forge build, slither) — it cannot
-        # release for itself before Fly escalates to SIGKILL. The daemon
-        # thread opens its own ``SessionLocal()`` so it doesn't share the
-        # main thread's session state, and finishes well within Fly's
-        # ``kill_timeout``.
-        if self._shutdown_release_started:
-            return
-        self._shutdown_release_started = True
-        threading.Thread(
-            target=self._release_inflight_leases,
-            name=f"{self.worker_id}-shutdown-release",
-            daemon=True,
-        ).start()
-
-    def _release_inflight_leases(self) -> None:
-        """Release every lease in ``self._inflight_jobs``.
-
-        Runs on a daemon thread spawned by ``_handle_sigterm``. Uses
-        ``release_job_lease`` (SQL-level conditional UPDATE on
-        ``lease_id``) so the call is a no-op if the main thread raced to
-        ``complete_job`` first or ``reclaim_stuck_jobs`` already swept.
-        Errors are logged and swallowed — the worker is shutting down
-        either way; failing here would just crash the daemon thread.
-        """
-        with self._inflight_lock:
-            snapshot = dict(self._inflight_jobs)
-        if not snapshot:
-            return
-        logger.info(
-            "Worker %s releasing %d in-flight job lease(s) before shutdown",
-            self.worker_id,
-            len(snapshot),
-        )
-        session = SessionLocal()
-        try:
-            for job_id, lease_id in snapshot.items():
-                try:
-                    released = release_job_lease(
-                        session,
-                        job_id,
-                        lease_id=lease_id,
-                        reason=f"graceful shutdown of {self.worker_id}",
-                    )
-                except Exception:
-                    logger.exception(
-                        "Worker %s: failed to release lease for job %s",
-                        self.worker_id,
-                        job_id,
-                    )
-                    continue
-                if released:
-                    logger.info("Worker %s released lease for job %s", self.worker_id, job_id)
-                else:
-                    logger.info(
-                        "Worker %s: lease for job %s already gone (sibling reclaimed or main "
-                        "thread completed it first)",
-                        self.worker_id,
-                        job_id,
-                    )
-        finally:
-            session.close()
+        # Keep renewing the lease until active work and its subprocesses finish.
+        # Releasing here would let another worker execute the same live job.
+        # A forced VM kill leaves the lease for normal expiry/recovery.
 
     def process(self, session: Session, job: Job) -> None:
         """Subclasses implement this to run their pipeline stage."""
@@ -341,9 +291,9 @@ class BaseWorker:
             # attributes from a long-lived worker session.
             setattr(job, "_heartbeat_job_id", claim_job_id)
             setattr(job, "_heartbeat_lease_id", claim_lease_id)
-            # Register this (job_id, lease_id) for graceful-shutdown release.
-            # ``_handle_sigterm`` reads this map on its daemon thread; the
-            # ``finally`` below removes the entry whether the job completes,
+            # Track the live claim through graceful shutdown. SIGTERM leaves
+            # this token and its heartbeat intact until execution finishes.
+            # The ``finally`` below removes the entry whether the job completes,
             # advances, or errors so a stale id never lingers.
             inflight_registered = False
             if claim_lease_id is not None:
@@ -728,27 +678,29 @@ class BaseWorker:
         logger.info("Worker %s shut down", self.worker_id)
 
     def _run_loop_single(self) -> None:
-        """Legacy K=1 loop: one in-flight job per worker process. Path is
-        byte-identical to the pre-concurrency implementation."""
-        recovery_counter = 0
+        """One in-flight job; empty queues back off without slowing recovery."""
+        idle = IdlePollDelay(self.poll_interval)
+        recovery_interval = max(60.0, 30 * self.poll_interval)
+        recover_at = time.monotonic() + recovery_interval
         while self._running:
             session = SessionLocal()
             try:
-                # Check for stale jobs every ~30 poll cycles (~60s at 2s interval)
-                recovery_counter += 1
-                if recovery_counter >= 30:
-                    recovery_counter = 0
+                if time.monotonic() >= recover_at:
+                    recover_at = time.monotonic() + recovery_interval
                     self._recover_stale_jobs(session)
 
                 job = self._claim_job(session)
                 if job is None:
                     session.close()
-                    time.sleep(self.poll_interval)
+                    time.sleep(idle.next_delay())
                     continue
 
+                idle.reset()
                 self._execute_job(session, job)
             except Exception:
                 logger.exception("Worker %s encountered error in main loop", self.worker_id)
+                session.close()
+                time.sleep(idle.next_delay())
             finally:
                 session.close()
 
@@ -758,13 +710,14 @@ class BaseWorker:
         at ``self._job_concurrency``; when full, the loop waits on
         ``FIRST_COMPLETED`` for back-pressure instead of polling.
 
-        SIGTERM (``self._running == False``) stops new claims and waits up
-        to ``STALE_JOB_TIMEOUT`` for in-flight jobs to drain before
-        returning. Survivors are logged; the cross-worker stale-job sweep
-        recovers them on a sibling worker.
+        SIGTERM stops new claims and waits for every in-flight job. A voluntary
+        idle shutdown never abandons live futures; a forced machine kill leaves
+        leases for normal recovery.
         """
         assert self._job_pool is not None
-        recovery_counter = 0
+        idle = IdlePollDelay(self.poll_interval)
+        recovery_interval = max(60.0, 30 * self.poll_interval)
+        recover_at = time.monotonic() + recovery_interval
         while self._running:
             # Drain finished futures so the slot count is accurate.
             self._reap_finished_futures()
@@ -779,9 +732,8 @@ class BaseWorker:
             job_to_dispatch: Job | None = None
             job_id_for_dispatch = None
             try:
-                recovery_counter += 1
-                if recovery_counter >= 30:
-                    recovery_counter = 0
+                if time.monotonic() >= recover_at:
+                    recover_at = time.monotonic() + recovery_interval
                     self._recover_stale_jobs(claim_session)
 
                 job_to_dispatch = self._claim_job(claim_session)
@@ -799,11 +751,13 @@ class BaseWorker:
                 # Nothing to claim — sleep just enough to avoid hammering
                 # Postgres while still letting in-flight futures progress.
                 if self._inflight:
+                    idle.reset()
                     wait(self._inflight, timeout=self.poll_interval, return_when=FIRST_COMPLETED)
                 else:
-                    time.sleep(self.poll_interval)
+                    time.sleep(idle.next_delay())
                 continue
 
+            idle.reset()
             # ``ThreadPoolExecutor.submit`` does not propagate contextvars
             # by default; wrap with ``copy_context().run`` so the dispatched
             # job inherits the claim-loop's contextvar state. The per-job
@@ -813,27 +767,11 @@ class BaseWorker:
             future = self._job_pool.submit(ctx.run, self._run_one_job, job_id_for_dispatch)
             self._inflight.add(future)
 
-        # Drain on shutdown so in-flight jobs land cleanly. Anything still
-        # running past the timeout is logged; the cross-worker sweep
-        # (``reclaim_stuck_jobs``) recovers them after STALE_JOB_TIMEOUT.
-        if self._inflight:
-            logger.info(
-                "Worker %s draining %d in-flight job(s) (timeout=%ds)",
-                self.worker_id,
-                len(self._inflight),
-                STALE_JOB_TIMEOUT,
-            )
-            done, not_done = wait(self._inflight, timeout=STALE_JOB_TIMEOUT)
-            if not_done:
-                logger.warning(
-                    "Worker %s: %d job(s) still running at shutdown; "
-                    "abandoning so cross-worker stale sweep can recover",
-                    self.worker_id,
-                    len(not_done),
-                )
-            self._inflight.clear()
+        # A voluntary idle stop has no deadline: finish all work, artifact
+        # uploads and child processes before the launcher may exit successfully.
         if self._job_pool is not None:
-            self._job_pool.shutdown(wait=False)
+            self._job_pool.shutdown(wait=True)
+        self._inflight.clear()
 
     def _reap_finished_futures(self) -> None:
         """Drop completed futures from ``self._inflight`` to free dispatch slots."""

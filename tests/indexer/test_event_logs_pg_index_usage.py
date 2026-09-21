@@ -115,10 +115,9 @@ def test_selective_fold_query_uses_lookup_index(db_session):
     assert "Seq Scan" not in plan, plan
 
 
-def test_lower_wrapped_query_would_seq_scan(db_session):
-    # Control: the pre-fix shape (lower()-wrapped columns) on the same data CANNOT
-    # use the raw-column index and falls back to a sequential scan. Demonstrates
-    # the sargability the raw-column query restores.
+def test_role_drift_query_uses_case_insensitive_lookup_index(db_session):
+    # Role reconciliation retains case-insensitive historical semantics. Its
+    # dedicated index must cover the negative lookup without a full scan.
     _seed_index_demo(db_session)
     plan = "\n".join(
         r[0]
@@ -126,13 +125,13 @@ def test_lower_wrapped_query_would_seq_scan(db_session):
             text(
                 "EXPLAIN SELECT * FROM indexed_event_logs "
                 "WHERE chain_id = 1 "
-                "AND lower(event_address) = :addr AND lower(topic0) = :topic"
+                "AND lower(event_address) = :addr AND topic0 = :topic AND block_number > 100"
             ),
             {"addr": TARGET_ADDR, "topic": TARGET_TOPIC0},
         ).fetchall()
     )
-    assert "ix_indexed_event_logs_lookup" not in plan, plan
-    assert "Seq Scan" in plan, plan
+    assert "ix_indexed_event_logs_role_lookup" in plan, plan
+    assert "Seq Scan" not in plan, plan
 
 
 def test_repo_returns_rows_with_raw_column_comparison(db_session):

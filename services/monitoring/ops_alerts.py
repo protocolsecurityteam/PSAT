@@ -44,7 +44,7 @@ from db.queue import (
 from services.monitoring.materialization_reconciler import materialization_backlog
 from services.monitoring.notifier import _send_discord
 from services.monitoring.observation_plan_state import CONFIG_SUPPLIED_BY_CALLER, plan_coverage_counts
-from services.monitoring.process_meta import ERROR, PROCESS_META, STALE, classify, stale_after_seconds
+from services.monitoring.process_meta import ERROR, PROCESS_META, STALE, classify, planned_sleep, stale_after_seconds
 from services.monitoring.verify_status import count_verification_read_gaps
 from utils.chains import UnknownChainError, chain_by_id, chain_cache_token
 
@@ -147,6 +147,8 @@ def collect_stale_processes(session: Session, *, now: datetime | None = None) ->
     beats = _read_heartbeats(session, now)
     stale: list[dict[str, Any]] = []
     for process, meta in PROCESS_META.items():
+        if planned_sleep(process, beats.get("worker_lifecycle")):
+            continue
         hb = beats.get(process)
         status = hb["status"] if hb else None
         beat_age_s = hb["beat_age_s"] if hb else None
@@ -321,6 +323,8 @@ def _current_problems(
     problems: dict[str, dict[str, Any]] = {}
     for process, meta in PROCESS_META.items():
         if process == HEARTBEAT_OPS_ALERTER:
+            continue
+        if planned_sleep(process, beats.get("worker_lifecycle")):
             continue
         hb = beats.get(process)
         status = hb["status"] if hb else None

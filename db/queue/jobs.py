@@ -145,6 +145,10 @@ def claim_job(
     index ``ix_job_dep_pending`` keeps the ``NOT EXISTS`` clause sub-ms
     even at fleet scale.
     """
+    from services.worker_lifecycle import claim_allowed, note_claim
+
+    if not claim_allowed(session):
+        return None
     pending_dep_exists = (
         select(JobDependency.id)
         .where(
@@ -168,6 +172,7 @@ def claim_job(
     job = session.execute(stmt).scalar_one_or_none()
     if job is None:
         return None
+    note_claim(session)
     job.status = JobStatus.processing
     job.worker_id = worker_id
     job.lease_id = uuid.uuid4()
@@ -188,19 +193,29 @@ def _check_lease_or_raise(job: Job, lease_id: uuid.UUID | None) -> None:
     """Verify the caller still holds the row's lease; raise ``LeaseLost`` if not.
 
     ``lease_id=None`` means the caller doesn't care (legacy/admin path);
-    skip the check. The pre-claim ``lease_id`` column may itself be NULL
-    on rows that pre-date the lease columns — in that case treat the
-    write as authoritative (no live competing claimant).
+    skip the check. A supplied token must match even if the current lease is
+    NULL: completion/release by another owner invalidates the old token.
     """
     if lease_id is None:
-        return
-    if job.lease_id is None:
         return
     if job.lease_id != lease_id:
         raise LeaseLost(
             f"Job {job.id}: lease {lease_id} no longer holds the row "
             f"(current holder: {job.lease_id}, worker_id={job.worker_id})"
         )
+
+
+def _locked_job(session: Session, job_id: Any, lease_id: uuid.UUID | None) -> Job | None:
+    if lease_id is not None:
+        # Check the database, not a cached ORM lease. Keep pending business
+        # fields intact and do not autoflush them before checking ownership.
+        with session.no_autoflush:
+            row = session.execute(select(Job.lease_id).where(Job.id == job_id).with_for_update()).first()
+            if row is None:
+                return None
+            if row[0] != lease_id:
+                raise LeaseLost(f"Job {job_id}: lease no longer owns the row")
+    return session.get(Job, job_id)
 
 
 def heartbeat_job(
@@ -259,7 +274,7 @@ def advance_job(
     threads its claim-time lease through here so a worker that's been
     silently reclaimed can't advance a job a sibling is now processing.
     """
-    job = session.get(Job, job_id)
+    job = _locked_job(session, job_id, lease_id)
     if job is None:
         return
     _check_lease_or_raise(job, lease_id)
@@ -280,16 +295,24 @@ def complete_job(
     lease_id: uuid.UUID | None = None,
 ) -> None:
     """Mark a job as completed with stage=done. See :func:`advance_job` for *lease_id*."""
-    job = session.get(Job, job_id)
+    job = _locked_job(session, job_id, lease_id)
     if job is None:
         return
     _check_lease_or_raise(job, lease_id)
+    newly_completed = job.status != JobStatus.completed
     job.stage = JobStage.done
     job.status = JobStatus.completed
     job.detail = detail
     job.worker_id = None
     job.lease_id = None
     job.lease_expires_at = None
+    if newly_completed and job.protocol_id is not None and job.address:
+        # Enrollment reads completed jobs. A policy-stage notification can be
+        # drained before coverage finishes (or skipped for the first job), so
+        # publish another notification atomically with final completion.
+        from services.monitoring.enrollment import mark_enrollment_dirty
+
+        mark_enrollment_dirty(session, job.protocol_id, "analysis_complete")
     session.commit()
 
 
@@ -455,7 +478,7 @@ def requeue_job(
     every attempt — this function does not touch it. The caller (typically
     ``BaseWorker``) appends the just-failed attempt before calling here.
     """
-    job = session.get(Job, job_id)
+    job = _locked_job(session, job_id, lease_id)
     if job is None:
         return
     _check_lease_or_raise(job, lease_id)
@@ -554,7 +577,7 @@ def fail_job_terminal(
     retried, so the count shouldn't move). The retries-exhausted path
     passes ``new_retry_count`` so the row records the total attempt count.
     """
-    job = session.get(Job, job_id)
+    job = _locked_job(session, job_id, lease_id)
     if job is None:
         return
     _check_lease_or_raise(job, lease_id)

@@ -401,7 +401,7 @@ def test_run_loop_no_job_sleeps(mock_sleep, mock_claim, mock_session_cls, mock_s
     mock_claim.side_effect = _claim_side_effect
     w.run_loop()
 
-    mock_sleep.assert_called_with(2.0)
+    assert [call.args[0] for call in mock_sleep.call_args_list] == [2.0, 4.0]
 
 
 @patch("workers.base.signal.signal")
@@ -437,8 +437,8 @@ def test_run_loop_next_stage_done_calls_complete_job(mock_complete, mock_claim, 
 @patch("workers.base.SessionLocal")
 @patch("workers.base.claim_job", return_value=None)
 @patch("workers.base.time.sleep")
-def test_run_loop_stale_recovery_every_30_cycles(mock_sleep, mock_claim, mock_session_cls, mock_signal):
-    """Stale job recovery runs on the 30th poll cycle."""
+def test_run_loop_stale_recovery_uses_elapsed_time(mock_sleep, mock_claim, mock_session_cls, mock_signal):
+    """Adaptive poll delays must not slow the stale-job recovery cadence."""
     mock_session = MagicMock()
     mock_session_cls.return_value = mock_session
 
@@ -455,7 +455,11 @@ def test_run_loop_stale_recovery_every_30_cycles(mock_sleep, mock_claim, mock_se
 
     mock_claim.side_effect = _claim_side_effect
 
-    with patch.object(w, "_recover_stale_jobs") as mock_recover:
+    # Each claimed poll advances a synthetic clock by two seconds.
+    with (
+        patch("workers.base.time.monotonic", side_effect=lambda: cycle * 2),
+        patch.object(w, "_recover_stale_jobs") as mock_recover,
+    ):
         w.run_loop()
         mock_recover.assert_called_once_with(mock_session)
 

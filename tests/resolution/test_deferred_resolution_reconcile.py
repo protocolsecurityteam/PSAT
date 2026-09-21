@@ -856,5 +856,9 @@ def test_event_indexer_loop_invokes_deferred_reconciler():
     from workers import event_log_indexer
 
     src = inspect.getsource(event_log_indexer.run_event_log_indexer_loop)
-    assert "reconcile_deferred_resolutions" in src
-    assert "reconcile_role_set_drift" in src
+    assert "drain_reconciliation" in src
+    from services.resolution import indexer_scheduler
+
+    scheduler_src = inspect.getsource(indexer_scheduler.drain_reconciliation)
+    assert "reconcile_deferred_resolutions" in scheduler_src
+    assert "reconcile_role_set_drift" in scheduler_src

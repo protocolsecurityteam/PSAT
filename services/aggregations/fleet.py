@@ -48,7 +48,7 @@ from db.queue import (
 from schemas.api_responses import FleetStatusResponse
 from services.monitoring.materialization_reconciler import materialization_backlog
 from services.monitoring.observation_plan_state import plan_coverage_counts
-from services.monitoring.process_meta import PROCESS_META, stale_after_seconds
+from services.monitoring.process_meta import PROCESS_META, planned_sleep, stale_after_seconds
 from services.monitoring.verify_status import count_verification_read_gaps
 from utils.chains import UnknownChainError, chain_by_id, chain_cache_token
 
@@ -412,12 +412,19 @@ def build_fleet_status(session: Session, *, now: datetime | None = None) -> Flee
         return None
 
     daemons: list[dict[str, Any]] = []
+    controller = beats.get("worker_lifecycle")
+    controller_view = (
+        {"status": controller.status, "detail": controller.detail, "beat_age_s": _age_seconds(controller.beat_at, now)}
+        if controller
+        else None
+    )
     for process, meta in PROCESS_META.items():
         hb = beats.get(process)
         beat_at = hb.beat_at if hb else None
         age = _age_seconds(beat_at, now)
         stale_after = stale_after_seconds(meta["interval_s"])
-        if age is None or age >= stale_after:
+        sleeping = planned_sleep(process, controller_view)
+        if not sleeping and (age is None or age >= stale_after):
             _warn_stale_daemon(process, age)
         else:
             _note_daemon_fresh(process)
@@ -426,11 +433,11 @@ def build_fleet_status(session: Session, *, now: datetime | None = None) -> Flee
                 "process": process,
                 "kind": meta["kind"],
                 "label": meta["label"],
-                "status": hb.status if hb else "unknown",
+                "status": "sleeping" if sleeping else (hb.status if hb else "unknown"),
                 "last_beat_at": beat_at.isoformat() if beat_at else None,
                 "beat_age_s": age,
                 "alive": age is not None and age < stale_after,
-                "stale": age is None or age >= stale_after,
+                "stale": not sleeping and (age is None or age >= stale_after),
                 "detail": hb.detail if hb else None,
                 "work": _work_for(process),
             }

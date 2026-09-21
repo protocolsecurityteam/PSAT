@@ -76,10 +76,17 @@ PLAN_OBJECT_ABSENT = "plan_object_absent"
 PLAN_NOT_READABLE = "plan_not_readable"
 #: The plan was there and would not parse.
 PLAN_LOAD_ERROR = "plan_load_error"
+
 #: Enrolled without ever being analyzed (primary controllers).
 CONTRACT_NOT_ANALYZED = "contract_not_analyzed"
 #: Authored by an API caller; no analyzer provenance at all.
 CONFIG_SUPPLIED_BY_CALLER = "config_supplied_by_caller"
+
+# These failures can recover without a new analysis or membership change.
+# Explicit missing/superseded-artifact and plan-load-error outcomes stay on the
+# repair cadence. Storage also classifies corrupt blobs as PLAN_NOT_READABLE;
+# those follow the same capped retries as an unreachable bucket.
+TRANSIENT_PLAN_FAILURES = frozenset({MATERIALIZATION_LOOKUP_FAILED, PLAN_NOT_READABLE})
 
 #: ``mark_enrollment_dirty`` reason for a pass that could not create one or more
 #: monitored rows because the chain head was not determined. The queue row is
