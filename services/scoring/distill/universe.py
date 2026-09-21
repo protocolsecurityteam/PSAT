@@ -243,6 +243,14 @@ def load_protocol_universe(session: Session, protocol_id: int) -> ProtocolUniver
     add("monitored_event_emitters", *[address for address, _ in enrolled])
     pairs: list[tuple[int, str]] = []
     for address, chain in enrolled:
+        # A standard address (including checksum-case digits) was already
+        # admitted above. Matching log emitters can only repeat it, so avoid
+        # scanning the event store for these rows. Keep the original lookup for
+        # nonstandard inputs: e.g. ``0X...`` is not a literal above, but a
+        # matching ``0x...`` log can still contribute one. Normalizing those
+        # inputs unconditionally would change membership for rows without logs.
+        if _ADDRESS_LITERAL.fullmatch(str(address or "")):
+            continue
         try:
             pairs.append((int(chain_by_name(str(chain)).chain_id), str(address or "").lower()))
         except (UnknownChainError, ValueError, TypeError):
