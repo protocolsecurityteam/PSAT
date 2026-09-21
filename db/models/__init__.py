@@ -96,6 +96,7 @@ from .jobs import (
     JobDependency,
     SourceFile,
 )
+from .lifecycle import WorkerLifecycle
 from .monitoring import (
     MonitoredContract,
     MonitoredEvent,
@@ -266,6 +267,7 @@ __all__ = [
     "WITNESS_RULE_W6_LLAMA_SEED",
     "WatchedProxy",
     "WorkerHeartbeat",
+    "WorkerLifecycle",
     "derive_job_chain_id",
     "engine",
     "enrollment_basis_permits_exactness",

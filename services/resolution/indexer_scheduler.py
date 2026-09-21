@@ -9,13 +9,22 @@ from functools import partial
 from sqlalchemy.orm import Session
 
 from db.models import Job, MonitoredContract
+from services.commit_fence import fenced_commits
 from services.resolution.deferred_reconciler import (
     enqueue_reorg_refreshes,
     reconcile_deferred_resolutions,
     reconcile_role_set_drift,
     refresh_invalidated_job,
 )
-from services.resolution.indexer_work import WorkPending, claim_one, finish, lock_claim, renew_and_commit, repair_due
+from services.resolution.indexer_work import (
+    WorkPending,
+    claim_one,
+    finish,
+    lock_claim,
+    renew_and_commit,
+    renew_claim,
+    repair_due,
+)
 from utils.chains import supported_chain_ids
 
 logger = logging.getLogger(__name__)
@@ -63,6 +72,7 @@ def drain_enrollment(session: Session, *, limit: int = 50, tracked_limit: int = 
                 )
             # Successful cursor inserts commit separately before the next RPC;
             # crashes retry the source and cheaply skip those durable cursors.
+            renew_claim(session, claim)
             finish(session, claim, success=not pending, remove=gone)
             enrolled += count
             deferred += bool(pending)
@@ -117,8 +127,12 @@ def drain_reconciliation(session: Session, *, limit: int = 20, job_limit: int = 
                 chain_id = int(claim.key)
                 if chain_id not in supported_chain_ids():
                     raise WorkPending("chain is not currently enabled")
-                a = reconcile_deferred_resolutions(session, chain_id=chain_id, limit=job_limit)
-                b = reconcile_role_set_drift(session, chain_id=chain_id, limit=job_limit)
+                with fenced_commits(session, partial(renew_claim, claim=claim)):
+                    a = reconcile_deferred_resolutions(session, chain_id=chain_id, limit=job_limit)
+                    b = reconcile_role_set_drift(session, chain_id=chain_id, limit=job_limit)
+                # Also fence any writes left pending by a reconciler that did
+                # not commit (including the final acknowledgement).
+                renew_claim(session, claim)
                 deferred += a
                 drift += b
                 # Existing reconcilers commit their progress; a cap must retain

@@ -38,4 +38,7 @@ export RUST_LOG="${RUST_LOG:-error}"
 # re-announcing itself once per process.
 export PYTHONWARNINGS="${PYTHONWARNINGS:-ignore::Warning:requests}"
 
+if [ "${PSAT_WORKER_LIFECYCLE_MODE:-off}" != "off" ] || [ "${PSAT_INDEXER_GROUP:-workers}" = "monitor" ]; then
+  exec uv run --no-sync python -m workers.machine_runtime monitor
+fi
 exec uv run --no-sync python -m workers.protocol_monitor

@@ -154,10 +154,16 @@ class AuditRowWorker:
         threads can read the fields off them without the session
         following the thread.
         """
+        from services.worker_lifecycle import claim_allowed, note_claim
+
+        if not claim_allowed(session):
+            return []
+
         rows = list(session.execute(self._pending_rows_query()).scalars().all())
         if not rows:
             return []
 
+        note_claim(session)
         now = datetime.now(timezone.utc)
         for row in rows:
             self._mark_processing(row, now)

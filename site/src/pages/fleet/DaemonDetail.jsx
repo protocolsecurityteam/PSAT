@@ -86,7 +86,8 @@ export function DaemonDetail({ daemonKey, fleet, onClose, rates }) {
   const tone = daemonTone(d, rate);
   const interval = PROCESS_INTERVAL_S[d.process];
   const window = staleWindowS(d.process);
-  const showAlert = d.status === "error" || d.stale || indexerLagging(d) || daemonStuck(d) || daemonFallingBehind(rate);
+  const sleeping = d.status === "sleeping";
+  const showAlert = !sleeping && (d.status === "error" || d.stale || indexerLagging(d) || daemonStuck(d) || daemonFallingBehind(rate));
   const alert = showAlert ? alertContent(d, rate) : null;
   const alertCls = d.status === "error" ? "err" : "warn";
 
@@ -142,7 +143,8 @@ export function DaemonDetail({ daemonKey, fleet, onClose, rates }) {
           <dt>stale</dt>
           <dd>
             {String(d.stale)}
-            {d.last_beat_at ? ` (${humanAge(d.beat_age_s)} ${d.stale ? "≥" : "<"} ${window}s window)` : ""}
+            {sleeping ? " (worker intentionally stopped; controller confirms no due work)"
+              : d.last_beat_at ? ` (${humanAge(d.beat_age_s)} ${d.stale ? "≥" : "<"} ${window}s window)` : ""}
           </dd>
         </dl>
       </section>

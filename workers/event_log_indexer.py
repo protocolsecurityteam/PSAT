@@ -1536,7 +1536,9 @@ def run_event_log_indexer_loop(
                 )
                 stop_event.wait(interval)
         finally:
-            backfill.join(timeout=max(1.0, interval))
+            stop_event.set()
+            # Do not relinquish singleton ownership while a scan can commit.
+            backfill.join()
 
 
 def _build_indexer_fetchers(

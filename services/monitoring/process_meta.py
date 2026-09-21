@@ -13,6 +13,7 @@ FastAPI router and a low-level aggregation can import it without a cycle.
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from db.queue import (
@@ -48,6 +49,35 @@ PROCESS_META: dict[str, dict[str, Any]] = {
     HEARTBEAT_PROTOCOL_SCORE: {"kind": "watcher", "interval_s": 300, "label": "Protocol score fold"},
     HEARTBEAT_OPS_ALERTER: {"kind": "daemon", "interval_s": 120, "label": "Ops watchdog / alerter"},
 }
+
+if os.getenv("PSAT_WORKER_LIFECYCLE_MODE", "off") != "off":
+    PROCESS_META["worker_lifecycle"] = {"kind": "daemon", "interval_s": 15, "label": "Worker lifecycle"}
+
+
+def planned_sleep(process: str, controller: dict | None) -> bool:
+    """Suppress only expected sleep, proved by a fresh, successful Fly read.
+
+    A queued job, failed controller or missed wake immediately removes this
+    exemption. Monitoring and the indexer are never exempted.
+    """
+    if (
+        process
+        not in {HEARTBEAT_AUDIT_TEXT, HEARTBEAT_AUDIT_SCOPE, HEARTBEAT_COVERAGE_VERIFY, HEARTBEAT_ENROLLMENT_RECONCILER}
+        or not controller
+    ):
+        return False
+    detail = controller.get("detail") or {}
+    age = controller.get("beat_age_s")
+    return bool(
+        controller.get("status") == "running"
+        and age is not None
+        and age < 45
+        and detail.get("mode") == "enforce"
+        and detail.get("machine_state") in {"stopped", "suspended"}
+        and detail.get("active") is False
+        and detail.get("ready_sources") == []
+    )
+
 
 # Classification labels shared by the fleet view and the watchdog.
 FRESH = "fresh"

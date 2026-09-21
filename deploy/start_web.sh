@@ -1,6 +1,7 @@
 #!/bin/bash
 # `web` process group: FastAPI only.
 set -e
+unset PSAT_WORKER_LIFECYCLE_TOKEN
 
 cd "$(dirname "$0")/.."
 

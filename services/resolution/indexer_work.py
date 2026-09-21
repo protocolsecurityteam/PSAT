@@ -111,6 +111,12 @@ def finish(session: Session, claim: Claim, *, success: bool, remove: bool = Fals
 
 def renew_and_commit(session: Session, claim: Claim) -> None:
     """Commit cursor progress before RPC only while this worker owns a live lease."""
+    renew_claim(session, claim)
+    session.commit()
+
+
+def renew_claim(session: Session, claim: Claim) -> None:
+    """Fence writes and renew within the caller's transaction, without committing."""
     result = session.execute(
         update(IndexerWork)
         .where(
@@ -123,9 +129,7 @@ def renew_and_commit(session: Session, claim: Claim) -> None:
         .returning(IndexerWork.lease_id)
     ).scalar_one_or_none()
     if result is None:
-        session.rollback()
         raise WorkPending("indexer work lease was lost")
-    session.commit()
 
 
 def lock_claim(session: Session, claim: Claim) -> None:
