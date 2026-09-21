@@ -2,7 +2,8 @@
 
 Deployment explicitly restores availability while the controller is paused.
 Rollback uses the captured image AND configuration, including a legacy release.
-Run only during an authorized deployment. No stop/scale/force-kill API exists here.
+Run only during an authorized deployment. Idle stops remain cooperative; an
+explicit deployment may stop a worker after a bounded grace period.
 """
 
 from __future__ import annotations
@@ -187,7 +188,12 @@ def capture(state_path: Path, config_path: Path) -> dict:
     return state
 
 
-def prepare(*, indexer: str, mode: str = "observe", timeout: float = 1200) -> bool:
+def prepare(*, indexer: str, mode: str = "observe", timeout: float = 60, stop_timeout: float = 120) -> bool:
+    """Pause claims, allow a short drain, then use Fly's bounded machine stop.
+
+    Confirm the old VM has stopped before moving ownership. Interrupted jobs
+    keep their leases for normal recovery; never release a lease from CI.
+    """
     previous = worker()
     old_mode, old_indexer = layout(previous)
     if mode == "off" and (old_indexer == "monitor" or indexer == "monitor"):
@@ -203,15 +209,46 @@ def prepare(*, indexer: str, mode: str = "observe", timeout: float = 1200) -> bo
             # controller exists on the legacy monitor. Roll back without SSH.
             return True
     admin("drain")
+    print("Worker claims paused; allowing up to 60 seconds for cooperative shutdown.", flush=True)
     deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
+    stop_requested = False
+    while True:
         current = worker()
-        if current["id"] != previous["id"]:
-            raise RuntimeError("worker topology changed during drain; deployment aborted")
+        if current["id"] != previous["id"] or layout(current) != layout(previous):
+            raise RuntimeError("worker topology/configuration changed during drain; deployment aborted")
         if current["state"] == "stopped":
+            print("Worker machine is stopped; deployment can proceed.", flush=True)
             return True
+        if time.monotonic() >= deadline:
+            if stop_requested:
+                raise TimeoutError("worker stop could not be confirmed; lifecycle remains paused")
+            stop_requested = True
+            deadline = time.monotonic() + stop_timeout
+            print("Drain grace expired; stopping the worker with Fly's 30-second termination deadline.", flush=True)
+            try:
+                subprocess.run(
+                    [
+                        "flyctl",
+                        "machine",
+                        "stop",
+                        current["id"],
+                        "-a",
+                        APP,
+                        "--signal",
+                        "SIGTERM",
+                        "--timeout",
+                        "30",
+                        "--wait-timeout",
+                        "60s",
+                    ],
+                    check=True,
+                    timeout=90,
+                )
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                # A lost response is not proof that the stop failed. Observe
+                # actual machine state before permitting any image handover.
+                print("Stop response unavailable; checking actual worker state.", flush=True)
         time.sleep(5)
-    raise TimeoutError("workers did not drain; lifecycle remains paused, operator recovery required")
 
 
 def restore(*, timeout: float = 300, stable_seconds: float = 10) -> None:

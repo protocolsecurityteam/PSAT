@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import uuid
 from functools import partial
+from threading import Event
 
 from sqlalchemy.orm import Session
 
@@ -30,7 +31,9 @@ from utils.chains import supported_chain_ids
 logger = logging.getLogger(__name__)
 
 
-def drain_enrollment(session: Session, *, limit: int = 50, tracked_limit: int = 50) -> int:
+def drain_enrollment(
+    session: Session, *, limit: int = 50, tracked_limit: int = 50, stop_event: Event | None = None
+) -> int:
     from workers.event_log_indexer import EnrollmentCaches, enroll_from_completed_jobs, enroll_from_tracked_topics
 
     kinds = ("job", "monitored") if tracked_limit > 0 else ("job",)
@@ -41,6 +44,8 @@ def drain_enrollment(session: Session, *, limit: int = 50, tracked_limit: int = 
     caches = EnrollmentCaches()
     visited: set[tuple[str, str]] = set()
     for _ in range(limit):
+        if stop_event is not None and stop_event.is_set():
+            break
         eligible = kinds if tracked_processed < tracked_limit else ("job",)
         claim = claim_one(session, eligible, exclude=visited)
         if claim is None:
@@ -100,12 +105,16 @@ def drain_enrollment(session: Session, *, limit: int = 50, tracked_limit: int = 
     return enrolled
 
 
-def drain_reconciliation(session: Session, *, limit: int = 20, job_limit: int = 200) -> tuple[int, int]:
+def drain_reconciliation(
+    session: Session, *, limit: int = 20, job_limit: int = 200, stop_event: Event | None = None
+) -> tuple[int, int]:
     repaired = repair_due(session, ("reconcile",), limit=limit)
     deferred = drift = 0
     pending = 0
     visited: set[tuple[str, str]] = set()
     for _ in range(limit):
+        if stop_event is not None and stop_event.is_set():
+            break
         claim = claim_one(session, ("reconcile", "reorg", "refresh_job"), exclude=visited)
         if claim is None:
             break

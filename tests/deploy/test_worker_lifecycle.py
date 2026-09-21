@@ -46,13 +46,49 @@ def test_managed_deploy_waits_for_real_stop(monkeypatch):
     admin.assert_called_once_with("drain")
 
 
-def test_deploy_timeout_never_forces_stop_or_resumes(monkeypatch):
-    monkeypatch.setattr(deploy, "machines", lambda: [worker()])
-    admin = Mock()
-    monkeypatch.setattr(deploy, "admin", admin)
-    with pytest.raises(TimeoutError):
-        deploy.prepare(indexer="monitor", timeout=0)
-    admin.assert_called_once_with("drain")
+def test_stuck_drain_uses_bounded_fly_stop_without_releasing_claims(monkeypatch):
+    fly = FakeFly(monkeypatch)
+    fly.drain_stuck = True
+    assert deploy.prepare(indexer="monitor", timeout=10) is True
+    assert fly.clock >= 10
+    assert fly.events == ["admin:drain", "stop"]
+    assert fly.status["paused"] is True
+
+
+@pytest.mark.parametrize("accepted", [False, True])
+def test_stop_response_failure_requires_observed_stopped_state(monkeypatch, accepted):
+    import subprocess
+
+    fly = FakeFly(monkeypatch)
+    fly.drain_stuck = True
+
+    def stop_loses_response(command, **kwargs):
+        if accepted:
+            fly.run(command, **kwargs)
+        raise subprocess.TimeoutExpired(command, 90)
+
+    monkeypatch.setattr(deploy.subprocess, "run", stop_loses_response)
+    if accepted:
+        assert deploy.prepare(indexer="monitor", timeout=0, stop_timeout=10) is True
+    else:
+        with pytest.raises(TimeoutError, match="could not be confirmed"):
+            deploy.prepare(indexer="monitor", timeout=0, stop_timeout=10)
+    assert "admin:resume" not in fly.events and "deploy" not in fly.events
+
+
+def test_drain_rejects_changed_worker_before_forced_stop(monkeypatch):
+    fly = FakeFly(monkeypatch)
+    fly.drain_stuck = True
+    original_sleep = fly.sleep
+
+    def change_worker(seconds):
+        original_sleep(seconds)
+        fly.rows[0]["id"] = "replacement"
+
+    monkeypatch.setattr(deploy.time, "sleep", change_worker)
+    with pytest.raises(RuntimeError, match="topology/configuration"):
+        deploy.prepare(indexer="monitor", timeout=5)
+    assert "stop" not in fly.events
 
 
 def test_layout_preserves_analysis_capacity_and_concurrency():
@@ -100,6 +136,7 @@ class FakeFly:
         self.events = []
         self.commands = []
         self.lose_start_response = False
+        self.drain_stuck = False
         self.start_status = {}
         self.readiness_overrides = {}
         self.status = {
@@ -163,8 +200,9 @@ class FakeFly:
         if action in {"pause", "drain", "resume"}:
             self.status["paused"] = action != "resume"
         if action == "drain":
-            next(row for row in self.rows if row["id"] == "abc")["state"] = "stopped"
-            self.status["phase"] = "stopped"
+            if not self.drain_stuck:
+                next(row for row in self.rows if row["id"] == "abc")["state"] = "stopped"
+                self.status["phase"] = "stopped"
         result = dict(self.status)
         if action == "ready":
             mode, indexer = deploy.layout(self.rows[0])
@@ -189,7 +227,24 @@ class FakeFly:
         import subprocess
 
         self.commands.append(command)
-        if command[1:3] == ["machine", "start"]:
+        if command[1:3] == ["machine", "stop"]:
+            assert command == [
+                "flyctl",
+                "machine",
+                "stop",
+                "abc",
+                "-a",
+                "psat",
+                "--signal",
+                "SIGTERM",
+                "--timeout",
+                "30",
+                "--wait-timeout",
+                "60s",
+            ]
+            self.events.append("stop")
+            self.rows[0]["state"] = "stopped"
+        elif command[1:3] == ["machine", "start"]:
             self.events.append("start")
             assert command[3] == "abc"
             self.rows[0]["state"] = "started"

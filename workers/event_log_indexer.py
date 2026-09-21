@@ -697,6 +697,7 @@ def scan_enrolled_events(
     max_windows_per_cursor: int = DEFAULT_MAX_WINDOWS_PER_CURSOR,
     max_windows_per_pass: int = DEFAULT_MAX_WINDOWS_PER_PASS,
     insert_batch_size: int = DEFAULT_INSERT_BATCH,
+    stop_event: Event | None = None,
 ) -> ScanSummary:
     # Cursors group by (chain, address): every topic0 on one address rides the
     # same eth_getLogs (an OR list), so the upstream request budget pays once
@@ -749,6 +750,8 @@ def scan_enrolled_events(
     # never advances must be visible in the logs, not a black hole.
     skipped_chains: set[int] = set()
     for (chain_id, event_address), entry in sorted(groups.items(), key=lambda item: _rotation_key(item)):
+        if stop_event is not None and stop_event.is_set():
+            break
         # Global per-pass budget: stop and return once this pass has scanned
         # pass_budget windows total, even with cold groups still unserviced.
         # They keep their older last_run_at, so the next pass — re-ordered
@@ -789,6 +792,8 @@ def scan_enrolled_events(
             if chain_id not in targets:
                 targets[chain_id] = max(0, head_fetcher.head_block() - chain_confirmation_depth)
             for _ in range(max(1, max_windows_per_cursor)):
+                if stop_event is not None and stop_event.is_set():
+                    break
                 if windows_scanned >= pass_budget:
                     break
                 result = index_event_group_step(
@@ -1424,7 +1429,9 @@ def run_event_log_indexer_loop(
                             with log_timed_phase(logger, "indexer_enroll", record_metric=False) as ph:
                                 from services.resolution.indexer_scheduler import drain_enrollment
 
-                                enrolled = drain_enrollment(session, tracked_limit=DEFAULT_TRACKED_TOPIC_ENROLL_LIMIT)
+                                enrolled = drain_enrollment(
+                                    session, tracked_limit=DEFAULT_TRACKED_TOPIC_ENROLL_LIMIT, stop_event=stop_event
+                                )
                                 ph["enrolled"] = enrolled
                             with log_timed_phase(logger, "indexer_scan", record_metric=False) as ph:
                                 summary = scan_enrolled_events(
@@ -1432,6 +1439,7 @@ def run_event_log_indexer_loop(
                                     fetchers=fetchers,
                                     head_fetchers=head_fetchers,
                                     block_hash_fetchers=block_hash_fetchers,
+                                    stop_event=stop_event,
                                 )
                                 ph["windows_scanned"] = summary.windows_scanned
                                 ph["inserted"] = summary.inserted
@@ -1483,7 +1491,7 @@ def run_event_log_indexer_loop(
                         with log_timed_phase(logger, "indexer_reconcile", record_metric=False) as ph:
                             from services.resolution.indexer_scheduler import drain_reconciliation
 
-                            reenqueued, drift_reenqueued = drain_reconciliation(session)
+                            reenqueued, drift_reenqueued = drain_reconciliation(session, stop_event=stop_event)
                             ph["reenqueued"] = reenqueued
                             ph["drift_reenqueued"] = drift_reenqueued
                     if reenqueued or drift_reenqueued:

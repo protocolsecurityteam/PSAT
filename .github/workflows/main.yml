@@ -96,7 +96,7 @@ jobs:
           python -m deploy.production.control restore
           python -m deploy.production.control verify --mode observe --indexer workers
 
-      - name: Drain managed workers before deployment
+      - name: Pause claims and stop workers before deployment
         id: lifecycle
         run: python -m deploy.production.control prepare
 
@@ -162,18 +162,17 @@ jobs:
           PSAT_LIVE_URL: ${{ env.PROD_URL }}
         run: uv run pytest -m "live and smoke" -q
 
-      - name: Restore previous release on deployment or smoke failure
+      - name: Activate lifecycle after successful deployment
+        run: python -m deploy.production.control resume --activate
+
+      - name: Restore previous release on handover, deployment, smoke, or activation failure
         id: rollback
         # A deployment can fail after draining or after updating only some groups.
         # Use the captured image/config pair and skip schema migration on the old image.
-        if: failure() && steps.snapshot.outcome == 'success' && (steps.bridge.outcome == 'failure' || steps.bridge.outcome == 'success' || (steps.lifecycle.outcome == 'success' && steps.deploy.outcome != 'skipped'))
+        if: failure() && steps.snapshot.outcome == 'success'
         run: |
           python -m deploy.production.control rollback
           curl -fsS --retry 12 --retry-delay 5 --retry-all-errors --max-time 10 "$PROD_URL/api/health" >/dev/null
-
-      - name: Activate lifecycle after successful deployment
-        if: success()
-        run: python -m deploy.production.control resume --activate
 
       - name: Restore previous lifecycle pause after successful rollback
         if: failure() && steps.rollback.outcome == 'success'
