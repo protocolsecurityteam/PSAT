@@ -446,3 +446,32 @@ def test_budgeted_backfill_is_identical_to_unbudgeted(session):
     for _addr, last_block, complete in budgeted_cursors:
         assert complete is True  # no cursor starved short of completion
         assert last_block == _TARGET  # backfill_complete only at the confirmed head, never premature
+
+
+@requires_postgres
+def test_many_warm_groups_do_not_consume_windows_or_trigger_busy_cadence(session):
+    for i in range(182):
+        enroll_event_cursor(session, chain_id=1, event_address=f"0x{i + 1:040x}", topic0=_TOPIC, start_block=_TARGET)
+    session.commit()
+    fetcher = _RangeCappedFetcher()
+    fetchers, heads, hashes = _maps(fetcher)
+    summary = scan_enrolled_events(
+        session, fetchers=fetchers, head_fetchers=heads, block_hash_fetchers=hashes, max_windows_per_pass=100
+    )
+    assert summary.windows_scanned == 0
+    assert summary.caught_up_cursors == 182
+    assert not summary.budget_exhausted
+    assert not fetcher.requested_spans
+
+
+@requires_postgres
+def test_exact_budget_finishing_last_cold_group_is_not_busy(session):
+    enroll_event_cursor(session, chain_id=1, event_address=_AUTHORITY, topic0=_TOPIC, start_block=_TARGET - 10)
+    session.commit()
+    fetcher = _RangeCappedFetcher()
+    fetchers, heads, hashes = _maps(fetcher)
+    summary = scan_enrolled_events(
+        session, fetchers=fetchers, head_fetchers=heads, block_hash_fetchers=hashes, max_windows_per_pass=1
+    )
+    assert summary.windows_scanned == 1
+    assert not summary.budget_exhausted

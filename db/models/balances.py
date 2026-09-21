@@ -589,6 +589,7 @@ class IndexedEventLog(Base):
             "transaction_index",
             "log_index",
         ),
+        Index("ix_indexed_event_logs_role_lookup", "chain_id", func.lower(event_address), "topic0", "block_number"),
         Index(
             "ix_indexed_event_logs_block",
             "chain_id",

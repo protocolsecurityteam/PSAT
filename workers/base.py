@@ -55,6 +55,27 @@ STALE_JOB_TIMEOUT = int(os.getenv("PSAT_STALE_JOB_TIMEOUT", "600"))  # seconds
 RECLAIM_INTERVAL_S = float(os.getenv("PSAT_RECLAIM_INTERVAL_S", "30"))
 
 
+class IdlePollDelay:
+    """Back off empty queues; reset as soon as any useful work is claimed."""
+
+    def __init__(self, base: float) -> None:
+        self.base = max(0.0, base)
+        try:
+            ceiling = float(os.getenv("PSAT_WORKER_IDLE_MAX_S", "15"))
+        except ValueError:
+            ceiling = 15.0
+        self.ceiling = max(self.base, ceiling)
+        self.reset()
+
+    def reset(self) -> None:
+        self.delay = self.base
+
+    def next_delay(self) -> float:
+        delay = self.delay
+        self.delay = min(self.ceiling, self.delay * 2)
+        return delay
+
+
 def _job_heartbeat_interval_s() -> float:
     """Resolve the max wait between background job heartbeats."""
     try:
@@ -728,27 +749,29 @@ class BaseWorker:
         logger.info("Worker %s shut down", self.worker_id)
 
     def _run_loop_single(self) -> None:
-        """Legacy K=1 loop: one in-flight job per worker process. Path is
-        byte-identical to the pre-concurrency implementation."""
-        recovery_counter = 0
+        """One in-flight job; empty queues back off without slowing recovery."""
+        idle = IdlePollDelay(self.poll_interval)
+        recovery_interval = max(60.0, 30 * self.poll_interval)
+        recover_at = time.monotonic() + recovery_interval
         while self._running:
             session = SessionLocal()
             try:
-                # Check for stale jobs every ~30 poll cycles (~60s at 2s interval)
-                recovery_counter += 1
-                if recovery_counter >= 30:
-                    recovery_counter = 0
+                if time.monotonic() >= recover_at:
+                    recover_at = time.monotonic() + recovery_interval
                     self._recover_stale_jobs(session)
 
                 job = self._claim_job(session)
                 if job is None:
                     session.close()
-                    time.sleep(self.poll_interval)
+                    time.sleep(idle.next_delay())
                     continue
 
+                idle.reset()
                 self._execute_job(session, job)
             except Exception:
                 logger.exception("Worker %s encountered error in main loop", self.worker_id)
+                session.close()
+                time.sleep(idle.next_delay())
             finally:
                 session.close()
 
@@ -764,7 +787,9 @@ class BaseWorker:
         recovers them on a sibling worker.
         """
         assert self._job_pool is not None
-        recovery_counter = 0
+        idle = IdlePollDelay(self.poll_interval)
+        recovery_interval = max(60.0, 30 * self.poll_interval)
+        recover_at = time.monotonic() + recovery_interval
         while self._running:
             # Drain finished futures so the slot count is accurate.
             self._reap_finished_futures()
@@ -779,9 +804,8 @@ class BaseWorker:
             job_to_dispatch: Job | None = None
             job_id_for_dispatch = None
             try:
-                recovery_counter += 1
-                if recovery_counter >= 30:
-                    recovery_counter = 0
+                if time.monotonic() >= recover_at:
+                    recover_at = time.monotonic() + recovery_interval
                     self._recover_stale_jobs(claim_session)
 
                 job_to_dispatch = self._claim_job(claim_session)
@@ -799,11 +823,13 @@ class BaseWorker:
                 # Nothing to claim — sleep just enough to avoid hammering
                 # Postgres while still letting in-flight futures progress.
                 if self._inflight:
+                    idle.reset()
                     wait(self._inflight, timeout=self.poll_interval, return_when=FIRST_COMPLETED)
                 else:
-                    time.sleep(self.poll_interval)
+                    time.sleep(idle.next_delay())
                 continue
 
+            idle.reset()
             # ``ThreadPoolExecutor.submit`` does not propagate contextvars
             # by default; wrap with ``copy_context().run`` so the dispatched
             # job inherits the claim-loop's contextvar state. The per-job

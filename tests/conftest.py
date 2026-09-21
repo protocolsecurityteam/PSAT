@@ -49,6 +49,7 @@ from db.models import (  # noqa: E402
     EffectVerdict,
     IndexedEventCursor,
     IndexedEventLog,
+    IndexerWork,
     Job,
     MonitoredContract,
     MonitoredEvent,
@@ -741,6 +742,7 @@ def db_session():
             # live 120s TTL under a per-process holder). Clear them so warm-DB
             # reruns don't couple lease state across unrelated passes.
             DaemonLease,
+            IndexerWork,
             # Delivery evidence is a fact about two ADDRESSES, so it carries no
             # protocol FK and nothing above cascades it. That is right for
             # production — the row outlives every fetch and every protocol that
