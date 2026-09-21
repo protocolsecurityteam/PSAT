@@ -37,6 +37,8 @@ def test_only_intentional_branch_point():
     branched = {r.revision for r in script.walk_revisions() if r.is_branch_point}
     assert branched == {"b3d7e1f05a92"}, f"Unexpected Alembic branch points: {branched}"
     join = script.get_revision("c90d1fe9c8e1")
+    assert join is not None
+    assert isinstance(join.down_revision, tuple)
     assert set(join.down_revision) == {"a8c2d4e6f901", "c6a10d82e5b7"}
 
 
