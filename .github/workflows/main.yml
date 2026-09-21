@@ -50,12 +50,12 @@ jobs:
           import re
           import sys
           from pathlib import Path
-          from scripts.worker_lifecycle_config import render
+          from deploy.production.control import render_config
 
           secret = os.environ["PSAT_HEALTH_SECRET"]
           if not re.fullmatch(r"[a-f0-9]{64}", secret):
               raise SystemExit("PSAT_HEALTH_SECRET must be a random 32-byte hex secret")
-          source = render(
+          source = render_config(
               Path("fly.toml").read_text(),
               mode=os.environ["PSAT_LIFECYCLE_MODE"],
               indexer=os.environ["PSAT_INDEXER_GROUP"],
@@ -69,11 +69,11 @@ jobs:
 
       - name: Capture previous image and configuration for rollback
         id: snapshot
-        run: python scripts/worker_lifecycle_deploy.py snapshot --config "$GITHUB_WORKSPACE/fly.rollback.json"
+        run: python -m deploy.production.control snapshot --config "$GITHUB_WORKSPACE/fly.rollback.json"
 
       - name: Drain managed workers before deployment
         id: lifecycle
-        run: python scripts/worker_lifecycle_deploy.py prepare
+        run: python -m deploy.production.control prepare
 
       - name: Deploy to production
         id: deploy
@@ -82,7 +82,7 @@ jobs:
             --build-arg GIT_SHA="${{ github.sha }}"
 
       - name: Restore workers and verify running boot
-        run: python scripts/worker_lifecycle_deploy.py restore
+        run: python -m deploy.production.control restore
 
       - name: Wait for /api/health
         # /api/health is the deep probe — DB SELECT 1 + storage head_bucket. 503 on any failure.
@@ -135,9 +135,9 @@ jobs:
         # Use the captured image/config pair and skip schema migration on the old image.
         if: failure() && steps.snapshot.outcome == 'success' && steps.lifecycle.outcome == 'success' && steps.deploy.outcome != 'skipped'
         run: |
-          python scripts/worker_lifecycle_deploy.py rollback
+          python -m deploy.production.control rollback
           curl -fsS --retry 12 --retry-delay 5 --retry-all-errors --max-time 10 "$PROD_URL/api/health" >/dev/null
 
       - name: Resume lifecycle after deployment or successful rollback
         if: always() && steps.snapshot.outcome == 'success' && (success() || steps.rollback.outcome == 'success')
-        run: python scripts/worker_lifecycle_deploy.py resume
+        run: python -m deploy.production.control resume

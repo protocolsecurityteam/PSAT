@@ -1,9 +1,9 @@
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
 
-from scripts import worker_lifecycle_deploy as deploy
-from scripts.worker_lifecycle_report import summarize
+from deploy.production import control as deploy
 
 
 def worker(mode="observe", state="started"):
@@ -55,40 +55,38 @@ def test_deploy_timeout_never_forces_stop_or_resumes(monkeypatch):
     admin.assert_called_once_with("drain")
 
 
-def test_cost_report_charges_unknown_gaps_and_all_overhead():
-    rows = [
-        {
-            "message": "worker lifecycle observation",
-            "timestamp": f"2026-09-21T00:0{minute}:00Z",
-            "machine_state": "started",
-            "idle_seconds": 900,
-            "sample_seconds": 15,
-            "ready_sources": [],
-            "active": False,
-        }
-        for minute in (0, 1, 2)
-    ]
-    result = summarize(rows, grace=300, startup_s=30, hourly=0.1189, monitor_delta=8.20, rootfs_gb=5, other_delta=2)
-    assert result["coverage_fraction"] == 0.25
-    assert result["projected_running_fraction_with_gaps_billed"] == 0.75
-    assert result["projected_savings_per_720h"] == round(180 * 0.1189 - 8.2 - 0.15 * 5 * 0.25 - 2, 2)
+def test_layout_preserves_analysis_capacity_and_concurrency():
+    source = Path("fly.toml").read_text()
+    rendered = deploy.render_config(source, mode="enforce", indexer="monitor", monitor_mb=2048)
+    worker = rendered.split('processes = ["workers"]')[1].split("[[vm]]")[0]
+    assert 'size = "shared-cpu-8x"' in worker and 'memory = "16gb"' in worker
+    for line in source.splitlines():
+        if any(
+            key in line
+            for key in (
+                "PSAT_STATIC_WORKERS =",
+                "PSAT_POLICY_WORKERS =",
+                "PSAT_RESOLUTION_WORKERS =",
+                "PSAT_POLICY_JOB_CONCURRENCY =",
+            )
+        ):
+            assert line in rendered
+    assert 'size = "shared-cpu-2x"\n  memory = "2048mb"' in rendered
+    assert 'policy = "on-failure"' in rendered
 
 
-def test_cost_report_no_savings_if_always_busy():
-    rows = [
-        {
-            "message": "worker lifecycle observation",
-            "timestamp": f"2026-09-21T00:00:{s:02d}Z",
-            "machine_state": "started",
-            "idle_seconds": 0,
-            "sample_seconds": 15,
-            "ready_sources": ["jobs"],
-            "active": True,
-        }
-        for s in (0, 15, 30)
-    ]
-    result = summarize(rows, grace=300, startup_s=30, hourly=0.1189, monitor_delta=8.20, rootfs_gb=5, other_delta=0)
-    assert result["projected_savings_per_720h"] == -8.20
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        dict(mode="invalid"),
+        dict(mode="enforce", indexer="workers"),
+        dict(indexer="monitor", monitor_mb=512),
+        dict(monitor_mb=1024),
+    ],
+)
+def test_unsafe_config_rejected(kwargs):
+    with pytest.raises(ValueError):
+        deploy.render_config(Path("fly.toml").read_text(), **kwargs)
 
 
 class FakeFly:

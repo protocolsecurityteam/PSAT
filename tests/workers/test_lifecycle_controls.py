@@ -1,47 +1,11 @@
 """Deployment invariants, Fly API boundary and intentional-sleep health."""
 
-from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
 
-from scripts.worker_lifecycle_config import render
 from services.monitoring.process_meta import planned_sleep
 from workers.lifecycle_controller import FlyMachines
-
-
-def test_layout_preserves_analysis_capacity_and_concurrency():
-    source = Path("fly.toml").read_text()
-    rendered = render(source, mode="enforce", indexer="monitor", monitor_mb=2048)
-    worker = rendered.split('processes = ["workers"]')[1].split("[[vm]]")[0]
-    assert 'size = "shared-cpu-8x"' in worker and 'memory = "16gb"' in worker
-    for line in source.splitlines():
-        if any(
-            key in line
-            for key in (
-                "PSAT_STATIC_WORKERS =",
-                "PSAT_POLICY_WORKERS =",
-                "PSAT_RESOLUTION_WORKERS =",
-                "PSAT_POLICY_JOB_CONCURRENCY =",
-            )
-        ):
-            assert line in rendered
-    assert 'size = "shared-cpu-2x"\n  memory = "2048mb"' in rendered
-    assert 'policy = "on-failure"' in rendered
-
-
-@pytest.mark.parametrize(
-    "kwargs",
-    [
-        dict(mode="invalid"),
-        dict(mode="enforce", indexer="workers"),
-        dict(indexer="monitor", monitor_mb=512),
-        dict(monitor_mb=1024),
-    ],
-)
-def test_unsafe_config_rejected(kwargs):
-    with pytest.raises(ValueError):
-        render(Path("fly.toml").read_text(), **kwargs)
 
 
 def machine(**config):
