@@ -22,8 +22,9 @@ import logging
 import os
 import uuid
 from collections.abc import Sequence
+from contextlib import contextmanager
 from datetime import timedelta
-from threading import Event
+from threading import Event, Thread
 from typing import NamedTuple
 
 from sqlalchemy import case, delete, func, select, text, update
@@ -52,16 +53,15 @@ DEFAULT_RECONCILE_INTERVAL_S = int(os.getenv("PSAT_ENROLLMENT_RECONCILE_INTERVAL
 # overridable via env rather than a buried ``chain="ethereum"`` signature default.
 RECONCILER_FALLBACK_CHAIN = os.getenv("PSAT_RECONCILER_FALLBACK_CHAIN", "ethereum")
 
-# Lease TTL for a claimed queue row — must exceed the worst single-protocol
-# ``enroll_protocol_contracts`` build (a full ``build_governance_view``) so a
-# slow build doesn't hand its row to a competing drainer mid-flight.
+# Recovery TTL. A scoped keepalive maintains it during long governance builds;
+# matching lease tokens fence every business commit against an actual takeover.
 DEFAULT_ENROLLMENT_LEASE_TTL_S = 900
 
 # Repair-sweep configuration lives in enrollment_schedule. Queue draining stays
 # independent so real changes and retries do not wait for the daily backstop.
 
-# Per-drain claim ceiling. Bounds how many heavy builds one tick serializes so a
-# lease can't expire while its protocol waits behind a long backlog.
+# Per-drain build ceiling. Claim each protocol just before its build so queued
+# protocols never spend their leases waiting behind another protocol.
 DEFAULT_ENROLLMENT_DRAIN_BATCH = 8
 
 # Backoff ceiling for a repeatedly-failing (poisoned) protocol: 6 hours.
@@ -106,12 +106,19 @@ class EnrollmentClaim(NamedTuple):
 
 
 def renew_claim(session: Session, claim: EnrollmentClaim, ttl: int = DEFAULT_ENROLLMENT_LEASE_TTL_S) -> None:
+    """Atomically renew a still-current token, locking it through business commit.
+
+    Expiry permits another drainer to claim; the changed UUID fences the old
+    owner. An expired but unchanged UUID can renew safely: either this UPDATE
+    wins the row lock, or it observes the new UUID and fails. Requiring an
+    unexpired timestamp would falsely reject a long transaction that itself
+    holds the queue row, preventing both keepalive and takeover.
+    """
     owned = session.execute(
         update(MonitoringEnrollmentQueue)
         .where(
             MonitoringEnrollmentQueue.protocol_id == claim.protocol_id,
             MonitoringEnrollmentQueue.lease_id == claim.lease_id,
-            MonitoringEnrollmentQueue.lease_expires_at > func.clock_timestamp(),
         )
         .values(lease_expires_at=func.clock_timestamp() + timedelta(seconds=ttl))
         .returning(MonitoringEnrollmentQueue.protocol_id)
@@ -120,11 +127,56 @@ def renew_claim(session: Session, claim: EnrollmentClaim, ttl: int = DEFAULT_ENR
         raise RuntimeError("enrollment lease lost")
 
 
+def _keepalive_once(claim: EnrollmentClaim, ttl: int) -> None:
+    # Never share the enrollment Session across threads. SKIP LOCKED prevents a
+    # business transaction holding its own queue row from deadlocking cleanup.
+    with SessionLocal() as session:
+        session.execute(text("SET LOCAL statement_timeout = '5s'"))
+        owned = session.execute(
+            select(MonitoringEnrollmentQueue.protocol_id)
+            .where(
+                MonitoringEnrollmentQueue.protocol_id == claim.protocol_id,
+                MonitoringEnrollmentQueue.lease_id == claim.lease_id,
+            )
+            .with_for_update(skip_locked=True)
+        ).scalar_one_or_none()
+        if owned is not None:
+            renew_claim(session, claim, ttl)
+            session.commit()
+
+
+@contextmanager
+def _keepalive(claim: EnrollmentClaim, ttl: int):
+    stopped = Event()
+
+    def maintain():
+        while not stopped.wait(min(60.0, ttl / 3)):
+            try:
+                _keepalive_once(claim, ttl)
+            except Exception as exc:
+                # Connectivity trouble is not proof of takeover. Each business
+                # commit still validates the token transactionally and fails
+                # closed if the DB cannot validate it or another owner won.
+                logger.info(
+                    "enrollment keepalive unavailable; commit fence remains required",
+                    extra={"protocol_id": claim.protocol_id, "exc_type": type(exc).__name__},
+                )
+
+    thread = Thread(target=maintain, name="enrollment-lease-keepalive")
+    thread.start()
+    try:
+        yield
+    finally:
+        stopped.set()
+        thread.join()
+
+
 def claim_due_enrollments(
     session: Session,
     *,
     lease_ttl_s: int,
     limit: int,
+    exclude_protocol_ids: Sequence[int] = (),
 ) -> list[EnrollmentClaim]:
     """Lease-claim up to *limit* due queue rows, exactly like ``db.queue.claim_job``.
 
@@ -144,6 +196,7 @@ def claim_due_enrollments(
         select(MonitoringEnrollmentQueue)
         .where(
             MonitoringEnrollmentQueue.dirty_at <= func.now(),
+            MonitoringEnrollmentQueue.protocol_id.not_in(exclude_protocol_ids),
             (
                 MonitoringEnrollmentQueue.lease_expires_at.is_(None)
                 | (MonitoringEnrollmentQueue.lease_expires_at < func.now())
@@ -265,11 +318,12 @@ def drain_enrollment_queue(
     *,
     lease_ttl_s: int | None = None,
     max_claims: int | None = None,
+    stop_event: Event | None = None,
 ) -> dict[str, int]:
     """Claim and process due enrollment-queue rows.
 
-    Claims a bounded batch with :func:`claim_due_enrollments`, then processes
-    each claimed protocol in its **own fresh session** running the full
+    Claims a bounded number with :func:`claim_due_enrollments`, one immediately
+    before each build. Each protocol runs in its **own fresh session** with the full
     ``enroll_protocol_contracts(..., enroll_controllers=True)`` build. Success
     deletes the claimed row (``dirty_at``-guarded) and stamps
     ``last_enrollment_reconcile_at``; failure (including a partially enrolled
@@ -288,16 +342,25 @@ def drain_enrollment_queue(
         else _env_int("PSAT_ENROLLMENT_DRAIN_BATCH", DEFAULT_ENROLLMENT_DRAIN_BATCH)
     )
 
-    with SessionLocal() as claim_session:
-        claims = claim_due_enrollments(claim_session, lease_ttl_s=lease_ttl_s, limit=max_claims)
+    if lease_ttl_s <= 0:
+        raise ValueError("enrollment lease TTL must be positive")
 
     drained = 0
     failed = 0
-    for claim in claims:
+    attempted: list[int] = []
+    for _ in range(max_claims):
+        if stop_event is not None and stop_event.is_set():
+            break
+        with SessionLocal() as claim_session:
+            claims = claim_due_enrollments(
+                claim_session, lease_ttl_s=lease_ttl_s, limit=1, exclude_protocol_ids=attempted
+            )
+        if not claims:
+            break
+        claim = claims[0]
+        attempted.append(claim.protocol_id)
         try:
-            with SessionLocal() as work_session:
-                # A batch's later claim may have expired while earlier builds
-                # ran. Never begin heavy work with an already stale token.
+            with _keepalive(claim, lease_ttl_s), SessionLocal() as work_session:
                 renew_claim(work_session, claim, lease_ttl_s)
                 work_session.commit()
                 protocol_chain = _protocol_chain(work_session, claim.protocol_id, chain)
@@ -368,7 +431,7 @@ def run_enrollment_reconciler_loop(
             if not os.getenv("PSAT_WORKER_BOOT_ID"):
                 with SessionLocal() as session:
                     swept = sweep_enqueue_stale(session)
-            result = drain_enrollment_queue(rpc_url, chain)
+            result = drain_enrollment_queue(rpc_url, chain, stop_event=stop_event)
             with SessionLocal() as session:
                 depth = _queue_depth(session)
         except Exception as exc:

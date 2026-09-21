@@ -117,7 +117,7 @@ def test_enrollment_internal_commit_is_fenced(db_session):
     db_session.commit()
     claim = reconciler.claim_due_enrollments(db_session, lease_ttl_s=900, limit=1)[0]
     with Session(db_session.bind) as other:
-        other.execute(text("UPDATE monitoring_enrollment_queue SET lease_expires_at=now()-interval '1 second'"))
+        other.execute(text("UPDATE monitoring_enrollment_queue SET lease_id=:new_owner"), {"new_owner": uuid.uuid4()})
         other.commit()
     with pytest.raises(RuntimeError, match="lease lost"):
         with fenced_commits(db_session, lambda s: reconciler.renew_claim(s, claim)):

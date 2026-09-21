@@ -40,3 +40,8 @@ phase-b-results.md
 coverage.xml
 diff-cover.html
 diff-cover.md
+
+# Generated deployment configuration can contain health credentials.
+fly.production.toml
+fly.rollback.json
+fly.lifecycle.json

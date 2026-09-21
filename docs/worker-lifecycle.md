@@ -98,9 +98,14 @@ deployment resumes; the controller does not wake a second large VM.
 
 Ordinary indexer reconciliation and heavy enrollment now fence and renew their
 queue lease **inside every business commit**, including internal commits, and
-guard final acknowledgement. An expired/stolen 900-second lease cannot publish
-a late transaction after takeover. Indexer shutdown joins the backfill thread
-before releasing singleton ownership.
+guard final acknowledgement. A replaced lease cannot publish a late transaction
+after takeover. Heavy enrollment claims each protocol immediately before its
+build and keeps the lease alive with an independent session. Expiry makes a row
+eligible for takeover; an unchanged enrollment UUID can atomically renew, while
+a replaced UUID rejects the old owner's commit. This also handles a long
+transaction holding its own queue row past the TTL. Shutdown finishes the active
+build and joins its keepalive before exiting. Indexer shutdown joins the backfill
+thread before releasing singleton ownership.
 
 ## Configuration and staged rollout
 
@@ -140,24 +145,43 @@ Rotate caveats when a Machine identity changes. See [Fly token caveats](https://
    closes the claim gate and waits up to 20 minutes for actual worker stopping;
    it does not kill/stop the VM. The old indexer exits and releases its own lock
    before the monitor's indexer can run. Monitoring loops stay on monitoring.
+   Fly preserves an updated machine's stopped state. The deployment helper
+   explicitly starts workers, including in observe mode, and verifies a fresh
+   running boot before health/smoke checks. The controller stays paused through
+   this handover; CI is a one-shot deployment owner, not another supervisor.
 3. Collect a representative healthy workload cycle (preferably 7–14 days),
    including analysis-dependent indexing, catch-up, daily repair and audits.
    Validate monitoring headroom/lag, output equivalence and projected total
    cost; perform controlled cold/warm start and race tests in isolation.
 4. Deploy **enforce** only after those gates pass. The migration initially sets
-   durable `paused=true`. Explicitly resume after validation; a successfully
-   drained managed deployment is resumed by CI after health/smoke checks.
+   durable `paused=true`. Explicitly resume after validation; CI restores the
+   pre-deployment pause setting after successful health/smoke checks, preserving
+   an operator's pause. The first bridge remains paused for validation.
    Verify real machine restart configuration, actual stopped state, one indexer,
    unchanged consumer concurrency and successful cold job completion.
 5. Reconcile actual running seconds, queue age, throughput and invoices daily
    during the canary. Stop rollout for unexplained output differences, duplicate
    execution, lag regression, missed wakes or an unfavorable total-cost trend.
 
-The CI workflow drains again before image rollback. A drain/deploy/rollback
-failure leaves lifecycle paused for operator recovery instead of force-killing
-live work. The workflow timeout allows draining; it does not alter Fly's normal
-forced-shutdown deadline. Manual deployments must use the same prepare/resume
-helper. A cancelled deployment may also leave `paused=true`; inspect status.
+Before draining, CI captures the actual immutable image, Fly's previous app
+configuration, actual per-group CPU/RAM allocations and the current pause
+setting. It rejects mixed images/configuration drift. Generated configuration
+contains credentials and is excluded from Git and the Docker build context.
+Rollback drains again, restores the captured image/configuration pair, explicitly
+starts workers, checks readiness and restores the previous pause setting. It
+skips the old image's release command: these migrations are additive, and an old
+Alembic image cannot interpret a newer migration revision. No schema downgrade
+is attempted. During a partial first bridge, control can execute on the updated
+worker if the monitor still has the legacy image.
+
+A drain/deploy/rollback failure leaves lifecycle paused for operator recovery
+instead of force-killing live work. The workflow timeout allows draining; it
+does not alter Fly's normal forced-shutdown deadline. Manual deployments must
+use the same `snapshot`, `prepare`, deploy, `restore`, health/smoke, `resume`
+sequence in `scripts/worker_lifecycle_deploy.py`. Retain the protected snapshot
+and config for `rollback`; never pair an old image with the new configuration.
+A cancelled deployment may also leave `paused=true`; inspect status and actual
+machine state before resuming. Resume alone never starts observe-mode workers.
 
 Operator commands (run in the monitor's deployed environment only when an
 operational change is authorized):
@@ -169,14 +193,15 @@ python -m workers.lifecycle_admin drain   # pause and close the current claim ga
 python -m workers.lifecycle_admin resume  # restore queue-driven lifecycle
 ```
 
-For rollback, retain a bridge-or-newer image, choose `observe` to keep workers
-running, and drain before changing layout. If workers are already stopped,
-restore their availability through an authorized start/deployment; `observe`
-does not start them. Do not roll back to a pre-bridge worker launcher while a
+For a later operational rollback, retain a bridge-or-newer image, choose
+`observe` to keep workers running, and use the deployment handover to drain,
+update and restore availability. Do not roll back to a pre-bridge worker launcher while a
 monitor-owned indexer is running. Move indexing back under the shared singleton
 first in `observe`, verify the original monitoring load, then deploy `off` with
 the smaller monitor. The deployment guard rejects turning ownership off while
 indexing is still on monitoring.
+Only the initial bridge can roll directly back to its captured legacy release,
+because indexing has not yet moved to monitoring.
 Keeping the larger monitor while reverting workers to continuous running costs
 more than the original baseline; it is an availability fallback, not savings.
 
@@ -231,7 +256,8 @@ The suite covers claim/drain transactions, late enqueues, delayed retries,
 dependencies, every custom queue, orphan rows, stale boot IDs, wake cooldown,
 controller restarts, direct singleton ownership, stale commit rejection, real
 child processes, preserved concurrency/configuration, lifecycle-off/on queue and
-artifact parity, health reporting, deployment guards and conservative cost math.
+artifact parity, health reporting, full stopped-update deployment restoration,
+legacy rollback, long enrollment builds and conservative cost math.
 Existing analysis/indexer/enrollment/audit suites exercise their unchanged
 business logic with controlled external responses. Real Fly cold-start latency,
 provider costs and healthy-load capacity remain production-canary release gates;

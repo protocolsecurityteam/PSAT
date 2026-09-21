@@ -9,3 +9,6 @@ tmp/
 image.png
 site/node_modules/
 *.png
+fly.production.toml
+fly.rollback.json
+fly.lifecycle.json

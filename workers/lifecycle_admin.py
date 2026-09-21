@@ -20,9 +20,18 @@ def main():
             session.execute(
                 text("UPDATE worker_lifecycle SET paused=:paused WHERE id=1"), {"paused": args.action == "pause"}
             )
-        row = session.execute(text("SELECT * FROM worker_lifecycle WHERE id=1")).mappings().one()
+        row = (
+            session.execute(
+                text(
+                    "SELECT *, heartbeat_at > clock_timestamp() - interval '30 seconds' AS boot_fresh "
+                    "FROM worker_lifecycle WHERE id=1"
+                )
+            )
+            .mappings()
+            .one()
+        )
         session.commit()
-        print(json.dumps(dict(row), default=str))
+        print(json.dumps({**dict(row), "control_version": 1}, default=str))
 
 
 if __name__ == "__main__":

@@ -22,7 +22,7 @@ jobs:
   deploy:
     needs: ci
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 75
     # `production` scopes FLY_PROD_API_TOKEN; its deployment branch policy allows only main.
     environment: production
     env:
@@ -32,6 +32,7 @@ jobs:
       PSAT_LIFECYCLE_MODE: ${{ vars.PSAT_LIFECYCLE_MODE || 'off' }}
       PSAT_INDEXER_GROUP: ${{ vars.PSAT_INDEXER_GROUP || 'workers' }}
       PSAT_MONITOR_MEMORY_MB: ${{ vars.PSAT_MONITOR_MEMORY_MB || '512' }}
+      PSAT_LIFECYCLE_STATE_FILE: ${{ runner.temp }}/psat-lifecycle.json
     steps:
       - uses: actions/checkout@v4
 
@@ -66,6 +67,10 @@ jobs:
           Path(sys.argv[1]).write_text(source.replace(marker, secret))
           PY
 
+      - name: Capture previous image and configuration for rollback
+        id: snapshot
+        run: python scripts/worker_lifecycle_deploy.py snapshot --config "$GITHUB_WORKSPACE/fly.rollback.json"
+
       - name: Drain managed workers before deployment
         id: lifecycle
         run: python scripts/worker_lifecycle_deploy.py prepare
@@ -75,6 +80,9 @@ jobs:
         run: |
           flyctl deploy -a psat --config "$GITHUB_WORKSPACE/fly.production.toml" --remote-only \
             --build-arg GIT_SHA="${{ github.sha }}"
+
+      - name: Restore workers and verify running boot
+        run: python scripts/worker_lifecycle_deploy.py restore
 
       - name: Wait for /api/health
         # /api/health is the deep probe — DB SELECT 1 + storage head_bucket. 503 on any failure.
@@ -121,30 +129,15 @@ jobs:
           PSAT_LIVE_URL: ${{ env.PROD_URL }}
         run: uv run pytest -m "live and smoke" -q
 
-      - name: Rollback prod on smoke failure
+      - name: Restore previous release on deployment or smoke failure
         id: rollback
-        # Re-deploy the previous successful release's image. Only fires when one of the steps
-        # after deploy (health, SHA, smoke) failed. If flyctl deploy itself fails,
-        # release_command aborts before rolling traffic and there is nothing to roll back.
-        # `flyctl releases` has no first-class `rollback` subcommand; --image is the canonical path.
-        if: failure() && steps.deploy.outcome == 'success'
+        # A deployment can fail after draining or after updating only some groups.
+        # Use the captured image/config pair and skip schema migration on the old image.
+        if: failure() && steps.snapshot.outcome == 'success' && steps.lifecycle.outcome == 'success' && steps.deploy.outcome != 'skipped'
         run: |
-          echo "::warning::Smoke failed — rolling back psat to previous release"
-          python scripts/worker_lifecycle_deploy.py prepare
-          PREV_IMAGE=$(flyctl releases -a psat --json \
-            | jq -r '[.[] | select(.Status == "complete")] | .[1].ImageRef // empty')
-          if [ -z "$PREV_IMAGE" ]; then
-            echo "::error::No previous successful release found; manual intervention required"
-            flyctl releases -a psat | head -20
-            exit 1
-          fi
-          echo "rolling back to $PREV_IMAGE"
-          flyctl deploy -a psat --config "$GITHUB_WORKSPACE/fly.production.toml" \
-            --image "$PREV_IMAGE" --remote-only --strategy immediate || {
-            echo "::error::Rollback deploy failed; manual intervention required"
-            exit 1
-          }
+          python scripts/worker_lifecycle_deploy.py rollback
+          curl -fsS --retry 12 --retry-delay 5 --retry-all-errors --max-time 10 "$PROD_URL/api/health" >/dev/null
 
       - name: Resume lifecycle after deployment or successful rollback
-        if: always() && steps.lifecycle.outputs.drained == 'true' && (success() || steps.rollback.outcome == 'success')
+        if: always() && steps.snapshot.outcome == 'success' && (success() || steps.rollback.outcome == 'success')
         run: python scripts/worker_lifecycle_deploy.py resume
