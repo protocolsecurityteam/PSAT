@@ -99,10 +99,6 @@ def build_proposal_impact(session: Session, company: str, jobs: list[Job]) -> di
         subjects = {row["id"]: row for row in observed["subjects"]}
         evidence_by_id = {row["id"]: row for row in observed["evidence"]}
         claims_by_id = {row["id"]: row for row in observed["claims"]}
-        observed_configs = [row for row in observed["claims"] if row["kind"].value == "configuration"]
-        current_by_key: dict[tuple[str, str], Mapping[str, Any]] = {}
-        for claim in sorted(observed_configs, key=_block_number):
-            current_by_key[_config_key(claim)] = claim
         for claim in observed["claims"]:
             if claim["kind"].value not in {
                 "proposal_contents",
@@ -151,11 +147,15 @@ def build_proposal_impact(session: Session, company: str, jobs: list[Job]) -> di
             scenario_subjects = {row["id"]: row for row in scenario["subjects"]}
             scenario_evidence = {row["id"]: row for row in scenario["evidence"]}
             scenario_claims = {row["id"]: row for row in scenario["claims"]}
+            baseline_by_key: dict[tuple[str, str], Mapping[str, Any]] = {}
+            for baseline_claim in sorted(scenario["claims"], key=_block_number):
+                if baseline_claim["kind"].value == "configuration" and baseline_claim["scope_kind"].value != "scenario":
+                    baseline_by_key[_config_key(baseline_claim)] = baseline_claim
             context = next((row["context"] for row in scenario["contexts"] if row["id"] == context_id), {})
             for claim in scenario["claims"]:
                 if claim["scope_kind"].value != "scenario" or claim["kind"].value != "configuration":
                     continue
-                before = current_by_key.get(_config_key(claim))
+                before = baseline_by_key.get(_config_key(claim))
                 proposition = claim["proposition"]
                 changes.append(
                     {

@@ -234,3 +234,55 @@ def test_proposal_impact_projects_current_to_scenario_delta(db_session):
     assert impact["changes"][0]["before"] == "172800"
     assert impact["changes"][0]["after"] == "21600"
     assert impact["changes"][0]["prerequisites"] == [baseline]
+
+
+@requires_postgres
+def test_scenario_keeps_its_pinned_baseline_after_a_later_observation(db_session):
+    job = _job(db_session)
+    job.company = "example"
+    store_artifact(db_session, job.id, "assessment", data=_assessment("0x" + "aa" * 20, 90))
+    old_delay = record_configuration(
+        db_session,
+        job.id,
+        contract_address=ADDRESS,
+        point=_point(100),
+        parameter=ConfigurationParameter.minimum_delay,
+        value="172800",
+        unit="seconds",
+        clock=None,
+        source={"method": "getMinDelay"},
+        implementation={"adapter": "openzeppelin_timelock"},
+    )
+    later_delay = record_configuration(
+        db_session,
+        job.id,
+        contract_address=ADDRESS,
+        point=_point(200),
+        parameter=ConfigurationParameter.minimum_delay,
+        value="21600",
+        unit="seconds",
+        clock=None,
+        source={"method": "getMinDelay"},
+        implementation={"adapter": "openzeppelin_timelock"},
+    )
+    _, context_id = record_scenario_configuration(
+        db_session,
+        job.id,
+        contract_address=ADDRESS,
+        baseline=_point(100),
+        step=1,
+        parameter=ConfigurationParameter.minimum_delay,
+        value="3600",
+        unit="seconds",
+        actions=[{"kind": "call", "target": ADDRESS, "calldata": "0x", "sender": ADDRESS, "value": "0"}],
+        assumptions=[],
+        prerequisite_claims=[old_delay],
+        implementation={"engine": "anvil"},
+    )
+    db_session.commit()
+
+    scenario = load_temporal_assessment(db_session, job.id, context_id=context_id)
+    assert scenario is not None
+    assert later_delay not in {claim["id"] for claim in scenario["claims"]}
+    impact = build_proposal_impact(db_session, "example", [job])
+    assert impact["changes"][0]["before"] == "172800"

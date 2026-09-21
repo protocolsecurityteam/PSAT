@@ -628,7 +628,23 @@ def publish_scoped_claim(
         else _latest_publication(session, job_id)
     )
     if source_publication is None and producer == AnalysisProducer.scenario:
-        source_publication = _latest_publication(session, job_id)
+        base = context_value.get("base")
+        if not isinstance(base, Mapping):
+            raise ValueError("scenario context requires a pinned baseline")
+        try:
+            base_block = int(base["block_number"])
+            base_chain = int(base["chain_id"])
+            base_hash = str(base["block_hash"]).lower()
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("scenario context requires a valid pinned baseline") from exc
+        source_publication = _publication_for_view(session, job_id, at_block=base_block)
+        if (
+            source_publication is None
+            or source_publication.chain_id != base_chain
+            or source_publication.block_number != base_block
+            or source_publication.block_hash != base_hash
+        ):
+            raise ValueError("scenario baseline has no matching observed publication")
     if source_publication is None:
         raise ValueError("scoped claim requires an existing observed Assessment publication")
     publication = _clone_publication(session, source_publication)

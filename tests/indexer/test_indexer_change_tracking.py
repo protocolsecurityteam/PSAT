@@ -35,6 +35,23 @@ AUTH = "0x" + "a7" * 20
 ADDR = "0x" + "b8" * 20
 
 
+@pytest.fixture(autouse=True)
+def scheduler_inputs(monkeypatch):
+    """Keep scheduling tests focused on claims, retries, and shared lookups.
+
+    The production reader validates the canonical Assessment before extracting
+    predicate trees. These tests supply synthetic descriptors directly, so they
+    model a successfully loaded Assessment at that boundary.
+    """
+    import workers.event_log_indexer as indexer
+
+    def load(read, session, job_id):
+        artifact = read(session, job_id, "assessment")
+        return None if artifact is None else ({}, artifact, {})
+
+    monkeypatch.setattr(indexer, "load_assessment_inputs", load)
+
+
 @pytest.fixture
 def session(db_session):
     db_session.execute(delete(IndexerWork))
@@ -273,7 +290,7 @@ def test_drain_shares_failed_lookups_and_retries_with_fresh_caches(
             address=AUTH,
             chain=chain_name,
             is_active=True,
-            monitoring_config={"tracked_topics": [{"topic0": topics[1]}]},
+            monitoring_config={"tracked_topics": [{"topic0": topics[1], "witness_tier": "hint"}]},
         )
     session.add(second)
     session.commit()
