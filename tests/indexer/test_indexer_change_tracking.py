@@ -45,8 +45,11 @@ def scheduler_inputs(monkeypatch):
     """
     import workers.event_log_indexer as indexer
 
-    def load(read, session, job_id):
-        artifact = read(session, job_id, "assessment")
+    # Synthetic scheduler inputs are supplied by each test through this seam.
+    monkeypatch.setattr(indexer, "get_artifact", lambda *_args: None, raising=False)
+
+    def load(session, job_id):
+        artifact = getattr(indexer, "get_artifact")(session, job_id, "assessment")
         return None if artifact is None else ({}, artifact, {})
 
     monkeypatch.setattr(indexer, "load_assessment_inputs", load)

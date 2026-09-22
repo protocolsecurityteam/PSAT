@@ -13,7 +13,6 @@ if TYPE_CHECKING:  # typing-only: the effects plane stays off static's runtime i
 
 from sqlalchemy.orm import Session
 
-from db.queue import get_artifact
 from db.queue.typed import load_assessment_inputs
 from services.abi import canonical_signature
 from utils.logging import record_degraded
@@ -107,7 +106,7 @@ def _load_contract_facts_uncached(session: Session, address: str) -> ContractFac
         return None
     job_id = lookup.analysis_job.id
 
-    inputs = load_assessment_inputs(get_artifact, session, job_id)
+    inputs = load_assessment_inputs(session, job_id)
     if inputs is None:
         return None
     analysis, trees_art, effects_art = inputs

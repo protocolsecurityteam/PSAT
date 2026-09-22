@@ -1,8 +1,7 @@
 """Transient runtime inputs projected from the canonical assessment.
 
 These helpers exist for algorithms that still prefer batch-shaped dictionaries.
-The dictionaries are never persisted: ``Assessment`` remains the only durable
-analytical document.
+The dictionaries are never persisted: the immutable Assessment rows remain authoritative.
 """
 
 from __future__ import annotations
@@ -10,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from schemas.assessment import Assessment
+from schemas.assessment_projection import LegacyAssessmentProjection
 from schemas.observations import ObservationPlan
 from services.resolution.observation_plan import compile_observation_plan
 
@@ -19,7 +18,7 @@ def _list(value: object) -> list[Any]:
     return list(value) if isinstance(value, list) else []
 
 
-def contract_subject(assessment: Assessment) -> dict[str, Any]:
+def contract_subject(assessment: LegacyAssessmentProjection) -> dict[str, Any]:
     return {
         "subject": {
             "address": assessment["contract"]["deployment_address"],
@@ -28,7 +27,7 @@ def contract_subject(assessment: Assessment) -> dict[str, Any]:
     }
 
 
-def observation_plan(assessment: Assessment) -> ObservationPlan:
+def observation_plan(assessment: LegacyAssessmentProjection) -> ObservationPlan:
     """Compile read/watch instructions from the canonical controller records."""
     return compile_observation_plan(
         assessment["contract"]["deployment_address"],
@@ -37,7 +36,7 @@ def observation_plan(assessment: Assessment) -> ObservationPlan:
     )
 
 
-def controller_observations(assessment: Assessment) -> dict[str, Any]:
+def controller_observations(assessment: LegacyAssessmentProjection) -> dict[str, Any]:
     """Project successful observation evidence for runtime policy evaluation."""
 
     controllers = assessment["controllers"]
@@ -75,7 +74,7 @@ def controller_observations(assessment: Assessment) -> dict[str, Any]:
     }
 
 
-def controller_state_values(assessment: Assessment) -> dict[str, str]:
+def controller_state_values(assessment: LegacyAssessmentProjection) -> dict[str, str]:
     """Successful controller observations keyed for predicate evaluation."""
     state_variables: dict[str, str] = {}
     other: dict[str, str] = {}
@@ -92,7 +91,7 @@ def controller_state_values(assessment: Assessment) -> dict[str, str]:
     return {**other, **state_variables}
 
 
-def control_graph(assessment: Assessment) -> dict[str, Any]:
+def control_graph(assessment: LegacyAssessmentProjection) -> dict[str, Any]:
     """Project resolved entities and relationships for graph algorithms."""
 
     entity_nodes: dict[str, dict[str, Any]] = {}

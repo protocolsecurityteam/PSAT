@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from db.models import Artifact, AssessmentImportManifest, AssessmentPayload, SessionLocal
 from db.queue.artifacts import _artifact_row_to_value
-from schemas.assessment import Assessment
+from schemas.assessment_projection import LegacyAssessmentProjection
 from services.assessment.repository import (
     intern_payload,
     load_legacy_assessment,
@@ -30,17 +30,33 @@ def _without_transport_version(value: Mapping[str, Any]) -> dict[str, Any]:
     return {key: item for key, item in value.items() if key != "schema_version"}
 
 
+def _assessment_for_comparison(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Normalize only unordered proof edges; preserve all source data."""
+    result = dict(value)
+    claims = result.get("claims")
+    if isinstance(claims, Mapping):
+        result["claims"] = {
+            key: {
+                **claim,
+                "evidence": sorted(claim["evidence"]),
+                "claims": sorted(claim["claims"]),
+            }
+            for key, claim in claims.items()
+        }
+    return result
+
+
 def _assert_projection(name: str, source: Mapping[str, Any], projected: Mapping[str, Any] | None) -> None:
     if projected is None:
         raise RuntimeError(f"{name} import produced no canonical projection")
-    left = dict(source) if name == "assessment" else _without_transport_version(source)
-    right = dict(projected) if name == "assessment" else _without_transport_version(projected)
+    left = _assessment_for_comparison(source) if name == "assessment" else _without_transport_version(source)
+    right = _assessment_for_comparison(projected) if name == "assessment" else _without_transport_version(projected)
     if _canonical_bytes(left) != _canonical_bytes(right):
         raise RuntimeError(f"{name} canonical projection does not match its source artifact")
 
 
 def import_legacy_artifacts(session: Session) -> dict[str, Any]:
-    """Consume every legacy Assessment/history row in restart-safe transactions.
+    """Consume every legacy assessment/history row in restart-safe transactions.
 
     Each source body is retained in the content store and named by a durable
     manifest before the mutable Artifact row is removed. A failed comparison
@@ -85,7 +101,7 @@ def import_legacy_artifacts(session: Session) -> dict[str, Any]:
             publication_id = publish_legacy_assessment(
                 session,
                 artifact.job_id,
-                cast(Assessment, source_value),
+                cast(LegacyAssessmentProjection, source_value),
             )
             projected = load_legacy_assessment(session, artifact.job_id)
         else:

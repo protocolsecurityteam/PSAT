@@ -95,6 +95,8 @@ def _drive_process_with_missing_contract_row(monkeypatch: pytest.MonkeyPatch) ->
         }.get(name)
 
     monkeypatch.setattr("workers.policy_worker.get_artifact", fake_get_artifact)
+    monkeypatch.setattr("workers.policy_worker.load_assessment_projection", lambda *_args: assessment)
+    monkeypatch.setattr("workers.policy_worker.publish_assessment_projection", lambda *_args: None)
     monkeypatch.setattr("workers.policy_worker.store_artifact", lambda *a, **kw: None)
     monkeypatch.setattr(
         "workers.policy_worker.derive_policy",

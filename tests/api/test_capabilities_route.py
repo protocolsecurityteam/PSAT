@@ -12,6 +12,8 @@ from datetime import datetime, timezone
 
 import pytest
 
+from db.queue import publish_assessment_projection
+
 # offline: no live owner()/governor() eth_call during predicate evaluation
 pytestmark = pytest.mark.usefixtures("_stub_live_authority")
 
@@ -23,7 +25,6 @@ def _seed_completed_job_with_artifact(
     db_session, *, address: str, predicate_trees, chain_id: int = 1, chain: str | None = None
 ):
     from db.models import Job, JobStage, JobStatus
-    from db.queue import store_artifact
 
     request: dict = {"address": address}
     if chain is not None:
@@ -42,11 +43,10 @@ def _seed_completed_job_with_artifact(
     if predicate_trees is not None:
         from tests.support.policy_builders import _assessment, _minimal_static_facts
 
-        store_artifact(
+        publish_assessment_projection(
             db_session,
             job.id,
-            "assessment",
-            data=_assessment(
+            _assessment(
                 static_facts=_minimal_static_facts(address=address, name="T"),
                 predicate_trees=predicate_trees,
                 chain_id=chain_id,

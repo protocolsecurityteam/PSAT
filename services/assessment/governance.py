@@ -58,6 +58,8 @@ def record_configuration(
     clock: ClockKind | None,
     source: Mapping[str, Any],
     implementation: Mapping[str, Any],
+    evidence_kind: EvidenceKind = EvidenceKind.chain_read,
+    preserve_publication_point: bool = False,
 ) -> str:
     """Append a point-in-time configuration value; prior values remain."""
     scope = _point_scope(point)
@@ -69,7 +71,7 @@ def record_configuration(
         subject_identity={"chain_id": point["chain_id"], "address": contract_address.lower()},
         subject_role=SubjectRole.entity,
         natural_key=f"configuration:{parameter.value}",
-        evidence_kind=EvidenceKind.chain_read,
+        evidence_kind=evidence_kind,
         evidence_payload={
             "parameter": parameter.value,
             "value": value,
@@ -89,6 +91,7 @@ def record_configuration(
         scope=scope,
         rule=DerivationRule.configuration,
         implementation=implementation,
+        preserve_publication_point=preserve_publication_point,
     )
     return claim
 
@@ -103,6 +106,7 @@ def record_proposal_state(
     state: ProposalState,
     source: Mapping[str, Any],
     implementation: Mapping[str, Any],
+    evidence_kind: EvidenceKind = EvidenceKind.chain_read,
 ) -> str:
     scope = _point_scope(point)
     _publication, _evidence, claim, _context = publish_scoped_claim(
@@ -117,7 +121,7 @@ def record_proposal_state(
         },
         subject_role=SubjectRole.proposal,
         natural_key=f"proposal:{governor_address.lower()}:{proposal_id}",
-        evidence_kind=EvidenceKind.chain_read,
+        evidence_kind=evidence_kind,
         evidence_payload={"state": state.value},
         evidence_source={"kind": EvidenceKind.chain_read.value, **dict(source)},
         claim_kind=ClaimKind.proposal_state,
@@ -141,6 +145,8 @@ def record_applied_configuration(
     configuration_claim: str,
     source: Mapping[str, Any],
     implementation: Mapping[str, Any],
+    evidence_kind: EvidenceKind = EvidenceKind.chain_read,
+    preserve_publication_point: bool = False,
 ) -> str:
     """Bind a proposal phase to the exact configuration claim it consulted."""
     scope = _point_scope(point)
@@ -156,7 +162,7 @@ def record_applied_configuration(
         },
         subject_role=SubjectRole.proposal,
         natural_key=f"proposal:{governor_address.lower()}:{proposal_id}:binding:{phase.value}",
-        evidence_kind=EvidenceKind.chain_read,
+        evidence_kind=evidence_kind,
         evidence_payload={"phase": phase.value, "configuration_claim": configuration_claim},
         evidence_source={"kind": EvidenceKind.chain_read.value, **dict(source)},
         claim_kind=ClaimKind.applied_configuration,
@@ -170,6 +176,7 @@ def record_applied_configuration(
         rule=DerivationRule.applied_configuration,
         implementation=implementation,
         prerequisite_claims=[configuration_claim],
+        preserve_publication_point=preserve_publication_point,
     )
     return claim
 
@@ -188,10 +195,17 @@ def record_scenario_configuration(
     assumptions: Sequence[Mapping[str, Any]],
     prerequisite_claims: list[str],
     implementation: Mapping[str, Any],
+    execution: Mapping[str, Any] | None = None,
 ) -> tuple[str, str]:
     """Publish a hypothetical update without making it observed current state."""
     if step < 1 or step > len(actions):
         raise ValueError("scenario step must identify an executed action")
+    if execution is None:
+        raise ValueError("scenario publication requires a witnessed fork execution")
+    if execution.get("fork_block_number") != baseline["block_number"] or execution.get("success") is not True:
+        raise ValueError("scenario execution does not match its pinned baseline")
+    if not isinstance(execution.get("transaction_hash"), str):
+        raise ValueError("scenario execution requires a transaction hash")
     normalized_actions: list[dict[str, Any]] = []
     for action in actions:
         raw_kind = action.get("kind")
@@ -213,8 +227,19 @@ def record_scenario_configuration(
         subject_role=SubjectRole.entity,
         natural_key=f"scenario:configuration:{parameter.value}:step:{step}",
         evidence_kind=EvidenceKind.execution,
-        evidence_payload={"parameter": parameter.value, "value": value, "unit": unit, "step": step},
-        evidence_source={"kind": EvidenceKind.execution.value, "environment": "fork", "step": step},
+        evidence_payload={
+            "parameter": parameter.value,
+            "value": value,
+            "unit": unit,
+            "step": step,
+            "execution": dict(execution),
+        },
+        evidence_source={
+            "kind": EvidenceKind.execution.value,
+            "environment": "fork",
+            "step": step,
+            "transaction_hash": execution["transaction_hash"],
+        },
         claim_kind=ClaimKind.configuration,
         proposition={
             "kind": ClaimKind.configuration.value,

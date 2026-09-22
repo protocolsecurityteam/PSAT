@@ -254,7 +254,7 @@ def probe_contract_membership(
         if job is None:
             raise HTTPException(status_code=404, detail=f"No completed analysis job found for {addr}")
 
-        inputs = load_assessment_inputs(deps.get_artifact, session, job.id)
+        inputs = load_assessment_inputs(session, job.id)
         if inputs is None:
             raise HTTPException(
                 status_code=404,
@@ -340,7 +340,7 @@ def probe_contract_signature(
         job = session.execute(job_stmt).scalar_one_or_none()
         if job is None:
             raise HTTPException(status_code=404, detail=f"No completed analysis job found for {addr}")
-        inputs = load_assessment_inputs(deps.get_artifact, session, job.id)
+        inputs = load_assessment_inputs(session, job.id)
         if inputs is None:
             raise HTTPException(
                 status_code=404,

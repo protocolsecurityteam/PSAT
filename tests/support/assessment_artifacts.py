@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from db.queue import store_artifact
+from db.queue import publish_assessment_projection
 from tests.support.policy_builders import _assessment, _minimal_static_facts
 
 
@@ -19,11 +19,10 @@ def store_test_assessment(
     predicate_trees: dict | None = None,
     effects: dict | None = None,
 ) -> None:
-    store_artifact(
+    publish_assessment_projection(
         session,
         job_id,
-        "assessment",
-        data=_assessment(
+        _assessment(
             static_facts=static_facts or _minimal_static_facts(address=address, name=name),
             predicate_trees=predicate_trees,
             effects=effects,
@@ -39,12 +38,11 @@ def store_test_observations(
     session: Any, job_id: Any, controllers: dict, *, deployment_address: str | None = None
 ) -> None:
     """Add controller observations to an existing canonical fixture document."""
-    from db.queue import get_artifact
-    from db.queue.typed import load_assessment
+    from db.queue.typed import load_assessment_projection
     from services.assessment import control_graph, static_inputs
     from tests.support.policy_builders import _minimal_snapshot
 
-    current = load_assessment(get_artifact, session, job_id)
+    current = load_assessment_projection(session, job_id)
     if current is None:
         return
     facts, trees, effects = static_inputs(current)
@@ -58,4 +56,4 @@ def store_test_observations(
         chain_id=current["contract"]["chain_id"],
     )
     assessment["contract"]["deployment_address"] = deployment_address or current["contract"]["deployment_address"]
-    store_artifact(session, job_id, "assessment", data=assessment)
+    publish_assessment_projection(session, job_id, assessment)

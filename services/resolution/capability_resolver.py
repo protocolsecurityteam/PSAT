@@ -2,7 +2,7 @@
 contract address, return semantic capabilities per externally-callable
 function.
 
-It loads predicate trees from the persisted Assessment, wires the
+It loads predicate trees from the persisted Assessment projection, wires the
 Postgres-backed generic event-log repo into an
 ``EvaluationContext``, evaluates each function's PredicateTree
 through ``evaluate_tree_with_registry`` to a ``CapabilityExpr``,
@@ -47,9 +47,8 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from db.models import Contract, Job, JobStatus
-from db.queue import get_artifact
-from db.queue.typed import load_assessment
-from schemas.assessment import Assessment
+from db.queue.typed import load_assessment_projection
+from schemas.assessment_projection import LegacyAssessmentProjection
 from services.assessment.runtime import controller_state_values
 from services.assessment.views import static_inputs
 from services.clients.rpc import ChainContext, chain_context, eth_call_batch, rpc_request
@@ -203,7 +202,7 @@ def find_analysis_job_for_address(
 ) -> AnalysisJobLookup | None:
     """Find the job whose artifacts should be used for a runtime address.
 
-    Proxies are runtime addresses, but their Assessment usually lives on the
+    Proxies are runtime addresses, but their LegacyAssessmentProjection usually lives on the
     implementation child job. Prefer a direct artifact when present;
     otherwise follow the proxy Contract row to the implementation job.
     """
@@ -263,7 +262,7 @@ def resolve_contract_capabilities(
     block: int | None = None,
     job_id: Any = None,
     chain: str | None = None,
-    assessment: Assessment | None = None,
+    assessment: LegacyAssessmentProjection | None = None,
 ) -> dict[str, dict[str, Any]] | None:
     """Return ``{function_signature: capability_dict}`` for the most
     recent completed analysis of ``address``, or ``None`` if there's
@@ -284,7 +283,7 @@ def resolve_contract_capabilities(
     the in-progress job and return None or stale prior artifacts.
 
     ``assessment`` lets pipeline callers supply their current ledger. Otherwise
-    the selected job's Assessment is loaded. Its chain and deployment must
+    the selected job's LegacyAssessmentProjection is loaded. Its chain and deployment must
     match the requested runtime. Controller observations and canonical function
     identities come from that document; controller indexes are never a fallback.
     """
@@ -314,7 +313,7 @@ def resolve_contract_capabilities(
         runtime_addr = (runtime_job.address or addr).lower()
 
     if assessment is None:
-        assessment = load_assessment(get_artifact, session, analysis_job.id)
+        assessment = load_assessment_projection(session, analysis_job.id)
     artifact = static_inputs(assessment)[1] if assessment is not None else None
     if not isinstance(artifact, dict) or "trees" not in artifact:
         lookup = _analysis_lookup_for_runtime_job(
@@ -327,7 +326,7 @@ def resolve_contract_capabilities(
             return None
         runtime_job = lookup.runtime_job
         analysis_job = lookup.analysis_job
-        assessment = load_assessment(get_artifact, session, analysis_job.id)
+        assessment = load_assessment_projection(session, analysis_job.id)
         artifact = static_inputs(assessment)[1] if assessment is not None else None
         if not isinstance(artifact, dict) or "trees" not in artifact:
             return None
@@ -765,15 +764,15 @@ def _analysis_lookup_for_runtime_job(
     chain: str | None,
     completed_only: bool,
 ) -> AnalysisJobLookup | None:
-    # A proxy's Assessment can contain an empty predicate-tree input because its
-    # logic lives on the implementation child. Prefer whichever Assessment has
+    # A proxy's LegacyAssessmentProjection can contain an empty predicate-tree input because its
+    # logic lives on the implementation child. Prefer whichever LegacyAssessmentProjection has
     # substantive trees; fall back to an empty one only when neither does.
-    runtime_artifact = get_artifact(session, runtime_job.id, "assessment")
+    runtime_artifact = load_assessment_projection(session, runtime_job.id)
     if _assessment_is_substantive(runtime_artifact):
         return AnalysisJobLookup(runtime_job=runtime_job, analysis_job=runtime_job)
 
     impl_job = _implementation_child_job(session, runtime_job, chain=chain, completed_only=completed_only)
-    impl_artifact = get_artifact(session, impl_job.id, "assessment") if impl_job is not None else None
+    impl_artifact = load_assessment_projection(session, impl_job.id) if impl_job is not None else None
     if impl_job is not None and _assessment_is_substantive(impl_artifact):
         return AnalysisJobLookup(runtime_job=runtime_job, analysis_job=impl_job)
 
@@ -857,7 +856,7 @@ def _job_chain(job: Job) -> str | None:
 
 
 def _assessment_is_substantive(artifact: Any) -> bool:
-    """Whether Assessment embeds at least one predicate or check tree."""
+    """Whether LegacyAssessmentProjection embeds at least one predicate or check tree."""
 
     if not isinstance(artifact, dict):
         return False
@@ -881,13 +880,13 @@ def _load_state_var_values(
     job_id: Any = None,
     chain: str | None = None,
 ) -> dict[str, str]:
-    """Load controller state only from the selected Assessment, never indexes."""
+    """Load controller state only from the selected LegacyAssessmentProjection, never indexes."""
     if job_id is None:
         lookup = find_analysis_job_for_address(session, address.lower(), chain=chain, completed_only=True)
         if lookup is None:
             return {}
         job_id = lookup.analysis_job.id
-    assessment = load_assessment(get_artifact, session, job_id)
+    assessment = load_assessment_projection(session, job_id)
     if assessment is None:
         return {}
     contract = assessment["contract"]

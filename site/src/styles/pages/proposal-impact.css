@@ -128,6 +128,16 @@
 .proposal-proof-record > p { margin: 0; color: var(--muted); }
 .proposal-proof-item { display: grid; gap: 6px; padding: 10px 0; border-top: 1px solid var(--line); }
 .proposal-proof-item > span { color: var(--muted); font-size: 0.72rem; }
+.proposal-proof-item > strong { font-size: 0.72rem; color: var(--muted); }
+.proposal-proof-item > p { margin: 0; color: var(--muted); overflow-wrap: anywhere; }
+.proposal-proof-record ol { display: grid; gap: 8px; margin: 0; padding-left: 18px; }
+.proposal-proof-record [role="note"] { border-left: 3px solid #f59e0b; padding: 8px 12px; color: #fde68a; }
+.proposal-request-form { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; }
+.proposal-request-form label { display: grid; gap: 5px; min-width: 170px; flex: 1; color: var(--muted); font-size: 0.75rem; }
+.proposal-request-form input { width: 100%; box-sizing: border-box; padding: 9px; border: 1px solid var(--line); border-radius: 6px; background: #101b2a; color: #fff; }
+.proposal-request-form button { padding: 10px 14px; border: 0; border-radius: 6px; background: #0d9488; color: #fff; cursor: pointer; }
+.proposal-request-form button:disabled { opacity: 0.6; cursor: wait; }
+.proposal-request-status { margin: 12px 0 0; overflow-wrap: anywhere; }
 .proposal-kv { display: grid; gap: 6px; margin: 0; }
 .proposal-kv div { display: grid; grid-template-columns: minmax(78px, 0.35fr) 1fr; gap: 10px; }
 .proposal-kv dt { color: var(--muted); text-transform: capitalize; }

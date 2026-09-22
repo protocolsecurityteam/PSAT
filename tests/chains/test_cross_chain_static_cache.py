@@ -20,6 +20,7 @@ from db.queue import (
     create_job,
     find_completed_static_cache,
     get_artifact,
+    publish_assessment_projection,
     store_artifact,
     store_source_files,
 )
@@ -98,11 +99,10 @@ def _make_donor(
     store_source_files(session, job.id, dict(_SOURCES))
     if with_analysis:
         facts = _analysis(address.lower())
-        store_artifact(
+        publish_assessment_projection(
             session,
             job.id,
-            "assessment",
-            data=_assessment(
+            _assessment(
                 static_facts=facts,
                 predicate_trees=dict(_PREDICATE_TREES),
                 effects=dict(_EFFECTS),
@@ -157,10 +157,10 @@ def test_copy_restamps_address_scopes_artifacts_and_leaves_donor_untouched(db_se
     assert cid == target_contract.id
 
     # Address re-stamped on the copied code plane.
-    from db.queue.typed import load_assessment
+    from db.queue.typed import load_assessment_projection
     from services.assessment import static_inputs
 
-    assessment = load_assessment(get_artifact, db_session, target_job.id)
+    assessment = load_assessment_projection(db_session, target_job.id)
     assert assessment is not None
     ca, predicate_trees, effects = static_inputs(assessment)
     assert ca["subject"]["address"] == ADDR_BASE.lower()
@@ -193,7 +193,7 @@ def test_copy_restamps_address_scopes_artifacts_and_leaves_donor_untouched(db_se
 
     # Donor untouched: its analysis still points at its own address, its contract
     # still belongs to the donor job (NOT reassigned like same-chain copy).
-    donor_assessment = load_assessment(get_artifact, db_session, donor_job.id)
+    donor_assessment = load_assessment_projection(db_session, donor_job.id)
     assert donor_assessment is not None
     donor_ca, _donor_trees, _donor_effects = static_inputs(donor_assessment)
     assert donor_ca["subject"]["address"] == ADDR_MAINNET.lower()
@@ -209,10 +209,10 @@ def test_parity_fresh_vs_cross_chain_copy(db_session):
     copy_static_cache_cross_chain(db_session, donor_job.id, target_job.id, target_address=ADDR_BASE)
 
     # What a fresh static analysis of the identical source at ADDR_BASE emits.
-    from db.queue.typed import load_assessment
+    from db.queue.typed import load_assessment_projection
     from services.assessment import static_inputs
 
-    assessment = load_assessment(get_artifact, db_session, target_job.id)
+    assessment = load_assessment_projection(db_session, target_job.id)
     assert assessment is not None
     assert static_inputs(assessment) == (_analysis(ADDR_BASE.lower()), _PREDICATE_TREES, _EFFECTS)
     assert assessment["contract"]["chain_id"] == 8453
@@ -317,10 +317,10 @@ def test_discovery_reuses_cross_chain_donor(db_session, monkeypatch):
     assert target_job.source_content_hash == donor_hash
 
     # The reused analysis is re-stamped to the Base deployment.
-    from db.queue.typed import load_assessment
+    from db.queue.typed import load_assessment_projection
     from services.assessment import static_inputs
 
-    target_assessment = load_assessment(get_artifact, db_session, target_job.id)
+    target_assessment = load_assessment_projection(db_session, target_job.id)
     assert target_assessment is not None
     ca, _trees, _effects = static_inputs(target_assessment)
     assert ca["subject"]["address"] == ADDR_BASE.lower()

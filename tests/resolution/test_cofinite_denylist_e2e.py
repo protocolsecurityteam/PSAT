@@ -34,6 +34,7 @@ from pathlib import Path
 
 import pytest
 
+from db.queue import publish_assessment_projection
 from tests.conftest import DATABASE_URL as _DB_URL
 from tests.conftest import _can_connect, requires_postgres
 
@@ -144,19 +145,17 @@ def _seed_contract(session, *, address: str, job_id, controllers: dict[str, str]
     session.flush()
     for cid, value in controllers.items():
         session.add(ControllerValue(contract_id=contract.id, controller_id=cid, value=value, source="test"))
-    from db.queue import get_artifact, store_artifact
-    from db.queue.typed import load_assessment
+    from db.queue.typed import load_assessment_projection
     from services.assessment import static_inputs
     from tests.support.policy_builders import _assessment, _minimal_snapshot
 
-    assessment = load_assessment(get_artifact, session, job_id)
+    assessment = load_assessment_projection(session, job_id)
     assert assessment is not None
     facts, trees, effects = static_inputs(assessment)
-    store_artifact(
+    publish_assessment_projection(
         session,
         job_id,
-        "assessment",
-        data=_assessment(
+        _assessment(
             static_facts=facts,
             predicate_trees=trees,
             effects=effects,

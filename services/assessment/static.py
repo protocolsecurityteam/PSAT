@@ -5,9 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, cast
 
-from schemas.assessment import (
+from schemas.assessment_projection import (
     Analysis,
-    Assessment,
     Claim,
     Contract,
     Controller,
@@ -18,6 +17,7 @@ from schemas.assessment import (
     Evidence,
     EvidenceMethod,
     Function,
+    LegacyAssessmentProjection,
     Proposition,
 )
 from services.static.claims.matchers import discover
@@ -384,7 +384,7 @@ def build_static_assessment(
     static_facts: Mapping[str, Any],
     effects: Mapping[str, Any],
     predicate_trees: Mapping[str, Any],
-) -> Assessment:
+) -> LegacyAssessmentProjection:
     """Build the static-stage canonical assessment."""
 
     discover()
@@ -484,7 +484,7 @@ def build_static_assessment(
         "evidence": [static_evidence_key],
     }
     analyses.insert(0, facts_receipt)
-    assessment: Assessment = {
+    assessment: LegacyAssessmentProjection = {
         "schema_version": "assessment/5",
         "contract": contract,
         "functions": functions,

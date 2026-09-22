@@ -8,7 +8,7 @@ from typing import Any, Literal, cast
 
 from pydantic import JsonValue
 
-from schemas.assessment import Entity
+from schemas.assessment_projection import Entity
 
 
 def entity_key(chain_id: int, address: str) -> str:

@@ -557,7 +557,7 @@ def test_call_frame_normalization_keeps_self_bound_parameters_symbolic():
 def test_inlined_callee_msg_sender_equality_is_call_edge_condition(monkeypatch):
     from eth_utils.crypto import keccak
 
-    import db.queue as queue_mod
+    import db.queue.typed as typed_queue_mod
     import services.resolution.capability_resolver as resolver_mod
     import services.resolution.external_check_materializer as materializer_mod
     from services.resolution.adapters import AdapterRegistry, CallFrame
@@ -652,8 +652,8 @@ def test_inlined_callee_msg_sender_equality_is_call_edge_condition(monkeypatch):
         resolver_mod, "_load_state_var_values", lambda *_args, **_kwargs: {"liquidityPool": target_addr}
     )
     monkeypatch.setattr(
-        queue_mod,
-        "get_artifact",
+        typed_queue_mod,
+        "load_assessment_projection",
         lambda *_args, **_kwargs: _assessment_with_trees(authority_addr, authority_artifact),
     )
     monkeypatch.setattr(
@@ -749,7 +749,7 @@ def test_view_call_mapping_key_expands_to_returned_role_members(monkeypatch):
 def test_delegated_check_conditional_inline_preserves_structural_result(monkeypatch):
     from eth_utils.crypto import keccak
 
-    import db.queue as queue_mod
+    import db.queue.typed as typed_queue_mod
     import services.resolution.capability_resolver as resolver_mod
     import services.resolution.external_check_materializer as materializer_mod
     from services.resolution.adapters import AdapterRegistry, CallFrame
@@ -827,8 +827,8 @@ def test_delegated_check_conditional_inline_preserves_structural_result(monkeypa
     )
     monkeypatch.setattr(resolver_mod, "_load_state_var_values", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(
-        queue_mod,
-        "get_artifact",
+        typed_queue_mod,
+        "load_assessment_projection",
         lambda *_args, **_kwargs: _assessment_with_trees(authority_addr, authority_artifact),
     )
 
@@ -869,7 +869,7 @@ def test_delegated_check_conditional_inline_preserves_structural_result(monkeypa
 def test_delegated_opaque_checker_materializes_with_zero_arg_getter(monkeypatch):
     from eth_utils.crypto import keccak
 
-    import db.queue as queue_mod
+    import db.queue.typed as typed_queue_mod
     import services.clients.rpc as rpc_mod
     import services.resolution.capability_resolver as resolver_mod
     import services.resolution.external_check_materializer as materializer_mod
@@ -942,8 +942,8 @@ def test_delegated_opaque_checker_materializes_with_zero_arg_getter(monkeypatch)
     )
     monkeypatch.setattr(resolver_mod, "_load_state_var_values", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(
-        queue_mod,
-        "get_artifact",
+        typed_queue_mod,
+        "load_assessment_projection",
         lambda *_args, **_kwargs: _assessment_with_trees(authority_addr, authority_artifact),
     )
 

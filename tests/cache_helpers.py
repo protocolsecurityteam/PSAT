@@ -196,9 +196,14 @@ def _sqlite_compatible_store_artifact(session, job_id, name, data=None, text_dat
         # These names are canonical temporal publications after the cutover;
         # bypassing the production writer would manufacture a legacy row that
         # no production process can create.
-        from db.queue import store_artifact
+        from db.queue import publish_assessment_projection, store_artifact
 
-        store_artifact(session, job_id, name, data=data, text_data=text_data)
+        if name == "assessment":
+            from services.assessment.validation import checked
+
+            publish_assessment_projection(session, job_id, checked(data))
+        else:
+            store_artifact(session, job_id, name, data=data, text_data=text_data)
         return
     from db.models import Artifact
 
@@ -370,7 +375,9 @@ def _create_completed_job_with_static_data(session, address=ADDR_A):
     from tests.support.policy_builders import _assessment, _minimal_static_facts
 
     facts = _minimal_static_facts(address=address, name="TestContract")
-    store_artifact(session, job.id, "assessment", data=_assessment(static_facts=facts))
+    from db.queue import publish_assessment_projection
+
+    publish_assessment_projection(session, job.id, _assessment(static_facts=facts))
     store_artifact(session, job.id, "slither_results", data={"results": {"detectors": []}})
     store_artifact(session, job.id, "static_facts_report", text_data="Test analysis report")
     store_artifact(session, job.id, "contract_flags", data={"is_proxy": False})
@@ -424,7 +431,9 @@ def _create_source_job_with_proxy(
     from tests.support.policy_builders import _assessment, _minimal_static_facts
 
     facts = _minimal_static_facts(address=address, name="ProxyContract")
-    store_artifact(session, job.id, "assessment", data=_assessment(static_facts=facts))
+    from db.queue import publish_assessment_projection
+
+    publish_assessment_projection(session, job.id, _assessment(static_facts=facts))
     store_artifact(session, job.id, "slither_results", data={"results": {"detectors": []}})
     store_artifact(session, job.id, "static_facts_report", text_data="proxy report")
 

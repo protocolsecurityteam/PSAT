@@ -6,12 +6,12 @@ import copy
 from collections.abc import Mapping
 from typing import Any, cast
 
-from schemas.assessment import Assessment, Claim
+from schemas.assessment_projection import Claim, LegacyAssessmentProjection
 from services.static.claims import EffectMatch
 from services.static.claims.registry import resolve_claim_precedence
 
 
-def function_effect_claims(assessment: Assessment, effect_kind: str | None = None) -> list[Claim]:
+def function_effect_claims(assessment: LegacyAssessmentProjection, effect_kind: str | None = None) -> list[Claim]:
     claims: list[Claim] = []
     for claim in assessment["claims"].values():
         proposition = claim["proposition"]
@@ -24,13 +24,15 @@ def function_effect_claims(assessment: Assessment, effect_kind: str | None = Non
     return claims
 
 
-def function_authority_claims(assessment: Assessment) -> list[Claim]:
+def function_authority_claims(assessment: LegacyAssessmentProjection) -> list[Claim]:
     """Supported answers to who may call a function, independent of its effect."""
 
     return [claim for claim in assessment["claims"].values() if claim["proposition"]["kind"] == "function_authority"]
 
 
-def effect_presence(assessment: Assessment, effect_kind: str, *, detector: str | None = None) -> bool | None:
+def effect_presence(
+    assessment: LegacyAssessmentProjection, effect_kind: str, *, detector: str | None = None
+) -> bool | None:
     """Three-state projection without storing uncertainty inside a claim."""
 
     if function_effect_claims(assessment, effect_kind):
@@ -49,7 +51,7 @@ def effect_presence(assessment: Assessment, effect_kind: str, *, detector: str |
     return None
 
 
-def effect_matches_by_function(assessment: Assessment) -> dict[str, list[dict[str, Any]]]:
+def effect_matches_by_function(assessment: LegacyAssessmentProjection) -> dict[str, list[dict[str, Any]]]:
     """Build the compact effect matches used by relational index writers."""
 
     out: dict[str, list[dict[str, Any]]] = {}
@@ -93,7 +95,7 @@ def effect_matches_by_function(assessment: Assessment) -> dict[str, list[dict[st
     return out
 
 
-def project_permission_index(assessment: Assessment) -> dict[str, Any]:
+def project_permission_index(assessment: LegacyAssessmentProjection) -> dict[str, Any]:
     """Rebuild permission rows exclusively from canonical Assessment evidence."""
 
     claims = effect_matches_by_function(assessment)
@@ -124,8 +126,8 @@ def project_permission_index(assessment: Assessment) -> dict[str, Any]:
     }
 
 
-def static_index_view(assessment: Assessment) -> dict[str, Any]:
-    """Project static relational indexes from validated Assessment evidence."""
+def static_index_view(assessment: LegacyAssessmentProjection) -> dict[str, Any]:
+    """Project static relational indexes from validated LegacyAssessmentProjection evidence."""
 
     for evidence in assessment["evidence"].values():
         if evidence["producer"] != "static.facts" or not isinstance(evidence["observation"], Mapping):
@@ -152,10 +154,10 @@ def static_index_view(assessment: Assessment) -> dict[str, Any]:
             "standards": list(summary.get("standards") or []),
             "role_definitions": list(roles) if isinstance(roles, list) else [],
         }
-    raise ValueError("Assessment has no static.facts evidence")
+    raise ValueError("LegacyAssessmentProjection has no static.facts evidence")
 
 
-def static_inputs(assessment: Assessment) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+def static_inputs(assessment: LegacyAssessmentProjection) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     """Project the transient semantic inputs embedded in static evidence."""
 
     for evidence in assessment["evidence"].values():
@@ -171,7 +173,7 @@ def static_inputs(assessment: Assessment) -> tuple[dict[str, Any], dict[str, Any
                 dict(cast(Mapping[str, Any], predicate_trees)),
                 dict(cast(Mapping[str, Any], effects)),
             )
-    raise ValueError("Assessment has no complete static input evidence")
+    raise ValueError("LegacyAssessmentProjection has no complete static input evidence")
 
 
 __all__ = [

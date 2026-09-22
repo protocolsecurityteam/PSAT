@@ -1,9 +1,9 @@
-"""Canonical temporal Assessment publication, selection, and legacy projection.
+"""Canonical temporal Assessment publication, selection, and pipeline projection.
 
 The current pipeline still constructs the compact legacy value in memory.  This
 module atomically interns its immutable records, records every analysis attempt,
 and publishes an exact set of outputs.  Readers reconstruct the compact shape
-from these tables; no mutable Assessment artifact is authoritative.
+from these tables; no mutable analytical artifact is authoritative.
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ from db.models import (
     AssessmentPublicationSubject,
     AssessmentSubject,
 )
-from schemas.assessment import Assessment
+from schemas.assessment_projection import LegacyAssessmentProjection
 from schemas.temporal_assessment import (
     AnalysisOutcome,
     AnalysisProducer,
@@ -142,17 +142,17 @@ def _implementation(session: Session, producer: AnalysisProducer, manifest: Mapp
 
 
 def _legacy_subjects(
-    session: Session, assessment: Assessment
-) -> tuple[str, dict[tuple[str, str], str], list[tuple[str, SubjectRole, str]]]:
+    session: Session, assessment: LegacyAssessmentProjection
+) -> tuple[str, dict[tuple[str, str], str], list[tuple[str, SubjectRole, str, dict[str, Any]]]]:
     contract = assessment["contract"]
     chain_id = contract["chain_id"]
     by_legacy: dict[tuple[str, str], str] = {}
-    links: list[tuple[str, SubjectRole, str]] = []
+    links: list[tuple[str, SubjectRole, str, dict[str, Any]]] = []
 
     root = _subject(
         session,
         SubjectKind.address,
-        {"chain_id": chain_id, "address": contract["address"], "legacy_value": contract},
+        {"chain_id": chain_id, "address": contract["address"]},
     )
     by_legacy[("contract", contract["address"])] = root
     by_legacy[("contract", contract["deployment_address"])] = _subject(
@@ -160,7 +160,7 @@ def _legacy_subjects(
         SubjectKind.address,
         {"chain_id": chain_id, "address": contract["deployment_address"]},
     )
-    links.append((root, SubjectRole.contract, "contract"))
+    links.append((root, SubjectRole.contract, "contract", dict(contract)))
 
     code_identity = {
         "runtime_code_hash": contract.get("code_hash"),
@@ -172,10 +172,10 @@ def _legacy_subjects(
         subject = _subject(
             session,
             SubjectKind.function,
-            {"code": code, "source_signature": natural_key, "identity": function, "legacy_value": function},
+            {"code": code, "source_signature": natural_key},
         )
         by_legacy[("function", natural_key)] = subject
-        links.append((subject, SubjectRole.function, natural_key))
+        links.append((subject, SubjectRole.function, natural_key, dict(function)))
     for natural_key, controller in assessment["controllers"].items():
         subject = _subject(
             session,
@@ -184,19 +184,18 @@ def _legacy_subjects(
                 "deployment": by_legacy[("contract", contract["deployment_address"])],
                 "code": code,
                 "controller_key": natural_key,
-                "legacy_value": controller,
             },
         )
         by_legacy[("controller", natural_key)] = subject
-        links.append((subject, SubjectRole.controller, natural_key))
+        links.append((subject, SubjectRole.controller, natural_key, dict(controller)))
     for natural_key, entity in assessment["entities"].items():
         subject = _subject(
             session,
             SubjectKind.address,
-            {"chain_id": entity["chain_id"], "address": entity["address"], "legacy_value": entity},
+            {"chain_id": entity["chain_id"], "address": entity["address"]},
         )
         by_legacy[("entity", natural_key)] = subject
-        links.append((subject, SubjectRole.entity, natural_key))
+        links.append((subject, SubjectRole.entity, natural_key, dict(entity)))
     return root, by_legacy, links
 
 
@@ -311,11 +310,12 @@ def _scope(
     return ScopeKind.reported, {"kind": ScopeKind.reported.value, "chain_id": chain_id}
 
 
-def publish_legacy_assessment(session: Session, job_id: Any, assessment: Assessment) -> uuid.UUID:
+def publish_legacy_assessment(session: Session, job_id: Any, assessment: LegacyAssessmentProjection) -> uuid.UUID:
     """Append one atomic canonical publication from an in-memory pipeline view."""
     from services.assessment.validation import checked
 
     assessment = checked(assessment)
+    previous = _latest_publication(session, job_id)
     now = datetime.now(timezone.utc)
     root, subjects, subject_links = _legacy_subjects(session, assessment)
     context_id = _context(session, {"kind": ContextKind.observed.value})
@@ -328,13 +328,14 @@ def publish_legacy_assessment(session: Session, job_id: Any, assessment: Assessm
     )
     session.add(publication)
     session.flush()
-    for subject_id, role, natural_key in subject_links:
+    for subject_id, role, natural_key, metadata in subject_links:
         session.add(
             AssessmentPublicationSubject(
                 publication_id=publication.id,
                 subject_id=subject_id,
                 role=role,
                 natural_key=natural_key,
+                projection_metadata=metadata,
             )
         )
 
@@ -347,7 +348,9 @@ def publish_legacy_assessment(session: Session, job_id: Any, assessment: Assessm
         block_number, block_hash = _block_data(legacy["observation"])
         source = {
             "kind": kind.value,
+            "projection": "pipeline",
             "method": legacy["method"],
+            "subject_kind": legacy["subject_kind"],
             "producer": legacy["producer"],
             "locator": legacy["locator"],
             "implementation": legacy.get("version"),
@@ -388,7 +391,7 @@ def publish_legacy_assessment(session: Session, job_id: Any, assessment: Assessm
         )
 
     code_subject: str | None = None
-    for linked_subject, role, _natural in subject_links:
+    for linked_subject, role, _natural, _metadata in subject_links:
         if role != SubjectRole.function:
             continue
         function_subject = session.get(AssessmentSubject, linked_subject)
@@ -549,6 +552,121 @@ def publish_legacy_assessment(session: Session, job_id: Any, assessment: Assessm
                 )
             )
 
+    if previous is not None:
+        # Pipeline refresh replaces only its own compact claim/evidence slice.
+        # Domain observations (governance, scenario, corrections) remain part
+        # of the selected immutable publication after a worker republishes.
+        for link in session.scalars(
+            select(AssessmentPublicationSubject).where(AssessmentPublicationSubject.publication_id == previous.id)
+        ):
+            if link.role in (SubjectRole.proposal, SubjectRole.operation, SubjectRole.role) or (
+                link.role == SubjectRole.entity and not link.projection_metadata
+            ):
+                _insert(
+                    session,
+                    AssessmentPublicationSubject,
+                    publication_id=publication.id,
+                    subject_id=link.subject_id,
+                    role=link.role,
+                    natural_key=link.natural_key,
+                    projection_metadata=link.projection_metadata,
+                )
+        for link in session.scalars(
+            select(AssessmentPublicationEvidence).where(AssessmentPublicationEvidence.publication_id == previous.id)
+        ):
+            row = session.get(AssessmentEvidence, link.evidence_id)
+            if (
+                row is not None
+                and not link.natural_key.startswith("evidence:")
+                and not link.natural_key.startswith("historical:")
+            ):
+                _insert(
+                    session,
+                    AssessmentPublicationEvidence,
+                    publication_id=publication.id,
+                    evidence_id=link.evidence_id,
+                    natural_key=link.natural_key,
+                )
+        domain_claim_ids: set[str] = set()
+        prior_analyses = session.scalars(
+            select(AssessmentPublicationAnalysis).where(AssessmentPublicationAnalysis.publication_id == previous.id)
+        ).all()
+        for analysis_link in prior_analyses:
+            analysis_row = session.get(AssessmentAnalysis, analysis_link.analysis_id)
+            if analysis_row is not None and "detector" not in analysis_row.receipt:
+                domain_claim_ids.update(
+                    session.scalars(
+                        select(AssessmentAnalysisOutput.claim_id).where(
+                            AssessmentAnalysisOutput.analysis_id == analysis_row.id
+                        )
+                    )
+                )
+        prior_claim_links = {
+            link.claim_id: link.natural_key
+            for link in session.scalars(
+                select(AssessmentPublicationClaim).where(AssessmentPublicationClaim.publication_id == previous.id)
+            )
+        }
+        prior_evidence_links = {
+            link.evidence_id: link.natural_key
+            for link in session.scalars(
+                select(AssessmentPublicationEvidence).where(AssessmentPublicationEvidence.publication_id == previous.id)
+            )
+        }
+        retained_claim_ids = set(domain_claim_ids)
+        pending = list(domain_claim_ids)
+        while pending:
+            claim_id = pending.pop()
+            for prerequisite_id in session.scalars(
+                select(AssessmentClaimDependency.prerequisite_claim_id).where(
+                    AssessmentClaimDependency.claim_id == claim_id
+                )
+            ):
+                if prerequisite_id not in retained_claim_ids:
+                    retained_claim_ids.add(prerequisite_id)
+                    pending.append(prerequisite_id)
+        for claim_id in retained_claim_ids:
+            natural_key = (
+                prior_claim_links.get(claim_id, f"historical:{claim_id}")
+                if claim_id in domain_claim_ids
+                else f"historical:{claim_id}"
+            )
+            _insert(
+                session,
+                AssessmentPublicationClaim,
+                publication_id=publication.id,
+                claim_id=claim_id,
+                natural_key=natural_key,
+            )
+            for evidence_id in session.scalars(
+                select(AssessmentClaimEvidence.evidence_id).where(AssessmentClaimEvidence.claim_id == claim_id)
+            ):
+                _insert(
+                    session,
+                    AssessmentPublicationEvidence,
+                    publication_id=publication.id,
+                    evidence_id=evidence_id,
+                    natural_key=f"historical:{evidence_id}"
+                    if evidence_id not in prior_evidence_links or evidence_id not in canonical_evidence.values()
+                    else prior_evidence_links[evidence_id],
+                )
+        position = len(assessment["analyses"])
+        for link in session.scalars(
+            select(AssessmentPublicationAnalysis)
+            .where(AssessmentPublicationAnalysis.publication_id == previous.id)
+            .order_by(AssessmentPublicationAnalysis.position)
+        ):
+            row = session.get(AssessmentAnalysis, link.analysis_id)
+            if row is not None and "detector" not in row.receipt:
+                _insert(
+                    session,
+                    AssessmentPublicationAnalysis,
+                    publication_id=publication.id,
+                    analysis_id=link.analysis_id,
+                    position=position,
+                )
+                position += 1
+
     block_number, block_hash = _block_data(assessment["evidence"])
     publication.block_number = block_number
     publication.block_hash = block_hash
@@ -616,6 +734,7 @@ def publish_scoped_claim(
     implementation: Mapping[str, Any],
     context: Mapping[str, Any] | None = None,
     prerequisite_claims: list[str] | None = None,
+    preserve_publication_point: bool = False,
 ) -> tuple[uuid.UUID, str, str, str]:
     """Append one governance/scenario fact through the shared temporal model."""
     if producer not in {AnalysisProducer.governance, AnalysisProducer.scenario}:
@@ -646,7 +765,7 @@ def publish_scoped_claim(
         ):
             raise ValueError("scenario baseline has no matching observed publication")
     if source_publication is None:
-        raise ValueError("scoped claim requires an existing observed Assessment publication")
+        raise ValueError("scoped claim requires an existing observed LegacyAssessmentProjection publication")
     publication = _clone_publication(session, source_publication)
     publication.context_id = context_id
     canonical_scope = dict(scope)
@@ -666,7 +785,7 @@ def publish_scoped_claim(
     source = cast(dict[str, Any], _json(evidence_source))
     at_value = canonical_scope.get("at")
     at: dict[str, Any] = dict(at_value) if isinstance(at_value, Mapping) else {}
-    if scope_kind == ScopeKind.point:
+    if scope_kind == ScopeKind.point and not preserve_publication_point:
         publication.chain_id = int(at["chain_id"])
         publication.block_number = int(at["block_number"])
         publication.block_hash = str(at["block_hash"])
@@ -854,7 +973,7 @@ def record_correction(
     """Append a correction without deleting the target or its history."""
     source = _latest_publication(session, job_id)
     if source is None:
-        raise ValueError("correction requires an existing Assessment publication")
+        raise ValueError("correction requires an existing LegacyAssessmentProjection publication")
     target_model = AssessmentEvidence if target_kind == CorrectionTargetKind.evidence else AssessmentClaim
     if session.get(target_model, target_id) is None:
         raise ValueError(f"unknown {target_kind.value} target {target_id}")
@@ -922,7 +1041,7 @@ def publish_diagnostic(
     """Append a failed/partial attempt without manufacturing a Claim."""
     source = _latest_publication(session, job_id)
     if source is None:
-        raise ValueError("diagnostic requires an existing Assessment publication")
+        raise ValueError("diagnostic requires an existing LegacyAssessmentProjection publication")
     publication = _clone_publication(session, source)
     now = datetime.now(timezone.utc)
     implementation_id = _implementation(session, producer, implementation)
@@ -971,7 +1090,7 @@ def has_publication(session: Session, job_id: Any) -> bool:
     return _latest_publication(session, job_id) is not None
 
 
-def load_legacy_assessment(session: Session, job_id: Any) -> Assessment | None:
+def load_legacy_assessment(session: Session, job_id: Any) -> LegacyAssessmentProjection | None:
     """Project the latest publication into the compact pipeline compatibility view."""
     publication = _latest_publication(session, job_id)
     if publication is None:
@@ -983,9 +1102,16 @@ def load_legacy_assessment(session: Session, job_id: Any) -> Assessment | None:
         .scalars()
         .all()
     )
-    natural_by_subject: dict[str, tuple[SubjectRole, str]] = {
-        link.subject_id: (link.role, link.natural_key) for link in subject_links
-    }
+    natural_by_subject: dict[str, tuple[SubjectRole, str]] = {}
+    for link in subject_links:
+        row = session.get(AssessmentSubject, link.subject_id)
+        if (
+            link.role == SubjectRole.entity
+            and not link.projection_metadata
+            and (row is None or "legacy_value" not in row.identity)
+        ):
+            continue
+        natural_by_subject[link.subject_id] = (link.role, link.natural_key)
     contract: dict[str, Any] | None = None
     functions: dict[str, Any] = {}
     controllers: dict[str, Any] = {}
@@ -994,15 +1120,16 @@ def load_legacy_assessment(session: Session, job_id: Any) -> Assessment | None:
         row = session.get(AssessmentSubject, link.subject_id)
         if row is None:
             continue
-        value = row.identity.get("legacy_value")
+        value = link.projection_metadata or row.identity.get("legacy_value")  # imported pre-cutover records
         if link.role == SubjectRole.contract:
-            contract = dict(value or {})
+            contract = dict(value or row.identity)
         elif link.role == SubjectRole.function:
-            functions[link.natural_key] = dict(value or {})
+            functions[link.natural_key] = dict(value or row.identity.get("identity") or {})
         elif link.role == SubjectRole.controller:
-            controllers[link.natural_key] = dict(value or {})
+            controllers[link.natural_key] = dict(value or row.identity.get("value") or {})
         elif link.role == SubjectRole.entity:
-            entities[link.natural_key] = dict(value or {})
+            if value or "kind" in row.identity:
+                entities[link.natural_key] = dict(value or row.identity)
     if contract is None:
         raise ValueError(f"publication {publication.id} has no contract subject")
 
@@ -1015,13 +1142,21 @@ def load_legacy_assessment(session: Session, job_id: Any) -> Assessment | None:
         .all()
     )
     for link in evidence_links:
+        if link.natural_key.startswith("historical:"):
+            continue
         row = session.get(AssessmentEvidence, link.evidence_id)
         payload = session.get(AssessmentPayload, row.payload_id) if row is not None else None
         if row is None or payload is None:
             raise ValueError(f"publication {publication.id} has missing evidence {link.evidence_id}")
         source = row.source
+        if not (source.get("projection") == "pipeline" or link.natural_key.startswith("evidence:")) or not all(
+            key in source for key in ("method", "producer", "locator")
+        ):
+            continue  # domain evidence is retained in canonical rows, not compact pipeline input
         role, natural_subject = natural_by_subject.get(row.subject_id, (SubjectRole.contract, contract["address"]))
-        subject_kind = "contract" if role == SubjectRole.contract else role.value
+        subject_kind = source.get("subject_kind") or ("contract" if role == SubjectRole.contract else role.value)
+        if subject_kind == "contract":
+            natural_subject = contract["address"]
         evidence[link.natural_key] = {
             "method": source["method"],
             "subject_kind": subject_kind,
@@ -1045,7 +1180,25 @@ def load_legacy_assessment(session: Session, job_id: Any) -> Assessment | None:
         [link.claim_id for link in claim_links],
         known_at=datetime.now(timezone.utc),
     )
-    claim_links = [link for link in claim_links if link.claim_id not in corrected_claims]
+    claim_links = [
+        link
+        for link in claim_links
+        if link.claim_id not in corrected_claims and not link.natural_key.startswith("historical:")
+    ]
+    domain_claim_ids: set[str] = set()
+    for analysis_link in session.scalars(
+        select(AssessmentPublicationAnalysis).where(AssessmentPublicationAnalysis.publication_id == publication.id)
+    ):
+        analysis_row = session.get(AssessmentAnalysis, analysis_link.analysis_id)
+        if analysis_row is not None and "detector" not in analysis_row.receipt:
+            domain_claim_ids.update(
+                session.scalars(
+                    select(AssessmentAnalysisOutput.claim_id).where(
+                        AssessmentAnalysisOutput.analysis_id == analysis_row.id
+                    )
+                )
+            )
+    claim_links = [link for link in claim_links if link.claim_id not in domain_claim_ids]
     natural_claim_by_id = {link.claim_id: link.natural_key for link in claim_links}
     natural_evidence_by_id = {link.evidence_id: link.natural_key for link in evidence_links}
 
@@ -1131,7 +1284,7 @@ def load_legacy_assessment(session: Session, job_id: Any) -> Assessment | None:
         if row is not None and "detector" in row.receipt:
             analyses.append(dict(row.receipt))
     return cast(
-        Assessment,
+        LegacyAssessmentProjection,
         {
             "schema_version": "assessment/5",
             "contract": contract,
@@ -1207,8 +1360,33 @@ def load_temporal_assessment(
         .scalars()
         .all()
     )
+    # Corrections remain knowledge-time facts even when selecting an older
+    # world point or a scenario snapshot. Include their receipt analyses in
+    # this view so every correction reference resolves.
+    correction_rows = session.execute(
+        select(AssessmentCorrection, AssessmentAnalysis.recorded_at)
+        .join(AssessmentAnalysis, AssessmentAnalysis.id == AssessmentCorrection.analysis_id)
+        .where(
+            AssessmentAnalysis.job_id == publication.job_id,
+            AssessmentAnalysis.recorded_at <= effective_known_at,
+        )
+        .order_by(AssessmentAnalysis.recorded_at, AssessmentCorrection.id)
+    ).all()
+    analysis_ids = list(dict.fromkeys([*analysis_ids, *(row.analysis_id for row, _recorded_at in correction_rows)]))
+    # A publication's natural-key links name its displayed subjects, while
+    # evidence and scoped claims may reference additional interned subjects.
+    # Include those references so the row-shaped LegacyAssessmentProjection is self-contained.
+    referenced_subject_ids = list(subject_ids)
+    for evidence_id in evidence_ids:
+        evidence_row = session.get(AssessmentEvidence, evidence_id)
+        if evidence_row is not None:
+            referenced_subject_ids.append(evidence_row.subject_id)
+    for claim_id in claim_ids:
+        claim_row = session.get(AssessmentClaim, claim_id)
+        if claim_row is not None:
+            referenced_subject_ids.append(claim_row.subject_id)
     subjects: list[TemporalSubjectDict] = []
-    for key in dict.fromkeys(subject_ids):
+    for key in dict.fromkeys(referenced_subject_ids):
         row = session.get(AssessmentSubject, key)
         if row is not None:
             subjects.append(
@@ -1275,6 +1453,42 @@ def load_temporal_assessment(
                 "claims": list(dependencies),
             }
         )
+
+    # A retained proof can refer to historical functions, entities, or code
+    # through its proposition even when the current pipeline inventory no
+    # longer links those subjects by natural key. Include the transitive
+    # subject identities so the public proof remains self-contained.
+    def subject_references(value: Any) -> set[str]:
+        if isinstance(value, str):
+            return {value} if value.startswith("subject:") else set()
+        if isinstance(value, Mapping):
+            return {ref for item in value.values() for ref in subject_references(item)}
+        if isinstance(value, list):
+            return {ref for item in value for ref in subject_references(item)}
+        return set()
+
+    published_subject_ids = {row["id"] for row in subjects}
+    pending_subject_ids = {ref for claim in claims for ref in subject_references(claim["proposition"])} | {
+        ref for subject in subjects for ref in subject_references(subject["identity"])
+    }
+    while pending_subject_ids:
+        subject_id = pending_subject_ids.pop()
+        if subject_id in published_subject_ids:
+            continue
+        subject_row = session.get(AssessmentSubject, subject_id)
+        if subject_row is None:
+            raise ValueError(f"publication {publication.id} references missing subject {subject_id}")
+        identity = {key: value for key, value in subject_row.identity.items() if key != "legacy_value"}
+        subjects.append(
+            {
+                "id": subject_row.id,
+                "recorded_at": subject_row.recorded_at.isoformat(),
+                "kind": subject_row.kind,
+                "identity": identity,
+            }
+        )
+        published_subject_ids.add(subject_id)
+        pending_subject_ids.update(subject_references(identity) - published_subject_ids)
     analyses: list[TemporalAnalysisDict] = []
     for key in analysis_ids:
         row = session.get(AssessmentAnalysis, key)
@@ -1341,15 +1555,6 @@ def load_temporal_assessment(
                 ],
             }
         )
-    correction_rows = session.execute(
-        select(AssessmentCorrection, AssessmentAnalysis.recorded_at)
-        .join(AssessmentAnalysis, AssessmentAnalysis.id == AssessmentCorrection.analysis_id)
-        .where(
-            AssessmentAnalysis.job_id == publication.job_id,
-            AssessmentAnalysis.recorded_at <= effective_known_at,
-        )
-        .order_by(AssessmentAnalysis.recorded_at, AssessmentCorrection.id)
-    ).all()
     corrections: list[TemporalCorrectionDict] = [
         {
             "id": str(row.id),
@@ -1390,9 +1595,22 @@ def load_temporal_assessment(
             )
     payload_ids = list(dict.fromkeys(row["payload"] for row in evidences))
     payloads: list[TemporalPayloadDict] = []
-    for payload_key in payload_ids:
-        payload_row = session.get(AssessmentPayload, payload_key)
-        if payload_row is not None:
+    if payload_ids:
+        payload_metadata = {
+            row.id: row
+            for row in session.execute(
+                select(
+                    AssessmentPayload.id,
+                    AssessmentPayload.recorded_at,
+                    AssessmentPayload.media_type,
+                    AssessmentPayload.byte_length,
+                ).where(AssessmentPayload.id.in_(payload_ids))
+            )
+        }
+        for payload_key in payload_ids:
+            payload_row = payload_metadata.get(payload_key)
+            if payload_row is None:
+                continue
             payloads.append(
                 {
                     "id": payload_row.id,
@@ -1412,7 +1630,7 @@ def load_temporal_assessment(
             "block_hash": publication.block_hash,
         },
     }
-    return {
+    result: TemporalAssessmentDict = {
         "view": view,
         "subjects": subjects,
         "evidence": evidences,
@@ -1423,6 +1641,12 @@ def load_temporal_assessment(
         "implementations": implementations,
         "payloads": payloads,
     }
+    from schemas.assessment import assessment_problems
+
+    problems = assessment_problems(result)
+    if problems:
+        raise ValueError("invalid canonical assessment publication: " + "; ".join(problems))
+    return result
 
 
 def _clone_publication(session: Session, source: AssessmentPublication) -> AssessmentPublication:
@@ -1438,7 +1662,7 @@ def _clone_publication(session: Session, source: AssessmentPublication) -> Asses
     session.add(clone)
     session.flush()
     for model, fields in (
-        (AssessmentPublicationSubject, ("subject_id", "role", "natural_key")),
+        (AssessmentPublicationSubject, ("subject_id", "role", "natural_key", "projection_metadata")),
         (AssessmentPublicationEvidence, ("evidence_id", "natural_key")),
         (AssessmentPublicationClaim, ("claim_id", "natural_key")),
         (AssessmentPublicationAnalysis, ("analysis_id", "position")),
@@ -1453,7 +1677,7 @@ def publish_principal_history(session: Session, job_id: Any, history: Mapping[st
     """Append legacy principal-history behavior as reported temporal claims."""
     source_publication = _latest_publication(session, job_id)
     if source_publication is None:
-        raise ValueError("principal history requires an existing Assessment publication")
+        raise ValueError("principal history requires an existing LegacyAssessmentProjection publication")
     publication = _clone_publication(session, source_publication)
     # A new principal-history result replaces that slice in the latest view;
     # prior publications retain the earlier slice. Flush the cloned links so

@@ -8,7 +8,9 @@ hashes, timestamps, messages, and identifiers remain data.
 from __future__ import annotations
 
 import enum
-from typing import Any, TypedDict
+from typing import Any
+
+from typing_extensions import TypedDict
 
 
 class StringEnum(str, enum.Enum):

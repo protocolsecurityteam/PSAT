@@ -1,12 +1,16 @@
 # Assessment temporal cutover — implementation plan
 
-Status: implementation in progress on the cutover branch. Core temporal rows,
+Status: integration verification in progress on the cutover branch. Core temporal rows,
 publication/deduplication, correction selection, legacy import, principal
 history, graph projection ownership, typed governance bindings, reusable
 scenario contexts, row-shaped API transport, initial OpenZeppelin Governor/
 Timelock and Safe getter collectors, proposal-impact UI, and restored-copy
-rehearsal tooling are implemented. Broader custom-governor adapters and live
-preview verification remain release gates. This plan does not authorize a live
+rehearsal tooling are implemented. The canonical artifact read boundary now uses
+the row-shaped type, pipeline writes use explicit publication, and the supported
+Governor workflow verifies proposal actions, executes them on a pinned local
+fork, and publishes observed/scenario-separated getter changes. Custom-governor
+semantics remain explicit unsupported diagnostics; live preview verification
+remains a release gate. This plan does not authorize a live
 migration or deployment.
 
 ## Objective
@@ -38,13 +42,13 @@ writer or a second authoritative analytical model.
 - Automatic PR live-database resets remain deferred and outside this PR.
 - Preserve unrelated dirty/untracked workspace contents.
 
-## Current starting point
+## Original starting point
 
 The working tree contains unpublished fixes and partial consolidation of the
 existing snapshot model. Reuse that work where it meets the new invariants.
 Do not assume the previous passing test suite proves temporal correctness.
 
-Known unresolved architecture gaps:
+Architecture gaps identified before implementation (retained as review history):
 
 1. Replacing controller observations can leave an old caller claim and a
    `completed` policy receipt eligible. Dependencies are incompletely recorded.

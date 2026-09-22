@@ -25,7 +25,7 @@ from utils.chains import canonical_chain
 from utils.logging import record_degraded
 
 from ._chains import _job_chain_name, _mainnet_coalesced_chain
-from .artifacts import get_artifact, store_artifact
+from .artifacts import publish_assessment_projection, store_artifact
 
 logger = logging.getLogger("db.queue")
 
@@ -71,10 +71,10 @@ def _store_assessment_from_source(
 ) -> None:
     """Rebuild a target Assessment from a donor's embedded static inputs."""
 
-    from db.queue.typed import load_assessment
+    from db.queue.typed import load_assessment_projection
     from services.assessment import static_inputs
 
-    source_assessment = load_assessment(get_artifact, session, source_job_id)
+    source_assessment = load_assessment_projection(session, source_job_id)
     if source_assessment is None:
         return
     copied_analysis, copied_trees, copied_effects = static_inputs(source_assessment)
@@ -108,7 +108,7 @@ def _store_assessment_from_source(
         effects=copied_effects,
         predicate_trees=copied_trees,
     )
-    store_artifact(session, job.id, "assessment", data=assessment)
+    publish_assessment_projection(session, job.id, assessment)
 
 
 def copy_row(session: Session, source: Base, *, exclude: frozenset[str] = frozenset(), **overrides: Any) -> Base:

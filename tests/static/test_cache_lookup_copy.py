@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+from db.queue import publish_assessment_projection
 from tests.cache_helpers import (
     ADDR_A,
     ADDR_B,
@@ -138,7 +139,7 @@ def test_find_completed_static_cache_hit_for_proxy_without_static_facts(db_sessi
 def test_find_completed_static_cache_miss_no_summary(db_session):
     """Completed job without contract_summaries row is not returned."""
     from db.models import Contract, JobStage, JobStatus
-    from db.queue import create_job, find_completed_static_cache, store_artifact, store_source_files
+    from db.queue import create_job, find_completed_static_cache, store_source_files
 
     job = create_job(db_session, {"address": ADDR_A})
     job.status = JobStatus.completed
@@ -150,7 +151,7 @@ def test_find_completed_static_cache_miss_no_summary(db_session):
     store_source_files(db_session, job.id, {"src/X.sol": "contract X {}"})
     from tests.support.policy_builders import _assessment
 
-    store_artifact(db_session, job.id, "assessment", data=_assessment())
+    publish_assessment_projection(db_session, job.id, _assessment())
 
     assert find_completed_static_cache(db_session, ADDR_A) is None
 
@@ -163,7 +164,7 @@ def test_find_completed_static_cache_picks_most_recent(db_session):
     from sqlalchemy import update
 
     from db.models import Contract, ContractSummary, Job, JobStage, JobStatus
-    from db.queue import create_job, find_completed_static_cache, store_artifact, store_source_files
+    from db.queue import create_job, find_completed_static_cache, store_source_files
 
     _create_completed_job_with_static_data(db_session, address=ADDR_A)
 
@@ -184,7 +185,7 @@ def test_find_completed_static_cache_picks_most_recent(db_session):
     from tests.support.policy_builders import _assessment, _minimal_static_facts
 
     facts = _minimal_static_facts(address=ADDR_A, name="TestContract2")
-    store_artifact(db_session, new_job.id, "assessment", data=_assessment(static_facts=facts))
+    publish_assessment_projection(db_session, new_job.id, _assessment(static_facts=facts))
 
     future = datetime.now(timezone.utc) + timedelta(hours=1)
     db_session.execute(update(Job).where(Job.id == new_job.id).values(updated_at=future))
@@ -205,23 +206,20 @@ def test_copy_static_cache(db_session):
     from sqlalchemy import select
 
     from db.models import Contract, ContractSummary, RoleDefinition
-    from db.queue import copy_static_cache, create_job, get_artifact, get_source_files, store_artifact
+    from db.queue import copy_static_cache, create_job, get_artifact, get_source_files
 
     source_job = _create_completed_job_with_static_data(db_session)
     predicate_trees = {"schema_version": "semantic", "trees": {"pause()": {"node_type": "caller"}}}
     effects = {"schema_version": "semantic", "effects": {"pause()": [{"kind": "external_call"}]}}
-    from db.queue.typed import load_assessment
+    from db.queue.typed import load_assessment_projection
     from services.assessment import static_inputs
     from tests.support.policy_builders import _assessment
 
-    source_assessment = load_assessment(get_artifact, db_session, source_job.id)
+    source_assessment = load_assessment_projection(db_session, source_job.id)
     assert source_assessment is not None
     facts, _old_trees, _old_effects = static_inputs(source_assessment)
-    store_artifact(
-        db_session,
-        source_job.id,
-        "assessment",
-        data=_assessment(static_facts=facts, predicate_trees=predicate_trees, effects=effects),
+    publish_assessment_projection(
+        db_session, source_job.id, _assessment(static_facts=facts, predicate_trees=predicate_trees, effects=effects)
     )
     target_job = create_job(db_session, {"address": ADDR_A})
 
@@ -252,7 +250,7 @@ def test_copy_static_cache(db_session):
     assert len(rds) == 1
     assert rds[0].role_name == "ADMIN_ROLE"
 
-    target_assessment = load_assessment(get_artifact, db_session, target_job.id)
+    target_assessment = load_assessment_projection(db_session, target_job.id)
     assert target_assessment is not None
     restamped_facts = {**facts, "subject": {**facts["subject"], "address": ADDR_A.lower()}}
     assert static_inputs(target_assessment) == (restamped_facts, predicate_trees, effects)

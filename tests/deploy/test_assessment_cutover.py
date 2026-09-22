@@ -29,7 +29,7 @@ def test_build_then_remove_then_migrate_and_restore_config(monkeypatch, config):
             return json.dumps(next(inventories))
         if args[0] == "deploy" and "--image" in args:
             release = config.read_text()
-            assert "alembic upgrade f6a1c2d3e4b5" in release
+            assert "alembic upgrade d9e8b7c6a5f4" in release
             assert "services.assessment.migrate" in release
             assert "assessment_cutover=stopped" in release
         return ""

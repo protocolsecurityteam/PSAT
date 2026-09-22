@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pydantic import TypeAdapter
 
-from schemas.assessment import Assessment
+from schemas.assessment_projection import LegacyAssessmentProjection
 from services.assessment import build_static_assessment, effect_presence, static_inputs
 
 
@@ -104,7 +104,7 @@ def test_pause_claim_has_first_class_evidence_and_state_changing_victim() -> Non
         predicate_trees=trees,
     )
 
-    TypeAdapter(Assessment).validate_python(assessment)
+    TypeAdapter(LegacyAssessmentProjection).validate_python(assessment)
     assert len(assessment["claims"]) == 1
     claim = next(iter(assessment["claims"].values()))
     proposition = claim["proposition"]

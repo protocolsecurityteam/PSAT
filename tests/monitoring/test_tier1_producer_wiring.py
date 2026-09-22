@@ -338,13 +338,9 @@ def _stub_stage(monkeypatch, **overrides: Any) -> None:
     assessment = _assessment(static_facts=static_facts)
     snapshot = {"contract_address": REGISTRY, "controller_values": {}, "block_number": BLOCK}
 
-    monkeypatch.setattr(
-        "workers.resolution_worker.get_artifact",
-        lambda _s, _j, name: {
-            "assessment": assessment,
-        }.get(name),
-    )
     monkeypatch.setattr("workers.resolution_worker.store_artifact", lambda *a, **kw: None)
+    monkeypatch.setattr("workers.resolution_worker.load_assessment_projection", lambda _s, _j: assessment)
+    monkeypatch.setattr("workers.resolution_worker.publish_assessment_projection", lambda *a, **kw: None)
     monkeypatch.setattr("workers.resolution_worker.observe_controllers", lambda *a, **kw: snapshot)
     monkeypatch.setattr(
         "workers.resolution_worker.resolve_control_graph",

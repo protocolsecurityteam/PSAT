@@ -862,6 +862,8 @@ def test_policy_worker_marks_dirty(qsession, monkeypatch):
     }
     monkeypatch.setattr("workers.policy_worker.get_artifact", lambda _s, _j, name: artifacts.get(name))
     monkeypatch.setattr("workers.policy_worker.store_artifact", lambda *a, **kw: None)
+    monkeypatch.setattr("workers.policy_worker.load_assessment_projection", lambda _s, _j: artifacts["assessment"])
+    monkeypatch.setattr("workers.policy_worker.publish_assessment_projection", lambda *a, **kw: None)
     monkeypatch.setattr(
         "workers.policy_worker.derive_policy",
         lambda assessment, **kw: assessment,

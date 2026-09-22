@@ -8,13 +8,14 @@ from typing import Any, cast
 
 from pydantic import TypeAdapter
 
-from schemas.assessment import Assessment, assessment_problems
+from db.queue import publish_assessment_projection
+from schemas.assessment_projection import LegacyAssessmentProjection, assessment_problems
 from services.assessment import add_effects, add_policy, build_static_assessment, effect_matches_by_function
 from services.effects.config import EFFECT_CLASS_FREEZE_PAUSE, VERDICT_PROVEN, VERDICT_UNKNOWN
 from tests.conftest import requires_postgres
 
 
-def _base() -> Assessment:
+def _base() -> LegacyAssessmentProjection:
     return build_static_assessment(
         chain_id=1,
         address="0x1111111111111111111111111111111111111111",
@@ -77,7 +78,7 @@ def _verdict(verdict: str, *, reason: str | None = None) -> SimpleNamespace:
 
 def test_proven_verdict_adds_execution_evidence_to_the_effect_claim() -> None:
     assessment = add_effects(_base(), [_verdict(VERDICT_PROVEN)], signatures_by_function_row={42: "pause()"})
-    TypeAdapter(Assessment).validate_python(assessment)
+    TypeAdapter(LegacyAssessmentProjection).validate_python(assessment)
 
     pause_claims = [
         claim
@@ -175,7 +176,6 @@ def test_execution_uses_canonical_function_identity() -> None:
 @requires_postgres
 def test_worker_refresh_preserves_other_functions_and_isolates_deployments(db_session) -> None:
     from db.models import Contract, EffectiveFunction, EffectVerdict, Job, JobStage, JobStatus
-    from db.queue import get_artifact, store_artifact
     from workers.effects_worker import EffectsWorker
 
     address, other_deployment = "0x" + "1" * 40, "0x" + "2" * 40
@@ -235,11 +235,13 @@ def test_worker_refresh_preserves_other_functions_and_isolates_deployments(db_se
             }
         },
     )
-    store_artifact(db_session, job.id, "assessment", data=assessment)
+    publish_assessment_projection(db_session, job.id, assessment)
     db_session.commit()
     items = cast(Any, [SimpleNamespace(candidate=SimpleNamespace(function_id=rows[0].id))])
     assert EffectsWorker()._update_assessments(db_session, items) == 1
-    result = get_artifact(db_session, job.id, "assessment")
-    assert set(effect_matches_by_function(cast(Assessment, result))) == {"pause(Authority)", "freeze()"}
+    from db.queue.typed import load_assessment_projection
+
+    result = load_assessment_projection(db_session, job.id)
+    assert set(effect_matches_by_function(cast(LegacyAssessmentProjection, result))) == {"pause(Authority)", "freeze()"}
     assert rows[0].claims and rows[1].claims
     assert rows[2].claims == []

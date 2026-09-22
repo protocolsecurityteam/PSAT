@@ -21,6 +21,7 @@ import uuid
 
 import pytest
 
+from db.queue import publish_assessment_projection
 from tests.conftest import requires_postgres
 
 
@@ -189,7 +190,7 @@ def _completed_source_with_null_contract(session, address, request_chain):
     """A completed source job whose request declares *request_chain* but whose
     Contract row was persisted ``chain=NULL`` (the legacy write shape)."""
     from db.models import Contract, ContractSummary, JobStage, JobStatus
-    from db.queue import create_job, store_artifact, store_source_files
+    from db.queue import create_job, store_source_files
 
     job = create_job(session, {"address": address, "name": "LegacyContract", "chain": request_chain})
     job.status = JobStatus.completed
@@ -216,12 +217,7 @@ def _completed_source_with_null_contract(session, address, request_chain):
     store_source_files(session, job.id, {"src/Legacy.sol": "contract Legacy {}"})
     from tests.support.policy_builders import _assessment, _minimal_static_facts
 
-    store_artifact(
-        session,
-        job.id,
-        "assessment",
-        data=_assessment(static_facts=_minimal_static_facts(address=address)),
-    )
+    publish_assessment_projection(session, job.id, _assessment(static_facts=_minimal_static_facts(address=address)))
     return job
 
 

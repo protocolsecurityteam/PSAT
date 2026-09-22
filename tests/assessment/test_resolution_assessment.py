@@ -5,12 +5,12 @@ from __future__ import annotations
 from pydantic import TypeAdapter
 
 from db.models import CONTROL_EDGE_RELATIONS
-from schemas.assessment import Assessment
+from schemas.assessment_projection import LegacyAssessmentProjection
 from services.assessment import add_resolution, build_static_assessment, control_graph
 from services.assessment.resolution import AUTHORITY_RELATIONS
 
 
-def _base() -> Assessment:
+def _base() -> LegacyAssessmentProjection:
     return build_static_assessment(
         chain_id=1,
         address="0x1111111111111111111111111111111111111111",
@@ -81,7 +81,7 @@ def test_resolution_separates_authority_from_dependency_edges() -> None:
     }
 
     assessment = add_resolution(_base(), graph, chain_id=1)
-    TypeAdapter(Assessment).validate_python(assessment)
+    TypeAdapter(LegacyAssessmentProjection).validate_python(assessment)
 
     authority_claims = [
         claim for claim in assessment["claims"].values() if claim["proposition"]["kind"] == "authority_relationship"

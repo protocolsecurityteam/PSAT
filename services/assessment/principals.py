@@ -1,4 +1,4 @@
-"""Principal observations belong to Assessment before any labels are projected."""
+"""Principal observations belong to LegacyAssessmentProjection before any labels are projected."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import copy
 from collections.abc import Iterable, Mapping
 from typing import Any, cast
 
-from schemas.assessment import Analysis, Assessment, Diagnostic, Proposition
+from schemas.assessment_projection import Analysis, Diagnostic, LegacyAssessmentProjection, Proposition
 from services.assessment.keys import content_key, entity_record, json_value
 from services.assessment.slices import prune_unreferenced_entities, remove_analysis_slice
 from services.assessment.validation import checked
@@ -15,8 +15,10 @@ PRODUCER = "policy.principal_observation"
 GRAPH_PRODUCER = "policy.principal_graph"
 
 
-def add_principal_observations(assessment: Assessment, observations: Iterable[Mapping[str, Any]]) -> Assessment:
-    result = cast(Assessment, copy.deepcopy(assessment))
+def add_principal_observations(
+    assessment: LegacyAssessmentProjection, observations: Iterable[Mapping[str, Any]]
+) -> LegacyAssessmentProjection:
+    result = cast(LegacyAssessmentProjection, copy.deepcopy(assessment))
     previous_entities = {
         evidence["subject"]
         for evidence in result["evidence"].values()
@@ -127,11 +129,11 @@ def add_principal_observations(assessment: Assessment, observations: Iterable[Ma
 
 
 def add_principal_graph_nodes(
-    assessment: Assessment,
+    assessment: LegacyAssessmentProjection,
     nodes: Iterable[Mapping[str, Any]],
-) -> Assessment:
+) -> LegacyAssessmentProjection:
     """Record FP-derived graph nodes separately from the observed graph walk."""
-    result = cast(Assessment, copy.deepcopy(assessment))
+    result = cast(LegacyAssessmentProjection, copy.deepcopy(assessment))
     remove_analysis_slice(result, GRAPH_PRODUCER)
     evidence_keys: list[str] = []
     claim_keys: list[str] = []

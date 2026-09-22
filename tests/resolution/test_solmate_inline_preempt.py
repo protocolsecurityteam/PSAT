@@ -27,7 +27,6 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import db.queue as DQ
 from services.resolution import capability_resolver as CR
 from services.resolution.predicate_evaluator import core as PE
 
@@ -76,7 +75,8 @@ def test_inline_returns_none_when_materialization_fails(monkeypatch):
     )
 
     monkeypatch.setattr(CR, "find_analysis_job_for_address", lambda *a, **k: fake_lookup)
-    monkeypatch.setattr(DQ, "get_artifact", lambda *a, **k: assessment)
+    monkeypatch.setattr(CR, "load_assessment_projection", lambda *a, **k: assessment)
+    monkeypatch.setattr("db.queue.typed.load_assessment_projection", lambda *a, **k: assessment)
     monkeypatch.setattr(CR, "_load_state_var_values", lambda *a, **k: {})
 
     # The trigger: generic materializer can't satisfy ``canCall``'s role-mapping

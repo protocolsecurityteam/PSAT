@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+from db.queue import publish_assessment_projection
 from tests.conftest import DATABASE_URL as _DB_URL
 from tests.conftest import _can_connect, requires_postgres
 
@@ -55,7 +56,6 @@ def session():
 
 def _seed_job_with_artifact(session, *, address: str, predicate_trees: dict | None):
     from db.models import Job, JobStage, JobStatus
-    from db.queue import store_artifact
 
     job = Job(
         address=address,
@@ -70,11 +70,10 @@ def _seed_job_with_artifact(session, *, address: str, predicate_trees: dict | No
     if predicate_trees is not None:
         from tests.support.policy_builders import _assessment, _minimal_static_facts
 
-        store_artifact(
+        publish_assessment_projection(
             session,
             job.id,
-            "assessment",
-            data=_assessment(
+            _assessment(
                 static_facts=_minimal_static_facts(address=address, name="T"),
                 predicate_trees=predicate_trees,
             ),
@@ -99,12 +98,12 @@ def _seed_contract(session, *, address: str):
 def _publish_controller_observations(session):
     """Materialize compact controller fixtures as canonical observation evidence."""
     from db.models import Contract, ControllerValue, Job
-    from db.queue import get_artifact, store_artifact
+    from db.queue.typed import load_assessment_projection
     from services.assessment import static_inputs
     from tests.support.policy_builders import _assessment, _minimal_snapshot
 
     for job in session.query(Job).all():
-        stored = get_artifact(session, job.id, "assessment")
+        stored = load_assessment_projection(session, job.id)
         if not isinstance(stored, dict):
             continue
         contract = session.query(Contract).filter_by(job_id=job.id).first()
@@ -121,9 +120,7 @@ def _publish_controller_observations(session):
             }
             for row in session.query(ControllerValue).filter_by(contract_id=contract.id)
         }
-        from db.queue.typed import validate_assessment
-
-        facts, trees, effects = static_inputs(validate_assessment(stored))
+        facts, trees, effects = static_inputs(stored)
         assessment = _assessment(
             static_facts=facts,
             predicate_trees=trees,
@@ -133,7 +130,7 @@ def _publish_controller_observations(session):
         proxies = session.query(Contract).filter_by(implementation=job.address).all()
         if len(proxies) == 1:
             assessment["contract"]["deployment_address"] = proxies[0].address.lower()
-        store_artifact(session, job.id, "assessment", data=assessment)
+        publish_assessment_projection(session, job.id, assessment)
     session.commit()
 
 
@@ -1426,14 +1423,12 @@ def test_external_authority_inlining_uses_check_trees_and_call_frame(session):
 
 
 def _store_controller_assessment(session, job, address, owner, chain_id=1):
-    from db.queue import store_artifact
     from tests.support.policy_builders import _assessment, _minimal_snapshot, _minimal_static_facts
 
-    store_artifact(
+    publish_assessment_projection(
         session,
         job.id,
-        "assessment",
-        data=_assessment(
+        _assessment(
             static_facts=_minimal_static_facts(address=address),
             chain_id=chain_id,
             snapshot=_minimal_snapshot({"state_variable:_owner": {"value": owner, "resolved_type": "eoa"}}),

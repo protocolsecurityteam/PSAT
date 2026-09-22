@@ -19,11 +19,12 @@ from db.queue import (
     create_job,
     get_artifact,
     get_source_files,
+    publish_assessment_projection,
     reconcile_impl_job_for_proxy,
     store_artifact,
 )
 from db.queue._chains import job_chain_id
-from schemas.assessment import Assessment
+from schemas.assessment_projection import LegacyAssessmentProjection
 from schemas.static_facts import StaticFacts
 from services.clients.rpc import default_rpc_url, normalize_hex  # used for address comparison
 from services.discovery import (
@@ -767,12 +768,12 @@ class StaticWorker(BaseWorker):
                         contract_name,
                     )
                     self.update_detail(session, job, "Static static_facts complete (cached)")
-                    # Assessment evidence carries the cached static inputs, so
+                    # LegacyAssessmentProjection evidence carries the cached static inputs, so
                     # secondaries resolve without a parallel static_facts artifact.
-                    from db.queue.typed import load_assessment
+                    from db.queue.typed import load_assessment_projection
                     from services.assessment import static_inputs
 
-                    cached_assessment = load_assessment(get_artifact, session, job.id)
+                    cached_assessment = load_assessment_projection(session, job.id)
                     if cached_assessment is not None:
                         secondary_analysis, _cached_trees, _cached_effects = static_inputs(cached_assessment)
             else:
@@ -1063,7 +1064,26 @@ class StaticWorker(BaseWorker):
                 child_request["protocol_id"] = job.protocol_id
             if force:
                 child_request["force"] = True
+            if label == "impl":
+                # A Governor proxy's implementation carries the callable code,
+                # while the request's governance identity remains the proxy.
+                # Facet/secondary children must not execute the same scenario.
+                for key in (
+                    "collect_governance",
+                    "proposal_ids",
+                    "operation_ids",
+                    "scenario_proposal_id",
+                    "scenario_proposal_transaction_hash",
+                    "scenario_sender",
+                ):
+                    if key in request:
+                        child_request[key] = request[key]
             child_job = create_job(session, child_request)
+            if label == "impl" and any(
+                key in child_request
+                for key in ("collect_governance", "proposal_ids", "operation_ids", "scenario_proposal_id")
+            ):
+                job.request = {**request, "_governance_delegate_job_id": str(child_job.id)}
             _redirect_proxy_policy_dependencies(
                 session,
                 chain=chain,
@@ -1640,7 +1660,7 @@ class StaticWorker(BaseWorker):
         if semantic_effects is not None:
             (project_dir / "effects.json").write_text(json.dumps(semantic_effects, indent=2, default=str) + "\n")
 
-        store_artifact(session, job.id, "assessment", data=assessment)
+        publish_assessment_projection(session, job.id, assessment)
         self._write_static_fact_indexes(session, job, assessment)
         logger.info(
             "Static stage contract static_facts complete for job %s address=%s contract=%s",
@@ -1654,9 +1674,9 @@ class StaticWorker(BaseWorker):
         self,
         session,
         job: Job,
-        assessment: Assessment,
+        assessment: LegacyAssessmentProjection,
     ) -> None:
-        """Replace relational indexes from validated Assessment evidence."""
+        """Replace relational indexes from validated LegacyAssessmentProjection evidence."""
         from sqlalchemy import select as sa_select
 
         contract_row = session.execute(
@@ -1719,8 +1739,8 @@ class StaticWorker(BaseWorker):
         a substantive plan). Publishing here makes coverage follow from static_facts
         having run — invariant 8.
 
-        Reads the validated Assessment this stage stored and projects its embedded
-        static inputs. Assessment is the only durable analytical artifact on both
+        Reads the validated LegacyAssessmentProjection this stage stored and projects its embedded
+        static inputs. The immutable Assessment rows are authoritative on both
         fresh and cache-hit paths.
 
         A row is stamped ``STATIC_FACTS_SCHEMA_VERSION``, so it may only be written
@@ -1767,10 +1787,10 @@ class StaticWorker(BaseWorker):
             return
 
         try:
-            from db.queue.typed import load_assessment
+            from db.queue.typed import load_assessment_projection
             from services.assessment import static_inputs
 
-            assessment = load_assessment(get_artifact, session, job.id)
+            assessment = load_assessment_projection(session, job.id)
             if assessment is None:
                 raise ValueError("assessment artifact absent")
             static_facts, predicate_trees, effects = static_inputs(assessment)

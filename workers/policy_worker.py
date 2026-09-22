@@ -19,13 +19,13 @@ from db.models import (
     PrincipalLabel,
     SessionLocal,
 )
-from db.queue import get_artifact, store_artifact
+from db.queue import get_artifact, publish_assessment_projection, store_artifact
 from db.queue._chains import _job_chain_name, job_chain_id
 from db.queue.typed import (
     ArtifactSchemaError,
-    load_assessment,
+    load_assessment_projection,
 )
-from schemas.assessment import Assessment
+from schemas.assessment_projection import LegacyAssessmentProjection
 from schemas.observations import ObservationBatch
 from schemas.permission_index import PermissionIndex
 from services.assessment.policy import derive_policy
@@ -264,13 +264,13 @@ def _resolve_semantic_capabilities(
     job_id: Any,
     chain: str | None = None,
     chain_id: int,
-    assessment: Assessment,
+    assessment: LegacyAssessmentProjection,
 ) -> dict[str, dict[str, Any]] | None:
     """Run the semantic capability resolver for ``contract_address`` against
     the in-progress job. Returns ``{function_signature: capability_dict}``
     or None on miss / failure.
 
-    The current Assessment supplies controller observations and function
+    The current LegacyAssessmentProjection supplies controller observations and function
     identities. The resolver validates its chain and deployment scope.
 
     ``chain_id`` is required: it binds the resolver's RPC/event reads
@@ -398,7 +398,7 @@ class PolicyWorker(BaseWorker):
                     classify_cache[addr] = (str(val[0]), dict(val[1]) if isinstance(val[1], dict) else {})
 
         try:
-            assessment = load_assessment(get_artifact, session, job.id)
+            assessment = load_assessment_projection(session, job.id)
         except ArtifactSchemaError as exc:
             raise RuntimeError(f"{exc.artifact_name} artifact failed validation") from exc
         if assessment is None:
@@ -496,7 +496,7 @@ class PolicyWorker(BaseWorker):
                 ),
                 resolve_controllers=_make_terminal_controller_resolver(rpc_url, chain_id=job_chain_id(job)),
             )
-            store_artifact(session, job.id, "assessment", data=assessment)
+            publish_assessment_projection(session, job.id, assessment)
             projected_types = principal_type_projection(assessment)
             graph_nodes = resolution_graph.get("nodes") if isinstance(resolution_graph, dict) else None
             safe_lookup = _safe_address_lookup_from_graph(graph_nodes if isinstance(graph_nodes, list) else None)
@@ -524,7 +524,7 @@ class PolicyWorker(BaseWorker):
                 context=f"policy_function_principals:{job.id}",
             )
         else:
-            store_artifact(session, job.id, "assessment", data=assessment)
+            publish_assessment_projection(session, job.id, assessment)
 
         record_stage_metric("effective_functions", len(ep_data.get("functions", [])))
         logger.info(
@@ -556,20 +556,48 @@ class PolicyWorker(BaseWorker):
             request_data.get("collect_governance") is True
             or isinstance(proposal_ids, list)
             or isinstance(operation_ids, list)
+            or request_data.get("scenario_proposal_id") is not None
         )
-        if governance_requested and job.address:
+        # Primary implementation jobs analyze the proxy's code and storage
+        # context. The proxy parent delegates this requested run when its
+        # primary child was actually queued in the static stage.
+        governance_address = deployment_address or job.address
+        if governance_requested and governance_address and not request_data.get("_governance_delegate_job_id"):
             from services.assessment.governance_collectors import collect_governance
 
             with log_timed_phase(logger, "governance_collection", durations_ms=durations_ms):
-                collect_governance(
+                governance_collection = collect_governance(
                     session,
                     job.id,
                     rpc_url=rpc_url,
                     chain_id=chain_id,
-                    address=job.address,
-                    proposal_ids=[int(value) for value in proposal_ids or []],
+                    address=governance_address,
+                    proposal_ids=list(
+                        dict.fromkeys(
+                            [int(value) for value in proposal_ids or []]
+                            + (
+                                [int(request_data["scenario_proposal_id"])]
+                                if request_data.get("scenario_proposal_id") is not None
+                                else []
+                            )
+                        )
+                    ),
                     operation_ids=[str(value) for value in operation_ids or []],
                 )
+                if request_data.get("scenario_proposal_id") is not None:
+                    from services.assessment.governance_workflow import execute_proposal_scenario
+
+                    execute_proposal_scenario(
+                        session,
+                        job.id,
+                        rpc_url=rpc_url,
+                        chain_id=chain_id,
+                        governor=governance_address,
+                        proposal_id=int(request_data["scenario_proposal_id"]),
+                        proposal_transaction_hash=str(request_data["scenario_proposal_transaction_hash"]),
+                        sender=str(request_data["scenario_sender"]),
+                        baseline=governance_collection.point,
+                    )
 
         # Rebuild the resolved graph now that permission_index exists,
         # so semantic role/controller principals can be projected into the graph.
@@ -612,7 +640,7 @@ class PolicyWorker(BaseWorker):
         #
         # HERE, and not at the enrollment call site, for three reasons that are
         # all data-flow, not preference:
-        #  1. It is built after the refresh, then Assessment is published and
+        #  1. It is built after the refresh, then LegacyAssessmentProjection is published and
         #     the entire graph index is projected once from that publication.
         #  2. It is strictly BEFORE the perimeter, so a minted node is a
         #     candidate in the SAME job rather than one run later.
@@ -634,7 +662,7 @@ class PolicyWorker(BaseWorker):
                     budget=FP_MATERIALIZE_LIMIT,
                     result=fp_ledger,
                     # Build candidates from FunctionPrincipal rows, then put
-                    # them through Assessment before rebuilding graph tables.
+                    # them through LegacyAssessmentProjection before rebuilding graph tables.
                     persist=False,
                 )
             except Exception:
@@ -649,9 +677,9 @@ class PolicyWorker(BaseWorker):
             assessment = add_resolution(assessment, resolution_graph, chain_id=chain_id)
         assessment = add_principal_graph_nodes(assessment, fp_nodes)
         # Publish the derivation before updating its disposable graph index.
-        # A crash can therefore rebuild rows from Assessment without rerunning
+        # A crash can therefore rebuild rows from LegacyAssessmentProjection without rerunning
         # discovery or principal classification.
-        store_artifact(session, job.id, "assessment", data=assessment)
+        publish_assessment_projection(session, job.id, assessment)
         if contract_row is not None:
             replace_control_graph_rows(
                 session,
@@ -741,7 +769,7 @@ class PolicyWorker(BaseWorker):
                 # Contract-principal -> ultimate Safe/EOA terminal walk.
                 resolve_controllers=_make_terminal_controller_resolver(rpc_url, chain_id=job_chain_id(job)),
             )
-            store_artifact(session, job.id, "assessment", data=assessment)
+            publish_assessment_projection(session, job.id, assessment)
             pl_data = build_principal_index(assessment)
             ph["principal_count"] = len(pl_data)
 
@@ -905,7 +933,7 @@ class PolicyWorker(BaseWorker):
         self,
         session: Session,
         job: Job,
-        assessment: Assessment,
+        assessment: LegacyAssessmentProjection,
     ) -> dict[str, list[EffectMatch]]:
         """Derive sibling evidence without mutating any analytical indexes."""
         from services.assessment import controller_observations, static_inputs
@@ -954,7 +982,7 @@ class PolicyWorker(BaseWorker):
         ) -> tuple[str, dict | None, dict | None]:
             sj_id, addr = target
             with SessionLocal() as s:
-                assessment_payload = load_assessment(get_artifact, s, sj_id)
+                assessment_payload = load_assessment_projection(s, sj_id)
             snapshot_payload = None
             effects_payload = None
             if assessment_payload is not None:

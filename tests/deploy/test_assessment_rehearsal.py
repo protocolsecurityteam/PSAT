@@ -26,6 +26,7 @@ def test_refuses_nonempty_scratch_without_running_commands(monkeypatch, tmp_path
 def test_rehearsal_orders_restore_import_contraction_and_check(monkeypatch, tmp_path):
     counts = iter([0, 2, 0, 2])
     monkeypatch.setattr(rehearsal, "_scalar", lambda *_a: next(counts))
+    monkeypatch.setattr(rehearsal, "_migration_head", lambda _url: "verified-head")
     commands = []
     backup = tmp_path / "assessment.dump"
 
@@ -43,8 +44,10 @@ def test_rehearsal_orders_restore_import_contraction_and_check(monkeypatch, tmp_
 
     assert [command[0][0] for command in commands] == ["pg_dump", "pg_restore", "uv", "uv", "uv", "uv"]
     assert "services.assessment.migrate" in commands[3][0]
+    assert commands[2][0][-1] == "d9e8b7c6a5f4"
     assert "assessment_cutover=stopped" in commands[4][0]
     assert commands[5][0][-1] == "check"
     assert result["source_artifacts"] == result["import_manifests"] == 2
     assert result["remaining_legacy_artifacts"] == 0
+    assert result["migration_head"] == "verified-head"
     assert result["backup_sha256"] == "54d00d867758cef816bc4685f58e327b949712b07ebd17c3485f3ffc9e9f5133"

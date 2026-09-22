@@ -26,6 +26,7 @@ from db.queue import (
     fail_job_terminal,
     get_artifact,
     heartbeat_job,
+    publish_assessment_projection,
     reclaim_stuck_jobs,
     requeue_job,
     store_artifact,
@@ -1049,13 +1050,13 @@ class BaseWorker:
                 data=StageErrors(errors=merged).model_dump(mode="json"),
             )
             try:
-                from db.queue.typed import load_assessment
+                from db.queue.typed import load_assessment_projection
                 from services.assessment import add_stage_errors
 
-                assessment = load_assessment(get_artifact, fresh, job.id)
+                assessment = load_assessment_projection(fresh, job.id)
                 if assessment is not None:
                     assessment = add_stage_errors(assessment, errors)
-                    store_artifact(fresh, job.id, "assessment", data=assessment)
+                    publish_assessment_projection(fresh, job.id, assessment)
             except Exception as assessment_exc:
                 # The stage_errors artifact is already durable. Assessment
                 # enrichment is best-effort here so diagnostics persistence can

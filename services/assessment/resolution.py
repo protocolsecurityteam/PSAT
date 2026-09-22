@@ -1,4 +1,4 @@
-"""Merge resolved entities and relationships into an Assessment."""
+"""Merge resolved entities and relationships into an assessment projection."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import copy
 from collections.abc import Mapping
 from typing import Any, cast
 
-from schemas.assessment import Analysis, Assessment, Claim, Evidence, Proposition
+from schemas.assessment_projection import Analysis, Claim, Evidence, LegacyAssessmentProjection, Proposition
 
 from .keys import content_key, entity_record
 from .keys import json_value as _json
@@ -55,10 +55,12 @@ def _node_evidence(contract: Mapping[str, Any], key: str, node: Mapping[str, Any
     }
 
 
-def add_resolution(assessment: Assessment, graph: Mapping[str, Any], *, chain_id: int) -> Assessment:
+def add_resolution(
+    assessment: LegacyAssessmentProjection, graph: Mapping[str, Any], *, chain_id: int
+) -> LegacyAssessmentProjection:
     """Replace the resolution-owned evidence and claims."""
 
-    result = cast(Assessment, copy.deepcopy(assessment))
+    result = cast(LegacyAssessmentProjection, copy.deepcopy(assessment))
     remove_analysis_slice(result, "resolution.graph")
     root_address = graph.get("root_contract_address")
     if isinstance(root_address, str) and root_address:

@@ -59,7 +59,7 @@ def cutover(config: Path, sha: str, backup_reference: str) -> None:
     config.write_text(
         source.replace(
             ordinary,
-            'release_command = "uv run --no-sync alembic upgrade f6a1c2d3e4b5 '
+            'release_command = "uv run --no-sync alembic upgrade d9e8b7c6a5f4 '
             "&& uv run --no-sync python -m services.assessment.migrate "
             '&& uv run --no-sync alembic -x assessment_cutover=stopped upgrade head"',
         )

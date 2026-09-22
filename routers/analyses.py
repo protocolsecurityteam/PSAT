@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import logging
+import re
+import uuid
 from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request, Response
-from fastapi.responses import JSONResponse, PlainTextResponse
-from sqlalchemy import literal, select
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
+from sqlalchemy import func, literal, select
 
-from db.models import Artifact, AssessmentPublication, Contract, Job, JobStatus
+from db.models import Artifact, AssessmentPayload, AssessmentPublication, Contract, Job, JobStatus
 from db.storage import StorageContentAbsent, StorageKeyAbsent, StorageKeyMissing
 from schemas.api_responses import AnalysisListEntry
 from services.aggregations import build_analysis_detail
@@ -24,6 +26,9 @@ from . import deps
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+_PAYLOAD_ID = re.compile(r"payload:([0-9a-f]{64})\Z")
+_PAYLOAD_CHUNK_BYTES = 256 * 1024
 
 # Artifact names the consumer frontend fetches via ``/artifact/``. Any other
 # name is operator/internal and gated behind a valid admin key. Compared
@@ -403,6 +408,59 @@ def analysis_artifact(
         if isinstance(artifact, (dict, list)):
             return JSONResponse(content=artifact)
         return PlainTextResponse(str(artifact))
+
+
+@router.get("/api/analyses/{job_id}/assessment-payload/{payload_id}")
+def assessment_payload(job_id: str, payload_id: str, context_id: str | None = None) -> StreamingResponse:
+    """Download immutable evidence bytes only when an eligible claim in this view cites them."""
+    match = _PAYLOAD_ID.fullmatch(payload_id)
+    if match is None:
+        raise HTTPException(status_code=404, detail="Assessment payload not found")
+    try:
+        parsed_job_id = uuid.UUID(job_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Analysis not found") from None
+    with deps.SessionLocal() as session:
+        if session.get(Job, parsed_job_id) is None:
+            raise HTTPException(status_code=404, detail="Analysis not found")
+        assessment = deps.load_temporal_assessment(session, parsed_job_id, context_id=context_id)
+        if assessment is None:
+            raise HTTPException(status_code=404, detail="Assessment view not found")
+        eligible_evidence = {evidence_id for claim in assessment["claims"] for evidence_id in claim["evidence"]}
+        if not any(row["id"] in eligible_evidence and row["payload"] == payload_id for row in assessment["evidence"]):
+            raise HTTPException(status_code=404, detail="Assessment payload not found")
+        metadata = session.execute(
+            select(AssessmentPayload.byte_length, AssessmentPayload.media_type).where(
+                AssessmentPayload.id == payload_id
+            )
+        ).one_or_none()
+        if metadata is None:
+            raise HTTPException(status_code=404, detail="Assessment payload not found")
+        byte_length, media_type = metadata
+
+    def chunks():
+        with deps.SessionLocal() as session:
+            for offset in range(0, byte_length, _PAYLOAD_CHUNK_BYTES):
+                chunk = session.scalar(
+                    select(func.substring(AssessmentPayload.data, offset + 1, _PAYLOAD_CHUNK_BYTES)).where(
+                        AssessmentPayload.id == payload_id
+                    )
+                )
+                if chunk is None:
+                    raise RuntimeError("Assessment payload disappeared during download")
+                yield bytes(chunk)
+
+    extension = "json" if media_type == "application/json" else "bin"
+    return StreamingResponse(
+        chunks(),
+        media_type="application/octet-stream",
+        headers={
+            "Content-Disposition": f'attachment; filename="assessment-payload-{match.group(1)}.{extension}"',
+            "Content-Length": str(byte_length),
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "private, no-store",
+        },
+    )
 
 
 @router.get("/api/analyses/{run_name:path}")

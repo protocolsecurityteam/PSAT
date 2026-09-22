@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from db.models import Job
+from db.models import AssessmentPayload, Job
 from services.assessment.repository import load_temporal_assessment, publication_history
 
 
@@ -32,36 +34,127 @@ def _proof(
     claim: Mapping[str, Any],
     claims: Mapping[str, Mapping[str, Any]],
     evidence: Mapping[str, Mapping[str, Any]],
+    payloads: Mapping[str, Mapping[str, Any]],
+    remaining_payload_bytes: list[int] | None = None,
 ) -> dict[str, Any]:
+    # A publication is the eligibility boundary. In particular, a corrected
+    # prerequisite absent from this projection must never look like a leaf.
+    issues: list[str] = []
+    if remaining_payload_bytes is None:
+        remaining_payload_bytes = [512 * 1024]
+    expanded = 0
+    max_claims = 128
+    max_depth = 16
+
+    def walk(row: Mapping[str, Any], path: frozenset[str], depth: int) -> dict[str, Any]:
+        nonlocal expanded
+        claim_id = row["id"]
+        expanded += 1
+        node: dict[str, Any] = {
+            "id": claim_id,
+            "kind": row["kind"].value,
+            "scope": row["scope"],
+            "proposition": row["proposition"],
+            "evidence": [],
+            "prerequisites": [],
+        }
+        if not row["evidence"] and not row["claims"]:
+            issues.append(f"Claim {claim_id} has no linked evidence or prerequisites")
+        for evidence_id in row["evidence"]:
+            item = evidence.get(evidence_id)
+            if item is None:
+                issues.append(f"Evidence {evidence_id} is unavailable in this publication")
+                node["evidence"].append({"id": evidence_id, "unavailable": "not in publication"})
+                continue
+            payload_id = item["payload"]
+            payload = payloads.get(payload_id)
+            if payload is None:
+                issues.append(f"Payload {payload_id} is unavailable")
+                payload_view: dict[str, Any] = {"id": payload_id, "unavailable": "not found"}
+            else:
+                payload_view = dict(payload)
+                if "unavailable" in payload_view:
+                    issues.append(f"Payload {payload_id} is unavailable: {payload_view['unavailable']}")
+                elif payload_view.get("byte_length", 0) > remaining_payload_bytes[0]:
+                    payload_view.pop("data", None)
+                    payload_view["unavailable"] = "response payload limit reached"
+                    issues.append(f"Payload {payload_id} is unavailable: response payload limit reached")
+                else:
+                    remaining_payload_bytes[0] -= payload_view.get("byte_length", 0)
+            node["evidence"].append(
+                {
+                    "id": evidence_id,
+                    "kind": item["kind"].value,
+                    "source": item["source"],
+                    "block_number": item["block_number"],
+                    "block_hash": item["block_hash"],
+                    "transaction_hash": item["transaction_hash"],
+                    "log_index": item["log_index"],
+                    "payload": payload_view,
+                }
+            )
+        for prerequisite_id in row["claims"]:
+            if prerequisite_id in path or prerequisite_id == claim_id:
+                issues.append(f"Prerequisite cycle at {prerequisite_id}")
+                node["prerequisites"].append({"id": prerequisite_id, "unavailable": "cycle"})
+            elif prerequisite_id not in claims:
+                issues.append(f"Prerequisite {prerequisite_id} is unavailable or correction-ineligible")
+                node["prerequisites"].append({"id": prerequisite_id, "unavailable": "not eligible in publication"})
+            elif depth >= max_depth or expanded >= max_claims:
+                issues.append(f"Prerequisite expansion limit reached at {prerequisite_id}")
+                node["prerequisites"].append({"id": prerequisite_id, "unavailable": "expansion limit"})
+            else:
+                node["prerequisites"].append(walk(claims[prerequisite_id], path | {claim_id}, depth + 1))
+        return node
+
+    root = walk(claim, frozenset(), 0)
     return {
-        "claim": {
-            "id": claim["id"],
-            "kind": claim["kind"].value,
-            "scope": claim["scope"],
-            "proposition": claim["proposition"],
-        },
-        "evidence": [
-            {
-                "id": evidence_id,
-                "kind": evidence[evidence_id]["kind"].value,
-                "source": evidence[evidence_id]["source"],
-                "block_number": evidence[evidence_id]["block_number"],
-                "block_hash": evidence[evidence_id]["block_hash"],
-            }
-            for evidence_id in claim["evidence"]
-            if evidence_id in evidence
-        ],
-        "prerequisites": [
-            {
-                "id": claim_id,
-                "kind": claims[claim_id]["kind"].value,
-                "scope": claims[claim_id]["scope"],
-                "proposition": claims[claim_id]["proposition"],
-            }
-            for claim_id in claim["claims"]
-            if claim_id in claims
-        ],
+        "claim": {key: root[key] for key in ("id", "kind", "scope", "proposition")},
+        "evidence": root["evidence"],
+        "prerequisites": root["prerequisites"],
+        "complete": not issues,
+        "issues": issues,
     }
+
+
+def _payload_views(
+    session: Session,
+    assessment: Mapping[str, Any],
+    cache: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    candidates = [
+        row["id"] for row in assessment["payloads"] if row["id"] not in cache and row["byte_length"] <= 32 * 1024
+    ]
+    fetched = (
+        {
+            row.id: row
+            for row in session.execute(select(AssessmentPayload).where(AssessmentPayload.id.in_(candidates))).scalars()
+        }
+        if candidates
+        else {}
+    )
+    for metadata in assessment["payloads"]:
+        payload_id = metadata["id"]
+        if payload_id in cache:
+            result[payload_id] = cache[payload_id]
+            continue
+        view = dict(metadata)
+        row = fetched.get(payload_id)
+        if metadata["byte_length"] > 32 * 1024:
+            view["unavailable"] = "exceeds 32 KiB inline proof limit"
+        elif row is None:
+            view["unavailable"] = "not found"
+        elif row.media_type == "application/json":
+            try:
+                view["data"] = json.loads(row.data)
+            except (UnicodeDecodeError, ValueError):
+                view["unavailable"] = "invalid JSON"
+        else:
+            view["unavailable"] = f"unsupported media type {row.media_type}"
+        result[payload_id] = view
+        cache[payload_id] = view
+    return result
 
 
 def _downstream(root: str, claims: Mapping[str, Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -91,7 +184,9 @@ def build_proposal_impact(session: Session, company: str, jobs: list[Job]) -> di
     proposals: list[dict[str, Any]] = []
     changes: list[dict[str, Any]] = []
     limitations: list[dict[str, Any]] = []
-    context_seen: set[str] = set()
+    context_seen: set[tuple[Any, str]] = set()
+    payload_cache: dict[str, dict[str, Any]] = {}
+    remaining_payload_bytes = [512 * 1024]
     for job in jobs:
         observed = load_temporal_assessment(session, job.id)
         if observed is None:
@@ -99,6 +194,7 @@ def build_proposal_impact(session: Session, company: str, jobs: list[Job]) -> di
         subjects = {row["id"]: row for row in observed["subjects"]}
         evidence_by_id = {row["id"]: row for row in observed["evidence"]}
         claims_by_id = {row["id"]: row for row in observed["claims"]}
+        payloads_by_id = _payload_views(session, observed, payload_cache)
         for claim in observed["claims"]:
             if claim["kind"].value not in {
                 "proposal_contents",
@@ -121,12 +217,12 @@ def build_proposal_impact(session: Session, company: str, jobs: list[Job]) -> di
                     "scope": claim["scope"],
                     "evidence": claim["evidence"],
                     "prerequisites": claim["claims"],
-                    "proof": _proof(claim, claims_by_id, evidence_by_id),
+                    "proof": _proof(claim, claims_by_id, evidence_by_id, payloads_by_id, remaining_payload_bytes),
                 }
             )
         for analysis in observed["analyses"]:
             for diagnostic in analysis["diagnostics"]:
-                if analysis["producer"].value == "governance":
+                if analysis["producer"].value in {"governance", "scenario"}:
                     limitations.append(
                         {
                             "job_id": str(job.id),
@@ -137,16 +233,17 @@ def build_proposal_impact(session: Session, company: str, jobs: list[Job]) -> di
 
         histories = publication_history(session, job.id)
         for publication in histories:
-            if publication["context_kind"] != "scenario" or publication["context"] in context_seen:
+            if publication["context_kind"] != "scenario" or (job.id, publication["context"]) in context_seen:
                 continue
             context_id = publication["context"]
-            context_seen.add(context_id)
+            context_seen.add((job.id, context_id))
             scenario = load_temporal_assessment(session, job.id, context_id=context_id)
             if scenario is None:
                 continue
             scenario_subjects = {row["id"]: row for row in scenario["subjects"]}
             scenario_evidence = {row["id"]: row for row in scenario["evidence"]}
             scenario_claims = {row["id"]: row for row in scenario["claims"]}
+            scenario_payloads = _payload_views(session, scenario, payload_cache)
             baseline_by_key: dict[tuple[str, str], Mapping[str, Any]] = {}
             for baseline_claim in sorted(scenario["claims"], key=_block_number):
                 if baseline_claim["kind"].value == "configuration" and baseline_claim["scope_kind"].value != "scenario":
@@ -174,7 +271,9 @@ def build_proposal_impact(session: Session, company: str, jobs: list[Job]) -> di
                         "baseline": context.get("base"),
                         "actions": context.get("actions") or [],
                         "assumptions": context.get("assumptions") or [],
-                        "proof": _proof(claim, scenario_claims, scenario_evidence),
+                        "proof": _proof(
+                            claim, scenario_claims, scenario_evidence, scenario_payloads, remaining_payload_bytes
+                        ),
                         "downstream": _downstream(claim["id"], scenario_claims),
                     }
                 )

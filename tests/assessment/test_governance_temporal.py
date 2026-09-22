@@ -5,7 +5,7 @@ from __future__ import annotations
 from sqlalchemy import func, select
 
 from db.models import AssessmentAnalysis, AssessmentAnalysisOutput, AssessmentClaimEvidence
-from db.queue import store_artifact
+from db.queue import publish_assessment_projection
 from schemas.temporal_assessment import (
     BindingPhase,
     ConfigurationParameter,
@@ -28,10 +28,14 @@ def _point(block: int) -> ChainPoint:
     return {"chain_id": 1, "block_number": block, "block_hash": "0x" + f"{block:064x}"}
 
 
+def _fork_execution(block: int) -> dict:
+    return {"success": True, "fork_block_number": block, "transaction_hash": "0x" + "ab" * 32}
+
+
 @requires_postgres
 def test_configuration_update_and_proposal_binding_preserve_the_consulted_value(db_session):
     job = _job(db_session)
-    store_artifact(db_session, job.id, "assessment", data=_assessment("0x" + "aa" * 20, 90))
+    publish_assessment_projection(db_session, job.id, _assessment("0x" + "aa" * 20, 90))
     old_delay = record_configuration(
         db_session,
         job.id,
@@ -83,7 +87,7 @@ def test_configuration_update_and_proposal_binding_preserve_the_consulted_value(
 @requires_postgres
 def test_scenario_update_is_reusable_and_never_becomes_observed_current(db_session):
     job = _job(db_session)
-    store_artifact(db_session, job.id, "assessment", data=_assessment("0x" + "aa" * 20, 90))
+    publish_assessment_projection(db_session, job.id, _assessment("0x" + "aa" * 20, 90))
     baseline = record_configuration(
         db_session,
         job.id,
@@ -117,6 +121,7 @@ def test_scenario_update_is_reusable_and_never_becomes_observed_current(db_sessi
         assumptions=[],
         prerequisite_claims=[baseline],
         implementation={"engine": "anvil", "mode": "fork"},
+        execution=_fork_execution(100),
     )
     analyses_before = db_session.scalar(select(func.count()).select_from(AssessmentAnalysis))
     outputs_before = db_session.scalar(select(func.count()).select_from(AssessmentAnalysisOutput))
@@ -133,6 +138,7 @@ def test_scenario_update_is_reusable_and_never_becomes_observed_current(db_sessi
         assumptions=[],
         prerequisite_claims=[baseline],
         implementation={"engine": "anvil", "mode": "fork"},
+        execution=_fork_execution(100),
     )
     db_session.commit()
 
@@ -152,7 +158,7 @@ def test_scenario_update_is_reusable_and_never_becomes_observed_current(db_sessi
 @requires_postgres
 def test_correction_of_one_proof_preserves_an_independent_proof(db_session):
     job = _job(db_session)
-    store_artifact(db_session, job.id, "assessment", data=_assessment("0x" + "aa" * 20, 90))
+    publish_assessment_projection(db_session, job.id, _assessment("0x" + "aa" * 20, 90))
     first = record_configuration(
         db_session,
         job.id,
@@ -201,7 +207,7 @@ def test_correction_of_one_proof_preserves_an_independent_proof(db_session):
 def test_proposal_impact_projects_current_to_scenario_delta(db_session):
     job = _job(db_session)
     job.company = "example"
-    store_artifact(db_session, job.id, "assessment", data=_assessment("0x" + "aa" * 20, 90))
+    publish_assessment_projection(db_session, job.id, _assessment("0x" + "aa" * 20, 90))
     baseline = record_configuration(
         db_session,
         job.id,
@@ -227,6 +233,7 @@ def test_proposal_impact_projects_current_to_scenario_delta(db_session):
         assumptions=[],
         prerequisite_claims=[baseline],
         implementation={"engine": "anvil"},
+        execution=_fork_execution(100),
     )
     db_session.commit()
 
@@ -240,7 +247,7 @@ def test_proposal_impact_projects_current_to_scenario_delta(db_session):
 def test_scenario_keeps_its_pinned_baseline_after_a_later_observation(db_session):
     job = _job(db_session)
     job.company = "example"
-    store_artifact(db_session, job.id, "assessment", data=_assessment("0x" + "aa" * 20, 90))
+    publish_assessment_projection(db_session, job.id, _assessment("0x" + "aa" * 20, 90))
     old_delay = record_configuration(
         db_session,
         job.id,
@@ -278,6 +285,7 @@ def test_scenario_keeps_its_pinned_baseline_after_a_later_observation(db_session
         assumptions=[],
         prerequisite_claims=[old_delay],
         implementation={"engine": "anvil"},
+        execution=_fork_execution(100),
     )
     db_session.commit()
 

@@ -6,13 +6,13 @@ import copy
 from collections.abc import Iterable, Mapping
 from typing import Any, cast
 
-from schemas.assessment import (
+from schemas.assessment_projection import (
     Analysis,
-    Assessment,
     Effect,
     EffectFamily,
     EffectKind,
     Evidence,
+    LegacyAssessmentProjection,
     Proposition,
 )
 from services.effects.claims_bridge import verdict_to_claim
@@ -26,7 +26,7 @@ from .slices import remove_analysis_slice
 from .validation import checked
 
 
-def _existing_effect(assessment: Assessment, function: str, kind: str) -> Effect | None:
+def _existing_effect(assessment: LegacyAssessmentProjection, function: str, kind: str) -> Effect | None:
     for claim in assessment["claims"].values():
         proposition = claim["proposition"]
         if (
@@ -39,14 +39,14 @@ def _existing_effect(assessment: Assessment, function: str, kind: str) -> Effect
 
 
 def add_effects(
-    assessment: Assessment,
+    assessment: LegacyAssessmentProjection,
     verdicts: Iterable[Any],
     *,
     signatures_by_function_row: Mapping[int, str],
-) -> Assessment:
+) -> LegacyAssessmentProjection:
     """Add proven execution evidence; unknown verdicts become omissions."""
 
-    result = cast(Assessment, copy.deepcopy(assessment))
+    result = cast(LegacyAssessmentProjection, copy.deepcopy(assessment))
     remove_analysis_slice(result, "effects.execution")
     verdict_items = list(verdicts)
     omissions: list[dict[str, str]] = []

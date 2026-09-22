@@ -1,83 +1,80 @@
-"""Canonical assessment loader contracts (``db.queue.typed``).
-
-The loaders are the stage-to-stage wire's validation gate; these tests pin
-their three contracts: a schema-complete document round-trips, a shape
-violation raises ``ArtifactSchemaError`` naming the artifact and the
-offending fields, and a non-dict body is rejected outright. A missing row
-stays ``None`` (absent), never an error.
-"""
+"""Canonical row-shaped Assessment read boundary."""
 
 from __future__ import annotations
 
 import pytest
 
-from db.queue.typed import (
-    ArtifactSchemaError,
-    load_assessment,
-)
+from db.queue.typed import ArtifactSchemaError, load_assessment
 
 
 def _reader(artifacts: dict) -> object:
     return lambda session, job_id, name: artifacts.get(name)
 
 
-def test_absent_artifact_returns_none() -> None:
-    read = _reader({})
-    assert load_assessment(read, None, "job") is None
-
-
-def test_assessment_validates_as_the_canonical_wire() -> None:
-    assessment = {
-        "schema_version": "assessment/5",
-        "contract": {
-            "chain_id": 1,
-            "address": "0x1111111111111111111111111111111111111111",
-            "deployment_address": "0x1111111111111111111111111111111111111111",
-            "name": "Vault",
-            "code_hash": None,
-            "source_hash": "0xsource",
-        },
-        "functions": {},
-        "controllers": {},
-        "entities": {},
-        "claims": {},
-        "evidence": {},
-        "analyses": [],
-    }
-    assert load_assessment(_reader({"assessment": assessment}), None, "job") is assessment
-
-    malformed = {**assessment, "evidence": []}
-    with pytest.raises(ArtifactSchemaError, match="evidence"):
-        load_assessment(_reader({"assessment": malformed}), None, "job")
-
-    dangling = {
-        **assessment,
-        "analyses": [
+def _assessment() -> dict:
+    return {
+        "view": {},
+        "subjects": [{"id": "subject:1", "recorded_at": "2026-01-01T00:00:00Z", "kind": "address", "identity": {}}],
+        "evidence": [
             {
-                "detector": "static.facts",
-                "version": "1",
-                "status": "completed",
-                "targets_total": 0,
-                "targets_completed": 0,
-                "omissions": [],
-                "diagnostics": [],
-                "claims": [],
-                "evidence": ["evidence:missing"],
+                "id": "evidence:1",
+                "recorded_at": "2026-01-01T00:00:00Z",
+                "subject": "subject:1",
+                "kind": "artifact",
+                "source": {},
+                "payload": "payload:1",
+                "obtained_at": "2026-01-01T00:00:00Z",
+                "chain_id": None,
+                "block_number": None,
+                "block_hash": None,
+                "transaction_hash": None,
+                "transaction_index": None,
+                "log_index": None,
+            }
+        ],
+        "claims": [],
+        "analyses": [],
+        "corrections": [],
+        "contexts": [],
+        "implementations": [],
+        "payloads": [
+            {
+                "id": "payload:1",
+                "recorded_at": "2026-01-01T00:00:00Z",
+                "media_type": "application/json",
+                "byte_length": 2,
             }
         ],
     }
-    with pytest.raises(ArtifactSchemaError, match="evidence:missing is missing"):
+
+
+def test_absent_artifact_returns_none() -> None:
+    assert load_assessment(_reader({}), None, "job") is None
+
+
+def test_assessment_validates_as_canonical_rows() -> None:
+    assessment = _assessment()
+    assert load_assessment(_reader({"assessment": assessment}), None, "job") is assessment
+
+    malformed = {**assessment, "evidence": {}}
+    with pytest.raises(ArtifactSchemaError, match="evidence"):
+        load_assessment(_reader({"assessment": malformed}), None, "job")
+
+    dangling = _assessment()
+    dangling["evidence"][0]["payload"] = "payload:missing"
+    with pytest.raises(ArtifactSchemaError, match="payload is missing"):
         load_assessment(_reader({"assessment": dangling}), None, "job")
 
-    stale = {**assessment, "schema_version": "assessment/3"}
+    duplicate = _assessment()
+    duplicate["subjects"].append(duplicate["subjects"][0])
+    with pytest.raises(ArtifactSchemaError, match="duplicate identity"):
+        load_assessment(_reader({"assessment": duplicate}), None, "job")
+
+    stale = {**assessment, "schema_version": "assessment/5"}
     with pytest.raises(ArtifactSchemaError, match="schema_version"):
         load_assessment(_reader({"assessment": stale}), None, "job")
 
-    invalid_boolean = {
-        **assessment,
-        "functions": {
-            "f()": {"abi_signature": "f()", "selector": None, "state_changing": "false"},
-        },
-    }
-    with pytest.raises(ArtifactSchemaError, match="state_changing"):
+    invalid_boolean = _assessment()
+    invalid_boolean["payloads"][0]["byte_length"] = "2"
+    with pytest.raises(ArtifactSchemaError, match="byte_length"):
         load_assessment(_reader({"assessment": invalid_boolean}), None, "job")

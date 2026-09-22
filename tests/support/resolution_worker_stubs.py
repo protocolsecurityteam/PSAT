@@ -141,16 +141,7 @@ def _patch_all(monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> dict[str, A
     assessment = overrides.get("assessment", _assessment(static_facts=static_facts))
     snapshot = overrides.get("snapshot", _minimal_snapshot())
     resolved_graph = overrides.get("resolved_graph", _resolved_graph())
-    dependencies = overrides.get("dependencies", None)  # None = no artifact
-
     artifact_store: dict[str, Any] = {}
-
-    def fake_get_artifact(_session: Any, _job_id: Any, name: str) -> Any:
-        lookup: dict[str, Any] = {
-            "assessment": assessment,
-            "dependencies": dependencies,
-        }
-        return lookup.get(name)
 
     store_calls: list[tuple[str, Any]] = []
 
@@ -178,7 +169,11 @@ def _patch_all(monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> dict[str, A
     ) -> tuple[dict, dict]:
         return resolved_graph, {}
 
-    monkeypatch.setattr("workers.resolution_worker.get_artifact", fake_get_artifact)
+    monkeypatch.setattr("workers.resolution_worker.load_assessment_projection", lambda _s, _j: assessment)
+    monkeypatch.setattr(
+        "workers.resolution_worker.publish_assessment_projection",
+        lambda _s, _j, value: store_calls.append(("assessment", value)),
+    )
     monkeypatch.setattr("workers.resolution_worker.store_artifact", fake_store_artifact)
     monkeypatch.setattr("workers.resolution_worker.create_job", fake_create_job)
     # The perimeter walk moved to services/discovery/perimeter; the resolution

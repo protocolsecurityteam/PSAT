@@ -57,9 +57,9 @@ from db.effect_cache import (
     upsert_cached_verdict,
 )
 from db.models import Contract, EffectBehaviorCache, EffectiveFunction, EffectVerdict, Job, JobStage
-from db.queue import advance_job, get_artifact, store_artifact
+from db.queue import advance_job, publish_assessment_projection, store_artifact
 from db.queue._chains import job_chain_id
-from db.queue.typed import ArtifactSchemaError, load_assessment
+from db.queue.typed import ArtifactSchemaError, load_assessment_projection
 from services.effects.config import (
     EFFECT_CLASS_VALUE_OUT,
     SCOPE_KERNEL,
@@ -1255,7 +1255,7 @@ class EffectsWorker(BaseWorker):
                 ownerless += 1
                 continue
             try:
-                assessment = load_assessment(get_artifact, session, contract.job_id)
+                assessment = load_assessment_projection(session, contract.job_id)
             except ArtifactSchemaError as exc:
                 record_degraded(
                     phase="effects_assessment",
@@ -1295,7 +1295,7 @@ class EffectsWorker(BaseWorker):
                 contract_verdicts,
                 signatures_by_function_row=signatures_by_contract.get(contract_id, {}),
             )
-            store_artifact(session, contract.job_id, "assessment", data=assessment)
+            publish_assessment_projection(session, contract.job_id, assessment)
             projected_claims = effect_matches_by_function(assessment)
             for row in owned_rows:
                 signature, _problem = resolve_function(

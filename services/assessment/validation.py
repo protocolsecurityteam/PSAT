@@ -6,16 +6,16 @@ from typing import cast
 
 from pydantic import TypeAdapter
 
-from schemas.assessment import Assessment, assessment_problems
+from schemas.assessment_projection import LegacyAssessmentProjection, assessment_problems
 
-_ADAPTER = TypeAdapter(Assessment)
+_ADAPTER = TypeAdapter(LegacyAssessmentProjection)
 
 
-def checked(value: object) -> Assessment:
+def checked(value: object) -> LegacyAssessmentProjection:
     """Validate shape and references, returning the original document."""
 
     _ADAPTER.validate_python(value, strict=True)
-    assessment = cast(Assessment, value)
+    assessment = cast(LegacyAssessmentProjection, value)
     problems = assessment_problems(assessment)
     from services.abi import is_canonical_abi_signature, selector_for_signature
 

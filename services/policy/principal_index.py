@@ -1,4 +1,4 @@
-"""Observe principal facts into Assessment and project their display labels."""
+"""Observe principal facts into LegacyAssessmentProjection and project their display labels."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from db.models import (
     EffectiveFunction,
     FunctionPrincipal,
 )
-from schemas.assessment import Assessment
+from schemas.assessment_projection import LegacyAssessmentProjection
 from schemas.observations import ResolvedControllerType, coerce_resolved_controller_type
 from schemas.permission_index import role_number
 from schemas.principal_index import LabelConfidence, PrincipalPermission, PrincipalProfile
@@ -532,7 +532,7 @@ def _display_name(
 
 
 def observe_principals(
-    assessment: Assessment,
+    assessment: LegacyAssessmentProjection,
     *,
     rpc_url: str | None = None,
     classify_cache: dict[str, tuple[str, dict[str, object]]] | None = None,
@@ -540,8 +540,8 @@ def observe_principals(
     protocol_safe_owner_sets: Mapping[str, Mapping[str, Any]] | None = None,
     protocol_deployer_groups: Mapping[str, Mapping[str, Any]] | None = None,
     resolve_controllers: Callable[[str], Sequence[Mapping[str, Any]] | None] | None = None,
-) -> Assessment:
-    """Observe principal classifications and relationships into Assessment.
+) -> LegacyAssessmentProjection:
+    """Observe principal classifications and relationships into LegacyAssessmentProjection.
 
     Cache hits reuse successful earlier reads. A failed probe becomes an
     omission, never a supported classification or a settled principal label.
@@ -673,7 +673,7 @@ def observe_principals(
     return add_principal_observations(assessment, principals)
 
 
-def build_principal_index(assessment: Assessment) -> list[PrincipalProfile]:
+def build_principal_index(assessment: LegacyAssessmentProjection) -> list[PrincipalProfile]:
     """Pure projection: no RPC, database, controller walk, or classification."""
     resolution_graph = control_graph(assessment)
     permission_index = project_permission_index(assessment)
@@ -757,7 +757,9 @@ def build_principal_index(assessment: Assessment) -> list[PrincipalProfile]:
     return profiles
 
 
-def principal_type_projection(assessment: Assessment) -> dict[str, tuple[str | None, dict[str, Any] | None]]:
+def principal_type_projection(
+    assessment: LegacyAssessmentProjection,
+) -> dict[str, tuple[str | None, dict[str, Any] | None]]:
     """Pure address classification lookup for relational materialization."""
     out: dict[str, tuple[str | None, dict[str, Any] | None]] = {}
     for evidence in assessment["evidence"].values():

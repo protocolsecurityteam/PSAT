@@ -21,6 +21,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -313,6 +314,9 @@ class AssessmentPublicationSubject(Base):
     )
     role: Mapped[SubjectRole] = mapped_column(_enum(SubjectRole, "assessment_subject_role"), primary_key=True)
     natural_key: Mapped[str] = mapped_column(Text, primary_key=True)
+    projection_metadata: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
 
 
 class AssessmentPublicationEvidence(Base):

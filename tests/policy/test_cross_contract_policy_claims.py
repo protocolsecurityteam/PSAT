@@ -22,7 +22,7 @@ from eth_utils.crypto import keccak
 from sqlalchemy.orm import sessionmaker
 
 from db.models import Contract, EffectiveFunction, Job, JobStage, JobStatus
-from db.queue import get_artifact, store_artifact
+from db.queue import get_artifact, publish_assessment_projection
 from services.static.claims import EffectMatch
 from tests.conftest import requires_postgres
 from tests.support.policy_builders import _assessment, _minimal_static_facts
@@ -42,11 +42,11 @@ def _selector(signature: str) -> str:
 
 def _run_cross_contract(session, job, snapshot, *, function_records=None):
     """Assert read-only enrichment, then run canonical derivation/materialization."""
-    from db.queue.typed import load_assessment
+    from db.queue.typed import load_assessment_projection
     from services.assessment import derive_policy, project_permission_index, static_inputs
     from services.policy.permission_index_writer import write_permission_rows
 
-    stored = load_assessment(get_artifact, session, job.id)
+    stored = load_assessment_projection(session, job.id)
     assert stored is not None
     facts, trees, effects = static_inputs(stored)
     for row in function_records or []:
@@ -60,7 +60,7 @@ def _run_cross_contract(session, job, snapshot, *, function_records=None):
     session.expire_all()
     assert {row.id: row.claims for row in session.query(EffectiveFunction).all()} == before
     assessment = derive_policy(assessment, extra_claims=enriched)
-    store_artifact(session, job.id, "assessment", data=assessment)
+    publish_assessment_projection(session, job.id, assessment)
     contract = session.query(Contract).filter_by(job_id=job.id).one_or_none()
     if contract:
         write_permission_rows(
@@ -104,20 +104,16 @@ def _make_job(session, *, address: str, company: str, request: dict | None = Non
 def _store_empty_assessment(session, job: Job, address: str) -> None:
     if get_artifact(session, job.id, "assessment") is not None:
         return
-    store_artifact(
-        session,
-        job.id,
-        "assessment",
-        data=_assessment(static_facts=_minimal_static_facts(address=address, name="C")),
+    publish_assessment_projection(
+        session, job.id, _assessment(static_facts=_minimal_static_facts(address=address, name="C"))
     )
 
 
 def _store_effects(session, job: Job, address: str, effects: dict) -> None:
-    store_artifact(
+    publish_assessment_projection(
         session,
         job.id,
-        "assessment",
-        data=_assessment(
+        _assessment(
             static_facts=_minimal_static_facts(address=address, name="C"),
             effects=effects,
         ),

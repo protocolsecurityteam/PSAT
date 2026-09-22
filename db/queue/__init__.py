@@ -16,6 +16,7 @@ from .artifacts import (
     get_artifact,
     get_legacy_artifact,
     get_source_files,
+    publish_assessment_projection,
     store_artifact,
     store_source_files,
 )
@@ -123,6 +124,7 @@ __all__ = [
     "heartbeat_job",
     "is_known_proxy",
     "proven_static_facts_schema_version",
+    "publish_assessment_projection",
     "reclaim_stuck_jobs",
     "reconcile_impl_job_for_proxy",
     "record_heartbeat",

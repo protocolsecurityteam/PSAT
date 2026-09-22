@@ -7,7 +7,7 @@ from collections.abc import Iterator
 from dataclasses import is_dataclass
 from typing import Any, Mapping, cast
 
-from schemas.assessment import Assessment
+from schemas.assessment_projection import LegacyAssessmentProjection
 from schemas.observations import ResolvedControllerType, coerce_resolved_controller_type
 from schemas.permission_index import (
     AuthorityRoleGrant,
@@ -505,12 +505,12 @@ def _column_values_for_capability(cap_dict: dict[str, Any]) -> dict[str, Any]:
 
 
 def policy_observations(
-    assessment: Assessment,
+    assessment: LegacyAssessmentProjection,
     *,
     capability_resolver_output: Mapping[str, Any] | None = None,
     extra_claims: Mapping[str, list[EffectMatch]] | None = None,
 ) -> Iterator[PermissionRow]:
-    """Derive per-function policy observations directly from Assessment inputs."""
+    """Derive per-function policy observations directly from LegacyAssessmentProjection inputs."""
     from services.assessment.runtime import controller_observations
     from services.assessment.views import effect_matches_by_function, static_inputs
 

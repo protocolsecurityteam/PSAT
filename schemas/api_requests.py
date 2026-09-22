@@ -75,6 +75,23 @@ class AnalyzeRequest(BaseModel):
     collect_governance: bool = False
     proposal_ids: list[int] | None = Field(default=None, max_length=100)
     operation_ids: list[str] | None = Field(default=None, max_length=100)
+    scenario_proposal_id: int | None = Field(default=None, ge=0, lt=2**256)
+    scenario_proposal_transaction_hash: str | None = None
+    scenario_sender: str | None = None
+
+    @field_validator("scenario_proposal_transaction_hash")
+    @classmethod
+    def _validate_scenario_transaction(cls, value: str | None) -> str | None:
+        if value is not None and not re.fullmatch(r"0x[a-fA-F0-9]{64}", value):
+            raise ValueError("scenario_proposal_transaction_hash must be a 32-byte hex hash")
+        return value.lower() if value is not None else None
+
+    @field_validator("scenario_sender")
+    @classmethod
+    def _validate_scenario_sender(cls, value: str | None) -> str | None:
+        if value is not None and not _HEX_ADDRESS_RE.fullmatch(value):
+            raise ValueError("scenario_sender must be a 20-byte hex address")
+        return value.lower() if value is not None else None
 
     @field_validator("proposal_ids")
     @classmethod
@@ -97,6 +114,11 @@ class AnalyzeRequest(BaseModel):
 
     @model_validator(mode="after")
     def _validate_target(self) -> "AnalyzeRequest":
+        scenario_values = (self.scenario_proposal_id, self.scenario_proposal_transaction_hash, self.scenario_sender)
+        if any(value is not None for value in scenario_values) and (
+            any(value is None for value in scenario_values) or self.address is None
+        ):
+            raise ValueError("scenario requires address, proposal id, proposal transaction hash, and sender")
         # address + company is allowed (address is target, company is context)
         primary = [self.address, self.dapp_urls, self.defillama_protocol]
         company_only = self.company and not any(primary)

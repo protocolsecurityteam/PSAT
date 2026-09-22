@@ -73,10 +73,19 @@ class TestProcessStoresAssessment:
             data: Any = None,
             text_data: Any = None,
         ) -> None:
+            assert name != "assessment", "Assessment must use the canonical publication API"
             store_calls.append((name, data))
 
         monkeypatch.setattr("workers.policy_worker.get_artifact", fake_get_artifact)
+        monkeypatch.setattr(
+            "workers.policy_worker.load_assessment_projection",
+            lambda session, job_id: fake_get_artifact(session, job_id, "assessment"),
+        )
         monkeypatch.setattr("workers.policy_worker.store_artifact", fake_store_artifact)
+        monkeypatch.setattr(
+            "workers.policy_worker.publish_assessment_projection",
+            lambda _session, _job_id, projection: store_calls.append(("assessment", projection)),
+        )
         monkeypatch.setattr(
             "workers.policy_worker.derive_policy",
             _policy_stub(lambda *a, **kw: {"schema_version": "1", "functions": []}),
@@ -95,6 +104,82 @@ class TestProcessStoresAssessment:
         stored_names = [name for name, _ in store_calls]
         assert "assessment" in stored_names
         assert not {"permission_index", "resolution_graph", "principal_labels"} & set(stored_names)
+
+
+@pytest.mark.parametrize(
+    "proxy_address,delegated,expected_calls",
+    [
+        (None, False, 1),
+        ("0x" + "77" * 20, False, 1),
+        (None, True, 0),
+    ],
+)
+def test_governance_worker_uses_runtime_deployment_and_preserves_scenario_request(
+    monkeypatch: pytest.MonkeyPatch,
+    proxy_address: str | None,
+    delegated: bool,
+    expected_calls: int,
+) -> None:
+    from services.assessment import governance_collectors, governance_workflow
+
+    session = MagicMock()
+    session.execute.return_value.scalar_one_or_none.return_value = None
+    request: dict[str, Any] = {
+        "rpc_url": "https://rpc.example",
+        "chain": "ethereum",
+        "scenario_proposal_id": 7,
+        "scenario_proposal_transaction_hash": "0x" + "ab" * 32,
+        "scenario_sender": "0x" + "cd" * 20,
+    }
+    if proxy_address:
+        request["proxy_address"] = proxy_address
+    if delegated:
+        request["_governance_delegate_job_id"] = "child-1"
+    job = _job(request=request)
+    assessment = _assessment(
+        static_facts=_minimal_static_facts(),
+        snapshot=_minimal_snapshot(),
+        graph=_graph_with_nodes([]),
+    )
+    monkeypatch.setattr("workers.policy_worker.get_artifact", lambda *_a, **_k: None)
+    monkeypatch.setattr("workers.policy_worker.load_assessment_projection", lambda *_a, **_k: assessment)
+    monkeypatch.setattr("workers.policy_worker.publish_assessment_projection", lambda *_a, **_k: None)
+    monkeypatch.setattr("workers.policy_worker.store_artifact", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        "workers.policy_worker.derive_policy",
+        _policy_stub(
+            lambda *_a, **_k: {"schema_version": "1", "functions": []},
+        ),
+    )
+    monkeypatch.setattr("workers.policy_worker.resolve_control_graph", lambda **_k: ({"nodes": [], "edges": []}, {}))
+    monkeypatch.setattr("workers.policy_worker.build_principal_index", lambda *_a, **_k: [])
+    monkeypatch.setattr(PolicyWorker, "_enrich_cross_contract", lambda *_a, **_k: {})
+    point = {"chain_id": 1, "block_number": 100, "block_hash": "0x" + "ef" * 32}
+    collected: list[dict[str, Any]] = []
+    executed: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        governance_collectors,
+        "collect_governance",
+        lambda *_a, **kwargs: collected.append(kwargs) or SimpleNamespace(point=point),
+    )
+    monkeypatch.setattr(
+        governance_workflow,
+        "execute_proposal_scenario",
+        lambda *_a, **kwargs: executed.append(kwargs) or [],
+    )
+
+    PolicyWorker().process(session, cast(Any, job))
+
+    assert len(collected) == len(executed) == expected_calls
+    if expected_calls:
+        runtime_address = proxy_address or TARGET_ADDRESS
+        assert collected[0]["address"] == runtime_address
+        assert collected[0]["proposal_ids"] == [7]
+        assert executed[0]["governor"] == runtime_address
+        assert executed[0]["proposal_id"] == 7
+        assert executed[0]["proposal_transaction_hash"] == request["scenario_proposal_transaction_hash"]
+        assert executed[0]["sender"] == request["scenario_sender"]
+        assert executed[0]["baseline"] == point
 
 
 class TestProcessSemanticInputs:
@@ -133,7 +218,12 @@ class TestProcessSemanticInputs:
             }
 
         monkeypatch.setattr("workers.policy_worker.get_artifact", fake_get_artifact)
+        monkeypatch.setattr(
+            "workers.policy_worker.load_assessment_projection",
+            lambda session, job_id: fake_get_artifact(session, job_id, "assessment"),
+        )
         monkeypatch.setattr("workers.policy_worker.store_artifact", lambda *a, **kw: None)
+        monkeypatch.setattr("workers.policy_worker.publish_assessment_projection", lambda *a, **kw: None)
         monkeypatch.setattr("workers.policy_worker.record_degraded", fake_record_degraded)
         monkeypatch.setattr("workers.policy_worker.derive_policy", _policy_stub(fake_build_ep))
         monkeypatch.setattr(
@@ -189,7 +279,12 @@ class TestGraphRefreshAfterPermissionIndex:
             return []
 
         monkeypatch.setattr("workers.policy_worker.get_artifact", fake_get_artifact)
+        monkeypatch.setattr(
+            "workers.policy_worker.load_assessment_projection",
+            lambda session, job_id: fake_get_artifact(session, job_id, "assessment"),
+        )
         monkeypatch.setattr("workers.policy_worker.store_artifact", lambda *a, **kw: None)
+        monkeypatch.setattr("workers.policy_worker.publish_assessment_projection", lambda *a, **kw: None)
         monkeypatch.setattr("workers.policy_worker.derive_policy", _policy_stub(fake_build_ep))
         monkeypatch.setattr("workers.policy_worker.resolve_control_graph", fake_resolve_graph)
         monkeypatch.setattr("workers.policy_worker.build_principal_index", fake_build_labels)
@@ -235,6 +330,7 @@ class TestCrossContractEnrichmentAssessmentSync:
         ) -> None:
             import json as _json
 
+            assert name != "assessment", "Assessment must use the canonical publication API"
             store_calls.append((name, _json.loads(_json.dumps(data)) if data is not None else text_data))
 
         contract_row = MagicMock()
@@ -242,7 +338,15 @@ class TestCrossContractEnrichmentAssessmentSync:
         session.execute.return_value.scalar_one_or_none.return_value = contract_row
 
         monkeypatch.setattr("workers.policy_worker.get_artifact", fake_get_artifact)
+        monkeypatch.setattr(
+            "workers.policy_worker.load_assessment_projection",
+            lambda session, job_id: fake_get_artifact(session, job_id, "assessment"),
+        )
         monkeypatch.setattr("workers.policy_worker.store_artifact", fake_store_artifact)
+        monkeypatch.setattr(
+            "workers.policy_worker.publish_assessment_projection",
+            lambda _session, _job_id, projection: store_calls.append(("assessment", projection)),
+        )
         monkeypatch.setattr(
             "workers.policy_worker.derive_policy",
             _policy_stub(
@@ -401,6 +505,7 @@ class TestProcessFanoutParity:
         def fake_store_artifact(
             _session: Any, _job_id: Any, name: str, data: Any = None, text_data: Any = None
         ) -> None:
+            assert name != "assessment", "Assessment must use the canonical publication API"
             store_calls.append((name, data))
 
         # Track every classify call so we can assert no spurious re-probes
@@ -412,7 +517,15 @@ class TestProcessFanoutParity:
             return "eoa", {"address": address}, True
 
         monkeypatch.setattr("workers.policy_worker.get_artifact", fake_get_artifact)
+        monkeypatch.setattr(
+            "workers.policy_worker.load_assessment_projection",
+            lambda session, job_id: fake_get_artifact(session, job_id, "assessment"),
+        )
         monkeypatch.setattr("workers.policy_worker.store_artifact", fake_store_artifact)
+        monkeypatch.setattr(
+            "workers.policy_worker.publish_assessment_projection",
+            lambda _session, _job_id, projection: store_calls.append(("assessment", projection)),
+        )
         monkeypatch.setattr(
             "workers.policy_worker.derive_policy",
             _policy_stub(lambda *a, **kw: ep_data),
@@ -537,7 +650,12 @@ class TestGraphRefreshRewritesTables:
             return len(resolved_graph.get("nodes", [])), len(resolved_graph.get("edges", []))
 
         monkeypatch.setattr("workers.policy_worker.get_artifact", fake_get_artifact)
+        monkeypatch.setattr(
+            "workers.policy_worker.load_assessment_projection",
+            lambda session, job_id: fake_get_artifact(session, job_id, "assessment"),
+        )
         monkeypatch.setattr("workers.policy_worker.store_artifact", lambda *a, **kw: None)
+        monkeypatch.setattr("workers.policy_worker.publish_assessment_projection", lambda *a, **kw: None)
         monkeypatch.setattr(
             "workers.policy_worker.derive_policy",
             _policy_stub(lambda *a, **kw: {"schema_version": "1", "functions": []}),

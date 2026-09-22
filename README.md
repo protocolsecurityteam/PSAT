@@ -125,6 +125,10 @@ deployment of an existing database. The `/company/{name}/proposals` surface
 shows observed-versus-scenario comparisons. Governance getter collection is opt-in through
 `collect_governance`, `proposal_ids`, or `operation_ids` in an analysis request;
 unsupported contract families produce diagnostics rather than inferred claims.
+The proposals page can also queue a verified proposal for execution on a pinned
+local fork; see [the workflow and request fields](docs/ASSESSMENT.md#evaluate-a-proposal).
+The public Assessment type is exported by
+[`schemas/assessment.py`](schemas/assessment.py).
 Field-level definitions remain authoritative in
 [`schemas/temporal_assessment.py`](schemas/temporal_assessment.py) and
 [`db/models/assessment.py`](db/models/assessment.py); the architecture document

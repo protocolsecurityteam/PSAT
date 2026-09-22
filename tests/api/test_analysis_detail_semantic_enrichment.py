@@ -12,6 +12,8 @@ from datetime import datetime, timezone
 
 import pytest
 
+from db.queue import publish_assessment_projection
+
 # offline: no live owner()/governor() eth_call during predicate evaluation
 pytestmark = pytest.mark.usefixtures("_stub_live_authority")
 
@@ -61,14 +63,12 @@ def _semantic_artifact() -> dict:
 
 
 def _store_assessment(db_session, job, address: str, predicate_trees: dict) -> None:
-    from db.queue import store_artifact
     from tests.support.policy_builders import _assessment, _minimal_static_facts
 
-    store_artifact(
+    publish_assessment_projection(
         db_session,
         job.id,
-        "assessment",
-        data=_assessment(
+        _assessment(
             static_facts=_minimal_static_facts(address=address, name="T"),
             predicate_trees=predicate_trees,
         ),

@@ -9,9 +9,8 @@ from typing import Any, cast
 
 from pydantic import JsonValue
 
-from schemas.assessment import (
+from schemas.assessment_projection import (
     Analysis,
-    Assessment,
     Authority,
     Claim,
     Effect,
@@ -19,6 +18,7 @@ from schemas.assessment import (
     EffectKind,
     Entity,
     Evidence,
+    LegacyAssessmentProjection,
     Proposition,
 )
 from services.policy.capability_surface import capability_role_grants
@@ -33,7 +33,9 @@ from .static import effect_targets
 from .validation import checked
 
 
-def _entity(result: Assessment, chain_id: int, principal: Mapping[str, Any]) -> tuple[str, Entity] | None:
+def _entity(
+    result: LegacyAssessmentProjection, chain_id: int, principal: Mapping[str, Any]
+) -> tuple[str, Entity] | None:
     address = principal.get("address")
     if not isinstance(address, str) or not address:
         return None
@@ -69,7 +71,7 @@ def _principal_lookup(permission: Mapping[str, Any]) -> dict[str, Mapping[str, A
 
 
 def _entity_for_address(
-    result: Assessment,
+    result: LegacyAssessmentProjection,
     chain_id: int,
     address: object,
     principals: Mapping[str, Mapping[str, Any]],
@@ -98,7 +100,7 @@ def _with_conditions(authority: Authority, conditions: list[JsonValue]) -> Autho
 
 
 def _authority_from_capability(
-    result: Assessment,
+    result: LegacyAssessmentProjection,
     chain_id: int,
     capability: Mapping[str, Any],
     principals: Mapping[str, Mapping[str, Any]],
@@ -160,7 +162,7 @@ def _authority_from_capability(
 
 
 def _authorities(
-    result: Assessment, chain_id: int, permission: Mapping[str, Any]
+    result: LegacyAssessmentProjection, chain_id: int, permission: Mapping[str, Any]
 ) -> tuple[Authority | None, str | None]:
     capability_expr = permission.get("capability_expr")
     if isinstance(capability_expr, Mapping):
@@ -179,7 +181,7 @@ def _authorities(
 
 
 def _authority_evidence(
-    assessment: Assessment,
+    assessment: LegacyAssessmentProjection,
     permission: Mapping[str, Any],
     authority: Authority | None,
 ) -> list[str]:
@@ -217,7 +219,7 @@ def _authority_evidence(
     return sorted(set(keys))
 
 
-def _effect_claims(assessment: Assessment, function: str) -> list[tuple[str, Claim]]:
+def _effect_claims(assessment: LegacyAssessmentProjection, function: str) -> list[tuple[str, Claim]]:
     out: list[tuple[str, Claim]] = []
     for claim_key, claim in assessment["claims"].items():
         proposition = claim["proposition"]
@@ -227,7 +229,7 @@ def _effect_claims(assessment: Assessment, function: str) -> list[tuple[str, Cla
 
 
 def _ensure_embedded_effect_claims(
-    result: Assessment,
+    result: LegacyAssessmentProjection,
     permission: Mapping[str, Any],
     function: str,
 ) -> tuple[list[str], list[str]]:
@@ -309,11 +311,11 @@ def _ensure_embedded_effect_claims(
 
 
 def derive_policy(
-    assessment: Assessment,
+    assessment: LegacyAssessmentProjection,
     *,
     capability_resolver_output: Mapping[str, Any] | None = None,
     extra_claims: Mapping[str, list[Any]] | None = None,
-) -> Assessment:
+) -> LegacyAssessmentProjection:
     """Derive policy into the ledger; indexes are produced only afterwards."""
     from services.policy.observations import policy_observations
 
@@ -326,11 +328,13 @@ def derive_policy(
     )
 
 
-def add_policy(assessment: Assessment, permissions: Iterable[Mapping[str, Any]], *, chain_id: int) -> Assessment:
+def add_policy(
+    assessment: LegacyAssessmentProjection, permissions: Iterable[Mapping[str, Any]], *, chain_id: int
+) -> LegacyAssessmentProjection:
     """Add current authority-capability claims to ``assessment``."""
 
     discover()
-    result = cast(Assessment, copy.deepcopy(assessment))
+    result = cast(LegacyAssessmentProjection, copy.deepcopy(assessment))
     remove_analysis_slice(result, "policy.capabilities")
     permission_items = list(permissions)
     omissions: list[dict[str, str]] = []

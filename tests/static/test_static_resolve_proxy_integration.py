@@ -155,6 +155,41 @@ def test_proxy_with_implementation_creates_child_job(monkeypatch):
     assert child_req["proxy_type"] == "eip1967"
 
 
+def test_primary_impl_inherits_scenario_request_and_parent_delegates(monkeypatch):
+    worker = StaticWorker()
+    session = MagicMock()
+    session.execute.return_value.scalar_one_or_none.return_value = None
+    request = {
+        "rpc_url": _RPC,
+        "collect_governance": True,
+        "proposal_ids": [7],
+        "scenario_proposal_id": 7,
+        "scenario_proposal_transaction_hash": "0x" + "ab" * 32,
+        "scenario_sender": "0x" + "cd" * 20,
+    }
+    job = _job(request=request)
+    _, children = _capture_store_and_create(monkeypatch)
+    monkeypatch.setattr(
+        "services.discovery.classifier.classify_single",
+        lambda *_a, **_k: {"type": "proxy", "proxy_type": "eip1967", "implementation": _IMPL_ADDR},
+    )
+
+    worker._resolve_proxy(session, job, _ADDR, "TestContract")
+
+    assert len(children) == 1
+    child = children[0]
+    assert child["proxy_address"] == _ADDR
+    for key in (
+        "collect_governance",
+        "proposal_ids",
+        "scenario_proposal_id",
+        "scenario_proposal_transaction_hash",
+        "scenario_sender",
+    ):
+        assert child[key] == request[key]
+    assert job.request["_governance_delegate_job_id"] == "child-0"
+
+
 def test_proxy_child_job_inherits_chain(monkeypatch):
     """When request includes 'chain', child job request also includes it."""
     # Models a base-enabled deployment: impl-child spawns gate off-allowlist

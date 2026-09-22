@@ -604,8 +604,7 @@ def _maybe_inline_cross_contract_call(
 
     # Look up the registry's semantic artifacts. If the registry address is
     # a proxy, predicate_trees live on its implementation child job.
-    from db.queue import get_artifact
-    from db.queue.typed import load_assessment
+    from db.queue.typed import load_assessment_projection
     from services.assessment.runtime import controller_state_values
     from services.assessment.views import static_inputs
     from services.resolution.capability_resolver import find_analysis_job_for_address
@@ -619,7 +618,7 @@ def _maybe_inline_cross_contract_call(
     )
     if lookup is None:
         return None
-    assessment = load_assessment(get_artifact, session, lookup.analysis_job.id)
+    assessment = load_assessment_projection(session, lookup.analysis_job.id)
     if assessment is None or assessment["contract"]["chain_id"] != chain_id:
         return None
     if assessment["contract"]["deployment_address"] != registry_addr.lower():

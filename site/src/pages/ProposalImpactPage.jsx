@@ -31,7 +31,39 @@ function KeyValue({ value }) {
   );
 }
 
-function ProofDetails({ proof }) {
+function ProofEvidence({ item, jobId, contextId }) {
+  if (item.unavailable) return <p>Evidence <code>{item.id}</code>: {item.unavailable}</p>;
+  const payloadUrl = item.payload?.id && jobId
+    ? `/api/analyses/${encodeURIComponent(jobId)}/assessment-payload/${encodeURIComponent(item.payload.id)}${contextId ? `?context_id=${encodeURIComponent(contextId)}` : ""}`
+    : null;
+  return (
+    <div className="proposal-proof-item">
+      <code>{item.id}</code><span>{item.kind}</span>
+      <span>{item.block_number != null ? `Block ${item.block_number}` : "No exact block"}</span>
+      <KeyValue value={item.source} />
+      <strong>Recorded payload</strong>
+      {payloadUrl && <a href={payloadUrl} download>Download exact payload</a>}
+      {item.payload?.unavailable
+        ? <p>{item.payload.unavailable} · <code>{item.payload.id}</code></p>
+        : <KeyValue value={item.payload?.data} />}
+    </div>
+  );
+}
+
+function ProofPrerequisite({ item, jobId, contextId }) {
+  if (item.unavailable) return <li>Prerequisite <code>{item.id}</code>: {item.unavailable}</li>;
+  return (
+    <li className="proposal-proof-item">
+      <code>{item.id}</code><span>{item.kind}</span><Scope scope={item.scope} />
+      <KeyValue value={item.proposition} />
+      <strong>Evidence</strong>
+      {item.evidence?.length ? item.evidence.map((evidence) => <ProofEvidence key={evidence.id} item={evidence} jobId={jobId} contextId={contextId} />) : <p>No direct evidence linked.</p>}
+      {!!item.prerequisites?.length && <><strong>Prerequisites</strong><ol>{item.prerequisites.map((child) => <ProofPrerequisite key={child.id} item={child} jobId={jobId} contextId={contextId} />)}</ol></>}
+    </li>
+  );
+}
+
+function ProofDetails({ proof, jobId, contextId }) {
   return (
     <details className="proposal-proof">
       <summary>Inspect proof</summary>
@@ -40,23 +72,56 @@ function ProofDetails({ proof }) {
         <code>{proof?.claim?.id}</code>
         <Scope scope={proof?.claim?.scope} />
         <KeyValue value={proof?.claim?.proposition} />
+        {proof?.complete === false && <div role="note"><strong>Proof incomplete</strong><ul>{proof.issues?.map((issue, index) => <li key={index}>{issue}</li>)}</ul></div>}
         <h4>Evidence</h4>
-        {proof?.evidence?.length ? proof.evidence.map((item) => (
-          <div className="proposal-proof-item" key={item.id}>
-            <code>{item.id}</code><span>{item.kind}</span>
-            <span>{item.block_number ? `Block ${item.block_number}` : "No exact block"}</span>
-            <KeyValue value={item.source} />
-          </div>
-        )) : <p>No evidence linked.</p>}
+        {proof?.evidence?.length ? proof.evidence.map((item) => <ProofEvidence key={item.id} item={item} jobId={jobId} contextId={contextId} />) : <p>No direct evidence linked.</p>}
         <h4>Prerequisites</h4>
-        {proof?.prerequisites?.length ? proof.prerequisites.map((item) => (
-          <div className="proposal-proof-item" key={item.id}>
-            <code>{item.id}</code><span>{item.kind}</span><Scope scope={item.scope} />
-            <KeyValue value={item.proposition} />
-          </div>
-        )) : <p>None.</p>}
+        {proof?.prerequisites?.length ? <ol>{proof.prerequisites.map((item) => <ProofPrerequisite key={item.id} item={item} jobId={jobId} contextId={contextId} />)}</ol> : <p>None.</p>}
       </div>
     </details>
+  );
+}
+
+function ScenarioRequest({ companyName }) {
+  const [form, setForm] = useState({ address: "", chain: "ethereum", proposalId: "", transactionHash: "", sender: "" });
+  const [result, setResult] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const update = (key) => (event) => setForm((value) => ({ ...value, [key]: event.target.value }));
+  async function submit(event) {
+    event.preventDefault();
+    setBusy(true);
+    setResult(null);
+    try {
+      const job = await api("/api/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          address: form.address.trim(), chain: form.chain.trim(), company: companyName,
+          scenario_proposal_id: form.proposalId.trim(),
+          scenario_proposal_transaction_hash: form.transactionHash.trim(),
+          scenario_sender: form.sender.trim(),
+        }),
+      });
+      setResult({ message: `Scenario analysis queued as job ${job.job_id}. Return after it completes to inspect changes.` });
+    } catch (error) {
+      setResult({ error: error.message });
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <section className="proposal-section" aria-labelledby="scenario-request-heading">
+      <div className="proposal-section-heading"><div><h2 id="scenario-request-heading">Evaluate a proposal</h2><p>Execute a collected proposal on an isolated fork at its pinned baseline. This queues an admin analysis job.</p></div></div>
+      <form className="proposal-request-form" onSubmit={submit}>
+        <label>Governor address<input required pattern="0x[a-fA-F0-9]{40}" value={form.address} onChange={update("address")} placeholder="0x…" /></label>
+        <label>Chain<input required value={form.chain} onChange={update("chain")} /></label>
+        <label>Proposal ID<input required pattern="[0-9]+" value={form.proposalId} onChange={update("proposalId")} /></label>
+        <label>ProposalCreated transaction hash<input required pattern="0x[a-fA-F0-9]{64}" value={form.transactionHash} onChange={update("transactionHash")} placeholder="0x…" /></label>
+        <label>Execution sender<input required pattern="0x[a-fA-F0-9]{40}" value={form.sender} onChange={update("sender")} placeholder="0x…" /></label>
+        <button type="submit" disabled={busy}>{busy ? "Queueing…" : "Evaluate scenario"}</button>
+      </form>
+      {result && <p role="status" className="proposal-request-status">{result.error || result.message}</p>}
+    </section>
   );
 }
 
@@ -120,7 +185,7 @@ function ScenarioChanges({ changes }) {
                 <td data-label="Pinned baseline" className="proposal-before">{displayValue(row.before, row.unit)}</td>
                 <td data-label="Proposed" className="proposal-after">{displayValue(row.after, row.unit)}</td>
                 <td data-label="Scope"><Scope scope={{ kind: "scenario", step: row.step }} /></td>
-                <td data-label="Derivation"><ProofDetails proof={row.proof} /></td>
+                <td data-label="Derivation"><ProofDetails proof={row.proof} jobId={row.job_id} contextId={row.context_id} /></td>
               </tr>
             ))}
           </tbody>
@@ -156,7 +221,7 @@ function ObservedClaims({ proposals }) {
                   <td data-label="Fact">{row.kind.replaceAll("_", " ")}</td>
                   <td data-label="Value"><KeyValue value={row.proposition} /></td>
                   <td data-label="Scope"><Scope scope={row.scope} /></td>
-                  <td data-label="Derivation"><ProofDetails proof={row.proof} /></td>
+                  <td data-label="Derivation"><ProofDetails proof={row.proof} jobId={row.job_id} /></td>
                 </tr>
               ))}
             </tbody>
@@ -209,6 +274,7 @@ export default function ProposalImpactPage({ companyName }) {
       )}
       {state.status === "ready" && (
         <>
+          <ScenarioRequest companyName={companyName} />
           <ScenarioChanges changes={state.data.changes || []} />
           <ObservedClaims proposals={state.data.proposals || []} />
           {!!state.data.limitations?.length && (

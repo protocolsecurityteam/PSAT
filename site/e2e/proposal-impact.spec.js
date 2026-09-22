@@ -96,7 +96,7 @@ test("proposal impact separates scenarios, observed facts, and limitations", asy
   await page.goto("/company/etherfi/proposals");
   await expect(page.getByRole("heading", { name: "Proposal impact" })).toBeVisible();
   await expect(page.getByText("21600 seconds")).toBeVisible();
-  await expect(page.locator(".proposal-section").nth(1).locator(".proposal-scope.observed").first()).toBeVisible();
+  await expect(page.locator(".proposal-section").filter({ has: page.getByRole("heading", { name: "Observed proposal record" }) }).locator(".proposal-scope.observed").first()).toBeVisible();
   await expect(page.getByRole("heading", { name: "Coverage limitations" })).toBeVisible();
   await page.getByText("Inspect proof").first().click();
   await expect(page.getByText("claim:scenario-delay")).toBeVisible();

@@ -11,7 +11,7 @@ from sqlalchemy import create_engine, text
 
 from db.models import DATABASE_URL
 
-EXPANSION = "f6a1c2d3e4b5"
+EXPANSION = "d9e8b7c6a5f4"
 CONTRACTION = "a8c2d4e6f901"
 
 
@@ -19,27 +19,29 @@ def _run(*args: str) -> None:
     subprocess.run([sys.executable, "-m", *args], check=True)
 
 
-def _current_revision() -> str | None:
+def _current_revisions() -> tuple[str, ...]:
     engine = create_engine(DATABASE_URL)
     try:
         with engine.connect() as connection:
             present = connection.execute(text("SELECT to_regclass('public.alembic_version') IS NOT NULL")).scalar_one()
             if not present:
-                return None
-            return connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one_or_none()
+                return ()
+            return tuple(connection.execute(text("SELECT version_num FROM alembic_version")).scalars())
     finally:
         engine.dispose()
 
 
-def _contains_contraction(revision: str | None) -> bool:
-    if revision is None:
+def _contains_contraction(revisions: tuple[str, ...]) -> bool:
+    if not revisions:
         return False
     script = ScriptDirectory.from_config(Config("alembic.ini"))
-    return any(item.revision == CONTRACTION for item in script.walk_revisions("base", revision))
+    return any(
+        item.revision == CONTRACTION for revision in revisions for item in script.walk_revisions("base", revision)
+    )
 
 
 def release() -> None:
-    current = _current_revision()
+    current = _current_revisions()
     if _contains_contraction(current):
         _run("alembic", "upgrade", "head")
         return

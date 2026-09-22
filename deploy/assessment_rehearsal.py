@@ -66,7 +66,7 @@ def rehearse(source_url: str, scratch_url: str, backup_file: Path) -> dict[str, 
         ["pg_restore", "--exit-on-error", "--no-owner", f"--dbname={scratch_name}", str(backup_file)],
         pg_url=scratch_url,
     )
-    _run(["uv", "run", "--no-sync", "alembic", "upgrade", "f6a1c2d3e4b5"], database_url=scratch_url)
+    _run(["uv", "run", "--no-sync", "alembic", "upgrade", "d9e8b7c6a5f4"], database_url=scratch_url)
     _run(["uv", "run", "--no-sync", "python", "-m", "services.assessment.migrate"], database_url=scratch_url)
     remaining = _scalar(
         scratch_url,
@@ -90,8 +90,17 @@ def rehearse(source_url: str, scratch_url: str, backup_file: Path) -> dict[str, 
         "remaining_legacy_artifacts": remaining,
         "backup_file": str(backup_file),
         "backup_sha256": backup_digest,
-        "migration_head": "a8c2d4e6f901",
+        "migration_head": _migration_head(scratch_url),
     }
+
+
+def _migration_head(database_url: str) -> str:
+    engine = create_engine(database_url)
+    try:
+        with engine.connect() as connection:
+            return str(connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one())
+    finally:
+        engine.dispose()
 
 
 def main() -> None:

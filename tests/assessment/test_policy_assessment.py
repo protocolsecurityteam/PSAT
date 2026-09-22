@@ -6,7 +6,7 @@ from typing import Any
 
 from pydantic import TypeAdapter
 
-from schemas.assessment import Assessment
+from schemas.assessment_projection import LegacyAssessmentProjection
 from services.assessment import (
     add_policy,
     build_static_assessment,
@@ -17,7 +17,7 @@ from services.resolution.capabilities import CapabilityExpr, intersect
 from services.resolution.capability_resolver import capability_to_dict
 
 
-def _base() -> Assessment:
+def _base() -> LegacyAssessmentProjection:
     effects = {
         "schema_version": "semantic-2",
         "claims_schema_version": "claims/1",
@@ -170,7 +170,7 @@ def test_public_authority_produces_a_capability_claim() -> None:
         _permission(authority_public=True, authority_openness="open")["functions"],
         chain_id=1,
     )
-    TypeAdapter(Assessment).validate_python(assessment)
+    TypeAdapter(LegacyAssessmentProjection).validate_python(assessment)
 
     capabilities = [
         claim for claim in assessment["claims"].values() if claim["proposition"]["kind"] == "authority_capability"

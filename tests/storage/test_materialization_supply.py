@@ -408,7 +408,10 @@ def captured_publish(monkeypatch):
 
 
 def _stub_artifacts(monkeypatch, mapping: dict[str, Any]) -> None:
-    monkeypatch.setattr("workers.static_worker.get_artifact", lambda _s, _j, name: mapping.get(name))
+    monkeypatch.setattr(
+        "db.queue.typed.load_assessment_projection",
+        lambda _session, _job_id: mapping.get("assessment"),
+    )
 
 
 def test_static_stage_publishes_inputs_from_assessment(monkeypatch, captured_publish):

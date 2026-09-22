@@ -6,7 +6,7 @@ import copy
 from collections.abc import Mapping
 from typing import Any, cast
 
-from schemas.assessment import Analysis, Assessment, Diagnostic, Evidence, EvidenceMethod
+from schemas.assessment_projection import Analysis, Diagnostic, Evidence, EvidenceMethod, LegacyAssessmentProjection
 
 from .keys import content_key
 from .keys import json_value as _json
@@ -22,10 +22,10 @@ def _method(observed_via: object) -> EvidenceMethod:
     return "rpc"
 
 
-def add_observations(assessment: Assessment, snapshot: Mapping[str, Any]) -> Assessment:
+def add_observations(assessment: LegacyAssessmentProjection, snapshot: Mapping[str, Any]) -> LegacyAssessmentProjection:
     """Add successful controller reads and an observation analysis receipt."""
 
-    result = cast(Assessment, copy.deepcopy(assessment))
+    result = cast(LegacyAssessmentProjection, copy.deepcopy(assessment))
     remove_analysis_slice(result, "observe.controllers")
     raw_values = snapshot.get("controller_values")
     values = raw_values if isinstance(raw_values, Mapping) else {}

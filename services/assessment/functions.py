@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from schemas.assessment import Assessment
+from schemas.assessment_projection import LegacyAssessmentProjection
 
 
-def resolve_function(assessment: Assessment, permission: Mapping[str, object]) -> tuple[str | None, str | None]:
-    """Return the unique Assessment function named by a permission row.
+def resolve_function(
+    assessment: LegacyAssessmentProjection, permission: Mapping[str, object]
+) -> tuple[str | None, str | None]:
+    """Return the unique LegacyAssessmentProjection function named by a permission row.
 
     Static analysis keys functions by their source-level signature while the
     permission index also carries the canonical ABI signature. Prefer the

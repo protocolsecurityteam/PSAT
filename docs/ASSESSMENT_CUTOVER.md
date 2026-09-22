@@ -20,10 +20,15 @@ traversal. Resetting remains an explicit operator action through the scoped
 
 ## Existing production database
 
-Migration `f6a1c2d3e4b5` expands the database with temporal tables. The importer
+Migration `f6a1c2d3e4b5` creates the temporal tables, and the additive expansion
+`d9e8b7c6a5f4` adds publication metadata while keeping subject identities stable.
+Both run before importing legacy artifacts. The importer
 archives each complete legacy source body, records its digest and source locator,
 publishes and reconstructs it, and removes the mutable legacy row only after
-equality succeeds. Migration `a8c2d4e6f901` removes the old physical columns. It refuses an ordinary
+equality succeeds. Reconstruction treats claim proof-edge lists as unordered
+sets; the archived source still retains their original ordering. Ordered
+actions and event history are not normalized this way.
+Migration `a8c2d4e6f901` removes the old physical columns. It refuses an ordinary
 upgrade of an existing database unless the maintenance cutover is explicitly
 acknowledged. The preceding expansion migration does not make dropping columns
 safe while old processes run. Fresh databases can migrate normally.
@@ -74,7 +79,7 @@ uv run --no-sync python -m deploy.assessment_rehearsal \
 
 Success requires expansion, exact projection comparison, zero remaining legacy
 Assessment/principal-history rows, one source manifest per imported row,
-contraction to `a8c2d4e6f901`, and a clean `alembic check`. The rehearsal does
+contraction through `a8c2d4e6f901` to the single current migration head, and a clean `alembic check`. The rehearsal does
 not authorize the production cutover.
 
 Private PR previews use the same loss-preserving order through

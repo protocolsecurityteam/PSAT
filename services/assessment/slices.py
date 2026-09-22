@@ -1,13 +1,13 @@
-"""Atomic ownership helpers for replaceable Assessment stages."""
+"""Atomic ownership helpers for replaceable LegacyAssessmentProjection stages."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 
-from schemas.assessment import Assessment
+from schemas.assessment_projection import LegacyAssessmentProjection
 
 
-def remove_analysis_slice(assessment: Assessment, detector: str) -> None:
+def remove_analysis_slice(assessment: LegacyAssessmentProjection, detector: str) -> None:
     """Remove the claim/evidence outputs owned by an earlier detector run."""
 
     prior = [analysis for analysis in assessment["analyses"] if analysis["detector"] == detector]
@@ -64,7 +64,7 @@ def remove_analysis_slice(assessment: Assessment, detector: str) -> None:
     assessment["analyses"] = other_receipts
 
 
-def prune_unreferenced_entities(assessment: Assessment) -> None:
+def prune_unreferenced_entities(assessment: LegacyAssessmentProjection) -> None:
     """Remove entities no current claim or evidence names."""
 
     contract = assessment["contract"]

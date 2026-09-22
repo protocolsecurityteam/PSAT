@@ -41,6 +41,7 @@ from db.models import (
     ProxyUpgradeEvent,
     WatchedProxy,
 )
+from db.queue import publish_assessment_projection
 from schemas.observations import MonitoredContractType
 from services.monitoring.reanalysis import (
     _REANALYSIS_WRITE_TARGETS,
@@ -546,7 +547,7 @@ class TestMaybeQueueReanalysis:
         assessment artifacts. A queued re-analysis job should not
         interfere because it has status=queued, stage=discovery.
         """
-        from db.queue import find_completed_static_cache, store_artifact, store_source_files
+        from db.queue import find_completed_static_cache, store_source_files
 
         addr = "0x" + "66" * 20
 
@@ -567,11 +568,8 @@ class TestMaybeQueueReanalysis:
         store_source_files(db_session, old_job.id, {"src/A.sol": "contract A {}"})
         from tests.support.policy_builders import _assessment, _minimal_static_facts
 
-        store_artifact(
-            db_session,
-            old_job.id,
-            "assessment",
-            data=_assessment(static_facts=_minimal_static_facts(address=addr.lower())),
+        publish_assessment_projection(
+            db_session, old_job.id, _assessment(static_facts=_minimal_static_facts(address=addr.lower()))
         )
 
         # Create Contract + ContractSummary (required by find_completed_static_cache)

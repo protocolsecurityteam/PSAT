@@ -6,8 +6,8 @@ from typing import Any
 import pytest
 from eth_utils.crypto import keccak
 
-from db.queue.typed import ArtifactSchemaError, validate_assessment
 from services.assessment import add_policy, build_static_assessment, project_permission_index
+from services.assessment.validation import checked
 from tests.conftest import requires_postgres
 from tests.support.policy_builders import _minimal_static_facts
 from tests.support.policy_builders import assessed_permissions as build_permission_index
@@ -62,8 +62,8 @@ def test_canonical_signature_overrides_source_spelling(source, canonical):
 def test_storage_rejects_mismatched_identity():
     assessment = build({"functions": {"f()": {}}}, {"trees": {}})
     assessment["functions"]["f()"]["selector"] = "0xdeadbeef"
-    with pytest.raises(ArtifactSchemaError, match="does not match ABI signature"):
-        validate_assessment(assessment)
+    with pytest.raises(ValueError, match="does not match ABI signature"):
+        checked(assessment)
 
 
 def test_unknown_source_type_does_not_publish_a_fabricated_dispatch():

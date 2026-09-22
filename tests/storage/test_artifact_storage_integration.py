@@ -20,6 +20,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 
+from db.queue import publish_assessment_projection
 from tests.cache_helpers import requires_postgres
 from tests.conftest import SessionFactory, requires_storage
 
@@ -613,7 +614,7 @@ def test_end_to_end_stubbed_worker(api_with, db_session, storage_bucket):
     )
     store_artifact(db_session, job.id, "contract_flags", data={"is_proxy": False})
     facts = _minimal_static_facts(address=job.address or "0x" + "00" * 20, name="Main")
-    store_artifact(db_session, job.id, "assessment", data=_assessment(static_facts=facts))
+    publish_assessment_projection(db_session, job.id, _assessment(static_facts=facts))
 
     client = TestClient(api_with.app)
 

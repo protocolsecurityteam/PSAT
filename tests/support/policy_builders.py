@@ -12,7 +12,7 @@ import uuid
 from types import SimpleNamespace
 from typing import Any
 
-from schemas.assessment import Assessment
+from schemas.assessment_projection import LegacyAssessmentProjection
 
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 AUTH_ADDRESS = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -164,7 +164,7 @@ def _assessment(
     snapshot: dict | None = None,
     graph: dict | None = None,
     chain_id: int = 1,
-) -> Assessment:
+) -> LegacyAssessmentProjection:
     """Canonical worker handoff fixture built from semantic inputs."""
 
     from services.assessment import add_observations, add_resolution, build_static_assessment

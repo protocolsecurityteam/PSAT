@@ -21,13 +21,21 @@ Design points:
 
 from __future__ import annotations
 
-from typing import Any
+import json
+from typing import Any, cast
 
 from pydantic import ValidationError
 
-from schemas.assessment import Assessment
+from schemas.assessment import Assessment, assessment_problems
+from schemas.assessment_projection import LegacyAssessmentProjection
 
-__all__ = ["ArtifactSchemaError", "load_assessment", "load_assessment_inputs", "validate_assessment"]
+__all__ = [
+    "ArtifactSchemaError",
+    "load_assessment",
+    "load_assessment_projection",
+    "load_assessment_inputs",
+    "validate_assessment",
+]
 
 
 class ArtifactSchemaError(RuntimeError):
@@ -53,24 +61,46 @@ def load_assessment(read: Any, session: Any, job_id: Any) -> Assessment | None:
 
 def validate_assessment(raw: object) -> Assessment:
     """Validate an already-loaded body through the same storage boundary."""
-    from services.assessment.validation import checked
+    from pydantic import TypeAdapter
 
     if not isinstance(raw, dict):
         raise ArtifactSchemaError("assessment", [f"expected a JSON object, got {type(raw).__name__}"])
     try:
-        return checked(raw)
+        TypeAdapter(Assessment).validate_json(json.dumps(raw), strict=True)
+        assessment = cast(Assessment, raw)
+        problems = assessment_problems(assessment)
+        if problems:
+            raise ArtifactSchemaError("assessment", problems)
+        return assessment
     except ValidationError as exc:
         raise ArtifactSchemaError("assessment", _problem_list(exc)) from None
     except ValueError as exc:
         raise ArtifactSchemaError("assessment", [str(exc)]) from None
 
 
-def load_assessment_inputs(
-    read: Any, session: Any, job_id: Any
-) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None:
+def load_assessment_projection(session: Any, job_id: Any) -> LegacyAssessmentProjection | None:
+    """Load the transient compact projection required by legacy pipeline builders."""
+    from db.queue.artifacts import get_artifact, get_assessment_projection
+    from services.assessment.validation import checked
+
+    canonical = load_assessment(get_artifact, session, job_id)
+    if canonical is None:
+        return None
+    raw = get_assessment_projection(session, job_id)
+    if raw is None:
+        return None
+    try:
+        return checked(raw)
+    except ValidationError as exc:
+        raise ArtifactSchemaError("assessment projection", _problem_list(exc)) from None
+    except ValueError as exc:
+        raise ArtifactSchemaError("assessment projection", [str(exc)]) from None
+
+
+def load_assessment_inputs(session: Any, job_id: Any) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None:
     """Load static facts, predicate trees, and effects from Assessment evidence."""
 
-    assessment = load_assessment(read, session, job_id)
+    assessment = load_assessment_projection(session, job_id)
     if assessment is None:
         return None
     from services.assessment import static_inputs

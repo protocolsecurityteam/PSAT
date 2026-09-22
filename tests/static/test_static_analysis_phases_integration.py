@@ -31,13 +31,20 @@ def _job(**overrides):
 
 
 def _capture_store_artifact(monkeypatch):
-    """Patch store_artifact and return a list that collects all calls."""
+    """Capture canonical publications and any forbidden side artifacts."""
     calls: list[dict] = []
 
     def _fake_store(_session, _job_id, name, data=None, text_data=None):
+        assert name != "assessment", "Assessment must use the canonical publication API"
         calls.append({"name": name, "data": data, "text_data": text_data})
 
     monkeypatch.setattr("workers.static_worker.store_artifact", _fake_store)
+    monkeypatch.setattr(
+        "workers.static_worker.publish_assessment_projection",
+        lambda _session, _job_id, projection: calls.append(
+            {"name": "assessment", "data": projection, "text_data": None}
+        ),
+    )
     return calls
 
 

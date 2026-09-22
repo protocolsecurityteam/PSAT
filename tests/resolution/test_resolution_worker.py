@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from db.models import ContractBalance, ContractBalanceFetch
+from db.queue import publish_assessment_projection
 from tests.conftest import DATABASE_URL as _DB_URL
 from tests.conftest import _can_connect, requires_postgres
 from tests.support.balance_stubs import page, pinned_native_unavailable
@@ -446,7 +447,7 @@ class TestMissingArtifactsRaise:
         session = MagicMock()
         job = _job()
 
-        monkeypatch.setattr("workers.resolution_worker.get_artifact", lambda _s, _j, name: None)
+        monkeypatch.setattr("workers.resolution_worker.load_assessment_projection", lambda _s, _j: None)
         monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
 
         with pytest.raises(RuntimeError, match="assessment artifact not found"):
@@ -457,10 +458,12 @@ class TestMissingArtifactsRaise:
         session = MagicMock()
         job = _job()
 
-        monkeypatch.setattr(
-            "workers.resolution_worker.get_artifact",
-            lambda _s, _j, name: "not a dict" if name == "assessment" else None,
-        )
+        from db.queue.typed import ArtifactSchemaError
+
+        def invalid_projection(_session, _job_id):
+            raise ArtifactSchemaError("assessment", ["expected a mapping"])
+
+        monkeypatch.setattr("workers.resolution_worker.load_assessment_projection", invalid_projection)
         monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
 
         with pytest.raises(RuntimeError, match="assessment artifact failed validation"):
@@ -627,7 +630,7 @@ def test_dependency_emission_walks_check_trees(db_session_for_resolution):
     from sqlalchemy import select
 
     from db.models import JobDependency, JobStage, JobStatus
-    from db.queue import create_job, store_artifact
+    from db.queue import create_job
 
     session = db_session_for_resolution
     provider_addr = "0x" + uuid.uuid4().hex[:8] + "aa" * 16
@@ -642,11 +645,10 @@ def test_dependency_emission_walks_check_trees(db_session_for_resolution):
     session.commit()
     from tests.support.policy_builders import _assessment, _minimal_static_facts
 
-    store_artifact(
+    publish_assessment_projection(
         session,
         provider_job.id,
-        "assessment",
-        data=_assessment(static_facts=_minimal_static_facts(address=provider_addr, name="Provider")),
+        _assessment(static_facts=_minimal_static_facts(address=provider_addr, name="Provider")),
     )
 
     depender_job = create_job(
@@ -654,11 +656,10 @@ def test_dependency_emission_walks_check_trees(db_session_for_resolution):
         {"address": depender_addr, "chain": "ethereum", "name": "Depender"},
         initial_stage=JobStage.resolution,
     )
-    store_artifact(
+    publish_assessment_projection(
         session,
         depender_job.id,
-        "assessment",
-        data=_assessment(
+        _assessment(
             static_facts=_minimal_static_facts(address=depender_addr, name="Depender"),
             predicate_trees={
                 "schema_version": "semantic",
@@ -738,14 +739,12 @@ def _authority_check_predicate_trees() -> dict:
 
 
 def _store_assessment_with_trees(session, job, address: str, name: str) -> None:
-    from db.queue import store_artifact
     from tests.support.policy_builders import _assessment, _minimal_static_facts
 
-    store_artifact(
+    publish_assessment_projection(
         session,
         job.id,
-        "assessment",
-        data=_assessment(
+        _assessment(
             static_facts=_minimal_static_facts(address=address, name=name),
             predicate_trees=_authority_check_predicate_trees(),
         ),

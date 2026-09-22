@@ -6,7 +6,7 @@ import copy
 from collections.abc import Iterable, Mapping
 from typing import Any, cast
 
-from schemas.assessment import Analysis, Assessment, Diagnostic
+from schemas.assessment_projection import Analysis, Diagnostic, LegacyAssessmentProjection
 
 from .validation import checked
 
@@ -17,10 +17,10 @@ def _field(error: Any, name: str, default: Any = None) -> Any:
     return getattr(error, name, default)
 
 
-def add_stage_errors(assessment: Assessment, errors: Iterable[Any]) -> Assessment:
+def add_stage_errors(assessment: LegacyAssessmentProjection, errors: Iterable[Any]) -> LegacyAssessmentProjection:
     """Merge StageError-shaped values into per-stage analysis receipts."""
 
-    result = cast(Assessment, copy.deepcopy(assessment))
+    result = cast(LegacyAssessmentProjection, copy.deepcopy(assessment))
     grouped: dict[str, list[Any]] = {}
     for error in errors:
         stage = str(_field(error, "stage", "unknown"))

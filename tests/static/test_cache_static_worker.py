@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from db.queue import publish_assessment_projection
 from tests.cache_helpers import (
     ADDR_A,
     IMPL_ADDR,
@@ -28,7 +29,7 @@ pytestmark = requires_postgres
 def test_static_worker_cache_hit_skips_analysis(db_session, monkeypatch):
     """Job flagged as static_cached skips Slither/analysis but runs deps."""
     from db.models import Contract
-    from db.queue import create_job, store_artifact, store_source_files
+    from db.queue import create_job, store_source_files
     from utils.logging import stage_metrics_var
     from workers.static_worker import StaticWorker
 
@@ -53,7 +54,7 @@ def test_static_worker_cache_hit_skips_analysis(db_session, monkeypatch):
     store_source_files(db_session, job.id, {"src/TestContract.sol": "contract TestContract {}"})
     from tests.support.policy_builders import _assessment
 
-    store_artifact(db_session, job.id, "assessment", data=_assessment())
+    publish_assessment_projection(db_session, job.id, _assessment())
 
     worker = StaticWorker()
     phases_run = _patch_static_worker_phases(monkeypatch, worker)

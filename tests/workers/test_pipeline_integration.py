@@ -577,23 +577,8 @@ def test_resolution_worker_rewrites_address_for_impl_jobs(monkeypatch):
     static_facts = _minimal_static_facts(address=IMPL, name="VaultImpl")
     assessment = _assessment(static_facts=static_facts)
 
-    artifacts = {
-        "assessment": assessment,
-        "predicate_trees": {"schema_version": "semantic", "trees": {}},
-        "effects": {
-            "schema_version": "semantic-2",
-            "contract_name": "VaultImpl",
-            "functions": {},
-            "claims_schema_version": "claims/1",
-            "claim_analyses": {},
-            "claim_diagnostics": [],
-        },
-    }
-
-    monkeypatch.setattr(
-        "workers.resolution_worker.get_artifact",
-        lambda _session, _job_id, name: artifacts.get(name),
-    )
+    monkeypatch.setattr("workers.resolution_worker.load_assessment_projection", lambda _s, _j: assessment)
+    monkeypatch.setattr("workers.resolution_worker.load_assessment_inputs", lambda _s, _j: (static_facts, {}, {}))
 
     # Capture what observe_controllers receives
     captured_plans: list[dict] = []
@@ -614,6 +599,10 @@ def test_resolution_worker_rewrites_address_for_impl_jobs(monkeypatch):
     monkeypatch.setattr(
         "workers.resolution_worker.store_artifact",
         lambda _s, _j, name, data=None, text_data=None: stored_artifacts.update({name: data or text_data}),
+    )
+    monkeypatch.setattr(
+        "workers.resolution_worker.publish_assessment_projection",
+        lambda _s, _j, projection: stored_artifacts.update({"assessment": projection}),
     )
     monkeypatch.setattr(worker, "update_detail", lambda *_a, **_kw: None)
 
@@ -1241,10 +1230,8 @@ def test_policy_worker_fails_cleanly_on_missing_assessment(monkeypatch):
     session = MagicMock()
     job = _job(request={"rpc_url": "https://rpc.example", "chain_id": 1})
 
-    monkeypatch.setattr(
-        "workers.policy_worker.get_artifact",
-        lambda _s, _j, name: None,
-    )
+    monkeypatch.setattr("workers.policy_worker.load_assessment_projection", lambda _s, _j: None)
+    monkeypatch.setattr("workers.policy_worker.get_artifact", lambda _s, _j, _name: None)
 
     import pytest
 
@@ -1267,9 +1254,6 @@ def test_resolution_worker_fails_on_missing_assessment(monkeypatch):
 
     import pytest
 
-    monkeypatch.setattr(
-        "workers.resolution_worker.get_artifact",
-        lambda _s, _j, name: None,
-    )
+    monkeypatch.setattr("workers.resolution_worker.load_assessment_projection", lambda _s, _j: None)
     with pytest.raises(RuntimeError, match="assessment"):
         worker.process(session, job)

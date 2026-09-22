@@ -35,7 +35,7 @@ def test_single_head_revision():
 def test_only_intentional_branch_point():
     script = _script_dir()
     branched = {r.revision for r in script.walk_revisions() if r.is_branch_point}
-    assert branched == {"b3d7e1f05a92"}, f"Unexpected Alembic branch points: {branched}"
+    assert branched == {"b3d7e1f05a92", "f6a1c2d3e4b5"}, f"Unexpected Alembic branch points: {branched}"
     join = script.get_revision("c90d1fe9c8e1")
     assert join is not None
     assert isinstance(join.down_revision, tuple)

@@ -56,6 +56,20 @@ reuses its context and claims while retaining every Analysis attempt.
 
 ## Pipeline boundary
 
+`schemas.assessment.Assessment` is the public row-shaped type. Both
+`get_artifact(..., "assessment")` and the Assessment API return that view;
+`load_assessment` validates the same type, including its row references.
+Neither boundary falls back to an old mutable Assessment artifact.
+
+Some analyzers work with natural-key maps while building their results. These
+are transient `LegacyAssessmentProjection` values, read explicitly with
+`load_assessment_projection` and published with `publish_assessment_projection`.
+`store_artifact(..., "assessment")` rejects writes so callers cannot recreate
+the old mutable store. These projections are not stored
+as a second analytical document. The migration importer alone reads archived
+legacy artifacts. A pipeline refresh preserves independently collected
+governance facts and their proof dependencies.
+
 ```text
 source/code + chain/event/execution inputs
                     |
@@ -78,6 +92,56 @@ Principal history is event-backed where transaction ordering and hashes are
 available. Old reports are retained as source payloads and `reported` evidence
 rather than being upgraded into stronger facts. Failures, omissions, unsupported
 semantics, and incomplete coverage belong to Analysis, never to positive Claim.
+
+## Evaluate a proposal
+
+The company's proposals page can submit an authenticated analysis for a Governor
+address. Supply the chain, full proposal ID, proposal-creation transaction hash,
+and execution sender. Proposal IDs remain decimal strings in the browser so
+uint256 values are not rounded by JavaScript.
+
+The equivalent `POST /api/analyze` request includes:
+
+```json
+{
+  "address": "<governor address>",
+  "chain": "ethereum",
+  "company": "<existing company name>",
+  "collect_governance": true,
+  "scenario_proposal_id": "<decimal uint256 proposal ID>",
+  "scenario_proposal_transaction_hash": "<ProposalCreated transaction hash>",
+  "scenario_sender": "<execution sender address>"
+}
+```
+
+The worker verifies the canonical transaction receipt, decodes the supported
+OpenZeppelin `ProposalCreated` event, and checks that the actions hash to the
+requested proposal ID. It pins observations to a block hash, starts a local
+Anvil fork at that baseline, and executes the Governor's `execute` call. The
+Governor's state and permission checks still apply. No transaction is sent to
+the upstream chain.
+
+Supported configuration getters on the Governor and action targets are read
+before and after execution. Changed values become scenario claims supported by
+the verified proposal contents, baseline observations, and execution evidence.
+The observed view retains the pre-execution values. Unsupported behavior,
+reverts, missing reads, and proposals without supported configuration changes
+produce diagnostics rather than invented effects.
+
+Creation-phase voting-period bindings require matching event boundaries and
+historical getters under a verified block-number clock. Other clocks or
+inconsistent observations do not produce that binding. This adapter does not
+claim to understand arbitrary custom Governor semantics.
+
+The impact response expands prerequisite claims and their evidence payloads.
+Missing or correction-ineligible support, cycles, and response-size limits are
+shown explicitly as incomplete proofs; a displayed summary is never silently
+presented as a complete derivation.
+
+Evidence omitted from the inline view remains downloadable through
+`GET /api/analyses/{job_id}/assessment-payload/{payload_id}`. Scenario links add
+`context_id`. The route verifies that an eligible claim in that selected view
+cites the payload and streams its original bytes as an attachment.
 
 The public assessment endpoint returns row arrays plus context, implementation,
 payload metadata, and correction tables. Evidence refers to shared payload IDs

@@ -20,9 +20,9 @@ from db.models import (
     Job,
     JobStage,
 )
-from db.queue import create_job, get_artifact, store_artifact
+from db.queue import create_job, publish_assessment_projection, store_artifact
 from db.queue._chains import _job_chain_name, job_chain_id
-from db.queue.typed import ArtifactSchemaError, load_assessment, load_assessment_inputs
+from db.queue.typed import ArtifactSchemaError, load_assessment_inputs, load_assessment_projection
 from schemas.observations import ObservationBatch, ObservationPlan
 from services.clients.rpc import require_rpc_url
 from services.discovery.perimeter import queue_discovered_contracts
@@ -163,7 +163,7 @@ class ResolutionWorker(BaseWorker):
         chain_id = job_chain_id(job)
 
         try:
-            assessment = load_assessment(get_artifact, session, job.id)
+            assessment = load_assessment_projection(session, job.id)
         except ArtifactSchemaError as exc:
             raise RuntimeError(f"{exc.artifact_name} artifact failed validation") from exc
         if assessment is None:
@@ -222,7 +222,7 @@ class ResolutionWorker(BaseWorker):
 
         assessment["contract"]["deployment_address"] = observation_plan["contract_address"].lower()
         assessment = add_observations(assessment, snapshot)
-        store_artifact(session, job.id, "assessment", data=assessment)
+        publish_assessment_projection(session, job.id, assessment)
         # A reverting controller read is recorded as an ``eth_call_error`` NULL
         # entry (see observe_controllers); counting those as resolved hid the
         # etherfi NULL-controller incident. Split the count so the resolved metric
@@ -325,7 +325,7 @@ class ResolutionWorker(BaseWorker):
             from services.assessment import add_resolution
 
             assessment = add_resolution(assessment, resolved_graph, chain_id=chain_id)
-            store_artifact(session, job.id, "assessment", data=assessment)
+            publish_assessment_projection(session, job.id, assessment)
             # Persist the classify cache so the policy stage skips re-running
             # the 6-10 RPC fan-out per address. dict[str, tuple] → JSON-friendly
             # dict[str, list] for storage.
@@ -552,7 +552,7 @@ class ResolutionWorker(BaseWorker):
         """
         if not deployment_address:
             return 0
-        inputs = load_assessment_inputs(get_artifact, session, job.id)
+        inputs = load_assessment_inputs(session, job.id)
         if inputs is None:
             return 0
         _static_facts, _predicate_trees, effects = inputs
@@ -883,7 +883,7 @@ class ResolutionWorker(BaseWorker):
 
         from db.models import JobDependency
 
-        inputs = load_assessment_inputs(get_artifact, session, job.id)
+        inputs = load_assessment_inputs(session, job.id)
         if inputs is None:
             return
         _static_facts, predicate_trees, _effects = inputs

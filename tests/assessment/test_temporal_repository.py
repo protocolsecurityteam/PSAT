@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import datetime
-from typing import cast
 
 from sqlalchemy import func, select
 
@@ -22,11 +22,12 @@ from db.models import (
     JobStage,
     JobStatus,
 )
-from db.queue import get_artifact, store_artifact
-from schemas.assessment import Assessment
+from db.queue import get_artifact, publish_assessment_projection, store_artifact
+from db.queue.typed import load_assessment, load_assessment_projection
+from schemas.assessment_projection import LegacyAssessmentProjection
 from schemas.temporal_assessment import CorrectionReason, CorrectionTargetKind
 from services.assessment import add_observations, add_policy, build_static_assessment
-from services.assessment.migrate import import_legacy_artifacts
+from services.assessment.migrate import _assessment_for_comparison, import_legacy_artifacts
 from services.assessment.repository import load_temporal_assessment, publication_history, record_correction
 from tests.conftest import requires_postgres
 
@@ -49,7 +50,7 @@ def _job(session):
     return job
 
 
-def _assessment(owner: str, block: int, *, block_hash: str | None = None) -> Assessment:
+def _assessment(owner: str, block: int, *, block_hash: str | None = None) -> LegacyAssessmentProjection:
     base = build_static_assessment(
         chain_id=1,
         address=ADDRESS,
@@ -118,7 +119,7 @@ def _assessment(owner: str, block: int, *, block_hash: str | None = None) -> Ass
 def test_assessment_artifact_is_a_projection_of_canonical_rows(db_session):
     job = _job(db_session)
     expected = _assessment(ALICE, 100)
-    store_artifact(db_session, job.id, "assessment", data=expected)
+    publish_assessment_projection(db_session, job.id, expected)
 
     assert (
         db_session.scalar(
@@ -126,9 +127,23 @@ def test_assessment_artifact_is_a_projection_of_canonical_rows(db_session):
         )
         == 0
     )
-    assert get_artifact(db_session, job.id, "assessment") == expected
     temporal = load_temporal_assessment(db_session, job.id)
     assert temporal is not None
+    assert get_artifact(db_session, job.id, "assessment") == temporal
+    assert load_assessment(get_artifact, db_session, job.id) == temporal
+    projected = load_assessment_projection(db_session, job.id)
+    assert projected is not None
+    for key in expected["claims"]:
+        actual_claim = projected["claims"][key]
+        expected_claim = expected["claims"][key]
+        assert actual_claim["proposition"] == expected_claim["proposition"]
+        assert actual_claim["rule"] == expected_claim["rule"]
+        assert set(actual_claim["evidence"]) == set(expected_claim["evidence"])
+        assert set(actual_claim["claims"]) == set(expected_claim["claims"])
+    assert {key: value for key, value in projected.items() if key != "claims"} == {
+        key: value for key, value in expected.items() if key != "claims"
+    }
+    assert "schema_version" not in temporal
     assert isinstance(temporal["subjects"], list)
     assert isinstance(temporal["claims"], list)
     assert all("id" in row for row in temporal["subjects"] + temporal["claims"])
@@ -138,11 +153,11 @@ def test_assessment_artifact_is_a_projection_of_canonical_rows(db_session):
 def test_identical_rerun_reuses_claims_and_retains_analysis_attempts(db_session):
     job = _job(db_session)
     value = _assessment(ALICE, 100)
-    store_artifact(db_session, job.id, "assessment", data=value)
+    publish_assessment_projection(db_session, job.id, value)
     claims = db_session.scalar(select(func.count()).select_from(AssessmentClaim))
     analyses = db_session.scalar(select(func.count()).select_from(AssessmentAnalysis))
     outputs = db_session.scalar(select(func.count()).select_from(AssessmentAnalysisOutput))
-    store_artifact(db_session, job.id, "assessment", data=value)
+    publish_assessment_projection(db_session, job.id, value)
 
     assert db_session.scalar(select(func.count()).select_from(AssessmentClaim)) == claims
     assert db_session.scalar(select(func.count()).select_from(AssessmentAnalysis)) == analyses * 2
@@ -155,17 +170,19 @@ def test_owner_update_keeps_history_and_latest_projection(db_session):
     job = _job(db_session)
     alice = _assessment(ALICE, 100)
     bob = _assessment(BOB, 200)
-    store_artifact(db_session, job.id, "assessment", data=alice)
-    store_artifact(db_session, job.id, "assessment", data=bob)
+    publish_assessment_projection(db_session, job.id, alice)
+    publish_assessment_projection(db_session, job.id, bob)
 
-    latest = cast(Assessment, get_artifact(db_session, job.id, "assessment"))
+    latest = get_artifact(db_session, job.id, "assessment")
+    assert isinstance(latest, dict)
     authorities = [
         claim["proposition"].get("authority")
-        for claim in latest["claims"].values()
+        for claim in latest["claims"]
         if claim["proposition"]["kind"] == "function_authority"
     ]
-    assert any(BOB in str(authority) for authority in authorities)
-    assert not any(ALICE in str(authority) for authority in authorities)
+    address_ids = {row["identity"].get("address"): row["id"] for row in latest["subjects"]}
+    assert any(address_ids[BOB] in str(authority) for authority in authorities)
+    assert ALICE not in address_ids or not any(address_ids[ALICE] in str(authority) for authority in authorities)
     assert len(publication_history(db_session, job.id)) == 2
     # Old and new proof rows remain; the latest publication chooses only Bob.
     assert db_session.scalar(select(func.count()).select_from(AssessmentClaim)) >= 2
@@ -175,7 +192,7 @@ def test_owner_update_keeps_history_and_latest_projection(db_session):
 def test_a_to_b_to_a_preserves_occurrences_without_duplicate_subjects(db_session):
     job = _job(db_session)
     for owner, block in ((ALICE, 100), (BOB, 200), (ALICE, 300)):
-        store_artifact(db_session, job.id, "assessment", data=_assessment(owner, block))
+        publish_assessment_projection(db_session, job.id, _assessment(owner, block))
     history = publication_history(db_session, job.id)
     assert [row["block_number"] for row in history] == ["100", "200", "300"]
     address_subjects = db_session.scalars(select(AssessmentSubject).where(AssessmentSubject.kind == "address")).all()
@@ -189,8 +206,8 @@ def test_repeated_static_statement_can_have_distinct_temporal_proofs(db_session)
     job = _job(db_session)
     first = _assessment(ALICE, 100)
     second = _assessment(ALICE, 200)
-    store_artifact(db_session, job.id, "assessment", data=first)
-    store_artifact(db_session, job.id, "assessment", data=second)
+    publish_assessment_projection(db_session, job.id, first)
+    publish_assessment_projection(db_session, job.id, second)
     rows = db_session.scalars(select(AssessmentClaim)).all()
     authorities = [row for row in rows if row.kind.value == "function_authority"]
     assert len(authorities) == 2
@@ -199,8 +216,8 @@ def test_repeated_static_statement_can_have_distinct_temporal_proofs(db_session)
 @requires_postgres
 def test_exact_as_of_update_uses_hash_anchored_publication(db_session):
     job = _job(db_session)
-    store_artifact(db_session, job.id, "assessment", data=_assessment(ALICE, 100, block_hash="0x" + "10" * 32))
-    store_artifact(db_session, job.id, "assessment", data=_assessment(BOB, 200, block_hash="0x" + "20" * 32))
+    publish_assessment_projection(db_session, job.id, _assessment(ALICE, 100, block_hash="0x" + "10" * 32))
+    publish_assessment_projection(db_session, job.id, _assessment(BOB, 200, block_hash="0x" + "20" * 32))
 
     at_100 = load_temporal_assessment(db_session, job.id, at_block=100)
     at_200 = load_temporal_assessment(db_session, job.id, at_block=200)
@@ -213,7 +230,7 @@ def test_exact_as_of_update_uses_hash_anchored_publication(db_session):
 @requires_postgres
 def test_hashless_update_is_reported_not_fabricated_exact_point(db_session):
     job = _job(db_session)
-    store_artifact(db_session, job.id, "assessment", data=_assessment(ALICE, 100))
+    publish_assessment_projection(db_session, job.id, _assessment(ALICE, 100))
 
     current = load_temporal_assessment(db_session, job.id)
     assert current is not None
@@ -225,7 +242,7 @@ def test_hashless_update_is_reported_not_fabricated_exact_point(db_session):
 @requires_postgres
 def test_reorg_correction_preserves_rows_but_removes_dependent_answers(db_session):
     job = _job(db_session)
-    store_artifact(db_session, job.id, "assessment", data=_assessment(ALICE, 100, block_hash="0x" + "10" * 32))
+    publish_assessment_projection(db_session, job.id, _assessment(ALICE, 100, block_hash="0x" + "10" * 32))
     before = load_temporal_assessment(db_session, job.id)
     assert before is not None
     authority = next(claim for claim in before["claims"] if claim["kind"].value == "function_authority")
@@ -270,6 +287,11 @@ def test_reorg_correction_preserves_rows_but_removes_dependent_answers(db_sessio
 def test_legacy_import_archives_source_and_is_idempotent(db_session):
     job = _job(db_session)
     assessment = _assessment(ALICE, 100)
+    # Claim evidence links are an unordered proof set; reverse the stored
+    # order to verify the importer retains exact archived bytes while comparing
+    # the reconstructed proof semantically.
+    multi_evidence = next(claim for claim in assessment["claims"].values() if len(claim["evidence"]) > 1)
+    multi_evidence["evidence"].reverse()
     assessment_row = Artifact(job_id=job.id, name="assessment", data=assessment)
     history = {
         "schema_version": "principal_history.v1",
@@ -300,7 +322,13 @@ def test_legacy_import_archives_source_and_is_idempotent(db_session):
     manifests = db_session.scalars(select(AssessmentImportManifest)).all()
     assert {row.artifact_id for row in manifests} == {assessment_row.id, history_row.id}
     assert all(db_session.get(AssessmentPayload, row.source_payload_id) is not None for row in manifests)
-    assert get_artifact(db_session, job.id, "assessment") == assessment
+    assessment_manifest = next(row for row in manifests if row.artifact_name == "assessment")
+    archived_source = db_session.get(AssessmentPayload, assessment_manifest.source_payload_id)
+    assert archived_source is not None and json.loads(archived_source.data) == assessment
+    projected = load_assessment_projection(db_session, job.id)
+    assert projected is not None
+    assert _assessment_for_comparison(projected) == _assessment_for_comparison(assessment)
+    assert get_artifact(db_session, job.id, "assessment") == load_temporal_assessment(db_session, job.id)
     assert get_artifact(db_session, job.id, "principal_history") == {
         key: value for key, value in history.items() if key != "schema_version"
     }
@@ -309,7 +337,7 @@ def test_legacy_import_archives_source_and_is_idempotent(db_session):
 @requires_postgres
 def test_closed_permission_update_keeps_exact_event_ordered_interval(db_session):
     job = _job(db_session)
-    store_artifact(db_session, job.id, "assessment", data=_assessment(ALICE, 100))
+    publish_assessment_projection(db_session, job.id, _assessment(ALICE, 100))
     history = {
         "contract_address": ADDRESS,
         "chain_id": 1,
@@ -355,7 +383,7 @@ def test_closed_permission_update_keeps_exact_event_ordered_interval(db_session)
 def test_one_role_event_can_support_membership_and_function_history(db_session):
     """One emitted grant can legitimately produce several derived history rows."""
     job = _job(db_session)
-    store_artifact(db_session, job.id, "assessment", data=_assessment(ALICE, 100))
+    publish_assessment_projection(db_session, job.id, _assessment(ALICE, 100))
     occurrence = {
         "authority_address": ADDRESS,
         "principal": ALICE,

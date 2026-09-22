@@ -35,7 +35,7 @@ from db.models import (
     derive_job_chain_id,
     exactness_eligible_cursor_clause,
 )
-from db.queue import HEARTBEAT_EVENT_INDEXER, get_artifact, record_heartbeat
+from db.queue import HEARTBEAT_EVENT_INDEXER, record_heartbeat
 from db.queue.typed import load_assessment_inputs
 from services.clients.etherscan import get_contract_creation_block
 from services.clients.rpc import require_rpc_url, rpc_request
@@ -1018,7 +1018,7 @@ def enroll_from_completed_jobs(
     witness_cache = caches.witnesses
     role_store_topic_cache = caches.role_topics
     for job in jobs:
-        inputs = load_assessment_inputs(get_artifact, session, job.id)
+        inputs = load_assessment_inputs(session, job.id)
         if inputs is None:
             continue
         _static_facts, artifact, _effects = inputs

@@ -17,7 +17,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from db.models import Contract, EffectiveFunction, FunctionPrincipal, Protocol
-from db.queue import create_job, store_artifact
+from db.queue import create_job, publish_assessment_projection
 from services.effects import calldata as cd
 from services.effects.anvil import ForkFixture, pause_recipe
 from services.effects.config import (
@@ -1632,11 +1632,10 @@ def test_load_contract_facts_indexes_the_canonical_selector(db_session):
     canonical = "sweep(address,uint256)"
     from tests.support.policy_builders import _assessment, _minimal_static_facts
 
-    store_artifact(
+    publish_assessment_projection(
         db_session,
         job.id,
-        "assessment",
-        data=_assessment(
+        _assessment(
             static_facts=_minimal_static_facts(address=address, name="T"),
             effects={"functions": {full_name: _effect_info(full_name, "0xdeadbeef")}},
             predicate_trees={
