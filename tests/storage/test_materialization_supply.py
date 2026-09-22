@@ -116,8 +116,8 @@ def test_publish_writes_a_current_row_with_provenance(cm_db):
     assert row.chain == "1"
     assert row.status == "ready"
     assert row.analysis_schema_version == ANALYSIS_SCHEMA_VERSION
-    assert row.tracking_plan == PLAN
-    assert row.analysis == ANALYSIS
+    assert cm.hydrate_tracking_plan(row) == PLAN
+    assert cm.hydrate_analysis(row) == ANALYSIS
     assert _provenance(row) == {
         "produced_by": PRODUCED_BY_PIPELINE,
         "source_job_id": "job-1",
@@ -241,7 +241,7 @@ def test_the_pipeline_refreshes_a_current_row_whose_bundle_differs(cm_db):
     cm_db.expire_all()
     row = _row(cm_db)
     assert row is not None
-    assert row.tracking_plan == improved
+    assert cm.hydrate_tracking_plan(row) == improved
     assert row.status == "ready"
 
     # Identical bundle, same flag: nothing to say, nothing written.
@@ -257,7 +257,7 @@ def test_the_sweep_never_overwrites_a_current_row_with_an_older_bundle(cm_db):
     assert _publish(tracking_plan=older) == PUBLISH_ALREADY_CURRENT
     cm_db.expire_all()
     row = _row(cm_db)
-    assert row is not None and row.tracking_plan == PLAN
+    assert row is not None and cm.hydrate_tracking_plan(row) == PLAN
 
 
 @requires_postgres
@@ -397,7 +397,10 @@ def captured_publish(monkeypatch):
 
 
 def _stub_artifacts(monkeypatch, mapping: dict[str, Any]) -> None:
-    monkeypatch.setattr("workers.static_worker.get_artifact", lambda _s, _j, name: mapping.get(name))
+    monkeypatch.setattr(
+        "workers.static_worker.get_artifact",
+        lambda _s, _j, name: {"schema_version": "assessment/1", **mapping} if name == "assessment" else None,
+    )
 
 
 def test_static_stage_publishes_the_artifacts_it_stored(monkeypatch, captured_publish):
@@ -482,7 +485,7 @@ def test_a_copied_bundle_does_not_overwrite_a_freshly_analyzed_row(cm_db):
     assert _publish(tracking_plan=ancestor_plan, refresh_on_differ=False) == PUBLISH_ALREADY_CURRENT
     cm_db.expire_all()
     row = _row(cm_db)
-    assert row is not None and row.tracking_plan == fresh_plan
+    assert row is not None and cm.hydrate_tracking_plan(row) == fresh_plan
 
 
 def test_static_stage_publishes_nothing_without_a_plan(monkeypatch, captured_publish):

@@ -15,6 +15,8 @@ from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
 
+from tests.support.assessment_artifacts import assessment_artifacts
+
 
 def _fake_artifact(job_id, name: str, data):
     """Inline ``Artifact`` row stand-in for the /api/analyses batched select."""
@@ -434,12 +436,14 @@ def test_analysis_detail_falls_back_to_proxy_artifacts(mock_session_cls, mock_ge
 
     mock_session.execute.side_effect = route_execute
 
-    impl_artifacts = {
-        "contract_analysis": {
-            "subject": {"name": "ImplContract"},
-            "summary": {"control_model": "ownable"},
-        },
-    }
+    impl_artifacts = assessment_artifacts(
+        {
+            "contract_analysis": {
+                "subject": {"name": "ImplContract"},
+                "summary": {"control_model": "ownable"},
+            },
+        }
+    )
 
     proxy_dep_graph = {
         "nodes": [{"id": "0x111"}, {"id": "0x222"}],
@@ -448,10 +452,12 @@ def test_analysis_detail_falls_back_to_proxy_artifacts(mock_session_cls, mock_ge
     proxy_dependencies = {
         "dependencies": ["0x4444444444444444444444444444444444444444"],
     }
-    proxy_artifacts = {
-        "dependency_graph_viz": proxy_dep_graph,
-        "dependencies": proxy_dependencies,
-    }
+    proxy_artifacts = assessment_artifacts(
+        {
+            "dependency_graph_viz": proxy_dep_graph,
+            "dependencies": proxy_dependencies,
+        }
+    )
 
     # get_all_artifacts is called once per job — return impl's artifacts for
     # the impl job's job.id and proxy's artifacts for the proxy job's job.id
@@ -509,14 +515,16 @@ def test_analysis_detail_no_fallback_when_impl_has_artifacts(
     impl_dependencies = {"dependencies": ["0x5555555555555555555555555555555555555555"]}
 
     # Impl job already has dependency_graph_viz and dependencies
-    mock_get_all_artifacts.return_value = {
-        "contract_analysis": {
-            "subject": {"name": "ImplContract"},
-            "summary": {},
-        },
-        "dependency_graph_viz": impl_dep_graph,
-        "dependencies": impl_dependencies,
-    }
+    mock_get_all_artifacts.return_value = assessment_artifacts(
+        {
+            "contract_analysis": {
+                "subject": {"name": "ImplContract"},
+                "summary": {},
+            },
+            "dependency_graph_viz": impl_dep_graph,
+            "dependencies": impl_dependencies,
+        }
+    )
 
     response = client.get("/api/analyses/impl_with_deps")
 
@@ -574,12 +582,14 @@ def test_analysis_detail_no_fallback_without_proxy_address(mock_session_cls, moc
     mock_session.execute.side_effect = route_execute
 
     # No dependency_graph_viz in artifacts
-    mock_get_all_artifacts.return_value = {
-        "contract_analysis": {
-            "subject": {"name": "Standalone"},
-            "summary": {},
-        },
-    }
+    mock_get_all_artifacts.return_value = assessment_artifacts(
+        {
+            "contract_analysis": {
+                "subject": {"name": "Standalone"},
+                "summary": {},
+            },
+        }
+    )
 
     response = client.get("/api/analyses/standalone_job")
 
@@ -677,10 +687,12 @@ def test_analysis_detail_proxy_inherits_impl_artifacts(mock_session_cls, mock_ge
     mock_session.get.return_value = None
 
     # Proxy job has only dependency artifacts (no analysis)
-    proxy_artifacts = {
-        "dependencies": {"address": proxy_addr, "dependencies": {}},
-        "dependency_graph_viz": {"nodes": [], "edges": []},
-    }
+    proxy_artifacts = assessment_artifacts(
+        {
+            "dependencies": {"address": proxy_addr, "dependencies": {}},
+            "dependency_graph_viz": {"nodes": [], "edges": []},
+        }
+    )
 
     # Impl artifacts (from get_all_artifacts)
     impl_analysis = {
@@ -688,19 +700,21 @@ def test_analysis_detail_proxy_inherits_impl_artifacts(mock_session_cls, mock_ge
         "summary": {"control_model": "authority"},
     }
     impl_permissions = {"functions": [{"function": "pause()", "selector": "0x12"}]}
-    impl_all_artifacts = {
-        "contract_analysis": impl_analysis,
-        "effective_permissions": impl_permissions,
-        "principal_labels": {"principals": []},
-        "principal_history": {
-            "schema_version": "principal_history.v1",
-            "contract_address": impl_addr,
-            "status": "ok",
-            "function_permissions": [{"function": "pause()", "principal": "0xowner"}],
-        },
-        "resolved_control_graph": {"nodes": [], "edges": []},
-        "control_snapshot": {"controller_values": {}},
-    }
+    impl_all_artifacts = assessment_artifacts(
+        {
+            "contract_analysis": impl_analysis,
+            "effective_permissions": impl_permissions,
+            "principal_labels": {"principals": []},
+            "principal_history": {
+                "schema_version": "principal_history.v1",
+                "contract_address": impl_addr,
+                "status": "ok",
+                "function_permissions": [{"function": "pause()", "principal": "0xowner"}],
+            },
+            "resolved_control_graph": {"nodes": [], "edges": []},
+            "control_snapshot": {"controller_values": {}},
+        }
+    )
 
     def fake_get_artifact(session, jid, name):
         if str(jid) == str(proxy_job_id) and name == "contract_flags":

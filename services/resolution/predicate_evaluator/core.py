@@ -10,6 +10,7 @@ import logging
 from dataclasses import replace
 from typing import Any, cast
 
+from db.assessment import get_assessment_section
 from services.resolution.caller_sources import CALLER_SOURCES as _CALLER_SOURCES
 from services.static.contract_analysis_pipeline.predicate_types import (
     LeafPredicate,
@@ -666,7 +667,7 @@ def _maybe_inline_cross_contract_call(
     )
     if lookup is None:
         return None
-    artifact = get_artifact(session, lookup.analysis_job.id, "predicate_trees")
+    artifact = get_assessment_section(session, lookup.analysis_job.id, "predicate_trees", reader=get_artifact)
     if not isinstance(artifact, dict):
         return None
     from services.resolution.adapters import CallFrame

@@ -374,7 +374,10 @@ def test_artifact_endpoint_serves_json_and_text(mock_session_cls) -> None:
 
     fake_json_artifact = MagicMock()
     fake_json_artifact.storage_key = None
-    fake_json_artifact.data = {"summary": {"control_model": "ownable"}}
+    fake_json_artifact.data = {
+        "schema_version": "assessment/1",
+        "contract_analysis": {"summary": {"control_model": "ownable"}},
+    }
     fake_json_artifact.text_data = None
     fake_json_artifact.content_type = "application/json"
 

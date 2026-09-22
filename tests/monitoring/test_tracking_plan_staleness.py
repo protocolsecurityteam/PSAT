@@ -319,7 +319,7 @@ def _materialize(session, address: str, plan: dict) -> ContractMaterialization:
         contract_name="GovernanceToken",
         status="ready",
         analysis_schema_version=ANALYSIS_SCHEMA_VERSION,
-        tracking_plan=plan,
+        assessment={"schema_version": "assessment/1", "control_tracking_plan": plan},
     )
     session.add(row)
     session.commit()

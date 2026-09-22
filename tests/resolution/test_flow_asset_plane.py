@@ -556,10 +556,22 @@ def test_a_rerun_replaces_the_payload_rather_than_appending(monkeypatch: pytest.
     ctx = _stage_ctx(monkeypatch, effects, [EthCallResult(True, WORD_KING, None, None)])
     worker, session, job = ctx["worker"], ctx["session"], ctx["job"]
     worker._resolve_flow_asset_addresses(
-        session, job, chain_id=1, rpc_url="http://stub", deployment_address=MERKLE_DROP, proven_proxied=True
+        session,
+        job,
+        chain_id=1,
+        rpc_url="http://stub",
+        deployment_address=MERKLE_DROP,
+        proven_proxied=True,
+        effects=effects,
     )
     worker._resolve_flow_asset_addresses(
-        session, job, chain_id=1, rpc_url="http://stub", deployment_address=MERKLE_DROP, proven_proxied=True
+        session,
+        job,
+        chain_id=1,
+        rpc_url="http://stub",
+        deployment_address=MERKLE_DROP,
+        proven_proxied=True,
+        effects=effects,
     )
     stored = [(name, data) for name, data in ctx["store_calls"] if name == "flow_asset_addresses"]
     assert len(stored) == 2
@@ -585,7 +597,9 @@ def _stage_ctx(
     artifact_store: dict[str, Any] = {}
 
     def fake_get_artifact(_session: Any, _job_id: Any, name: str) -> Any:
-        return effects if name == "effects" else None
+        if name != "assessment" or effects is None:
+            return None
+        return {"schema_version": "assessment/1", "effects": effects}
 
     def fake_store_artifact(_session: Any, _job_id: Any, name: str, data: Any = None, text_data: Any = None) -> None:
         store_calls.append((name, data))
@@ -618,6 +632,7 @@ def test_an_unpinnable_height_writes_nothing(monkeypatch: pytest.MonkeyPatch) ->
         rpc_url="http://stub",
         deployment_address=MERKLE_DROP,
         proven_proxied=True,
+        effects=effects,
     )
     assert written == 0
     assert ctx["store_calls"] == []
@@ -632,6 +647,7 @@ def test_no_effects_artifact_writes_nothing(monkeypatch: pytest.MonkeyPatch) -> 
         rpc_url="http://stub",
         deployment_address=MERKLE_DROP,
         proven_proxied=True,
+        effects=None,
     )
     assert written == 0
     assert ctx["store_calls"] == []
@@ -650,7 +666,8 @@ def test_an_effects_artifact_with_no_licensed_receiver_writes_nothing(monkeypatc
         "variable": "token",
         "receiver_provenance": "caller_named",
     }
-    ctx = _stage_ctx(monkeypatch, _effects(_sink("s0", caller_named)), [])
+    effects = _effects(_sink("s0", caller_named))
+    ctx = _stage_ctx(monkeypatch, effects, [])
     monkeypatch.setattr(fap, "eth_call_batch", lambda *a, **k: pytest.fail("must not read"))
     written = ctx["worker"]._resolve_flow_asset_addresses(
         ctx["session"],
@@ -659,6 +676,7 @@ def test_an_effects_artifact_with_no_licensed_receiver_writes_nothing(monkeypatc
         rpc_url="http://stub",
         deployment_address=MERKLE_DROP,
         proven_proxied=True,
+        effects=effects,
     )
     assert written == 0
     assert ctx["store_calls"] == []
@@ -674,6 +692,7 @@ def test_no_deployment_address_writes_nothing(monkeypatch: pytest.MonkeyPatch) -
         rpc_url="http://stub",
         deployment_address=None,
         proven_proxied=False,
+        effects=effects,
     )
     assert written == 0
     assert ctx["store_calls"] == []
@@ -702,6 +721,7 @@ def test_the_writer_reads_the_proxy_not_the_implementation(monkeypatch: pytest.M
         rpc_url="http://stub",
         deployment_address=REWARDS_ROUTER,
         proven_proxied=True,
+        effects=effects,
     )
     assert seen == [(REWARDS_ROUTER, hex(BLOCK))]
     payload = ctx["artifact_store"]["flow_asset_addresses"]
@@ -725,8 +745,17 @@ def test_a_failing_writer_degrades_the_step_not_the_stage(monkeypatch: pytest.Mo
     monkeypatch.setattr(rw.ResolutionWorker, "_resolve_flow_asset_addresses", boom)
 
     session = MagicMock()
-    session.execute.return_value.scalar_one_or_none.return_value = None
-    rw.ResolutionWorker().process(session, cast(Any, _job()))
+    job = _job()
+
+    # Canonical snapshot/graph writes each lock the job. The query between
+    # them is the optional Contract lookup and remains absent in this fixture.
+    def execute(statement: object) -> MagicMock:
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = job.id if "FOR UPDATE" in str(statement) else None
+        return result
+
+    session.execute.side_effect = execute
+    rw.ResolutionWorker().process(session, cast(Any, job))
 
     assert [d["phase"] for d in degraded] == ["resolution_flow_asset_plane"]
     # The stage still stored what it did prove.

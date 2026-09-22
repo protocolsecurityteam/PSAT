@@ -15,6 +15,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timedelta, timezone
 
+from db.assessment import store_assessment_section
 from tests.conftest import requires_postgres
 
 # ---------------------------------------------------------------------------
@@ -39,7 +40,6 @@ def _seed_completed_job_with_artifact(
     updated_at: datetime | None = None,
 ):
     from db.models import Job, JobStage, JobStatus
-    from db.queue import store_artifact
 
     ts = updated_at or datetime.now(timezone.utc)
     job = Job(
@@ -54,7 +54,7 @@ def _seed_completed_job_with_artifact(
     db_session.add(job)
     db_session.flush()
     if predicate_trees is not None:
-        store_artifact(db_session, job.id, "predicate_trees", data=predicate_trees)
+        store_assessment_section(db_session, job.id, "predicate_trees", data=predicate_trees)
     db_session.commit()
     return job
 
@@ -795,7 +795,6 @@ def test_probe_membership_picks_most_recent_completed_job(api_client, db_session
     one."""
     import api as api_module
     from db.models import Job, JobStage, JobStatus
-    from db.queue import store_artifact
 
     _no_auth(api_module)
     address = "0x" + "2f" * 20
@@ -839,8 +838,8 @@ def test_probe_membership_picks_most_recent_completed_job(api_client, db_session
             },
         }
 
-    store_artifact(db_session, older.id, "predicate_trees", data=_tree("OLD"))
-    store_artifact(db_session, newer.id, "predicate_trees", data=_tree("NEW"))
+    store_assessment_section(db_session, older.id, "predicate_trees", data=_tree("OLD"))
+    store_assessment_section(db_session, newer.id, "predicate_trees", data=_tree("NEW"))
     db_session.commit()
 
     resp = api_client.post(

@@ -20,6 +20,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
+from db.assessment import store_assessment_section
 from tests.conftest import requires_postgres
 
 
@@ -494,7 +495,7 @@ def test_end_to_end_heal_standalone_impl_resolves_after_backpatch(db_session, mo
     the override regresses), and the per-deployment controller-value read/sweep.
     """
     from db.models import Contract, JobStage, JobStatus
-    from db.queue import reconcile_impl_job_for_proxy, store_artifact
+    from db.queue import reconcile_impl_job_for_proxy
     from workers.resolution_worker import ResolutionWorker
 
     impl, proxy = _addr(), _addr()
@@ -506,19 +507,19 @@ def test_end_to_end_heal_standalone_impl_resolves_after_backpatch(db_session, mo
     contract = Contract(address=impl, chain="ethereum", contract_name="Core", job_id=job.id)
     db_session.add(contract)
     db_session.commit()
-    store_artifact(
+    store_assessment_section(
         db_session,
         job.id,
         "contract_analysis",
         data={"subject": {"address": impl}, "contract_name": "Core", "functions": []},
     )
-    store_artifact(
+    store_assessment_section(
         db_session,
         job.id,
         "control_tracking_plan",
         data={"schema_version": "0.1", "contract_address": impl, "contract_name": "Core", "tracked_controllers": []},
     )
-    store_artifact(
+    store_assessment_section(
         db_session,
         job.id,
         "predicate_trees",

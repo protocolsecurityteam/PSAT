@@ -734,7 +734,7 @@ def test_tracking_plan_drives_enrollment_and_scan_detection(anvil_env, test_db):
             bytecode_keccak="0x" + "0" * 64,
             address=addr.lower(),
             contract_name="TestSolmateOwned",
-            tracking_plan=tracking_plan,
+            assessment={"schema_version": "assessment/1", "control_tracking_plan": tracking_plan},
             status="ready",
             # Enrollment reads via the version-filtered ``find_by_address``; seed
             # at the current analyzer version so the row is visible after an

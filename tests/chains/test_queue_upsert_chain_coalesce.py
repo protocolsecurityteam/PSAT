@@ -189,7 +189,7 @@ def _completed_source_with_null_contract(session, address, request_chain):
     """A completed source job whose request declares *request_chain* but whose
     Contract row was persisted ``chain=NULL`` (the legacy write shape)."""
     from db.models import Contract, ContractSummary, JobStage, JobStatus
-    from db.queue import create_job, store_artifact, store_source_files
+    from db.queue import create_job, store_source_files
 
     job = create_job(session, {"address": address, "name": "LegacyContract", "chain": request_chain})
     job.status = JobStatus.completed
@@ -214,7 +214,12 @@ def _completed_source_with_null_contract(session, address, request_chain):
     session.commit()
 
     store_source_files(session, job.id, {"src/Legacy.sol": "contract Legacy {}"})
-    store_artifact(session, job.id, "contract_analysis", data={"summary": {}})
+    from db.assessment import store_assessment_section
+    from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
+
+    job.analysis_schema_version = ANALYSIS_SCHEMA_VERSION
+    session.commit()
+    store_assessment_section(session, job.id, "contract_analysis", {"summary": {}})
     return job
 
 

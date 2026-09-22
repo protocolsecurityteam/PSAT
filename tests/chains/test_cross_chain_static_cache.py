@@ -11,8 +11,11 @@ chain/on-chain-derived artifacts to be re-derived per chain.
 
 from __future__ import annotations
 
+from typing import cast
+
 from sqlalchemy import select
 
+from db.assessment import get_assessment_section, load_assessment, store_assessment
 from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
 from db.models import Contract, ContractSummary, JobStage, JobStatus, RoleDefinition
 from db.queue import (
@@ -23,6 +26,7 @@ from db.queue import (
     store_artifact,
     store_source_files,
 )
+from schemas.assessment import Assessment
 from tests.cache_helpers import db_session, requires_postgres  # noqa: F401
 
 pytestmark = requires_postgres
@@ -99,10 +103,21 @@ def _make_donor(
 
     store_source_files(session, job.id, dict(_SOURCES))
     if with_analysis:
-        store_artifact(session, job.id, "contract_analysis", data=_analysis(address.lower()))
-        store_artifact(session, job.id, "control_tracking_plan", data=_tracking_plan(address.lower()))
-        store_artifact(session, job.id, "predicate_trees", data=dict(_PREDICATE_TREES))
-        store_artifact(session, job.id, "effects", data=dict(_EFFECTS))
+        store_assessment(
+            session,
+            job.id,
+            cast(
+                Assessment,
+                {
+                    "schema_version": "assessment/1",
+                    "contract_analysis": _analysis(address.lower()),
+                    "control_tracking_plan": _tracking_plan(address.lower()),
+                    "predicate_trees": dict(_PREDICATE_TREES),
+                    "effects": dict(_EFFECTS),
+                    "control_snapshot": {"runtime": "must-not-copy"},
+                },
+            ),
+        )
     else:
         # Proxy donor: contract_flags, no contract_analysis.
         store_artifact(session, job.id, "contract_flags", data={"is_proxy": True, "proxy_type": "eip1967"})
@@ -146,21 +161,42 @@ def test_copy_restamps_address_scopes_artifacts_and_leaves_donor_untouched(db_se
         },
     )
     target_job, target_contract = _make_target(db_session)
+    store_assessment(
+        db_session,
+        target_job.id,
+        {
+            "schema_version": "assessment/1",
+            "control_snapshot": {
+                "schema_version": "1",
+                "contract_address": ADDR_BASE.lower(),
+                "contract_name": "Vault",
+                "block_number": 123,
+                "controller_values": {},
+            },
+        },
+    )
 
     cid = copy_static_cache_cross_chain(db_session, donor_job.id, target_job.id, target_address=ADDR_BASE)
     assert cid == target_contract.id
 
     # Address re-stamped on the copied code plane.
-    ca = get_artifact(db_session, target_job.id, "contract_analysis")
+    ca = get_assessment_section(db_session, target_job.id, "contract_analysis")
     assert isinstance(ca, dict)
     assert ca["subject"]["address"] == ADDR_BASE.lower()
-    tp = get_artifact(db_session, target_job.id, "control_tracking_plan")
+    tp = get_assessment_section(db_session, target_job.id, "control_tracking_plan")
     assert isinstance(tp, dict)
     assert tp["contract_address"] == ADDR_BASE.lower()
 
     # Source-only artifacts reused byte-for-byte.
-    assert get_artifact(db_session, target_job.id, "predicate_trees") == _PREDICATE_TREES
-    assert get_artifact(db_session, target_job.id, "effects") == _EFFECTS
+    assert get_assessment_section(db_session, target_job.id, "predicate_trees") == _PREDICATE_TREES
+    assert get_assessment_section(db_session, target_job.id, "effects") == _EFFECTS
+    assert get_assessment_section(db_session, target_job.id, "control_snapshot") == {
+        "contract_address": ADDR_BASE.lower(),
+        "schema_version": "1",
+        "contract_name": "Vault",
+        "block_number": 123,
+        "controller_values": {},
+    }
 
     # Deployment/chain-specific artifacts NOT copied — re-derived per chain.
     assert get_artifact(db_session, target_job.id, "static_dependencies") is None
@@ -182,7 +218,7 @@ def test_copy_restamps_address_scopes_artifacts_and_leaves_donor_untouched(db_se
 
     # Donor untouched: its analysis still points at its own address, its contract
     # still belongs to the donor job (NOT reassigned like same-chain copy).
-    donor_ca = get_artifact(db_session, donor_job.id, "contract_analysis")
+    donor_ca = get_assessment_section(db_session, donor_job.id, "contract_analysis")
     assert isinstance(donor_ca, dict)
     assert donor_ca["subject"]["address"] == ADDR_MAINNET.lower()
     db_session.refresh(donor_contract)
@@ -203,8 +239,10 @@ def test_parity_fresh_vs_cross_chain_copy(db_session):
         "predicate_trees": _PREDICATE_TREES,
         "effects": _EFFECTS,
     }
+    assessment = load_assessment(db_session, target_job.id)
+    assert assessment is not None
     for name, want in expected.items():
-        assert get_artifact(db_session, target_job.id, name) == want, name
+        assert assessment.get(name) == want, name
 
 
 def test_copy_returns_none_without_target_contract(db_session):
@@ -306,7 +344,7 @@ def test_discovery_reuses_cross_chain_donor(db_session, monkeypatch):
     assert target_job.source_content_hash == donor_hash
 
     # The reused analysis is re-stamped to the Base deployment.
-    ca = get_artifact(db_session, target_job.id, "contract_analysis")
+    ca = get_assessment_section(db_session, target_job.id, "contract_analysis")
     assert isinstance(ca, dict)
     assert ca["subject"]["address"] == ADDR_BASE.lower()
     # The Base deployment got its own per-chain Contract row.

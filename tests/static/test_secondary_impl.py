@@ -430,8 +430,8 @@ def test_static_cache_hit_still_resolves_secondary_impls(db_session, monkeypatch
     leaving the admin impl an ownerless orphan. Drives the real
     ``StaticWorker.process`` through the cache branch.
     """
+    from db.assessment import store_assessment_section
     from db.models import Contract, Job, JobStage, JobStatus
-    from db.queue import store_artifact
     from workers.static_worker import StaticWorker
 
     def _a() -> str:
@@ -464,7 +464,7 @@ def test_static_cache_hit_still_resolves_secondary_impls(db_session, monkeypatch
     )
     db_session.commit()
     # The cached contract_analysis carries the detected pointer (copy_static_cache copies it).
-    store_artifact(
+    store_assessment_section(
         db_session,
         impl_job.id,
         "contract_analysis",

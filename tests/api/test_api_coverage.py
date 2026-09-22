@@ -23,6 +23,8 @@ from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 
+from tests.support.assessment_artifacts import assessment_artifacts
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -309,7 +311,7 @@ def test_artifact_lookup_by_job_id(mock_session_cls, mock_get_artifact):
     mock_session.execute.side_effect = route_execute
     mock_session.get.return_value = fake_job
 
-    mock_get_artifact.return_value = {"data": "value"}
+    mock_get_artifact.return_value = {"schema_version": "assessment/1", "contract_analysis": {"data": "value"}}
 
     response = client.get(f"/api/analyses/{job_id}/artifact/contract_analysis", headers=_admin_headers())
     assert response.status_code == 200
@@ -344,7 +346,7 @@ def test_artifact_lookup_by_address(mock_session_cls, mock_get_artifact):
     # session.get for ID lookup raises (simulating invalid UUID)
     mock_session.get.side_effect = Exception("not a UUID")
 
-    mock_get_artifact.return_value = {"found": True}
+    mock_get_artifact.return_value = {"schema_version": "assessment/1", "contract_analysis": {"found": True}}
 
     response = client.get(f"/api/analyses/{addr}/artifact/contract_analysis", headers=_admin_headers())
     assert response.status_code == 200
@@ -504,7 +506,7 @@ def test_artifact_json_extension_stripping(mock_session_cls, mock_get_artifact):
     mock_exec.scalar_one_or_none.return_value = fake_job
     mock_session.execute.return_value = mock_exec
 
-    mock_get_artifact.side_effect = [{"key": "val"}]
+    mock_get_artifact.side_effect = [{"schema_version": "assessment/1", "contract_analysis": {"key": "val"}}]
 
     response = client.get("/api/analyses/job1/artifact/contract_analysis.json", headers=_admin_headers())
     assert response.status_code == 200
@@ -603,12 +605,14 @@ def test_analysis_detail_relational_effective_permissions(mock_session_cls, mock
 
     mock_session.execute.side_effect = route_execute
 
-    mock_get_all_artifacts.return_value = {
-        "contract_analysis": {
-            "subject": {"name": "TestContract"},
-            "summary": {"control_model": "ownable"},
-        },
-    }
+    mock_get_all_artifacts.return_value = assessment_artifacts(
+        {
+            "contract_analysis": {
+                "subject": {"name": "TestContract"},
+                "summary": {"control_model": "ownable"},
+            },
+        }
+    )
 
     response = client.get("/api/analyses/rel_job")
     assert response.status_code == 200
@@ -679,12 +683,14 @@ def test_analysis_detail_relational_control_snapshot(mock_session_cls, mock_get_
     mock_session.execute.side_effect = route_execute
 
     # No control_snapshot in artifacts
-    mock_get_all_artifacts.return_value = {
-        "contract_analysis": {
-            "subject": {"name": "CVContract"},
-            "summary": {},
-        },
-    }
+    mock_get_all_artifacts.return_value = assessment_artifacts(
+        {
+            "contract_analysis": {
+                "subject": {"name": "CVContract"},
+                "summary": {},
+            },
+        }
+    )
 
     response = client.get("/api/analyses/cv_job")
     assert response.status_code == 200
@@ -761,12 +767,14 @@ def test_analysis_detail_relational_control_graph(mock_session_cls, mock_get_all
     mock_session.execute.side_effect = route_execute
 
     # No resolved_control_graph in artifacts
-    mock_get_all_artifacts.return_value = {
-        "contract_analysis": {
-            "subject": {"name": "CGContract"},
-            "summary": {},
-        },
-    }
+    mock_get_all_artifacts.return_value = assessment_artifacts(
+        {
+            "contract_analysis": {
+                "subject": {"name": "CGContract"},
+                "summary": {},
+            },
+        }
+    )
 
     response = client.get("/api/analyses/cg_job")
     assert response.status_code == 200
@@ -831,12 +839,14 @@ def test_analysis_detail_relational_principal_labels(mock_session_cls, mock_get_
 
     mock_session.execute.side_effect = route_execute
 
-    mock_get_all_artifacts.return_value = {
-        "contract_analysis": {
-            "subject": {"name": "PLContract"},
-            "summary": {},
-        },
-    }
+    mock_get_all_artifacts.return_value = assessment_artifacts(
+        {
+            "contract_analysis": {
+                "subject": {"name": "PLContract"},
+                "summary": {},
+            },
+        }
+    )
 
     response = client.get("/api/analyses/pl_job")
     assert response.status_code == 200
@@ -873,7 +883,7 @@ def test_analysis_detail_lookup_by_id(mock_session_cls, mock_get_all_artifacts):
     mock_session.execute.side_effect = route_execute
     mock_session.get.return_value = job
 
-    mock_get_all_artifacts.return_value = {}
+    mock_get_all_artifacts.return_value = assessment_artifacts({})
 
     response = client.get(f"/api/analyses/{job_id}")
     assert response.status_code == 200
@@ -910,7 +920,7 @@ def test_analysis_detail_lookup_by_address(mock_session_cls, mock_get_all_artifa
     mock_session.execute.side_effect = route_execute
     mock_session.get.side_effect = Exception("invalid UUID")
 
-    mock_get_all_artifacts.return_value = {}
+    mock_get_all_artifacts.return_value = assessment_artifacts({})
 
     response = client.get(f"/api/analyses/{addr}")
     assert response.status_code == 200

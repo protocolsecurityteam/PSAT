@@ -1,6 +1,4 @@
-"""One-shot backfill: move contract_materializations.{analysis,tracking_plan}
-out of Postgres JSONB into object storage, populating the
-``*_blob_key`` columns and clearing the inline JSONB.
+"""Move inline canonical materialization Assessments into object storage.
 
 Why: JSONB is fine for storage but gets detoasted on every read,
 inflates page-cache pressure on this hot table, and slows backup /
@@ -10,7 +8,7 @@ Tigris lets the table itself stay tiny while keeping the dedup
 semantics (the row continues to be the source of truth for which
 keccak has been built; only the payload moves).
 
-Idempotent: rows that already have ``analysis_blob_key`` set are
+Idempotent: rows that already have ``assessment_blob_key`` set are
 skipped. Safe to re-run after a partial completion. Exits non-zero
 if any row fails so the operator can re-run targeted at the
 remaining set.
@@ -36,8 +34,8 @@ The script does NOT clear the inline JSONB columns by default —
      suspenders for one TTL cycle).
   3. Verify reads are working via the blob path (``hydrate_*``).
   4. Re-run with --clear-jsonb to reclaim the JSONB space.
-  5. Optional follow-up migration: drop the ``analysis`` /
-     ``tracking_plan`` columns entirely.
+Legacy component columns are deliberately ignored. They belong to an older
+analyzer era and regenerate through the normal materialization cache miss.
 """
 
 from __future__ import annotations
@@ -73,33 +71,21 @@ def _backfill_row(
 ) -> tuple[int, int]:
     """Backfill one row. Returns ``(blobs_written, bytes_uploaded)``.
 
-    Skips per-payload if the corresponding blob_key is already set
-    (idempotent re-run) or the inline JSONB is None (nothing to move).
+    Skips rows already uploaded or without an inline canonical Assessment.
     """
     blobs_written = 0
     bytes_uploaded = 0
 
     updates: dict[str, Any] = {}
 
-    if row.analysis_blob_key is None and row.analysis is not None:
-        key = _blob_key(row.chain, row.bytecode_keccak, "analysis")
-        body = _serialize(row.analysis)
+    if row.assessment_blob_key is None and row.assessment is not None:
+        key = _blob_key(row.chain, row.bytecode_keccak, "assessment")
+        body = _serialize(row.assessment)
         if not dry_run:
             client.put(key, body, JSON_CONTENT_TYPE)
-        updates["analysis_blob_key"] = key
+        updates["assessment_blob_key"] = key
         if clear_jsonb:
-            updates["analysis"] = None
-        blobs_written += 1
-        bytes_uploaded += len(body)
-
-    if row.tracking_plan_blob_key is None and row.tracking_plan is not None:
-        key = _blob_key(row.chain, row.bytecode_keccak, "tracking_plan")
-        body = _serialize(row.tracking_plan)
-        if not dry_run:
-            client.put(key, body, JSON_CONTENT_TYPE)
-        updates["tracking_plan_blob_key"] = key
-        if clear_jsonb:
-            updates["tracking_plan"] = None
+            updates["assessment"] = None
         blobs_written += 1
         bytes_uploaded += len(body)
 
@@ -125,7 +111,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--clear-jsonb",
         action="store_true",
-        help="Set analysis/tracking_plan JSONB to NULL after blob upload. Off by default — run twice "
+        help="Set assessment JSONB to NULL after blob upload. Off by default — run twice "
         "(once without to populate blob_key, once with to reclaim JSONB space) so a rollback in "
         "between is safe.",
     )
@@ -187,9 +173,7 @@ def main(argv: list[str] | None = None) -> int:
                 row_id = f"{row.chain}:{row.bytecode_keccak[:18]}"
 
                 # Skip rows that have nothing to move.
-                if (row.analysis_blob_key is not None or row.analysis is None) and (
-                    row.tracking_plan_blob_key is not None or row.tracking_plan is None
-                ):
+                if row.assessment_blob_key is not None or row.assessment is None:
                     continue
 
                 try:

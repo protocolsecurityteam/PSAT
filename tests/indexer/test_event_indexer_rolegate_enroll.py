@@ -172,8 +172,8 @@ def session():
 
 
 def _completed_job_with_gate(session, descriptor: dict[str, Any]):
+    from db.assessment import store_assessment_section
     from db.models import Job, JobStage, JobStatus
-    from db.queue import store_artifact
 
     job = Job(
         address=_PROTECTED,
@@ -185,7 +185,7 @@ def _completed_job_with_gate(session, descriptor: dict[str, Any]):
     )
     session.add(job)
     session.flush()
-    store_artifact(
+    store_assessment_section(
         session,
         job.id,
         "predicate_trees",
@@ -343,8 +343,8 @@ def test_enrolls_via_state_variable_controllervalue(session, monkeypatch):
 
 
 def _completed_job_with_two_gates(session, descriptors: list[dict[str, Any]]):
+    from db.assessment import store_assessment_section
     from db.models import Job, JobStage, JobStatus
-    from db.queue import store_artifact
 
     job = Job(
         address=_PROTECTED,
@@ -357,7 +357,7 @@ def _completed_job_with_two_gates(session, descriptors: list[dict[str, Any]]):
     session.add(job)
     session.flush()
     trees = {f"fn{i}()": {"op": "LEAF", "leaf": {"set_descriptor": d}} for i, d in enumerate(descriptors)}
-    store_artifact(session, job.id, "predicate_trees", data={"trees": trees})
+    store_assessment_section(session, job.id, "predicate_trees", data={"trees": trees})
     session.commit()
     return job
 

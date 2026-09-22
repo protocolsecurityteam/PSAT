@@ -165,10 +165,12 @@ def test_cross_chain_reuse_copies_bundle_and_skips_builder(_route_to_test_db, _c
     assert row2.bytecode_keccak == KECCAK_BASE
     assert row2.address == ADDR_BASE
     assert row2.source_content_hash == src_hash
-    # The CODE plane is reused byte-for-byte.
-    assert cm.hydrate_analysis(row2) == row1.analysis
-    assert cm.hydrate_tracking_plan(row2) == row1.tracking_plan
-    assert cm.hydrate_predicate_trees(row2) == row1.predicate_trees
+    # Static inputs are reused while deployment identity is reconstructed.
+    reused_analysis = cm.hydrate_analysis(row2)
+    reused_plan = cm.hydrate_tracking_plan(row2)
+    assert reused_analysis is not None and reused_analysis["subject"]["address"] == ADDR_BASE
+    assert reused_plan is not None and reused_plan["contract_address"] == ADDR_BASE
+    assert cm.hydrate_predicate_trees(row2) == cm.hydrate_predicate_trees(row1)
     # Two distinct rows: state stays per (chain, address).
     assert cm.find_by_keccak(_clean_cm, chain="base", bytecode_keccak=KECCAK_BASE) is not None
     assert cm.find_by_keccak(_clean_cm, chain="ethereum", bytecode_keccak=KECCAK_BASE) is None
@@ -209,6 +211,42 @@ def test_reuse_ignores_old_schema_version_donor(_route_to_test_db, _clean_cm):
     assert built["n"] == 1, "old-version donor must not be reused"
     assert row.analysis_schema_version == ANALYSIS_SCHEMA_VERSION
     assert row.contract_name == "Fresh"
+
+
+@requires_postgres
+def test_current_era_row_without_canonical_assessment_regenerates(_route_to_test_db, _clean_cm):
+    """The era stamp alone cannot turn legacy component columns into Assessment."""
+    stale = ContractMaterialization(
+        chain="1",
+        bytecode_keccak=KECCAK_MAINNET,
+        address=ADDR_MAINNET,
+        analysis={"legacy": True},
+        tracking_plan={"legacy": True},
+        status="ready",
+        analysis_schema_version=ANALYSIS_SCHEMA_VERSION,
+    )
+    _clean_cm.add(stale)
+    _clean_cm.commit()
+
+    built = {"n": 0}
+
+    def build() -> dict[str, Any]:
+        built["n"] += 1
+        return _bundle("Canonical")
+
+    row = cm.materialize_or_wait(
+        chain="ethereum",
+        address=ADDR_MAINNET,
+        bytecode_keccak=KECCAK_MAINNET,
+        builder=build,
+    )
+    assert built["n"] == 1
+    assert row.assessment == {
+        "schema_version": "assessment/1",
+        "contract_analysis": _bundle("Canonical")["analysis"],
+        "control_tracking_plan": _bundle("Canonical")["tracking_plan"],
+        "predicate_trees": _bundle("Canonical")["predicate_trees"],
+    }
 
 
 @requires_postgres

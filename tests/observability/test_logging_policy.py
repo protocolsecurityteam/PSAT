@@ -96,15 +96,19 @@ def _drive_process_with_missing_contract_row(monkeypatch: pytest.MonkeyPatch) ->
     }
 
     def fake_get_artifact(_session: Any, _job_id: Any, name: str) -> Any:
+        if name != "assessment":
+            return None
         return {
+            "schema_version": "assessment/1",
             "contract_analysis": contract_analysis,
             "control_snapshot": control_snapshot,
             "resolved_control_graph": resolved_graph,
             "control_tracking_plan": tracking_plan,
-        }.get(name)
+        }
 
     monkeypatch.setattr("workers.policy_worker.get_artifact", fake_get_artifact)
     monkeypatch.setattr("workers.policy_worker.store_artifact", lambda *a, **kw: None)
+    monkeypatch.setattr("db.assessment._lock_job", lambda *a: None)
     monkeypatch.setattr("workers.policy_worker._load_nested_artifacts", lambda *_a, **_kw: {})
     monkeypatch.setattr(
         "workers.policy_worker.build_effective_permissions",
@@ -188,14 +192,23 @@ def _drive_hydration(monkeypatch: pytest.MonkeyPatch, *, raises: bool) -> tuple[
     ``contract_materializations`` lookup either raises or misses."""
     from unittest.mock import MagicMock
 
-    from db.nested_artifacts import artifact_key
     from workers import policy_worker
 
-    row = SimpleNamespace(name=artifact_key(TARGET_ADDRESS, "snapshot"))
     session = MagicMock()
-    session.execute.return_value.scalars.return_value.all.return_value = [row]
 
-    monkeypatch.setattr(policy_worker, "get_artifact", lambda *_a, **_kw: {"contract_address": TARGET_ADDRESS})
+    monkeypatch.setattr(
+        policy_worker,
+        "get_artifact",
+        lambda *_a, **_kw: {
+            "schema_version": "assessment/1",
+            "recursive": {
+                TARGET_ADDRESS: {
+                    "schema_version": "assessment/1",
+                    "control_snapshot": {"contract_address": TARGET_ADDRESS},
+                }
+            },
+        },
+    )
 
     def _lookup(_session: Any, *, chain: str, address: str) -> Any:
         if raises:

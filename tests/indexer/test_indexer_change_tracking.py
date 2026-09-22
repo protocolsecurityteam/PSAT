@@ -35,6 +35,10 @@ AUTH = "0x" + "a7" * 20
 ADDR = "0x" + "b8" * 20
 
 
+def _assessment(predicate_trees=None):
+    return {"schema_version": "assessment/1", "predicate_trees": predicate_trees or {}}
+
+
 @pytest.fixture
 def session(db_session):
     db_session.execute(delete(IndexerWork))
@@ -213,7 +217,7 @@ def test_unchanged_enrollment_reads_no_artifact_and_poison_does_not_block_siblin
     def read(_session, job_id, name):
         if job_id == first.id:
             raise ValueError("broken object")
-        return {}
+        return _assessment()
 
     read_mock = Mock(side_effect=read)
     monkeypatch.setattr(indexer, "get_artifact", read_mock)
@@ -226,7 +230,7 @@ def test_unchanged_enrollment_reads_no_artifact_and_poison_does_not_block_siblin
     read_mock.assert_not_called()
     # Repair only the failed source; a new write allows it to run immediately.
     read_mock.side_effect = None
-    read_mock.return_value = {}
+    read_mock.return_value = _assessment()
     mark_dirty(session, "job", str(first.id))
     session.commit()
     scheduler.drain_enrollment(session)
@@ -238,7 +242,7 @@ def test_transient_missing_seed_stays_pending_until_retry_succeeds(session, monk
     import workers.event_log_indexer as indexer
 
     row = job(session)
-    monkeypatch.setattr(indexer, "get_artifact", lambda *_: {})
+    monkeypatch.setattr(indexer, "get_artifact", lambda *_: _assessment())
     monkeypatch.setattr(
         indexer,
         "_descriptors_from_artifact",
@@ -279,7 +283,11 @@ def test_drain_shares_failed_lookups_and_retries_with_fresh_caches(
     session.commit()
     sources = [("job", first.id), (second_kind, second.id)]
     monkeypatch.setattr(indexer, "supported_chain_ids", lambda: {1, 8453})
-    monkeypatch.setattr(indexer, "get_artifact", lambda _s, source_id, _n: {"first": source_id == first.id})
+    monkeypatch.setattr(
+        indexer,
+        "get_artifact",
+        lambda _s, source_id, _n: _assessment({"first": source_id == first.id}),
+    )
     monkeypatch.setattr(
         indexer,
         "_descriptors_from_artifact",
@@ -323,7 +331,7 @@ def test_drain_shares_delegated_role_probes_until_next_pass(session, monkeypatch
     import workers.event_log_indexer as indexer
 
     sources = [job(session), job(session)]
-    monkeypatch.setattr(indexer, "get_artifact", lambda *_: {})
+    monkeypatch.setattr(indexer, "get_artifact", lambda *_: _assessment())
     monkeypatch.setattr(indexer, "_descriptors_from_artifact", lambda _: [{"authority_contract": {"address": AUTH}}])
     monkeypatch.setattr(indexer, "_is_delegated_role_gate_descriptor", lambda _: True)
     probe = Mock(side_effect=TimeoutError("unavailable"))
@@ -424,7 +432,7 @@ def test_partial_seed_failure_preserves_siblings_and_retries_missing_only(sessio
     addresses = ["0x" + f"{i:040x}" for i in (123, 124, 125)]
     missing = addresses[1]
     topic = "0x" + "11" * 32
-    monkeypatch.setattr(indexer, "get_artifact", lambda *_: {})
+    monkeypatch.setattr(indexer, "get_artifact", lambda *_: _assessment())
     monkeypatch.setattr(
         indexer,
         "_descriptors_from_artifact",
@@ -546,7 +554,7 @@ def test_more_than_500_sources_drain_in_bounded_batches_without_rereads(session,
         ]
     )
     session.commit()
-    reader = Mock(return_value={})
+    reader = Mock(return_value=_assessment())
     monkeypatch.setattr(indexer, "get_artifact", reader)
     scheduler.drain_enrollment(session, limit=50)
     assert reader.call_count == 50
@@ -563,7 +571,7 @@ def test_enrollment_commits_before_next_external_read(session, monkeypatch):
     row = job(session)
     addresses = [AUTH, ADDR]
     topic = "0x" + "77" * 32
-    monkeypatch.setattr(indexer, "get_artifact", lambda *_: {})
+    monkeypatch.setattr(indexer, "get_artifact", lambda *_: _assessment())
     monkeypatch.setattr(
         indexer,
         "_descriptors_from_artifact",
@@ -614,7 +622,7 @@ def test_crash_mid_role_authority_does_not_commit_an_incomplete_topic_group(sess
 
     row = job(session)
     topics = all_topic0s()[:2]
-    monkeypatch.setattr(indexer, "get_artifact", lambda *_: {})
+    monkeypatch.setattr(indexer, "get_artifact", lambda *_: _assessment())
     monkeypatch.setattr(indexer, "_descriptors_from_artifact", lambda _: [{"authority_contract": {"address": AUTH}}])
     monkeypatch.setattr(indexer, "_is_delegated_role_gate_descriptor", lambda _: True)
     monkeypatch.setattr(indexer, "_role_store_topic0s", lambda *_: topics)
@@ -650,7 +658,7 @@ def test_tracking_budget_does_not_disable_job_enrollment(session, monkeypatch):
     )
     session.add(monitored)
     session.commit()
-    reader = Mock(return_value={})
+    reader = Mock(return_value=_assessment())
     monkeypatch.setattr(indexer, "get_artifact", reader)
     scheduler.drain_enrollment(session, tracked_limit=0)
     assert reader.call_count == 1

@@ -335,12 +335,19 @@ def _stub_stage(monkeypatch, **overrides: Any) -> None:
 
     monkeypatch.setattr(
         "workers.resolution_worker.get_artifact",
-        lambda _s, _j, name: {
-            "control_tracking_plan": tracking_plan,
-            "contract_analysis": contract_analysis,
-        }.get(name),
+        lambda _s, _j, name: (
+            {
+                "schema_version": "assessment/1",
+                "control_tracking_plan": tracking_plan,
+                "contract_analysis": contract_analysis,
+            }
+            if name == "assessment"
+            else None
+        ),
     )
     monkeypatch.setattr("workers.resolution_worker.store_artifact", lambda *a, **kw: None)
+    monkeypatch.setattr("workers.resolution_worker.store_assessment_section", lambda *a, **kw: None)
+    monkeypatch.setattr("workers.resolution_worker.store_nested_artifacts", lambda *a, **kw: None)
     monkeypatch.setattr("workers.resolution_worker.build_control_snapshot", lambda *a, **kw: snapshot)
     monkeypatch.setattr(
         "workers.resolution_worker.resolve_control_graph",

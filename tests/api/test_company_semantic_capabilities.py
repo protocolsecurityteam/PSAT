@@ -13,6 +13,8 @@ from datetime import datetime, timezone
 
 import pytest
 
+from db.assessment import store_assessment_section
+
 # offline: no live owner()/governor() eth_call during predicate evaluation
 pytestmark = pytest.mark.usefixtures("_stub_live_authority")
 
@@ -24,7 +26,6 @@ def _seed_protocol_with_jobs(db_session, *, name: str, addresses_with_artifacts)
     """``addresses_with_artifacts`` is a list of
     ``(address, predicate_trees_or_None)``."""
     from db.models import Job, JobStage, JobStatus, Protocol
-    from db.queue import store_artifact
 
     proto = Protocol(name=name)
     db_session.add(proto)
@@ -43,7 +44,7 @@ def _seed_protocol_with_jobs(db_session, *, name: str, addresses_with_artifacts)
         db_session.add(job)
         db_session.flush()
         if artifact is not None:
-            store_artifact(db_session, job.id, "predicate_trees", data=artifact)
+            store_assessment_section(db_session, job.id, "predicate_trees", data=artifact)
     db_session.commit()
     return proto
 
@@ -126,7 +127,6 @@ def test_company_semantic_capabilities_twin_keeps_both_chains(api_client, db_ses
     entry.
     """
     from db.models import Job, JobStage, JobStatus, Protocol
-    from db.queue import store_artifact
 
     name = f"twin_semcaps_{uuid.uuid4().hex[:6]}"
     addr = "0x" + uuid.uuid4().hex[:8] + "77" * 16
@@ -146,7 +146,7 @@ def test_company_semantic_capabilities_twin_keeps_both_chains(api_client, db_ses
         )
         db_session.add(job)
         db_session.flush()
-        store_artifact(db_session, job.id, "predicate_trees", data=_guard_tree(fn))
+        store_assessment_section(db_session, job.id, "predicate_trees", data=_guard_tree(fn))
     db_session.commit()
 
     resp = api_client.get(f"/api/company/{name}/semantic_capabilities")

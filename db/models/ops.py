@@ -111,11 +111,15 @@ class EtherscanCache(Base):
 class ContractMaterialization(Base):
     """Cross-job, cross-process materialization cache.
 
-    A row per ``(chain, bytecode_keccak)`` recording the static analysis
-    + tracking_plan bundle so two impl jobs in the same protocol — or a
+    A row per ``(chain, bytecode_keccak)`` recording one canonical Assessment
+    with reusable static sections, so two impl jobs in the same protocol — or a
     same-protocol re-run on the next day — skip the expensive forge build
     + Slither pass. Read/written via ``db.contract_materializations`` with
     request-coalescing through ``pg_advisory_xact_lock``.
+
+    ``assessment`` / ``assessment_blob_key`` are the only analytical payload
+    read and written by current code. The older component columns remain for a
+    rolling compatibility window and are inert.
 
     ``status='building'`` marks a row whose builder is currently running
     (``builder_started_at`` records when); concurrent callers poll the
@@ -131,6 +135,11 @@ class ContractMaterialization(Base):
     bytecode_keccak: Mapped[str] = mapped_column(String(66), primary_key=True)
     address: Mapped[str] = mapped_column(String(42), nullable=False)
     contract_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Canonical persisted analytical document. The legacy component columns
+    # below remain physically present for rolling compatibility, but new code
+    # reads and writes only this Assessment envelope.
+    assessment: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    assessment_blob_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     analysis: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     tracking_plan: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     predicate_trees: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)

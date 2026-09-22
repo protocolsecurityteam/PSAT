@@ -192,16 +192,10 @@ def test_legacy_inline_artifact_still_reads(db_session, storage_bucket):
 
 
 def test_nested_artifact_keys_round_trip_through_storage(db_session, storage_bucket):
-    """Regression: nested recursive.* artifact names must pass ``_safe_name``.
-
-    The storage layer's name validator rejects colons. A prior key format
-    used ``recursive:<addr>:<kind>`` which passed unit tests (those stub
-    ``store_artifact``) but failed at runtime whenever S3-compatible storage
-    was active. This test hits the real client to make sure the current
-    naming stays compatible.
-    """
-    from db.nested_artifacts import ARTIFACT_KINDS, artifact_key, parse_key, store_bundle
-    from db.queue import create_job, get_artifact
+    """Recursive results persist inside the one Assessment object."""
+    from db.assessment import load_assessment
+    from db.nested_artifacts import store_bundle
+    from db.queue import create_job
 
     job = create_job(db_session, {"address": "0xab", "name": "nested-keys"})
     address = "0x3994741a5b29c60d0ab318de1024f9256fe959dc"
@@ -214,11 +208,13 @@ def test_nested_artifact_keys_round_trip_through_storage(db_session, storage_buc
 
     store_bundle(db_session, job.id, {address: bundle})
 
-    # Round-trip each kind back.
-    for kind in ARTIFACT_KINDS:
-        name = artifact_key(address, kind)
-        assert parse_key(name) == (address, kind)
-        assert get_artifact(db_session, job.id, name) == bundle[kind]
+    assessment = load_assessment(db_session, job.id)
+    assert assessment is not None
+    child = assessment.get("recursive", {})[address]
+    assert child.get("contract_analysis") == bundle["analysis"]
+    assert child.get("control_tracking_plan") == bundle["tracking_plan"]
+    assert child.get("control_snapshot") == bundle["snapshot"]
+    assert child.get("effective_permissions") == bundle["effective_permissions"]
 
 
 def test_repeat_store_overwrites_same_key(db_session, storage_bucket):
@@ -247,16 +243,16 @@ def test_repeat_store_overwrites_same_key(db_session, storage_bucket):
 
 def test_artifact_endpoint_serves_storage_backed_json(api_with, db_session, storage_bucket):
     """Storage-backed JSON artifact is fetched from Tigris and served as JSON."""
-    from db.queue import store_artifact
+    from db.assessment import store_assessment_section
 
     job = _completed_job(db_session, "json-test")
     payload = {"summary": {"control_model": "ownable"}, "tag": "v1"}
-    store_artifact(db_session, job.id, "contract_analysis", data=payload)
+    store_assessment_section(db_session, job.id, "contract_analysis", payload)
 
     client = TestClient(api_with.app)
-    resp = client.get("/api/analyses/json-test/artifact/contract_analysis.json", headers=_admin_headers())
+    resp = client.get("/api/analyses/json-test/artifact/assessment.json", headers=_admin_headers())
     assert resp.status_code == 200
-    assert resp.json() == payload
+    assert resp.json() == {"schema_version": "assessment/1", "contract_analysis": payload}
 
 
 def test_artifact_endpoint_serves_storage_backed_text(api_with, db_session, storage_bucket):
@@ -628,6 +624,7 @@ def test_health_endpoint_503_when_storage_unreachable(api_with, monkeypatch):
 
 def test_end_to_end_stubbed_worker(api_with, db_session, storage_bucket):
     """Simulate a worker writing all the artifacts a real job would."""
+    from db.assessment import store_assessment_section
     from db.queue import store_artifact, store_source_files
 
     job = _completed_job(db_session, "e2e-test", address="0xabcdef0000000000000000000000000000000003")
@@ -641,11 +638,11 @@ def test_end_to_end_stubbed_worker(api_with, db_session, storage_bucket):
         },
     )
     store_artifact(db_session, job.id, "contract_flags", data={"is_proxy": False})
-    store_artifact(
+    store_assessment_section(
         db_session,
         job.id,
         "contract_analysis",
-        data={"subject": {"name": "Main"}, "summary": {"control_model": "ownable"}},
+        {"subject": {"name": "Main"}, "summary": {"control_model": "ownable"}},
     )
     store_artifact(db_session, job.id, "slither_results", data={"results": {"detectors": []}})
     store_artifact(db_session, job.id, "analysis_report", text_data="Test analysis report content")
@@ -656,7 +653,7 @@ def test_end_to_end_stubbed_worker(api_with, db_session, storage_bucket):
     assert detail.status_code == 200, detail.text
     payload = detail.json()
     assert payload["run_name"] == "e2e-test"
-    assert "contract_analysis" in payload["available_artifacts"]
+    assert "assessment" in payload["available_artifacts"]
     assert payload["contract_analysis"]["subject"]["name"] == "Main"
 
     artifact = client.get(
@@ -945,7 +942,7 @@ def test_artifact_written_under_a_foreign_prefix_is_still_readable(db_session, s
 
     job = create_job(db_session, {"address": "0xab", "name": "prefix-artifacts"})
     payload = {"witness": "present", "n": 7}
-    store_artifact(db_session, job.id, "effects", data=payload)
+    store_artifact(db_session, job.id, "static_dependencies", data=payload)
 
     row = db_session.execute(select(Artifact).where(Artifact.job_id == job.id)).scalars().one()
     assert row.storage_key.startswith("pr-160/artifacts/")
@@ -954,8 +951,8 @@ def test_artifact_written_under_a_foreign_prefix_is_still_readable(db_session, s
     # Leave the preview environment. The row keeps its recorded key, which now
     # addresses nothing; only the stripped candidate can answer.
     os.environ.pop("ARTIFACT_STORAGE_PREFIX", None)
-    assert get_artifact(db_session, job.id, "effects") == payload
-    assert get_all_artifacts(db_session, job.id)["effects"] == payload
+    assert get_artifact(db_session, job.id, "static_dependencies") == payload
+    assert get_all_artifacts(db_session, job.id)["static_dependencies"] == payload
 
 
 def test_source_files_written_under_a_foreign_prefix_are_still_readable(db_session, storage_bucket, preview_prefix):
@@ -995,10 +992,11 @@ def test_materialization_blobs_written_under_a_foreign_prefix_are_still_readable
     chain, keccak = "1", "0x" + "ab" * 32
     materialization_key(chain, keccak)
     payloads = {
-        "analysis": {"functions": ["pauseContract()"]},
-        "tracking_plan": {"events": ["Paused"]},
+        "contract_analysis": {"functions": ["pauseContract()"]},
+        "control_tracking_plan": {"events": ["Paused"]},
         "predicate_trees": {"trees": {"pauseContract()": {"kind": "role"}}},
     }
+    assessment = {"schema_version": "assessment/1", **payloads}
     row = ContractMaterialization(
         chain=chain,
         address="0x" + "cd" * 20,
@@ -1006,18 +1004,17 @@ def test_materialization_blobs_written_under_a_foreign_prefix_are_still_readable
         status="ready",
         analysis_schema_version=cm.ANALYSIS_SCHEMA_VERSION,
     )
-    for kind, payload in payloads.items():
-        key = cm._blob_key(chain, keccak, kind)
-        assert key.startswith("pr-160/contract_materializations/")
-        cm._put_blob(storage_bucket, key, payload)
-        _divergent_key(storage_bucket, key)
-        setattr(row, f"{kind}_blob_key", key)
+    key = cm._blob_key(chain, keccak, "assessment")
+    assert key.startswith("pr-160/contract_materializations/")
+    cm._put_blob(storage_bucket, key, assessment)
+    _divergent_key(storage_bucket, key)
+    row.assessment_blob_key = key
     db_session.add(row)
     db_session.commit()
 
     os.environ.pop("ARTIFACT_STORAGE_PREFIX", None)
-    assert cm.hydrate_analysis(row) == payloads["analysis"]
-    assert cm.hydrate_tracking_plan(row) == payloads["tracking_plan"]
+    assert cm.hydrate_analysis(row) == payloads["contract_analysis"]
+    assert cm.hydrate_tracking_plan(row) == payloads["control_tracking_plan"]
     assert cm.hydrate_predicate_trees(row) == payloads["predicate_trees"]
 
 
@@ -1097,32 +1094,32 @@ def test_a_bucket_outage_is_not_the_same_answer_as_a_job_with_no_artifacts(db_se
     from workers.retry_policy import classify
 
     job = create_job(db_session, {"address": "0xab", "name": "outage-vs-empty"})
-    store_artifact(db_session, job.id, "effects", data={"v": 1})
-    store_artifact(db_session, job.id, "contract_analysis", data={"v": 2})
+    store_artifact(db_session, job.id, "static_dependencies", data={"v": 1})
+    store_artifact(db_session, job.id, "dynamic_dependencies", data={"v": 2})
     empty_job = create_job(db_session, {"address": "0xcd", "name": "outage-vs-empty-2"})
 
     # A — healthy.
-    assert set(get_all_artifacts(db_session, job.id)) == {"effects", "contract_analysis"}
+    assert set(get_all_artifacts(db_session, job.id)) == {"static_dependencies", "dynamic_dependencies"}
 
     # B — bucket unreachable. Not determined, and it says so.
     with patch.object(StorageClient, "_get_one", side_effect=StorageUnavailable("bucket unreachable")):
         with pytest.raises(StorageContentNotDetermined) as excinfo:
             get_all_artifacts(db_session, job.id)
-    assert set(excinfo.value.not_determined) == {"effects", "contract_analysis"}
+    assert set(excinfo.value.not_determined) == {"static_dependencies", "dynamic_dependencies"}
     assert excinfo.value.proven_absent == {}
     assert classify(excinfo.value) == "transient"
 
     # C — the bucket answered: the row asserts a key nothing is stored under.
     # A different class from B, because a retry cannot change this answer.
     gone = db_session.execute(
-        select(Artifact).where(Artifact.job_id == job.id, Artifact.name == "effects")
+        select(Artifact).where(Artifact.job_id == job.id, Artifact.name == "static_dependencies")
     ).scalar_one()
     storage_bucket.delete(gone.storage_key)
     with pytest.raises(StorageContentAbsent) as absent:
         get_all_artifacts(db_session, job.id)
-    assert set(absent.value.proven_absent) == {"effects"}
+    assert set(absent.value.proven_absent) == {"static_dependencies"}
     assert absent.value.not_determined == {}
-    assert set(absent.value.values) == {"contract_analysis"}
+    assert set(absent.value.values) == {"dynamic_dependencies"}
     assert classify(absent.value) == "terminal"
     assert not isinstance(absent.value, StorageContentNotDetermined)
 
@@ -1215,7 +1212,7 @@ def test_collection_reads_publish_a_keyless_row_as_not_determined(db_session, st
     from workers.retry_policy import classify
 
     job = create_job(db_session, {"address": "0xab", "name": "keyless-collection"})
-    store_artifact(db_session, job.id, "effects", data={"v": 1})
+    store_artifact(db_session, job.id, "static_dependencies", data={"v": 1})
     # Exactly what ``store_artifact`` writes when the backend is unconfigured
     # and the stage passed no payload.
     db_session.add(Artifact(job_id=job.id, name="dependencies", data=None, text_data=None, storage_key=None))
@@ -1226,7 +1223,7 @@ def test_collection_reads_publish_a_keyless_row_as_not_determined(db_session, st
     assert set(arts.value.not_determined) == {"dependencies"}
     assert arts.value.proven_absent == {}
     # The readable row is still carried, so a page that may degrade renders it.
-    assert set(arts.value.values) == {"effects"}
+    assert set(arts.value.values) == {"static_dependencies"}
     assert classify(arts.value) == "transient"
 
     src_job = create_job(db_session, {"address": "0xcd", "name": "keyless-source"})
@@ -1269,15 +1266,19 @@ def test_hydrate_keeps_outage_absence_and_payload_apart(db_session, storage_buck
     chain, keccak = "1", "0x" + "ef" * 32
     keyless_keccak = "0x" + "cc" * 32
     materialization_key(chain, keccak, keyless_keccak)
-    key = cm._blob_key(chain, keccak, "analysis")
-    cm._put_blob(storage_bucket, key, {"functions": ["pauseContract()"]})
+    key = cm._blob_key(chain, keccak, "assessment")
+    cm._put_blob(
+        storage_bucket,
+        key,
+        {"schema_version": "assessment/1", "contract_analysis": {"functions": ["pauseContract()"]}},
+    )
     row = ContractMaterialization(
         chain=chain,
         address="0x" + "12" * 20,
         bytecode_keccak=keccak,
         status="ready",
         analysis_schema_version=cm.ANALYSIS_SCHEMA_VERSION,
-        analysis_blob_key=key,
+        assessment_blob_key=key,
     )
     keyless = ContractMaterialization(
         chain=chain,
@@ -1303,8 +1304,8 @@ def test_hydrate_keeps_outage_absence_and_payload_apart(db_session, storage_buck
 
     # And the inline copy still wins over an unreadable blob — serving a
     # possibly-stale real payload is not the same as inventing an absence.
-    keyless.analysis_blob_key = key
-    keyless.analysis = {"functions": ["inline"]}
+    keyless.assessment_blob_key = key
+    keyless.assessment = {"schema_version": "assessment/1", "contract_analysis": {"functions": ["inline"]}}
     with patch.object(StorageClient, "_get_one", side_effect=StorageUnavailable("bucket unreachable")):
         assert cm.hydrate_analysis(keyless) == {"functions": ["inline"]}
 
@@ -1314,7 +1315,7 @@ def test_hydrate_keeps_outage_absence_and_payload_apart(db_session, storage_buck
     storage_bucket.delete(key)
     with pytest.raises(StorageContentAbsent) as absent:
         cm.hydrate_analysis(row)
-    assert set(absent.value.proven_absent) == {"analysis_blob_key"}
+    assert set(absent.value.proven_absent) == {"assessment_blob_key"}
     assert absent.value.not_determined == {}
     assert classify(absent.value) == "terminal"
 

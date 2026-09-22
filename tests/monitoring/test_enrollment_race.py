@@ -139,7 +139,10 @@ def _stub_policy_internals(monkeypatch, job_address):
         "resolved_control_graph": {"nodes": [], "edges": []},
         "control_tracking_plan": {"schema_version": "0.1", "contract_address": job_address},
     }
-    monkeypatch.setattr("workers.policy_worker.get_artifact", lambda _s, _j, name: artifacts.get(name))
+    monkeypatch.setattr(
+        "workers.policy_worker.get_artifact",
+        lambda _s, _j, name: {"schema_version": "assessment/1", **artifacts} if name == "assessment" else None,
+    )
     monkeypatch.setattr("workers.policy_worker.store_artifact", lambda *a, **kw: None)
     monkeypatch.setattr("workers.policy_worker._load_nested_artifacts", lambda *a, **kw: {})
     monkeypatch.setattr(

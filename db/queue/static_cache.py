@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import copy
 import logging
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
+from db.assessment import load_assessment, store_assessment
 from db.models import (
     Artifact,
     Base,
@@ -21,11 +23,12 @@ from db.models import (
     derive_job_chain_id,
 )
 from db.storage import artifact_key, get_storage_client, source_file_key
+from schemas.assessment import ASSESSMENT_VERSION, Assessment, AssessmentSectionName, validate_assessment
 from utils.chains import canonical_chain
 from utils.logging import record_degraded
 
 from ._chains import _job_chain_name, _mainnet_coalesced_chain
-from .artifacts import get_artifact, store_artifact
+from .artifacts import store_artifact
 
 logger = logging.getLogger("db.queue")
 
@@ -41,14 +44,52 @@ logger = logging.getLogger("db.queue")
 # required by resolution and policy, so cache hits must carry them forward.
 _STATIC_ARTIFACT_NAMES = frozenset(
     {
-        "contract_analysis",
-        "control_tracking_plan",
-        "predicate_trees",
-        "effects",
         "static_dependencies",
         "enrichment_cache",
     }
 )
+
+_STATIC_ASSESSMENT_SECTIONS: tuple[AssessmentSectionName, ...] = (
+    "contract_analysis",
+    "predicate_trees",
+    "effects",
+    "control_tracking_plan",
+)
+
+
+def _copy_static_assessment(
+    session: Session,
+    source_job_id: Any,
+    target_job_id: Any,
+    *,
+    target_address: str,
+) -> bool:
+    """Copy only code-plane sections and restamp their deployment identity."""
+    source = load_assessment(session, source_job_id)
+    if source is None or "contract_analysis" not in source:
+        return False
+    # Serialize with concurrent section writers and preserve any runtime,
+    # resolution, or policy sections the target already accumulated. Only the
+    # static allowlist is replaced from the donor.
+    session.execute(select(Job.id).where(Job.id == target_job_id).with_for_update()).scalar_one()
+    current = load_assessment(session, target_job_id)
+    raw: dict[str, Any] = (
+        copy.deepcopy(cast(dict[str, Any], current)) if current is not None else {"schema_version": ASSESSMENT_VERSION}
+    )
+    for name in _STATIC_ASSESSMENT_SECTIONS:
+        section = cast(dict[str, Any], source).get(name)
+        if isinstance(section, dict):
+            raw[name] = copy.deepcopy(section)
+    copied: Assessment = validate_assessment(raw)
+    analysis = copied.get("contract_analysis")
+    if isinstance(analysis, dict) and isinstance(analysis.get("subject"), dict):
+        analysis["subject"]["address"] = target_address.lower()
+    plan = copied.get("control_tracking_plan")
+    if isinstance(plan, dict):
+        plan["contract_address"] = target_address.lower()
+    store_assessment(session, target_job_id, copied)
+    return True
+
 
 # Artifacts copied as a starting baseline but appended to on subsequent runs.
 _SEED_ARTIFACT_NAMES = frozenset(
@@ -236,6 +277,15 @@ def find_completed_static_cache(
         if not contract_row:
             continue
 
+        # A legacy artifact set is never a donor for the canonical envelope.
+        # Cache-hit jobs can have a NULL local era, so follow their witnessed
+        # donor chain; old eras regenerate instead of being guessed current.
+        if not contract_row.is_proxy:
+            from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
+
+            if proven_analysis_schema_version(session, candidate) != ANALYSIS_SCHEMA_VERSION:
+                continue
+
         # Static-stage-finished check. For non-proxy contracts the canonical
         # indicator is ``contract_analysis`` (slither output + summary).
         # Proxies never produce ``contract_analysis`` on their own job —
@@ -243,12 +293,21 @@ def find_completed_static_cache(
         # which proxies do write (is_proxy + proxy_type). Without this
         # branch, re-discovered proxies would miss the cache and do a full
         # fresh Etherscan fetch + slither run every time.
-        required_artifact = "contract_flags" if contract_row.is_proxy else "contract_analysis"
+        required_artifact = "contract_flags" if contract_row.is_proxy else "assessment"
         has_required = session.execute(
             select(Artifact).where(Artifact.job_id == candidate.id, Artifact.name == required_artifact).limit(1)
         ).scalar_one_or_none()
         if not has_required:
             continue
+        if not contract_row.is_proxy:
+            try:
+                assessment = load_assessment(session, candidate.id)
+                if assessment is None or "contract_analysis" not in assessment:
+                    continue
+            except ValueError:
+                # A row named assessment is not proof that its envelope is the
+                # supported canonical version. Malformed donors regenerate.
+                continue
 
         summary = session.execute(
             select(ContractSummary).where(ContractSummary.contract_id == contract_row.id).limit(1)
@@ -319,9 +378,15 @@ def _find_static_cache_by_source_hash(session: Session, source_content_hash: str
         if not donor_contract:
             continue
         has_analysis = session.execute(
-            select(Artifact).where(Artifact.job_id == candidate.id, Artifact.name == "contract_analysis").limit(1)
+            select(Artifact).where(Artifact.job_id == candidate.id, Artifact.name == "assessment").limit(1)
         ).scalar_one_or_none()
         if not has_analysis:
+            continue
+        try:
+            assessment = load_assessment(session, candidate.id)
+            if assessment is None or "contract_analysis" not in assessment:
+                continue
+        except ValueError:
             continue
         return candidate
     return None
@@ -523,6 +588,16 @@ def copy_static_cache(session: Session, source_job_id: Any, target_job_id: Any) 
         else:
             store_artifact(session, target_job_id, art.name, data=art.data, text_data=art.text_data)
 
+    target_job = session.get(Job, target_job_id)
+    target_address = target_job.address if target_job is not None else None
+    if target_address is None or not _copy_static_assessment(
+        session,
+        source_job_id,
+        target_job_id,
+        target_address=target_address,
+    ):
+        return None
+
     session.commit()
     return new_contract.id
 
@@ -535,9 +610,6 @@ def copy_static_cache(session: Session, source_job_id: Any, target_job_id: Any) 
 # upgrade_history are on-chain-derived and MERGED on re-run — cross-chain merge
 # would be wrong). ``contract_analysis`` / ``control_tracking_plan`` carry the one
 # deployment-specific field (the contract address), which is re-stamped on copy.
-_CROSS_CHAIN_STATIC_ARTIFACTS = frozenset({"contract_analysis", "control_tracking_plan", "predicate_trees", "effects"})
-
-
 def copy_static_cache_cross_chain(
     session: Session,
     source_job_id: Any,
@@ -614,16 +686,13 @@ def copy_static_cache_cross_chain(
         for rd in donor_roles:
             copy_row(session, rd, contract_id=target_contract.id)
 
-    # --- code-plane artifacts (re-stamp the deployment address) ---
-    for name in _CROSS_CHAIN_STATIC_ARTIFACTS:
-        payload = get_artifact(session, source_job_id, name)
-        if payload is None:
-            continue
-        if name == "contract_analysis" and isinstance(payload, dict) and isinstance(payload.get("subject"), dict):
-            payload = {**payload, "subject": {**payload["subject"], "address": target_addr_norm}}
-        elif name == "control_tracking_plan" and isinstance(payload, dict):
-            payload = {**payload, "contract_address": target_addr_norm}
-        store_artifact(session, target_job_id, name, data=payload)
+    if not _copy_static_assessment(
+        session,
+        source_job_id,
+        target_job_id,
+        target_address=target_addr_norm,
+    ):
+        return None
 
     session.commit()
     return target_contract.id

@@ -75,12 +75,13 @@ def _patch_all(monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> dict[str, A
     artifact_store: dict[str, Any] = {}
 
     def fake_get_artifact(_session: Any, _job_id: Any, name: str) -> Any:
-        lookup: dict[str, Any] = {
-            "control_tracking_plan": tracking_plan,
-            "contract_analysis": contract_analysis,
-            "dependencies": dependencies,
-        }
-        return lookup.get(name)
+        if name == "assessment":
+            return {
+                "schema_version": "assessment/1",
+                "control_tracking_plan": tracking_plan,
+                "contract_analysis": contract_analysis,
+            }
+        return dependencies if name == "dependencies" else None
 
     store_calls: list[tuple[str, Any]] = []
 
@@ -110,6 +111,14 @@ def _patch_all(monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> dict[str, A
 
     monkeypatch.setattr("workers.resolution_worker.get_artifact", fake_get_artifact)
     monkeypatch.setattr("workers.resolution_worker.store_artifact", fake_store_artifact)
+    monkeypatch.setattr("workers.resolution_worker.store_nested_artifacts", lambda *_a, **_kw: None)
+    monkeypatch.setattr(
+        "workers.resolution_worker.store_assessment_section",
+        lambda _session, _job_id, name, data, **_kw: (
+            store_calls.append((name, data)),
+            artifact_store.update({name: data}),
+        ),
+    )
     monkeypatch.setattr("workers.resolution_worker.create_job", fake_create_job)
     # The perimeter walk moved to services/discovery/perimeter; the resolution
     # worker still imports create_job for its dependency-provider spawn, so both

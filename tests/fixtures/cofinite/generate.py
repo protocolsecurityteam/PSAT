@@ -9,9 +9,10 @@ import json
 import os
 import sys
 
+from db.assessment import get_assessment_section
+
 sys.path.insert(0, "/home/riley/PSAT")
 from db.models import SessionLocal
-from db.queue import get_artifact
 from services.resolution.capability_resolver import _load_state_var_values
 
 # (name, address, job_id, [function signatures to keep] or None for all)
@@ -83,7 +84,7 @@ with SessionLocal() as s:
     for name, addr, job_id, keep in TARGETS:
         if job_id is None:
             job_id = find_job(s, addr)
-        art = get_artifact(s, job_id, "predicate_trees")
+        art = get_assessment_section(s, job_id, "predicate_trees")
         if not isinstance(art, dict) or "trees" not in art:
             print(f"!! {name} {addr}: no predicate_trees ({job_id})")
             continue

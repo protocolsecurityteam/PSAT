@@ -48,6 +48,7 @@ from typing import Any, Mapping
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from db.assessment import get_assessment_section
 from db.deployment import deployment_scope, normalize_deployment
 from db.models import Contract, ControllerValue, Job, JobStatus
 from db.queue import get_artifact
@@ -317,7 +318,7 @@ def resolve_contract_capabilities(
         analysis_job = lookup.analysis_job
         runtime_addr = (runtime_job.address or addr).lower()
 
-    artifact = get_artifact(session, analysis_job.id, "predicate_trees")
+    artifact = get_assessment_section(session, analysis_job.id, "predicate_trees", reader=get_artifact)
     if not isinstance(artifact, dict) or "trees" not in artifact:
         lookup = _analysis_lookup_for_runtime_job(
             session,
@@ -330,7 +331,7 @@ def resolve_contract_capabilities(
             return None
         runtime_job = lookup.runtime_job
         analysis_job = lookup.analysis_job
-        artifact = get_artifact(session, analysis_job.id, "predicate_trees")
+        artifact = get_assessment_section(session, analysis_job.id, "predicate_trees", reader=get_artifact)
         if not isinstance(artifact, dict) or "trees" not in artifact:
             return None
 
@@ -814,12 +815,16 @@ def _analysis_lookup_for_runtime_job(
     # resolves its owner/timelock). Prefer whichever job carries a *substantive*
     # artifact; only fall back to a present-but-empty one when neither does (a
     # contract that genuinely has no gated functions).
-    runtime_artifact = get_artifact(session, runtime_job.id, required_artifact)
+    runtime_artifact = get_assessment_section(session, runtime_job.id, required_artifact, reader=get_artifact)
     if _artifact_is_substantive(required_artifact, runtime_artifact):
         return AnalysisJobLookup(runtime_job=runtime_job, analysis_job=runtime_job)
 
     impl_job = _implementation_child_job(session, runtime_job, chain=chain, completed_only=completed_only)
-    impl_artifact = get_artifact(session, impl_job.id, required_artifact) if impl_job is not None else None
+    impl_artifact = (
+        get_assessment_section(session, impl_job.id, required_artifact, reader=get_artifact)
+        if impl_job is not None
+        else None
+    )
     if impl_job is not None and _artifact_is_substantive(required_artifact, impl_artifact):
         return AnalysisJobLookup(runtime_job=runtime_job, analysis_job=impl_job)
 

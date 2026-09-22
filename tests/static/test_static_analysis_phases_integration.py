@@ -33,12 +33,19 @@ def _job(**overrides):
 
 
 def _capture_store_artifact(monkeypatch):
-    """Patch store_artifact and return a list that collects all calls."""
+    """Capture canonical Assessment writes while preserving merge reads."""
     calls: list[dict] = []
+    state: dict = {"value": None}
+
+    def _fake_get(_session, _job_id, name):
+        return state["value"] if name == "assessment" else None
 
     def _fake_store(_session, _job_id, name, data=None, text_data=None):
         calls.append({"name": name, "data": data, "text_data": text_data})
+        if name == "assessment":
+            state["value"] = data
 
+    monkeypatch.setattr("workers.static_worker.get_artifact", _fake_get)
     monkeypatch.setattr("workers.static_worker.store_artifact", _fake_store)
     return calls
 
@@ -75,11 +82,12 @@ class TestAnalysisPhaseSuccess:
         result = worker._run_analysis_phase(session, job, tmp_path, "TestContract", job.address)
 
         assert result == analysis_data
-        names = [call["name"] for call in calls]
-        assert names == ["contract_analysis", "predicate_trees", "effects"]
-        assert calls[0]["data"] == analysis_data
-        assert calls[1]["data"] == predicate_trees
-        assert calls[2]["data"] == effects
+        assert [call["name"] for call in calls] == ["assessment"] * 3
+        assessment = calls[-1]["data"]
+        assert assessment["schema_version"] == "assessment/1"
+        assert assessment["contract_analysis"] == analysis_data
+        assert assessment["predicate_trees"] == predicate_trees
+        assert assessment["effects"] == effects
 
     def test_stores_predicate_trees_and_effects_side_artifacts(self, monkeypatch, tmp_path):
         worker = StaticWorker()
@@ -107,7 +115,7 @@ class TestAnalysisPhaseSuccess:
         result = worker._run_analysis_phase(session, job, tmp_path, "TestContract", job.address)
 
         assert result == analysis_data
-        assert [call["name"] for call in calls] == ["contract_analysis", "predicate_trees", "effects"]
+        assert [call["name"] for call in calls] == ["assessment"] * 3
 
     def test_skips_predicate_trees_for_vyper(self, monkeypatch, tmp_path):
         """Vyper projects return ``None`` for predicate_trees + effects;
@@ -127,7 +135,8 @@ class TestAnalysisPhaseSuccess:
         result = worker._run_analysis_phase(session, job, tmp_path, "TestContract", job.address)
 
         assert result == {"schema_version": "0.1"}
-        assert [call["name"] for call in calls] == ["contract_analysis"]
+        assert [call["name"] for call in calls] == ["assessment"]
+        assert calls[-1]["data"]["contract_analysis"] == {"schema_version": "0.1"}
 
 
 class TestAnalysisPhaseFailure:

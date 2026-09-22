@@ -17,6 +17,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
+from db.assessment import get_assessment_section
 from db.models import (
     CURSOR_BASIS_NOT_DETERMINED,
     ENROLLMENT_BASIS_PREDICATE_HINT,
@@ -995,7 +996,7 @@ def enroll_from_completed_jobs(
     witness_cache = caches.witnesses
     role_store_topic_cache = caches.role_topics
     for job in jobs:
-        artifact = get_artifact(session, job.id, "predicate_trees")
+        artifact = get_assessment_section(session, job.id, "predicate_trees", reader=get_artifact)
         if not isinstance(artifact, dict):
             continue
         # Stamp each cursor with the job's own chain — the first-class

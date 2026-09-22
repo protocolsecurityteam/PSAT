@@ -2089,6 +2089,15 @@ class TestTrackingPlanNotDetermined:
                 "analysis_schema_version": ANALYSIS_SCHEMA_VERSION,
             }
             fields.update(overrides)
+            plan = fields.pop("tracking_plan", None)
+            legacy_plan_blob = fields.pop("tracking_plan_blob_key", None)
+            if plan is not None:
+                fields["assessment"] = {
+                    "schema_version": "assessment/1",
+                    "control_tracking_plan": plan,
+                }
+            elif legacy_plan_blob is not None:
+                fields["assessment_blob_key"] = legacy_plan_blob
             row = ContractMaterialization(**fields)
             pg_session.add(row)
             pg_session.commit()

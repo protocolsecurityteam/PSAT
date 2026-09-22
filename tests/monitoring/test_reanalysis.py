@@ -27,6 +27,7 @@ import pytest
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session as SASession
 
+from db.assessment import store_assessment_section
 from db.models import (
     Base,
     Contract,
@@ -546,7 +547,7 @@ class TestMaybeQueueReanalysis:
         contract_analysis artifacts. A queued re-analysis job should not
         interfere because it has status=queued, stage=discovery.
         """
-        from db.queue import find_completed_static_cache, store_artifact, store_source_files
+        from db.queue import find_completed_static_cache, store_source_files
 
         addr = "0x" + "66" * 20
 
@@ -557,12 +558,15 @@ class TestMaybeQueueReanalysis:
             stage=JobStage.done,
             request={"address": addr.lower(), "chain": "ethereum"},
         )
+        from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
+
+        old_job.analysis_schema_version = ANALYSIS_SCHEMA_VERSION
         db_session.add(old_job)
         db_session.commit()
         db_session.refresh(old_job)
 
         store_source_files(db_session, old_job.id, {"src/A.sol": "contract A {}"})
-        store_artifact(db_session, old_job.id, "contract_analysis", data={"functions": []})
+        store_assessment_section(db_session, old_job.id, "contract_analysis", data={"functions": []})
 
         # Create Contract + ContractSummary (required by find_completed_static_cache)
         contract = Contract(

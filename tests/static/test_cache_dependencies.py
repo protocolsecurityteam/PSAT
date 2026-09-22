@@ -130,7 +130,9 @@ def test_static_deps_reused_on_cache_hit(db_session, monkeypatch):
     store_source_files(db_session, job.id, {"src/Test.sol": "contract Test {}"})
     # Copy static artifacts (including static_dependencies)
     store_artifact(db_session, job.id, "static_dependencies", data=FAKE_STATIC_DEPS)
-    store_artifact(db_session, job.id, "contract_analysis", data={"summary": {}})
+    from db.assessment import store_assessment_section
+
+    store_assessment_section(db_session, job.id, "contract_analysis", {"summary": {}})
 
     # find_dependencies should NOT be called
     find_deps_called = []
@@ -209,7 +211,9 @@ def test_dynamic_deps_still_run_on_cache_hit(db_session, monkeypatch):
     db_session.commit()
     store_source_files(db_session, job.id, {"src/Test.sol": "contract Test {}"})
     store_artifact(db_session, job.id, "static_dependencies", data=FAKE_STATIC_DEPS)
-    store_artifact(db_session, job.id, "contract_analysis", data={"summary": {}})
+    from db.assessment import store_assessment_section
+
+    store_assessment_section(db_session, job.id, "contract_analysis", {"summary": {}})
 
     dynamic_called = []
 
