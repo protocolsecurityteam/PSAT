@@ -23,6 +23,42 @@ from tests.support.policy_builders import (
 )
 from workers.policy_worker import PolicyWorker
 
+
+def _read_assessment(sections: dict[str, Any], name: str) -> Any:
+    if name == "assessment":
+        canonical = {
+            key: value
+            for key, value in sections.items()
+            if key
+            in {
+                "contract_analysis",
+                "predicate_trees",
+                "effects",
+                "control_tracking_plan",
+                "control_snapshot",
+                "resolved_control_graph",
+                "effective_permissions",
+                "principal_labels",
+                "principal_history",
+            }
+        }
+        return {"schema_version": "assessment/1", **canonical}
+    return sections.get(name)
+
+
+@pytest.fixture(autouse=True)
+def _assessment_store_without_database_lock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep these mocked worker tests at the injected persistence boundary."""
+
+    def store_section(session, job_id, name, data, *, reader, writer):
+        current = reader(session, job_id, "assessment") or {"schema_version": "assessment/1"}
+        merged = {**current, name: data}
+        writer(session, job_id, "assessment", merged)
+        return merged
+
+    monkeypatch.setattr("workers.policy_worker.store_assessment_section", store_section)
+
+
 # ---------------------------------------------------------------------------
 # _resolve_authority tests (now takes session, job, graph, snapshot, nested)
 # ---------------------------------------------------------------------------
@@ -126,12 +162,15 @@ class TestProcessStoresAllArtifacts:
         tracking_plan = {"schema_version": "0.1", "contract_address": TARGET_ADDRESS, "contract_name": "TestContract"}
 
         def fake_get_artifact(_session: Any, _job_id: Any, name: str) -> Any:
-            return {
-                "contract_analysis": contract_analysis,
-                "control_snapshot": control_snapshot,
-                "resolved_control_graph": resolved_graph,
-                "control_tracking_plan": tracking_plan,
-            }.get(name)
+            return _read_assessment(
+                {
+                    "contract_analysis": contract_analysis,
+                    "control_snapshot": control_snapshot,
+                    "resolved_control_graph": resolved_graph,
+                    "control_tracking_plan": tracking_plan,
+                },
+                name,
+            )
 
         store_calls: list[tuple[str, Any]] = []
 
@@ -162,10 +201,10 @@ class TestProcessStoresAllArtifacts:
 
         worker.process(session, cast(Any, job))
 
-        stored_names = [name for name, _ in store_calls]
-        assert "effective_permissions" in stored_names
-        assert "resolved_control_graph" in stored_names
-        assert "principal_labels" in stored_names
+        assessments = [data for name, data in store_calls if name == "assessment"]
+        assert any(item.get("effective_permissions", {}).get("functions") == [] for item in assessments)
+        assert any(item.get("resolved_control_graph", {}).get("refreshed") is True for item in assessments)
+        assert any(item.get("principal_labels") == {"principals": []} for item in assessments)
 
 
 class TestProcessSemanticInputs:
@@ -183,12 +222,15 @@ class TestProcessSemanticInputs:
         tracking_plan = {"schema_version": "0.1", "contract_address": TARGET_ADDRESS, "contract_name": "TestContract"}
 
         def fake_get_artifact(_session: Any, _job_id: Any, name: str) -> Any:
-            return {
-                "contract_analysis": contract_analysis,
-                "control_snapshot": control_snapshot,
-                "resolved_control_graph": resolved_graph,
-                "control_tracking_plan": tracking_plan,
-            }.get(name)
+            return _read_assessment(
+                {
+                    "contract_analysis": contract_analysis,
+                    "control_snapshot": control_snapshot,
+                    "resolved_control_graph": resolved_graph,
+                    "control_tracking_plan": tracking_plan,
+                },
+                name,
+            )
 
         degraded: list[dict[str, Any]] = []
 
@@ -247,12 +289,15 @@ class TestGraphRefreshAfterEffectivePermissions:
         tracking_plan = {"schema_version": "0.1", "contract_address": TARGET_ADDRESS, "contract_name": "TestContract"}
 
         def fake_get_artifact(_session: Any, _job_id: Any, name: str) -> Any:
-            return {
-                "contract_analysis": contract_analysis,
-                "control_snapshot": control_snapshot,
-                "resolved_control_graph": resolved_graph,
-                "control_tracking_plan": tracking_plan,
-            }.get(name)
+            return _read_assessment(
+                {
+                    "contract_analysis": contract_analysis,
+                    "control_snapshot": control_snapshot,
+                    "resolved_control_graph": resolved_graph,
+                    "control_tracking_plan": tracking_plan,
+                },
+                name,
+            )
 
         call_order: list[str] = []
 
@@ -301,12 +346,15 @@ class TestCrossContractEnrichmentArtifactSync:
         tracking_plan = {"schema_version": "0.1", "contract_address": TARGET_ADDRESS, "contract_name": "TestContract"}
 
         def fake_get_artifact(_session: Any, _job_id: Any, name: str) -> Any:
-            return {
-                "contract_analysis": contract_analysis,
-                "control_snapshot": control_snapshot,
-                "resolved_control_graph": resolved_graph,
-                "control_tracking_plan": tracking_plan,
-            }.get(name)
+            return _read_assessment(
+                {
+                    "contract_analysis": contract_analysis,
+                    "control_snapshot": control_snapshot,
+                    "resolved_control_graph": resolved_graph,
+                    "control_tracking_plan": tracking_plan,
+                },
+                name,
+            )
 
         store_calls: list[tuple[str, Any]] = []
 
@@ -361,7 +409,11 @@ class TestCrossContractEnrichmentArtifactSync:
 
         worker.process(session, cast(Any, job))
 
-        effective_payloads = [data for name, data in store_calls if name == "effective_permissions"]
+        effective_payloads = [
+            data["effective_permissions"]
+            for name, data in store_calls
+            if name == "assessment" and "effective_permissions" in data
+        ]
         assert len(effective_payloads) == 2
         fn = effective_payloads[-1]["functions"][0]
         # The policy-derived claim merged into the claims plane; legacy labels are
@@ -458,13 +510,16 @@ class TestProcessFanoutParity:
         }
 
         def fake_get_artifact(_session: Any, _job_id: Any, name: str) -> Any:
-            return {
-                "contract_analysis": contract_analysis,
-                "control_snapshot": control_snapshot,
-                "resolved_control_graph": resolved_graph,
-                "control_tracking_plan": tracking_plan,
-                "classified_addresses": None,
-            }.get(name)
+            return _read_assessment(
+                {
+                    "contract_analysis": contract_analysis,
+                    "control_snapshot": control_snapshot,
+                    "resolved_control_graph": resolved_graph,
+                    "control_tracking_plan": tracking_plan,
+                    "classified_addresses": None,
+                },
+                name,
+            )
 
         store_calls: list[tuple[str, Any]] = []
 
@@ -504,7 +559,11 @@ class TestProcessFanoutParity:
 
         worker.process(session, cast(Any, job))
 
-        labels_payload = next(data for name, data in store_calls if name == "principal_labels")
+        labels_payload = next(
+            data["principal_labels"]
+            for name, data in reversed(store_calls)
+            if name == "assessment" and "principal_labels" in data
+        )
         return labels_payload, {"classify_calls": classify_calls}
 
     def test_process_fanout_parity_50_plus_principals(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -564,12 +623,15 @@ class TestGraphRefreshRewritesTables:
         }
 
         def fake_get_artifact(_session: Any, _job_id: Any, name: str) -> Any:
-            return {
-                "contract_analysis": contract_analysis,
-                "control_snapshot": control_snapshot,
-                "resolved_control_graph": resolved_graph,
-                "control_tracking_plan": tracking_plan,
-            }.get(name)
+            return _read_assessment(
+                {
+                    "contract_analysis": contract_analysis,
+                    "control_snapshot": control_snapshot,
+                    "resolved_control_graph": resolved_graph,
+                    "control_tracking_plan": tracking_plan,
+                },
+                name,
+            )
 
         replace_calls: list[dict] = []
 

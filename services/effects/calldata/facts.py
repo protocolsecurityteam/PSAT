@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 from weakref import WeakKeyDictionary
 
+from db.assessment import load_assessment
+
 if TYPE_CHECKING:  # typing-only: the effects plane stays off static's runtime import graph
     pass
 
@@ -106,12 +108,15 @@ def _load_contract_facts_uncached(session: Session, address: str) -> ContractFac
         return None
     job_id = lookup.analysis_job.id
 
-    effects_art = get_artifact(session, job_id, "effects")
+    assessment = load_assessment(session, job_id, reader=get_artifact)
+    if assessment is None:
+        return None
+    effects_art = assessment.get("effects")
     functions = effects_art.get("functions") if isinstance(effects_art, dict) else None
     if not isinstance(functions, dict) or not functions:
         return None
 
-    trees_art = get_artifact(session, job_id, "predicate_trees")
+    trees_art = assessment.get("predicate_trees")
     trees_art = trees_art if isinstance(trees_art, dict) else {}
     raw_trees = trees_art.get("trees")
     trees: dict[str, Any] = raw_trees if isinstance(raw_trees, dict) else {}
@@ -121,7 +126,7 @@ def _load_contract_facts_uncached(session: Session, address: str) -> ContractFac
         if isinstance(sig, str) and "(" in sig and sig.endswith(")")
     }
 
-    analysis = get_artifact(session, job_id, "contract_analysis")
+    analysis = assessment.get("contract_analysis")
     legacy_flows = _legacy_value_flow_map(analysis)
 
     raw_slots = effects_art.get("token_slots") if isinstance(effects_art, dict) else None

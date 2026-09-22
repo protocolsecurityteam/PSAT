@@ -454,8 +454,8 @@ class TestMissingArtifactsRaise:
         job = _job()
 
         def fake_get_artifact(_s: Any, _j: Any, name: str) -> Any:
-            if name == "control_tracking_plan":
-                return _minimal_tracking_plan()
+            if name == "assessment":
+                return {"schema_version": "assessment/1", "control_tracking_plan": _minimal_tracking_plan()}
             return None
 
         monkeypatch.setattr("workers.resolution_worker.get_artifact", fake_get_artifact)
@@ -471,11 +471,15 @@ class TestMissingArtifactsRaise:
 
         monkeypatch.setattr(
             "workers.resolution_worker.get_artifact",
-            lambda _s, _j, name: "not a dict" if name == "control_tracking_plan" else None,
+            lambda _s, _j, name: (
+                {"schema_version": "assessment/1", "control_tracking_plan": "not a dict"}
+                if name == "assessment"
+                else None
+            ),
         )
         monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
 
-        with pytest.raises(RuntimeError, match="control_tracking_plan artifact not found"):
+        with pytest.raises(ValueError, match="assessment.control_tracking_plan must be an object"):
             worker.process(session, cast(Any, job))
 
 
@@ -634,8 +638,9 @@ def test_dependency_emission_walks_check_trees(db_session_for_resolution):
     need dependency gates."""
     from sqlalchemy import select
 
+    from db.assessment import store_assessment_section
     from db.models import JobDependency, JobStage, JobStatus
-    from db.queue import create_job, store_artifact
+    from db.queue import create_job
 
     session = db_session_for_resolution
     provider_addr = "0x" + uuid.uuid4().hex[:8] + "aa" * 16
@@ -648,14 +653,14 @@ def test_dependency_emission_walks_check_trees(db_session_for_resolution):
     )
     provider_job.status = JobStatus.queued
     session.commit()
-    store_artifact(session, provider_job.id, "effective_permissions", data={"functions": []})
+    store_assessment_section(session, provider_job.id, "effective_permissions", data={"functions": []})
 
     depender_job = create_job(
         session,
         {"address": depender_addr, "chain": "ethereum", "name": "Depender"},
         initial_stage=JobStage.resolution,
     )
-    store_artifact(
+    store_assessment_section(
         session,
         depender_job.id,
         "predicate_trees",
@@ -740,8 +745,9 @@ def test_dependency_emission_records_pending_status_metrics(db_session_for_resol
     folds the per-status breakdown into the stage metrics."""
     from sqlalchemy import select
 
+    from db.assessment import store_assessment_section
     from db.models import JobDependency, JobStage
-    from db.queue import create_job, store_artifact
+    from db.queue import create_job
     from utils.logging import stage_metrics_var
 
     session = db_session_for_resolution
@@ -753,7 +759,7 @@ def test_dependency_emission_records_pending_status_metrics(db_session_for_resol
         {"address": depender_addr, "chain": "ethereum", "name": "Depender"},
         initial_stage=JobStage.resolution,
     )
-    store_artifact(session, depender_job.id, "predicate_trees", data=_authority_check_predicate_trees())
+    store_assessment_section(session, depender_job.id, "predicate_trees", data=_authority_check_predicate_trees())
     snapshot = {"controller_values": {"external_contract:authority": {"value": provider_addr}}}
 
     metrics: dict = {}
@@ -780,8 +786,9 @@ def test_dependency_emission_warns_and_records_on_cycle(db_session_for_resolutio
 
     from sqlalchemy import select
 
+    from db.assessment import store_assessment_section
     from db.models import JobDependency, JobStage
-    from db.queue import create_job, store_artifact
+    from db.queue import create_job
     from utils.logging import stage_metrics_var
 
     session = db_session_for_resolution
@@ -807,7 +814,7 @@ def test_dependency_emission_warns_and_records_on_cycle(db_session_for_resolutio
     )
     session.commit()
 
-    store_artifact(session, job_a.id, "predicate_trees", data=_authority_check_predicate_trees())
+    store_assessment_section(session, job_a.id, "predicate_trees", data=_authority_check_predicate_trees())
     snapshot = {"controller_values": {"external_contract:authority": {"value": b_addr}}}
 
     metrics: dict = {}

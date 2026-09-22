@@ -16,6 +16,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, select
 
+from db.assessment import get_assessment_section
 from db.models import Job, JobStatus, Protocol
 from utils.chains import require_chain
 from utils.ratelimit import SlidingWindowRateLimiter, client_ip
@@ -253,7 +254,7 @@ def probe_contract_membership(
         if job is None:
             raise HTTPException(status_code=404, detail=f"No completed analysis job found for {addr}")
 
-        artifact = deps.get_artifact(session, job.id, "predicate_trees")
+        artifact = get_assessment_section(session, job.id, "predicate_trees", reader=deps.get_artifact)
         if artifact is None:
             raise HTTPException(
                 status_code=404,
@@ -341,7 +342,7 @@ def probe_contract_signature(
         job = session.execute(job_stmt).scalar_one_or_none()
         if job is None:
             raise HTTPException(status_code=404, detail=f"No completed analysis job found for {addr}")
-        artifact = deps.get_artifact(session, job.id, "predicate_trees")
+        artifact = get_assessment_section(session, job.id, "predicate_trees", reader=deps.get_artifact)
         if artifact is None:
             raise HTTPException(
                 status_code=404,

@@ -40,6 +40,8 @@ from typing import Any, cast
 
 import pytest
 
+from db.assessment import store_assessment_section
+
 slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
 
@@ -365,7 +367,6 @@ def _seed_two_hop(
     before the resolve — the adapter-live variants use it to make the registry a
     recognized role store (impl markers + indexed events + warm cursor)."""
     from db.models import Contract, ControllerValue, Job, JobStage, JobStatus, Protocol
-    from db.queue import store_artifact
     from services.resolution.capability_resolver import resolve_contract_capabilities
 
     proto = Protocol(name=f"rolegate_guard_{uuid.uuid4().hex[:8]}")
@@ -386,7 +387,9 @@ def _seed_two_hop(
         )
         session.add(job)
         session.flush()
-        store_artifact(session, job.id, "predicate_trees", data={"schema_version": "semantic", "trees": trees})
+        store_assessment_section(
+            session, job.id, "predicate_trees", data={"schema_version": "semantic", "trees": trees}
+        )
         contract = Contract(address=addr, chain="ethereum", protocol_id=proto.id, job_id=job.id)
         session.add(contract)
         session.flush()

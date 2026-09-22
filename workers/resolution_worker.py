@@ -8,11 +8,12 @@ import re
 import time
 from collections.abc import Callable
 from datetime import datetime, timezone
-from typing import cast
+from typing import Any, cast
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from db.assessment import load_assessment, store_assessment_section
 from db.deployment import deployment_scope, normalize_deployment
 from db.models import (
     Contract,
@@ -188,15 +189,16 @@ class ResolutionWorker(BaseWorker):
         chain_id = _chain_id_for_job(job)
 
         # Read control_tracking_plan from DB
-        tracking_plan = get_artifact(session, job.id, "control_tracking_plan")
+        assessment = load_assessment(session, job.id, reader=get_artifact) or {}
+        tracking_plan = cast(dict[str, Any] | None, assessment.get("control_tracking_plan"))
         if not isinstance(tracking_plan, dict):
             raise RuntimeError("control_tracking_plan artifact not found")
 
         # Read contract_analysis from DB (needed for recursive resolution)
-        contract_analysis = get_artifact(session, job.id, "contract_analysis")
+        contract_analysis = cast(dict[str, Any] | None, assessment.get("contract_analysis"))
         if not isinstance(contract_analysis, dict):
             raise RuntimeError("contract_analysis artifact not found")
-        predicate_trees = get_artifact(session, job.id, "predicate_trees")
+        predicate_trees = assessment.get("predicate_trees")
         if not isinstance(predicate_trees, dict):
             predicate_trees = None
 
@@ -244,7 +246,9 @@ class ResolutionWorker(BaseWorker):
             extra={"duration_ms": int((time.monotonic() - t0) * 1000), "phase": "control_snapshot"},
         )
         # Keep as artifact — policy stage reads it as JSON
-        store_artifact(session, job.id, "control_snapshot", data=snapshot)
+        store_assessment_section(
+            session, job.id, "control_snapshot", snapshot, reader=get_artifact, writer=store_artifact
+        )
         # A reverting controller read is recorded as an ``eth_call_error`` NULL
         # entry (see build_control_snapshot); counting those as resolved hid the
         # etherfi NULL-controller incident. Split the count so the resolved metric
@@ -348,7 +352,9 @@ class ResolutionWorker(BaseWorker):
             # read them back by address (no local filesystem).
             store_nested_artifacts(session, job.id, nested_artifacts)
             # Keep as artifact — policy stage reads it as JSON
-            store_artifact(session, job.id, "resolved_control_graph", data=resolved_graph)
+            store_assessment_section(
+                session, job.id, "resolved_control_graph", resolved_graph, reader=get_artifact, writer=store_artifact
+            )
             # Persist the classify cache so the policy stage skips re-running
             # the 6-10 RPC fan-out per address. dict[str, tuple] → JSON-friendly
             # dict[str, list] for storage.
@@ -389,7 +395,9 @@ class ResolutionWorker(BaseWorker):
         # resolution stage from completing — the depender just won't
         # benefit from cross-contract inlining at policy time.
         try:
-            self._emit_dependency_edges_from_predicate_trees(session, job, snapshot, rpc_url)
+            self._emit_dependency_edges_from_predicate_trees(
+                session, job, snapshot, rpc_url, predicate_trees=predicate_trees
+            )
         except Exception as exc:
             record_degraded(
                 phase="resolution_dependency_emission",
@@ -440,6 +448,7 @@ class ResolutionWorker(BaseWorker):
                 rpc_url=rpc_url,
                 deployment_address=proxy_address or job.address,
                 proven_proxied=bool(proxy_address),
+                effects=assessment.get("effects"),
             )
         except Exception as exc:
             session.rollback()
@@ -558,6 +567,7 @@ class ResolutionWorker(BaseWorker):
         rpc_url: str,
         deployment_address: str | None,
         proven_proxied: bool,
+        effects: object,
     ) -> int:
         """Dereference this job's flow-sink asset getters. Returns rows published.
 
@@ -575,7 +585,6 @@ class ResolutionWorker(BaseWorker):
         """
         if not deployment_address:
             return 0
-        effects = get_artifact(session, job.id, "effects")
         if not isinstance(effects, dict):
             return 0
         receivers = collect_asset_receivers(effects)
@@ -873,6 +882,8 @@ class ResolutionWorker(BaseWorker):
         job: Job,
         snapshot: ControlSnapshot,
         rpc_url: str,
+        *,
+        predicate_trees: object = None,
     ) -> None:
         """Insert ``JobDependency`` rows for every external contract A's
         predicate trees reference as an authority source.
@@ -905,7 +916,8 @@ class ResolutionWorker(BaseWorker):
 
         from db.models import JobDependency
 
-        predicate_trees = get_artifact(session, job.id, "predicate_trees")
+        if predicate_trees is None:
+            predicate_trees = (load_assessment(session, job.id, reader=get_artifact) or {}).get("predicate_trees")
         if not isinstance(predicate_trees, dict):
             return
         tree_maps = [

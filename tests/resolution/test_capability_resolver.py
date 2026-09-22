@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+from db.assessment import store_assessment_section
 from tests.conftest import DATABASE_URL as _DB_URL
 from tests.conftest import _can_connect, requires_postgres
 
@@ -55,7 +56,6 @@ def session():
 
 def _seed_job_with_artifact(session, *, address: str, predicate_trees: dict | None):
     from db.models import Job, JobStage, JobStatus
-    from db.queue import store_artifact
 
     job = Job(
         address=address,
@@ -68,7 +68,7 @@ def _seed_job_with_artifact(session, *, address: str, predicate_trees: dict | No
     session.add(job)
     session.flush()
     if predicate_trees is not None:
-        store_artifact(session, job.id, "predicate_trees", data=predicate_trees)
+        store_assessment_section(session, job.id, "predicate_trees", data=predicate_trees)
     session.commit()
     return job
 

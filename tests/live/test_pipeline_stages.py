@@ -1,4 +1,4 @@
-"""Single-contract pipeline output: WETH reaches ``done`` and emits the expected per-stage artifacts."""
+"""WETH reaches ``done`` and publishes Assessment with the existing stage views."""
 
 from __future__ import annotations
 
@@ -10,6 +10,23 @@ from tests.live.conftest import LiveClient
 def test_pipeline_reaches_done_stage(analyzed_weth):
     assert analyzed_weth["status"] == "completed"
     assert analyzed_weth["stage"] == "done"
+
+
+def test_assessment_contains_completed_pipeline_sections(analyzed_weth, live_client: LiveClient):
+    assessment = live_client.artifact(analyzed_weth["name"], "assessment")
+    assert isinstance(assessment, dict)
+    assert assessment.get("schema_version") == "assessment/1"
+    for section in (
+        "contract_analysis",
+        "predicate_trees",
+        "effects",
+        "control_tracking_plan",
+        "control_snapshot",
+        "effective_permissions",
+        "principal_labels",
+    ):
+        assert isinstance(assessment.get(section), dict), f"Assessment is missing {section}"
+        assert live_client.artifact(analyzed_weth["name"], section) == assessment[section]
 
 
 def test_contract_analysis_artifact(analyzed_weth, live_client: LiveClient):

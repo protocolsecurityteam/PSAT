@@ -89,6 +89,15 @@ def store_artifact(session: Session, job_id: Any, name: str, data: Any = None, t
     committed artifact with the same deterministic key and then rolling back
     leaves the object in place (deleting it would break the previous row).
     """
+    from schemas.assessment import ASSESSMENT_SECTIONS, validate_assessment
+
+    if name in ASSESSMENT_SECTIONS or name.startswith("recursive."):
+        raise ValueError(f"{name} is an Assessment section; write the canonical assessment instead")
+    if name == "assessment":
+        if text_data is not None:
+            raise ValueError("Assessment must be structured JSON")
+        data = validate_assessment(data)
+
     client = get_storage_client()
     if client is not None:
         body, content_type = serialize_artifact(data, text_data)

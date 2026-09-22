@@ -13,6 +13,7 @@ from typing import Any, cast
 
 from sqlalchemy import select
 
+from db.assessment import get_assessment_section, load_assessment, store_assessment_section
 from db.models import Contract, ContractSummary, Job, JobDependency, JobStage, RoleDefinition, derive_job_chain_id
 from db.queue import (
     _MUTABLE_CONTRACT_FIELDS,
@@ -777,7 +778,7 @@ class StaticWorker(BaseWorker):
                 # The cached contract_analysis still carries secondary_impl_pointers
                 # (copy_static_cache copies it), so secondaries get resolved on the
                 # cache path too — not only on a fresh (Slither) analysis.
-                cached_analysis = get_artifact(session, job.id, "contract_analysis")
+                cached_analysis = get_assessment_section(session, job.id, "contract_analysis", reader=get_artifact)
                 secondary_analysis = cached_analysis if isinstance(cached_analysis, dict) else None
             else:
                 # Phase 1: Contract analysis (uses Slither's Python IR — the
@@ -1629,10 +1630,19 @@ class StaticWorker(BaseWorker):
         if semantic_effects is not None:
             (project_dir / "effects.json").write_text(json.dumps(semantic_effects, indent=2, default=str) + "\n")
 
-        store_artifact(session, job.id, "contract_analysis", data=analysis_data)
+        store_assessment_section(
+            session, job.id, "contract_analysis", analysis_data, reader=get_artifact, writer=store_artifact
+        )
         if semantic_predicate_trees is not None:
             try:
-                store_artifact(session, job.id, "predicate_trees", data=semantic_predicate_trees)
+                store_assessment_section(
+                    session,
+                    job.id,
+                    "predicate_trees",
+                    semantic_predicate_trees,
+                    reader=get_artifact,
+                    writer=store_artifact,
+                )
             except Exception as exc:
                 record_degraded(
                     phase="predicate_trees_artifact_store",
@@ -1645,7 +1655,9 @@ class StaticWorker(BaseWorker):
                 )
         if semantic_effects is not None:
             try:
-                store_artifact(session, job.id, "effects", data=semantic_effects)
+                store_assessment_section(
+                    session, job.id, "effects", semantic_effects, reader=get_artifact, writer=store_artifact
+                )
             except Exception as exc:
                 record_degraded(
                     phase="effects_artifact_store",
@@ -1780,9 +1792,11 @@ class StaticWorker(BaseWorker):
             return
 
         try:
-            analysis = get_artifact(session, job.id, "contract_analysis")
-            tracking_plan = get_artifact(session, job.id, "control_tracking_plan")
-            predicate_trees = get_artifact(session, job.id, "predicate_trees")
+            assessment = load_assessment(session, job.id, reader=get_artifact) or {}
+            analysis = cast(dict[str, Any] | None, assessment.get("contract_analysis"))
+            tracking_plan = cast(dict[str, Any] | None, assessment.get("control_tracking_plan"))
+            predicate_trees = assessment.get("predicate_trees")
+            effects = assessment.get("effects")
         except Exception as exc:
             record_degraded(phase="materialization_publish", exc=exc, context={"address": address})
             logger.warning(
@@ -1832,6 +1846,7 @@ class StaticWorker(BaseWorker):
                 analysis=analysis,
                 tracking_plan=tracking_plan,
                 predicate_trees=predicate_trees if isinstance(predicate_trees, dict) else None,
+                effects=effects if isinstance(effects, dict) else None,
                 source_content_hash=job.source_content_hash,
                 provenance=build_provenance(PRODUCED_BY_PIPELINE, source_job_id=job.id),
                 # Only a bundle THIS job produced may overwrite a current row.
@@ -1873,7 +1888,9 @@ class StaticWorker(BaseWorker):
         self.update_detail(session, job, "Building control tracking plan")
         try:
             tracking_plan = build_control_tracking_plan(cast(ContractAnalysis, analysis))
-            store_artifact(session, job.id, "control_tracking_plan", data=tracking_plan)
+            store_assessment_section(
+                session, job.id, "control_tracking_plan", tracking_plan, reader=get_artifact, writer=store_artifact
+            )
             logger.info(
                 "Static stage tracking plan complete for job %s address=%s contract=%s",
                 job.id,

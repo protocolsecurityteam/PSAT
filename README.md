@@ -23,6 +23,8 @@ graph, and upgrade tables) with artifact bodies stored in object storage
 under `contracts/<name>/` while a job is running so that Slither has
 files on disk, but the DB is the authoritative store.
 
+See [Assessment storage and cutover](docs/ASSESSMENT.md) for the shared analytical document and migration of saved results.
+
 ## Local Development
 
 ### Python setup

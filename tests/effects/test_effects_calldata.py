@@ -16,8 +16,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from db.assessment import store_assessment_section
 from db.models import Contract, EffectiveFunction, FunctionPrincipal, Protocol
-from db.queue import create_job, store_artifact
+from db.queue import create_job
 from services.effects import calldata as cd
 from services.effects.anvil import ForkFixture, pause_recipe
 from services.effects.config import (
@@ -1626,13 +1627,13 @@ def test_load_contract_facts_indexes_the_canonical_selector(db_session):
     # the only source that recovers the real selector for it.
     full_name = "sweep(IERC20,uint256)"
     canonical = "sweep(address,uint256)"
-    store_artifact(
+    store_assessment_section(
         db_session,
         job.id,
         "effects",
         data={"functions": {full_name: _effect_info(full_name, "0xdeadbeef")}},
     )
-    store_artifact(
+    store_assessment_section(
         db_session,
         job.id,
         "predicate_trees",

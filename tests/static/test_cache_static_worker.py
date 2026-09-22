@@ -28,7 +28,7 @@ pytestmark = requires_postgres
 def test_static_worker_cache_hit_skips_analysis(db_session, monkeypatch):
     """Job flagged as static_cached skips Slither/analysis but runs deps."""
     from db.models import Contract
-    from db.queue import create_job, store_artifact, store_source_files
+    from db.queue import create_job, store_source_files
     from workers.static_worker import StaticWorker
 
     # Create a new job with the explicit cache flag set by discovery worker
@@ -50,10 +50,16 @@ def test_static_worker_cache_hit_skips_analysis(db_session, monkeypatch):
     db_session.commit()
 
     store_source_files(db_session, job.id, {"src/TestContract.sol": "contract TestContract {}"})
-    store_artifact(db_session, job.id, "contract_analysis", data={"summary": {}})
+    from db.assessment import store_assessment_section
+
+    store_assessment_section(db_session, job.id, "contract_analysis", {"summary": {}})
 
     worker = StaticWorker()
     phases_run = _patch_static_worker_phases(monkeypatch, worker)
+    monkeypatch.setattr(
+        "services.clients.rpc.get_code_with_keccak",
+        lambda *_args, **_kwargs: (b"\x60\x00", "0x" + "11" * 32),
+    )
 
     worker.process(db_session, job)
 
@@ -567,7 +573,8 @@ def test_e2e_discovery_then_static_with_cache(db_session, monkeypatch):
     """End-to-end test: run discovery (cache hit), then static (cached)
     and verify the complete flow works with the static_cached flag."""
 
-    from db.queue import create_job, get_artifact, get_source_files
+    from db.assessment import get_assessment_section
+    from db.queue import create_job, get_source_files
     from workers.discovery import DiscoveryWorker
     from workers.static_worker import StaticWorker
 
@@ -594,6 +601,10 @@ def test_e2e_discovery_then_static_with_cache(db_session, monkeypatch):
     # Phase 2: Static -- should skip analysis phases
     static_worker = StaticWorker()
     phases_run = _patch_static_worker_phases(monkeypatch, static_worker)
+    monkeypatch.setattr(
+        "services.clients.rpc.get_code_with_keccak",
+        lambda *_args, **_kwargs: (b"\x60\x00", "0x" + "11" * 32),
+    )
 
     static_worker.process(db_session, new_job)
 
@@ -607,4 +618,4 @@ def test_e2e_discovery_then_static_with_cache(db_session, monkeypatch):
     # Data should be intact
     sources = get_source_files(db_session, new_job.id)
     assert len(sources) == 2
-    assert get_artifact(db_session, new_job.id, "contract_analysis") is not None
+    assert get_assessment_section(db_session, new_job.id, "contract_analysis") is not None

@@ -197,8 +197,8 @@ def test_block0_seed_scans_pre_deploy_range(session):
 @requires_postgres
 def test_enroll_from_completed_jobs_seeds_solmate_cursor_at_creation_block(session, monkeypatch):
     import workers.event_log_indexer as eli
+    from db.assessment import store_assessment_section
     from db.models import Contract, ControllerValue, Job, JobStage, JobStatus, Protocol
-    from db.queue import store_artifact
 
     authority = "0x" + "ab" * 20
     deploy = 18_500_000
@@ -219,7 +219,7 @@ def test_enroll_from_completed_jobs_seeds_solmate_cursor_at_creation_block(sessi
     )
     session.add(job)
     session.flush()
-    store_artifact(session, job.id, "predicate_trees", data=_SOLMATE_CANCALL_TREES)
+    store_assessment_section(session, job.id, "predicate_trees", data=_SOLMATE_CANCALL_TREES)
 
     proto = Protocol(name=f"seed_test_{uuid.uuid4().hex[:8]}")
     session.add(proto)
@@ -256,8 +256,8 @@ def test_enroll_from_completed_jobs_skips_zero_authority(session, monkeypatch):
     # NO cursor: 0x0 has no creation block, so it would seed at genesis and backfill
     # the whole chain for an address that can never emit role events.
     import workers.event_log_indexer as eli
+    from db.assessment import store_assessment_section
     from db.models import Contract, ControllerValue, IndexedEventCursor, Job, JobStage, JobStatus, Protocol
-    from db.queue import store_artifact
 
     # If the guard works, _seed_block is never reached for 0x0; stub anyway so a
     # regression that *does* reach it can't quietly "succeed" with a real block.
@@ -274,7 +274,7 @@ def test_enroll_from_completed_jobs_skips_zero_authority(session, monkeypatch):
     )
     session.add(job)
     session.flush()
-    store_artifact(session, job.id, "predicate_trees", data=_SOLMATE_CANCALL_TREES)
+    store_assessment_section(session, job.id, "predicate_trees", data=_SOLMATE_CANCALL_TREES)
 
     proto = Protocol(name=f"zero_auth_{uuid.uuid4().hex[:8]}")
     session.add(proto)

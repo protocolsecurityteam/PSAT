@@ -34,6 +34,7 @@ from pathlib import Path
 
 import pytest
 
+from db.assessment import store_assessment_section
 from tests.conftest import DATABASE_URL as _DB_URL
 from tests.conftest import _can_connect, requires_postgres
 
@@ -105,7 +106,6 @@ def _no_network(monkeypatch):
 
 def _seed_job_with_trees(session, *, address: str, artifact: dict):
     from db.models import Job, JobStage, JobStatus
-    from db.queue import store_artifact
 
     job = Job(
         address=address,
@@ -118,7 +118,7 @@ def _seed_job_with_trees(session, *, address: str, artifact: dict):
     session.add(job)
     session.flush()
     # The resolver reads ``artifact["trees"]`` (+ canonical_signatures); store the dump verbatim.
-    store_artifact(
+    store_assessment_section(
         session,
         job.id,
         "predicate_trees",

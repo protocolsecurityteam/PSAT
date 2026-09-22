@@ -9,9 +9,11 @@ from fastapi import APIRouter, Header, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
 from sqlalchemy import select
 
+from db.assessment import get_assessment_section, load_assessment
 from db.models import Artifact, Contract, Job, JobStatus
 from db.storage import StorageContentAbsent, StorageKeyAbsent, StorageKeyMissing
 from schemas.api_responses import AnalysisListEntry
+from schemas.assessment import ASSESSMENT_SECTIONS
 from services.aggregations import build_analysis_detail
 from services.aggregations.company_overview.entity_keys import _coalesce_chain
 from services.aggregations.company_overview.jobs import _job_chain_name
@@ -311,9 +313,15 @@ def analysis_artifact(
         artifact: Any = None
         not_determined: str | None = None
         try:
-            artifact = deps.get_artifact(session, job.id, lookup_name)
-            if artifact is None:
-                artifact = deps.get_artifact(session, job.id, artifact_name)
+            if lookup_name == "assessment":
+                artifact = load_assessment(session, job.id, reader=deps.get_artifact)
+            elif lookup_name in ASSESSMENT_SECTIONS:
+                # Existing operator views are projections of the canonical document.
+                artifact = get_assessment_section(session, job.id, lookup_name, reader=deps.get_artifact)
+            else:
+                artifact = deps.get_artifact(session, job.id, lookup_name)
+                if artifact is None:
+                    artifact = deps.get_artifact(session, job.id, artifact_name)
         except (StorageKeyMissing, StorageContentAbsent) as exc:
             # The bucket was asked about every candidate key and answered "no
             # object here". Determined: this job has no body for that name.

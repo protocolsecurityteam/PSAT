@@ -17,6 +17,8 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
+from db.assessment import store_assessment_section
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 # Re-exported: modules import the gate from here alongside the fixtures below.
@@ -290,6 +292,7 @@ def db_session():
 
 def _create_completed_job_with_static_data(session, address=ADDR_A):
     """Helper: create a completed job with all static data populated."""
+    from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
     from db.models import (
         Contract,
         ContractSummary,
@@ -302,6 +305,7 @@ def _create_completed_job_with_static_data(session, address=ADDR_A):
     job = create_job(session, {"address": address, "name": "TestContract"})
     job.status = JobStatus.completed
     job.stage = JobStage.done
+    job.analysis_schema_version = ANALYSIS_SCHEMA_VERSION
     session.commit()
 
     # Contract row
@@ -356,10 +360,10 @@ def _create_completed_job_with_static_data(session, address=ADDR_A):
     )
 
     # Artifacts
-    store_artifact(session, job.id, "contract_analysis", data={"summary": {"control_model": "ownable"}})
+    store_assessment_section(session, job.id, "contract_analysis", data={"summary": {"control_model": "ownable"}})
     store_artifact(session, job.id, "slither_results", data={"results": {"detectors": []}})
     store_artifact(session, job.id, "analysis_report", text_data="Test analysis report")
-    store_artifact(session, job.id, "control_tracking_plan", data={"controllers": []})
+    store_assessment_section(session, job.id, "control_tracking_plan", data={"controllers": []})
     store_artifact(session, job.id, "contract_flags", data={"is_proxy": False})
 
     return job
@@ -408,10 +412,10 @@ def _create_source_job_with_proxy(
     session.commit()
 
     store_source_files(session, job.id, {"src/Proxy.sol": "contract Proxy {}"})
-    store_artifact(session, job.id, "contract_analysis", data={"summary": {}})
+    store_assessment_section(session, job.id, "contract_analysis", data={"summary": {}})
     store_artifact(session, job.id, "slither_results", data={"results": {"detectors": []}})
     store_artifact(session, job.id, "analysis_report", text_data="proxy report")
-    store_artifact(session, job.id, "control_tracking_plan", data={"controllers": []})
+    store_assessment_section(session, job.id, "control_tracking_plan", data={"controllers": []})
 
     return job
 

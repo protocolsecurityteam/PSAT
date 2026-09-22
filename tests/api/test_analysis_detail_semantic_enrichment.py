@@ -13,6 +13,8 @@ from datetime import datetime, timezone
 
 import pytest
 
+from db.assessment import store_assessment_section
+
 # offline: no live owner()/governor() eth_call during predicate evaluation
 pytestmark = pytest.mark.usefixtures("_stub_live_authority")
 
@@ -64,11 +66,10 @@ def _semantic_artifact() -> dict:
 
 @requires_postgres
 def test_endpoint_includes_semantic_keys_when_artifact_present(api_client, db_session):
-    from db.queue import store_artifact
 
     address = "0x" + uuid.uuid4().hex[:8] + "11" * 16
     job = _seed_completed_job(db_session, address=address)
-    store_artifact(db_session, job.id, "predicate_trees", data=_semantic_artifact())
+    store_assessment_section(db_session, job.id, "predicate_trees", data=_semantic_artifact())
     db_session.commit()
 
     resp = api_client.get(f"/api/analyses/{address}")
@@ -107,11 +108,10 @@ def test_endpoint_includes_predicate_trees_even_when_resolver_fails(api_client, 
     """A semantic resolution failure must not break the endpoint. The
     raw ``predicate_trees`` artifact stays inlined; only the
     resolved ``semantic_capabilities`` is dropped."""
-    from db.queue import store_artifact
 
     address = "0x" + uuid.uuid4().hex[:8] + "33" * 16
     job = _seed_completed_job(db_session, address=address)
-    store_artifact(db_session, job.id, "predicate_trees", data=_semantic_artifact())
+    store_assessment_section(db_session, job.id, "predicate_trees", data=_semantic_artifact())
     db_session.commit()
 
     # Force the resolver import to raise.
@@ -136,11 +136,10 @@ def test_endpoint_handles_unguarded_only_contract_with_empty_caps(api_client, db
     """Contract with only public functions: predicate_trees has
     trees={}. semantic_capabilities resolves to {} — both keys present
     but empty, signaling 'analyzed, every function public'."""
-    from db.queue import store_artifact
 
     address = "0x" + uuid.uuid4().hex[:8] + "44" * 16
     job = _seed_completed_job(db_session, address=address)
-    store_artifact(
+    store_assessment_section(
         db_session,
         job.id,
         "predicate_trees",
@@ -174,8 +173,8 @@ def test_endpoint_names_artifacts_it_could_not_read_instead_of_omitting_them(api
     def _partial(_session, _job_id):
         raise StorageContentNotDetermined(
             "bucket unreachable",
-            values={"predicate_trees": _semantic_artifact()},
-            not_determined={"effective_permissions": "could not read artifacts/j/effective_permissions"},
+            values={"assessment": {"schema_version": "assessment/1", "predicate_trees": _semantic_artifact()}},
+            not_determined={"analysis_report": "could not read artifacts/j/analysis_report"},
         )
 
     monkeypatch.setattr(deps, "get_all_artifacts", _partial)
@@ -186,8 +185,8 @@ def test_endpoint_names_artifacts_it_could_not_read_instead_of_omitting_them(api
     # What did read is still rendered.
     assert body["predicate_trees"]["schema_version"] == "semantic"
     # What did not is named, rather than reading as "the analysis has none".
-    assert "effective_permissions" in body["artifacts_not_determined"]
-    assert "effective_permissions" not in body["available_artifacts"]
+    assert "analysis_report" in body["artifacts_not_determined"]
+    assert "analysis_report" not in body["available_artifacts"]
 
 
 @requires_postgres
@@ -210,8 +209,8 @@ def test_endpoint_keeps_a_lost_body_apart_from_one_it_could_not_ask_about(api_cl
     def _partial(_session, _job_id):
         raise StorageContentAbsent(
             "1/2 artifact bodies proven absent",
-            values={"predicate_trees": _semantic_artifact()},
-            proven_absent={"effective_permissions": "no object at any candidate for artifacts/j/eff"},
+            values={"assessment": {"schema_version": "assessment/1", "predicate_trees": _semantic_artifact()}},
+            proven_absent={"analysis_report": "no object at any candidate for artifacts/j/analysis_report"},
         )
 
     monkeypatch.setattr(deps, "get_all_artifacts", _partial)
@@ -220,9 +219,9 @@ def test_endpoint_keeps_a_lost_body_apart_from_one_it_could_not_ask_about(api_cl
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["predicate_trees"]["schema_version"] == "semantic"
-    assert "effective_permissions" in body["artifacts_body_absent"]
+    assert "analysis_report" in body["artifacts_body_absent"]
     assert "artifacts_not_determined" not in body
-    assert "effective_permissions" not in body["available_artifacts"]
+    assert "analysis_report" not in body["available_artifacts"]
 
 
 def test_principal_label_payload_narrows_confidence_and_the_duplicate_label():

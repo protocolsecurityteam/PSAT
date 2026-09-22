@@ -642,7 +642,11 @@ def test_inlined_callee_msg_sender_equality_is_call_edge_condition(monkeypatch):
     monkeypatch.setattr(
         resolver_mod, "_load_state_var_values", lambda *_args, **_kwargs: {"liquidityPool": target_addr}
     )
-    monkeypatch.setattr(queue_mod, "get_artifact", lambda *_args, **_kwargs: authority_artifact)
+    monkeypatch.setattr(
+        queue_mod,
+        "get_artifact",
+        lambda *_args, **_kwargs: {"schema_version": "assessment/1", "predicate_trees": authority_artifact},
+    )
     monkeypatch.setattr(
         materializer_mod,
         "materialize_external_check_from_events",
@@ -813,7 +817,11 @@ def test_delegated_check_conditional_inline_preserves_structural_result(monkeypa
         lambda *_args, **_kwargs: SimpleNamespace(analysis_job=job, runtime_job=job),
     )
     monkeypatch.setattr(resolver_mod, "_load_state_var_values", lambda *_args, **_kwargs: {})
-    monkeypatch.setattr(queue_mod, "get_artifact", lambda *_args, **_kwargs: authority_artifact)
+    monkeypatch.setattr(
+        queue_mod,
+        "get_artifact",
+        lambda *_args, **_kwargs: {"schema_version": "assessment/1", "predicate_trees": authority_artifact},
+    )
 
     materialize_calls = []
 
@@ -924,7 +932,11 @@ def test_delegated_opaque_checker_materializes_with_zero_arg_getter(monkeypatch)
         lambda *_args, **_kwargs: SimpleNamespace(analysis_job=job, runtime_job=job),
     )
     monkeypatch.setattr(resolver_mod, "_load_state_var_values", lambda *_args, **_kwargs: {})
-    monkeypatch.setattr(queue_mod, "get_artifact", lambda *_args, **_kwargs: authority_artifact)
+    monkeypatch.setattr(
+        queue_mod,
+        "get_artifact",
+        lambda *_args, **_kwargs: {"schema_version": "assessment/1", "predicate_trees": authority_artifact},
+    )
 
     rpc_calls = []
 

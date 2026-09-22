@@ -10,6 +10,7 @@ from typing import Any, cast
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from db.assessment import load_assessment, store_assessment_section
 from db.deployment import deployment_scope, normalize_deployment
 from db.models import (
     Contract,
@@ -21,7 +22,6 @@ from db.models import (
     SessionLocal,
     derive_job_chain_id,
 )
-from db.nested_artifacts import ARTIFACT_KINDS, KEY_PREFIX, parse_key
 from db.nested_artifacts import store_bundle as store_nested_artifacts
 from db.queue import get_artifact, store_artifact
 from schemas.control_tracking import ControlSnapshot
@@ -274,85 +274,57 @@ def _root_artifacts(
 
 
 def _load_nested_artifacts(session: Session, job_id, *, chain: str) -> dict[str, LoadedArtifacts]:
-    """Hydrate ``recursive.*`` artifacts written by the resolution stage.
-
-    Resolution writes only the runtime-state slices (snapshot,
-    effective_permissions) to ``recursive.*`` rows. The static slices
-    (analysis, tracking_plan) live in ``contract_materializations``
-    (content-addressed by ``(chain, bytecode_keccak)``); we hydrate them
-    here per-address so the rest of policy still sees a full
-    ``LoadedArtifacts`` bundle. A bundle missing analysis/snapshot is
-    dropped — ``_resolve_authority`` and the post-policy
-    ``resolve_control_graph`` refresh both require both fields.
-    """
-    import copy
-
-    from db import contract_materializations as cm
-    from db.models import Artifact
-
-    prefix = f"{KEY_PREFIX}."
-    rows = (
-        session.execute(select(Artifact).where(Artifact.job_id == job_id, Artifact.name.like(f"{prefix}%")))
-        .scalars()
-        .all()
-    )
-    bundles: dict[str, dict] = {}
-    for row in rows:
-        parsed = parse_key(row.name)
-        if parsed is None:
+    """Reconstruct recursive resolver bundles from the canonical Assessment."""
+    assessment = load_assessment(session, job_id, reader=get_artifact)
+    if assessment is None:
+        return {}
+    bundles: dict[str, LoadedArtifacts] = {}
+    for address, child in assessment.get("recursive", {}).items():
+        analysis = child.get("contract_analysis")
+        tracking_plan = child.get("control_tracking_plan")
+        snapshot = child.get("control_snapshot")
+        if not isinstance(snapshot, dict):
             continue
-        address, kind = parsed
-        if kind not in ARTIFACT_KINDS:
-            continue
-        payload = get_artifact(session, job_id, row.name)
-        if payload is None:
-            continue
-        bundles.setdefault(address, {})[kind] = payload
+        if not isinstance(analysis, dict):
+            from db import contract_materializations as cm
 
-    # Hydrate analysis + tracking_plan from contract_materializations.
-    # Address-keyed lookup keyed on the job's chain (the same name the resolution
-    # stage materialized under); on a row miss we drop the bundle below since the
-    # downstream consumers can't operate without analysis. ``chain`` is the job's
-    # resolved chain name — a chainless call is a data bug, so fail loud
-    # rather than defaulting to mainnet via the old PSAT_DEFAULT_CHAIN env read.
-    require_chain(chain=chain, context="policy nested-artifact hydration")
-    for address, bundle in bundles.items():
-        try:
-            mrow = cm.find_by_address(session, chain=chain, address=address)
-        except Exception as exc:
-            # A failed query leaves the session pending-rollback; roll back before
-            # the next address's lookup so one DB hiccup doesn't drop every
-            # remaining bundle. The bundle is dropped either way, but a row miss
-            # is an expected outcome (silent, above) and a DB error is not.
-            session.rollback()
-            # ``bundle_*``, not ``address``/``chain``: the job's own address and
-            # chain are already bound as context fields, and the formatter drops
-            # an ``extra`` whose key collides with one of them.
-            record_degraded(
-                phase="nested_artifact_hydration",
-                exc=exc,
-                context={"job_id": str(job_id), "bundle_address": address, "bundle_chain": chain},
-            )
-            logger.warning(
-                "Materialization hydration failed for %s on %s; bundle dropped from policy analysis",
-                address,
-                chain,
-                extra={"exc_type": type(exc).__name__, "bundle_address": address, "bundle_chain": chain},
-            )
-            mrow = None
-        if mrow is None:
+            require_chain(chain=chain, context="policy nested-artifact hydration")
+            try:
+                materialization = cm.find_by_address(session, chain=chain, address=address)
+            except Exception as exc:
+                session.rollback()
+                record_degraded(
+                    phase="nested_artifact_hydration",
+                    exc=exc,
+                    context={"job_id": str(job_id), "bundle_address": address, "bundle_chain": chain},
+                )
+                logger.warning(
+                    "Materialization hydration failed for %s on %s; bundle dropped from policy analysis",
+                    address,
+                    chain,
+                    extra={"exc_type": type(exc).__name__, "bundle_address": address, "bundle_chain": chain},
+                )
+                continue
+            if materialization is None:
+                continue
+            analysis = cm.hydrate_analysis(materialization)
+            if not isinstance(tracking_plan, dict):
+                tracking_plan = cm.hydrate_tracking_plan(materialization)
+        if not isinstance(analysis, dict):
             continue
-        if mrow.analysis:
-            bundle["analysis"] = copy.deepcopy(mrow.analysis)
-        if mrow.tracking_plan:
-            bundle["tracking_plan"] = copy.deepcopy(mrow.tracking_plan)
-
-    # Only keep bundles that have the minimum fields resolve_control_graph needs.
-    return {
-        addr: cast(LoadedArtifacts, bundle)
-        for addr, bundle in bundles.items()
-        if {"analysis", "snapshot"} <= bundle.keys()
-    }
+        raw_bundle: dict[str, Any] = {
+            "analysis": analysis,
+            "tracking_plan": tracking_plan if isinstance(tracking_plan, dict) else {},
+            "snapshot": cast(ControlSnapshot, snapshot),
+        }
+        predicate_trees = child.get("predicate_trees")
+        if isinstance(predicate_trees, dict):
+            raw_bundle["predicate_trees"] = predicate_trees
+        permissions = child.get("effective_permissions")
+        if isinstance(permissions, dict):
+            raw_bundle["effective_permissions"] = permissions
+        bundles[address] = cast(LoadedArtifacts, raw_bundle)
+    return bundles
 
 
 def _resolve_semantic_capabilities(
@@ -530,13 +502,14 @@ class PolicyWorker(BaseWorker):
         durations_ms: dict[str, int] = {}
 
         # Load required artifacts from DB
-        contract_analysis = get_artifact(session, job.id, "contract_analysis")
-        control_snapshot = get_artifact(session, job.id, "control_snapshot")
-        resolved_control_graph = get_artifact(session, job.id, "resolved_control_graph")
+        assessment = load_assessment(session, job.id, reader=get_artifact) or {}
+        contract_analysis = cast(dict[str, Any] | None, assessment.get("contract_analysis"))
+        control_snapshot = cast(dict[str, Any] | None, assessment.get("control_snapshot"))
+        resolved_control_graph = cast(dict[str, Any] | None, assessment.get("resolved_control_graph"))
         # ``predicate_trees`` and ``effects`` are the semantic inputs to
         # ``build_effective_permissions``.
-        predicate_trees = get_artifact(session, job.id, "predicate_trees")
-        effects_artifact = get_artifact(session, job.id, "effects")
+        predicate_trees = assessment.get("predicate_trees")
+        effects_artifact = assessment.get("effects")
         missing_semantic_inputs = [
             name
             for name, artifact in (("predicate_trees", predicate_trees), ("effects", effects_artifact))
@@ -555,7 +528,7 @@ class PolicyWorker(BaseWorker):
                 ", ".join(sorted(missing_semantic_inputs)),
                 extra={"missing_artifacts": sorted(missing_semantic_inputs)},
             )
-        tracking_plan = get_artifact(session, job.id, "control_tracking_plan")
+        tracking_plan = cast(dict[str, Any] | None, assessment.get("control_tracking_plan"))
         # Optional: classify cache populated by the resolution stage. Lets the
         # refresh + labeling passes skip 6-10 RPCs per address.
         classify_cache_raw = get_artifact(session, job.id, "classified_addresses")
@@ -696,7 +669,9 @@ class PolicyWorker(BaseWorker):
                 context=f"policy_function_principals:{job.id}",
             )
 
-        store_artifact(session, job.id, "effective_permissions", data=ep_data)
+        store_assessment_section(
+            session, job.id, "effective_permissions", ep_data, reader=get_artifact, writer=store_artifact
+        )
         record_stage_metric("effective_functions", len(ep_data.get("functions", [])))
         if contract_row and isinstance(predicate_trees, dict):
             job_chain = job.request.get("chain") if isinstance(job.request, dict) else None
@@ -747,7 +722,9 @@ class PolicyWorker(BaseWorker):
                         "function_permissions": [],
                         "public_capabilities": [],
                     }
-                store_artifact(session, job.id, "principal_history", data=principal_history)
+                store_assessment_section(
+                    session, job.id, "principal_history", principal_history, reader=get_artifact, writer=store_artifact
+                )
 
         logger.info(
             "Policy stage effective permissions complete for job %s address=%s name=%s",
@@ -788,7 +765,14 @@ class PolicyWorker(BaseWorker):
             )
             if refreshed_graph:
                 resolved_control_graph = refreshed_graph
-                store_artifact(session, job.id, "resolved_control_graph", data=refreshed_graph)
+                store_assessment_section(
+                    session,
+                    job.id,
+                    "resolved_control_graph",
+                    refreshed_graph,
+                    reader=get_artifact,
+                    writer=store_artifact,
+                )
                 # Rewrite the CGN/CGE tables to the refreshed graph too — the
                 # same scoped replace the resolution stage used. Rewriting only
                 # the artifact left the table plane a strict subset: every
@@ -972,7 +956,9 @@ class PolicyWorker(BaseWorker):
                     )
             session.commit()
 
-        store_artifact(session, job.id, "principal_labels", data=pl_data)
+        store_assessment_section(
+            session, job.id, "principal_labels", pl_data, reader=get_artifact, writer=store_artifact
+        )
         record_stage_metric("principals_labeled", len(pl_data.get("principals", [])))
 
         logger.info(
@@ -990,10 +976,13 @@ class PolicyWorker(BaseWorker):
                 contract_analysis,
                 control_snapshot,
                 function_records=ep_data.get("functions") if isinstance(ep_data, dict) else None,
+                target_effects=effects_artifact,
             )
             if enriched and ep_data is not None:
                 self._apply_cross_contract_claims(ep_data, enriched)
-                store_artifact(session, job.id, "effective_permissions", data=ep_data)
+                store_assessment_section(
+                    session, job.id, "effective_permissions", ep_data, reader=get_artifact, writer=store_artifact
+                )
 
         self.update_detail(
             session,
@@ -1135,6 +1124,7 @@ class PolicyWorker(BaseWorker):
         contract_analysis: dict,
         control_snapshot: dict,
         function_records: list[dict] | None = None,
+        target_effects: object = None,
     ) -> dict[str, list[Claim]]:
         """Mint policy-derived claims from sibling facts.
 
@@ -1192,8 +1182,9 @@ class PolicyWorker(BaseWorker):
         ) -> tuple[str, dict | None, dict | None]:
             sj_id, addr = target
             with SessionLocal() as s:
-                effects_payload = get_artifact(s, sj_id, "effects")
-                snapshot_payload = get_artifact(s, sj_id, "control_snapshot")
+                sibling_assessment = load_assessment(s, sj_id, reader=get_artifact) or {}
+                effects_payload = cast(dict[str, Any] | None, sibling_assessment.get("effects"))
+                snapshot_payload = cast(dict[str, Any] | None, sibling_assessment.get("control_snapshot"))
             return (
                 addr,
                 effects_payload if isinstance(effects_payload, dict) else None,
@@ -1222,7 +1213,6 @@ class PolicyWorker(BaseWorker):
 
         callee_claim_map = build_callee_claim_map(sibling_effects)
         controller_values = control_snapshot.get("controller_values", {})
-        target_effects = get_artifact(session, job.id, "effects")
         target_effects = target_effects if isinstance(target_effects, dict) else None
         target_address = (job.address or "").lower()
 

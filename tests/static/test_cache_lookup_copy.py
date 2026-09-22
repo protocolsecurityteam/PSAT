@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+from db.assessment import get_assessment_section, store_assessment_section
 from tests.cache_helpers import (
     ADDR_A,
     ADDR_B,
@@ -39,6 +40,39 @@ def test_find_completed_static_cache_case_insensitive(db_session):
     found = find_completed_static_cache(db_session, checksummed.lower())
     assert found is not None
     assert found.id == completed.id
+
+
+def test_find_completed_static_cache_rejects_wrong_assessment_version(db_session):
+    """An era stamp and artifact name do not validate the canonical envelope."""
+    from sqlalchemy import select
+
+    from db.models import Artifact
+    from db.queue import find_completed_static_cache
+
+    completed = _create_completed_job_with_static_data(db_session)
+    row = db_session.execute(
+        select(Artifact).where(Artifact.job_id == completed.id, Artifact.name == "assessment")
+    ).scalar_one()
+    row.data = {"schema_version": "assessment/0", "contract_analysis": {"summary": {}}}
+    row.storage_key = None
+    db_session.commit()
+
+    assert find_completed_static_cache(db_session, ADDR_A) is None
+
+
+def test_cache_rejects_assessment_without_contract_analysis(db_session):
+    from db.assessment import load_assessment, store_assessment
+    from db.queue import copy_static_cache, create_job, find_completed_static_cache
+
+    completed = _create_completed_job_with_static_data(db_session)
+    assessment = load_assessment(db_session, completed.id)
+    assert assessment is not None
+    assessment.pop("contract_analysis")
+    store_assessment(db_session, completed.id, assessment)
+
+    assert find_completed_static_cache(db_session, ADDR_A) is None
+    target = create_job(db_session, {"address": ADDR_A})
+    assert copy_static_cache(db_session, completed.id, target.id) is None
 
 
 def test_find_completed_static_cache_miss_no_job(db_session):
@@ -125,7 +159,7 @@ def test_find_completed_static_cache_hit_for_proxy_without_contract_analysis(db_
 def test_find_completed_static_cache_miss_no_summary(db_session):
     """Completed job without contract_summaries row is not returned."""
     from db.models import Contract, JobStage, JobStatus
-    from db.queue import create_job, find_completed_static_cache, store_artifact, store_source_files
+    from db.queue import create_job, find_completed_static_cache, store_source_files
 
     job = create_job(db_session, {"address": ADDR_A})
     job.status = JobStatus.completed
@@ -135,7 +169,7 @@ def test_find_completed_static_cache_miss_no_summary(db_session):
     db_session.add(Contract(job_id=job.id, address=ADDR_A, contract_name="X"))
     db_session.commit()
     store_source_files(db_session, job.id, {"src/X.sol": "contract X {}"})
-    store_artifact(db_session, job.id, "contract_analysis", data={"summary": {}})
+    store_assessment_section(db_session, job.id, "contract_analysis", {"summary": {}})
 
     assert find_completed_static_cache(db_session, ADDR_A) is None
 
@@ -148,13 +182,16 @@ def test_find_completed_static_cache_picks_most_recent(db_session):
     from sqlalchemy import update
 
     from db.models import Contract, ContractSummary, Job, JobStage, JobStatus
-    from db.queue import create_job, find_completed_static_cache, store_artifact, store_source_files
+    from db.queue import create_job, find_completed_static_cache, store_source_files
 
     _create_completed_job_with_static_data(db_session, address=ADDR_A)
 
     new_job = create_job(db_session, {"address": ADDR_A, "name": "TestContract2"})
     new_job.status = JobStatus.completed
     new_job.stage = JobStage.done
+    from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
+
+    new_job.analysis_schema_version = ANALYSIS_SCHEMA_VERSION
     db_session.commit()
 
     contract = Contract(job_id=new_job.id, address=ADDR_A, chain="ethereum", contract_name="TestContract2")
@@ -163,7 +200,7 @@ def test_find_completed_static_cache_picks_most_recent(db_session):
     db_session.add(ContractSummary(contract_id=contract.id))
     db_session.commit()
     store_source_files(db_session, new_job.id, {"src/T.sol": "contract T {}"})
-    store_artifact(db_session, new_job.id, "contract_analysis", data={"summary": {}})
+    store_assessment_section(db_session, new_job.id, "contract_analysis", {"summary": {}})
 
     future = datetime.now(timezone.utc) + timedelta(hours=1)
     db_session.execute(update(Job).where(Job.id == new_job.id).values(updated_at=future))
@@ -184,13 +221,13 @@ def test_copy_static_cache(db_session):
     from sqlalchemy import select
 
     from db.models import Contract, ContractSummary, RoleDefinition
-    from db.queue import copy_static_cache, create_job, get_artifact, get_source_files, store_artifact
+    from db.queue import copy_static_cache, create_job, get_artifact, get_source_files
 
     source_job = _create_completed_job_with_static_data(db_session)
     predicate_trees = {"schema_version": "semantic", "trees": {"pause()": {"node_type": "caller"}}}
     effects = {"schema_version": "semantic", "effects": {"pause()": [{"kind": "external_call"}]}}
-    store_artifact(db_session, source_job.id, "predicate_trees", data=predicate_trees)
-    store_artifact(db_session, source_job.id, "effects", data=effects)
+    store_assessment_section(db_session, source_job.id, "predicate_trees", predicate_trees)
+    store_assessment_section(db_session, source_job.id, "effects", effects)
     target_job = create_job(db_session, {"address": ADDR_A})
 
     new_contract_id = copy_static_cache(db_session, source_job.id, target_job.id)
@@ -220,13 +257,13 @@ def test_copy_static_cache(db_session):
     assert len(rds) == 1
     assert rds[0].role_name == "ADMIN_ROLE"
 
-    assert get_artifact(db_session, target_job.id, "contract_analysis") is not None
-    assert get_artifact(db_session, target_job.id, "predicate_trees") == predicate_trees
-    assert get_artifact(db_session, target_job.id, "effects") == effects
+    assert get_assessment_section(db_session, target_job.id, "contract_analysis") is not None
+    assert get_assessment_section(db_session, target_job.id, "predicate_trees") == predicate_trees
+    assert get_assessment_section(db_session, target_job.id, "effects") == effects
     # slither_results / analysis_report were removed from the static-artifact
     # cache copy set when the Slither CLI subprocess was excised — they no
     # longer participate in caching since they're no longer produced.
-    assert get_artifact(db_session, target_job.id, "control_tracking_plan") is not None
+    assert get_assessment_section(db_session, target_job.id, "control_tracking_plan") is not None
     assert get_artifact(db_session, target_job.id, "contract_flags") is None
 
 
@@ -240,7 +277,7 @@ def test_data_isolation_after_cache_copy(db_session):
     from sqlalchemy import select
 
     from db.models import Contract, ContractSummary, Job
-    from db.queue import copy_static_cache, create_job, get_artifact, get_source_files
+    from db.queue import copy_static_cache, create_job, get_source_files
 
     source_job = _create_completed_job_with_static_data(db_session)
     target_job = create_job(db_session, {"address": ADDR_A})
@@ -263,7 +300,7 @@ def test_data_isolation_after_cache_copy(db_session):
     ).scalar_one_or_none()
     assert summary is not None
 
-    assert get_artifact(db_session, target_job.id, "contract_analysis") is not None
+    assert get_assessment_section(db_session, target_job.id, "contract_analysis") is not None
 
 
 # ---------------------------------------------------------------------------
@@ -309,7 +346,7 @@ def test_no_duplicate_rows_after_two_runs(db_session, monkeypatch):
     from sqlalchemy import func, select
 
     from db.models import Contract, ContractSummary, RoleDefinition, SourceFile
-    from db.queue import create_job, get_artifact
+    from db.queue import create_job
     from workers.discovery import DiscoveryWorker
 
     _create_completed_job_with_static_data(db_session)
@@ -317,7 +354,7 @@ def test_no_duplicate_rows_after_two_runs(db_session, monkeypatch):
     new_job = create_job(db_session, {"address": ADDR_A})
     monkeypatch.setattr(
         "workers.discovery.fetch",
-        lambda addr: (_ for _ in ()).throw(AssertionError("fetch should not be called")),
+        lambda addr, **_kwargs: (_ for _ in ()).throw(AssertionError("fetch should not be called")),
     )
 
     worker = DiscoveryWorker()
@@ -342,7 +379,7 @@ def test_no_duplicate_rows_after_two_runs(db_session, monkeypatch):
     assert src_count == 2, f"Expected 2 source files, got {src_count}"
 
     for artifact_name in ["contract_analysis", "control_tracking_plan"]:
-        art = get_artifact(db_session, new_job.id, artifact_name)
+        art = get_assessment_section(db_session, new_job.id, artifact_name)
         assert isinstance(art, dict), f"Missing artifact {artifact_name}"
 
 

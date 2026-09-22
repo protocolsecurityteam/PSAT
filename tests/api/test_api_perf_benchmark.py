@@ -22,6 +22,7 @@ from contextlib import contextmanager
 import pytest
 from sqlalchemy import event, text
 
+from db.assessment import store_assessment_section
 from db.models import (
     AuditContractCoverage,
     AuditReport,
@@ -291,7 +292,7 @@ def seeded(db_session, storage_bucket):
         # contract_analysis / contract_flags / dependencies via store_artifact
         # so each body lands in object storage (storage_key set, data NULL),
         # matching the prod layout that exposes the per-row GET hotspot.
-        store_artifact(
+        store_assessment_section(
             db_session,
             job.id,
             "contract_analysis",

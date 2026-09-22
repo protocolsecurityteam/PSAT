@@ -171,23 +171,26 @@ def materialized_protocol(qsession):
         address=VAULT_ADDR,
         status="ready",
         analysis_schema_version=ANALYSIS_SCHEMA_VERSION,
-        tracking_plan={
-            "tracked_controllers": [
-                {
-                    "controller_id": "state_variable:guardian",
-                    "name": "guardian",
-                    "read_spec": {"strategy": "getter_call", "target": "guardian", "type_kind": "address"},
-                    "event_watch": {
-                        "events": [
-                            {
-                                "topic0": "0x" + "ab" * 32,
-                                "signature": "GuardianChanged(address,address)",
-                                "inputs": [{"name": "old", "type": "address", "indexed": True}],
-                            }
-                        ]
-                    },
-                }
-            ]
+        assessment={
+            "schema_version": "assessment/1",
+            "control_tracking_plan": {
+                "tracked_controllers": [
+                    {
+                        "controller_id": "state_variable:guardian",
+                        "name": "guardian",
+                        "read_spec": {"strategy": "getter_call", "target": "guardian", "type_kind": "address"},
+                        "event_watch": {
+                            "events": [
+                                {
+                                    "topic0": "0x" + "ab" * 32,
+                                    "signature": "GuardianChanged(address,address)",
+                                    "inputs": [{"name": "old", "type": "address", "indexed": True}],
+                                }
+                            ]
+                        },
+                    }
+                ]
+            },
         },
     )
     qsession.add(row)
@@ -858,7 +861,10 @@ def test_policy_worker_marks_dirty(qsession, monkeypatch):
         "resolved_control_graph": {"nodes": [], "edges": []},
         "control_tracking_plan": {"schema_version": "0.1", "contract_address": job.address},
     }
-    monkeypatch.setattr("workers.policy_worker.get_artifact", lambda _s, _j, name: artifacts.get(name))
+    monkeypatch.setattr(
+        "workers.policy_worker.get_artifact",
+        lambda _s, _j, name: {"schema_version": "assessment/1", **artifacts} if name == "assessment" else None,
+    )
     monkeypatch.setattr("workers.policy_worker.store_artifact", lambda *a, **kw: None)
     monkeypatch.setattr("workers.policy_worker._load_nested_artifacts", lambda *a, **kw: {})
     monkeypatch.setattr(

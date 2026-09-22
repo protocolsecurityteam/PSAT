@@ -276,8 +276,8 @@ def test_predicate_trees_cached_inline(_route_to_test_db, _clean_cm):
         )
 
     # Inline path: JSONB column populated, blob_key NULL.
-    assert winner.predicate_trees == predicate_payload
-    assert winner.predicate_trees_blob_key is None
+    assert winner.assessment is not None
+    assert winner.assessment_blob_key is None
     # Hydrator returns the same shape.
     assert cm.hydrate_predicate_trees(winner) == predicate_payload
 
@@ -339,12 +339,11 @@ def test_predicate_trees_cached_via_blob(_route_to_test_db, _clean_cm):
             builder=builder,
         )
 
-    # Blob path: predicate_trees_blob_key set, JSONB NULL, three puts
-    # total (analysis, tracking_plan, predicate_trees).
-    assert row.predicate_trees is None
-    assert row.predicate_trees_blob_key is not None
+    # Blob path stores one canonical Assessment.
+    assert row.assessment is None
+    assert row.assessment_blob_key is not None
     keys_written = sorted(storage.put_calls)
-    assert any(k.endswith("/predicate_trees.json") for k in keys_written)
+    assert keys_written == [row.assessment_blob_key]
 
     with patch("db.contract_materializations.get_storage_client", return_value=storage):
         assert cm.hydrate_predicate_trees(row) == predicate_payload
@@ -356,12 +355,8 @@ def _row_stub(**kwargs: Any) -> Any:
     Returning ``Any`` keeps pyright from rejecting the stub at the
     typed ``ContractMaterialization`` parameter boundary."""
     defaults = dict(
-        analysis=None,
-        analysis_blob_key=None,
-        tracking_plan=None,
-        tracking_plan_blob_key=None,
-        predicate_trees=None,
-        predicate_trees_blob_key=None,
+        assessment=None,
+        assessment_blob_key=None,
     )
     defaults.update(kwargs)
     return SimpleNamespace(**defaults)
@@ -371,8 +366,7 @@ def test_hydrate_predicate_trees_unit():
     """Unit-level smoke: ``hydrate_predicate_trees`` reads the
     ``predicate_trees`` column, not ``analysis`` or ``tracking_plan``."""
     row = _row_stub(
-        analysis={"should": "not appear"},
-        predicate_trees={"trees": {"f()": {}}},
+        assessment={"schema_version": "assessment/1", "predicate_trees": {"trees": {"f()": {}}}},
     )
     assert cm.hydrate_predicate_trees(row) == {"trees": {"f()": {}}}
 
@@ -417,6 +411,7 @@ def test_find_by_keccak_filters_on_schema_version(_clean_cm):
                 address="0x" + "2" * 40,
                 status="ready",
                 analysis_schema_version=cm.ANALYSIS_SCHEMA_VERSION,
+                assessment={"schema_version": "assessment/1"},
             ),
         ]
     )
@@ -450,6 +445,7 @@ def test_find_by_address_filters_on_schema_version(_clean_cm):
                 address=addr_cur,
                 status="ready",
                 analysis_schema_version=cm.ANALYSIS_SCHEMA_VERSION,
+                assessment={"schema_version": "assessment/1"},
             ),
         ]
     )
@@ -520,6 +516,7 @@ def test_materialize_serves_current_schema_version_row(_route_to_test_db, _clean
             contract_name="CurrentAnalyzer",
             status="ready",
             analysis_schema_version=cm.ANALYSIS_SCHEMA_VERSION,
+            assessment={"schema_version": "assessment/1"},
         )
     )
     _clean_cm.commit()

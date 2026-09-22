@@ -106,6 +106,7 @@ def _materialization(
             status=status,
             builder_started_at=builder_started_at,
             analysis_schema_version=version,
+            assessment={"schema_version": "assessment/1"} if status == "ready" else None,
         )
     )
     session.commit()

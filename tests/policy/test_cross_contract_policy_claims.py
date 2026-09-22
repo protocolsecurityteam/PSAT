@@ -22,8 +22,9 @@ import pytest
 from eth_utils.crypto import keccak
 from sqlalchemy.orm import sessionmaker
 
+from db.assessment import load_assessment
+from db.assessment import store_assessment_section as store_artifact
 from db.models import Contract, EffectiveFunction, Job, JobStage, JobStatus
-from db.queue import store_artifact
 from services.static.claims import Claim
 from tests.conftest import requires_postgres
 from workers.policy_worker import PolicyWorker
@@ -144,7 +145,13 @@ def test_value_flow_claim_propagates_to_effective_function(db_session, _repoint_
     contract = _make_target_functions(db_session, target_job, ["sweep(address)"])
     control_snapshot = {"controller_values": {"state_variable:token": {"value": TOKEN}}}
 
-    enriched = PolicyWorker()._enrich_cross_contract(db_session, target_job, {}, control_snapshot)
+    enriched = PolicyWorker()._enrich_cross_contract(
+        db_session,
+        target_job,
+        {},
+        control_snapshot,
+        target_effects=(load_assessment(db_session, target_job.id) or {}).get("effects"),
+    )
 
     assert "sweep(address)" in enriched
     claim = enriched["sweep(address)"][0]
@@ -211,7 +218,11 @@ def test_no_claims_without_matching_evidence(db_session, _repoint_session_local)
     _make_target_functions(db_session, target_job, ["sweep(address)"])
 
     enriched = PolicyWorker()._enrich_cross_contract(
-        db_session, target_job, {}, {"controller_values": {"state_variable:token": {"value": TOKEN}}}
+        db_session,
+        target_job,
+        {},
+        {"controller_values": {"state_variable:token": {"value": TOKEN}}},
+        target_effects=(load_assessment(db_session, target_job.id) or {}).get("effects"),
     )
     assert enriched == {}
 
@@ -388,6 +399,7 @@ def test_struct_param_function_still_matches_its_row(db_session, _repoint_sessio
         {},
         control_snapshot,
         function_records=[{"function": full_name, "abi_signature": canonical, "selector": selector}],
+        target_effects=(load_assessment(db_session, target_job.id) or {}).get("effects"),
     )
 
     # The derivation itself keys on the full_name and always worked...
@@ -472,7 +484,13 @@ def test_enrichment_lands_only_on_this_job_s_deployment(db_session, _repoint_ses
     db_session.commit()
 
     control_snapshot = {"controller_values": {"state_variable:token": {"value": TOKEN}}}
-    PolicyWorker()._enrich_cross_contract(db_session, target_job, {}, control_snapshot)
+    PolicyWorker()._enrich_cross_contract(
+        db_session,
+        target_job,
+        {},
+        control_snapshot,
+        target_effects=(load_assessment(db_session, target_job.id) or {}).get("effects"),
+    )
 
     def _claims_for(deployment: str) -> set[str]:
         row = (
@@ -555,7 +573,13 @@ def test_ambiguous_row_match_is_skipped_not_raised(db_session, _repoint_session_
 
     control_snapshot = {"controller_values": {"state_variable:token": {"value": TOKEN}}}
     with caplog.at_level("WARNING", logger="workers.policy_worker"):
-        enriched = PolicyWorker()._enrich_cross_contract(db_session, target_job, {}, control_snapshot)
+        enriched = PolicyWorker()._enrich_cross_contract(
+            db_session,
+            target_job,
+            {},
+            control_snapshot,
+            target_effects=(load_assessment(db_session, target_job.id) or {}).get("effects"),
+        )
 
     # The derivation still ran; only the placement was declined.
     assert "sweep(address)" in enriched

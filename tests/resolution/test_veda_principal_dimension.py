@@ -42,6 +42,7 @@ from pathlib import Path
 
 import pytest
 
+from db.assessment import store_assessment_section
 from services.resolution.capabilities import CapabilityExpr, Condition, ExternalCheck
 from services.resolution.deferred_reconciler import (
     DEFERRED_MARKER,
@@ -125,7 +126,6 @@ def _no_network(monkeypatch):
 
 def _seed_job_with_trees(session, *, address: str, trees: dict | None):
     from db.models import Job, JobStage, JobStatus
-    from db.queue import store_artifact
 
     job = Job(
         address=address,
@@ -138,7 +138,7 @@ def _seed_job_with_trees(session, *, address: str, trees: dict | None):
     session.add(job)
     session.flush()
     if trees is not None:
-        store_artifact(session, job.id, "predicate_trees", data=trees)
+        store_assessment_section(session, job.id, "predicate_trees", data=trees)
     session.commit()
     return job
 

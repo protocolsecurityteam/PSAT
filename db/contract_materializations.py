@@ -1,7 +1,8 @@
-"""Cross-job, cross-process materialization cache.
+"""Cross-job, cross-process canonical Assessment cache.
 
-A row per ``(chain, bytecode_keccak)`` holding the static analysis +
-tracking-plan bundle so two impl jobs requesting the same contract pay
+A row per ``(chain, bytecode_keccak)`` holds one ``assessment/1`` envelope
+containing only reusable static sections. This lets two implementation jobs
+requesting the same contract share
 the expensive forge+Slither cost exactly once. Concurrent requests are
 serialized via ``pg_advisory_xact_lock(hashtext(chain || ':' || keccak))``:
 the lock winner runs the builder; the loser blocks on the lock, finds
@@ -19,14 +20,12 @@ onto the id token so a name-keyed writer and an id-keyed reader hit the
 same row. ``None``/empty resolves to the mainnet token ``"1"``, matching
 how ``Job.request['chain']`` defaults.
 
-Bundle storage: the ``analysis`` and ``tracking_plan`` payloads can be
-multi-megabyte JSON blobs (a Compound-v3-class contract analysis is
+The Assessment can be a multi-megabyte JSON blob (a Compound-v3-class analysis is
 ~5-20 MB). Postgres JSONB stores fine but detoasts on every read,
 inflates page-cache pressure on this hot table, and slows backup /
 dump / restore. The schema therefore carries paired columns:
 
-  - ``analysis`` (JSONB) and ``analysis_blob_key`` (Text)
-  - ``tracking_plan`` (JSONB) and ``tracking_plan_blob_key`` (Text)
+  - ``assessment`` (JSONB) and ``assessment_blob_key`` (Text)
 
 When object storage is configured (``ARTIFACT_STORAGE_*`` env vars set,
 ``db.storage.get_storage_client()`` returns non-None) new writes go to
@@ -35,12 +34,10 @@ columns are then the source of truth. When storage is unconfigured
 (local dev, offline tests without minio) writes fall back to inline
 JSONB and blob_key is NULL.
 
-Reads are always handled by ``hydrate_analysis`` / ``hydrate_tracking_plan``
-which try the blob first and transparently fall back to inline JSONB.
-That fallback is what lets pre-migration rows keep working while the
-backfill (``scripts/backfill_contract_materializations_to_blob.py``)
-catches up — and what insulates the pipeline from a transient Tigris
-outage when the inline copy still exists. When it does not, the read
+Reads hydrate and validate the Assessment first, then project the legacy
+resolver return sections in memory. Legacy component columns are inert and
+their rows regenerate after the analyzer era bump. Blob reads fall back to an
+inline canonical Assessment when one exists. When it does not, the read
 raises ``StorageContentIncomplete``: "the bucket could not answer" and
 "this row stored nothing" are different facts, and the caller
 (``services/resolution/recursive``) turns the second into an empty
@@ -54,7 +51,7 @@ import logging
 import os
 import time
 from datetime import datetime, timezone
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, cast
 
 from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -69,6 +66,7 @@ from db.storage import (
     content_shortfall,
     get_storage_client,
 )
+from schemas.assessment import ASSESSMENT_VERSION, Assessment, validate_assessment
 from utils.chains import chain_cache_token
 
 logger = logging.getLogger(__name__)
@@ -154,7 +152,11 @@ logger = logging.getLogger(__name__)
 # safety prep (index-based operand exclusion, element-aware operand ordering)
 # so the shape change and its invalidation land together rather than thrashing
 # through ``_bundle_differs``, which compares the whole serialized tree.
-ANALYSIS_SCHEMA_VERSION = 6
+# v7 replaces the independently persisted static component documents with one
+# validated ``assessment/1`` envelope. Older rows deliberately miss: treating
+# legacy columns as if they were a canonical Assessment would silently mix two
+# persistence contracts.
+ANALYSIS_SCHEMA_VERSION = 7
 
 
 # ── Provenance ─────────────────────────────────────────────────────────────
@@ -253,6 +255,58 @@ def _blob_key(chain_norm: str, keccak_norm: str, kind: str) -> str:
     return f"{_key_prefix()}contract_materializations/{chain_norm}/{keccak_norm}/{kind}.json"
 
 
+def _static_assessment(
+    analysis: dict,
+    tracking_plan: dict,
+    predicate_trees: dict | None,
+    effects: dict | None = None,
+) -> Assessment:
+    """Build the code-plane-only envelope stored in this cache."""
+    assessment = cast(
+        Assessment,
+        {
+            "schema_version": ASSESSMENT_VERSION,
+            "contract_analysis": analysis,
+            "control_tracking_plan": tracking_plan,
+        },
+    )
+    if predicate_trees is not None:
+        assessment["predicate_trees"] = predicate_trees
+    if effects is not None:
+        assessment["effects"] = effects
+    return validate_assessment(assessment)
+
+
+def _assessment_for_address(assessment: Assessment, address: str) -> Assessment:
+    """Copy reusable code inputs while restamping deployment identity.
+
+    Materializations never contain runtime/resolution/policy sections. Keeping
+    an allowlist here prevents a malformed or future donor from leaking those
+    sections across deployments.
+    """
+    import copy
+
+    result_data: dict[str, Any] = {"schema_version": ASSESSMENT_VERSION}
+    assessment_data = cast(dict[str, Any], assessment)
+    analysis = assessment.get("contract_analysis")
+    if isinstance(analysis, dict):
+        copied = copy.deepcopy(analysis)
+        subject = copied.get("subject")
+        if isinstance(subject, dict):
+            subject["address"] = address.lower()
+        result_data["contract_analysis"] = copied
+    plan = assessment.get("control_tracking_plan")
+    if isinstance(plan, dict):
+        copied_plan = copy.deepcopy(plan)
+        copied_plan["contract_address"] = address.lower()
+        result_data["control_tracking_plan"] = copied_plan
+    for name in ("predicate_trees", "effects"):
+        section = assessment_data.get(name)
+        if isinstance(section, dict):
+            result_data[name] = copy.deepcopy(section)
+    return validate_assessment(result_data)
+
+
 def find_by_keccak(
     session: Session,
     *,
@@ -277,7 +331,7 @@ def find_by_keccak(
             ContractMaterialization.analysis_schema_version == ANALYSIS_SCHEMA_VERSION,
         )
     ).scalar_one_or_none()
-    return row
+    return row if _is_current_ready(row) else None
 
 
 def find_by_address(
@@ -304,7 +358,25 @@ def find_by_address(
             ContractMaterialization.analysis_schema_version == ANALYSIS_SCHEMA_VERSION,
         )
     ).scalar_one_or_none()
-    return row
+    return row if _is_current_ready(row) else None
+
+
+def _is_current_ready(row: ContractMaterialization | None) -> bool:
+    if row is None or row.status != "ready" or row.analysis_schema_version != ANALYSIS_SCHEMA_VERSION:
+        return False
+    try:
+        return hydrate_assessment(row) is not None
+    except StorageError:
+        # The envelope exists but its transport cannot answer. Preserve the row
+        # so the section reader can report the established unreadable/absent
+        # reason instead of collapsing an outage into a cache miss.
+        return True
+    except ValueError:
+        logger.warning(
+            "contract materialization has no valid canonical Assessment; forcing regeneration",
+            extra={"chain": row.chain, "address": row.address},
+        )
+        return False
 
 
 def _hydrate(row: ContractMaterialization, *, blob_key_attr: str, inline_attr: str) -> dict | None:
@@ -398,21 +470,28 @@ def _hydrate(row: ContractMaterialization, *, blob_key_attr: str, inline_attr: s
     )
 
 
+def hydrate_assessment(row: ContractMaterialization) -> Assessment | None:
+    """Load and validate the sole persisted analytical document."""
+    payload = _hydrate(row, blob_key_attr="assessment_blob_key", inline_attr="assessment")
+    return validate_assessment(payload) if payload is not None else None
+
+
+def _hydrate_section(row: ContractMaterialization, name: str) -> dict | None:
+    assessment = hydrate_assessment(row)
+    if assessment is None:
+        return None
+    value = cast(dict[str, Any], assessment).get(name)
+    return value if isinstance(value, dict) else None
+
+
 def hydrate_analysis(row: ContractMaterialization) -> dict | None:
-    """Load the row's ``analysis`` payload, transparently picking the
-    blob path when ``analysis_blob_key`` is set and falling back to the
-    inline JSONB column otherwise. ``None`` means the row genuinely
-    has no analysis (nothing was ever stored — the ``status='failed'``
-    corner case). Raises ``StorageContentIncomplete`` when a blob key is
-    recorded but its content cannot be obtained: that is not the same fact and
-    must not reach a consumer as an empty analysis."""
-    return _hydrate(row, blob_key_attr="analysis_blob_key", inline_attr="analysis")
+    """Compatibility projection of ``Assessment.contract_analysis``."""
+    return _hydrate_section(row, "contract_analysis")
 
 
 def hydrate_tracking_plan(row: ContractMaterialization) -> dict | None:
-    """Symmetric to ``hydrate_analysis`` for ``tracking_plan``, including the
-    ``StorageContentIncomplete`` third state."""
-    return _hydrate(row, blob_key_attr="tracking_plan_blob_key", inline_attr="tracking_plan")
+    """Compatibility projection of ``Assessment.control_tracking_plan``."""
+    return _hydrate_section(row, "control_tracking_plan")
 
 
 def hydrate_predicate_trees(row: ContractMaterialization) -> dict | None:
@@ -424,7 +503,7 @@ def hydrate_predicate_trees(row: ContractMaterialization) -> dict | None:
     row records a blob key whose content cannot be obtained — "written before
     the migration" and "the bucket is down" are different facts and the
     fallback is only correct for the first."""
-    return _hydrate(row, blob_key_attr="predicate_trees_blob_key", inline_attr="predicate_trees")
+    return _hydrate_section(row, "predicate_trees")
 
 
 def _advisory_lock(session: Session, chain_norm: str, keccak_norm: str) -> None:
@@ -466,15 +545,14 @@ def find_reusable_by_source_hash(
     """
     if not source_content_hash:
         return None
-    return session.execute(
-        select(ContractMaterialization)
-        .where(
+    candidates = session.execute(
+        select(ContractMaterialization).where(
             ContractMaterialization.source_content_hash == source_content_hash,
             ContractMaterialization.status == "ready",
             ContractMaterialization.analysis_schema_version == ANALYSIS_SCHEMA_VERSION,
         )
-        .limit(1)
-    ).scalar_one_or_none()
+    ).scalars()
+    return next((row for row in candidates if _is_current_ready(row)), None)
 
 
 def _copy_bundle_row(
@@ -496,17 +574,24 @@ def _copy_bundle_row(
     the new row pointing at the donor's blob is safe and avoids re-uploading a
     multi-MB payload. Inline JSONB (storage-unconfigured rows) is copied by value.
     """
+    donor_assessment = hydrate_assessment(donor)
+    if donor_assessment is None:
+        raise ValueError("current materialization donor has no Assessment")
+    assessment = _assessment_for_address(donor_assessment, addr_norm)
+    assessment_inline: dict[str, Any] | None = cast(dict[str, Any], assessment)
+    assessment_blob_key: str | None = None
+    client = get_storage_client()
+    if client is not None:
+        assessment_blob_key = _blob_key(chain_norm, keccak_norm, "assessment")
+        _put_blob(client, assessment_blob_key, cast(dict[str, Any], assessment))
+        assessment_inline = None
     values = dict(
         chain=chain_norm,
         bytecode_keccak=keccak_norm,
         address=addr_norm,
         contract_name=donor.contract_name,
-        analysis=donor.analysis,
-        tracking_plan=donor.tracking_plan,
-        predicate_trees=donor.predicate_trees,
-        analysis_blob_key=donor.analysis_blob_key,
-        tracking_plan_blob_key=donor.tracking_plan_blob_key,
-        predicate_trees_blob_key=donor.predicate_trees_blob_key,
+        assessment=assessment_inline,
+        assessment_blob_key=assessment_blob_key,
         source_content_hash=source_content_hash,
         status="ready",
         error=None,
@@ -526,12 +611,8 @@ def _copy_bundle_row(
         set_={
             "address": stmt.excluded.address,
             "contract_name": stmt.excluded.contract_name,
-            "analysis": stmt.excluded.analysis,
-            "tracking_plan": stmt.excluded.tracking_plan,
-            "predicate_trees": stmt.excluded.predicate_trees,
-            "analysis_blob_key": stmt.excluded.analysis_blob_key,
-            "tracking_plan_blob_key": stmt.excluded.tracking_plan_blob_key,
-            "predicate_trees_blob_key": stmt.excluded.predicate_trees_blob_key,
+            "assessment": stmt.excluded.assessment,
+            "assessment_blob_key": stmt.excluded.assessment_blob_key,
             "source_content_hash": stmt.excluded.source_content_hash,
             "status": "ready",
             "error": None,
@@ -649,9 +730,9 @@ def materialize_or_wait(
                     ContractMaterialization.bytecode_keccak == keccak_norm,
                 )
             ).scalar_one_or_none()
-            if row is not None and row.status == "ready" and row.analysis_schema_version == ANALYSIS_SCHEMA_VERSION:
+            if _is_current_ready(row):
                 session.commit()
-                return row
+                return cast(ContractMaterialization, row)
             # An old-version 'ready' row falls through to the claim below and
             # is rebuilt; its status is overwritten to 'building' then 'ready'
             # with the current version in phase 3.
@@ -764,12 +845,17 @@ def materialize_or_wait(
     analysis_payload = bundle.get("analysis")
     tracking_plan_payload = bundle.get("tracking_plan")
     predicate_trees_payload = bundle.get("predicate_trees")
-    analysis_blob_key: str | None = None
-    tracking_plan_blob_key: str | None = None
-    predicate_trees_blob_key: str | None = None
-    analysis_inline: dict | None = analysis_payload if isinstance(analysis_payload, dict) else None
-    tracking_plan_inline: dict | None = tracking_plan_payload if isinstance(tracking_plan_payload, dict) else None
-    predicate_trees_inline: dict | None = predicate_trees_payload if isinstance(predicate_trees_payload, dict) else None
+    effects_payload = bundle.get("effects")
+    if not isinstance(analysis_payload, dict) or not isinstance(tracking_plan_payload, dict):
+        raise ValueError("materialization builder returned an incomplete static Assessment")
+    assessment = _static_assessment(
+        analysis_payload,
+        tracking_plan_payload,
+        predicate_trees_payload if isinstance(predicate_trees_payload, dict) else None,
+        effects_payload if isinstance(effects_payload, dict) else None,
+    )
+    assessment_blob_key: str | None = None
+    assessment_inline: dict[str, Any] | None = cast(dict[str, Any], assessment)
 
     client = get_storage_client()
     if client is not None:
@@ -777,18 +863,9 @@ def materialize_or_wait(
         # Tigris PUT doesn't push us back into idle-connection territory.
         # On failure, propagate without writing a row — the next caller
         # retries the build cleanly.
-        if analysis_inline is not None:
-            analysis_blob_key = _blob_key(chain_norm, keccak_norm, "analysis")
-            _put_blob(client, analysis_blob_key, analysis_inline)
-            analysis_inline = None
-        if tracking_plan_inline is not None:
-            tracking_plan_blob_key = _blob_key(chain_norm, keccak_norm, "tracking_plan")
-            _put_blob(client, tracking_plan_blob_key, tracking_plan_inline)
-            tracking_plan_inline = None
-        if predicate_trees_inline is not None:
-            predicate_trees_blob_key = _blob_key(chain_norm, keccak_norm, "predicate_trees")
-            _put_blob(client, predicate_trees_blob_key, predicate_trees_inline)
-            predicate_trees_inline = None
+        assessment_blob_key = _blob_key(chain_norm, keccak_norm, "assessment")
+        _put_blob(client, assessment_blob_key, cast(dict[str, Any], assessment))
+        assessment_inline = None
 
     # ── Phase 3: write under a short-lived lock ────────────────────
     with SessionLocal() as session:
@@ -804,25 +881,17 @@ def materialize_or_wait(
                 ContractMaterialization.bytecode_keccak == keccak_norm,
             )
         ).scalar_one_or_none()
-        if (
-            existing is not None
-            and existing.status == "ready"
-            and existing.analysis_schema_version == ANALYSIS_SCHEMA_VERSION
-        ):
+        if _is_current_ready(existing):
             session.commit()
-            return existing
+            return cast(ContractMaterialization, existing)
 
         stmt = pg_insert(ContractMaterialization).values(
             chain=chain_norm,
             bytecode_keccak=keccak_norm,
             address=addr_norm,
             contract_name=bundle.get("contract_name"),
-            analysis=analysis_inline,
-            tracking_plan=tracking_plan_inline,
-            predicate_trees=predicate_trees_inline,
-            analysis_blob_key=analysis_blob_key,
-            tracking_plan_blob_key=tracking_plan_blob_key,
-            predicate_trees_blob_key=predicate_trees_blob_key,
+            assessment=assessment_inline,
+            assessment_blob_key=assessment_blob_key,
             source_content_hash=_src["hash"],
             status="ready",
             builder_started_at=None,
@@ -838,12 +907,8 @@ def materialize_or_wait(
             set_={
                 "status": "ready",
                 "contract_name": stmt.excluded.contract_name,
-                "analysis": stmt.excluded.analysis,
-                "tracking_plan": stmt.excluded.tracking_plan,
-                "predicate_trees": stmt.excluded.predicate_trees,
-                "analysis_blob_key": stmt.excluded.analysis_blob_key,
-                "tracking_plan_blob_key": stmt.excluded.tracking_plan_blob_key,
-                "predicate_trees_blob_key": stmt.excluded.predicate_trees_blob_key,
+                "assessment": stmt.excluded.assessment,
+                "assessment_blob_key": stmt.excluded.assessment_blob_key,
                 "source_content_hash": stmt.excluded.source_content_hash,
                 "address": stmt.excluded.address,
                 "error": None,
@@ -871,33 +936,22 @@ def materialize_or_wait(
         return ready
 
 
-def _publish_blobs(
+def _publish_assessment(
     chain_norm: str,
     keccak_norm: str,
     analysis: dict,
     tracking_plan: dict,
     predicate_trees: dict | None,
-) -> tuple[dict | None, dict | None, dict | None, str | None, str | None, str | None]:
-    """Upload the bundle when storage is configured; else keep it inline.
-
-    Returns ``(analysis_inline, tracking_plan_inline, predicate_trees_inline,
-    analysis_key, tracking_plan_key, predicate_trees_key)`` — the same
-    inline-or-blob split ``materialize_or_wait`` phase 2 produces. Upload
-    failures propagate: a row pointing at a key the bucket does not have reads
-    as "this contract's payload could not be produced" forever after.
-    """
+    effects: dict | None,
+) -> tuple[dict | None, str | None]:
+    """Upload one canonical envelope, or retain it inline."""
+    assessment = _static_assessment(analysis, tracking_plan, predicate_trees, effects)
     client = get_storage_client()
     if client is None:
-        return analysis, tracking_plan, predicate_trees, None, None, None
-    analysis_key = _blob_key(chain_norm, keccak_norm, "analysis")
-    _put_blob(client, analysis_key, analysis)
-    tracking_plan_key = _blob_key(chain_norm, keccak_norm, "tracking_plan")
-    _put_blob(client, tracking_plan_key, tracking_plan)
-    predicate_trees_key: str | None = None
-    if predicate_trees is not None:
-        predicate_trees_key = _blob_key(chain_norm, keccak_norm, "predicate_trees")
-        _put_blob(client, predicate_trees_key, predicate_trees)
-    return None, None, None, analysis_key, tracking_plan_key, predicate_trees_key
+        return cast(dict[str, Any], assessment), None
+    key = _blob_key(chain_norm, keccak_norm, "assessment")
+    _put_blob(client, key, cast(dict[str, Any], assessment))
+    return None, key
 
 
 def publish_materialization(
@@ -909,6 +963,7 @@ def publish_materialization(
     analysis: dict | None,
     tracking_plan: dict | None,
     predicate_trees: dict | None = None,
+    effects: dict | None = None,
     source_content_hash: str | None = None,
     provenance: dict[str, Any],
     refresh_on_differ: bool = False,
@@ -991,7 +1046,9 @@ def publish_materialization(
         ).scalar_one_or_none()
         outcome = _publish_precheck(existing, addr_norm)
         if outcome == PUBLISH_ALREADY_CURRENT:
-            if not refresh_on_differ or not _bundle_differs(existing, analysis, tracking_plan, predicate_trees):
+            if not refresh_on_differ or not _bundle_differs(
+                existing, analysis, tracking_plan, predicate_trees, effects
+            ):
                 session.commit()
                 return PUBLISH_ALREADY_CURRENT
             written = PUBLISH_REFRESHED
@@ -1020,26 +1077,17 @@ def publish_materialization(
             session.commit()
             return PUBLISH_ADDRESS_BOUND_TO_OTHER_KECCAK
 
-        (
-            analysis_inline,
-            plan_inline,
-            trees_inline,
-            analysis_key,
-            plan_key,
-            trees_key,
-        ) = _publish_blobs(chain_norm, keccak_norm, analysis, tracking_plan, predicate_trees)
+        assessment_inline, assessment_key = _publish_assessment(
+            chain_norm, keccak_norm, analysis, tracking_plan, predicate_trees, effects
+        )
 
         stmt = pg_insert(ContractMaterialization).values(
             chain=chain_norm,
             bytecode_keccak=keccak_norm,
             address=addr_norm,
             contract_name=contract_name,
-            analysis=analysis_inline,
-            tracking_plan=plan_inline,
-            predicate_trees=trees_inline,
-            analysis_blob_key=analysis_key,
-            tracking_plan_blob_key=plan_key,
-            predicate_trees_blob_key=trees_key,
+            assessment=assessment_inline,
+            assessment_blob_key=assessment_key,
             source_content_hash=source_content_hash,
             status="ready",
             error=None,
@@ -1052,12 +1100,8 @@ def publish_materialization(
             set_={
                 "address": stmt.excluded.address,
                 "contract_name": stmt.excluded.contract_name,
-                "analysis": stmt.excluded.analysis,
-                "tracking_plan": stmt.excluded.tracking_plan,
-                "predicate_trees": stmt.excluded.predicate_trees,
-                "analysis_blob_key": stmt.excluded.analysis_blob_key,
-                "tracking_plan_blob_key": stmt.excluded.tracking_plan_blob_key,
-                "predicate_trees_blob_key": stmt.excluded.predicate_trees_blob_key,
+                "assessment": stmt.excluded.assessment,
+                "assessment_blob_key": stmt.excluded.assessment_blob_key,
                 "source_content_hash": stmt.excluded.source_content_hash,
                 "status": "ready",
                 "error": None,
@@ -1078,6 +1122,7 @@ def _bundle_differs(
     analysis: dict,
     tracking_plan: dict,
     predicate_trees: dict | None,
+    effects: dict | None = None,
 ) -> bool:
     """Does the stored bundle say something other than the caller's?
 
@@ -1089,11 +1134,7 @@ def _bundle_differs(
     if existing is None:
         return True
     try:
-        stored = (
-            hydrate_analysis(existing),
-            hydrate_tracking_plan(existing),
-            hydrate_predicate_trees(existing),
-        )
+        stored = hydrate_assessment(existing)
     except Exception as exc:
         logger.info(
             "contract_materializations: %s/%s stored bundle unreadable (%s); treating as differing",
@@ -1102,10 +1143,10 @@ def _bundle_differs(
             exc,
         )
         return True
-    return [_canonical(p) for p in stored] != [_canonical(p) for p in (analysis, tracking_plan, predicate_trees)]
+    return _canonical(stored) != _canonical(_static_assessment(analysis, tracking_plan, predicate_trees, effects))
 
 
-def _canonical(payload: dict | None) -> str | None:
+def _canonical(payload: Mapping[str, Any] | None) -> str | None:
     if payload is None:
         return None
     return json.dumps(payload, sort_keys=True, default=str)
@@ -1136,7 +1177,7 @@ def _publish_precheck(existing: ContractMaterialization | None, addr_norm: str) 
     """
     if existing is None:
         return None
-    if existing.status != "ready" or existing.analysis_schema_version != ANALYSIS_SCHEMA_VERSION:
+    if not _is_current_ready(existing):
         return None
     if (existing.address or "").lower() != addr_norm:
         return PUBLISH_KECCAK_BOUND_TO_OTHER_ADDRESS

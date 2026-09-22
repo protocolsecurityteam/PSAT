@@ -167,8 +167,8 @@ def session():
 @requires_postgres
 def test_enroll_proxy_linked_impl_seeds_cursor_at_proxy(session, monkeypatch):
     import workers.event_log_indexer as eli
+    from db.assessment import store_assessment_section
     from db.models import IndexedEventCursor, Job, JobStage, JobStatus
-    from db.queue import store_artifact
 
     deploy = 21_000_000
     seen: list[str] = []
@@ -189,7 +189,7 @@ def test_enroll_proxy_linked_impl_seeds_cursor_at_proxy(session, monkeypatch):
     )
     session.add(job)
     session.flush()
-    store_artifact(
+    store_assessment_section(
         session,
         job.id,
         "predicate_trees",

@@ -86,10 +86,15 @@ def _create_completed_job_with_chain(session, address, chain, name="TestContract
         },
     )
 
-    store_artifact(session, job.id, "contract_analysis", data={"summary": {"control_model": "ownable"}})
+    from db.assessment import store_assessment_section
+    from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
+
+    job.analysis_schema_version = ANALYSIS_SCHEMA_VERSION
+    session.commit()
+    store_assessment_section(session, job.id, "contract_analysis", {"summary": {"control_model": "ownable"}})
     store_artifact(session, job.id, "slither_results", data={"results": {"detectors": []}})
     store_artifact(session, job.id, "analysis_report", text_data="Test analysis report")
-    store_artifact(session, job.id, "control_tracking_plan", data={"controllers": []})
+    store_assessment_section(session, job.id, "control_tracking_plan", {"controllers": []})
 
     return job
 

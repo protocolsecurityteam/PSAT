@@ -379,7 +379,10 @@ def test_detail_inlines_upgrade_history_and_graph_viz(mock_session_cls, mock_get
     _mock_session_ctx(mock_session_cls, mock_session)
 
     mock_get_all_artifacts.return_value = {
-        "contract_analysis": {"subject": {"name": "Pool"}, "summary": {"control_model": "proxy"}},
+        "assessment": {
+            "schema_version": "assessment/1",
+            "contract_analysis": {"subject": {"name": "Pool"}, "summary": {"control_model": "proxy"}},
+        },
         "upgrade_history": {"schema_version": "0.1", "proxies": {PROXY: {}}, "total_upgrades": 3},
         "dependency_graph_viz": {"nodes": [{"id": "addr:" + TARGET}], "edges": []},
         "dependencies": {"address": TARGET, "dependencies": {}},
@@ -556,16 +559,22 @@ def test_detail_inlines_all_pipeline_artifacts(mock_session_cls, mock_get_all_ar
     _mock_session_ctx(mock_session_cls, mock_session)
 
     mock_get_all_artifacts.return_value = {
-        "contract_analysis": {"subject": {"name": "Vault"}, "summary": {"control_model": "authority"}},
-        "control_snapshot": {"schema_version": "0.1", "controller_values": {"state_variable:owner": {"value": "0xaa"}}},
-        "resolved_control_graph": {"nodes": [{"id": "a", "address": TARGET}], "edges": []},
-        "dependencies": {"address": TARGET, "dependencies": {}},
-        "principal_history": {
-            "schema_version": "principal_history.v1",
-            "contract_address": TARGET,
-            "status": "ok",
-            "function_permissions": [{"function": "pause()", "principal": "0xaa"}],
+        "assessment": {
+            "schema_version": "assessment/1",
+            "contract_analysis": {"subject": {"name": "Vault"}, "summary": {"control_model": "authority"}},
+            "control_snapshot": {
+                "schema_version": "0.1",
+                "controller_values": {"state_variable:owner": {"value": "0xaa"}},
+            },
+            "resolved_control_graph": {"nodes": [{"id": "a", "address": TARGET}], "edges": []},
+            "principal_history": {
+                "schema_version": "principal_history.v1",
+                "contract_address": TARGET,
+                "status": "ok",
+                "function_permissions": [{"function": "pause()", "principal": "0xaa"}],
+            },
         },
+        "dependencies": {"address": TARGET, "dependencies": {}},
     }
 
     resp = client.get("/api/analyses/full_run")
@@ -718,8 +727,11 @@ def test_resolution_worker_rewrites_address_for_impl_jobs(monkeypatch):
     }
 
     artifacts = {
-        "control_tracking_plan": tracking_plan,
-        "contract_analysis": contract_analysis,
+        "assessment": {
+            "schema_version": "assessment/1",
+            "control_tracking_plan": tracking_plan,
+            "contract_analysis": contract_analysis,
+        }
     }
 
     monkeypatch.setattr(
@@ -746,6 +758,11 @@ def test_resolution_worker_rewrites_address_for_impl_jobs(monkeypatch):
     monkeypatch.setattr(
         "workers.resolution_worker.store_artifact",
         lambda _s, _j, name, data=None, text_data=None: stored_artifacts.update({name: data or text_data}),
+    )
+    monkeypatch.setattr("workers.resolution_worker.store_nested_artifacts", lambda *_a, **_kw: None)
+    monkeypatch.setattr(
+        "workers.resolution_worker.store_assessment_section",
+        lambda _s, _j, name, data, **_kw: stored_artifacts.update({name: data}),
     )
     monkeypatch.setattr(worker, "update_detail", lambda *_a, **_kw: None)
 
@@ -1166,8 +1183,8 @@ def test_artifact_endpoint_strips_json_extension(mock_session_cls, mock_get_arti
 
     def _get_artifact(_session, _job_id, name):
         call_names.append(name)
-        if name == "effective_permissions":
-            return {"functions": []}
+        if name == "assessment":
+            return {"schema_version": "assessment/1", "effective_permissions": {"functions": []}}
         return None
 
     mock_get_artifact.side_effect = _get_artifact
@@ -1178,7 +1195,7 @@ def test_artifact_endpoint_strips_json_extension(mock_session_cls, mock_get_arti
     )
     assert resp.status_code == 200
     # First call should be with stripped name
-    assert call_names[0] == "effective_permissions"
+    assert call_names[0] == "assessment"
 
 
 # ===================================================================
@@ -1389,7 +1406,11 @@ def test_policy_worker_fails_cleanly_on_missing_artifacts(monkeypatch):
     # contract_analysis present but control_snapshot missing
     monkeypatch.setattr(
         "workers.policy_worker.get_artifact",
-        lambda _s, _j, name: {"subject": {"address": TARGET, "name": "T"}} if name == "contract_analysis" else None,
+        lambda _s, _j, name: (
+            {"schema_version": "assessment/1", "contract_analysis": {"subject": {"address": TARGET, "name": "T"}}}
+            if name == "assessment"
+            else None
+        ),
     )
 
     with pytest.raises(RuntimeError, match="control_snapshot"):
@@ -1424,7 +1445,12 @@ def test_resolution_worker_fails_on_missing_artifacts(monkeypatch):
     monkeypatch.setattr(
         "workers.resolution_worker.get_artifact",
         lambda _s, _j, name: (
-            {"schema_version": "0.1", "tracked_controllers": []} if name == "control_tracking_plan" else None
+            {
+                "schema_version": "assessment/1",
+                "control_tracking_plan": {"schema_version": "0.1", "tracked_controllers": []},
+            }
+            if name == "assessment"
+            else None
         ),
     )
     with pytest.raises(RuntimeError, match="contract_analysis"):

@@ -70,7 +70,14 @@ def test_inline_returns_none_when_materialization_fails(monkeypatch):
     fake_lookup = SimpleNamespace(analysis_job=fake_job, runtime_job=fake_job)
 
     monkeypatch.setattr(CR, "find_analysis_job_for_address", lambda *a, **k: fake_lookup)
-    monkeypatch.setattr(DQ, "get_artifact", lambda *a, **k: _callee_artifact_with_unmaterializable_cancall())
+    monkeypatch.setattr(
+        DQ,
+        "get_artifact",
+        lambda *a, **k: {
+            "schema_version": "assessment/1",
+            "predicate_trees": _callee_artifact_with_unmaterializable_cancall(),
+        },
+    )
     monkeypatch.setattr(CR, "_load_state_var_values", lambda *a, **k: {})
 
     # The trigger: generic materializer can't satisfy ``canCall``'s role-mapping

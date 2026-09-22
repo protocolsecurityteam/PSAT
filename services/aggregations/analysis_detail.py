@@ -26,6 +26,7 @@ from db.models import (
 # Indirect through ``routers.deps`` so tests get a single patch point for
 # ``SessionLocal``/``get_all_artifacts``.
 from routers import deps
+from schemas.assessment import ASSESSMENT_SECTIONS, validate_assessment
 from services.aggregations.action_summary import describe_action
 from services.policy.capability_surface import capability_currency, exact_empty_credit
 
@@ -71,6 +72,16 @@ def _principal_label_payload(row: PrincipalLabel) -> dict[str, Any]:
     return out
 
 
+def _assessment_views(artifacts: dict[str, Any]) -> dict[str, Any]:
+    """Derive existing detail fields from the sole analytical document."""
+    views = {name: value for name, value in artifacts.items() if name not in ASSESSMENT_SECTIONS}
+    assessment = artifacts.get("assessment")
+    if assessment is not None:
+        sections = dict(validate_assessment(assessment))
+        views.update({name: sections[name] for name in ASSESSMENT_SECTIONS if name in sections})
+    return views
+
+
 def _artifacts_or_degrade(
     session: Session,
     job_id: Any,
@@ -100,7 +111,7 @@ def _artifacts_or_degrade(
     consumers; the SPA's equivalent distinction is served by the header.
     """
     try:
-        return deps.get_all_artifacts(session, job_id)
+        return _assessment_views(deps.get_all_artifacts(session, job_id))
     except deps.StorageContentIncomplete as exc:
         logger.error(
             "analysis detail for job %s is missing %d artifact bodies (%d not determined, %d proven absent)",
@@ -111,7 +122,7 @@ def _artifacts_or_degrade(
         )
         not_determined.update(exc.not_determined)
         proven_absent.update(exc.proven_absent)
-        return dict(exc.values or {})
+        return _assessment_views(dict(exc.values or {}))
 
 
 def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | None:
@@ -175,6 +186,7 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
     }
 
     for artifact_name in (
+        "assessment",
         "contract_analysis",
         "control_snapshot",
         "dependencies",
