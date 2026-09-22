@@ -3,7 +3,7 @@
 Invariant 8 says a completed analysis leaves a current materialization row.
 The main pipeline now writes one (F4a), so the invariant holds going forward —
 but it does not hold *retroactively*, and it stops holding the moment
-``ANALYSIS_SCHEMA_VERSION`` is bumped: every existing row reads as a miss at
+``STATIC_FACTS_SCHEMA_VERSION`` is bumped: every existing row reads as a miss at
 once, and the whole monitored fleet silently falls back to baseline-only
 watching until something re-analyzes it.
 
@@ -33,7 +33,7 @@ from typing import Any
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from db.contract_materializations import ANALYSIS_SCHEMA_VERSION, builder_claim_is_stale
+from db.contract_materializations import STATIC_FACTS_SCHEMA_VERSION, builder_claim_is_stale
 from db.models import ContractMaterialization, Job, JobStatus, MonitoredContract
 from utils.chains import chain_cache_token
 
@@ -93,11 +93,11 @@ class RebuildCandidate:
 def _materialization_state_by_key(
     session: Session, addresses: set[str]
 ) -> dict[tuple[str, str], tuple[str, int | None, datetime | None]]:
-    """``(chain_token, address) -> (status, analysis_schema_version, builder_started_at)``.
+    """``(chain_token, address) -> (status, static_facts_schema_version, builder_started_at)``.
 
     Not a SQL join: ``contract_materializations.chain`` holds chain-id tokens
     while ``monitored_contracts.chain`` holds names, and the two are only
-    comparable through ``chain_cache_token`` (see ``tracking_plan_state``). The
+    comparable through ``chain_cache_token`` (see ``observation_plan_state``). The
     address filter keeps the read proportional to the monitored fleet rather
     than to every contract the pipeline has ever materialized — this runs on
     every ``/api/fleet`` request and every ops tick.
@@ -105,13 +105,13 @@ def _materialization_state_by_key(
     if not addresses:
         return {}
     return {
-        (row.chain, (row.address or "").lower()): (row.status, row.analysis_schema_version, row.builder_started_at)
+        (row.chain, (row.address or "").lower()): (row.status, row.static_facts_schema_version, row.builder_started_at)
         for row in session.execute(
             select(
                 ContractMaterialization.chain,
                 ContractMaterialization.address,
                 ContractMaterialization.status,
-                ContractMaterialization.analysis_schema_version,
+                ContractMaterialization.static_facts_schema_version,
                 ContractMaterialization.builder_started_at,
             ).where(ContractMaterialization.address.in_(sorted(addresses)))
         ).all()
@@ -132,7 +132,7 @@ def _backlog_reason(state: tuple[str, int | None, datetime | None] | None) -> st
         return REASON_IN_PROGRESS
     if status == "failed":
         return REASON_FAILED
-    if version != ANALYSIS_SCHEMA_VERSION:
+    if version != STATIC_FACTS_SCHEMA_VERSION:
         return REASON_SUPERSEDED_VERSION
     if status != "ready":
         return REASON_NO_ROW

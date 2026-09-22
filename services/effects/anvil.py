@@ -1000,6 +1000,33 @@ class SubprocessAnvil:
             time.sleep(_TRANSACTION_RECEIPT_POLL_INTERVAL_S)
         raise ForkRpcTimeoutError(f"anvil deployment receipt for {tx_hash} did not become available")
 
+    def _wait_transaction_receipt(
+        self,
+        tx_hash: str,
+        *,
+        timeout: float = 10.0,
+        poll_interval: float = 0.01,
+    ) -> dict[str, Any]:
+        """Wait for anvil to publish a submitted transaction receipt.
+
+        ``eth_sendTransaction`` returning does not guarantee the receipt index
+        is visible to the immediately-following RPC. Fast local machines usually
+        hide that race; loaded CI runners consistently expose it. A missing
+        receipt is therefore retried boundedly, never subscripted as if it were
+        a mined transaction.
+        """
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            receipt = self._rpc("eth_getTransactionReceipt", [tx_hash])
+            if isinstance(receipt, dict):
+                return receipt
+            proc = getattr(self, "_proc", None)
+            if proc is not None and proc.poll() is not None:
+                raise ForkRpcTimeoutError(f"anvil exited while waiting for transaction receipt {tx_hash}")
+            time.sleep(poll_interval)
+        raise ForkRpcTimeoutError(f"anvil transaction receipt not available within {timeout:g}s: {tx_hash}")
+
     def accounts(self) -> list[str]:
         return list(self._rpc("eth_accounts", []))
 

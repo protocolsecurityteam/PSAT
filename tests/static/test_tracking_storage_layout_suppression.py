@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import pytest
 
-from services.static.contract_analysis_pipeline.tracking import (
+from services.static.static_analysis.tracking import (
     _is_storage_layout_constant,
 )
 

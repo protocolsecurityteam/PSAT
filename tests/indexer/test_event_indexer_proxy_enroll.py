@@ -168,7 +168,7 @@ def session():
 def test_enroll_proxy_linked_impl_seeds_cursor_at_proxy(session, monkeypatch):
     import workers.event_log_indexer as eli
     from db.models import IndexedEventCursor, Job, JobStage, JobStatus
-    from db.queue import store_artifact
+    from tests.support.assessment_artifacts import store_test_assessment
 
     deploy = 21_000_000
     seen: list[str] = []
@@ -189,11 +189,12 @@ def test_enroll_proxy_linked_impl_seeds_cursor_at_proxy(session, monkeypatch):
     )
     session.add(job)
     session.flush()
-    store_artifact(
+    store_test_assessment(
         session,
         job.id,
-        "predicate_trees",
-        data={
+        address=_IMPL,
+        name="KINGlike",
+        predicate_trees={
             "trees": {
                 "grantRole(bytes32,address)": {"op": "LEAF", "leaf": {"set_descriptor": _self_admin_descriptor()}}
             }

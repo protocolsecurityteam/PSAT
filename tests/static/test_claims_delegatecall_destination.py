@@ -94,7 +94,7 @@ _CONTRACT = "DelegatecallDestinations"
 def witnesses(tmp_path_factory) -> dict[str, dict]:
     """``{signature: delegatecall.execute witness}`` from the real static
     pipeline — Slither, effects, and the production claims phase."""
-    from services.static.contract_analysis_pipeline import collect_contract_analysis_with_artifacts
+    from services.static.static_analysis import collect_static_inputs
 
     project_dir = write_foundry_project(
         tmp_path_factory.mktemp("delegatecall_destinations"),
@@ -102,7 +102,7 @@ def witnesses(tmp_path_factory) -> dict[str, dict]:
         textwrap.dedent(_SRC).strip() + "\n",
     )
     assert Path(project_dir, "src", f"{_CONTRACT}.sol").exists()
-    _analysis, _trees, effects = collect_contract_analysis_with_artifacts(project_dir)
+    _analysis, _trees, effects = collect_static_inputs(project_dir)
     assert effects is not None and "functions" in effects
 
     out: dict[str, dict] = {}

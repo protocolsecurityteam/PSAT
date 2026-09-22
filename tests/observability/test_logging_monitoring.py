@@ -431,7 +431,7 @@ def test_undecodable_tracked_log_is_counted_for_the_scanner_heartbeat():
 
 
 def test_poller_publishes_the_plan_entries_it_could_not_dispatch(db_session):
-    """A plan entry this build cannot dispatch vanished from all accounting."""
+    """A valid future plan entry this build cannot dispatch stays accounted."""
     import uuid as _uuid
 
     from db.models import MonitoredContract
@@ -446,7 +446,6 @@ def test_poller_publishes_the_plan_entries_it_could_not_dispatch(db_session):
                 "polling_plan": [
                     {"field": "owner", "kind": "getter_call", "selector": "0x8da5cb5b", "type_kind": "address"},
                     {"field": "future", "kind": "a_kind_this_build_does_not_know"},
-                    "not even a dict",
                 ]
             },
             last_known_state={},
@@ -462,7 +461,7 @@ def test_poller_publishes_the_plan_entries_it_could_not_dispatch(db_session):
             uw.poll_for_state_changes(db_session, "http://stub")
 
     _process, kwargs = hb.call_args
-    assert kwargs["detail"]["entries_unrecognized"] == 2
+    assert kwargs["detail"]["entries_unrecognized"] == 1
     # Not a partial: an entry that was never dispatched failed to observe nothing.
     assert kwargs["detail"]["contracts_selected"] == 1
 

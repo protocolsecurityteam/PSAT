@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from ..context import ClaimContext
 from ..decorator import claim_matcher
-from ..types import ClaimEvidence
+from ..types import MatchedEvidence
 from . import _authcommon as ac
 
 
@@ -31,11 +31,10 @@ def _has_rotatable_scalar(ctx: ClaimContext) -> bool:
 @claim_matcher(
     claim_id="authorized_caller.rotate",
     sentence="rotates a non-owner scalar address that authorizes callers of specific gated functions",
-    legacy_projection=None,
     consumer_family="control_plane",
     gate=_has_rotatable_scalar,
 )
-def authorized_caller_rotate(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
+def authorized_caller_rotate(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
     if not ctx.effect_record(function).get("state_changing"):
         return None
     if not ac.function_has_caller_authority_leaf(ctx, function):
@@ -46,7 +45,7 @@ def authorized_caller_rotate(ctx: ClaimContext, function: str) -> ClaimEvidence 
     rotated = sorted(ac.clean_scalar_writes(ctx, function) & rotatable)
     if not rotated:
         return None
-    return ClaimEvidence(
+    return MatchedEvidence(
         tier="idiom_structural",
         witness={
             "kind": "caller_authority_rotate",

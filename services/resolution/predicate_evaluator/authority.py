@@ -389,7 +389,7 @@ def _oz_v5_namespaced_authority_selector(signature: str | None) -> str | None:
     ``_getAccessControlStorage()`` role-admin root — is never rerouted here."""
     if not isinstance(signature, str) or not signature.endswith("()"):
         return None
-    from services.static.contract_analysis_pipeline.tracking import (
+    from services.static.static_analysis.tracking import (
         _oz_v5_ownership_getter_for_accessor,
     )
 
@@ -440,7 +440,7 @@ def _canonical_authority_selector_for_slot(name: str | None, leaf: Mapping[str, 
         return None
     if _leaf_is_keyed_set_membership(leaf):
         return None
-    from services.static.contract_analysis_pipeline.tracking import _is_storage_layout_constant
+    from services.static.static_analysis.tracking import _is_storage_layout_constant
 
     if not _is_storage_layout_constant(name):
         return None

@@ -44,11 +44,21 @@ function installApiMocks() {
   );
 }
 
+function fixtureFunctions(data) {
+  return Object.fromEntries(
+    (data.contracts || []).map((contract) => [
+      entityKey(contract.chain, contract.address),
+      contract.functions || [],
+    ]),
+  );
+}
+
 function renderSurface() {
   return render(
     <ProtocolSurface
       companyName="etherfi"
       initialData={ETHERFI_COMPANY_RICH}
+      initialFunctions={fixtureFunctions(ETHERFI_COMPANY_RICH)}
       embedded
     />,
   );
@@ -246,6 +256,19 @@ describe("ProtocolSurface — empty / loading states", () => {
     });
     expectNoCrash();
   });
+
+  it("renders function-analysis failure instead of an empty surface", async () => {
+    setFetchHandler(
+      (url) => /^\/api\/company\/etherfi$/.test(url.pathname),
+      () => ETHERFI_COMPANY_RICH,
+    );
+    setFetchHandler(
+      (url) => /\/functions$/.test(url.pathname),
+      () => new Response("unavailable", { status: 503 }),
+    );
+    render(<ProtocolSurface companyName="etherfi" />);
+    expect(await screen.findByText(/Failed: Failed to load function analysis/i)).toBeInTheDocument();
+  });
 });
 
 // A minimal two-chain protocol: 2 ethereum contracts + 1 base contract. Only
@@ -264,7 +287,14 @@ const MULTICHAIN_COMPANY = {
 };
 
 function renderMultichain() {
-  return render(<ProtocolSurface companyName="multi" initialData={MULTICHAIN_COMPANY} embedded />);
+  return render(
+    <ProtocolSurface
+      companyName="multi"
+      initialData={MULTICHAIN_COMPANY}
+      initialFunctions={fixtureFunctions(MULTICHAIN_COMPANY)}
+      embedded
+    />,
+  );
 }
 
 function scopedMachineCount() {
@@ -320,7 +350,15 @@ describe("ProtocolSurface — multichain chain switcher", () => {
   // must wear the new chain so the switch is visible without opening anything.
   it("a cross-chain selectExample switches the chain scope and lands the selection", async () => {
     const ref = React.createRef();
-    render(<ProtocolSurface ref={ref} companyName="multi" initialData={MULTICHAIN_COMPANY} embedded />);
+    render(
+      <ProtocolSurface
+        ref={ref}
+        companyName="multi"
+        initialData={MULTICHAIN_COMPANY}
+        initialFunctions={fixtureFunctions(MULTICHAIN_COMPANY)}
+        embedded
+      />,
+    );
     await waitFor(() => expect(ref.current).toBeTruthy());
 
     let result;
@@ -358,6 +396,7 @@ describe("ProtocolSurface — multichain chain switcher", () => {
           // absent list must NOT witness it onto arbitrum.
           principals: [{ address: "0xc4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4", type: "safe", controls: [] }],
         }}
+        initialFunctions={fixtureFunctions(MULTICHAIN_COMPANY)}
         embedded
       />,
     );
@@ -409,8 +448,7 @@ describe("ProtocolSurface — per-chain function verdicts (functions chain axis)
         function: "pauseOnEth",
         selector: "0xeth00000",
         abi_signature: "pauseOnEth()",
-        effect_labels: ["pause"],
-        action_summary: "pause eth",
+        claims: [{ claim_id: "pause.set", tier: "standard_exact", witness: {} }],
         authority_public: false,
       },
     ],
@@ -419,8 +457,7 @@ describe("ProtocolSurface — per-chain function verdicts (functions chain axis)
         function: "pauseOnBase",
         selector: "0xbase0000",
         abi_signature: "pauseOnBase()",
-        effect_labels: ["pause"],
-        action_summary: "pause base",
+        claims: [{ claim_id: "pause.set", tier: "standard_exact", witness: {} }],
         authority_public: true,
       },
     ],
@@ -537,12 +574,12 @@ describe("rich fixture", () => {
     expect(nonProxies.length).toBeGreaterThan(0);
   });
 
-  it("has functions covering every lane", () => {
-    const allEffects = ETHERFI_COMPANY_RICH.contracts.flatMap((c) =>
-      c.functions.flatMap((f) => f.effect_labels),
+  it("has functions covering every claim lane", () => {
+    const allClaims = ETHERFI_COMPANY_RICH.contracts.flatMap((c) =>
+      c.functions.flatMap((f) => (f.claims || []).map((claim) => claim.claim_id)),
     );
-    expect(allEffects).toEqual(
-      expect.arrayContaining(["upgrade", "pause", "asset_pull", "asset_send", "config"]),
+    expect(allClaims).toEqual(
+      expect.arrayContaining(["upgrade.implementation", "pause.set", "flow.in", "flow.out", "authority.replace"]),
     );
   });
 
@@ -761,6 +798,7 @@ describe("ProtocolSurface — stage-1 selection model", () => {
       <ProtocolSurface
         companyName="etherfi-v2"
         initialData={ETHERFI_COMPANY_RICH}
+        initialFunctions={fixtureFunctions(ETHERFI_COMPANY_RICH)}
         embedded
       />,
     );
@@ -810,8 +848,7 @@ describe("ProtocolSurface — stage-1 selection model", () => {
                 function: "upgrade",
                 selector: "0xupgrade0",
                 abi_signature: "upgrade",
-                effect_labels: ["upgrade"],
-                action_summary: "upgrade action",
+                claims: [{ claim_id: "upgrade.implementation", tier: "standard_exact", witness: {} }],
               },
             ],
           },
@@ -897,7 +934,11 @@ describe("ProtocolSurface — M2 per-tab awareness + URL", () => {
 
   it("writes ?sel= (no view) when a safe is committed", async () => {
     render(
-      <ProtocolSurface companyName="etherfi" initialData={ETHERFI_COMPANY_RICH} />,
+      <ProtocolSurface
+        companyName="etherfi"
+        initialData={ETHERFI_COMPANY_RICH}
+        initialFunctions={fixtureFunctions(ETHERFI_COMPANY_RICH)}
+      />,
     ); // NON-embedded → URL writes enabled
     const user = userEvent.setup();
     await selectSearchMode(user, "Safes");
@@ -915,7 +956,11 @@ describe("ProtocolSurface — M2 per-tab awareness + URL", () => {
 
   it("writes ?sel= (no view) when a contract is committed", async () => {
     render(
-      <ProtocolSurface companyName="etherfi" initialData={ETHERFI_COMPANY_RICH} />,
+      <ProtocolSurface
+        companyName="etherfi"
+        initialData={ETHERFI_COMPANY_RICH}
+        initialFunctions={fixtureFunctions(ETHERFI_COMPANY_RICH)}
+      />,
     );
     const user = userEvent.setup();
     await user.type(searchInput(), "Vault");
@@ -930,7 +975,11 @@ describe("ProtocolSurface — M2 per-tab awareness + URL", () => {
 
   it("a focus-preview never writes the URL", async () => {
     render(
-      <ProtocolSurface companyName="etherfi" initialData={ETHERFI_COMPANY_RICH} />,
+      <ProtocolSurface
+        companyName="etherfi"
+        initialData={ETHERFI_COMPANY_RICH}
+        initialFunctions={fixtureFunctions(ETHERFI_COMPANY_RICH)}
+      />,
     );
     const user = userEvent.setup();
     await user.type(searchInput(), "Vault");
@@ -944,41 +993,6 @@ describe("ProtocolSurface — M2 per-tab awareness + URL", () => {
     expectNoCrash();
   });
 
-  it("restores a safe from a legacy ?sel=&view=principal URL (view ignored)", async () => {
-    window.history.replaceState(
-      {},
-      "",
-      `/company/etherfi/surface?sel=${SAFE}&view=principal`,
-    );
-    render(
-      <ProtocolSurface companyName="etherfi" initialData={ETHERFI_COMPANY_RICH} />,
-    ); // non-admin → Detail
-    // The safe is a principal-only entity, so the principal-shaped card renders — the
-    // legacy view happens to match, but it's the facet, not the param, deciding.
-    expect(await screen.findByText(/2\/3 threshold/i)).toBeInTheDocument();
-    // The stale view param is dropped on the restore's URL normalization.
-    await waitFor(() => {
-      expect(url().searchParams.get("view")).toBeNull();
-    });
-    expect(url().searchParams.get("sel")?.toLowerCase()).toBe(SAFE.toLowerCase());
-    expectNoCrash();
-  });
-
-  it("resolves a legacy ?focus= link and normalizes it to ?sel= (no view)", async () => {
-    window.history.replaceState({}, "", `/company/etherfi/surface?focus=${VAULT}`);
-    render(
-      <ProtocolSurface companyName="etherfi" initialData={ETHERFI_COMPANY_RICH} />,
-    ); // non-admin → Detail
-    // The Vault contract card renders (EntityCard shows its functions).
-    expect(await screen.findByText("upgrade")).toBeInTheDocument();
-    // Legacy param translated: ?focus dropped, ?sel written, no view axis.
-    await waitFor(() => {
-      expect(url().searchParams.get("sel")?.toLowerCase()).toBe(VAULT.toLowerCase());
-    });
-    expect(url().searchParams.get("view")).toBeNull();
-    expect(url().searchParams.get("focus")).toBeNull();
-    expectNoCrash();
-  });
 });
 
 // M3 (stage 4) polish: label cosmetics. The node-less touch-set highlight
@@ -1003,7 +1017,12 @@ describe("ProtocolSurface — M3 polish", () => {
       ],
     };
     render(
-      <ProtocolSurface companyName="etherfi" initialData={bareLabelData} embedded />,
+      <ProtocolSurface
+        companyName="etherfi"
+        initialData={bareLabelData}
+        initialFunctions={fixtureFunctions(bareLabelData)}
+        embedded
+      />,
     );
     const user = userEvent.setup();
     await selectSearchMode(user, "Safes");
@@ -1031,20 +1050,18 @@ describe("ProtocolSurface — machine-only authority (motivating bug)", () => {
   const GOV = "0x9999999999999999999999999999999999999999";
   const GPOOL = "0x8888888888888888888888888888888888888888";
 
-  function mkFn(name, effectLabels, owner) {
+  function mkFn(name, claimIds, owner) {
     return {
       function: name,
       selector: `0x${name.slice(0, 8).padEnd(8, "0")}`,
       abi_signature: name,
-      effect_labels: effectLabels,
-      action_summary: `${name} action`,
+      claims: claimIds.map((claim_id) => ({ claim_id, tier: "standard_exact", witness: {} })),
       authority_public: false,
       direct_owner: owner
         ? { ...owner, label: null, source_contract: null, source_controller_id: null }
         : null,
       authority_roles: [],
       controllers: [],
-      effect_targets: [],
     };
   }
 
@@ -1059,7 +1076,7 @@ describe("ProtocolSurface — machine-only authority (motivating bug)", () => {
         is_proxy: false,
         controllers: {},
         job_id: "gov-job",
-        functions: [mkFn("schedule", ["config"], null)],
+        functions: [mkFn("schedule", ["timelock.schedule"], null)],
       },
       {
         address: GPOOL,
@@ -1070,7 +1087,7 @@ describe("ProtocolSurface — machine-only authority (motivating bug)", () => {
         controllers: {},
         job_id: "gpool-job",
         functions: [
-          mkFn("upgradeTo", ["upgrade"], {
+          mkFn("upgradeTo", ["upgrade.implementation"], {
             address: GOV,
             resolved_type: "timelock",
             details: { delay: 864000 },
@@ -1092,7 +1109,13 @@ describe("ProtocolSurface — machine-only authority (motivating bug)", () => {
   });
 
   it("navigating via a timelock-typed caller opens the contract card on its default tab", async () => {
-    render(<ProtocolSurface companyName="etherfi" initialData={FIXTURE} />); // non-embedded → URL writes
+    render(
+      <ProtocolSurface
+        companyName="etherfi"
+        initialData={FIXTURE}
+        initialFunctions={fixtureFunctions(FIXTURE)}
+      />,
+    ); // non-embedded → URL writes
     const user = userEvent.setup();
 
     // Open the governed contract, then commit to its upgradeTo caller via the
@@ -1142,20 +1165,6 @@ describe("ProtocolSurface — machine-only authority (motivating bug)", () => {
     expectNoCrash();
   });
 
-  it("restores a machine-only authority from a legacy ?sel=&view=principal URL as its contract card", async () => {
-    window.history.replaceState({}, "", `/company/etherfi/surface?sel=${GOV}&view=principal`);
-    render(<ProtocolSurface companyName="etherfi" initialData={FIXTURE} />); // non-admin → Detail
-
-    // The stale view=principal is ignored; the machine facet wins → contract
-    // card, not an empty sidebar.
-    const machineName = await waitFor(() => {
-      const el = document.querySelector(".ps-machine-name");
-      expect(el).toBeTruthy();
-      return el;
-    });
-    expect(machineName).toHaveTextContent("GovTimelock");
-    expectNoCrash();
-  });
 });
 
 describe("ProtocolSurface — external selection handle", () => {
@@ -1187,7 +1196,15 @@ describe("ProtocolSurface — external selection handle", () => {
 
   function renderWithHandle(data = ETHERFI_COMPANY_RICH) {
     const ref = React.createRef();
-    render(<ProtocolSurface ref={ref} companyName="etherfi" initialData={data} embedded />);
+    render(
+      <ProtocolSurface
+        ref={ref}
+        companyName="etherfi"
+        initialData={data}
+        initialFunctions={fixtureFunctions(data)}
+        embedded
+      />,
+    );
     return ref;
   }
 
@@ -1343,7 +1360,13 @@ describe("ProtocolSurface — score arrivals land on the one sidebar card", () =
   function renderWithHandle() {
     const ref = React.createRef();
     render(
-      <ProtocolSurface ref={ref} companyName="etherfi" initialData={ETHERFI_COMPANY_RICH} embedded />,
+      <ProtocolSurface
+        ref={ref}
+        companyName="etherfi"
+        initialData={ETHERFI_COMPANY_RICH}
+        initialFunctions={fixtureFunctions(ETHERFI_COMPANY_RICH)}
+        embedded
+      />,
     );
     return ref;
   }
@@ -1484,7 +1507,13 @@ describe("ProtocolSurface — a score arrival marks the function/caller pair", (
   async function arrive(example) {
     const ref = React.createRef();
     render(
-      <ProtocolSurface ref={ref} companyName="etherfi" initialData={ETHERFI_COMPANY_RICH} embedded />,
+      <ProtocolSurface
+        ref={ref}
+        companyName="etherfi"
+        initialData={ETHERFI_COMPANY_RICH}
+        initialFunctions={fixtureFunctions(ETHERFI_COMPANY_RICH)}
+        embedded
+      />,
     );
     await waitFor(() => expect(ref.current).toBeTruthy());
     let result;
@@ -1602,7 +1631,15 @@ describe("ProtocolSurface — a score arrival marks the function/caller pair", (
     pool.functions.push({ ...structuredClone(vaultWithdraw), direct_owner: structuredClone(safeGate) });
 
     const ref = React.createRef();
-    render(<ProtocolSurface ref={ref} companyName="etherfi" initialData={shared} embedded />);
+    render(
+      <ProtocolSurface
+        ref={ref}
+        companyName="etherfi"
+        initialData={shared}
+        initialFunctions={fixtureFunctions(shared)}
+        embedded
+      />,
+    );
     await waitFor(() => expect(ref.current).toBeTruthy());
 
     // Without the pair the name resolves to neither host.
@@ -1677,7 +1714,15 @@ describe("ProtocolSurface — a score arrival marks the function/caller pair", (
     vault.functions.push(structuredClone(pause));
 
     const ref = React.createRef();
-    render(<ProtocolSurface ref={ref} companyName="etherfi" initialData={doubled} embedded />);
+    render(
+      <ProtocolSurface
+        ref={ref}
+        companyName="etherfi"
+        initialData={doubled}
+        initialFunctions={fixtureFunctions(doubled)}
+        embedded
+      />,
+    );
     await waitFor(() => expect(ref.current).toBeTruthy());
     let result;
     await act(async () => {
@@ -1737,7 +1782,15 @@ describe("ProtocolSurface — reached-from route on the entity card", () => {
 
   function renderWithHandle(data = WITH_CONTROL_EDGES) {
     const ref = React.createRef();
-    render(<ProtocolSurface ref={ref} companyName="etherfi" initialData={data} embedded />);
+    render(
+      <ProtocolSurface
+        ref={ref}
+        companyName="etherfi"
+        initialData={data}
+        initialFunctions={fixtureFunctions(data)}
+        embedded
+      />,
+    );
     return ref;
   }
 

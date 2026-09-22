@@ -19,8 +19,8 @@ import pytest
 pytest.importorskip("slither")
 from slither import Slither
 
-from services.static.contract_analysis_pipeline import record_ordering as ro
-from services.static.contract_analysis_pipeline.effects import build_effects
+from services.static.static_analysis import record_ordering as ro
+from services.static.static_analysis.effects import build_effects
 
 _SRC = """
 // SPDX-License-Identifier: MIT

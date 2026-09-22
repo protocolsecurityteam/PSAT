@@ -41,7 +41,8 @@ from db.models import (
     ProxyUpgradeEvent,
     WatchedProxy,
 )
-from schemas.control_tracking import MonitoredContractType
+from db.queue import publish_assessment_projection
+from schemas.observations import MonitoredContractType
 from services.monitoring.reanalysis import (
     _REANALYSIS_WRITE_TARGETS,
     REANALYSIS_POLL_FIELDS_VENDORED,
@@ -227,7 +228,7 @@ def _make_monitored_contract(
     # assembly; default to the matching vendored entry so the storage-
     # slot poll dispatch actually reads the upgraded value.
     plan_proxy_type = proxy_type or ("eip1967" if contract_type == "proxy" else None)
-    tracking_plan: dict | None = None
+    observation_plan: dict | None = None
     if contract_type in ("regular", "pausable", "proxy"):
         tracked: list[dict] = [
             {
@@ -256,11 +257,11 @@ def _make_monitored_contract(
                     },
                 }
             )
-        tracking_plan = {"tracked_controllers": tracked}
+        observation_plan = {"tracked_controllers": tracked}
     polling_plan = build_polling_plan(
         contract_type=contract_type,
         proxy_type=plan_proxy_type,
-        tracking_plan=tracking_plan,
+        observation_plan=observation_plan,
         tracked_topics=None,
     )
 
@@ -543,10 +544,10 @@ class TestMaybeQueueReanalysis:
         """A re-analysis job does not break find_completed_static_cache.
 
         The cache finder looks for completed+done jobs with source files and
-        contract_analysis artifacts. A queued re-analysis job should not
+        assessment artifacts. A queued re-analysis job should not
         interfere because it has status=queued, stage=discovery.
         """
-        from db.queue import find_completed_static_cache, store_artifact, store_source_files
+        from db.queue import find_completed_static_cache, store_source_files
 
         addr = "0x" + "66" * 20
 
@@ -557,12 +558,19 @@ class TestMaybeQueueReanalysis:
             stage=JobStage.done,
             request={"address": addr.lower(), "chain": "ethereum"},
         )
+        from db.contract_materializations import STATIC_FACTS_SCHEMA_VERSION
+
+        old_job.static_facts_schema_version = STATIC_FACTS_SCHEMA_VERSION
         db_session.add(old_job)
         db_session.commit()
         db_session.refresh(old_job)
 
         store_source_files(db_session, old_job.id, {"src/A.sol": "contract A {}"})
-        store_artifact(db_session, old_job.id, "contract_analysis", data={"functions": []})
+        from tests.support.policy_builders import _assessment, _minimal_static_facts
+
+        publish_assessment_projection(
+            db_session, old_job.id, _assessment(static_facts=_minimal_static_facts(address=addr.lower()))
+        )
 
         # Create Contract + ContractSummary (required by find_completed_static_cache)
         contract = Contract(

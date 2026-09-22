@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -64,7 +64,7 @@ _SUPPLY_DIRECTIONS = frozenset({"mint", "burn"})
 # vocabulary alone. A mint/burn function's own value movement is recorded by the
 # lattice as the inbound pull it takes (``in``) or the outbound payout it makes
 # (``out``); that is where its quantity and its recipient live. Applicability is
-# still decided by :data:`_SUPPLY_DIRECTIONS`, which is read off ``effect_labels``
+# still decided by :data:`_SUPPLY_DIRECTIONS` and supported supply claims
 # — those DO carry mint/burn.
 _SUPPLY_LATTICE_DIRECTIONS = frozenset({"in", "out"})
 
@@ -201,8 +201,10 @@ def synthesize_value_out(candidate: Candidate, fn: FunctionFacts) -> ValueOutPla
 
 def synthesize_supply(candidate: Candidate, fn: FunctionFacts) -> SupplyPlanInputs | None:
     """Applicable when static says the function mints or burns."""
-    labels = {str(lbl) for lbl in (fn.effect_info.get("effect_labels") or [])}
-    if not (_flow_directions(fn) & _SUPPLY_DIRECTIONS or labels & _SUPPLY_DIRECTIONS):
+    claim_ids = {
+        str(claim.get("claim_id")) for claim in fn.effect_info.get("claims") or [] if isinstance(claim, Mapping)
+    }
+    if not (_flow_directions(fn) & _SUPPLY_DIRECTIONS or claim_ids & {"supply.mint", "supply.burn"}):
         return None
     principal = candidate.principal_addresses[0] if candidate.principal_addresses else None
     if not principal:

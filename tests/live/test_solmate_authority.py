@@ -30,11 +30,11 @@ import json
 
 import pytest
 
-from tests.live.conftest import LiveClient
+from tests.live.conftest import VEDA_TELLER_ADDRESS, LiveClient
 
 # TellerWithMultiAssetSupport — Solmate ``Auth``; ``canCall`` delegates to
 # RolesAuthority 0x3994741a…; governing 4/6 Safe (ground-truthed on-chain).
-VEDA_TELLER = "0xe2acf9f80a2756e51d1e53f9f41583c84279fb1f"
+VEDA_TELLER = VEDA_TELLER_ADDRESS
 GOVERNING_SAFE = "0xcea8039076e35a825854c5c2f85659430b06ec96"
 _CANCALL_SELECTOR = "0xb7009613"  # keccak("canCall(address,address,bytes4)")[:4]
 
@@ -52,23 +52,6 @@ _CANCALL_MARKERS = (
     "solmate_roles_authority",
     "delegated_check_not_materialized",
 )
-
-
-@pytest.fixture(scope="session")
-def analyzed_veda_teller(live_client: LiveClient) -> dict:
-    """Analyze the Veda Teller once per session.
-
-    SKIPs (not fails) on timeout / non-completion: the live suite is
-    throughput-bound on contended previews, and this smoke check must not add hard
-    failures under load. A genuine submission error (HTTP 4xx/5xx) still propagates.
-    """
-    try:
-        job = live_client.submit_and_wait(VEDA_TELLER)
-    except TimeoutError as exc:
-        pytest.skip(f"Veda Teller analysis did not finish in time on {live_client.base_url}: {exc}")
-    if job["status"] != "completed":
-        pytest.skip(f"Veda Teller analysis did not complete (status={job['status']})")
-    return job
 
 
 def _cancall_functions(ep: dict) -> list[dict]:
@@ -95,12 +78,23 @@ def _finite_set_members(node: object, out: set[str]) -> None:
             _finite_set_members(node["signer"], out)
 
 
+def _capability_rows(live_client: LiveClient) -> dict:
+    response = live_client._session.get(
+        live_client._url(f"/api/contract/{VEDA_TELLER}/capabilities"),
+        timeout=30,
+    )
+    assert response.status_code == 200, response.text
+    capabilities = response.json().get("capabilities")
+    assert isinstance(capabilities, dict)
+    return {
+        "functions": [{"function": signature, "capability_expr": value} for signature, value in capabilities.items()]
+    }
+
+
 def test_veda_teller_cancall_resolves_without_preempt(analyzed_veda_teller, live_client: LiveClient):
     """canCall is detected, dispatched, and resolved — never the pre-#104
     ``delegated_check_not_materialized`` inline-preempt dead-end."""
-    ep = live_client.artifact(analyzed_veda_teller["name"], "effective_permissions")
-    if not isinstance(ep, dict):
-        pytest.skip("effective_permissions artifact not available")
+    ep = _capability_rows(live_client)
 
     cancall = _cancall_functions(ep)
     assert cancall, "no canCall-guarded functions resolved — static missed the Solmate Auth pattern"
@@ -122,9 +116,7 @@ def test_veda_teller_cancall_recovers_governing_safe(analyzed_veda_teller, live_
     deferred to a probe. That's fail-safe, not a regression; the recovery path is
     pinned deterministically offline.
     """
-    ep = live_client.artifact(analyzed_veda_teller["name"], "effective_permissions")
-    if not isinstance(ep, dict):
-        pytest.skip("effective_permissions artifact not available")
+    ep = _capability_rows(live_client)
 
     members: set[str] = set()
     for fn in ep.get("functions") or []:

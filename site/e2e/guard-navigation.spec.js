@@ -23,68 +23,6 @@ const COMPANY_FIXTURE = {
       name: "Vault",
       display_name: "Vault",
       role: "governance",
-      functions: [
-        {
-          function: "setSafe()",
-          selector: "0x11111111",
-          effect_labels: ["ownership_transfer"],
-          direct_owner: {
-            address: SAFE_ADDR,
-            resolved_type: "safe",
-            details: { threshold: 2, owners: ["0x0001", "0x0002", "0x0003"] },
-          },
-          authority_roles: [],
-          controllers: [],
-        },
-        {
-          function: "setTimelock()",
-          selector: "0x22222222",
-          effect_labels: ["pause_toggle"],
-          direct_owner: {
-            address: TL_ADDR,
-            resolved_type: "timelock",
-            details: { delay: 86400 },
-          },
-          authority_roles: [],
-          controllers: [],
-        },
-        {
-          function: "setOwner()",
-          selector: "0x33333333",
-          effect_labels: ["ownership_transfer"],
-          direct_owner: {
-            address: CON_ADDR,
-            resolved_type: "contract",
-            details: {},
-          },
-          authority_roles: [],
-          controllers: [],
-        },
-        {
-          function: "setMixed()",
-          selector: "0x44444444",
-          effect_labels: ["authority_update"],
-          direct_owner: {
-            address: SAFE_ADDR,
-            resolved_type: "safe",
-            details: { threshold: 2, owners: ["0x0001", "0x0002", "0x0003"] },
-          },
-          authority_roles: [],
-          controllers: [
-            {
-              controller_id: "extra",
-              label: "secondary",
-              principals: [
-                {
-                  address: TL_ADDR,
-                  resolved_type: "timelock",
-                  details: { delay: 86400 },
-                },
-              ],
-            },
-          ],
-        },
-      ],
     },
   ],
   principals: [
@@ -106,8 +44,82 @@ const COMPANY_FIXTURE = {
   fund_flows: [],
 };
 
+const FUNCTIONS_FIXTURE = {
+  functions: {
+    [`ethereum::${VAULT_ADDR.toLowerCase()}`]: [
+        {
+          function: "setSafe()",
+          selector: "0x11111111",
+          claims: [{ claim_id: "ownership.transfer", tier: "standard_exact", witness: {} }],
+          direct_owner: {
+            address: SAFE_ADDR,
+            resolved_type: "safe",
+            details: { threshold: 2, owners: ["0x0001", "0x0002", "0x0003"] },
+          },
+          authority_roles: [],
+          controllers: [],
+        },
+        {
+          function: "setTimelock()",
+          selector: "0x22222222",
+          claims: [{ claim_id: "pause.set", tier: "standard_exact", witness: {} }],
+          direct_owner: {
+            address: TL_ADDR,
+            resolved_type: "timelock",
+            details: { delay: 86400 },
+          },
+          authority_roles: [],
+          controllers: [],
+        },
+        {
+          function: "setOwner()",
+          selector: "0x33333333",
+          claims: [{ claim_id: "ownership.transfer", tier: "standard_exact", witness: {} }],
+          direct_owner: {
+            address: CON_ADDR,
+            resolved_type: "contract",
+            details: {},
+          },
+          authority_roles: [],
+          controllers: [],
+        },
+        {
+          function: "setMixed()",
+          selector: "0x44444444",
+          claims: [{ claim_id: "authority.replace", tier: "standard_exact", witness: {} }],
+          direct_owner: {
+            address: SAFE_ADDR,
+            resolved_type: "safe",
+            details: { threshold: 2, owners: ["0x0001", "0x0002", "0x0003"] },
+          },
+          authority_roles: [],
+          controllers: [
+            {
+              controller_id: "extra",
+              label: "secondary",
+              principals: [
+                {
+                  address: TL_ADDR,
+                  resolved_type: "timelock",
+                  details: { delay: 86400 },
+                },
+              ],
+            },
+          ],
+        },
+      ],
+  },
+};
+
 /** Intercept the company API and return our fixture. */
 async function mockApi(page) {
+  await page.route("**/api/company/testco/functions", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(FUNCTIONS_FIXTURE),
+    })
+  );
   await page.route("**/api/company/testco", (route) =>
     route.fulfill({
       status: 200,
@@ -228,27 +240,8 @@ test.describe("Caller button navigation", () => {
   });
 });
 
-test.describe("URL focus parameter", () => {
-  test("legacy focus param in URL restores a committed selection", async ({ page }) => {
-    await mockApi(page);
-    await page.goto(`/company/testco/surface?focus=${VAULT_ADDR}`);
-    await page.waitForSelector(".ps-node", { timeout: 10000 });
-
-    // Wait for the restore to apply
-    await page.waitForTimeout(500);
-
-    // A legacy ?focus link resolves to a full selection: the node gets the
-    // selected ring (the gold dotted ring is reserved for search browsing,
-    // which never applies to the committed node) and the URL normalizes to
-    // the ?sel form.
-    const selectedNode = page.locator(".ps-node-selected");
-    await expect(selectedNode).toBeVisible({ timeout: 5000 });
-    await expect(selectedNode.locator(".ps-node-name")).toHaveText("Vault");
-    await expect(page).toHaveURL(new RegExp(`sel=${VAULT_ADDR}`));
-    await expect(page.locator(".ps-node-focused")).toHaveCount(0);
-  });
-
-  test("navigating updates focus param to new target", async ({ page }) => {
+test.describe("URL selection parameter", () => {
+  test("navigating updates the selected target", async ({ page }) => {
     await goToSurface(page);
     await openVaultDetail(page);
 
@@ -261,4 +254,15 @@ test.describe("URL focus parameter", () => {
     // URL selection should now point to the safe address, not the vault
     await expect(page).toHaveURL(new RegExp(`sel=${SAFE_ADDR}`));
   });
+});
+
+test("a failed functions response is explicit, never an empty graph", async ({ page }) => {
+  await page.route("**/api/company/testco/functions", (route) =>
+    route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ detail: "unavailable" }) })
+  );
+  await page.route("**/api/company/testco", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(COMPANY_FIXTURE) })
+  );
+  await page.goto("/company/testco/surface");
+  await expect(page.getByText("Failed: Failed to load function analysis")).toBeVisible();
 });

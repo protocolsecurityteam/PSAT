@@ -1,6 +1,6 @@
 """Resolve + queue split-proxy *secondary implementations*.
 
-Static analysis (``services/static/contract_analysis_pipeline/secondary_impl.py``)
+Static analysis (``services/static/static_analysis/secondary_impl.py``)
 detects the *pointer* state vars a primary impl's fallback delegatecalls to. This
 module reads those pointers against the **proxy's** storage to get the actual
 secondary impl addresses, records them on the proxy's ``Contract`` row, and

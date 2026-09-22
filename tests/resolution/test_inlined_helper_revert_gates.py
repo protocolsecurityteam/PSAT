@@ -32,7 +32,7 @@ import pytest
 slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
 
-from services.static.contract_analysis_pipeline.predicate_artifacts import (  # noqa: E402
+from services.static.static_analysis.predicate_artifacts import (  # noqa: E402
     build_predicate_artifacts,
 )
 
@@ -118,7 +118,7 @@ def _authority_public(tree) -> bool:
     from services.resolution.predicate_evaluator import evaluate_tree
 
     if tree is None:
-        # effective_permissions._public_capability(): absent from trees -> public.
+        # permission_index._public_capability(): absent from trees -> public.
         return True
     cap = evaluate_tree(tree)
     cap_dict = capability_to_dict(cap)
@@ -130,7 +130,6 @@ def _verdicts(subject, monkeypatch, inline_gates_flag: str) -> dict[str, bool]:
     """Build trees under the given PSAT_INLINE_HELPER_REVERT_GATES value and
     evaluate every fixture entry point under the production earned-public
     default."""
-    monkeypatch.setenv("PSAT_AUTHORITY_EARNED_PUBLIC", "1")
     monkeypatch.setenv("PSAT_INLINE_HELPER_REVERT_GATES", inline_gates_flag)
     trees = build_predicate_artifacts(subject).get("trees") or {}
     return {

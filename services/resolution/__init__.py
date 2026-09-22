@@ -1,15 +1,15 @@
 """Resolution package."""
 
+from .observation_plan import build_observation_plan
 from .recursive import resolve_control_graph
 from .tracking import (
-    build_control_snapshot,
     classify_resolved_address,
+    observe_controllers,
 )
-from .tracking_plan import build_control_tracking_plan
 
 __all__ = [
-    "build_control_snapshot",
-    "build_control_tracking_plan",
+    "observe_controllers",
+    "build_observation_plan",
     "classify_resolved_address",
     "resolve_control_graph",
 ]

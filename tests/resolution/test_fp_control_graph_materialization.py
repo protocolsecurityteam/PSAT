@@ -89,7 +89,7 @@ def anchor(db_session):
             resolved_type="contract",
             label="root",
             depth=0,
-            analyzed=True,
+            analysis_state="analyzed",
             graph_max_depth=6,
         )
     )
@@ -164,7 +164,7 @@ def _rewrite_the_scope(db_session, contract):
                     "resolved_type": "contract",
                     "label": "root",
                     "depth": 0,
-                    "analyzed": True,
+                    "analysis_state": "analyzed",
                     "details": {},
                 }
             ],
@@ -190,8 +190,7 @@ def test_timelock_fp_row_mints_the_exact_witnessed_node(db_session, anchor, monk
     """The EtherFiTimelock shape. Byte-exact: every field the node publishes is
     either witnessed by the FP row or explicitly not-determined.
 
-    ``analyzed`` False and ``analysis_state`` NULL are the load-bearing pair —
-    stamping ``analyzed=true`` would make the perimeter spawn on a node no walk
+    ``analysis_state`` NULL is load-bearing — stamping it ``analyzed`` would make the perimeter spawn on a node no walk
     ever produced. ``graph_max_depth`` NULL because no walk horizon covered it:
     the walk's own horizon is a completeness claim about the walk, and this node
     was never in one.
@@ -214,7 +213,6 @@ def test_timelock_fp_row_mints_the_exact_witnessed_node(db_session, anchor, monk
     # proven noun.
     assert node.label is None
     assert node.contract_name is None
-    assert node.analyzed is False
     assert node.analysis_state is None
     assert node.graph_max_depth is None
     assert node.depth == 1  # root node depth 0 + 1
@@ -252,7 +250,7 @@ def test_timelock_fp_row_mints_the_exact_witnessed_node(db_session, anchor, monk
         }
     ]
     assert [p["id"] for p in payloads] == [f"address:{timelock}"]
-    assert payloads[0]["analyzed"] is False
+    assert payloads[0]["analysis_state"] != "analyzed"
     assert payloads[0]["analysis_state"] is None
 
 
@@ -308,7 +306,7 @@ def test_non_analyzable_principal_mints_a_node_and_provably_no_job(db_session, a
     node = _nodes(db_session, contract, principal)[0]
     assert node.node_type == "principal"
     assert node.resolved_type == resolved_type
-    assert node.analyzed is False
+    assert node.analysis_state is None
 
     # (2) the mint ledger — minted, and named as never-a-candidate
     assert ledger["minted"] == [
@@ -411,7 +409,7 @@ def test_end_to_end_the_timelock_gets_one_job_and_the_safe_gets_none(db_session,
 def test_a_walk_node_that_is_unanalyzed_is_still_refused(db_session, anchor, monkeypatch):
     """The admission arm is scoped to the FP-mint witness, not widened.
 
-    An ordinary walk node with ``analyzed=false`` still books
+    An ordinary walk node with missing analysis state still books
     ``not_analyzed``: the walk REACHED it and did not analyse it, which is a
     recorded decision. Only a node the walk was never offered is admitted.
     """
@@ -436,7 +434,7 @@ def test_a_walk_node_that_is_unanalyzed_is_still_refused(db_session, anchor, mon
         "label": "role principal",
         "contract_name": None,
         "depth": 1,
-        "analyzed": False,
+        "analysis_state": None,
         "details": {"source": "semantic_capability:role_grant"},
     }
     spawn = queue_discovered_contracts(
@@ -486,7 +484,7 @@ def test_a_forged_basis_marker_does_not_buy_admission(db_session, anchor, monkey
         "label": None,
         "contract_name": None,
         "depth": 1,
-        "analyzed": False,
+        "analysis_state": None,
         "details": {CONTROL_GRAPH_BASIS_KEY: FP_MATERIALIZATION_BASIS},
     }
     graph = {"root_contract_address": contract.address, "max_depth": 6, "nodes": [forged_node], "edges": []}
@@ -649,7 +647,7 @@ def test_minted_node_is_reminted_after_a_scoped_rewrite(db_session, anchor, monk
     assert len(after) == 1
     assert after[0].details == before_details
     assert after[0].node_type == "contract"
-    assert after[0].analyzed is False
+    assert after[0].analysis_state is None
     assert after[0].analysis_state is None
     assert after[0].depth == 1
     assert len(_edges(db_session, contract, EDGE_RELATION_CAPABILITY_PRINCIPAL)) == 1

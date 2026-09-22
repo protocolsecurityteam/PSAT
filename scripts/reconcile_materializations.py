@@ -3,7 +3,7 @@ materialization (F4, invariant 11).
 
 The main pipeline now leaves a materialization row behind (F4a) and the sweep
 lifted the historical ones (F4b), so the invariant holds — until
-``ANALYSIS_SCHEMA_VERSION`` is bumped, at which point every row reads as a miss
+``STATIC_FACTS_SCHEMA_VERSION`` is bumped, at which point every row reads as a miss
 at once and the fleet quietly falls back to baseline-only watching. This is the
 clamp for that: it re-analyzes the backlog at a rate somebody chose.
 

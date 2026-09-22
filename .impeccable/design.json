@@ -1,0 +1,156 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-09-07T23:08:27Z",
+  "title": "Design System: PSAT",
+  "extensions": {
+    "colorMeta": {
+      "canvas-deep": { "role": "neutral", "displayName": "Deep Canvas", "canonical": "#03050a", "tonalRamp": ["oklch(15% 0.02 260)", "oklch(25% 0.02 260)", "oklch(35% 0.018 260)", "oklch(47% 0.016 260)", "oklch(59% 0.014 260)", "oklch(71% 0.012 260)", "oklch(83% 0.008 260)", "oklch(95% 0.004 260)"] },
+      "canvas": { "role": "neutral", "displayName": "Canvas", "canonical": "#0b0f16", "tonalRamp": ["oklch(15% 0.025 260)", "oklch(25% 0.024 260)", "oklch(35% 0.022 260)", "oklch(47% 0.019 260)", "oklch(59% 0.016 260)", "oklch(71% 0.012 260)", "oklch(83% 0.008 260)", "oklch(95% 0.004 260)"] },
+      "canvas-soft": { "role": "neutral", "displayName": "Soft Canvas", "canonical": "rgba(17, 22, 32, 0.74)", "tonalRamp": ["oklch(15% 0.025 260)", "oklch(25% 0.024 260)", "oklch(35% 0.022 260)", "oklch(47% 0.019 260)", "oklch(59% 0.016 260)", "oklch(71% 0.012 260)", "oklch(83% 0.008 260)", "oklch(95% 0.004 260)"] },
+      "panel": { "role": "neutral", "displayName": "Panel Navy", "canonical": "#111620", "tonalRamp": ["oklch(15% 0.025 260)", "oklch(25% 0.024 260)", "oklch(35% 0.022 260)", "oklch(47% 0.019 260)", "oklch(59% 0.016 260)", "oklch(71% 0.012 260)", "oklch(83% 0.008 260)", "oklch(95% 0.004 260)"] },
+      "rule": { "role": "neutral", "displayName": "Fine Rule", "canonical": "rgba(148, 163, 184, 0.10)", "tonalRamp": ["oklch(15% 0.02 255)", "oklch(25% 0.02 255)", "oklch(35% 0.018 255)", "oklch(47% 0.016 255)", "oklch(59% 0.014 255)", "oklch(71% 0.012 255)", "oklch(83% 0.008 255)", "oklch(95% 0.004 255)"] },
+      "rule-strong": { "role": "neutral", "displayName": "Panel Rule", "canonical": "rgba(148, 163, 184, 0.14)", "tonalRamp": ["oklch(15% 0.02 255)", "oklch(25% 0.02 255)", "oklch(35% 0.018 255)", "oklch(47% 0.016 255)", "oklch(59% 0.014 255)", "oklch(71% 0.012 255)", "oklch(83% 0.008 255)", "oklch(95% 0.004 255)"] },
+      "ink": { "role": "neutral", "displayName": "Primary Ink", "canonical": "#e2e8f0", "tonalRamp": ["oklch(15% 0.02 255)", "oklch(25% 0.02 255)", "oklch(35% 0.018 255)", "oklch(47% 0.016 255)", "oklch(59% 0.014 255)", "oklch(71% 0.012 255)", "oklch(83% 0.008 255)", "oklch(95% 0.004 255)"] },
+      "ink-secondary": { "role": "neutral", "displayName": "Secondary Ink", "canonical": "#cbd5e1", "tonalRamp": ["oklch(15% 0.02 255)", "oklch(25% 0.02 255)", "oklch(35% 0.018 255)", "oklch(47% 0.016 255)", "oklch(59% 0.014 255)", "oklch(71% 0.012 255)", "oklch(83% 0.008 255)", "oklch(95% 0.004 255)"] },
+      "muted": { "role": "neutral", "displayName": "Muted Ink", "canonical": "#94a3b8", "tonalRamp": ["oklch(15% 0.03 255)", "oklch(25% 0.03 255)", "oklch(35% 0.028 255)", "oklch(47% 0.025 255)", "oklch(59% 0.022 255)", "oklch(71% 0.018 255)", "oklch(83% 0.012 255)", "oklch(95% 0.006 255)"] },
+      "observed": { "role": "primary", "displayName": "Observed Teal", "canonical": "#2dd4bf", "tonalRamp": ["oklch(15% 0.06 180)", "oklch(25% 0.09 180)", "oklch(35% 0.12 180)", "oklch(47% 0.15 180)", "oklch(59% 0.17 180)", "oklch(71% 0.15 180)", "oklch(83% 0.10 180)", "oklch(95% 0.035 180)"] },
+      "observed-text": { "role": "primary", "displayName": "Observed Text", "canonical": "#99f6e4", "tonalRamp": ["oklch(15% 0.05 180)", "oklch(25% 0.075 180)", "oklch(35% 0.10 180)", "oklch(47% 0.12 180)", "oklch(59% 0.13 180)", "oklch(71% 0.12 180)", "oklch(83% 0.08 180)", "oklch(95% 0.03 180)"] },
+      "observed-soft": { "role": "primary", "displayName": "Observed Wash", "canonical": "rgba(45, 212, 191, 0.12)", "tonalRamp": ["oklch(15% 0.06 180)", "oklch(25% 0.09 180)", "oklch(35% 0.12 180)", "oklch(47% 0.15 180)", "oklch(59% 0.17 180)", "oklch(71% 0.15 180)", "oklch(83% 0.10 180)", "oklch(95% 0.035 180)"] },
+      "scenario": { "role": "secondary", "displayName": "Scenario Amber", "canonical": "#f59e0b", "tonalRamp": ["oklch(15% 0.06 75)", "oklch(25% 0.10 75)", "oklch(35% 0.14 75)", "oklch(47% 0.17 75)", "oklch(59% 0.19 75)", "oklch(71% 0.16 75)", "oklch(83% 0.10 75)", "oklch(95% 0.035 75)"] },
+      "scenario-text": { "role": "secondary", "displayName": "Scenario Text", "canonical": "#fcd68a", "tonalRamp": ["oklch(15% 0.05 75)", "oklch(25% 0.08 75)", "oklch(35% 0.11 75)", "oklch(47% 0.14 75)", "oklch(59% 0.16 75)", "oklch(71% 0.14 75)", "oklch(83% 0.09 75)", "oklch(95% 0.03 75)"] },
+      "scenario-strong": { "role": "secondary", "displayName": "Strong Scenario Amber", "canonical": "#fbbf24", "tonalRamp": ["oklch(15% 0.06 85)", "oklch(25% 0.10 85)", "oklch(35% 0.14 85)", "oklch(47% 0.17 85)", "oklch(59% 0.19 85)", "oklch(71% 0.16 85)", "oklch(83% 0.10 85)", "oklch(95% 0.035 85)"] },
+      "scenario-soft": { "role": "secondary", "displayName": "Scenario Wash", "canonical": "rgba(245, 158, 11, 0.14)", "tonalRamp": ["oklch(15% 0.06 75)", "oklch(25% 0.10 75)", "oklch(35% 0.14 75)", "oklch(47% 0.17 75)", "oklch(59% 0.19 75)", "oklch(71% 0.16 75)", "oklch(83% 0.10 75)", "oklch(95% 0.035 75)"] },
+      "success": { "role": "tertiary", "displayName": "Success Green", "canonical": "#22c55e", "tonalRamp": ["oklch(15% 0.06 145)", "oklch(25% 0.10 145)", "oklch(35% 0.14 145)", "oklch(47% 0.17 145)", "oklch(59% 0.18 145)", "oklch(71% 0.15 145)", "oklch(83% 0.10 145)", "oklch(95% 0.035 145)"] },
+      "danger": { "role": "tertiary", "displayName": "Error Red", "canonical": "#ef4444", "tonalRamp": ["oklch(15% 0.07 25)", "oklch(25% 0.11 25)", "oklch(35% 0.15 25)", "oklch(47% 0.19 25)", "oklch(59% 0.21 25)", "oklch(71% 0.17 25)", "oklch(83% 0.10 25)", "oklch(95% 0.035 25)"] },
+      "danger-text": { "role": "tertiary", "displayName": "Error Text", "canonical": "#fecaca", "tonalRamp": ["oklch(15% 0.05 25)", "oklch(25% 0.08 25)", "oklch(35% 0.11 25)", "oklch(47% 0.14 25)", "oklch(59% 0.15 25)", "oklch(71% 0.13 25)", "oklch(83% 0.08 25)", "oklch(95% 0.03 25)"] },
+      "info": { "role": "tertiary", "displayName": "Information Blue", "canonical": "#38bdf8", "tonalRamp": ["oklch(15% 0.06 235)", "oklch(25% 0.10 235)", "oklch(35% 0.14 235)", "oklch(47% 0.17 235)", "oklch(59% 0.18 235)", "oklch(71% 0.15 235)", "oklch(83% 0.10 235)", "oklch(95% 0.035 235)"] },
+      "status-muted": { "role": "neutral", "displayName": "Status Muted", "canonical": "#64748b", "tonalRamp": ["oklch(15% 0.03 255)", "oklch(25% 0.03 255)", "oklch(35% 0.028 255)", "oklch(47% 0.025 255)", "oklch(59% 0.022 255)", "oklch(71% 0.018 255)", "oklch(83% 0.012 255)", "oklch(95% 0.006 255)"] }
+    },
+    "typographyMeta": {
+      "display": { "displayName": "Analytical Display", "purpose": "One page title per analytical surface." },
+      "headline": { "displayName": "Panel Headline", "purpose": "Section, panel, and established application headings." },
+      "body": { "displayName": "Interface Body", "purpose": "Descriptions, conclusions, and control labels." },
+      "label": { "displayName": "Ledger Label", "purpose": "Uppercase table headers, field labels, and compact metadata." },
+      "mono": { "displayName": "Evidence Mono", "purpose": "Addresses, hashes, claim IDs, and machine-shaped values." }
+    },
+    "shadows": [
+      { "name": "ambient-panel", "value": "0 18px 54px rgba(0, 0, 0, 0.35)", "purpose": "Established floating panels and cards." },
+      { "name": "strong-overlay", "value": "0 24px 60px rgba(0, 0, 0, 0.5)", "purpose": "High-elevation overlays and modals." },
+      { "name": "sticky-navigation", "value": "0 4px 20px rgba(0, 0, 0, 0.35)", "purpose": "Separates the sticky top navigation from page content." },
+      { "name": "focus-halo", "value": "0 0 0 4px rgba(45, 212, 191, 0.12)", "purpose": "Keyboard focus on form controls." }
+    ],
+    "motion": [
+      { "name": "control-state", "value": "140ms ease", "purpose": "Border, opacity, and subtle transform changes on general controls." },
+      { "name": "analytical-state", "value": "120ms ease", "purpose": "Quiet hover and selection changes inside dense analytical surfaces." }
+    ],
+    "breakpoints": [
+      { "name": "proposal-records", "value": "760px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "The standard affirmative action with restrained lift and a visible teal focus ring.",
+      "html": "<button class=\"ds-btn-primary\">Run analysis</button>",
+      "css": ".ds-btn-primary { border: 0; border-radius: 12px; padding: 10px 16px; background: linear-gradient(180deg, #34e4cc, #14b8a6); color: #06110f; font: 700 1rem/1.2 'Instrument Sans', system-ui, sans-serif; letter-spacing: -0.01em; cursor: pointer; transition: transform 140ms ease, opacity 140ms ease; } .ds-btn-primary:hover { transform: translateY(-1px); } .ds-btn-primary:focus-visible { outline: 2px solid var(--teal, #2dd4bf); outline-offset: 3px; } .ds-btn-primary:active { transform: translateY(0); }"
+    },
+    {
+      "name": "Ghost Button",
+      "kind": "button",
+      "refersTo": "button-ghost",
+      "description": "A quiet secondary action that preserves the dark page plane.",
+      "html": "<button class=\"ds-btn-ghost\">Cancel</button>",
+      "css": ".ds-btn-ghost { border: 1px solid rgba(148, 163, 184, 0.22); border-radius: 12px; padding: 10px 16px; background: transparent; color: var(--ink, #e2e8f0); font: 700 1rem/1.2 'Instrument Sans', system-ui, sans-serif; cursor: pointer; transition: border-color 140ms ease, background 140ms ease; } .ds-btn-ghost:hover { background: rgba(148, 163, 184, 0.08); border-color: rgba(148, 163, 184, 0.35); } .ds-btn-ghost:focus-visible { outline: 2px solid var(--teal, #2dd4bf); outline-offset: 3px; } .ds-btn-ghost:active { background: rgba(148, 163, 184, 0.12); }"
+    },
+    {
+      "name": "Text Field",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "The incumbent full-width dark field with a teal focus halo.",
+      "html": "<label class=\"ds-field\"><span>Address or company</span><input placeholder=\"0x... or etherfi\"></label>",
+      "css": ".ds-field { display: grid; gap: 6px; color: var(--muted, #94a3b8); font: 600 0.76rem/1.2 'Instrument Sans', system-ui, sans-serif; } .ds-field input { width: 100%; border: 1px solid rgba(148, 163, 184, 0.22); border-radius: 12px; background: rgba(10, 14, 20, 0.85); color: var(--ink, #e2e8f0); padding: 12px 14px; font: 400 1rem/1.4 'Instrument Sans', system-ui, sans-serif; transition: border-color 140ms ease, box-shadow 140ms ease; } .ds-field input::placeholder { color: rgba(148, 163, 184, 0.55); } .ds-field input:hover { border-color: rgba(148, 163, 184, 0.35); } .ds-field input:focus-visible { outline: none; border-color: rgba(45, 212, 191, 0.55); box-shadow: 0 0 0 4px rgba(45, 212, 191, 0.12); }"
+    },
+    {
+      "name": "Top Navigation",
+      "kind": "nav",
+      "refersTo": "nav-active",
+      "description": "The compact sticky shell with muted defaults and an observed-teal active destination.",
+      "html": "<nav class=\"ds-nav\"><strong>PSAT</strong><span>etherfi</span><button>Overview</button><button class=\"ds-nav-active\">Proposals</button></nav>",
+      "css": ".ds-nav { display: flex; align-items: center; gap: 8px; min-height: 52px; padding: 0 24px; border-bottom: 1px solid var(--panel-border, rgba(148, 163, 184, 0.14)); background: linear-gradient(180deg, rgba(17, 22, 32, 0.98), rgba(17, 22, 32, 0.92)); box-shadow: 0 4px 20px rgba(0, 0, 0, 0.35); color: var(--ink, #e2e8f0); } .ds-nav strong { margin-right: 4px; font: 800 18px/1 'Space Grotesk', system-ui, sans-serif; letter-spacing: -0.04em; } .ds-nav span { margin-right: auto; padding: 4px 10px; border-radius: 6px; background: rgba(148, 163, 184, 0.10); color: #cbd5e1; font: 600 12px/1.2 'Instrument Sans', system-ui, sans-serif; } .ds-nav button { border: 0; border-radius: 10px; background: transparent; color: var(--muted, #94a3b8); padding: 6px 14px; font: 600 13px/1.2 'Instrument Sans', system-ui, sans-serif; cursor: pointer; } .ds-nav button:hover { background: rgba(148, 163, 184, 0.08); color: var(--ink, #e2e8f0); } .ds-nav button:focus-visible { outline: 2px solid var(--teal, #2dd4bf); outline-offset: 2px; } .ds-nav .ds-nav-active { background: var(--teal-soft, rgba(45, 212, 191, 0.12)); color: var(--teal, #2dd4bf); }"
+    },
+    {
+      "name": "Scope Chips",
+      "kind": "chip",
+      "refersTo": "chip-observed",
+      "description": "Non-color-only provenance labels for observed and hypothetical values.",
+      "html": "<div class=\"ds-scopes\"><span class=\"ds-scope ds-observed\">Observed · block 120</span><span class=\"ds-scope ds-scenario\">Scenario · step 1</span><span class=\"ds-scope ds-reported\">Reported</span></div>",
+      "css": ".ds-scopes { display: flex; flex-wrap: wrap; gap: 8px; } .ds-scope { display: inline-flex; padding: 5px 8px; border-radius: 999px; font: 700 0.7rem/1.2 'Instrument Sans', system-ui, sans-serif; white-space: nowrap; } .ds-observed { color: #99f6e4; background: rgba(45, 212, 191, 0.11); } .ds-scenario { color: #fcd68a; background: rgba(245, 158, 11, 0.12); } .ds-reported { color: #cbd5e1; background: rgba(148, 163, 184, 0.10); }"
+    },
+    {
+      "name": "Analytical Panel",
+      "kind": "card",
+      "refersTo": "panel",
+      "description": "The established floating panel for grouped application content; inline evidence uses flatter treatment.",
+      "html": "<section class=\"ds-panel\"><h3>Protocol score</h3><p>No score has been computed for this protocol yet.</p></section>",
+      "css": ".ds-panel { padding: 20px; border: 1px solid var(--panel-border, rgba(148, 163, 184, 0.14)); border-radius: 20px; background: linear-gradient(180deg, rgba(20, 26, 36, 0.95), rgba(15, 20, 28, 0.92)); box-shadow: 0 18px 54px rgba(0, 0, 0, 0.35); color: var(--ink, #e2e8f0); } .ds-panel:hover { border-color: rgba(148, 163, 184, 0.22); } .ds-panel h3 { margin: 0 0 8px; font: 700 1.22rem/1.2 'Space Grotesk', system-ui, sans-serif; letter-spacing: -0.02em; } .ds-panel p { margin: 0; color: var(--muted, #94a3b8); font: 400 1rem/1.6 'Instrument Sans', system-ui, sans-serif; }"
+    },
+    {
+      "name": "Comparison Table and Mobile Record",
+      "kind": "custom",
+      "refersTo": "comparison-record",
+      "description": "The proposal-impact comparison that preserves baseline, scenario, scope, and derivation as labeled mobile records.",
+      "html": "<div class=\"ds-table-wrap\"><table class=\"ds-table\"><thead><tr><th>Target</th><th>Pinned baseline</th><th>Proposed</th><th>Scope</th><th>Derivation</th></tr></thead><tbody><tr><td data-label=\"Target\"><strong>0x1111…1111</strong><small>Timelock</small></td><td data-label=\"Pinned baseline\">172800 seconds</td><td data-label=\"Proposed\" class=\"ds-after\">21600 seconds</td><td data-label=\"Scope\"><span class=\"ds-table-scope\">Scenario · step 1</span></td><td data-label=\"Derivation\"><button class=\"ds-proof-link\">Inspect proof</button></td></tr></tbody></table></div>",
+      "css": ".ds-table-wrap { overflow-x: auto; border-top: 1px solid rgba(148, 163, 184, 0.20); } .ds-table { width: 100%; border-collapse: collapse; color: #cbd5e1; font: 400 0.84rem/1.4 'Instrument Sans', system-ui, sans-serif; font-variant-numeric: tabular-nums; } .ds-table th { padding: 13px 14px; border-bottom: 1px solid var(--panel-border, rgba(148, 163, 184, 0.14)); color: var(--muted, #94a3b8); font-size: 0.7rem; font-weight: 700; letter-spacing: 0.08em; text-align: left; text-transform: uppercase; } .ds-table td { min-width: 126px; padding: 16px 14px; border-bottom: 1px solid var(--line, rgba(148, 163, 184, 0.10)); vertical-align: top; } .ds-table tr:hover { background: rgba(148, 163, 184, 0.035); } .ds-table strong { display: block; color: var(--ink, #e2e8f0); } .ds-table small { display: block; margin-top: 4px; color: var(--muted, #94a3b8); } .ds-after { color: #fcd68a; font-weight: 700; } .ds-table-scope { display: inline-flex; padding: 5px 8px; border-radius: 999px; background: rgba(245, 158, 11, 0.12); color: #fcd68a; font-size: 0.7rem; font-weight: 700; white-space: nowrap; } .ds-proof-link { border: 0; background: transparent; color: #99f6e4; padding: 0; font-size: 0.76rem; font-weight: 700; cursor: pointer; } .ds-proof-link:hover { color: #ccfbf1; } .ds-proof-link:focus-visible { outline: 2px solid var(--teal, #2dd4bf); outline-offset: 3px; } @media (max-width: 760px) { .ds-table-wrap { overflow: visible; } .ds-table, .ds-table tbody, .ds-table tr { display: block; width: 100%; } .ds-table thead { display: none; } .ds-table tr { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px 16px; padding: 18px 10px; border-bottom: 1px solid var(--panel-border, rgba(148, 163, 184, 0.14)); } .ds-table td { min-width: 0; padding: 0; border: 0; overflow-wrap: anywhere; } .ds-table td::before { content: attr(data-label); display: block; margin-bottom: 7px; color: var(--muted, #94a3b8); font-size: 0.66rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; } .ds-table td[data-label='Pinned baseline'], .ds-table td[data-label='Proposed'], .ds-table td[data-label='Derivation'] { grid-column: 1 / -1; } }"
+    },
+    {
+      "name": "Inline Proof and Trace Disclosures",
+      "kind": "custom",
+      "refersTo": "comparison-record",
+      "description": "Local disclosures keep claim proof and the ordered scenario chain beside the comparison they explain.",
+      "html": "<div class=\"ds-disclosures\"><details class=\"ds-proof\"><summary>Inspect proof</summary><div><h4>Claim</h4><code>claim:scenario</code><span class=\"ds-proof-scope\">Scenario · step 1</span><h4>Evidence</h4><p>No evidence linked.</p><h4>Prerequisites</h4><p>None.</p></div></details><details class=\"ds-trace\"><summary>Review ordered actions and downstream chain</summary><div><section><h3>Ordered actions</h3><ol><li><strong>Step 1</strong><code>call</code></li></ol></section><section><h3>Assumptions</h3><p>No assumptions; execution evidence uses the pinned baseline.</p></section><section><h3>Downstream claims</h3><p>No downstream claim has been derived beyond the direct changes shown above.</p></section></div></details></div>",
+      "css": ".ds-disclosures { display: grid; gap: 14px; color: #cbd5e1; font: 400 0.84rem/1.4 'Instrument Sans', system-ui, sans-serif; } .ds-proof summary { color: #99f6e4; cursor: pointer; font-size: 0.76rem; font-weight: 700; } .ds-proof summary:hover { color: #ccfbf1; } .ds-proof summary:focus-visible, .ds-trace summary:focus-visible { outline: 2px solid var(--teal, #2dd4bf); outline-offset: 3px; } .ds-proof > div { display: grid; gap: 10px; margin-top: 12px; } .ds-proof h4 { margin: 8px 0 0; color: var(--muted, #94a3b8); font-size: 0.68rem; letter-spacing: 0.08em; text-transform: uppercase; } .ds-proof code, .ds-trace code { color: #cbd5e1; font: 400 0.74rem/1.4 'JetBrains Mono', monospace; overflow-wrap: anywhere; } .ds-proof p, .ds-trace p { margin: 0; color: var(--muted, #94a3b8); } .ds-proof-scope { justify-self: start; padding: 5px 8px; border-radius: 999px; background: rgba(245, 158, 11, 0.12); color: #fcd68a; font-size: 0.7rem; font-weight: 700; } .ds-trace { border-block: 1px solid var(--panel-border, rgba(148, 163, 184, 0.14)); } .ds-trace > summary { padding: 14px; color: #cbd5e1; cursor: pointer; font-size: 0.78rem; font-weight: 700; } .ds-trace > summary:hover { color: var(--ink, #e2e8f0); } .ds-trace > div { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 28px; padding: 8px 14px 22px; } .ds-trace h3 { margin: 0 0 12px; font-size: 0.82rem; } .ds-trace ol { margin: 0; padding-left: 20px; } .ds-trace li strong { display: block; margin-bottom: 6px; } @media (max-width: 760px) { .ds-trace > div { grid-template-columns: 1fr; gap: 24px; } }"
+    },
+    {
+      "name": "Assessment States",
+      "kind": "custom",
+      "refersTo": "panel",
+      "description": "Explicit loading, error, and empty treatments that never conflate unavailable data with no findings.",
+      "html": "<div class=\"ds-states\"><section class=\"ds-loading\"><p>Loading proposal impact…</p><span></span><span></span><span></span></section><section class=\"ds-error\" role=\"alert\"><h3>Proposal impact could not be loaded</h3><p>The assessment API did not complete. No empty-state conclusion has been inferred.</p><button>Retry loading</button></section><section class=\"ds-empty\"><h3>No scenario has been evaluated</h3><p>Collect a proposal and run its ordered actions against a pinned baseline.</p></section></div>",
+      "css": ".ds-states { display: grid; gap: 24px; color: var(--ink, #e2e8f0); font: 400 0.9rem/1.5 'Instrument Sans', system-ui, sans-serif; } .ds-loading, .ds-error, .ds-empty { display: grid; gap: 10px; padding: 20px 0; border-block: 1px solid var(--panel-border, rgba(148, 163, 184, 0.14)); } .ds-states h3, .ds-states p { margin: 0; } .ds-states p { color: var(--muted, #94a3b8); } .ds-loading span { height: 32px; border-radius: 8px; background: rgba(148, 163, 184, 0.07); } .ds-error { color: #fecaca; } .ds-error button { justify-self: start; margin-top: 6px; padding: 9px 13px; border: 1px solid rgba(248, 113, 113, 0.35); border-radius: 8px; background: transparent; color: #fecaca; font-weight: 700; cursor: pointer; } .ds-error button:hover { background: rgba(239, 68, 68, 0.08); } .ds-error button:focus-visible { outline: 2px solid #fca5a5; outline-offset: 3px; } .ds-error button:active { background: rgba(239, 68, 68, 0.14); }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Investigation Ledger",
+    "overview": "PSAT is a restrained dark analytical workspace: dense enough for protocol review, but ordered so scope, consequence, and proof remain easy to scan. Fine rules and tonal surface shifts carry most of the structure; bright color is scarce and therefore meaningful.\n\nThe interface treats data provenance as a visual property. Observed state, hypothetical scenarios, warnings, and failures remain textually labeled as well as colored, while addresses, claim identifiers, and exact values use mono type. Proposal impact extends this incumbent world with comparison-first tables and disclosures placed directly beside the claims they substantiate.",
+    "keyCharacteristics": [
+      "Dark, low-glare analytical canvases with quiet panel separation.",
+      "Compact labels, tabular numerals, and mono evidence values.",
+      "Teal observed-state semantics and amber scenario semantics.",
+      "Fine rules and inline disclosure instead of decorative framing.",
+      "Responsive records that preserve labels and provenance on small screens."
+    ],
+    "rules": [
+      { "name": "The Scope Before Color Rule", "body": "Every semantic color must be accompanied by an explicit word such as Observed, Scenario, Warning, or Error; hue never carries provenance alone.", "section": "colors" },
+      { "name": "The Two Truths Rule", "body": "Teal means observed or evidentiary state. Amber means hypothetical change or caution. Never style a scenario result as current state.", "section": "colors" },
+      { "name": "The Identifier Voice Rule", "body": "Use mono type for values users may compare, trace, or copy. Keep narrative conclusions in the sans-serif body face.", "section": "typography" },
+      { "name": "The Flat Evidence Rule", "body": "Keep tables, traces, limitations, and empty states on the page plane; use rules and spacing, not card shadows, to separate evidence.", "section": "elevation" },
+      { "name": "The Same Evidence Rule", "body": "Responsive transformations may change arrangement, never labels, order, scope, or access to proof.", "section": "layout" }
+    ],
+    "dos": [
+      "Do put the scope legend before the first comparison value.",
+      "Do keep baseline, proposed value, scenario step, and proof available in the same comparison record.",
+      "Do retain explicit labels, tabular numerals, and traceability when a table becomes a mobile record.",
+      "Do place limitations after the observed record and state unsupported coverage directly.",
+      "Do preserve keyboard focus, semantic table markup on desktop, disclosure controls, live loading copy, and alert roles."
+    ],
+    "donts": [
+      "Don't let teal and amber become interchangeable decorative accents.",
+      "Don't present a failed or unknown API response as an empty analysis.",
+      "Don't hide proof, prerequisites, assumptions, or downstream claims in a detached modal when they can remain inline.",
+      "Don't force horizontal table scrolling on the proposal-impact mobile layout.",
+      "Don't invent production proposal data or imply that synthetic fixture data is observed."
+    ]
+  }
+}

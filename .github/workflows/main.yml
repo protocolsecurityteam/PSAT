@@ -6,6 +6,16 @@ name: Main deploy
 on:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: 'One-time downtime: enter ASSESSMENT CUTOVER to replace all old stateless machines'
+        required: true
+        type: string
+      backup_reference:
+        description: 'Verified pre-cutover database backup or snapshot reference'
+        required: true
+        type: string
 
 # Static group → multiple SHAs queue rather than race flyctl deploy.
 concurrency:
@@ -21,6 +31,7 @@ jobs:
 
   deploy:
     needs: ci
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 120
     # `production` scopes FLY_PROD_API_TOKEN; its deployment branch policy allows only main.
@@ -29,6 +40,8 @@ jobs:
       FLY_API_TOKEN: ${{ secrets.FLY_PROD_API_TOKEN }}
       PSAT_HEALTH_SECRET: ${{ secrets.PSAT_HEALTH_SECRET }}
       PROD_URL: https://snif.sh
+      CUTOVER_CONFIRMATION: ${{ inputs.confirmation }}
+      CUTOVER_BACKUP_REFERENCE: ${{ inputs.backup_reference }}
       PSAT_LIFECYCLE_MODE: enforce
       PSAT_INDEXER_GROUP: monitor
       PSAT_MONITOR_MEMORY_MB: '2048'
@@ -83,8 +96,16 @@ jobs:
               raise SystemExit("Missing lifecycle secrets: " + ", ".join(sorted(required - names)))
           PY
 
+      - name: Run one-time Assessment cutover
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          python -m deploy.assessment_cutover \
+            --config "$GITHUB_WORKSPACE/fly.production.toml" --sha "$GITHUB_SHA" \
+            --backup-reference "$CUTOVER_BACKUP_REFERENCE" --confirm "$CUTOVER_CONFIRMATION"
+
       - name: Capture previous image and configuration for rollback
         id: snapshot
+        if: github.event_name != 'workflow_dispatch'
         run: python -m deploy.production.control snapshot --config "$GITHUB_WORKSPACE/fly.rollback.json"
 
       - name: Install managed ownership for the first activation
@@ -98,10 +119,12 @@ jobs:
 
       - name: Pause claims and stop workers before deployment
         id: lifecycle
+        if: github.event_name != 'workflow_dispatch'
         run: python -m deploy.production.control prepare
 
       - name: Deploy to production
         id: deploy
+        if: github.event_name != 'workflow_dispatch'
         env:
           BRIDGE_IMAGE: ${{ steps.bridge.outputs.image }}
         run: |
@@ -113,6 +136,7 @@ jobs:
             --build-arg GIT_SHA="${{ github.sha }}" "${image_args[@]}"
 
       - name: Restore workers and verify running boot
+        if: github.event_name != 'workflow_dispatch'
         run: |
           python -m deploy.production.control restore
           python -m deploy.production.control verify
@@ -163,13 +187,14 @@ jobs:
         run: uv run pytest -m "live and smoke" -q
 
       - name: Activate lifecycle after successful deployment
+        if: github.event_name != 'workflow_dispatch'
         run: python -m deploy.production.control resume --activate
 
       - name: Restore previous release on handover, deployment, smoke, or activation failure
         id: rollback
         # A deployment can fail after draining or after updating only some groups.
         # Use the captured image/config pair and skip schema migration on the old image.
-        if: failure() && steps.snapshot.outcome == 'success'
+        if: failure() && steps.snapshot.outcome == 'success' && github.event_name != 'workflow_dispatch'
         run: |
           python -m deploy.production.control rollback
           curl -fsS --retry 12 --retry-delay 5 --retry-all-errors --max-time 10 "$PROD_URL/api/health" >/dev/null

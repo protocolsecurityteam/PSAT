@@ -11,6 +11,7 @@ import pytest
 import requests
 
 WETH_ADDRESS = "0xC02aaA39b223FE8D0A0e5c4F27eAD9083C756Cc2"
+VEDA_TELLER_ADDRESS = "0xe2acf9f80a2756e51d1e53f9f41583c84279fb1f"
 
 # These bound job *completion* (worker-side pipeline wall time), not the HTTP
 # calls that poll for it. The CI live runner is a shared-cpu-8x Fly machine:
@@ -91,8 +92,12 @@ class LiveClient:
 
     # -- analyze -------------------------------------------------------------
 
-    def analyze(self, address: str) -> dict[str, Any]:
-        r = self._session.post(self._url("/api/analyze"), json={"address": address}, timeout=15)
+    def analyze(self, address: str, *, force: bool = False) -> dict[str, Any]:
+        r = self._session.post(
+            self._url("/api/analyze"),
+            json={"address": address, "force": force},
+            timeout=15,
+        )
         r.raise_for_status()
         return r.json()
 
@@ -171,6 +176,14 @@ class LiveClient:
         r = self._session.get(self._url(f"/api/analyses/{run_name}"), timeout=15)
         r.raise_for_status()
         return r.json()
+
+    def stage_timings(self, job_id: str) -> dict[str, dict[str, Any]]:
+        r = self._session.get(self._url(f"/api/jobs/{job_id}/stage_timings"), timeout=30)
+        r.raise_for_status()
+        body = r.json()
+        timings = body.get("stage_timings")
+        assert isinstance(timings, dict), f"stage timings response malformed: {body}"
+        return timings
 
     # -- company -------------------------------------------------------------
 
@@ -423,8 +436,10 @@ class LiveClient:
         self,
         address: str,
         timeout: float = DEFAULT_SINGLE_TIMEOUT,
+        *,
+        force: bool = False,
     ) -> dict[str, Any]:
-        return self.poll_job_until_done(self.analyze(address)["job_id"], timeout=timeout)
+        return self.poll_job_until_done(self.analyze(address, force=force)["job_id"], timeout=timeout)
 
     def submit_company_and_wait(
         self,
@@ -513,8 +528,14 @@ def _require_live_api(live_base_url: str):
 
 @pytest.fixture(scope="session")
 def analyzed_weth(live_client: LiveClient) -> dict[str, Any]:
-    """Submit WETH once per session; dependent tests reuse the result."""
-    job = live_client.submit_and_wait(WETH_ADDRESS)
+    """Submit one deliberately cold WETH run; dependent tests reuse it.
+
+    Preview data survives PR reruns, so an ordinary first submission can itself
+    hit a prior run's static cache. ``force`` is the API's bench-only cold-run
+    switch and makes the timing comparison below measure cold versus cached
+    work without resetting the shared preview database.
+    """
+    job = live_client.submit_and_wait(WETH_ADDRESS, force=True)
     if job["status"] != "completed":
         pytest.fail(f"WETH analysis did not complete on {live_client.base_url}: {job.get('error')}")
     return job
@@ -532,6 +553,19 @@ def cached_weth(analyzed_weth, live_client: LiveClient) -> dict[str, Any]:
     job = live_client.submit_and_wait(WETH_ADDRESS)
     if job["status"] != "completed":
         pytest.fail(f"Cached WETH run did not complete on {live_client.base_url}: {job.get('error')}")
+    return job
+
+
+@pytest.fixture(scope="session")
+def analyzed_veda_teller(live_client: LiveClient) -> dict[str, Any]:
+    """Analyze the shared known-guarded Veda Teller once per live session."""
+
+    try:
+        job = live_client.submit_and_wait(VEDA_TELLER_ADDRESS)
+    except TimeoutError as exc:
+        pytest.fail(f"Veda Teller analysis did not finish in time on {live_client.base_url}: {exc}")
+    if job["status"] != "completed":
+        pytest.fail(f"Veda Teller analysis did not complete (status={job['status']}): {job.get('error')}")
     return job
 
 

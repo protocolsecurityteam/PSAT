@@ -24,6 +24,7 @@ from schemas.api_responses import (
     ReEnrollResponse,
     SubscriptionItem,
 )
+from services.monitoring.config import load_monitoring_config
 from utils.chains import UnsupportedChainError, require_supported_chain
 
 from . import deps
@@ -81,7 +82,7 @@ def re_enroll_protocol(protocol_id: int, chain: str = "ethereum") -> ReEnrollRes
                 "id": str(mc.id),
                 "address": mc.address,
                 "contract_type": mc.contract_type,
-                "monitoring_config": mc.monitoring_config,
+                "monitoring_config": dict(load_monitoring_config(mc.monitoring_config)),
                 "needs_polling": mc.needs_polling,
                 "is_active": mc.is_active,
             }

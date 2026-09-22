@@ -15,10 +15,8 @@ from db.models import AuditContractCoverage, AuditReport, Contract, Protocol
 from schemas.api_responses import (
     AuditBrief,
     AuditCoverageEntry,
-    CompanyAddressesResponse,
     CompanyAuditCoverageResponse,
     CompanyAuditsResponse,
-    CompanyFunctionsResponse,
     CompanyOverviewResponse,
     CompanyScoreResponse,
 )
@@ -28,6 +26,7 @@ from services.aggregations.company_overview import (
     build_functions_for_protocol,
     resolve_company_jobs,
 )
+from services.assessment.impact import build_proposal_impact
 from services.audits.serializers import _audit_brief, _audit_report_to_dict
 
 from . import deps
@@ -118,7 +117,7 @@ def company_overview(company_name: str, response: Response) -> CompanyOverviewRe
 
 
 @router.get("/api/company/{company_name}/addresses", response_model=None)
-def company_addresses(company_name: str, response: Response) -> CompanyAddressesResponse:
+def company_addresses(company_name: str, response: Response) -> dict[str, Any]:
     """Full inventory of contract addresses for a protocol.
 
     Split out from the main ``/api/company/{name}`` payload so the
@@ -143,7 +142,7 @@ def company_addresses(company_name: str, response: Response) -> CompanyAddresses
 
 
 @router.get("/api/company/{company_name}/functions", response_model=None)
-def company_functions(company_name: str, response: Response) -> CompanyFunctionsResponse:
+def company_functions(company_name: str, response: Response) -> dict[str, Any]:
     """Per-contract function entries for a protocol, keyed by the composite
     ``"<chain>::<address>"`` entity token (invariant 13) so a same-address
     cross-chain pair keeps each chain's own analysis. The frontend indexes this
@@ -172,6 +171,32 @@ def company_functions(company_name: str, response: Response) -> CompanyFunctions
         function_count=sum(len(v) for v in functions_by_entity.values()),
     )
     return {"functions": functions_by_entity}
+
+
+@router.get("/api/company/{company_name}/proposal-impact", response_model=None)
+def company_proposal_impact(company_name: str) -> dict[str, Any]:
+    """Observed proposal facts and scenario deltas from canonical Assessment."""
+    started = time.monotonic()
+    with deps.SessionLocal() as session:
+        protocol_row, jobs = resolve_company_jobs(session, company_name)
+        if protocol_row is None and not jobs:
+            _log_endpoint(
+                "/api/company/{name}/proposal-impact",
+                company=company_name,
+                started=started,
+                outcome="not_found",
+            )
+            raise HTTPException(status_code=404, detail="Company not found")
+        payload = build_proposal_impact(session, company_name, jobs)
+    _log_endpoint(
+        "/api/company/{name}/proposal-impact",
+        company=company_name,
+        started=started,
+        outcome="success",
+        proposal_count=len(payload["proposals"]),
+        change_count=len(payload["changes"]),
+    )
+    return payload
 
 
 @router.get("/api/company/{company_name}/audits", response_model=None)

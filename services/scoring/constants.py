@@ -6,7 +6,7 @@ from fractions import Fraction
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:  # typing-only: scoring reads static's persisted JSON, not its modules
-    from services.static.contract_analysis_pipeline.predicate_types import StateVarTargetKind
+    from services.static.static_analysis.predicate_types import StateVarTargetKind
 
 from utils.scoring_status import MODEL_VERSION
 

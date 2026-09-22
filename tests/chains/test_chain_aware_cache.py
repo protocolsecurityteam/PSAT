@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import uuid
 
+from db.queue import publish_assessment_projection
 from tests.cache_helpers import (
     ADDR_A,
     _sqlite_compatible_store_artifact,
@@ -38,6 +39,9 @@ def _create_completed_job_with_chain(session, address, chain, name="TestContract
     job = create_job(session, {"address": address, "name": name, "chain": chain})
     job.status = JobStatus.completed
     job.stage = JobStage.done
+    from db.contract_materializations import STATIC_FACTS_SCHEMA_VERSION
+
+    job.static_facts_schema_version = STATIC_FACTS_SCHEMA_VERSION
     session.commit()
 
     contract = Contract(
@@ -86,10 +90,12 @@ def _create_completed_job_with_chain(session, address, chain, name="TestContract
         },
     )
 
-    store_artifact(session, job.id, "contract_analysis", data={"summary": {"control_model": "ownable"}})
+    from tests.support.policy_builders import _assessment, _minimal_static_facts
+
+    facts = _minimal_static_facts(address=address, name="TestContract")
+    publish_assessment_projection(session, job.id, _assessment(static_facts=facts, chain_id=job.chain_id or 1))
     store_artifact(session, job.id, "slither_results", data={"results": {"detectors": []}})
-    store_artifact(session, job.id, "analysis_report", text_data="Test analysis report")
-    store_artifact(session, job.id, "control_tracking_plan", data={"controllers": []})
+    store_artifact(session, job.id, "static_facts_report", text_data="Test analysis report")
 
     return job
 

@@ -31,19 +31,23 @@ from db.models import (
 )
 from services.monitoring import reconciler
 from services.monitoring.enrollment import mark_enrollment_dirty
-from services.monitoring.reconciler import (
-    claim_due_enrollments,
-    drain_enrollment_queue,
-    sweep_enqueue_stale,
-)
-from services.monitoring.tracking_plan_state import (
+from services.monitoring.observation_plan_state import (
     MATERIALIZATION_LOOKUP_FAILED,
     NOT_DETERMINED_KEY,
     PLAN_NOT_READABLE,
     POLLING_PLAN_KEY,
     TRACKED_TOPICS_KEY,
 )
+from services.monitoring.reconciler import (
+    claim_due_enrollments,
+    drain_enrollment_queue,
+    sweep_enqueue_stale,
+)
 from tests.conftest import DATABASE_URL, requires_postgres
+from tests.support.policy_builders import (
+    _assessment,
+    _minimal_static_facts,
+)
 
 pytestmark = requires_postgres
 
@@ -162,7 +166,7 @@ def wired_drain(monkeypatch):
 
 @pytest.fixture()
 def materialized_protocol(qsession):
-    from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
+    from db.contract_materializations import STATIC_FACTS_SCHEMA_VERSION
 
     proto = _seed_protocol_with_controller(qsession)
     row = ContractMaterialization(
@@ -170,8 +174,8 @@ def materialized_protocol(qsession):
         bytecode_keccak="0x" + uuid.uuid4().hex * 2,
         address=VAULT_ADDR,
         status="ready",
-        analysis_schema_version=ANALYSIS_SCHEMA_VERSION,
-        tracking_plan={
+        static_facts_schema_version=STATIC_FACTS_SCHEMA_VERSION,
+        observation_plan={
             "tracked_controllers": [
                 {
                     "controller_id": "state_variable:guardian",
@@ -224,7 +228,7 @@ def test_transient_plan_failure_retries_and_recovers_without_notification(
     qsession.expire_all()
     last_success = proto.last_enrollment_reconcile_at
 
-    target = "hydrate_tracking_plan" if failure == PLAN_NOT_READABLE else "find_by_address"
+    target = "hydrate_observation_plan" if failure == PLAN_NOT_READABLE else "find_by_address"
     healthy = getattr(enrollment, target)
 
     def fail_read(*args, **kwargs):
@@ -272,7 +276,7 @@ def test_persistent_plan_outage_backs_off_to_ceiling(qsession, wired_drain, mate
     def fail_read(*args):
         raise StorageContentNotDetermined("temporary outage")
 
-    monkeypatch.setattr("services.monitoring.enrollment.hydrate_tracking_plan", fail_read)
+    monkeypatch.setattr("services.monitoring.enrollment.hydrate_observation_plan", fail_read)
     mark_enrollment_dirty(qsession, proto.id, "analysis_complete")
     qsession.commit()
     for attempt in range(1, 11):
@@ -308,7 +312,7 @@ def test_nontransient_plan_absence_does_not_create_retry_loop(
                 raise StorageContentAbsent("no object")
             raise ValueError("malformed plan")
 
-        monkeypatch.setattr("services.monitoring.enrollment.hydrate_tracking_plan", fail_read)
+        monkeypatch.setattr("services.monitoring.enrollment.hydrate_observation_plan", fail_read)
     mark_enrollment_dirty(qsession, proto.id, "analysis_complete")
     qsession.commit()
     assert drain_enrollment_queue("http://rpc.invalid", "ethereum") == {"drained": 1, "failed": 0}
@@ -840,8 +844,9 @@ def test_policy_worker_marks_dirty(qsession, monkeypatch):
     proto = _make_protocol(qsession)
     # A completed sibling job makes maybe_enroll_protocol return True.
     qsession.add(Job(address="0x" + "a2" * 20, protocol_id=proto.id, status=JobStatus.completed, stage=JobStage.done))
+    job_address = "0x" + "b3" * 20
     job = Job(
-        address="0x" + "b3" * 20,
+        address=job_address,
         name="TestContract",
         protocol_id=proto.id,
         chain_id=1,
@@ -853,25 +858,18 @@ def test_policy_worker_marks_dirty(qsession, monkeypatch):
     qsession.commit()
 
     artifacts = {
-        "contract_analysis": {"contract_address": job.address, "contract_name": "TestContract", "functions": []},
-        "control_snapshot": {"contract_address": job.address, "controller_values": {}},
-        "resolved_control_graph": {"nodes": [], "edges": []},
-        "control_tracking_plan": {"schema_version": "0.1", "contract_address": job.address},
+        "assessment": _assessment(static_facts=_minimal_static_facts(address=job_address)),
     }
     monkeypatch.setattr("workers.policy_worker.get_artifact", lambda _s, _j, name: artifacts.get(name))
     monkeypatch.setattr("workers.policy_worker.store_artifact", lambda *a, **kw: None)
-    monkeypatch.setattr("workers.policy_worker._load_nested_artifacts", lambda *a, **kw: {})
+    monkeypatch.setattr("workers.policy_worker.load_assessment_projection", lambda _s, _j: artifacts["assessment"])
+    monkeypatch.setattr("workers.policy_worker.publish_assessment_projection", lambda *a, **kw: None)
     monkeypatch.setattr(
-        "workers.policy_worker.build_effective_permissions",
-        lambda *a, **kw: {"schema_version": "1", "functions": []},
+        "workers.policy_worker.derive_policy",
+        lambda assessment, **kw: assessment,
     )
     monkeypatch.setattr("workers.policy_worker.resolve_control_graph", lambda **kw: ({}, {}))
-    monkeypatch.setattr("workers.policy_worker.build_principal_labels", lambda *a, **kw: {"principals": []})
-    monkeypatch.setattr(
-        PolicyWorker,
-        "_resolve_authority",
-        lambda self, *a, **kw: {"principal_resolution": {"status": "no_authority"}, "authority_snapshot": None},
-    )
+    monkeypatch.setattr("workers.policy_worker.build_principal_index", lambda *a, **kw: [])
     monkeypatch.setattr(PolicyWorker, "_enrich_cross_contract", lambda self, *a, **kw: {})
     monkeypatch.setattr("services.monitoring.enrollment.rpc_request", lambda *a, **kw: "0x100")
     # Stub the DeFiLlama fetch so the initial-TVL block doesn't touch the network.

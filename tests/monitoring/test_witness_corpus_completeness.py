@@ -36,20 +36,20 @@ from services.monitoring.event_topics import (
     parse_tracked_log,
 )
 from services.monitoring.polling_plan import build_polling_plan
-from services.resolution.tracking_plan import build_control_tracking_plan
-from services.static.contract_analysis_pipeline.effects import build_effects
-from services.static.contract_analysis_pipeline.mapping_events import (
+from services.resolution.observation_plan import build_observation_plan
+from services.static.static_analysis.effects import build_effects
+from services.static.static_analysis.mapping_events import (
     discover_mapping_writer_events,
     member_witness_records,
     multi_entry_writers,
 )
-from services.static.contract_analysis_pipeline.predicate_artifacts import (
+from services.static.static_analysis.predicate_artifacts import (
     build_predicate_artifacts,
 )
-from services.static.contract_analysis_pipeline.summaries import (
+from services.static.static_analysis.summaries import (
     _build_semantic_control_summary,
 )
-from services.static.contract_analysis_pipeline.tracking import (
+from services.static.static_analysis.tracking import (
     _assembly_log_functions,
     _state_writers_from_effects,
     build_controller_tracking,
@@ -247,10 +247,10 @@ def corpus(tmp_path_factory):
         "subject": {"address": "0x" + "11" * 20, "name": "WitnessCorpus"},
         "controller_tracking": targets,
     }
-    plan = build_control_tracking_plan(analysis)  # pyright: ignore[reportArgumentType]
+    plan = build_observation_plan(analysis)  # pyright: ignore[reportArgumentType]
     specs = extract_governance_topics(dict(plan))
     planned = {tc["controller_id"] for tc in plan["tracked_controllers"]}
-    polling = build_polling_plan(contract_type="regular", tracking_plan=plan, tracked_topics=specs)
+    polling = build_polling_plan(contract_type="regular", observation_plan=plan, tracked_topics=specs)
     return {
         "contract": contract,
         "effects": effects,
@@ -711,7 +711,7 @@ def opaque(tmp_path_factory):
             },
             "controller_tracking": targets,
         }
-        plan = build_control_tracking_plan(analysis)  # pyright: ignore[reportArgumentType]
+        plan = build_observation_plan(analysis)  # pyright: ignore[reportArgumentType]
         out[name] = {
             "contract": contract,
             "effects": effects,
@@ -862,7 +862,7 @@ def test_ordinary_library_use_is_not_opaque(opaque):
     """A library taking no storage pointer cannot write the caller's state, so
     Math-style and SafeERC20-style use must leave the qualification alone —
     otherwise the guard nullifies F3 on most real contracts."""
-    from services.static.contract_analysis_pipeline.tracking import _library_storage_write_functions
+    from services.static.static_analysis.tracking import _library_storage_write_functions
 
     derived = opaque["PlainLibrary"]
     contract = derived["contract"]

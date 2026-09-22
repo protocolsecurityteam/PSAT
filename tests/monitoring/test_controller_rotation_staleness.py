@@ -102,7 +102,7 @@ def _monitored(session, contract) -> MonitoredContract:
         id=uuid.uuid4(),
         address=SUBJECT,
         chain="ethereum",
-        contract_type="contract",
+        contract_type="regular",
         contract_id=contract.id,
         protocol_id=contract.protocol_id,
         monitoring_config={

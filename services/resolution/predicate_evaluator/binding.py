@@ -6,14 +6,13 @@ import logging
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any, cast
 
-from eth_utils.crypto import keccak
-
+from services.abi import selector_for_signature as _selector_for_signature
 from services.resolution.caller_sources import CALLER_SOURCES as _CALLER_SOURCES
-from services.static.contract_analysis_pipeline.predicate_types import (
+from services.static.static_analysis.predicate_types import (
     LeafPredicate,
     PredicateTree,
 )
-from services.static.contract_analysis_pipeline.shared import external_bool_leaf_is_gate_shape
+from services.static.static_analysis.shared import external_bool_leaf_is_gate_shape
 
 from .telemetry import _pass_live_read_memo, _state_var_lookup_key
 
@@ -260,21 +259,20 @@ def _tree_for_signature_or_selector(
     *,
     callee_signature: str | None,
     callee_selector: str | None,
+    canonical_signatures: dict[str, str] | None = None,
 ) -> PredicateTree | None:
     """Find a predicate tree by exact ABI signature or selector."""
     if callee_signature and callee_signature in trees:
         tree = trees[callee_signature]
         return cast(PredicateTree, tree) if isinstance(tree, dict) else None
     if callee_selector:
+        from services.abi import function_identity
+
+        matches = []
         for signature, tree in trees.items():
             if not isinstance(signature, str):
                 continue
-            if _selector_for_signature(signature) == callee_selector and isinstance(tree, dict):
-                return cast(PredicateTree, tree)
+            if function_identity(signature, canonical_signatures)[1] == callee_selector and isinstance(tree, dict):
+                matches.append(cast(PredicateTree, tree))
+        return matches[0] if len(matches) == 1 else None
     return None
-
-
-def _selector_for_signature(signature: str) -> str | None:
-    if "(" not in signature or not signature.endswith(")"):
-        return None
-    return "0x" + keccak(text=signature).hex()[:8]

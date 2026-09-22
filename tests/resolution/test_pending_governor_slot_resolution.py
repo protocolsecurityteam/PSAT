@@ -34,7 +34,7 @@ from services.policy.capability_surface import capability_surface_status, projec
 from services.resolution.capabilities import CapabilityExpr
 from services.resolution.capability_resolver import capability_to_dict
 from services.resolution.predicate_evaluator import EvaluationContext, evaluate_tree
-from services.static.contract_analysis_pipeline.predicate_types import PredicateTree
+from services.static.static_analysis.predicate_types import PredicateTree
 from tests.support.eq_tree import eq_tree
 
 CONTRACT = "0x" + "11" * 20
@@ -202,7 +202,7 @@ def test_slotless_pending_operand_keeps_empty_by_design_fallback(monkeypatch: py
 pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
 
-from services.static.contract_analysis_pipeline.predicate_artifacts import build_predicate_artifacts  # noqa: E402
+from services.static.static_analysis.predicate_artifacts import build_predicate_artifacts  # noqa: E402
 from tests.support.solc import solc_path_for as _solc_path_for  # noqa: E402
 
 pytestmark = pytest.mark.compile

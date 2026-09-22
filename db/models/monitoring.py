@@ -44,7 +44,7 @@ class MonitoredContract(Base):
     watched_proxy_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("watched_proxies.id", ondelete="SET NULL"), nullable=True
     )
-    # Vocabulary: ``schemas.control_tracking.MonitoredContractType`` (column
+    # Vocabulary: ``schemas.observations.MonitoredContractType`` (column
     # stays untyped varchar; rows may carry values minted by older enrollments).
     contract_type: Mapped[str] = mapped_column(String(50), nullable=False, default="regular")
     monitoring_config: Mapped[dict[str, Any] | None] = mapped_column(

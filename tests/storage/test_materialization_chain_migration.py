@@ -48,7 +48,7 @@ def _row(chain, keccak, addr, **kw):
         bytecode_keccak=keccak,
         address=addr,
         status="ready",
-        analysis_schema_version=1,
+        static_facts_schema_version=1,
         **kw,
     )
 

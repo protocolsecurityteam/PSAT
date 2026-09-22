@@ -20,13 +20,20 @@ from utils.scoring_status import (
     SELF_SERVICE_STATE_PROVEN,
 )
 
-from ...contract_analysis_pipeline.record_ordering import W2_BASIS_CLEAR_DOMINATES_CALLS
+from ...static_analysis.record_ordering import W2_BASIS_CLEAR_DOMINATES_CALLS
 from ..context import ClaimContext, abi_selector, selector_of
 
 # Per-context memo tables (keyed by the ClaimContext instance, which lives only
 # for one contract's build_claims pass).
 _PAUSE_TARGETS: WeakKeyDictionary[ClaimContext, set[tuple[str, str | None]]] = WeakKeyDictionary()
 _MANDATORY_READS: WeakKeyDictionary[ClaimContext, set[tuple[str, str | None]]] = WeakKeyDictionary()
+_MANDATORY_READS_BY_FUNCTION: WeakKeyDictionary[ClaimContext, dict[str, set[tuple[str, str | None]]]] = (
+    WeakKeyDictionary()
+)
+_MANDATORY_LATCH_READS: WeakKeyDictionary[ClaimContext, set[tuple[str, str | None]]] = WeakKeyDictionary()
+_MANDATORY_LATCH_READS_BY_FUNCTION: WeakKeyDictionary[ClaimContext, dict[str, set[tuple[str, str | None]]]] = (
+    WeakKeyDictionary()
+)
 _TOTAL_SUPPLY_VARS: WeakKeyDictionary[ClaimContext, set[str]] = WeakKeyDictionary()
 
 
@@ -49,11 +56,6 @@ def _iter_leaves(tree: Any) -> Any:
 
 def tree_has_role(tree: Any, roles: tuple[str, ...]) -> bool:
     return any(leaf.get("authority_role") in roles for leaf in _iter_leaves(tree))
-
-
-def tree_is_authority_gated(tree: Any) -> bool:
-    """The function's guard depends on the caller's identity/authority."""
-    return tree_has_role(tree, ("caller_authority", "delegated_authority"))
 
 
 def tree_is_one_shot(tree: Any) -> bool:
@@ -99,17 +101,101 @@ def _mandatory_operands(tree: Any) -> set[tuple[str, str | None]]:
 
 
 def mandatory_gate_reads(ctx: ClaimContext) -> set[tuple[str, str | None]]:
-    """Every ``(var, member)`` pair read as a mandatory revert gate anywhere in
-    the contract's predicate trees (cached per contract)."""
+    """State read as a mandatory gate by a state-changing entry point."""
     cached = _MANDATORY_READS.get(ctx)
     if cached is not None:
         return cached
     reads: set[tuple[str, str | None]] = set()
+    for function_reads in mandatory_gate_reads_by_function(ctx).values():
+        reads |= function_reads
+    _MANDATORY_READS[ctx] = reads
+    return reads
+
+
+def mandatory_gate_reads_by_function(ctx: ClaimContext) -> dict[str, set[tuple[str, str | None]]]:
+    """Mandatory state reads keyed by state-changing function signature."""
+
+    cached = _MANDATORY_READS_BY_FUNCTION.get(ctx)
+    if cached is not None:
+        return cached
+    reads: dict[str, set[tuple[str, str | None]]] = {}
     for signature in ctx.function_signatures():
+        if ctx.effect_record(signature).get("state_changing") is not True:
+            continue
         tree = ctx.predicate_tree(signature)
         if tree is not None:
-            reads |= _mandatory_operands(tree)
-    _MANDATORY_READS[ctx] = reads
+            reads[signature] = _mandatory_operands(tree)
+    _MANDATORY_READS_BY_FUNCTION[ctx] = reads
+    return reads
+
+
+def _mandatory_latch_operands(tree: Any) -> set[tuple[str, str | None]]:
+    """Mandatory reads with boolean/constant-equality latch shape."""
+
+    out: set[tuple[str, str | None]] = set()
+
+    def walk(node: Any, mandatory: bool) -> None:
+        if not isinstance(node, dict):
+            return
+        op = node.get("op")
+        if op == "LEAF":
+            if not mandatory:
+                return
+            leaf = node.get("leaf")
+            if not isinstance(leaf, dict):
+                return
+            operator = leaf.get("operator")
+            operands = [operand for operand in (leaf.get("operands") or []) if isinstance(operand, dict)]
+            absorbed = [operand for operand in (leaf.get("absorbed_operands") or []) if isinstance(operand, dict)]
+            if operator not in ("truthy", "falsy", "eq", "ne"):
+                return
+            if operator in ("eq", "ne") and not any(
+                operand.get("source") == "constant" for operand in (*operands, *absorbed)
+            ):
+                return
+            for operand in (*operands, *absorbed):
+                name = operand.get("state_variable_name")
+                if not isinstance(name, str) or not name:
+                    continue
+                member_path = operand.get("member_path") or []
+                member = member_path[0] if isinstance(member_path, list) and member_path else None
+                out.add((name, member if isinstance(member, str) else None))
+            return
+        child_mandatory = mandatory and op != "OR"
+        for child in node.get("children") or []:
+            walk(child, child_mandatory)
+
+    walk(tree, True)
+    return out
+
+
+def mandatory_latch_reads(ctx: ClaimContext) -> set[tuple[str, str | None]]:
+    """Numeric/bitmap reads that carry a mandatory latch comparison."""
+
+    cached = _MANDATORY_LATCH_READS.get(ctx)
+    if cached is not None:
+        return cached
+    reads: set[tuple[str, str | None]] = set()
+    for function_reads in mandatory_latch_reads_by_function(ctx).values():
+        reads |= function_reads
+    _MANDATORY_LATCH_READS[ctx] = reads
+    return reads
+
+
+def mandatory_latch_reads_by_function(ctx: ClaimContext) -> dict[str, set[tuple[str, str | None]]]:
+    """Latch-shaped mandatory reads keyed by state-changing function."""
+
+    cached = _MANDATORY_LATCH_READS_BY_FUNCTION.get(ctx)
+    if cached is not None:
+        return cached
+    reads: dict[str, set[tuple[str, str | None]]] = {}
+    for signature in ctx.function_signatures():
+        if ctx.effect_record(signature).get("state_changing") is not True:
+            continue
+        tree = ctx.predicate_tree(signature)
+        if tree is not None:
+            reads[signature] = _mandatory_latch_operands(tree)
+    _MANDATORY_LATCH_READS_BY_FUNCTION[ctx] = reads
     return reads
 
 
@@ -814,7 +900,7 @@ def _verified_guard_verdicts(ctx: ClaimContext) -> dict[str, Any]:
         return cached
     verdicts: dict[str, Any] = {}
     if ctx.contract is not None:
-        from ...contract_analysis_pipeline.reentrancy_pause import verified_guard_verdicts
+        from ...static_analysis.reentrancy_pause import verified_guard_verdicts
 
         try:
             verdicts = verified_guard_verdicts(ctx.contract)
@@ -991,6 +1077,18 @@ def bool_write_targets(ctx: ClaimContext, function: str) -> set[tuple[str, str |
     return out
 
 
+def numeric_latch_write_targets(ctx: ClaimContext, function: str) -> set[tuple[str, str | None]]:
+    """Numeric state writes admitted only when a latch-shaped gate reads them."""
+
+    out: set[tuple[str, str | None]] = set()
+    for write in state_writes(ctx, function):
+        if write.get("declared_type") not in ("uint8", "uint256"):
+            continue
+        member_path = write.get("member_path") or []
+        out.add((write["var"], member_path[0] if member_path else None))
+    return out
+
+
 def namespaced_write_vars(ctx: ClaimContext, function: str) -> set[str]:
     """Slot pseudo-variables this function writes (ERC-7201 namespaced storage).
 
@@ -1133,9 +1231,14 @@ def pause_targets(ctx: ClaimContext) -> set[tuple[str, str | None]]:
         return cached
     gate_reads = mandatory_gate_reads(ctx)
     all_bool_writes: set[tuple[str, str | None]] = set()
+    all_numeric_writes: set[tuple[str, str | None]] = set()
     for signature in ctx.function_signatures():
         all_bool_writes |= bool_write_targets(ctx, signature)
-    targets = {pair for pair in all_bool_writes if _pair_is_gate_read(pair, gate_reads)}
+        all_numeric_writes |= numeric_latch_write_targets(ctx, signature)
+    numeric_gate_reads = mandatory_latch_reads(ctx)
+    targets = {pair for pair in all_bool_writes if _pair_is_gate_read(pair, gate_reads)} | {
+        pair for pair in all_numeric_writes if _pair_is_gate_read(pair, numeric_gate_reads)
+    }
     _PAUSE_TARGETS[ctx] = targets
     return targets
 
@@ -1158,15 +1261,50 @@ def _pair_is_gate_read(pair: tuple[str, str | None], gate_reads: set[tuple[str, 
 
 def function_pause_targets(ctx: ClaimContext, function: str) -> set[tuple[str, str | None]]:
     """The contract's pause targets that ``function`` writes in its body."""
-    return bool_write_targets(ctx, function) & pause_targets(ctx)
+    return (bool_write_targets(ctx, function) | numeric_latch_write_targets(ctx, function)) & pause_targets(ctx)
+
+
+def pause_affected_functions(ctx: ClaimContext, targets: set[tuple[str, str | None]]) -> list[str]:
+    """State-changing entry points mandatorily gated by one of ``targets``."""
+
+    toggle_functions = {
+        signature
+        for signature in ctx.function_signatures()
+        if (bool_write_targets(ctx, signature) | numeric_latch_write_targets(ctx, signature)) & targets
+    }
+    out: list[str] = []
+    for signature, reads in mandatory_latch_reads_by_function(ctx).items():
+        if signature in toggle_functions:
+            continue
+        if any(_pair_is_gate_read(target, reads) for target in targets):
+            out.append(signature)
+    return sorted(out)
+
+
+def pause_target_declared_types(ctx: ClaimContext, function: str, target: tuple[str, str | None]) -> set[str]:
+    """Declared write types contributing to one pause target."""
+
+    variable, member = target
+    out: set[str] = set()
+    for write in state_writes(ctx, function):
+        if write.get("var") != variable:
+            continue
+        member_path = write.get("member_path") or []
+        write_member = member_path[0] if member_path else None
+        if member is not None and write_member != member:
+            continue
+        declared = write.get("declared_type")
+        if isinstance(declared, str):
+            out.add(declared)
+    return out
 
 
 def toggle_polarity(function: Any, var: str, member: str | None, *, alias_members: frozenset[str] = frozenset()) -> str:
-    """``"set"`` (writes the flag true), ``"unset"`` (writes it false), or
-    ``"both"`` (parameter-driven / branch-dependent). Member writes are paired
-    through their ``Member`` reference the way the effects builder pairs them.
-    Walks internal callees so an OZ ``_pause()``/``_unpause()`` indirection is
-    attributed to the entry point.
+    """``set`` / ``unset`` / ``both`` (indeterminate write) / ``none``.
+
+    Member writes are paired through their ``Member`` reference the way the
+    effects builder pairs them. Walks internal callees so an OZ
+    ``_pause()``/``_unpause()`` indirection is attributed to the entry point.
 
     ``alias_members`` handles the ERC-7201 namespaced latch, where the write is
     attributed to the slot pseudo-variable but the IR assigns through a LOCAL
@@ -1176,12 +1314,16 @@ def toggle_polarity(function: Any, var: str, member: str | None, *, alias_member
     this the polarity is indeterminate and every namespaced pauser would claim
     both directions — asserting that ``pause()`` also unpauses."""
     polarities: set[str] = set()
-    visited: set[int] = set()
+    matched_write = False
+    visited: set[tuple[int, tuple[tuple[str, str], ...]]] = set()
 
-    def walk(unit: Any) -> None:
-        if id(unit) in visited:
+    def walk(unit: Any, bound_polarities: dict[str, str] | None = None) -> None:
+        nonlocal matched_write
+        bound = dict(bound_polarities or {})
+        visit_key = (id(unit), tuple(sorted(bound.items())))
+        if visit_key in visited:
             return
-        visited.add(id(unit))
+        visited.add(visit_key)
         for node in getattr(unit, "nodes", []) or []:
             ref_pair: dict[int, tuple[str, str]] = {}
             irs = list(getattr(node, "irs", []) or [])
@@ -1197,6 +1339,14 @@ def toggle_polarity(function: Any, var: str, member: str | None, *, alias_member
                 if type(ir).__name__ != "Assignment":
                     continue
                 lvalue = getattr(ir, "lvalue", None)
+                rvalue = getattr(ir, "rvalue", None)
+                polarity = _constant_bool_polarity(rvalue)
+                rvalue_name = getattr(rvalue, "name", None)
+                if polarity is None and isinstance(rvalue_name, str):
+                    polarity = bound.get(rvalue_name)
+                lvalue_name = getattr(lvalue, "name", None)
+                if polarity is not None and isinstance(lvalue_name, str):
+                    bound[lvalue_name] = polarity
                 if member is None:
                     named = _base_name(getattr(lvalue, "name", None)) == var
                     aliased = bool(alias_members) and (ref_pair.get(id(lvalue)) or ("", ""))[1] in alias_members
@@ -1204,20 +1354,33 @@ def toggle_polarity(function: Any, var: str, member: str | None, *, alias_member
                         continue
                 elif lvalue is None or ref_pair.get(id(lvalue)) != (var, member):
                     continue
-                polarity = _constant_bool_polarity(getattr(ir, "rvalue", None))
+                matched_write = True
                 if polarity:
                     polarities.add(polarity)
             for ir in irs:
                 if type(ir).__name__ in ("InternalCall", "LibraryCall"):
                     callee = getattr(ir, "function", None)
                     if callee is not None and getattr(callee, "nodes", None):
-                        walk(callee)
+                        callee_bound: dict[str, str] = {}
+                        parameters = list(getattr(callee, "parameters", None) or [])
+                        arguments = list(getattr(ir, "arguments", None) or [])
+                        for parameter, argument in zip(parameters, arguments, strict=False):
+                            parameter_name = getattr(parameter, "name", None)
+                            argument_name = getattr(argument, "name", None)
+                            argument_polarity = _constant_bool_polarity(argument)
+                            if argument_polarity is None and isinstance(argument_name, str):
+                                argument_polarity = bound.get(argument_name)
+                            if isinstance(parameter_name, str) and argument_polarity is not None:
+                                callee_bound[parameter_name] = argument_polarity
+                        walk(callee, callee_bound)
 
     walk(function)
     if polarities == {"set"}:
         return "set"
     if polarities == {"unset"}:
         return "unset"
+    if not matched_write:
+        return "none"
     return "both"
 
 
@@ -1239,6 +1402,10 @@ def _constant_bool_polarity(rvalue: Any) -> str | None:
         return "set"
     if text in ("false", "0"):
         return "unset"
+    try:
+        return "set" if int(text, 0) != 0 else "unset"
+    except ValueError:
+        pass
     return None
 
 

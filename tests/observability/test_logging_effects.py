@@ -277,7 +277,7 @@ class _ClientReturning:
 def test_static_setter_var_scan_failure_records_degraded():
     """The pure-analysis module has no logger by design, so the failed scan is
     published as a degraded record rather than vanishing into an empty map."""
-    from services.static.contract_analysis_pipeline import effects as static_effects
+    from services.static.static_analysis import effects as static_effects
 
     class _Fn:
         is_constructor = False

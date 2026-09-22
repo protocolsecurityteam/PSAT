@@ -20,7 +20,7 @@ from typing import Any, cast
 
 from typing_extensions import NotRequired
 
-from schemas.control_tracking import RESOLVED_CONTROLLER_TYPES, ResolvedControllerType
+from schemas.observations import RESOLVED_CONTROLLER_TYPES, ResolvedControllerType
 from schemas.upgrade_history import (
     ImplementationRecord,
     ProxyUpgradeHistory,

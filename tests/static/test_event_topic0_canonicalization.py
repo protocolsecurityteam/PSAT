@@ -28,8 +28,8 @@ from eth_utils.crypto import keccak
 slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
 
-from services.static.contract_analysis_pipeline import tracking  # noqa: E402
-from services.static.contract_analysis_pipeline.mapping_events import (  # noqa: E402
+from services.static.static_analysis import tracking  # noqa: E402
+from services.static.static_analysis.mapping_events import (  # noqa: E402
     _abi_type,
     _event_metadata,
 )

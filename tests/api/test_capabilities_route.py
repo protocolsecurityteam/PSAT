@@ -12,6 +12,8 @@ from datetime import datetime, timezone
 
 import pytest
 
+from db.queue import publish_assessment_projection
+
 # offline: no live owner()/governor() eth_call during predicate evaluation
 pytestmark = pytest.mark.usefixtures("_stub_live_authority")
 
@@ -23,7 +25,6 @@ def _seed_completed_job_with_artifact(
     db_session, *, address: str, predicate_trees, chain_id: int = 1, chain: str | None = None
 ):
     from db.models import Job, JobStage, JobStatus
-    from db.queue import store_artifact
 
     request: dict = {"address": address}
     if chain is not None:
@@ -40,7 +41,17 @@ def _seed_completed_job_with_artifact(
     db_session.add(job)
     db_session.flush()
     if predicate_trees is not None:
-        store_artifact(db_session, job.id, "predicate_trees", data=predicate_trees)
+        from tests.support.policy_builders import _assessment, _minimal_static_facts
+
+        publish_assessment_projection(
+            db_session,
+            job.id,
+            _assessment(
+                static_facts=_minimal_static_facts(address=address, name="T"),
+                predicate_trees=predicate_trees,
+                chain_id=chain_id,
+            ),
+        )
     db_session.commit()
     return job
 
@@ -109,13 +120,13 @@ def test_capabilities_returns_404_for_unknown_address(api_client, db_session):
 
 
 @requires_postgres
-def test_capabilities_returns_404_when_predicate_tree_artifact_is_missing(api_client, db_session):
-    """A completed Job without a predicate_trees artifact returns 404."""
+def test_capabilities_returns_404_when_assessment_predicate_evidence_is_missing(api_client, db_session):
+    """A completed Job without Assessment predicate evidence returns 404."""
     address = "0x" + uuid.uuid4().hex[:8] + "b2" * 16
     _seed_completed_job_with_artifact(db_session, address=address, predicate_trees=None)
     resp = api_client.get(f"/api/contract/{address}/capabilities")
     assert resp.status_code == 404
-    assert "predicate-tree artifact is missing" in resp.json()["detail"]
+    assert "Assessment predicate evidence is missing" in resp.json()["detail"]
 
 
 @requires_postgres

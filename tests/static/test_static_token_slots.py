@@ -29,8 +29,8 @@ import pytest
 slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
 
-from services.static.contract_analysis_pipeline.effects import build_effects  # noqa: E402
-from services.static.contract_analysis_pipeline.token_slots import derive_token_slots  # noqa: E402
+from services.static.static_analysis.effects import build_effects  # noqa: E402
+from services.static.static_analysis.token_slots import derive_token_slots  # noqa: E402
 from tests.support.solc import solc_path_for as _solc_path_for  # noqa: E402
 
 pytestmark = pytest.mark.compile

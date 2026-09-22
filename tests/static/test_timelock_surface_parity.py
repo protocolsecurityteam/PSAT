@@ -192,8 +192,8 @@ def test_static_producer_mints_no_openness_verdict(compiled):
     producer only.
 
     `authority_openness` has no static writer at all. Every writer is
-    policy-stage (`effective_permissions_writer.py:119,318,332`;
-    `effective_permissions.py:652,801,821`), so what this test can catch is a
+    policy-stage (`permission_index_writer.py:119,318,332`;
+    `permission_index.py:652,801,821`), so what this test can catch is a
     static regression that starts minting a capability verdict from source
     alone. It is **structurally blind to the more realistic failure**: the
     semantic resolver minting `restricted` for id=11 from a fold that did not

@@ -247,7 +247,7 @@ class TestBuildMonitoringConfig:
 
         config = _build_monitoring_config(None, [], "regular")
         assert config["tracked_topics"] == []
-        assert "tracking_plan_not_determined" not in config
+        assert "observation_plan_not_determined" not in config
         assert "watch_authority" not in config
 
 
@@ -463,7 +463,7 @@ def _grant_primary_authority(
     principal_address,
     function_name="setOwner",
     resolved_type=None,
-    effect_labels=None,
+    claim_id=None,
     details=None,
 ):
     """Make ``principal_address`` a primary controller of the contract by
@@ -476,9 +476,7 @@ def _grant_primary_authority(
     Enrollment seeds candidates from this when the address has no usable
     ``control_graph_nodes`` type, mirroring the Surface canvas.
 
-    ``effect_labels`` sets the function's effect labels, which the
-    co-controller rule reads — a privileged label (e.g. ``pause_toggle``)
-    keeps a non-primary caller as a monitored co-controller.
+    Claims describe the function's capabilities for enrollment policy.
     """
     _grant_shared_authority(
         session,
@@ -486,7 +484,7 @@ def _grant_primary_authority(
         [principal_address],
         function_name=function_name,
         resolved_type=resolved_type,
-        effect_labels=effect_labels,
+        claim_id=claim_id,
         details=details,
     )
 
@@ -497,7 +495,7 @@ def _grant_shared_authority(
     principal_addresses,
     function_name="setOwner",
     resolved_type=None,
-    effect_labels=None,
+    claim_id=None,
     details=None,
 ):
     """Attach a single ``EffectiveFunction`` callable by *every* address in
@@ -509,8 +507,12 @@ def _grant_shared_authority(
     """
     from db.models import EffectiveFunction, FunctionPrincipal
 
+    claims = [{"claim_id": claim_id, "tier": "standard_exact", "witness": {}}] if claim_id else []
     ef = EffectiveFunction(
-        contract_id=contract_id, function_name=function_name, authority_public=False, effect_labels=effect_labels
+        contract_id=contract_id,
+        function_name=function_name,
+        authority_public=False,
+        claims=claims,
     )
     session.add(ef)
     session.flush()
@@ -629,7 +631,7 @@ class TestEnrollmentIntegration:
 
         from db.models import Contract, Protocol
         from services.monitoring.enrollment import enroll_protocol_contracts
-        from services.monitoring.tracking_plan_state import NO_CURRENT_MATERIALIZATION
+        from services.monitoring.observation_plan_state import NO_CURRENT_MATERIALIZATION
 
         proto = Protocol(name=PROTO_NAME)
         pg_session.add(proto)
@@ -645,7 +647,7 @@ class TestEnrollmentIntegration:
             with patch("services.monitoring.enrollment.rpc_request", return_value="0x100"):
                 enroll_protocol_contracts(pg_session, proto.id, "http://rpc", "ethereum")
 
-        per_contract = [r for r in caplog.records if "no current tracking_plan materialization" in r.message]
+        per_contract = [r for r in caplog.records if "no current observation_plan materialization" in r.message]
         assert per_contract, "the per-contract line still exists, at DEBUG"
         assert {r.levelno for r in per_contract} == {_logging.DEBUG}
 
@@ -1023,7 +1025,6 @@ class TestEnrollmentIntegration:
             [big_safe, *bidder_safes],
             function_name="createBid",
             resolved_type="safe",
-            effect_labels=["external_contract_call"],
         )
         _grant_primary_authority(pg_session, governed.id, big_safe, function_name="setOwner", resolved_type="safe")
         pg_session.commit()
@@ -1076,15 +1077,29 @@ class TestEnrollmentIntegration:
         # gov_safe governs both contracts (owns more) so it wins pool's primary
         # over the guardian. The guardian's only authority is pause on pool — a
         # privileged label, so it's kept as a co-controller despite losing.
-        _grant_primary_authority(pg_session, pool.id, gov_safe, function_name="setOwner", resolved_type="safe")
-        _grant_primary_authority(pg_session, other.id, gov_safe, function_name="setOwner", resolved_type="safe")
+        _grant_primary_authority(
+            pg_session,
+            pool.id,
+            gov_safe,
+            function_name="setOwner",
+            resolved_type="safe",
+            claim_id="ownership.transfer",
+        )
+        _grant_primary_authority(
+            pg_session,
+            other.id,
+            gov_safe,
+            function_name="setOwner",
+            resolved_type="safe",
+            claim_id="ownership.transfer",
+        )
         _grant_primary_authority(
             pg_session,
             pool.id,
             guardian,
             function_name="pauseContract",
             resolved_type="safe",
-            effect_labels=["pause_toggle"],
+            claim_id="pause.set",
         )
         pg_session.commit()
 
@@ -2027,7 +2042,7 @@ class TestControlGraphTypeReconciliation:
 class TestTrackingPlanNotDetermined:
     """Not-determined vs. found-nothing at the enrollment boundary.
 
-    ``_load_tracking_plan_artifacts`` returns no topics in four different
+    ``_load_observation_plan_artifacts`` returns no topics in four different
     situations and exactly one of them is a finding about the contract.
     Enrollment degrades to the baseline registry in all four, but the persisted
     ``monitoring_config`` must not present the other three as the first — a
@@ -2037,7 +2052,7 @@ class TestTrackingPlanNotDetermined:
     Every case here goes through the real ``find_by_address`` against real
     ``contract_materializations`` rows, because the collapse being tested is
     inside that function: it returns ``None`` for *no row*, for *not ready*,
-    and for *superseded analysis_schema_version* alike. Stubbing it out is how
+    and for *superseded static_facts_schema_version* alike. Stubbing it out is how
     the hole stayed open.
 
     Row shapes mirror the working DB's 85 joinable monitored contracts:
@@ -2073,7 +2088,7 @@ class TestTrackingPlanNotDetermined:
         made: list[tuple[str, str]] = []
 
         def _make(address: str, **overrides):
-            from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
+            from db.contract_materializations import STATIC_FACTS_SCHEMA_VERSION
             from utils.chains import chain_cache_token
 
             keccak = ("0x" + uuid.uuid4().hex * 2)[:66]
@@ -2086,7 +2101,7 @@ class TestTrackingPlanNotDetermined:
                 "address": address.lower(),
                 "contract_name": "Fixture",
                 "status": "ready",
-                "analysis_schema_version": ANALYSIS_SCHEMA_VERSION,
+                "static_facts_schema_version": STATIC_FACTS_SCHEMA_VERSION,
             }
             fields.update(overrides)
             row = ContractMaterialization(**fields)
@@ -2117,52 +2132,52 @@ class TestTrackingPlanNotDetermined:
 
         contract = SimpleNamespace(address="0x" + "11" * 20, chain="ethereum")
 
-        topics, plan, not_determined = enr._load_tracking_plan_artifacts(pg_session, cast(Any, contract))
+        topics, plan, not_determined = enr._load_observation_plan_artifacts(pg_session, cast(Any, contract))
         assert (topics, plan) == ([], None)
         assert not_determined == "no_current_materialization"
 
         config = enr._build_monitoring_config(None, [], "regular", topics, None, plan_not_determined=not_determined)
         assert "tracked_topics" not in config
-        assert config["tracking_plan_not_determined"] == "no_current_materialization"
+        assert config["observation_plan_not_determined"] == "no_current_materialization"
 
     def test_superseded_schema_version_is_not_determined(self, pg_session, materialization_factory):
         """POSITIVE CONTROL, the subtle arm of the same collapse.
 
         A ``status='ready'`` row holding a plan with real governance events,
-        stamped at a superseded ``analysis_schema_version``. ``find_by_address``
+        stamped at a superseded ``static_facts_schema_version``. ``find_by_address``
         reads that as a miss on purpose ("so a bumped analyzer rebuilds rather
         than serving a stale bundle") — which is a statement about our
         analyzer, not about the contract. Publishing zero tracked_topics here
         would assert that a contract with a ``GuardianChanged`` event has no
         governance events at all.
         """
-        from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
+        from db.contract_materializations import STATIC_FACTS_SCHEMA_VERSION
         from services.monitoring import enrollment as enr
 
         address = "0x" + "33" * 20
         materialization_factory(
             address,
-            analysis_schema_version=ANALYSIS_SCHEMA_VERSION - 1,
-            tracking_plan=self._PLAN_WITH_EVENTS,
+            static_facts_schema_version=STATIC_FACTS_SCHEMA_VERSION - 1,
+            observation_plan=self._PLAN_WITH_EVENTS,
         )
         contract = SimpleNamespace(address=address, chain="ethereum")
 
-        topics, plan, not_determined = enr._load_tracking_plan_artifacts(pg_session, cast(Any, contract))
+        topics, plan, not_determined = enr._load_observation_plan_artifacts(pg_session, cast(Any, contract))
         assert (topics, plan) == ([], None)
         assert not_determined == "no_current_materialization"
 
         config = enr._build_monitoring_config(None, [], "regular", topics, None, plan_not_determined=not_determined)
-        assert config["tracking_plan_not_determined"] == "no_current_materialization"
+        assert config["observation_plan_not_determined"] == "no_current_materialization"
 
     def test_unready_row_is_not_determined(self, pg_session, materialization_factory):
         """POSITIVE CONTROL, third arm: a build still in flight."""
         from services.monitoring import enrollment as enr
 
         address = "0x" + "44" * 20
-        materialization_factory(address, status="building", tracking_plan=self._PLAN_WITH_EVENTS)
+        materialization_factory(address, status="building", observation_plan=self._PLAN_WITH_EVENTS)
         contract = SimpleNamespace(address=address, chain="ethereum")
 
-        _topics, _plan, not_determined = enr._load_tracking_plan_artifacts(pg_session, cast(Any, contract))
+        _topics, _plan, not_determined = enr._load_observation_plan_artifacts(pg_session, cast(Any, contract))
         assert not_determined == "no_current_materialization"
 
     def test_unreadable_plan_is_stamped_with_its_own_reason(self, pg_session, materialization_factory, monkeypatch):
@@ -2176,20 +2191,20 @@ class TestTrackingPlanNotDetermined:
         from services.monitoring import enrollment as enr
 
         address = "0x" + "55" * 20
-        materialization_factory(address, tracking_plan_blob_key="artifacts/x/tracking_plan.json")
+        materialization_factory(address, observation_plan_blob_key="artifacts/x/observation_plan.json")
         monkeypatch.setattr(
             enr,
-            "hydrate_tracking_plan",
+            "hydrate_observation_plan",
             lambda _row: (_ for _ in ()).throw(StorageContentNotDetermined("bucket unreachable")),
         )
         contract = SimpleNamespace(address=address, chain="ethereum")
 
-        topics, plan, not_determined = enr._load_tracking_plan_artifacts(pg_session, cast(Any, contract))
+        topics, plan, not_determined = enr._load_observation_plan_artifacts(pg_session, cast(Any, contract))
         assert (topics, plan) == ([], None)
         assert not_determined == "plan_not_readable"
 
         config = enr._build_monitoring_config(None, [], "regular", topics, None, plan_not_determined=not_determined)
-        assert config["tracking_plan_not_determined"] == "plan_not_readable"
+        assert config["observation_plan_not_determined"] == "plan_not_readable"
 
     def test_a_plan_object_the_bucket_says_is_gone_gets_its_own_token(
         self, pg_session, materialization_factory, monkeypatch
@@ -2202,26 +2217,26 @@ class TestTrackingPlanNotDetermined:
         from services.monitoring import enrollment as enr
 
         address = "0x" + "66" * 20
-        materialization_factory(address, tracking_plan_blob_key="artifacts/x/tracking_plan.json")
+        materialization_factory(address, observation_plan_blob_key="artifacts/x/observation_plan.json")
         monkeypatch.setattr(
             enr,
-            "hydrate_tracking_plan",
+            "hydrate_observation_plan",
             lambda _row: (_ for _ in ()).throw(StorageContentAbsent("no object at any candidate")),
         )
         contract = SimpleNamespace(address=address, chain="ethereum")
 
-        topics, plan, not_determined = enr._load_tracking_plan_artifacts(pg_session, cast(Any, contract))
+        topics, plan, not_determined = enr._load_observation_plan_artifacts(pg_session, cast(Any, contract))
         assert (topics, plan) == ([], None)
         assert not_determined == "plan_object_absent"
 
         config = enr._build_monitoring_config(None, [], "regular", topics, None, plan_not_determined=not_determined)
-        assert config["tracking_plan_not_determined"] == "plan_object_absent"
+        assert config["observation_plan_not_determined"] == "plan_object_absent"
 
     def test_a_read_plan_with_no_events_stays_clean(self, pg_session, materialization_factory):
         """NEGATIVE CONTROL, 5 of 85 rows in the working DB.
 
         Mirrors ``0x28a6e7ebb6aca8f64145952a9565245c3dc1f32f`` (PriceProvider,
-        ethereum): ready, current schema version, ``tracking_plan`` actually
+        ethereum): ready, current schema version, ``observation_plan`` actually
         hydrates to a dict, and the analyzer derived no governance events. This
         is the one shape where an empty ``tracked_topics`` is a finding: it is
         witnessed as the PRESENT empty list, with no not-determined flag — a
@@ -2229,45 +2244,45 @@ class TestTrackingPlanNotDetermined:
         exists to make, and one that omitted the key would make the finding
         indistinguishable from rows the builder never produced.
 
-        The plan is read through the real ``hydrate_tracking_plan``; nothing is
+        The plan is read through the real ``hydrate_observation_plan``; nothing is
         stubbed.
         """
         from services.monitoring import enrollment as enr
 
         address = "0x" + "66" * 20
-        materialization_factory(address, tracking_plan={"tracked_controllers": []})
+        materialization_factory(address, observation_plan={"tracked_controllers": []})
         contract = SimpleNamespace(address=address, chain="ethereum")
 
-        topics, plan, not_determined = enr._load_tracking_plan_artifacts(pg_session, cast(Any, contract))
+        topics, plan, not_determined = enr._load_observation_plan_artifacts(pg_session, cast(Any, contract))
         assert topics == []
         assert plan == {"tracked_controllers": []}
         assert not_determined is None
 
         config = enr._build_monitoring_config(None, [], "regular", topics, None, plan_not_determined=not_determined)
         assert config["tracked_topics"] == []
-        assert "tracking_plan_not_determined" not in config
+        assert "observation_plan_not_determined" not in config
 
     def test_a_read_plan_with_events_stays_clean_and_publishes_them(self, pg_session, materialization_factory):
         """NEGATIVE CONTROL, 45 of 85 rows: proven-present is untouched."""
         from services.monitoring import enrollment as enr
 
         address = "0x" + "77" * 20
-        materialization_factory(address, tracking_plan=self._PLAN_WITH_EVENTS)
+        materialization_factory(address, observation_plan=self._PLAN_WITH_EVENTS)
         contract = SimpleNamespace(address=address, chain="ethereum")
 
-        topics, _plan, not_determined = enr._load_tracking_plan_artifacts(pg_session, cast(Any, contract))
+        topics, _plan, not_determined = enr._load_observation_plan_artifacts(pg_session, cast(Any, contract))
         assert not_determined is None
         assert [t["topic0"] for t in topics] == [self._TOPIC0]
 
         config = enr._build_monitoring_config(None, [], "regular", topics, None, plan_not_determined=not_determined)
         assert config["tracked_topics"] == topics
-        assert "tracking_plan_not_determined" not in config
+        assert "observation_plan_not_determined" not in config
 
     def test_unanalyzed_primary_controller_config_is_flagged(self):
         """The second ``_build_monitoring_config`` call site.
 
         Primary controllers are enrolled without ever being analyzed, so their
-        config is built with ``tracking_plan=None``. That empty
+        config is built with ``observation_plan=None``. That empty
         ``tracked_topics`` is the absence of a question, and it reads as a
         finding unless it is stamped.
         """
@@ -2276,4 +2291,4 @@ class TestTrackingPlanNotDetermined:
         config = enr._build_monitoring_config(
             None, [], "safe", None, [{"field": "threshold"}], plan_not_determined="contract_not_analyzed"
         )
-        assert config["tracking_plan_not_determined"] == "contract_not_analyzed"
+        assert config["observation_plan_not_determined"] == "contract_not_analyzed"

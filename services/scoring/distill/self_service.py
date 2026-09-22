@@ -6,7 +6,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from schemas.contract_analysis import ControllerProvenance
+from schemas.static_facts import ControllerProvenance
 from services.scoring import constants as K
 from utils.scoring_status import (
     SELF_SERVICE_BASIS_BOUNDED,

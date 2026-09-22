@@ -33,14 +33,12 @@ from services.effects import anvil, recipes
 from services.effects.config import (
     effects_stage_enabled,
 )
-from services.effects.hashing import resolved_function_hash
 from services.effects.preflight import (
     InMemoryCapabilityStore,
     probe_simulate_support,
 )
 from services.effects.selection import AuthorityGraph, select_candidates
 from tests.cache_helpers import requires_postgres
-from tests.support.effects_ir import _fn, _ir, _node, _var
 
 # Shared structural doubles + scripted stubs from the harness tests.
 from tests.support.effects_stubs import CTX, RecordingStore, ScriptedSimulate, ok, transfer_log, uint_ret
@@ -69,30 +67,6 @@ def clean_effects(db_session):
 # ---------------------------------------------------------------------------
 # No name drives an effect; every verdict traces to a witness.
 # ---------------------------------------------------------------------------
-
-
-def test_inv1_no_name_drives_effect():
-    # Two structurally-identical functions with DIFFERENT names hash equal —
-    # the identity is structural, never the name.
-    a = _fn("A.wildlyDifferentName()", nodes=[_node("EXPRESSION", [_ir("Assignment", lvalue=_var("StateVariable"))])])
-    b = _fn("B.f()", nodes=[_node("EXPRESSION", [_ir("Assignment", lvalue=_var("StateVariable"))])])
-    assert resolved_function_hash(a) == resolved_function_hash(b)
-    # And a positive verdict carries a replayable transcript (an observed witness).
-    from services.effects.simulate import SimResult
-
-    res = SimResult(
-        calls=(ok(uint_ret(1)), ok(logs=[transfer_log(CONTRACT, "0x" + "00" * 20, PRINCIPAL, 1)]), ok(uint_ret(2)))
-    )
-    eff = recipes.supply(
-        simulate=ScriptedSimulate(res),
-        store=RecordingStore(),
-        ctx=CTX,
-        token_address=CONTRACT,
-        principal=PRINCIPAL,
-        mint_calldata="0x40c10f19",
-        simulate_supported=True,
-    )
-    assert eff.transcript is not None and eff.is_proven
 
 
 # ---------------------------------------------------------------------------
@@ -151,7 +125,6 @@ def test_inv4_value_never_gates_cap_logs_drops(clean_effects, caplog):
                 function_name=f"f{i}",
                 selector=f"0x0000000{i}",
                 authority_public=False,
-                effect_targets=["slot0"],
             )
         )
     session.commit()

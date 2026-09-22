@@ -38,7 +38,7 @@ from services.monitoring.enrollment import enroll_protocol_contracts
 from services.monitoring.enrollment_schedule import (
     sweep_enqueue_stale,
 )
-from services.monitoring.tracking_plan_state import NOT_DETERMINED_KEY, TRANSIENT_PLAN_FAILURES
+from services.monitoring.observation_plan_state import NOT_DETERMINED_KEY, TRANSIENT_PLAN_FAILURES
 
 logger = logging.getLogger(__name__)
 

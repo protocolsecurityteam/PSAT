@@ -1,7 +1,7 @@
 """The reconciler that keeps invariant 8 true across a schema bump — at a price
 somebody decided (invariant 11).
 
-A bump to ``ANALYSIS_SCHEMA_VERSION`` makes every existing row read as a miss at
+A bump to ``STATIC_FACTS_SCHEMA_VERSION`` makes every existing row read as a miss at
 once, and without this the whole monitored fleet quietly falls back to
 baseline-only watching. The backlog is published while it is still small (F9c),
 and the rebuild work is capped, counted, and reported rather than emitted.
@@ -16,7 +16,7 @@ import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
+from db.contract_materializations import STATIC_FACTS_SCHEMA_VERSION
 from db.models import ContractMaterialization, Job, JobStage, JobStatus, MonitoredContract
 from services.monitoring.materialization_reconciler import (
     REASON_FAILED,
@@ -105,7 +105,7 @@ def _materialization(
             address=address.lower(),
             status=status,
             builder_started_at=builder_started_at,
-            analysis_schema_version=version,
+            static_facts_schema_version=version,
         )
     )
     session.commit()
@@ -116,15 +116,15 @@ def test_backlog_names_the_reason_per_contract(cm_db):
     addrs = ["0x" + f"{n:02x}" * 20 for n in range(1, 6)]
     for addr in addrs:
         _monitored(cm_db, addr)
-    _materialization(cm_db, addrs[0], "0x" + "01" * 32, status="ready", version=ANALYSIS_SCHEMA_VERSION)
-    _materialization(cm_db, addrs[1], "0x" + "02" * 32, status="ready", version=ANALYSIS_SCHEMA_VERSION - 1)
-    _materialization(cm_db, addrs[2], "0x" + "03" * 32, status="failed", version=ANALYSIS_SCHEMA_VERSION)
+    _materialization(cm_db, addrs[0], "0x" + "01" * 32, status="ready", version=STATIC_FACTS_SCHEMA_VERSION)
+    _materialization(cm_db, addrs[1], "0x" + "02" * 32, status="ready", version=STATIC_FACTS_SCHEMA_VERSION - 1)
+    _materialization(cm_db, addrs[2], "0x" + "03" * 32, status="failed", version=STATIC_FACTS_SCHEMA_VERSION)
     _materialization(
         cm_db,
         addrs[3],
         "0x" + "04" * 32,
         status="building",
-        version=ANALYSIS_SCHEMA_VERSION,
+        version=STATIC_FACTS_SCHEMA_VERSION,
         builder_started_at=datetime.now(timezone.utc),
     )
 
@@ -149,7 +149,7 @@ def test_rebuild_plan_is_capped_and_excludes_in_flight_builds(cm_db, monkeypatch
         addrs[0],
         "0x" + "10" * 32,
         status="building",
-        version=ANALYSIS_SCHEMA_VERSION,
+        version=STATIC_FACTS_SCHEMA_VERSION,
         builder_started_at=datetime.now(timezone.utc),
     )
 
@@ -264,7 +264,7 @@ def test_a_resolved_attempt_is_not_outstanding_work(cm_db, monkeypatch):
     resolved, outstanding = "0x" + "90" * 20, "0x" + "91" * 20
     _monitored(cm_db, resolved)
     _monitored(cm_db, outstanding)
-    _materialization(cm_db, resolved, "0x" + "90" * 32, status="ready", version=ANALYSIS_SCHEMA_VERSION)
+    _materialization(cm_db, resolved, "0x" + "90" * 32, status="ready", version=STATIC_FACTS_SCHEMA_VERSION)
     _queue_rebuild_jobs(cm_db, [resolved, outstanding])
 
     monkeypatch.setenv("PSAT_MATERIALIZATION_REBUILD_BUDGET_PER_DAY", "5")
@@ -289,7 +289,7 @@ def test_a_stale_builder_claim_is_rebuildable_not_in_flight(cm_db, monkeypatch):
                 address=addr,
                 status="building",
                 builder_started_at=started,
-                analysis_schema_version=ANALYSIS_SCHEMA_VERSION,
+                static_facts_schema_version=STATIC_FACTS_SCHEMA_VERSION,
             )
         )
     cm_db.commit()

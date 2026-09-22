@@ -29,29 +29,17 @@ The exclusion list (each entry structural, never name-based):
     ``view``/``pure`` bool call gated on the caller is an external ACL →
     authority.
 
-Behavior is gated behind ``PSAT_AUTHORITY_EARNED_PUBLIC`` while the corpus
-metrics mature; the legacy path keeps the E3/E4 point fixes
-(``is_caller_keyed_time_allowlist`` / ``is_caller_keyed_membership_allowlist``,
-which the general rule subsumes).
 """
 
 from __future__ import annotations
 
-import os
 from collections.abc import Mapping
 from typing import Any
 
 # Self-auth shapes are excluded by the equality arm below, and permit flows
 # resolve through the ``signature_auth`` leaf kind.
 from services.resolution.caller_sources import CALLER_SOURCES as _CALLER_TAINT_SOURCES
-from services.static.contract_analysis_pipeline.predicate_types import LeafPredicate
-
-
-def earned_public_enabled() -> bool:
-    """The caller-taint default (plan: AUTHORITY_REFACTOR) — ON by default;
-    ``PSAT_AUTHORITY_EARNED_PUBLIC=0`` is the release kill-switch back to the
-    legacy E3/E4 point-fix path (precedent: #130's env kill switch)."""
-    return os.getenv("PSAT_AUTHORITY_EARNED_PUBLIC", "1").lower() in ("1", "true", "yes")
+from services.static.static_analysis.predicate_types import LeafPredicate
 
 
 def leaf_is_caller_tainted(leaf: LeafPredicate) -> bool:

@@ -138,14 +138,14 @@ def test_base_monitored_contract_chain_roundtrips(base_monitored_contract):
     assert base_monitored_contract["chain"] == BASE_CHAIN
     assert base_monitored_contract["address"] == WEETH_BASE_ADDRESS.lower()
     assert base_monitored_contract["is_active"] is True
-    # Subset, not equality: the route stamps ``tracking_plan_not_determined``
+    # Subset, not equality: the route stamps ``observation_plan_not_determined``
     # into every caller-supplied config so the row cannot read as "the analysis
     # looked and found nothing to track" (routers/monitored._stamp_caller_supplied).
     # The caller's own keys still round-trip untouched, which is what this
     # assertion is for.
     stored = base_monitored_contract["monitoring_config"]
     assert {k: stored.get(k) for k in _BASE_CONFIG} == _BASE_CONFIG
-    assert stored["tracking_plan_not_determined"] == "config_supplied_by_caller"
+    assert stored["observation_plan_not_determined"] == "config_supplied_by_caller"
 
 
 def test_base_monitored_contract_listed_by_chain(

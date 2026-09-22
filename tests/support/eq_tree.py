@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any, cast
 
-from services.static.contract_analysis_pipeline.predicate_types import PredicateTree
+from services.static.static_analysis.predicate_types import PredicateTree
 
 
 def eq_tree(operand: dict[str, Any], expression: str = "msg.sender == X") -> PredicateTree:

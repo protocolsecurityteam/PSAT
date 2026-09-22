@@ -51,6 +51,7 @@ COPY alembic/ alembic/
 COPY db/ db/
 COPY workers/ workers/
 COPY deploy/start_workers.sh deploy/start_container.sh deploy/start_web.sh deploy/start_browser.sh deploy/start_monitor.sh deploy/
+COPY deploy/preview/assessment_release.py deploy/preview/assessment_release.py
 RUN chmod +x deploy/start_workers.sh deploy/start_container.sh deploy/start_web.sh deploy/start_browser.sh deploy/start_monitor.sh
 COPY services/ services/
 COPY schemas/ schemas/

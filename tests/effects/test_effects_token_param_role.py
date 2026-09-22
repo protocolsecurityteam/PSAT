@@ -56,7 +56,6 @@ def _facts(
     *,
     parameter_names: list[str],
     sinks: list[dict[str, Any]] | None = None,
-    labels: list[str] | None = None,
 ) -> cd.ContractFacts:
     selector = _sel(sig)
     info = {
@@ -66,8 +65,7 @@ def _facts(
         "sinks": sinks or [],
         "state_writes": [],
         "value_flows": [],
-        "effect_labels": labels if labels is not None else ["mint"],
-        "effect_targets": [],
+        "claims": [{"claim_id": "supply.mint", "tier": "standard_exact", "witness": {}}],
         "state_changing": True,
         "parameter_names": parameter_names,
         "payable": False,
@@ -460,7 +458,7 @@ def test_priced_holdings_only_and_richest_first(db_session):
 
     p = _protocol(db_session, "reach-holdings")
     c = _contract(db_session, p.id, ADDR(0x2301))
-    _fn(db_session, c.id, name="deposit", selector="0xbbbb0301", effect_targets=["S"])
+    _fn(db_session, c.id, name="deposit", selector="0xbbbb0301")
     for token, usd in ((ADDR(0xAA01), 10.0), (ADDR(0xAA02), 900.0), (ADDR(0xAA03), None)):
         db_session.add(
             ContractBalance(contract_id=c.id, token_address=token, raw_balance="1", decimals=18, usd_value=usd)

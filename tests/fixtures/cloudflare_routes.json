@@ -20,6 +20,7 @@
   ["GET", "/api/company/{company_name}/audit_coverage"],
   ["GET", "/api/company/{company_name}/audits"],
   ["GET", "/api/company/{company_name}/functions"],
+  ["GET", "/api/company/{company_name}/proposal-impact"],
   ["GET", "/api/company/{company_name}/score"],
   ["GET", "/api/company/{company_name}/semantic_capabilities"],
   ["GET", "/api/config"],

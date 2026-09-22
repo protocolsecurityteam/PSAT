@@ -50,14 +50,12 @@ const COMPANY_ETHERFI = {
       upgrade_count: 2,
       control_model: "timelock",
       controllers: { owner: "0xMultiSig" },
-      functions: [],
     },
     {
       address: POOL_ADDR,
       name: "LiquidityPool",
       upgrade_count: 0,
       controllers: {},
-      functions: [],
     },
   ],
   ownership_hierarchy: [],
@@ -114,6 +112,9 @@ async function setupPage(page) {
   );
   await page.route(matchApi(/^\/api\/company\/[^/]+\/audit_coverage$/), (route) =>
     route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(COVERAGE) }),
+  );
+  await page.route(matchApi(/^\/api\/company\/[^/]+\/functions$/), (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ functions: {} }) }),
   );
   await page.route(matchApi(/^\/api\/company\/[^/]+$/), (route) =>
     route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(COMPANY_ETHERFI) }),

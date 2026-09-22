@@ -44,6 +44,7 @@ const EXPECTED_CLAIM_IDS = [
   "timelock.execute",
   "timelock.schedule",
   "timelock.set_delay",
+  "transfer_policy.configure",
   "upgrade.implementation",
   "value_router",
   "weth.deposit",

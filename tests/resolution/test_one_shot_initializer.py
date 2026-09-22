@@ -36,7 +36,7 @@ from services.policy.capability_surface import project_capability_surface  # noq
 from services.resolution.capability_resolver import capability_to_dict  # noqa: E402
 from services.resolution.one_shot_probe import collect_one_shot_latches  # noqa: E402
 from services.resolution.predicate_evaluator import evaluate_tree  # noqa: E402
-from services.static.contract_analysis_pipeline.predicate_artifacts import (  # noqa: E402
+from services.static.static_analysis.predicate_artifacts import (  # noqa: E402
     build_predicate_artifacts,
 )
 from tests.support.solc import solc_path_for as _solc_path_for  # noqa: E402

@@ -41,6 +41,7 @@ from eth_utils.crypto import keccak
 
 from services.clients.rpc import encode_address_word, multicall3_aggregate3, rpc_request
 from services.resolution.caller_sources import CALLER_SOURCES as _CALLER_SOURCES
+from services.resolution.role_store_standards import is_single_address_param_signature
 from utils.logging import record_stage_metric
 from utils.scoring_status import TRACE_STEP_ENUMERABLE_ROLE_STORE
 
@@ -97,7 +98,7 @@ class EnumerableRoleStoreAdapter:
         # once the descriptor is shaped like a delegated single-address role gate.
         if not isinstance(descriptor, dict) or descriptor.get("kind") != "external_set":
             return 0
-        if not _is_single_address_param_signature(descriptor.get("callee_signature")):
+        if not is_single_address_param_signature(descriptor.get("callee_signature")):
             return 0
         if not _has_caller_key_source(descriptor):
             return 0
@@ -590,13 +591,6 @@ def _resolve_callee_selector(descriptor: dict) -> str | None:
     if isinstance(signature, str) and "(" in signature:
         return "0x" + keccak(text=signature.replace(" ", "")).hex()[:8]
     return None
-
-
-def _is_single_address_param_signature(signature: Any) -> bool:
-    if not isinstance(signature, str) or "(" not in signature or not signature.rstrip().endswith(")"):
-        return False
-    params = signature[signature.index("(") + 1 : signature.rindex(")")]
-    return [p.strip() for p in params.split(",") if p.strip()] == ["address"]
 
 
 def _has_caller_key_source(descriptor: dict) -> bool:

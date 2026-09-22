@@ -4,7 +4,7 @@ index catches up — the event-indexer cold-start resolution race.
 The bug: a privileged function whose authority isn't durably indexed at
 analysis time resolves cold to ``external_check_only`` (basis
 ``no_index_cursor``). That is fail-safe but *sticky* — it lands in
-``EffectiveFunction`` / ``FunctionPrincipal`` / ``effective_permissions`` and
+``EffectiveFunction`` / ``FunctionPrincipal`` / ``permission_index`` and
 nothing recomputes it once the index backfills, so the function shows "no
 controller" forever (until a manual re-analysis).
 

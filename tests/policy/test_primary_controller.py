@@ -20,13 +20,9 @@ def _p(addr: str, ptype: str) -> dict:
     return {"address": addr, "type": ptype}
 
 
-def _fn(callers: set[str], labels: set[str] | None = None, *, claims: list[str] | None = None) -> dict:
-    """One EffectiveFunction's caller set + effect labels (and optional Plane-1
-    claim ids), the shape ``assign_co_controllers`` reads per contract."""
-    fn: dict = {"callers": set(callers), "labels": set(labels or ())}
-    if claims is not None:
-        fn["claims"] = list(claims)
-    return fn
+def _fn(callers: set[str], *, claims: list[str] | None = None) -> dict:
+    """One permission row's caller set and supported claims."""
+    return {"callers": set(callers), "claims": list(claims or [])}
 
 
 def test_unknown_type_excluded():
@@ -166,7 +162,13 @@ def test_governance_passthrough_resolves_safe_behind_timelock():
         vault: {timelock},  # vault.onlyOwner caller resolves to the timelock
         timelock: {safe},  # timelock.execute caller resolves to the safe
     }
-    result = assign_primary_controllers([_p(safe, "safe")], fp, governance_passthrough={timelock})
+    detail = {
+        vault: [_fn({timelock}, claims=["upgrade.implementation"])],
+        timelock: [_fn({safe}, claims=["timelock.execute"])],
+    }
+    result = assign_primary_controllers(
+        [_p(safe, "safe")], fp, governance_passthrough={timelock}, fp_function_detail_by_contract=detail
+    )
     # Safe owns both the vault (through the timelock) and the timelock itself.
     assert sorted(result[safe]) == sorted([vault, timelock])
 
@@ -179,7 +181,9 @@ def test_governance_passthrough_off_is_unchanged_one_hop():
     """
     vault, timelock, safe = "0xc1", "0xtl", "0xsafe"
     fp = {vault: {timelock}, timelock: {safe}}
-    result = assign_primary_controllers([_p(safe, "safe")], fp)
+    result = assign_primary_controllers(
+        [_p(safe, "safe")], fp, fp_function_detail_by_contract={timelock: [_fn({safe}, claims=["timelock.execute"])]}
+    )
     assert result[safe] == [timelock]  # vault is NOT attributed without pass-through
 
 
@@ -198,6 +202,10 @@ def test_governance_passthrough_excludes_fee_destination():
         [_p(gov_safe, "safe"), _p(fee_safe, "safe")],
         fp,
         governance_passthrough={timelock},
+        fp_function_detail_by_contract={
+            vault: [_fn({timelock}, claims=["upgrade.implementation"])],
+            timelock: [_fn({gov_safe}, claims=["timelock.execute"])],
+        },
     )
     assert sorted(result[gov_safe]) == sorted([vault, timelock])
     assert result[fee_safe] == []
@@ -208,7 +216,15 @@ def test_governance_passthrough_is_cycle_and_depth_safe():
     breaks the cycle) and still resolves the reachable principal."""
     a, b, safe = "0xa", "0xb", "0xsafe"
     fp = {a: {b, safe}, b: {a}}  # a <-> b mutually reference; safe calls a
-    result = assign_primary_controllers([_p(safe, "safe")], fp, governance_passthrough={a, b})
+    result = assign_primary_controllers(
+        [_p(safe, "safe")],
+        fp,
+        governance_passthrough={a, b},
+        fp_function_detail_by_contract={
+            a: [_fn({b, safe}, claims=["timelock.execute"])],
+            b: [_fn({a}, claims=["timelock.execute"])],
+        },
+    )
     assert sorted(result[safe]) == ["0xa", "0xb"]
 
 
@@ -221,7 +237,12 @@ def test_governance_passthrough_does_not_recurse_through_non_governance():
     vault, manager, safe = "0xc1", "0xmgr", "0xsafe"
     fp = {vault: {manager}, manager: {safe}}
     # manager is NOT passed through → safe only owns manager, not vault.
-    result = assign_primary_controllers([_p(safe, "safe")], fp, governance_passthrough=set())
+    result = assign_primary_controllers(
+        [_p(safe, "safe")],
+        fp,
+        governance_passthrough=set(),
+        fp_function_detail_by_contract={manager: [_fn({safe}, claims=["ownership.transfer"])]},
+    )
     assert result[safe] == [manager]
 
 
@@ -347,7 +368,7 @@ def test_partial_claim_coverage_does_not_read_as_veto_only():
         vault: [_fn({tl}, claims=["upgrade.implementation"])],
         tl: [
             _fn({canceller, prop}, claims=["timelock.cancel"]),
-            _fn({prop}, {"role_management"}),  # claim-less privileged row
+            _fn({prop}, claims=["roles.grant"]),
         ],
     }
     result = assign_primary_controllers(
@@ -395,7 +416,7 @@ def test_whitelist_callers_do_not_inherit_through_mediator():
     fp = {vault: {tl}, tl: set(bidders)}
     detail = {
         vault: [_fn({tl}, claims=["upgrade.implementation"])],
-        tl: [_fn(bidders, {"external_contract_call"})],
+        tl: [_fn(bidders)],
     }
     result = assign_primary_controllers(
         [_p(b, "safe") for b in bidders],
@@ -414,7 +435,7 @@ def test_delegatecall_is_governing_tier():
     fp = {"0xc1": {dc, granter}}
     detail = {
         "0xc1": [
-            _fn({dc}, {"delegatecall_execution"}),
+            _fn({dc}, claims=["delegatecall.execute"]),
             _fn({granter}, claims=["roles.grant"]),
         ]
     }
@@ -434,29 +455,13 @@ def test_composite_detail_caller_tokens_still_gate():
     bidders = {f"eth::0xb{i}" for i in range(6)}
     auction = "eth::0xauction"
     fp = {auction: set(bidders)}
-    detail = {auction: [_fn(bidders, {"external_contract_call"})]}
+    detail = {auction: [_fn(bidders)]}
     result = assign_primary_controllers(
         [_p(b.split("::")[1], "safe") for b in bidders],
         fp,
         fp_function_detail_by_contract=detail,
     )
     assert all(v == [] for v in result.values())
-
-
-def test_claimless_mediator_caller_still_inherits():
-    """Veto gating needs a positive cancel-only witness. A mediator caller with
-    no claim rows at all (stale data / degraded artifact) keeps the legacy
-    passthrough expansion — absence of claims is not proof of veto-only."""
-    vault, tl, safe = "0xc1", "0xtl", "0xsafe"
-    fp = {vault: {tl}, tl: {safe}}
-    detail = {vault: [_fn({tl}, claims=["upgrade.implementation"])]}  # no rows for tl's callers
-    result = assign_primary_controllers(
-        [_p(safe, "safe")],
-        fp,
-        governance_passthrough={tl},
-        fp_function_detail_by_contract=detail,
-    )
-    assert sorted(result[safe]) == [vault, tl]
 
 
 def test_broad_whitelist_callers_not_primary_eligible():
@@ -468,7 +473,7 @@ def test_broad_whitelist_callers_not_primary_eligible():
     bidders = {f"0xbidder{i}" for i in range(6)}
     auction = "0xauction"
     fp = {auction: set(bidders)}
-    detail = {auction: [_fn(bidders, {"external_contract_call"})]}
+    detail = {auction: [_fn(bidders)]}
     result = assign_primary_controllers(
         [_p(b, "safe") for b in bidders],
         fp,
@@ -630,7 +635,7 @@ def test_co_controller_privileged_label_kept_despite_losing_primary():
     timelock-passthrough Safe yet holding pause/recover on all of them."""
     big, guardian, contract = "0xbig", "0xguardian", "0xc1"
     primary_for = {big: [contract], guardian: []}
-    detail = {contract: [_fn({big, guardian, "0xeoa"}, {"pause_toggle"})]}
+    detail = {contract: [_fn({big, guardian, "0xeoa"}, claims=["pause.set"])]}
     result = assign_co_controllers([_p(big, "safe"), _p(guardian, "safe")], detail, primary_for)
     assert result[guardian] == [contract]
     # The primary is never listed as co-controlling what it already owns.
@@ -644,7 +649,7 @@ def test_co_controller_tight_gate_kept_even_without_strong_label():
     label because every function it holds is tightly gated."""
     big, ops, contract = "0xbig", "0xops", "0xc1"
     primary_for = {big: [contract], ops: []}
-    detail = {contract: [_fn({ops}, {"external_contract_call"})]}
+    detail = {contract: [_fn({ops})]}
     result = assign_co_controllers([_p(big, "safe"), _p(ops, "timelock")], detail, primary_for)
     assert result[ops] == [contract]
 
@@ -657,7 +662,7 @@ def test_co_controller_permissionless_caller_excluded():
     contract = "0xauction"
     principals = [_p(b, "safe") for b in bidders]
     primary_for = {b: [] for b in bidders}
-    detail = {contract: [_fn(bidders, {"external_contract_call"})]}
+    detail = {contract: [_fn(bidders)]}
     result = assign_co_controllers(principals, detail, primary_for)
     assert all(result[b] == [] for b in bidders)
 
@@ -666,7 +671,7 @@ def test_co_controller_non_principal_types_ignored():
     """Only safe/timelock/eoa/proxy_admin participate; a ``contract``-typed
     caller on a significant function is not a co-controller."""
     contract = "0xc1"
-    detail = {contract: [_fn({"0xinner", "0xsafe"}, {"pause_toggle"})]}
+    detail = {contract: [_fn({"0xinner", "0xsafe"}, claims=["pause.set"])]}
     result = assign_co_controllers([_p("0xinner", "contract"), _p("0xsafe", "safe")], detail, {"0xsafe": []})
     assert "0xinner" not in result
     assert result["0xsafe"] == [contract]
@@ -699,26 +704,8 @@ def test_co_controller_callee_pointer_claim_excluded():
     assert all(result[c] == [] for c in wide)
 
 
-def test_co_controller_claims_take_precedence_over_legacy_labels():
-    """When a row carries claims, they are authoritative for significance and the
-    legacy labels are not consulted. A ``callee_pointer.rotate`` claim on a
-    function whose legacy label is the privileged ``pause_toggle`` is NOT
-    significant — the excluded claim wins over the would-be-privileged label."""
-    contract = "0xc1"
-    wide = {f"0xcaller{i}" for i in range(8)}
-    principals = [_p(c, "safe") for c in wide]
-    primary_for = {c: [] for c in wide}
-    detail = {contract: [_fn(wide, {"pause_toggle"}, claims=["callee_pointer.rotate"])]}
-    result = assign_co_controllers(principals, detail, primary_for)
-    assert all(result[c] == [] for c in wide), (
-        "claims are authoritative: the excluded callee_pointer.rotate claim must "
-        "not be overridden by a privileged legacy label on the same row"
-    )
-
-
 def test_co_controller_new_claim_families_are_privileged():
-    """The claim families with no legacy label — ``safe.*``, ``timelock.*`` — now
-    make their callers co-controllers (a wide-caller Safe/timelock guardian)."""
+    """Safe and timelock claims make their callers co-controllers."""
     guardian, big, c_safe, c_tl = "0xguardian", "0xbig", "0xsafecontract", "0xtlcontract"
     wide = {guardian, big} | {f"0xr{i}" for i in range(8)}
     primary_for = {big: [c_safe, c_tl], guardian: []}
@@ -737,6 +724,6 @@ def test_co_controller_empty_and_shape():
     assert assign_co_controllers([], {}, {}) == {}
     assert assign_co_controllers([_p("0xa", "safe")], {}, {}) == {"0xa": []}
     # Address casing is normalized on both sides.
-    detail = {"0xC1": [_fn({"0xAbC"}, {"role_management"})]}
+    detail = {"0xC1": [_fn({"0xAbC"}, claims=["roles.grant"])]}
     result = assign_co_controllers([_p("0xABC", "safe")], detail, {})
     assert result == {"0xabc": ["0xc1"]}

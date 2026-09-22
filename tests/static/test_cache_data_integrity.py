@@ -271,15 +271,15 @@ def _setup_company_with_proxy(db_session, monkeypatch):
     store(
         db_session,
         old_job.id,
-        "contract_analysis",
+        "static_facts",
         data={
             "subject": {"name": "ProxyContract", "address": ADDR_A},
             "summary": {"control_model": "proxy"},
         },
     )
     store(db_session, old_job.id, "slither_results", data={"results": {}})
-    store(db_session, old_job.id, "analysis_report", text_data="report")
-    store(db_session, old_job.id, "control_tracking_plan", data={"controllers": []})
+    store(db_session, old_job.id, "static_facts_report", text_data="report")
+    store(db_session, old_job.id, "observation_plan", data={"controllers": []})
     store(
         db_session,
         old_job.id,
@@ -344,7 +344,7 @@ def test_api_company_returns_data_for_old_proxy_job(db_session, api_client, monk
 
 def test_api_analysis_detail_returns_data_for_old_job(db_session, api_client, monkeypatch):
     """After copy_static_cache, loading an analysis detail for the OLD job
-    should still return contract data (deployer, effective_permissions, etc.)
+    should still return contract data (deployer, permission_index, etc.)
     rather than null."""
     old_job, new_job, protocol = _setup_company_with_proxy(db_session, monkeypatch)
 
@@ -352,9 +352,9 @@ def test_api_analysis_detail_returns_data_for_old_job(db_session, api_client, mo
     assert resp.status_code == 200
     data = resp.json()
 
-    # The contract_analysis artifact was copied to the new job, but the old
+    # The static_facts artifact was copied to the new job, but the old
     # job should still have its own copy
-    assert data.get("contract_analysis") is not None or data.get("address") is not None, (
+    assert data.get("static_facts") is not None or data.get("address") is not None, (
         "Old job analysis detail should have data, not be empty"
     )
 

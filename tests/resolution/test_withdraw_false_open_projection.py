@@ -115,12 +115,7 @@ def _requires_auth_tree(selector: str) -> dict:
     return {"kind": "AND", "children": [_BEFORE_TRANSFER, _authority_cap_dict(selector)]}
 
 
-@pytest.fixture
-def earned_public(monkeypatch):
-    monkeypatch.setenv("PSAT_AUTHORITY_EARNED_PUBLIC", "1")
-
-
-def test_withdraw_empty_exact_solmate_set_gates_the_and(earned_public):
+def test_withdraw_empty_exact_solmate_set_gates_the_and():
     # The authority leaf is a provably-nobody empty-exact Solmate set; the
     # sibling beforeTransfer public path must NOT open the function.
     auth = _authority_cap_dict(WITHDRAW)
@@ -135,7 +130,7 @@ def test_withdraw_empty_exact_solmate_set_gates_the_and(earned_public):
 
 
 @pytest.mark.parametrize("selector", [BRIDGE, DEPOSIT, DEPOSIT_AND_BRIDGE])
-def test_public_capability_function_stays_public(earned_public, selector):
+def test_public_capability_function_stays_public(selector):
     # PublicCapabilityUpdated(target, sig, true) => the adapter yields a
     # conditional_universal, not an empty set: genuinely public, must NOT gate.
     auth = _authority_cap_dict(selector)
@@ -145,7 +140,7 @@ def test_public_capability_function_stays_public(earned_public, selector):
     assert surface.authority_public, f"selector {selector} is a public RolesAuthority capability and must stay public"
 
 
-def test_bare_empty_exact_set_without_solmate_trace_does_not_gate(earned_public):
+def test_bare_empty_exact_set_without_solmate_trace_does_not_gate():
     # A generic exact-empty set (an accept-side ceiling, no Solmate enumeration)
     # remains a side-condition next to a public path — only the on-chain Solmate
     # provably-nobody read blocks. Pins the narrow scope of the gate.
@@ -154,7 +149,7 @@ def test_bare_empty_exact_set_without_solmate_trace_does_not_gate(earned_public)
     assert surface.authority_public
 
 
-def test_empty_lower_bound_solmate_like_set_does_not_manufacture_a_gate(earned_public):
+def test_empty_lower_bound_solmate_like_set_does_not_manufacture_a_gate():
     # An empty LOWER_BOUND set (cold index / under-resolved) must NOT be turned
     # into a confident gate even if it carries the trace step — only an EXACT
     # read is provably-nobody. (The adapter defers cold sets to a probe, so this

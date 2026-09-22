@@ -114,15 +114,12 @@ def _edge(
 def test_cascade_filters_sink_claim_and_public(db_session):
     """Proven-inert dropped; claim-present dropped; public dropped; blank-gated kept.
 
-    The blank predicate MUST key on ``claims``, not ``effect_labels``: a row
-    with a populated ``effect_labels`` but empty ``claims`` is still blank and
-    must survive.
+    The blank predicate keys on ``claims``.
 
     Filter (a) reads the mutability evidence plane, so "dropped for having nothing to
     simulate" now requires the writer to have LOOKED: a compiler-typed view with
-    ``state_writes = []`` and ``sinks = []``. The two arms this test used to pin —
-    ``effect_targets`` NULL and ``[]`` with no evidence written at all — are
-    INVERTED below (``unmeasured``): they are not-determined and are kept.
+    ``state_writes = []`` and ``sinks = []``. Unmeasured rows are
+    not-determined and are kept.
     """
     p = _protocol(db_session, "cascade-proto")
     c = _contract(db_session, p.id, ADDR(0x1000))
@@ -132,7 +129,6 @@ def test_cascade_filters_sink_claim_and_public(db_session):
         c.id,
         name="pause",
         selector="0xaaaa0001",
-        effect_targets=["SLOT"],
         state_changing=True,
         state_writes=[{"var": "paused", "declared_type": "bool", "origin": "body"}],
         sinks=[{"kind": "state_write", "target": "paused", "origin": "body"}],
@@ -144,7 +140,6 @@ def test_cascade_filters_sink_claim_and_public(db_session):
         c.id,
         name="view",
         selector="0xaaaa0002",
-        effect_targets=None,
         state_changing=False,
         state_writes=[],
         sinks=[],
@@ -153,14 +148,13 @@ def test_cascade_filters_sink_claim_and_public(db_session):
     # (a) INVERTED: the evidence plane was never written for this row (every row
     # predating the mutability columns) -> not determined -> KEPT. This row used to be
     # dropped for the absence of a display field.
-    unmeasured = _fn(db_session, c.id, name="view2", selector="0xaaaa0003", effect_targets=[])
+    unmeasured = _fn(db_session, c.id, name="view2", selector="0xaaaa0003")
     # (b) confident claim present -> dropped
     claimed = _fn(
         db_session,
         c.id,
         name="mint",
         selector="0xaaaa0004",
-        effect_targets=["SLOT"],
         state_changing=True,
         state_writes=[{"var": "totalSupply", "origin": "body"}],
         sinks=[{"kind": "state_write", "target": "totalSupply", "origin": "body"}],
@@ -172,7 +166,6 @@ def test_cascade_filters_sink_claim_and_public(db_session):
         c.id,
         name="poke",
         selector="0xaaaa0005",
-        effect_targets=["SLOT"],
         state_changing=True,
         state_writes=[{"var": "x", "origin": "body"}],
         sinks=[{"kind": "state_write", "target": "x", "origin": "body"}],
@@ -191,12 +184,8 @@ def test_cascade_filters_sink_claim_and_public(db_session):
 def test_filter_a_keeps_the_three_evidence_states_apart(db_session):
     """The input-shape → candidacy table of ``_has_effect_evidence``, row by row.
 
-    Filter (a) used to read ``effect_targets``, a DISPLAY field concatenating
-    state-write variable names with dotted external-call heads: 501 of its 1,642
-    populated rows carry only call heads, so a populated value asserted a write
-    nothing had proven, and an empty one dropped the function on an absence of
-    measurement. Each arm below is a shape that decision got wrong, or must keep
-    getting right.
+    Filter (a) reads structured mutability evidence. Each arm below pins one
+    distinct evidence state.
 
     One arm per DISJUNCT, not one per narrative: the predicate is an ``or_`` of
     six, and an arm only pins the disjunct that is the SOLE admitter of its shape.
@@ -210,20 +199,17 @@ def test_filter_a_keeps_the_three_evidence_states_apart(db_session):
     c = _contract(db_session, p.id, ADDR(0x1100))
     sw = [{"var": "balanceOf", "declared_type": "mapping(address => uint256)", "origin": "body"}]
 
-    # PROVEN WRITE with an EMPTY display field (a write reached only through a
-    # modifier: ``effect_targets`` is body-origin only, ``state_writes`` is not).
+    # PROVEN WRITE reached through a modifier.
     guard_writer = _fn(
         db_session,
         c.id,
         name="init",
         selector="0xbb000001",
-        effect_targets=[],
         state_changing=True,
         state_writes=sw,
         sinks=[{"kind": "state_write", "target": "balanceOf", "origin": "guard"}],
     )
-    # The 156-function class as it MEASURES on the projected plane: gated,
-    # populated ``effect_targets``, not one proven state write, and
+    # The external-call-only class: gated, not one proven state write, and
     # ``state_changing = TRUE`` (147 of the 156; 8 are NULL, 1 is FALSE). It keeps
     # its candidate slot, and the disjunct that keeps it is the ABI-mutability one
     # — NOT the sink evidence. This arm therefore pins nothing about sinks; see
@@ -233,7 +219,6 @@ def test_filter_a_keeps_the_three_evidence_states_apart(db_session):
         c.id,
         name="harvest",
         selector="0xbb000002",
-        effect_targets=["oracle.latestAnswer"],
         state_changing=True,
         state_writes=[],
         sinks=[{"kind": "external_call", "target": "oracle.latestAnswer"}],
@@ -246,7 +231,6 @@ def test_filter_a_keeps_the_three_evidence_states_apart(db_session):
         c.id,
         name="asmWrite",
         selector="0xbb000003",
-        effect_targets=[],
         state_changing=True,
         state_writes=[],
         sinks=[],
@@ -268,7 +252,6 @@ def test_filter_a_keeps_the_three_evidence_states_apart(db_session):
         c.id,
         name="shouldSubmitReport",
         selector="0xbb000006",
-        effect_targets=["etherFiAdmin.lastHandledReportRefSlot"],
         state_changing=False,
         state_writes=[],
         sinks=[{"kind": "external_call", "target": "etherFiAdmin.lastHandledReportRefSlot", "origin": "body"}],
@@ -290,7 +273,6 @@ def test_filter_a_keeps_the_three_evidence_states_apart(db_session):
         c.id,
         name="previewMint",
         selector="0xbb000007",
-        effect_targets=[],
         state_changing=False,
         state_writes=sw,
         sinks=[],
@@ -309,7 +291,6 @@ def test_filter_a_keeps_the_three_evidence_states_apart(db_session):
         c.id,
         name="unselectoredEntry",
         selector="0xbb000008",
-        effect_targets=[],
         state_changing=None,
         state_writes=[],
         sinks=[],
@@ -322,7 +303,6 @@ def test_filter_a_keeps_the_three_evidence_states_apart(db_session):
         c.id,
         name="previewDeposit",
         selector="0xbb000004",
-        effect_targets=["asset.balanceOf"],
         state_changing=False,
         state_writes=None,
         sinks=None,
@@ -334,7 +314,6 @@ def test_filter_a_keeps_the_three_evidence_states_apart(db_session):
         c.id,
         name="paused",
         selector="0xbb000005",
-        effect_targets=[],
         state_changing=False,
         state_writes=[],
         sinks=[],
@@ -348,7 +327,6 @@ def test_filter_a_keeps_the_three_evidence_states_apart(db_session):
         c.id,
         name="fallback",
         selector="",
-        effect_targets=[],
         state_changing=False,
         state_writes=[],
         sinks=[],
@@ -384,8 +362,8 @@ def test_filter_a_is_total_over_every_persisted_jsonb_shape(db_session):
     """
     p = _protocol(db_session, "jsonb-shapes")
     c = _contract(db_session, p.id, ADDR(0x1200))
-    written_null = _fn(db_session, c.id, name="a", selector="0xbc000001", effect_targets=[], state_changing=False)
-    malformed = _fn(db_session, c.id, name="b", selector="0xbc000002", effect_targets=[], state_changing=False)
+    written_null = _fn(db_session, c.id, name="a", selector="0xbc000001", state_changing=False)
+    malformed = _fn(db_session, c.id, name="b", selector="0xbc000002", state_changing=False)
     db_session.commit()
     # Bypass the ORM: ``none_as_null=True`` cannot produce either shape.
     db_session.execute(
@@ -449,7 +427,6 @@ def test_a_public_payout_or_mint_is_admitted_to_the_candidate_set(db_session):
             c.id,
             name=name,
             selector=selector,
-            effect_targets=["SLOT"],
             authority_public=True,
             claims=[{"claim_id": claim_id, "tier": "standard_exact"}] if claim_id else None,
         )
@@ -497,7 +474,6 @@ def test_the_public_admission_predicate_survives_every_claims_shape(db_session):
             c.id,
             name=f"odd{i}",
             selector=f"0xffff000{i}",
-            effect_targets=["SLOT"],
             authority_public=True,
             claims=claims,
         )
@@ -506,7 +482,6 @@ def test_the_public_admission_predicate_survives_every_claims_shape(db_session):
         c.id,
         name="redeem",
         selector="0xffff00ff",
-        effect_targets=["SLOT"],
         authority_public=True,
         claims=[{"claim_id": "flow.out", "tier": "standard_exact"}],
     )
@@ -531,7 +506,6 @@ def test_a_public_payout_reaches_a_synthesized_probe(db_session):
         c.id,
         name="redeem",
         selector="0xeeee0001",
-        effect_targets=["SLOT"],
         authority_public=True,
         claims=[{"claim_id": "flow.out", "tier": "standard_exact"}],
     )
@@ -564,13 +538,12 @@ def test_gate_lift_enrolls_flow_and_supply_claims_scoped(db_session):
     p = _protocol(db_session, "gate-lift-proto")
     c = _contract(db_session, p.id, ADDR(0x3000))
 
-    blank = _fn(db_session, c.id, name="pauseUntil", selector="0xcccc0001", effect_targets=["SLOT"])
+    blank = _fn(db_session, c.id, name="pauseUntil", selector="0xcccc0001")
     flow = _fn(
         db_session,
         c.id,
         name="withdrawEther",
         selector="0xcccc0002",
-        effect_targets=["SLOT"],
         claims=[{"claim_id": "flow.out", "tier": "idiom_structural"}],
     )
     mint = _fn(
@@ -578,7 +551,6 @@ def test_gate_lift_enrolls_flow_and_supply_claims_scoped(db_session):
         c.id,
         name="mint",
         selector="0xcccc0003",
-        effect_targets=["SLOT"],
         claims=[{"claim_id": "supply.mint", "tier": "standard_exact"}],
     )
     both = _fn(
@@ -586,7 +558,6 @@ def test_gate_lift_enrolls_flow_and_supply_claims_scoped(db_session):
         c.id,
         name="enter",
         selector="0xcccc0004",
-        effect_targets=["SLOT"],
         claims=[{"claim_id": "flow.in", "tier": "idiom_structural"}, {"claim_id": "supply.mint", "tier": "fact"}],
     )
     # Carries only a non-value/supply claim → already explained → dropped.
@@ -595,7 +566,6 @@ def test_gate_lift_enrolls_flow_and_supply_claims_scoped(db_session):
         c.id,
         name="upgradeTo",
         selector="0xcccc0005",
-        effect_targets=["SLOT"],
         claims=[{"claim_id": "upgrade.implementation", "tier": "standard_exact"}],
     )
     db_session.commit()
@@ -619,8 +589,8 @@ def test_a_fact_claim_never_removes_a_function_from_the_candidate_set(db_session
 
     This pins the 13 measured local-DB rows that would silently leave the
     candidate set the moment the claims plane mints the new ids (all gated,
-    ``effect_targets`` non-empty, zero other claims — i.e. exactly the
-    ``rate_only`` shape below): LRTSquaredAdmin.depositToStrategy 0xaf76d4bd
+    zero other claims — i.e. exactly the ``rate_only`` shape below):
+    LRTSquaredAdmin.depositToStrategy 0xaf76d4bd
     (delegatecall.execute) and the 12 EtherFiNodesManager rate-limited rows —
     queueETHWithdrawal 0x03f49be8/0xc3a9e20e, queueWithdrawals
     0x0031e778/0xeea43aba, requestConsolidation 0x6691954e,
@@ -634,7 +604,6 @@ def test_a_fact_claim_never_removes_a_function_from_the_candidate_set(db_session
         c.id,
         name="queueETHWithdrawal",
         selector="0xab110001",
-        effect_targets=["SLOT"],
         claims=[{"claim_id": "rate_limit.consume", "tier": "idiom_structural"}],
     )
     dc_only = _fn(
@@ -642,7 +611,6 @@ def test_a_fact_claim_never_removes_a_function_from_the_candidate_set(db_session
         c.id,
         name="depositToStrategy",
         selector="0xab110002",
-        effect_targets=["SLOT"],
         claims=[{"claim_id": "delegatecall.execute", "tier": "idiom_structural"}],
     )
     both_facts = _fn(
@@ -650,7 +618,6 @@ def test_a_fact_claim_never_removes_a_function_from_the_candidate_set(db_session
         c.id,
         name="requestConsolidation",
         selector="0xab110003",
-        effect_targets=["SLOT"],
         claims=[
             {"claim_id": "rate_limit.consume", "tier": "idiom_structural"},
             {"claim_id": "delegatecall.execute", "tier": "idiom_structural"},
@@ -664,7 +631,6 @@ def test_a_fact_claim_never_removes_a_function_from_the_candidate_set(db_session
         c.id,
         name="withdraw",
         selector="0xab110004",
-        effect_targets=["SLOT"],
         claims=[
             {"claim_id": "rate_limit.consume", "tier": "idiom_structural"},
             {"claim_id": "flow.out", "tier": "idiom_structural"},
@@ -675,7 +641,6 @@ def test_a_fact_claim_never_removes_a_function_from_the_candidate_set(db_session
         c.id,
         name="pauseAll",
         selector="0xab110005",
-        effect_targets=["SLOT"],
         claims=[
             {"claim_id": "rate_limit.consume", "tier": "idiom_structural"},
             {"claim_id": "pause.set", "tier": "standard_exact"},
@@ -703,7 +668,7 @@ def test_candidate_carries_witnessed_value_holders_and_acting_floor(db_session):
     _balance(db_session, acting.id, 221_000_000.0)
     _balance(db_session, lp.id, 55_200_000.0)
     _balance(db_session, empty.id, 0.0)  # zero-balance holder is excluded
-    f = _fn(db_session, acting.id, name="invalidate", selector="0x99990001", effect_targets=["S"])
+    f = _fn(db_session, acting.id, name="invalidate", selector="0x99990001")
     _principal(db_session, f.id, ADDR(0xE0A2))
     db_session.commit()
 
@@ -735,7 +700,7 @@ def test_the_tvl_ceiling_reads_defillama_tvl_and_never_total_usd(db_session):
 
     p = _protocol(db_session, "tvl-ceiling")
     c = _contract(db_session, p.id, ADDR(0x9500))
-    f = _fn(db_session, c.id, name="withdraw", selector="0x95000001", effect_targets=["S"])
+    f = _fn(db_session, c.id, name="withdraw", selector="0x95000001")
     _principal(db_session, f.id, ADDR(0x9501))
     now = datetime.now(timezone.utc)
     # Only total_usd: the column the old proposal would have read.
@@ -775,8 +740,8 @@ def test_holdings_the_fetch_recorded_at_the_page_cap_are_marked_incomplete(db_se
     p = _protocol(db_session, "holdings-cap")
     capped = _contract(db_session, p.id, ADDR(0x9600))
     whole = _contract(db_session, p.id, ADDR(0x9601))
-    _fn(db_session, capped.id, name="a", selector="0x96000001", effect_targets=["S"])
-    _fn(db_session, whole.id, name="b", selector="0x96000002", effect_targets=["S"])
+    _fn(db_session, capped.id, name="a", selector="0x96000001")
+    _fn(db_session, whole.id, name="b", selector="0x96000002")
     capped_fetch = ContractBalanceFetch(
         contract_id=capped.id,
         chain_id=1,
@@ -843,7 +808,6 @@ def test_value_holders_are_per_asset_with_native_keyed_on_the_log_emitter(db_ses
             impl.id,
             name="withdraw",
             selector=f"0x8800000{impl.id % 10}",
-            effect_targets=["S"],
             deployment_address=deployment,
         )
         # Each code row carries a COPY of the same deployment's sheet.
@@ -875,7 +839,7 @@ def test_principal_addresses_are_totally_ordered_so_the_probe_identity_is_the_da
     """
     p = _protocol(db_session, "principal-order-proto")
     c = _contract(db_session, p.id, ADDR(0x7100))
-    f = _fn(db_session, c.id, name="rebalance", selector="0x71000001", effect_targets=["S"])
+    f = _fn(db_session, c.id, name="rebalance", selector="0x71000001")
     holders = [ADDR(0x71FF), ADDR(0x71C0), ADDR(0x7180), ADDR(0x7140), ADDR(0x7101)]
     for addr in holders:  # descending: insertion order is NOT the answer
         _principal(db_session, f.id, addr)
@@ -888,19 +852,16 @@ def test_principal_addresses_are_totally_ordered_so_the_probe_identity_is_the_da
     assert cand.principal_addresses[0] == ADDR(0x7101).lower()
 
 
-def test_blank_predicate_keys_on_claims_not_effect_labels(db_session):
-    """effect_labels populated but claims empty => still blank => selected."""
+def test_blank_predicate_keys_on_claims(db_session):
     p = _protocol(db_session, "blank-proto")
     c = _contract(db_session, p.id, ADDR(0x2000))
-    f = _fn(db_session, c.id, name="pauseUntil", selector="0xbbbb0001", effect_targets=["SLOT"])
-    # A legacy effect_labels projection exists, but no claim was minted.
-    f.effect_labels = ["pause"]
+    f = _fn(db_session, c.id, name="pauseUntil", selector="0xbbbb0001")
     f.claims = []
 
     # Blankness must hold across all three "no claim" storage shapes: [] above,
     # true SQL NULL, and JSON-null (what the ORM writes for Python None).
-    sql_null = _fn(db_session, c.id, name="a", selector="0xbbbb0002", effect_targets=["S"])
-    json_null = _fn(db_session, c.id, name="b", selector="0xbbbb0003", effect_targets=["S"], claims=None)
+    sql_null = _fn(db_session, c.id, name="a", selector="0xbbbb0002")
+    json_null = _fn(db_session, c.id, name="b", selector="0xbbbb0003", claims=None)
     db_session.commit()
     db_session.execute(text("UPDATE effective_functions SET claims = NULL WHERE id = :i"), {"i": sql_null.id})
     db_session.commit()
@@ -937,11 +898,11 @@ def test_transitive_value_beats_direct_balance(db_session):
 
     # The high-blast-radius function lives on the tiny admin contract, gated by
     # the Safe. Its reach = admin ($33K) + vault ($3.2B) via the Safe principal.
-    small = _fn(db_session, admin.id, name="setImpl", selector="0xdead0001", effect_targets=["IMPL"])
+    small = _fn(db_session, admin.id, name="setImpl", selector="0xdead0001")
     _principal(db_session, small.id, safe)
 
     # The directly-rich contract is terminal: a gated blank function, no control edges out.
-    big_direct = _fn(db_session, rich.id, name="sweep", selector="0xdead0002", effect_targets=["BAL"])
+    big_direct = _fn(db_session, rich.id, name="sweep", selector="0xdead0002")
     _principal(db_session, big_direct.id, ADDR(0xE0A1))
     db_session.commit()
 
@@ -1118,8 +1079,8 @@ def test_equal_reach_orders_by_function_id_not_by_rounding(db_session):
         _edge(db_session, c.id, controlled_contract=c.address, controller=right.address)
     # `right` gets the LOWER function id, so ordering by id puts it first while
     # ordering by insertion or by rounding would not.
-    f_right = _fn(db_session, right.id, name="rightFn", selector="0xeeee0001", effect_targets=["S"])
-    f_left = _fn(db_session, left.id, name="leftFn", selector="0xeeee0002", effect_targets=["S"])
+    f_right = _fn(db_session, right.id, name="rightFn", selector="0xeeee0001")
+    f_left = _fn(db_session, left.id, name="leftFn", selector="0xeeee0002")
     db_session.commit()
 
     by_id = {c.function_id: c for c in select_candidates(db_session, p.id)}
@@ -1223,13 +1184,13 @@ def test_resource_cap_logs_exactly_what_it_dropped(db_session, caplog):
     # Three gated-blank candidates with distinct reach so ordering is determinate.
     high = _contract(db_session, p.id, ADDR(0x0D01))
     _balance(db_session, high.id, 1_000_000.0)
-    keep = _fn(db_session, high.id, name="big", selector="0xcafe0001", effect_targets=["S"])
+    keep = _fn(db_session, high.id, name="big", selector="0xcafe0001")
 
     mid = _contract(db_session, p.id, ADDR(0x0D02))
     _balance(db_session, mid.id, 500.0)
-    drop_mid = _fn(db_session, mid.id, name="mid", selector="0xcafe0002", effect_targets=["S"])
+    drop_mid = _fn(db_session, mid.id, name="mid", selector="0xcafe0002")
 
-    drop_low = _fn(db_session, c.id, name="low", selector="0xcafe0003", effect_targets=["S"])
+    drop_low = _fn(db_session, c.id, name="low", selector="0xcafe0003")
     db_session.commit()
 
     with caplog.at_level(logging.WARNING, logger="services.effects.selection"):
@@ -1251,7 +1212,7 @@ def test_value_never_gates_without_cap(db_session):
     p = _protocol(db_session, "nogate-proto")
     c = _contract(db_session, p.id, ADDR(0x0E00))
     # No balances anywhere -> all value_at_stake == 0, but nothing is dropped.
-    fns = [_fn(db_session, c.id, name=f"f{i}", selector=f"0xfeed000{i}", effect_targets=["S"]) for i in range(4)]
+    fns = [_fn(db_session, c.id, name=f"f{i}", selector=f"0xfeed000{i}") for i in range(4)]
     db_session.commit()
 
     got = {cand.function_id for cand in select_candidates(db_session, p.id)}
@@ -1275,10 +1236,9 @@ def test_probe_target_is_the_deployment_not_the_implementation(db_session):
         impl.id,
         name="pause",
         selector="0x8456cb59",
-        effect_targets=["paused"],
         deployment_address=ADDR(0x7002),
     )
-    _fn(db_session, impl.id, name="sweep", selector="0xdeadbeef", effect_targets=["bal"])
+    _fn(db_session, impl.id, name="sweep", selector="0xdeadbeef")
     db_session.commit()
 
     by_name = {c.function_name: c for c in select_candidates(db_session, proto.id)}
@@ -1349,7 +1309,7 @@ def _scoped_fixture(session: Session, *, status=JobStatus.processing):
     jobs: dict[str, Job] = {}
     for key, addr in addrs.items():
         contract = _contract(session, proto.id, addr, chain="ethereum")
-        fns[key] = _fn(session, contract.id, name=key, selector=f"0x0000{ord(key):04x}", effect_targets=["s"]).id
+        fns[key] = _fn(session, contract.id, name=key, selector=f"0x0000{ord(key):04x}").id
     jobs["a"] = _job(session, proto.id, addrs["a"], status=status)
     jobs["b"] = _job(session, proto.id, addrs["b"], status=status)
     _job(session, None, addrs["c"])  # unowned: no protocol_id
@@ -1424,9 +1384,9 @@ def test_shape2_new_contract_does_not_replan_the_protocol(db_session):
     proto = _protocol(db_session, "scope-incremental")
     old_addr, new_addr = ADDR(0x8301), ADDR(0x8302)
     old = _contract(db_session, proto.id, old_addr, chain="ethereum")
-    old_fn = _fn(db_session, old.id, name="old", selector="0x00008301", effect_targets=["s"])
+    old_fn = _fn(db_session, old.id, name="old", selector="0x00008301")
     new = _contract(db_session, proto.id, new_addr, chain="ethereum")
-    new_fn = _fn(db_session, new.id, name="new", selector="0x00008302", effect_targets=["s"])
+    new_fn = _fn(db_session, new.id, name="new", selector="0x00008302")
     old_job = _job(db_session, proto.id, old_addr)
     _ran_effects(db_session, old_job)
     _verdict_for(db_session, old_fn.id, old_addr)
@@ -1447,7 +1407,7 @@ def _prod_shape(session: Session, n_contracts: int = 4):
     for i in range(n_contracts):
         addr = ADDR(0x8400 + i)
         contract = _contract(session, proto.id, addr, chain="ethereum")
-        fns[addr] = _fn(session, contract.id, name=f"f{i}", selector=f"0x0000{0x8400 + i:04x}", effect_targets=["s"]).id
+        fns[addr] = _fn(session, contract.id, name=f"f{i}", selector=f"0x0000{0x8400 + i:04x}").id
         _job(session, proto.id, addr, status=JobStatus.completed)
         addrs.append(addr)
     session.commit()
@@ -1496,9 +1456,9 @@ def test_owner_job_must_belong_to_the_same_protocol(db_session):
     theirs = _protocol(db_session, "scope-proto-theirs")
     shared, own_addr = ADDR(0x8501), ADDR(0x8502)
     shared_contract = _contract(db_session, mine.id, shared, chain="ethereum")
-    shared_fn = _fn(db_session, shared_contract.id, name="s", selector="0x00008501", effect_targets=["s"])
+    shared_fn = _fn(db_session, shared_contract.id, name="s", selector="0x00008501")
     own = _contract(db_session, mine.id, own_addr, chain="ethereum")
-    _fn(db_session, own.id, name="o", selector="0x00008502", effect_targets=["s"])
+    _fn(db_session, own.id, name="o", selector="0x00008502")
     _job(db_session, mine.id, own_addr)
     _job(db_session, theirs.id, shared)  # in flight, but for a different protocol
     db_session.commit()
@@ -1512,9 +1472,9 @@ def test_terminally_failed_job_does_not_own_its_contract(db_session):
     proto = _protocol(db_session, "scope-failed")
     owner_addr, other_addr = ADDR(0x8101), ADDR(0x8102)
     dead = _contract(db_session, proto.id, other_addr, chain="ethereum")
-    dead_fn = _fn(db_session, dead.id, name="d", selector="0x0000d001", effect_targets=["s"])
+    dead_fn = _fn(db_session, dead.id, name="d", selector="0x0000d001")
     live = _contract(db_session, proto.id, owner_addr, chain="ethereum")
-    _fn(db_session, live.id, name="l", selector="0x0000d002", effect_targets=["s"])
+    _fn(db_session, live.id, name="l", selector="0x0000d002")
     _job(db_session, proto.id, owner_addr)
     _job(db_session, proto.id, other_addr, status=JobStatus.failed_terminal)
     db_session.commit()
@@ -1529,8 +1489,8 @@ def test_scope_excludes_other_chains(db_session):
     eth_addr, base_addr = ADDR(0x8201), ADDR(0x8202)
     eth = _contract(db_session, proto.id, eth_addr, chain="ethereum")
     base = _contract(db_session, proto.id, base_addr, chain="base")
-    eth_fn = _fn(db_session, eth.id, name="e", selector="0x0000c001", effect_targets=["s"])
-    base_fn = _fn(db_session, base.id, name="b", selector="0x0000c002", effect_targets=["s"])
+    eth_fn = _fn(db_session, eth.id, name="e", selector="0x0000c001")
+    base_fn = _fn(db_session, base.id, name="b", selector="0x0000c002")
     _job(db_session, proto.id, eth_addr, chain_id=1)
     _job(db_session, proto.id, base_addr, chain_id=8453)
     db_session.commit()
@@ -1580,9 +1540,9 @@ def _swept_only(session: Session, proto: Protocol) -> tuple[str, int, Contract]:
     the shape that gets re-swept forever when its planning yields nothing."""
     owner_addr, orphan_addr = ADDR(0x8601), ADDR(0x8602)
     owner = _contract(session, proto.id, owner_addr, chain="ethereum")
-    _fn(session, owner.id, name="own", selector="0x00008601", effect_targets=["s"])
+    _fn(session, owner.id, name="own", selector="0x00008601")
     orphan = _contract(session, proto.id, orphan_addr, chain="ethereum")
-    orphan_fn = _fn(session, orphan.id, name="orph", selector="0x00008602", effect_targets=["s"])
+    orphan_fn = _fn(session, orphan.id, name="orph", selector="0x00008602")
     _job(session, proto.id, owner_addr)
     session.commit()
     return owner_addr, orphan_fn.id, orphan
@@ -1631,7 +1591,7 @@ def test_marker_does_not_shadow_a_contract_that_yields_plans(db_session):
     owner_addr, orphan_fn, orphan = _swept_only(db_session, proto)
     other_addr = ADDR(0x8603)
     other = _contract(db_session, proto.id, other_addr, chain="ethereum")
-    other_fn = _fn(db_session, other.id, name="oth", selector="0x00008603", effect_targets=["s"])
+    other_fn = _fn(db_session, other.id, name="oth", selector="0x00008603")
     now = datetime.now(timezone.utc)
     _mark_planned_empty(db_session, orphan.id, None, at=now + timedelta(seconds=1))
     db_session.commit()
@@ -1648,11 +1608,11 @@ def test_shape2_incremental_run_re_sweeps_a_marker_from_the_old_run(db_session):
     proto = _protocol(db_session, "scope-marker-incremental")
     old_addr, new_addr, empty_addr = ADDR(0x8701), ADDR(0x8702), ADDR(0x8703)
     old = _contract(db_session, proto.id, old_addr, chain="ethereum")
-    old_fn = _fn(db_session, old.id, name="old", selector="0x00008701", effect_targets=["s"])
+    old_fn = _fn(db_session, old.id, name="old", selector="0x00008701")
     new = _contract(db_session, proto.id, new_addr, chain="ethereum")
-    new_fn = _fn(db_session, new.id, name="new", selector="0x00008702", effect_targets=["s"])
+    new_fn = _fn(db_session, new.id, name="new", selector="0x00008702")
     empty = _contract(db_session, proto.id, empty_addr, chain="ethereum")
-    empty_fn = _fn(db_session, empty.id, name="empty", selector="0x00008703", effect_targets=["s"])
+    empty_fn = _fn(db_session, empty.id, name="empty", selector="0x00008703")
     old_job = _job(db_session, proto.id, old_addr)
     _ran_effects(db_session, old_job)
     _verdict_for(db_session, old_fn.id, old_addr)
@@ -1745,7 +1705,7 @@ def _pair(session: Session, name: str, *, a: int = 0x8801, b: int = 0x8802):
     fns: dict[str, int] = {}
     for key, addr, idx in (("a", a_addr, a), ("b", b_addr, b)):
         contract = _contract(session, proto.id, addr, chain="ethereum")
-        fns[key] = _fn(session, contract.id, name=key, selector=f"0x0000{idx:04x}", effect_targets=["s"]).id
+        fns[key] = _fn(session, contract.id, name=key, selector=f"0x0000{idx:04x}").id
     session.commit()
     return proto, a_addr, b_addr, fns
 
@@ -1897,7 +1857,7 @@ def _interleaved(session: Session, name: str):
     fns: dict[str, int] = {}
     for i, key in enumerate(keys):
         contract = _contract(session, proto.id, addrs[key], chain="ethereum")
-        fns[key] = _fn(session, contract.id, name=key, selector=f"0x0000{0x8900 + i:04x}", effect_targets=["s"]).id
+        fns[key] = _fn(session, contract.id, name=key, selector=f"0x0000{0x8900 + i:04x}").id
 
     healthy_job = _job(session, proto.id, addrs["healthy"])
     _ran_effects(session, healthy_job, status="success")

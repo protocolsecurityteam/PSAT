@@ -163,7 +163,7 @@ SOLMATE_OWNED_SOURCE = """
 pragma solidity ^0.8.20;
 // Solmate Owned shape: OwnerUpdated(user, newOwner) — distinct topic0
 // from OZ OwnershipTransferred. Used to exercise the full enrollment
-// pipeline that consumes a tracking_plan instead of relying on the
+// pipeline that consumes a observation_plan instead of relying on the
 // hand-rolled global registry.
 contract TestSolmateOwned {
     address public owner;
@@ -625,14 +625,14 @@ def test_in_flight_sibling_job_does_not_block_enrollment(anvil_env, test_db):
     assert mc.is_active is True
 
 
-def test_tracking_plan_drives_enrollment_and_scan_detection(anvil_env, test_db):
+def test_observation_plan_drives_enrollment_and_scan_detection(anvil_env, test_db):
     """End-to-end regression for the *general* bug fix.
 
     Verifies the full enrollment → scan pipeline for a non-OZ ABI:
 
       1. Deploy a Solmate-Owned contract on Anvil.
       2. Seed Protocol + Contract + Job (completed) + ContractMaterialization
-         with an inline ``tracking_plan`` JSONB that lists the contract's
+         with an inline ``observation_plan`` JSONB that lists the contract's
          ``OwnerUpdated`` event (mirrors what the static analysis pipeline
          persists for a real Solmate-derived protocol contract).
       3. Call ``enroll_protocol_contracts`` and assert the resulting
@@ -651,14 +651,14 @@ def test_tracking_plan_drives_enrollment_and_scan_detection(anvil_env, test_db):
 
     This test would fail under the pre-fix code on assertion (3) —
     ``enroll_protocol_contracts`` did not look at
-    ``contract_materializations.tracking_plan`` and therefore wrote no
+    ``contract_materializations.observation_plan`` and therefore wrote no
     ``tracked_topics`` field; the scanner's filter then drops the
     Solmate topic0 at the network layer and no MonitoredEvent is ever
     created.
     """
     from eth_utils.crypto import keccak
 
-    from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
+    from db.contract_materializations import STATIC_FACTS_SCHEMA_VERSION
     from db.models import ContractMaterialization
     from services.monitoring.enrollment import enroll_protocol_contracts
     from services.monitoring.unified_watcher import scan_for_events
@@ -683,13 +683,13 @@ def test_tracking_plan_drives_enrollment_and_scan_detection(anvil_env, test_db):
     proto = _make_protocol(test_db)
     _add_protocol_contract(test_db, proto.id, addr, contract_name="TestSolmateOwned")
 
-    # Persist a tracking_plan that lists the Solmate OwnerUpdated event,
+    # Persist a observation_plan that lists the Solmate OwnerUpdated event,
     # exactly as the static analysis pipeline would for a real Solmate-
     # derived contract. The bytecode_keccak is arbitrary here — find_by_address
     # uses the (chain, address) unique index, not the keccak PK.
     owner_updated_sig = "OwnerUpdated(address,address)"
     owner_updated_topic0 = "0x" + keccak(text=owner_updated_sig).hex()
-    tracking_plan = {
+    observation_plan = {
         "schema_version": "0.1",
         "contract_address": addr.lower(),
         "contract_name": "TestSolmateOwned",
@@ -734,25 +734,25 @@ def test_tracking_plan_drives_enrollment_and_scan_detection(anvil_env, test_db):
             bytecode_keccak="0x" + "0" * 64,
             address=addr.lower(),
             contract_name="TestSolmateOwned",
-            tracking_plan=tracking_plan,
+            observation_plan=observation_plan,
             status="ready",
             # Enrollment reads via the version-filtered ``find_by_address``; seed
             # at the current analyzer version so the row is visible after an
-            # ANALYSIS_SCHEMA_VERSION bump, not just at the DB default.
-            analysis_schema_version=ANALYSIS_SCHEMA_VERSION,
+            # STATIC_FACTS_SCHEMA_VERSION bump, not just at the DB default.
+            static_facts_schema_version=STATIC_FACTS_SCHEMA_VERSION,
         )
     )
     test_db.commit()
 
     try:
-        # ---- Phase 1: enrollment consumes the tracking_plan -----------------
+        # ---- Phase 1: enrollment consumes the observation_plan -----------------
         enrolled = enroll_protocol_contracts(test_db, proto.id, rpc_url, "ethereum")
         assert len(enrolled) == 1
         mc = enrolled[0]
         config = mc.monitoring_config or {}
         tracked = config.get("tracked_topics") or []
         assert tracked, (
-            "enrollment did not read tracking_plan from contract_materializations — "
+            "enrollment did not read observation_plan from contract_materializations — "
             "monitoring_config.tracked_topics is empty. Pre-fix behavior; the "
             "general fix wires _load_tracked_topics into the enroll loop."
         )

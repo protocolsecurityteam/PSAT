@@ -44,8 +44,8 @@ import pytest
 slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
 
-from services.static.contract_analysis_pipeline import predicate_artifacts  # noqa: E402
-from services.static.contract_analysis_pipeline.predicate_artifacts import (  # noqa: E402
+from services.static.static_analysis import predicate_artifacts  # noqa: E402
+from services.static.static_analysis.predicate_artifacts import (  # noqa: E402
     _is_externally_callable,
     build_predicate_artifacts_with_pause_info,
 )

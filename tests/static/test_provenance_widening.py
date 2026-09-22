@@ -17,7 +17,7 @@ import pytest
 pytest.importorskip("slither")
 from slither.slither import Slither  # noqa: E402
 
-from services.static.contract_analysis_pipeline.provenance import (  # noqa: E402
+from services.static.static_analysis.provenance import (  # noqa: E402
     DEFAULT_WIDEN_AFTER,
     TOP,
     ProvenanceEngine,

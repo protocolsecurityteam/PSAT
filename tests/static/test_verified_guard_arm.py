@@ -20,7 +20,7 @@ import pytest
 slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
 
-from services.static.contract_analysis_pipeline.reentrancy_pause import (  # noqa: E402
+from services.static.static_analysis.reentrancy_pause import (  # noqa: E402
     W2_REASON_AMBIGUOUS_DECLARATION,
     W2_REASON_GUARD_NOT_APPLIED,
     W2_REASON_NO_VERIFIED_GUARD,

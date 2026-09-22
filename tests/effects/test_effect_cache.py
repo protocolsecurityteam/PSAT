@@ -165,7 +165,7 @@ def test_stale_schema_version_reads_as_miss(clean_effects):
     row = upsert_cached_verdict(
         session, behavior_hash="bh_v", effect_class="supply", scope=KERNEL, verdict="proven", tier="tier1"
     )
-    row.analysis_schema_version = EFFECT_CACHE_SCHEMA_VERSION + 1
+    row.static_facts_schema_version = EFFECT_CACHE_SCHEMA_VERSION + 1
     session.flush()
     assert find_cached_verdict(session, behavior_hash="bh_v", effect_class="supply", scope=KERNEL) is None
 
@@ -226,7 +226,6 @@ def _seed_function_row(session, address: str, selector: str) -> int:
         function_name="pause",
         selector=selector,
         abi_signature="pause()",
-        effect_labels=[],
         authority_public=False,
     )
     session.add(ef)

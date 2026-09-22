@@ -155,6 +155,41 @@ def test_proxy_with_implementation_creates_child_job(monkeypatch):
     assert child_req["proxy_type"] == "eip1967"
 
 
+def test_primary_impl_inherits_scenario_request_and_parent_delegates(monkeypatch):
+    worker = StaticWorker()
+    session = MagicMock()
+    session.execute.return_value.scalar_one_or_none.return_value = None
+    request = {
+        "rpc_url": _RPC,
+        "collect_governance": True,
+        "proposal_ids": [7],
+        "scenario_proposal_id": 7,
+        "scenario_proposal_transaction_hash": "0x" + "ab" * 32,
+        "scenario_sender": "0x" + "cd" * 20,
+    }
+    job = _job(request=request)
+    _, children = _capture_store_and_create(monkeypatch)
+    monkeypatch.setattr(
+        "services.discovery.classifier.classify_single",
+        lambda *_a, **_k: {"type": "proxy", "proxy_type": "eip1967", "implementation": _IMPL_ADDR},
+    )
+
+    worker._resolve_proxy(session, job, _ADDR, "TestContract")
+
+    assert len(children) == 1
+    child = children[0]
+    assert child["proxy_address"] == _ADDR
+    for key in (
+        "collect_governance",
+        "proposal_ids",
+        "scenario_proposal_id",
+        "scenario_proposal_transaction_hash",
+        "scenario_sender",
+    ):
+        assert child[key] == request[key]
+    assert job.request["_governance_delegate_job_id"] == "child-0"
+
+
 def test_proxy_child_job_inherits_chain(monkeypatch):
     """When request includes 'chain', child job request also includes it."""
     # Models a base-enabled deployment: impl-child spawns gate off-allowlist
@@ -651,7 +686,7 @@ def session():
 
 def _seed_job_with_artifact(session, *, address: str, predicate_trees: dict | None):
     from db.models import Job, JobStage, JobStatus
-    from db.queue import store_artifact
+    from tests.support.assessment_artifacts import store_test_assessment
 
     job = Job(
         address=address,
@@ -664,7 +699,7 @@ def _seed_job_with_artifact(session, *, address: str, predicate_trees: dict | No
     session.add(job)
     session.flush()
     if predicate_trees is not None:
-        store_artifact(session, job.id, "predicate_trees", data=predicate_trees)
+        store_test_assessment(session, job.id, address=address, predicate_trees=predicate_trees)
     session.commit()
     return job
 
@@ -672,7 +707,6 @@ def _seed_job_with_artifact(session, *, address: str, predicate_trees: dict | No
 @requires_postgres
 def test_dependency_provider_lookup_returns_impl_child_for_proxy(session):
     from db.models import Contract, Protocol
-    from db.queue import store_artifact
     from services.resolution.capability_resolver import find_dependency_provider_job_for_address
 
     proxy_addr = "0x" + uuid.uuid4().hex[:8] + "d4" * 16
@@ -703,7 +737,6 @@ def test_dependency_provider_lookup_returns_impl_child_for_proxy(session):
         "parent_job_id": str(proxy_job.id),
         "proxy_address": proxy_addr,
     }
-    store_artifact(session, impl_job.id, "effective_permissions", data={"functions": []})
     session.commit()
 
     lookup = find_dependency_provider_job_for_address(session, proxy_addr, chain="ethereum")

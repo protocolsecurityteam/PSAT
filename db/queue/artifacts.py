@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import select
 from sqlalchemy import update as sa_update
@@ -22,6 +22,7 @@ from db.storage import (
     serialize_artifact,
     source_file_key,
 )
+from schemas.assessment_projection import LegacyAssessmentProjection
 
 logger = logging.getLogger("db.queue")
 
@@ -77,6 +78,19 @@ def _mirror_contract_flags_to_job(session: Session, job_id: Any, name: str, data
     session.execute(sa_update(Job).where(Job.id == job_id).values(is_proxy=is_proxy))
 
 
+def publish_assessment_projection(session: Session, job_id: Any, projection: LegacyAssessmentProjection) -> None:
+    """Publish transient pipeline data into the immutable Assessment store."""
+    from services.assessment.repository import publish_legacy_assessment
+    from services.assessment.validation import checked
+
+    try:
+        publish_legacy_assessment(session, job_id, checked(projection))
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+
+
 def store_artifact(session: Session, job_id: Any, name: str, data: Any = None, text_data: str | None = None) -> None:
     """Upsert an artifact for a job (unique on job_id + name).
 
@@ -89,6 +103,21 @@ def store_artifact(session: Session, job_id: Any, name: str, data: Any = None, t
     committed artifact with the same deterministic key and then rolling back
     leaves the object in place (deleting it would break the previous row).
     """
+    if name == "assessment":
+        raise ValueError("publish an assessment projection with publish_assessment_projection")
+    if name == "principal_history":
+        if not isinstance(data, dict) or text_data is not None:
+            raise ValueError("Principal-history publication requires one JSON object")
+        from services.assessment.repository import publish_principal_history
+
+        try:
+            publish_principal_history(session, job_id, data)
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        return
+
     client = get_storage_client()
     if client is not None:
         body, content_type = serialize_artifact(data, text_data)
@@ -154,6 +183,31 @@ def store_artifact(session: Session, job_id: Any, name: str, data: Any = None, t
 
 def get_artifact(session: Session, job_id: Any, name: str) -> dict | list | str | None:
     """Read an artifact by job_id and name."""
+    if name == "assessment":
+        from services.assessment.repository import load_temporal_assessment
+
+        temporal = load_temporal_assessment(session, job_id)
+        if temporal is not None:
+            return cast(dict[str, Any], temporal)
+        return None
+    if name == "principal_history":
+        from services.assessment.repository import load_principal_history
+
+        temporal_history = load_principal_history(session, job_id)
+        if temporal_history is not None:
+            return temporal_history
+    return get_legacy_artifact(session, job_id, name)
+
+
+def get_assessment_projection(session: Session, job_id: Any) -> LegacyAssessmentProjection | None:
+    """Reconstruct the compact in-memory input used by pipeline stages."""
+    from services.assessment.repository import load_legacy_assessment
+
+    return load_legacy_assessment(session, job_id)
+
+
+def get_legacy_artifact(session: Session, job_id: Any, name: str) -> dict | list | str | None:
+    """Read the pre-cutover artifact table directly for the one-shot importer."""
     stmt = select(Artifact).where(Artifact.job_id == job_id, Artifact.name == name)
     artifact = session.execute(stmt).scalar_one_or_none()
     if artifact is None:
@@ -161,7 +215,7 @@ def get_artifact(session: Session, job_id: Any, name: str) -> dict | list | str 
     return _artifact_row_to_value(artifact)
 
 
-def get_all_artifacts(session: Session, job_id: Any) -> dict[str, Any]:
+def get_all_artifacts(session: Session, job_id: Any, *, include_assessment: bool = True) -> dict[str, Any]:
     """Read all artifacts for a job. Returns {name: data_or_text}.
 
     Storage-backed bodies are fetched in parallel via
@@ -171,7 +225,7 @@ def get_all_artifacts(session: Session, job_id: Any) -> dict[str, Any]:
     **Fails closed.** If any row's body could not be read this raises rather
     than returning a short dict. A short dict is byte-identical to "this job
     produced fewer artifacts", so a bucket outage rendered as *"this analysis
-    has no effective_permissions"* — the substitution of an unanswered question
+    has no permission_index"* — the substitution of an unanswered question
     for a proven negative.
 
     That includes the keyless row — a row with no ``storage_key`` and no inline
@@ -190,9 +244,15 @@ def get_all_artifacts(session: Session, job_id: Any) -> dict[str, Any]:
     maps, so a caller that may legitimately degrade opts in explicitly and
     publishes them beside it; see ``services/aggregations/analysis_detail``.
     """
-    stmt = select(Artifact).where(Artifact.job_id == job_id)
+    from services.assessment.repository import load_principal_history, load_temporal_assessment
+
+    temporal = load_temporal_assessment(session, job_id) if include_assessment else None
+    temporal_history = load_principal_history(session, job_id) if include_assessment else None
+    stmt = select(Artifact).where(Artifact.job_id == job_id, Artifact.name.notin_(("assessment", "principal_history")))
     artifacts = session.execute(stmt).scalars().all()
-    result: dict[str, Any] = {}
+    result: dict[str, Any] = {"assessment": temporal} if temporal is not None else {}
+    if temporal_history is not None:
+        result["principal_history"] = temporal_history
     storage_lookups: dict[str, tuple[str, str | None]] = {}
     proven_absent: dict[str, str] = {}
     not_determined: dict[str, str] = {}

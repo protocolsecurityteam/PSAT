@@ -501,7 +501,7 @@ def test_salience_is_orthogonal_to_witness_tier(db_session, make_mc):
 # ---------------------------------------------------------------------------
 
 
-def _tracking_plan(*controllers: dict) -> dict:
+def _observation_plan(*controllers: dict) -> dict:
     return {"schema_version": "0.1", "tracked_controllers": list(controllers)}
 
 
@@ -530,7 +530,7 @@ def test_reference_typed_entries_classify_config():
     plan = _by_field(
         build_polling_plan(
             contract_type="regular",
-            tracking_plan=_tracking_plan(
+            observation_plan=_observation_plan(
                 _controller("state_variable:owner", type_kind="address"),
                 _controller("state_variable:priceProvider", type_kind="contract"),
             ),
@@ -545,7 +545,7 @@ def test_a_proven_caller_gate_primitive_classifies_config():
     plan = _by_field(
         build_polling_plan(
             contract_type="regular",
-            tracking_plan=_tracking_plan(
+            observation_plan=_observation_plan(
                 _controller("state_variable:isPaused", type_kind="primitive", type_str="bool", provenance="caller_gate")
             ),
         )
@@ -562,7 +562,7 @@ def test_an_ungated_primitive_classifies_metric_with_a_stated_basis():
     plan = _by_field(
         build_polling_plan(
             contract_type="regular",
-            tracking_plan=_tracking_plan(
+            observation_plan=_observation_plan(
                 _controller("state_variable:_totalSupply", type_kind="primitive", type_str="uint256")
             ),
         )
@@ -577,7 +577,7 @@ def test_call_target_provenance_is_not_a_gate_proof():
     plan = _by_field(
         build_polling_plan(
             contract_type="regular",
-            tracking_plan=_tracking_plan(
+            observation_plan=_observation_plan(
                 _controller(
                     "state_variable:threshold2",
                     type_kind="primitive",
@@ -613,7 +613,7 @@ def test_every_freshly_built_entry_carries_both_keys_or_neither():
     plan = build_polling_plan(
         contract_type="safe",
         proxy_type="eip1967",
-        tracking_plan=_tracking_plan(
+        observation_plan=_observation_plan(
             _controller("state_variable:owner", type_kind="address"),
             _controller("state_variable:rate", type_kind="primitive", type_str="uint256"),
             _controller("state_variable:cap", type_kind="primitive", type_str="uint256", provenance="caller_gate"),

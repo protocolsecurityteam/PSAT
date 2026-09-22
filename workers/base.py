@@ -26,6 +26,7 @@ from db.queue import (
     fail_job_terminal,
     get_artifact,
     heartbeat_job,
+    publish_assessment_projection,
     reclaim_stuck_jobs,
     requeue_job,
     store_artifact,
@@ -1048,6 +1049,24 @@ class BaseWorker:
                 "stage_errors",
                 data=StageErrors(errors=merged).model_dump(mode="json"),
             )
+            try:
+                from db.queue.typed import load_assessment_projection
+                from services.assessment import add_stage_errors
+
+                assessment = load_assessment_projection(fresh, job.id)
+                if assessment is not None:
+                    assessment = add_stage_errors(assessment, errors)
+                    publish_assessment_projection(fresh, job.id, assessment)
+            except Exception as assessment_exc:
+                # The stage_errors artifact is already durable. Assessment
+                # enrichment is best-effort here so diagnostics persistence can
+                # never be defeated by the document it is meant to describe.
+                logger.warning(
+                    "Worker %s: failed to attach stage errors to assessment for job %s",
+                    self.worker_id,
+                    job.id,
+                    extra={"exc_type": type(assessment_exc).__name__},
+                )
         except Exception:
             logger.exception(
                 "Worker %s: failed to write stage_errors artifact for job %s (non-fatal)",

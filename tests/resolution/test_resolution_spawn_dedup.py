@@ -20,7 +20,9 @@ def _addr() -> str:
 def _graph(parent_addr: str, child_addr: str) -> dict:
     return {
         "root_contract_address": parent_addr,
-        "nodes": [{"address": child_addr, "analyzed": True, "node_type": "contract", "contract_name": "Child"}],
+        "nodes": [
+            {"address": child_addr, "analysis_state": "analyzed", "node_type": "contract", "contract_name": "Child"}
+        ],
     }
 
 

@@ -4,8 +4,8 @@
 The ``(chain, bytecode_keccak)`` key reuses a bundle only across byte-identical
 deployments. Per-chain immutables make the same source compile to different
 bytecode, so a genuine cross-chain deployment misses on keccak. The
-``source_content_hash`` reuse path closes that gap: the analysis /
-tracking_plan / predicate_trees bundle is a pure function of the verified
+``source_content_hash`` reuse path closes that gap: the static_facts /
+observation_plan / predicate_trees bundle is a pure function of the verified
 source, so a ready row for the same source hash on any chain is copied into the
 new deployment's row instead of paying the forge+Slither build again. State
 (owner/roles/proxy impl/balances) is never shared — it stays per
@@ -19,7 +19,7 @@ from typing import Any
 import pytest
 
 from db import contract_materializations as cm
-from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
+from db.contract_materializations import STATIC_FACTS_SCHEMA_VERSION
 from db.models import ContractMaterialization
 from services.discovery.fetch import source_content_hash
 from tests.conftest import requires_postgres
@@ -66,8 +66,9 @@ def _route_to_test_db(monkeypatch):
 def _bundle(name: str = "C") -> dict[str, Any]:
     return {
         "contract_name": name,
-        "analysis": {"subject": {"address": "0xwhatever", "name": name}, "functions": []},
-        "tracking_plan": {"contract_address": "0xwhatever", "controllers": []},
+        "static_facts": {"subject": {"address": "0xwhatever", "name": name}, "functions": []},
+        "observation_plan": {"contract_address": "0xwhatever", "controllers": []},
+        "effects": {"schema_version": "semantic", "functions": {}},
         "predicate_trees": {"schema_version": "semantic", "trees": {"pause()": {"node_type": "caller"}}},
     }
 
@@ -166,8 +167,8 @@ def test_cross_chain_reuse_copies_bundle_and_skips_builder(_route_to_test_db, _c
     assert row2.address == ADDR_BASE
     assert row2.source_content_hash == src_hash
     # The CODE plane is reused byte-for-byte.
-    assert cm.hydrate_analysis(row2) == row1.analysis
-    assert cm.hydrate_tracking_plan(row2) == row1.tracking_plan
+    assert cm.hydrate_static_facts(row2) == row1.static_facts
+    assert cm.hydrate_observation_plan(row2) == row1.observation_plan
     assert cm.hydrate_predicate_trees(row2) == row1.predicate_trees
     # Two distinct rows: state stays per (chain, address).
     assert cm.find_by_keccak(_clean_cm, chain="base", bytecode_keccak=KECCAK_BASE) is not None
@@ -176,7 +177,7 @@ def test_cross_chain_reuse_copies_bundle_and_skips_builder(_route_to_test_db, _c
 
 @requires_postgres
 def test_reuse_ignores_old_schema_version_donor(_route_to_test_db, _clean_cm):
-    """A ready row with the same source hash but an OLDER analysis_schema_version
+    """A ready row with the same source hash but an OLDER static_facts_schema_version
     is not a reuse donor — the bundle shape may have changed, so we rebuild."""
     src_hash = "0x" + "ee" * 32
     stale = ContractMaterialization(
@@ -184,11 +185,11 @@ def test_reuse_ignores_old_schema_version_donor(_route_to_test_db, _clean_cm):
         bytecode_keccak=KECCAK_MAINNET,
         address=ADDR_MAINNET,
         contract_name="Old",
-        analysis={"old": True},
-        tracking_plan={"old": True},
+        static_facts={"old": True},
+        observation_plan={"old": True},
         source_content_hash=src_hash,
         status="ready",
-        analysis_schema_version=ANALYSIS_SCHEMA_VERSION + 1000,
+        static_facts_schema_version=STATIC_FACTS_SCHEMA_VERSION + 1000,
     )
     _clean_cm.add(stale)
     _clean_cm.commit()
@@ -207,7 +208,7 @@ def test_reuse_ignores_old_schema_version_donor(_route_to_test_db, _clean_cm):
         source_hash_fn=lambda: src_hash,
     )
     assert built["n"] == 1, "old-version donor must not be reused"
-    assert row.analysis_schema_version == ANALYSIS_SCHEMA_VERSION
+    assert row.static_facts_schema_version == STATIC_FACTS_SCHEMA_VERSION
     assert row.contract_name == "Fresh"
 
 
@@ -222,7 +223,7 @@ def test_find_reusable_only_returns_ready(_route_to_test_db, _clean_cm):
                 address="0x" + f"c{i}" * 20,
                 source_content_hash=src_hash,
                 status=status,
-                analysis_schema_version=ANALYSIS_SCHEMA_VERSION,
+                static_facts_schema_version=STATIC_FACTS_SCHEMA_VERSION,
             )
         )
     _clean_cm.commit()

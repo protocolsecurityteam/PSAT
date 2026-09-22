@@ -176,6 +176,13 @@ class SolmateRolesAuthorityAdapter:
                 "target": target,
                 "selector": selector,
                 "roles": sorted(roles_for_target_sig),
+                # Keep the join provenance per role. Set union may later fold
+                # this capability together with a direct owner or another
+                # role; the flattened ``members`` list cannot say which branch
+                # admitted which caller.
+                "role_members": {
+                    str(role): sorted(users_by_role.get(role, set())) for role in sorted(roles_for_target_sig)
+                },
             }
         ]
         if last_block is None:

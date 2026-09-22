@@ -67,6 +67,8 @@ def run_migrations_online() -> None:
             compare_type=True,
             compare_server_default=True,
         )
+        config.attributes["assessment_fresh_database"] = not context.get_context().get_current_heads()
+        connection.commit()
         with context.begin_transaction():
             context.run_migrations()
 

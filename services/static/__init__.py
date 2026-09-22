@@ -1,5 +1,5 @@
 """Static analysis package."""
 
-from .contract_analysis import collect_contract_analysis
+from .static_analysis import collect_static_inputs
 
-__all__ = ["collect_contract_analysis"]
+__all__ = ["collect_static_inputs"]

@@ -21,14 +21,14 @@ import pytest
 slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
 
-from services.static.contract_analysis_pipeline.effects import build_effects  # noqa: E402
-from services.static.contract_analysis_pipeline.predicate_artifacts import (  # noqa: E402
+from services.static.static_analysis.effects import build_effects  # noqa: E402
+from services.static.static_analysis.predicate_artifacts import (  # noqa: E402
     build_predicate_artifacts,
 )
-from services.static.contract_analysis_pipeline.summaries import (  # noqa: E402
+from services.static.static_analysis.summaries import (  # noqa: E402
     _build_semantic_control_summary,
 )
-from services.static.contract_analysis_pipeline.tracking import (  # noqa: E402
+from services.static.static_analysis.tracking import (  # noqa: E402
     build_controller_tracking,
 )
 
@@ -315,7 +315,7 @@ def test_private_var_without_getter_gets_unknown_strategy_and_no_poll_entry(tmp_
     plan = build_polling_plan(
         contract_type="regular",
         proxy_type=None,
-        tracking_plan={"tracked_controllers": targets},
+        observation_plan={"tracked_controllers": targets},
         tracked_topics=None,
     )
     assert not any(e.get("field") == "_admin" or e.get("target") == "_admin" for e in plan)
@@ -356,7 +356,7 @@ def test_private_var_with_getter_stays_pollable_through_the_getter(tmp_path):
     plan = build_polling_plan(
         contract_type="regular",
         proxy_type=None,
-        tracking_plan={"tracked_controllers": targets},
+        observation_plan={"tracked_controllers": targets},
         tracked_topics=None,
     )
     entry = next(e for e in plan if e.get("field") == "_owner")
@@ -393,7 +393,7 @@ def test_public_underscore_var_keeps_its_auto_getter(tmp_path):
     plan = build_polling_plan(
         contract_type="regular",
         proxy_type=None,
-        tracking_plan={"tracked_controllers": targets},
+        observation_plan={"tracked_controllers": targets},
         tracked_topics=None,
     )
     entry = next(e for e in plan if e.get("field") == "_roleRegistry")

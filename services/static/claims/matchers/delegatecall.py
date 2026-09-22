@@ -51,13 +51,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from ...contract_analysis_pipeline.predicate_types import (
+from ...static_analysis.predicate_types import (
     TARGET_KIND_STORAGE_NO_SETTER,
     TARGET_KIND_STORAGE_SETTER,
 )
 from ..context import ClaimContext
 from ..decorator import claim_matcher
-from ..types import ClaimEvidence
+from ..types import MatchedEvidence
 from . import _facts
 from ._taint import UNDETERMINED, _definitions, _origin, _root_variable
 
@@ -296,7 +296,6 @@ def _explained_by_upgrade(ctx: ClaimContext, function: str) -> bool:
     """True when this entry IS a standard upgrade, whose delegatecall sink is
     the upgrade mechanism rather than a separate capability.
 
-    Mirrors the suppression ``project_effect_labels`` already applies to the
     ``delegatecall_execution`` LABEL: without it every UUPS ``upgradeToAndCall``
     — whose OZ implementation delegatecalls the new logic to run its initializer
     — would carry both claims and be counted twice by an exec consumer. The
@@ -310,10 +309,9 @@ def _explained_by_upgrade(ctx: ClaimContext, function: str) -> bool:
 @claim_matcher(
     claim_id="delegatecall.execute",
     sentence="executes foreign code in this contract's storage context (delegatecall)",
-    legacy_projection="delegatecall_execution",
     consumer_family="exec",
 )
-def delegatecall_execute(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
+def delegatecall_execute(ctx: ClaimContext, function: str) -> MatchedEvidence | None:
     sink_ids = [
         str(sink["id"])
         for sink in _facts.body_sinks(ctx, function)
@@ -331,7 +329,7 @@ def delegatecall_execute(ctx: ClaimContext, function: str) -> ClaimEvidence | No
         "destination": destination,
         "destination_constraint": _destination_constraint(ctx, function, unit, destination),
     }
-    return ClaimEvidence(tier="idiom_structural", witness=witness)
+    return MatchedEvidence(tier="idiom_structural", witness=witness)
 
 
 def _destination_constraint(ctx: ClaimContext, function: str, unit: Any, destination: dict[str, Any]) -> dict[str, Any]:

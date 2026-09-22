@@ -143,7 +143,7 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
     // surface doesn't have to re-fetch.
     api(`/api/company/${encodeURIComponent(companyName)}/functions`, options)
       .then((d) => { if (!cancelled) setFunctionData(d?.functions || {}); })
-      .catch((e) => { if (!cancelled) setFunctionError(e.message); });
+      .catch((e) => { if (!cancelled) setFunctionError(e.message || "Failed to load function analysis"); });
     // Fetched here rather than inside ScoreBand so it travels in parallel with
     // the company payload: mounting the band only after /api/company answered
     // would serialise the two.
@@ -336,6 +336,7 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
               initialData={data}
               initialCoverage={auditCoverage}
               initialFunctions={functionData}
+              initialFunctionsError={functionError}
               embedded
             />
           </Suspense>}

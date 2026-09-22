@@ -1,9 +1,9 @@
-"""Type vocabulary for the two-plane claims subsystem (Plane 1).
+"""Positive matcher results and detector receipts for static effects.
 
-A CLAIM is a typed, machine-checkable statement about a function, minted only
-through the registry. Its ``tier`` records how the claim was proven and has no
-heuristic/guess value: introducing one would require editing this Literal, the
-registry contract, and the CI gate together, not a silent ``labels.add(...)``.
+The registry's successful matcher result is a compact internal effect match,
+then converted into canonical assessment Evidence and Claim records. ``tier``
+has no heuristic/guess value:
+introducing one requires editing the Literal, registry contract, and CI gate.
 """
 
 from __future__ import annotations
@@ -47,17 +47,19 @@ CONSUMER_FAMILIES: frozenset[str] = frozenset(get_args(ConsumerFamily))
 Witness = dict[str, Any]
 
 
-class Claim(TypedDict):
+class EffectMatch(TypedDict):
+    """A positive matcher hit awaiting canonical evidence construction."""
+
     claim_id: str
     tier: Tier
     witness: Witness
 
 
-class ClaimsArtifact(TypedDict):
+class MatchResults(TypedDict):
     schema_version: str
     contract_name: str | None
     # Function full-name -> its claims (empty list is valid and common).
-    functions: dict[str, list[Claim]]
+    functions: dict[str, list[EffectMatch]]
     # Function full-name -> the 4-byte selector of its CANONICAL ABI signature
     # (enum/interface/struct params lowered) — the value a caller puts in
     # ``msg.sig``. Three states per function, and consumers must keep them
@@ -66,10 +68,35 @@ class ClaimsArtifact(TypedDict):
     # never appear (they have no selector by construction). The whole key is
     # absent on artifacts minted before it existed.
     abi_selectors: NotRequired[dict[str, str]]
+    # One receipt per registered matcher. A clean miss is completed work; only
+    # an exception creates an omission. These receipts, not missing claims,
+    # carry failure and coverage semantics into the canonical Assessment.
+    analyses: NotRequired[dict[str, "MatchAnalysis"]]
+    diagnostics: NotRequired[list["MatchDiagnostic"]]
+
+
+class MatchOmission(TypedDict):
+    function: str
+    reason: str
+
+
+class MatchAnalysis(TypedDict):
+    detector: str
+    status: Literal["completed", "partial", "failed"]
+    targets_total: int
+    targets_completed: int
+    omissions: list[MatchOmission]
+
+
+class MatchDiagnostic(TypedDict):
+    claim_id: str
+    function: str | None
+    exc_type: str
+    message: str
 
 
 @dataclass(frozen=True)
-class ClaimEvidence:
+class MatchedEvidence:
     """What a matcher trigger returns on a hit: the tier it proved the claim at
     and the replayable witness. A trigger returns ``None`` for no claim."""
 

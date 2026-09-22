@@ -1,6 +1,13 @@
 {
   "fixtures": [
     {
+      "path": "governance/proposal_scenario.sol",
+      "category": "governance",
+      "contract_name": "ScenarioGovernor",
+      "description": "Governor-shaped proposal events and executable action bundles with a guarded delay target for local fork integration.",
+      "detection_patterns": ["proposal_actions", "governor_execution", "configuration_readback"]
+    },
+    {
       "path": "pause/direct_owner_pause.sol",
       "category": "pause",
       "contract_name": "DirectOwnerPause",

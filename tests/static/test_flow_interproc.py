@@ -26,7 +26,7 @@ Held at the witness bar (stay ``indeterminate``):
 
 The last two sections cover WHICH parameter a ``param`` destination is —
 ``target_param_index``, the ABI slot the fork prober plants its sentinel in —
-and the legacy ``contract_analysis`` eth_out flow that used to deny every native
+and the legacy ``static_facts`` eth_out flow that used to deny every native
 send had a caller-chosen recipient at all.
 
 Precedent: ``tests/static/test_flow_lattice.py`` (same compile-with-Slither harness).
@@ -43,8 +43,8 @@ import pytest
 slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
 
-from services.static.contract_analysis_pipeline.effects import build_effects  # noqa: E402
-from services.static.contract_analysis_pipeline.summaries import _extract_value_flows  # noqa: E402
+from services.static.static_analysis.effects import build_effects  # noqa: E402
+from services.static.static_analysis.summaries import _extract_value_flows  # noqa: E402
 
 
 def _compile(tmp_path: Path, source: str, name: str):
@@ -904,7 +904,7 @@ def test_param_index_for_guarded_onward_forward(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# The legacy ``contract_analysis`` eth_out flow (``summaries._extract_value_flows``)
+# The legacy ``static_facts`` eth_out flow (``summaries._extract_value_flows``)
 #
 # It used to hardcode ``token_var=None, is_parameter=False`` on EVERY native
 # send — asserting "no caller-chosen address here" even when the recipient was
