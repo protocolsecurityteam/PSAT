@@ -85,7 +85,8 @@ from services.monitoring.delivery_evidence import (
     load_delivery_evidence,
     record_delivery_evidence,
 )
-from services.resolution.repos.event_logs_rpc import FetchedEventLog, RpcEventLogFetcher
+from services.monitoring.delivery_spool import DeliverySpool
+from services.resolution.repos.event_logs_rpc import FetchedEventLog, RpcEventLogFetcher, RpcScanCancelled
 from utils.balance_status import (
     ASSET_SET_SOURCE_CHAIN_LOG_SWEEP,
     ASSET_SET_STATUS_AT_PAGE_CAP,
@@ -265,14 +266,8 @@ class DispositionRequest:
     priced_dust_tokens: tuple[str, ...] = ()
 
 
-class DispositionBudgetExceeded(RuntimeError):
-    """The cycle's request ceiling was reached mid-scan.
-
-    A ``RuntimeError`` subclass so the fetcher's bisect-on-reject path treats it
-    like any other refusal — except that bisecting spends MORE requests, so the
-    check fires again at once on the narrower span and the scan unwinds rather
-    than grinding to the floor.
-    """
+class DispositionBudgetExceeded(RpcScanCancelled):
+    """The cycle's request ceiling was reached; bisection cannot restore budget."""
 
 
 @dataclass(frozen=True)
@@ -287,7 +282,7 @@ class _Pair:
 
 @dataclass
 class _Measured:
-    """A pair's raw deliveries before the fan-out meter has run over them.
+    """A pair's exact new-delivery count and bounded sample before receipt reads.
 
     ``aborted`` is set when a window covering the pair could not be proven
     whole. It is not the same as "no deliveries": one publishes nothing, the
@@ -307,7 +302,9 @@ class _Measured:
     measured_through: int
     caught_up: bool | None = None
     observed_balance_raw: str | None = None
-    deliveries: dict[tuple[str, int | None], dict[str, Any]] = field(default_factory=dict)
+    cursor: int = -1
+    delivery_count: int = 0
+    deliveries: list[dict[str, Any]] = field(default_factory=list)
     aborted: bool = False
 
 
@@ -336,15 +333,19 @@ class _DispositionFetcher(RpcEventLogFetcher):
             max_block_range=max_block_range,
             min_bisect_span=min_bisect_span,
             timeout=DISPOSITION_SCAN_TIMEOUT_SECONDS,
+            before_retry=self._count_get_logs,
         )
         self._cost = cost
         self._budget = budget
 
-    def _fetch_range(self, event_address, topics, from_block, to_block, window_stats=None):
+    def _count_get_logs(self) -> None:
         if self._cost.total >= self._budget:
             raise DispositionBudgetExceeded(f"disposition request budget of {self._budget} reached")
         self._cost.get_logs += 1
-        return super()._fetch_range(event_address, topics, from_block, to_block, window_stats)
+
+    def _request_logs(self, params):
+        self._count_get_logs()
+        return super()._request_logs(params)
 
 
 def creation_block(holder_address: str, *, chain_id: int, cost: DispositionCost) -> int:
@@ -1293,6 +1294,11 @@ def _scan_chain(
                 measured_through=scan_to,
                 caught_up=scan_to >= head,
                 observed_balance_raw=balance_of.get((pair.holder, pair.token)),
+                cursor=(
+                    int(stored[(chain_id, pair.holder, pair.token)].measured_through_block)
+                    if (chain_id, pair.holder, pair.token) in stored
+                    else -1
+                ),
             )
         starved = _discover(
             fetcher,
@@ -1329,7 +1335,6 @@ def _scan_chain(
         chain_id=chain_id,
         rpc_url=rpc_url,
         measured=measured,
-        stored=stored,
         max_block_range=max_block_range,
         cost=cost,
         priority=priority,
@@ -1451,6 +1456,46 @@ def _discover(
     priority: Mapping[str, int],
     cost: DispositionCost,
 ) -> bool:
+    # Keep discovery off the ORM session: a failed page or spool must never
+    # leave an incrementally advanced evidence row for the producer to commit.
+    with DeliverySpool() as spool:
+        pair_ids = {key: i for i, key in enumerate(sorted({(p.holder, p.token) for p in pairs}))}
+        starved = _discover_passes(
+            fetcher,
+            pairs,
+            chain_id=chain_id,
+            from_block=from_block,
+            to_block=to_block,
+            measured=measured,
+            priority=priority,
+            cost=cost,
+            spool=spool,
+            pair_ids=pair_ids,
+        )
+        for key, pair_id in pair_ids.items():
+            entry = measured[key]
+            if not entry.aborted:
+                entry.delivery_count, entry.deliveries = spool.summary(
+                    pair_id,
+                    cursor=entry.cursor,
+                    keep=max(DELIVERY_ENTRIES_RETAINED, DISPOSITION_MAX_DELIVERIES_PER_PAIR),
+                )
+        return starved
+
+
+def _discover_passes(
+    fetcher: RpcEventLogFetcher,
+    pairs: Sequence[_Pair],
+    *,
+    chain_id: int,
+    from_block: int,
+    to_block: int,
+    measured: dict[tuple[str, str], _Measured],
+    priority: Mapping[str, int],
+    cost: DispositionCost,
+    spool: DeliverySpool,
+    pair_ids: Mapping[tuple[str, str], int],
+) -> bool:
     """Fill *measured* with every delivery the requested pairs received.
 
     The window is the caller's — it owns both the earliest start the group needs
@@ -1507,6 +1552,8 @@ def _discover(
                 measured=measured,
                 chain_id=chain_id,
                 cost=cost,
+                spool=spool,
+                pair_ids=pair_ids,
             )
         except DispositionBudgetExceeded as exc:
             logger.warning(
@@ -1559,12 +1606,25 @@ def _run_pass(
     measured: dict[tuple[str, str], _Measured],
     chain_id: int,
     cost: DispositionCost,
+    spool: DeliverySpool,
+    pair_ids: Mapping[tuple[str, str], int],
 ) -> None:
     if not event_address:
         return
     try:
-        logs = fetcher.fetch_logs(
-            event_address=list(event_address), topics=topics, from_block=from_block, to_block=to_block
+        fetcher.visit_logs(
+            event_address=list(event_address),
+            topics=topics,
+            from_block=from_block,
+            to_block=to_block,
+            consume=lambda log: _attribute(
+                log,
+                recipient_topic=recipient_topic,
+                wanted=wanted,
+                measured=measured,
+                spool=spool,
+                pair_ids=pair_ids,
+            ),
         )
     except DispositionBudgetExceeded:
         raise
@@ -1587,8 +1647,6 @@ def _run_pass(
         )
         _abort(holder_batch, token_batch, measured, cost=cost)
         return
-    for log in logs:
-        _attribute(log, recipient_topic=recipient_topic, wanted=wanted, measured=measured)
 
 
 def _attribute(
@@ -1597,6 +1655,8 @@ def _attribute(
     recipient_topic: int,
     wanted: set[tuple[str, str]],
     measured: dict[tuple[str, str], _Measured],
+    spool: DeliverySpool,
+    pair_ids: Mapping[tuple[str, str], int],
 ) -> None:
     if len(log.topics) <= recipient_topic:
         return
@@ -1606,7 +1666,7 @@ def _attribute(
     if key not in wanted:
         return
     entry = measured.get(key)
-    if entry is None:
+    if entry is None or entry.aborted:
         return
     topic0 = log.topics[0].lower()
     # ERC-20 and ERC-721 share this topic0 and are told apart by topic COUNT: a
@@ -1614,12 +1674,7 @@ def _attribute(
     # same-token 3-topic transfer LOGS, so a 4-topic delivery is outside what it
     # can measure and is carried as an unreadable delivery rather than dropped.
     meterable = topic0 == TRANSFER_TOPIC0 and len(log.topics) == 3
-    entry.deliveries[("0x" + log.tx_hash.hex(), log.log_index)] = {
-        "tx": "0x" + log.tx_hash.hex(),
-        "block": int(log.block_number),
-        "log_index": int(log.log_index),
-        "meterable": meterable,
-    }
+    spool.add(pair_ids[key], log, meterable=meterable)
 
 
 def _ordered(tokens: Sequence[str], priority: Mapping[str, int]) -> list[str]:
@@ -1633,7 +1688,6 @@ def _resolve_fan_out(
     chain_id: int,
     rpc_url: str,
     measured: Mapping[tuple[str, str], _Measured],
-    stored: Mapping[tuple[int, str, str], Any],
     max_block_range: int,
     cost: DispositionCost,
     priority: Mapping[str, int],
@@ -1679,22 +1733,16 @@ def _resolve_fan_out(
         if entry.aborted:
             continue
         deliveries: list[dict[str, Any]] = []
-        fact = stored.get((chain_id, holder, token))
-        cursor = None if fact is None else int(fact.measured_through_block)
-        ordered = [
-            record
-            for record in sorted(entry.deliveries.values(), key=lambda d: (d["block"], d["log_index"] or 0))
-            if cursor is None or int(record["block"]) > cursor
-        ]
+        ordered = entry.deliveries
         elided = 0
-        too_heavy = len(ordered) > DISPOSITION_MAX_DELIVERIES_PER_PAIR
+        too_heavy = entry.delivery_count > DISPOSITION_MAX_DELIVERIES_PER_PAIR
         if too_heavy:
             # The pair is abandoned. Keep a bounded sample so the row still shows
             # what an abandoned delivery looks like, and carry the rest as a
             # count — the row must still say how many were seen and that none was
             # metered, which is what keeps the verdict not_determined.
             keep = min(DELIVERY_ENTRIES_RETAINED, len(ordered))
-            elided = len(ordered) - keep
+            elided = entry.delivery_count - keep
             # One line per pair, and it is not noise: the row this writes can
             # never be disposed, so this is the only announcement that a pair
             # left the convergent population for good.
@@ -1704,7 +1752,7 @@ def _resolve_fan_out(
                     "chain_id": chain_id,
                     "holder_address": holder,
                     "token_address": token,
-                    "deliveries": len(ordered),
+                    "deliveries": entry.delivery_count,
                     "max_deliveries_per_pair": DISPOSITION_MAX_DELIVERIES_PER_PAIR,
                 },
             )

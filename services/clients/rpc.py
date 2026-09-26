@@ -6,6 +6,7 @@ import logging
 import os
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Mapping, NamedTuple, Sequence
 from urllib.parse import urlparse
@@ -507,6 +508,7 @@ def rpc_request(
     *,
     chain_id: int | None = None,
     timeout: float | None = None,
+    before_retry: Callable[[], None] | None = None,
 ) -> Any:
     """One JSON-RPC call. ``timeout`` overrides :data:`JSON_RPC_TIMEOUT_SECONDS`.
 
@@ -520,11 +522,16 @@ def rpc_request(
     :class:`RpcClientTimeout`, so a caller can tell "we stopped waiting" apart
     from "the upstream refused" instead of treating a slow window as a rejected
     one.
+
+    ``before_retry`` lets a budgeted caller charge transport retries as well as
+    its initial call. An exception from it cancels before another HTTP attempt.
     """
     _assert_url_chain_id(rpc_url, chain_id)
     session = _get_session()
     effective_timeout = JSON_RPC_TIMEOUT_SECONDS if timeout is None else timeout
     for attempt in range(retries + 1):
+        if attempt and before_retry is not None:
+            before_retry()
         try:
             response = session.post(
                 rpc_url,

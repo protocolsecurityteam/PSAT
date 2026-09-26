@@ -84,7 +84,7 @@ def _log(*, token: str, holder: str, tx: int, block: int, log_index: int, topics
     ``topics=4`` is the ERC-721 shape: the third indexed slot is a token id, not
     a quantity, and the fan-out meter is not defined over it.
     """
-    slots = [TRANSFER_TOPIC0, _pad(_addr("5ende4")), _pad(holder)]
+    slots = [TRANSFER_TOPIC0, _pad(_addr("5eade4")), _pad(holder)]
     if topics == 4:
         slots.append("0x" + f"{7:064x}")
     return {
@@ -102,7 +102,7 @@ def _log(*, token: str, holder: str, tx: int, block: int, log_index: int, topics
 def _receipt(*, token: str, same_token_transfers: int) -> dict:
     """A receipt whose *same_token_transfers* logs are 3-topic same-token sends."""
     logs = [
-        {"address": token, "topics": [TRANSFER_TOPIC0, _pad(_addr("5ende4")), _pad(_addr(f"{i:x}"))]}
+        {"address": token, "topics": [TRANSFER_TOPIC0, _pad(_addr("5eade4")), _pad(_addr(f"{i:x}"))]}
         for i in range(same_token_transfers)
     ]
     # One unrelated log, so the meter is shown to count same-token transfers
@@ -972,7 +972,7 @@ def test_a_typed_token_is_also_asked_for_at_the_1155_recipient_slot(db_session, 
         "topics": [
             TRANSFER_SINGLE_TOPIC0,
             _pad(_addr("09e4a704")),
-            _pad(_addr("5ende4")),
+            _pad(_addr("5eade4")),
             _pad(HOLDER),
         ],
         "data": "0x" + f"{7:064x}" + f"{1:064x}",
@@ -1275,6 +1275,144 @@ def test_a_truncated_window_never_advances_an_existing_pairs_cursor(db_session, 
     assert row.delivery_count == 1
     assert row.delivery_shape == DELIVERY_SHAPE_FAN_OUT_ALL
     assert f"blocks {CREATION}..{HEAD}" in row.basis
+
+
+@pytest.mark.parametrize("malformed", [None, {}, [None]])
+def test_malformed_forward_page_cannot_complete_a_prior_positive(db_session, wire, monkeypatch, malformed):
+    wire.logs = [_log(token=TOKEN, holder=HOLDER, tx=1, block=910_000, log_index=1)]
+    wire.receipts = {_tx(1): _receipt(token=TOKEN, same_token_transfers=100)}
+    scan_delivery_shape(db_session, [_request()], rpc_url_for=_rpc_url_for)
+    row = _facts(db_session)[(HOLDER, TOKEN)]
+    row.caught_up = False
+    db_session.flush()
+    wire.head = HEAD + 100
+    monkeypatch.setattr(delivery_shape._DispositionFetcher, "_request_logs", lambda *args: malformed)
+    scan_delivery_shape(db_session, [_request()], rpc_url_for=_rpc_url_for)
+    db_session.flush()
+    assert row.measured_through_block == HEAD
+    assert row.delivery_count == 1
+    assert row.delivery_shape == DELIVERY_SHAPE_FAN_OUT_ALL
+    assert row.caught_up is False
+
+
+@pytest.mark.parametrize("n", [8, 9, 100])
+def test_streamed_pages_keep_exact_count_and_sample_with_duplicates(db_session, wire, monkeypatch, n):
+    monkeypatch.setitem(delivery_shape._CHAIN_SCAN_WINDOW, CHAIN, (10_000, 1))
+    monkeypatch.setattr(delivery_shape, "DISPOSITION_RESULT_CAP", 10)
+    wire.logs = [
+        _log(token=TOKEN, holder=HOLDER, tx=i, block=CREATION + i * 900, log_index=0) for i in reversed(range(1, n + 1))
+    ]
+    wire.logs += [wire.logs[0], wire.logs[-1]]
+    wire.receipts = {_tx(i): _receipt(token=TOKEN, same_token_transfers=100) for i in range(1, n + 1)}
+    scan_delivery_shape(db_session, [_request()], rpc_url_for=_rpc_url_for)
+    row = _facts(db_session)[(HOLDER, TOKEN)]
+    assert row.delivery_count == n
+    assert [r["tx"] for r in row.deliveries] == [_tx(i) for i in range(1, 9)]
+    assert row.unreadable_deliveries == (0 if n == 8 else n)
+    assert len(wire.receipt_calls) == (8 if n == 8 else 0)
+    assert row.measured_through_block == HEAD and row.caught_up
+    assert len(wire.get_logs_calls) > 1
+
+
+@pytest.mark.parametrize("failure", ["late_page", "typed_pass", "disk", "cancel"])
+def test_partial_stream_never_writes_evidence(db_session, wire, monkeypatch, tmp_path, failure):
+    from services.monitoring.delivery_spool import DeliverySpool, DeliverySpoolError
+    from services.resolution.repos.event_logs_rpc import RpcEventLogFetcher
+
+    monkeypatch.setenv("PSAT_DISPOSITION_SPOOL_DIR", str(tmp_path))
+    monkeypatch.setitem(delivery_shape._CHAIN_SCAN_WINDOW, CHAIN, (10_000, 1_000))
+    wire.logs = [_log(token=TOKEN, holder=HOLDER, tx=1, block=CREATION + 1, log_index=1)]
+    original = RpcEventLogFetcher._request_logs
+
+    def request(fetcher, params):
+        q = params[0]
+        if (failure == "typed_pass" and len(q["topics"]) == 4) or (
+            failure in {"late_page", "cancel"} and int(q["fromBlock"], 16) > CREATION
+        ):
+            raise (KeyboardInterrupt if failure == "cancel" else RuntimeError)("synthetic interruption")
+        return original(fetcher, params)
+
+    monkeypatch.setattr(RpcEventLogFetcher, "_request_logs", request)
+    if failure == "disk":
+
+        def fail_summary(*args, **kwargs):
+            raise DeliverySpoolError("synthetic disk read failure")
+
+        monkeypatch.setattr(DeliverySpool, "summary", fail_summary)
+    if failure in {"disk", "cancel"}:
+        with pytest.raises(DeliverySpoolError if failure == "disk" else KeyboardInterrupt):
+            scan_delivery_shape(db_session, [_request(typed=(TOKEN,))], rpc_url_for=_rpc_url_for)
+    else:
+        scan_delivery_shape(db_session, [_request(typed=(TOKEN,))], rpc_url_for=_rpc_url_for)
+    db_session.commit()  # Even a producer that catches the failure cannot publish partial evidence.
+    assert _facts(db_session) == {} and wire.receipt_calls == []
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_cursor_filter_precedes_bounded_sample(db_session, wire):
+    from services.monitoring.delivery_evidence import record_delivery_evidence
+
+    for token, cursor in [(TOKEN, HEAD), (OTHER_TOKEN, HEAD + 50)]:
+        record_delivery_evidence(
+            db_session,
+            chain_id=CHAIN,
+            holder_address=HOLDER,
+            token_address=token,
+            scanned_from_block=CREATION,
+            measured_through_block=cursor,
+            deliveries=[],
+            scan_basis="fixture",
+            caught_up=False,
+        )
+    db_session.flush()
+    wire.head = HEAD + 100
+    wire.logs = [
+        _log(token=OTHER_TOKEN, holder=HOLDER, tx=i, block=HEAD + i, log_index=0) for i in [*range(1, 9), 60, 70]
+    ]
+    wire.receipts = {_tx(i): _receipt(token=OTHER_TOKEN, same_token_transfers=100) for i in [60, 70]}
+    scan_delivery_shape(db_session, [_request(tokens=(TOKEN, OTHER_TOKEN))], rpc_url_for=_rpc_url_for)
+    row = _facts(db_session)[(HOLDER, OTHER_TOKEN)]
+    assert row.delivery_count == 2
+    assert [r["tx"] for r in row.deliveries] == [_tx(60), _tx(70)]
+    assert wire.receipt_calls == [_tx(60), _tx(70)]
+    assert row.caught_up and row.measured_through_block == HEAD + 100
+
+
+def test_streamed_evidence_rolls_back_with_producer_transaction(db_session, wire):
+    wire.logs = [_log(token=TOKEN, holder=HOLDER, tx=1, block=910_000, log_index=1)]
+    wire.receipts = {_tx(1): _receipt(token=TOKEN, same_token_transfers=100)}
+    scan_delivery_shape(db_session, [_request()], rpc_url_for=_rpc_url_for)
+    assert _facts(db_session)[(HOLDER, TOKEN)].delivery_count == 1
+    db_session.rollback()
+    assert _facts(db_session) == {}
+
+
+def test_streaming_preserves_receipt_priority_and_cache_across_pairs(db_session, wire):
+    heavy = _addr("70ce9")
+    wire.logs = [
+        _log(token=TOKEN, holder=HOLDER, tx=77, block=960_000, log_index=3),
+        _log(token=OTHER_TOKEN, holder=HOLDER, tx=77, block=960_000, log_index=2),
+        _log(token=OTHER_TOKEN, holder=HOLDER, tx=88, block=950_000, log_index=1),
+    ] + [_log(token=heavy, holder=HOLDER, tx=i, block=CREATION + i, log_index=0) for i in range(200, 209)]
+    shared = _receipt(token=TOKEN, same_token_transfers=100)
+    shared["logs"].extend(_receipt(token=OTHER_TOKEN, same_token_transfers=100)["logs"])
+    wire.receipts = {_tx(77): shared, _tx(88): _receipt(token=OTHER_TOKEN, same_token_transfers=100)}
+    scan_delivery_shape(
+        db_session, [_request(tokens=(TOKEN, heavy, OTHER_TOKEN), dust=(OTHER_TOKEN,))], rpc_url_for=_rpc_url_for
+    )
+    rows = _facts(db_session)
+    assert wire.receipt_calls == [_tx(88), _tx(77)]
+    assert [rows[(HOLDER, t)].delivery_count for t in (TOKEN, OTHER_TOKEN, heavy)] == [1, 2, 9]
+    assert rows[(HOLDER, heavy)].unreadable_deliveries == 9
+
+
+def test_conflicting_duplicate_cannot_publish_even_when_producer_catches_failure(db_session, wire):
+    wire.logs = [_log(token=TOKEN, holder=HOLDER, tx=i, block=CREATION + i, log_index=0) for i in range(1, 21)]
+    wire.logs.append(wire.logs[-1] | {"data": "0x" + "ff" * 32})
+    cost = delivery_shape.run_disposition(db_session, [_request()], rpc_url_for=_rpc_url_for)
+    db_session.commit()
+    assert cost.counts["scan_failed"] == 1
+    assert _facts(db_session) == {}
 
 
 # --- the protocol-reference verdict -----------------------------------------
