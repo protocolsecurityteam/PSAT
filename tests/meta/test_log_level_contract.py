@@ -109,7 +109,7 @@ ALLOW_LIST: dict[str, dict[int, str]] = {
         # process. A malformed cap is a deployment misconfiguration, not a
         # per-job partial outcome, and recording it would stamp every job's
         # stage_errors with the same process-level fact.
-        60: "Process-level env parse; a bad cap is a misconfiguration, not a per-job degradation.",
+        62: "Process-level env parse; a bad cap is a misconfiguration, not a per-job degradation.",
     },
 }
 
