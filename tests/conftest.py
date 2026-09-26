@@ -459,6 +459,21 @@ def _stub_balance_asset_sweep(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _stub_delivery_shape_rpc(monkeypatch):
+    """Balance tests must not read disposition heads/checkpoints from the wire.
+
+    Disposition owns its budgeted RPC reads independently of the asset sweep.
+    Model an unavailable head unless a test supplies its own wire; the dedicated
+    disposition fixtures override this stub and exercise the real scanner.
+    """
+
+    def _unavailable(*args, **kwargs):
+        raise RuntimeError("offline: disposition RPC unavailable")
+
+    monkeypatch.setattr("services.monitoring.delivery_shape.rpc_request", _unavailable)
+
+
+@pytest.fixture(autouse=True)
 def _clear_protocol_universe_memo():
     """Start and end every test with no memoized protocol universe.
 
