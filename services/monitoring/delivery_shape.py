@@ -232,6 +232,12 @@ class DispositionCost:
     # (``warn_degraded_once``) for the failures that repeat per holder.
     degraded: dict[str, int] = field(default_factory=dict)
     reserved: int = 0
+    # Log-only counters shared by discovery and receipt metering. They do not
+    # affect the budget or the evidence written by the scan.
+    progress_started_at: float = field(default_factory=lambda: time.monotonic(), repr=False, compare=False)
+    progress_next_at: float = field(default_factory=lambda: time.monotonic() + 60, repr=False, compare=False)
+    progress_total_pairs: int = field(default=0, repr=False, compare=False)
+    progress_partitions: int = field(default=0, repr=False, compare=False)
 
     @property
     def spent(self) -> int:
@@ -244,6 +250,28 @@ class DispositionCost:
 
     def count(self, key: str, n: int = 1) -> None:
         self.counts[key] = self.counts.get(key, 0) + n
+
+    def log_progress_if_due(self, *, chain_id: int, step: str) -> None:
+        """Emit one structured progress line per minute during long scans."""
+        now = time.monotonic()
+        if now < self.progress_next_at:
+            return
+        self.progress_next_at = now + 60
+        logger.info(
+            "disposition scan progress",
+            extra={
+                "phase": "disposition",
+                "step": step,
+                "chain_id": chain_id,
+                "elapsed_s": round(now - self.progress_started_at, 1),
+                "pairs_recorded_attempted": self.counts.get("pairs_recorded", 0),
+                "pairs_total": self.progress_total_pairs,
+                "partitions_completed": self.progress_partitions,
+                "get_logs": self.get_logs,
+                "receipts": self.receipts,
+                "request_budget": DISPOSITION_REQUEST_BUDGET,
+            },
+        )
 
 
 @dataclass(frozen=True)
@@ -400,11 +428,15 @@ class _DispositionFetcher(RpcEventLogFetcher):
         )
         self._cost = cost
         self._budget = budget
+        self._progress_chain_id = chain_id
 
     def _count_get_logs(self) -> None:
         if self._cost.spent >= self._budget:
             raise DispositionBudgetExceeded(f"disposition request budget of {self._budget} reached")
         self._cost.get_logs += 1
+        # A succession of rejected/timeout windows may never complete a
+        # partition, so the accepted-partition tick alone would stay silent.
+        self._cost.log_progress_if_due(chain_id=self._progress_chain_id, step="get_logs")
 
     def _request_logs(self, params):
         self._count_get_logs()
@@ -799,6 +831,7 @@ def scan_delivery_shape(
     cost = cost or DispositionCost()
     if not requests:
         return cost
+    cost.progress_total_pairs = sum(len(request.tokens) for request in requests)
 
     by_chain: dict[int, list[DispositionRequest]] = {}
     for request in requests:
@@ -1740,6 +1773,8 @@ def _discover(
                     entry.measured_through_hash = checkpoint
                     entry.caught_up = bool(goals[key]) and hi == to_block
                     entry.aborted = False
+                cost.progress_partitions += 1
+                cost.log_progress_if_due(chain_id=chain_id, step="get_logs")
                 lo = hi + 1
     cost.count("pairs_aborted", sum(measured[key].aborted for key in wanted))
     return False
@@ -1877,6 +1912,7 @@ def _resolve_fan_out(
                 receipts[tx] = get_transaction_receipt(
                     rpc_url, tx, chain_id=chain_id, timeout=DISPOSITION_SCAN_TIMEOUT_SECONDS, retries=0
                 )
+                cost.log_progress_if_due(chain_id=chain_id, step="receipts")
                 if receipts[tx] is None:
                     # ``get_transaction_receipt`` logs the per-call failure at
                     # DEBUG (hot path). The cycle counts it, because an unread
@@ -1910,6 +1946,7 @@ def _resolve_fan_out(
         )
         cost.count("pairs_recorded")
         cost.count(f"verdict_{shape}")
+        cost.log_progress_if_due(chain_id=chain_id, step="evidence_write")
     if exhausted:
         raise DispositionBudgetExceeded(f"disposition request budget of {DISPOSITION_REQUEST_BUDGET} reached")
 

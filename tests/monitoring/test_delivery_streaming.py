@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import random
 import resource
@@ -19,6 +20,58 @@ from services.resolution.repos import event_logs_rpc as rpc
 HOLDER = "0x" + "11" * 20
 TOKEN = "0x" + "22" * 20
 TOPICS = [[ds.TRANSFER_TOPIC0], None, [ds._pad32(HOLDER)]]
+
+
+def test_long_disposition_scan_progress_is_throttled(monkeypatch, caplog):
+    clock = [0.0]
+    monkeypatch.setattr(ds.time, "monotonic", lambda: clock[0])
+    cost = ds.DispositionCost()
+    cost.progress_total_pairs = 10
+    cost.progress_partitions = 3
+    cost.get_logs = 7
+    cost.count("pairs_recorded", 2)
+    with caplog.at_level(logging.INFO, logger=ds.logger.name):
+        clock[0] = 59.9
+        cost.log_progress_if_due(chain_id=1, step="get_logs")
+        clock[0] = 60.0
+        cost.log_progress_if_due(chain_id=1, step="get_logs")
+        cost.log_progress_if_due(chain_id=1, step="receipts")
+        clock[0] = 120.0
+        cost.log_progress_if_due(chain_id=1, step="receipts")
+
+    records = [r for r in caplog.records if r.message == "disposition scan progress"]
+    assert len(records) == 2
+    assert [r.step for r in records] == ["get_logs", "receipts"]
+    assert records[0].pairs_recorded_attempted == 2
+    assert records[0].pairs_total == 10
+    assert records[0].partitions_completed == 3
+    assert records[0].get_logs == 7
+    assert records[0].elapsed_s == 60.0
+
+
+def test_rejected_get_logs_requests_still_report_long_scan_progress(monkeypatch, caplog):
+    clock = [0.0]
+    monkeypatch.setattr(ds.time, "monotonic", lambda: clock[0])
+    cost = ds.DispositionCost()
+    fetcher = ds._DispositionFetcher(
+        "http://stub.invalid", chain_id=1, cost=cost, budget=10, max_block_range=100, min_bisect_span=1
+    )
+
+    def reject(_self, _params):
+        raise RuntimeError("upstream rejected window")
+
+    monkeypatch.setattr(rpc.RpcEventLogFetcher, "_request_logs", reject)
+    with caplog.at_level(logging.INFO, logger=ds.logger.name):
+        for moment in (0.0, 60.0):
+            clock[0] = moment
+            with pytest.raises(RuntimeError, match="upstream rejected"):
+                fetcher._request_logs([{}])
+
+    records = [r for r in caplog.records if r.message == "disposition scan progress"]
+    assert len(records) == 1
+    assert records[0].step == "get_logs"
+    assert records[0].get_logs == 2
+    assert records[0].partitions_completed == 0
 
 
 def raw_log(n: int) -> dict:
