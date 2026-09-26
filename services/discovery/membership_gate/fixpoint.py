@@ -24,7 +24,7 @@ from db.models import (
 )
 from utils.logging import record_degraded
 
-from .admission import _attempt_admission
+from .admission import _attempt_admission, defer_membership_dirty
 from .deployers import _nonlineage_corroborating_member_ids, classify_deployer, register_deployer
 from .heuristics import _w4h_stratum
 from .readers import _chain_key, _perimeter_fact, _secondary_pointer_named, principal_addresses
@@ -273,14 +273,15 @@ def evaluate(
             if deployer and _ADDRESS_RE.match(deployer)
         }
     dirty_vias |= _standing_vias_named_by_edges(session, named_addresses)
-    settled = _stratified_fixpoint(
-        session,
-        targeted,
-        dirty_via_addresses=sorted(dirty_vias),
-        changed_deployer_addresses=facts_delta.changed_deployer_addresses,
-        w4h_extra_addresses=sorted(entry_member_deployers),
-        deployer_enumerator=deployer_enumerator,
-    )
+    with defer_membership_dirty(session):
+        settled = _stratified_fixpoint(
+            session,
+            targeted,
+            dirty_via_addresses=sorted(dirty_vias),
+            changed_deployer_addresses=facts_delta.changed_deployer_addresses,
+            w4h_extra_addresses=sorted(entry_member_deployers),
+            deployer_enumerator=deployer_enumerator,
+        )
     return PromotionResult(
         targeted_contract_ids=tuple(sorted(targeted)),
         promoted_contract_ids=settled.promoted_contract_ids,

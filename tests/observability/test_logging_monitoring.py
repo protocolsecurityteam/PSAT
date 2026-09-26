@@ -15,6 +15,8 @@ from __future__ import annotations
 import logging
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 import services.monitoring as monitoring
 import services.monitoring.unified_watcher as uw
 from services.monitoring import (
@@ -23,8 +25,21 @@ from services.monitoring import (
     HEARTBEAT_PROTOCOL_TVL,
     emit_monitor_cycle,
 )
+from utils.logging import log_timed_phase
 
 _CYCLE_FIELDS = {"contracts_scanned", "blocks_scanned", "events_found", "partial", "duration_ms"}
+
+
+def test_failed_phase_can_log_duration_when_stage_artifact_is_unavailable(caplog):
+    logger = logging.getLogger("test.failed_phase")
+    with caplog.at_level(logging.INFO, logger=logger.name):
+        with pytest.raises(RuntimeError, match="database down"):
+            with log_timed_phase(logger, "membership_gate_intake", log_failure=True):
+                raise RuntimeError("database down")
+    record = next(r for r in caplog.records if r.message.startswith("phase ended with error"))
+    assert record.phase == "membership_gate_intake"
+    assert record.outcome == "failed"
+    assert record.duration_ms >= 0
 
 
 def test_emit_monitor_cycle_running_heartbeat_and_info(caplog):
@@ -178,7 +193,7 @@ def test_sweep_budget_exceeded_is_logged_with_its_cost(caplog):
     cost = asset_sweep.SweepCost(get_logs=1500)
 
     class _Blown:
-        def fetch_logs(self, **_kwargs):
+        def visit_logs(self, **_kwargs):
             raise asset_sweep.SweepBudgetExceeded("sweep request budget of 1500 reached")
 
     with caplog.at_level(logging.WARNING, logger="services.monitoring.asset_sweep"):

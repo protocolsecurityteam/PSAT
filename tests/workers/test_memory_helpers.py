@@ -8,13 +8,18 @@ pressure message fires once per threshold and resets cleanly.
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
+import time
 
 from utils.memory import (
     _vmrss_bytes,
     cache_pressure_message,
+    cgroup_anon_file_bytes,
     cgroup_memory_max_bytes,
     count_sibling_python_procs,
     current_rss_bytes,
+    descendant_rss_samples,
     mb,
     reset_cache_pressure_state,
     rss_bytes_for_pid,
@@ -37,6 +42,21 @@ def test_rss_bytes_for_pid_live_and_dead():
     assert rss_bytes_for_pid(2**31 - 1) == 0
 
 
+def test_descendant_sampler_sees_worker_owned_subprocess():
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(2)"])
+    try:
+        for _ in range(20):
+            samples = descendant_rss_samples(os.getpid())
+            if any(pid == child.pid and rss > 0 for pid, _ppid, _name, _start, rss in samples):
+                break
+            time.sleep(0.01)
+        else:
+            assert os.name != "posix", "live child was not sampled"
+    finally:
+        child.terminate()
+        child.wait(timeout=3)
+
+
 def test_vmrss_bytes_parses_fixture_and_tolerates_missing(tmp_path):
     status = tmp_path / "status"
     status.write_text("Name:\tanvil\nVmPeak:\t  200000 kB\nVmRSS:\t   13648 kB\n")
@@ -51,6 +71,9 @@ def test_cgroup_helpers_dont_crash_on_dev_host():
     # On a dev host without cgroup v2 these all return None or 0.
     # On a Fly machine they return ints. Both are fine.
     cgroup_memory_max_bytes()  # no exception
+    anon, file = cgroup_anon_file_bytes()
+    assert anon is None or anon >= 0
+    assert file is None or file >= 0
     assert isinstance(count_sibling_python_procs(), int)
 
 

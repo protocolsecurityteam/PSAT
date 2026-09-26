@@ -11,6 +11,11 @@ nothing".
 
 from __future__ import annotations
 
+import hashlib
+import json
+import os
+import subprocess
+import sys
 from decimal import Decimal
 
 import pytest
@@ -75,7 +80,7 @@ from utils.balance_status import (
     SWEEP_STATUS_FAILED,
 )
 
-HOLDER = "0x00000000000000000000000000000000000ho1de"[:42].ljust(42, "1")
+HOLDER = "0x00000000000000000000000000000000000a01de"
 TOKEN = "0x000000000000000000000000000000000000c0de"
 NFT = "0x000000000000000000000000000000000000f731"
 
@@ -89,13 +94,14 @@ def _addr_n(n: int) -> str:
 
 
 def _log(*, emitter: str, topics: list[str], block: int = 5, data: str = "0x" + "0" * 64) -> dict:
+    identity = hashlib.sha256((emitter + repr(topics) + data).encode()).hexdigest()
     return {
         "address": emitter,
         "topics": topics,
         "data": data,
-        "transactionHash": "0x" + "11" * 32,
+        "transactionHash": "0x" + identity,
         "blockHash": "0x" + "22" * 32,
-        "logIndex": "0x0",
+        "logIndex": hex(int(identity[:8], 16)),
         "blockNumber": hex(block),
         "transactionIndex": "0x0",
     }
@@ -164,6 +170,87 @@ class _StubRpc:
         if isinstance(answer, Exception):
             raise answer
         return answer
+
+
+def test_streaming_sweep_keeps_budget_across_both_recipient_passes(monkeypatch):
+    calls = _StubRpc([[]])
+    monkeypatch.setattr("services.resolution.repos.event_logs_rpc.rpc_request", calls)
+    monkeypatch.setattr(A, "SWEEP_REQUEST_BUDGET", 1)
+    cost = SweepCost()
+    _erc20, _typed, failure = A.discover_recipient_assets(
+        [HOLDER], rpc_url="http://rpc.invalid", chain_id=1, from_block=0, to_block=9, cost=cost
+    )
+    assert len(calls.calls) == cost.get_logs == 1
+    assert failure is not None and "budget" in failure
+
+
+def test_streaming_sweep_charges_transport_retry(monkeypatch):
+    calls = 0
+
+    def rpc(_url, _method, _params, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            kwargs["before_retry"]()
+        return []
+
+    monkeypatch.setattr("services.resolution.repos.event_logs_rpc.rpc_request", rpc)
+    monkeypatch.setattr(A, "SWEEP_REQUEST_BUDGET", 2)
+    cost = SweepCost()
+    _erc20, _typed, failure = A.discover_recipient_assets(
+        [HOLDER], rpc_url="http://rpc.invalid", chain_id=1, from_block=0, to_block=9, cost=cost
+    )
+    assert calls == 1
+    assert cost.get_logs == 2
+    assert failure is not None and "budget" in failure
+
+
+def test_streaming_sweep_memory_does_not_scale_with_window_count():
+    """The old accumulated list retained every decoded log across windows."""
+    code = r"""
+import json, resource, sys, tracemalloc
+from services.monitoring import asset_sweep as A
+from services.resolution.repos import event_logs_rpc
+holder = "0x" + "a" * 40
+token = "0x" + "b" * 40
+padded = "0x" + holder[2:].rjust(64, "0")
+token_topic = "0x" + token[2:].rjust(64, "0")
+def rpc(_url, _method, params, **_kwargs):
+    query = params[0]
+    if len(query["topics"]) == 4:
+        return []
+    block = int(query["fromBlock"], 16)
+    return [{"address": token, "topics": [A.TRANSFER_TOPIC0, token_topic, padded],
+             "data": "0x" + "0" * 64, "transactionHash": "0x" + f"{block * 2500 + i:064x}",
+             "blockHash": "0x" + f"{block:064x}", "logIndex": hex(i),
+             "transactionIndex": hex(i), "blockNumber": hex(block)} for i in range(2500)]
+event_logs_rpc.rpc_request = rpc
+windows = int(sys.argv[1])
+tracemalloc.start()
+cost = A.SweepCost()
+assets, typed, failure = A.discover_recipient_assets(
+    [holder], rpc_url="http://rpc.invalid", chain_id=1,
+    from_block=0, to_block=windows * 1000000 - 1, cost=cost)
+assert failure is None and assets[holder] == {token} and not typed[holder]
+assert cost.get_logs == 2 * windows
+print(json.dumps({"traced_peak": tracemalloc.get_traced_memory()[1],
+                  "rss_peak_kb": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}))
+"""
+
+    def profile(windows):
+        env = dict(os.environ, PSAT_MEMORY_SAMPLE_INTERVAL_S="0")
+        result = subprocess.run(
+            [sys.executable, "-c", code, str(windows)],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        return json.loads(result.stdout)
+
+    one, eight = profile(1), profile(8)
+    assert eight["traced_peak"] - one["traced_peak"] < 15 * 1024 * 1024
+    assert eight["rss_peak_kb"] - one["rss_peak_kb"] < 24 * 1024
 
 
 class TestBatchFailureIsIsolatedToItsCause:
@@ -262,6 +349,23 @@ class TestSweepFailsClosed:
         outcome, _rpc, _cost = self._sweep(monkeypatch, [RuntimeError("query timed out")], to_block=MIN_BISECT_SPAN - 1)
         assert outcome.status == SWEEP_FAILED
         assert outcome.failure_reason and "query timed out" in outcome.failure_reason
+
+    def test_a_late_second_pass_failure_never_publishes_the_first_pass(self, monkeypatch):
+        first = _log(emitter=TOKEN, topics=[TRANSFER_TOPIC0, _pad(TOKEN), _pad(HOLDER)])
+        outcome, _rpc, cost = self._sweep(
+            monkeypatch, [[first], RuntimeError("second recipient pass rejected")], to_block=MIN_BISECT_SPAN - 1
+        )
+        assert cost.get_logs == 2
+        assert outcome.status == SWEEP_FAILED
+        assert outcome.swept_through_block is None
+        assert outcome.assets == ()
+
+    def test_a_malformed_accepted_page_is_not_a_complete_scan(self, monkeypatch):
+        malformed = _log(emitter=TOKEN, topics=[TRANSFER_TOPIC0, _pad(TOKEN), _pad(HOLDER)])
+        malformed["removed"] = True
+        outcome, _rpc, _cost = self._sweep(monkeypatch, [[malformed]], to_block=MIN_BISECT_SPAN - 1)
+        assert outcome.status == SWEEP_FAILED
+        assert outcome.swept_through_block is None
 
     def test_the_sweep_passes_its_own_result_cap_and_never_the_env(self, monkeypatch):
         # Setting PSAT_GETLOGS_RESULT_CAP in-process would change the DURABLE
@@ -1017,6 +1121,7 @@ class TestTypedReceiptIdRecovery:
                     _log(
                         emitter=NFT,
                         topics=[TRANSFER_SINGLE_TOPIC0, _pad(NFT), _pad(NFT), _pad(HOLDER)],
+                        block=900,
                         data=_single_data(7, 1),
                     )
                 ],

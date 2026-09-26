@@ -504,36 +504,39 @@ def _gate_intake(session: Session, job: Job, contract: Contract | None, request:
     if not tags:
         discovered_by = request.get("discovered_by")
         tags = [discovered_by] if isinstance(discovered_by, str) and discovered_by else [""]
-    for tag in tags:
-        # The gate consumes the W5 assertion at nomination (invariant 14);
-        # the witness upsert is idempotent across tags.
-        gate.nominate(
-            session, contract=contract, protocol_id=protocol_id, source_tag=tag, human_assertion=human_assertion
-        )
-
-    _structural_intake(session, job, contract, request)
+    with log_timed_phase(logger, "gate_nomination", log_failure=True):
+        for tag in tags:
+            # The gate consumes the W5 assertion at nomination (invariant 14);
+            # the witness upsert is idempotent across tags.
+            gate.nominate(
+                session, contract=contract, protocol_id=protocol_id, source_tag=tag, human_assertion=human_assertion
+            )
+        _structural_intake(session, job, contract, request)
 
     registry_row: ProtocolDeployer | None = None
     reprobe_sink: set[int] = set()
     deployer = (contract.deployer or "").lower() or None
     if deployer:
-        registry_row = _register_protocol_deployer(
-            session,
-            protocol_id=protocol_id,
-            deployer=deployer,
-            contract_address=(contract.address or "").lower() or None,
-            reprobe_sink=reprobe_sink,
-        )
-        if registry_row is not None:
-            _write_deployer_witness(session, contract=contract, registry_row=registry_row)
+        with log_timed_phase(logger, "gate_deployer_registration", log_failure=True):
+            registry_row = _register_protocol_deployer(
+                session,
+                protocol_id=protocol_id,
+                deployer=deployer,
+                contract_address=(contract.address or "").lower() or None,
+                reprobe_sink=reprobe_sink,
+            )
+            if registry_row is not None:
+                _write_deployer_witness(session, contract=contract, registry_row=registry_row)
 
-    if needs_probe(session, contract):
-        result = gate.probe(session, contract)
-        record_code_witness(session, contract=contract, protocol_id=protocol_id, probe_result=result)
-    seeded = gate.seed_llama_witness(session, contract=contract)
+    with log_timed_phase(logger, "gate_probe", log_failure=True):
+        if needs_probe(session, contract):
+            result = gate.probe(session, contract)
+            record_code_witness(session, contract=contract, protocol_id=protocol_id, probe_result=result)
+        seeded = gate.seed_llama_witness(session, contract=contract)
 
-    promoted = gate.promote(session, contract=contract, protocol_id=protocol_id)
-    session.commit()
+    with log_timed_phase(logger, "gate_promotion_commit", log_failure=True):
+        promoted = gate.promote(session, contract=contract, protocol_id=protocol_id)
+        session.commit()
 
     # A demote-only registration (registry_row None, sink non-empty) is still
     # a deployer fact change the cascade must see. A W6 seeded onto an
@@ -546,18 +549,21 @@ def _gate_intake(session: Session, job: Job, contract: Contract | None, request:
         recheck_contract_ids=(contract.id,) if seeded and not promoted else (),
     )
     if delta != gate.FactsDelta():
-        cascade = gate.evaluate(session, delta, deployer_enumerator=session_deployer_enumerator(session))
-        session.commit()
+        with log_timed_phase(logger, "gate_cascade_commit", log_failure=True):
+            cascade = gate.evaluate(session, delta, deployer_enumerator=session_deployer_enumerator(session))
+            session.commit()
         # Enqueue after the commit (create_job commits). Residual: a crash in
         # between delays the pass to the next event, never loses it — selection
         # ranks the full unanalyzed set.
-        enqueue_selection_for_promotions(
-            session,
-            ((contract.id,) if promoted else ()) + cascade.promoted_contract_ids,
-            reason="membership_promotion",
-        )
+        with log_timed_phase(logger, "gate_selection_enqueue", log_failure=True):
+            enqueue_selection_for_promotions(
+                session,
+                ((contract.id,) if promoted else ()) + cascade.promoted_contract_ids,
+                reason="membership_promotion",
+            )
         reprobe_sink.update(cascade.reprobe_contract_ids)
-    _consume_reprobes(session, sorted(reprobe_sink), context=f"gate_intake:{job.id}", exclude={contract.id})
+    with log_timed_phase(logger, "gate_reprobes", log_failure=True):
+        _consume_reprobes(session, sorted(reprobe_sink), context=f"gate_intake:{job.id}", exclude={contract.id})
 
 
 def _sweep_candidates(session: Session, chain_id: int) -> list[Contract]:
@@ -1093,7 +1099,9 @@ class DiscoveryWorker(BaseWorker):
         job.analysis_schema_version = ANALYSIS_SCHEMA_VERSION
 
         self.update_detail(session, job, "Storing source files")
-        store_source_files(session, job.id, sources)
+        with log_timed_phase(logger, "source_storage", files=len(sources)):
+            store_source_files(session, job.id, sources)
+        self.update_detail(session, job, "Evaluating membership")
 
         raw_evm = result.get("EVMVersion", "") or ""
         evm_version = raw_evm if raw_evm.lower() not in ("", "default") else "shanghai"
@@ -1178,12 +1186,14 @@ class DiscoveryWorker(BaseWorker):
             )
             session.add(contract)
             gate_row = contract
-        session.commit()
+        with log_timed_phase(logger, "discovery_contract_commit"):
+            session.commit()
 
         # Membership gate intake for the row this fetch touched: nominate,
         # earn witnesses, probe (event 1), attempt promotion. Promotion and
         # demotion mark the enrollment + scoring dirty queues inside the gate.
-        _gate_intake(session, job, gate_row, request)
+        with log_timed_phase(logger, "membership_gate_intake", log_failure=True):
+            _gate_intake(session, job, gate_row, request)
 
         if not job.name:
             job.name = f"{contract_name}_{address[2:10]}"
