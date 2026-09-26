@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Sequence
 
@@ -140,6 +142,14 @@ class FetchedEventLog:
     raw: dict[str, Any] | None = field(default=None, compare=False)
 
 
+class RpcScanCancelled(RuntimeError):
+    """A local scan limit, not an upstream rejection that bisection can fix."""
+
+
+class RpcRangeTooLarge(RuntimeError):
+    """Retry a smaller partition; no events from this partition were accepted."""
+
+
 class RpcEventLogFetcher:
     def __init__(
         self,
@@ -150,6 +160,7 @@ class RpcEventLogFetcher:
         chain_id: int | None = None,
         result_cap: int | None = None,
         timeout: float | None = None,
+        before_retry: Callable[[], None] | None = None,
     ) -> None:
         self.rpc_url = rpc_url
         self.max_block_range = max(1, max_block_range)
@@ -172,6 +183,7 @@ class RpcEventLogFetcher:
         # extent of a scan is a claim about the chain, never about how long this
         # process waited.
         self.timeout = timeout
+        self.before_retry = before_retry
 
     def fetch_logs(
         self,
@@ -228,6 +240,80 @@ class RpcEventLogFetcher:
             out.extend(self._fetch_range(address_filter, topic_filter, start, end, window_stats))
             start = end + 1
         return out
+
+    def visit_logs(
+        self,
+        *,
+        consume: Callable[[FetchedEventLog], None],
+        event_address: str | Sequence[str] | None = None,
+        topics: Sequence[Any],
+        from_block: int,
+        to_block: int,
+        bisect: bool = True,
+    ) -> None:
+        """Visit capped, validated pages without retaining the complete history.
+
+        Callback effects are provisional until this method returns. Callers must
+        discard the affected scan on any exception, including callback failures.
+        The legacy list API intentionally keeps its existing decoding contract.
+
+        ``bisect=False`` leaves subdivision to a caller coordinating multiple
+        filters over the same partition. That caller must supply a single window.
+        """
+        if self.result_cap is None or self.result_cap <= 0:
+            raise ValueError("streaming a complete scan requires an explicit result cap")
+        if not bisect and to_block - from_block + 1 > self.max_block_range:
+            raise ValueError("a coordinated partition must fit in one request window")
+        address = event_address if isinstance(event_address, str) or event_address is None else list(event_address)
+        filters = normalize_topic_filter(topics)
+        if address is None and not any(filters):
+            raise ValueError("eth_getLogs filter constrains neither address nor any topic position")
+        addresses = (
+            None if address is None else {a.lower() for a in ([address] if isinstance(address, str) else address)}
+        )
+        start = from_block
+        while start <= to_block:
+            end = min(to_block, start + self.max_block_range - 1)
+            pending = [(start, end)]
+            while pending:
+                lo, hi = pending.pop()
+                query: dict[str, Any] = {"topics": filters, "fromBlock": hex(lo), "toBlock": hex(hi)}
+                if address is not None:
+                    query["address"] = address
+                rejected = False
+                page: Any = None
+                # Leave the exception handlers before descending: tracebacks may
+                # retain response bodies. Only the range stack survives a reject.
+                try:
+                    try:
+                        page = self._request_logs([query])
+                    except RpcClientTimeout:
+                        time.sleep(TIMEOUT_RETRY_BACKOFF_SECONDS)
+                        page = self._request_logs([query])
+                except RpcScanCancelled:
+                    raise
+                except RuntimeError:
+                    if hi - lo + 1 <= self.min_bisect_span:
+                        raise
+                    rejected = True
+                if not rejected:
+                    if not isinstance(page, list):
+                        raise RuntimeError("eth_getLogs returned a malformed page")
+                    if len(page) >= self.result_cap:
+                        page = None
+                        if hi - lo + 1 <= self.min_bisect_span:
+                            raise RuntimeError("eth_getLogs reached the result cap at the bisect floor")
+                        rejected = True
+                if rejected:
+                    if not bisect:
+                        raise RpcRangeTooLarge("eth_getLogs requires a smaller partition")
+                    mid = lo + (hi - lo + 1) // 2 - 1
+                    pending.extend(((mid + 1, hi), (lo, mid)))
+                    continue
+                assert isinstance(page, list)
+                _visit_page(page, lo, hi, addresses, filters, consume)
+                page = None
+            start = end + 1
 
     def _fetch_range(
         self,
@@ -312,6 +398,15 @@ class RpcEventLogFetcher:
         # Two branches rather than one call passing ``timeout=None``: a fetcher
         # that declared no ceiling issues the SAME call it always has, argument
         # for argument, so nothing about the landed callers' request changes.
+        if self.before_retry is not None:
+            return rpc_request(
+                self.rpc_url,
+                "eth_getLogs",
+                params,
+                chain_id=self.chain_id,
+                timeout=self.timeout,
+                before_retry=self.before_retry,
+            )
         if self.timeout is None:
             return rpc_request(self.rpc_url, "eth_getLogs", params, chain_id=self.chain_id)
         return rpc_request(self.rpc_url, "eth_getLogs", params, chain_id=self.chain_id, timeout=self.timeout)
@@ -356,6 +451,64 @@ class RpcEventLogFetcher:
         return self._fetch_range(event_address, topics, from_block, mid, window_stats) + self._fetch_range(
             event_address, topics, mid + 1, to_block, window_stats
         )
+
+
+def _visit_page(
+    page: list[Any],
+    lo: int,
+    hi: int,
+    addresses: set[str] | None,
+    filters: list[list[str] | None],
+    consume: Callable[[FetchedEventLog], None],
+) -> None:
+    # Identical logs cannot cross validated, disjoint range/filter partitions
+    # of one canonical history. Identity state therefore lives for ONE page.
+    # Validate conflicts before exposing any event, including duplicates beyond
+    # the consumer's bounded sample. Keep references, not copies of raw payloads.
+    identities: dict[tuple[bytes, int], FetchedEventLog] = {}
+    positions: dict[tuple[int, int], tuple[bytes, int]] = {}
+    blocks: dict[int, bytes] = {}
+    for raw in page:
+        decoded = _validate_scan_log(raw, lo, hi, addresses, filters)
+        identity = (decoded.tx_hash, decoded.log_index)
+        position = (decoded.block_number, decoded.log_index)
+        if identity in identities and identities[identity] != decoded:
+            raise RuntimeError("eth_getLogs returned conflicting duplicate identities")
+        if position in positions and positions[position] != identity:
+            raise RuntimeError("eth_getLogs returned conflicting log positions")
+        if decoded.block_number in blocks and blocks[decoded.block_number] != decoded.block_hash:
+            raise RuntimeError("eth_getLogs mixed block histories")
+        identities[identity] = decoded
+        positions[position] = identity
+        blocks[decoded.block_number] = decoded.block_hash
+    for decoded in identities.values():
+        consume(decoded)
+
+
+def _validate_scan_log(
+    raw: Any, lo: int, hi: int, addresses: set[str] | None, filters: list[list[str] | None]
+) -> FetchedEventLog:
+    decoded = _decode_log(raw)
+    if decoded is None:
+        raise RuntimeError("eth_getLogs returned an undecodable log")
+    valid = (
+        lo <= decoded.block_number <= hi
+        and decoded.log_index >= 0
+        and decoded.transaction_index >= 0
+        and _hex_to_bytes(decoded.address, 20) is not None
+        and (addresses is None or decoded.address in addresses)
+        and raw.get("removed", False) is False
+        and len(decoded.topics) <= 4
+        and all(_hex_to_bytes(t, 32) is not None for t in decoded.topics)
+        and isinstance(raw.get("data"), str)
+        and re.fullmatch(r"0x(?:[0-9a-fA-F]{64})*", raw["data"]) is not None
+        and all(
+            slot is None or (i < len(decoded.topics) and decoded.topics[i] in slot) for i, slot in enumerate(filters)
+        )
+    )
+    if not valid:
+        raise RuntimeError("eth_getLogs returned a malformed, removed, or out-of-filter log")
+    return decoded
 
 
 class RpcHeadBlockFetcher:

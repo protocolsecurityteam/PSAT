@@ -148,20 +148,31 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - name: Start minio
         run: |
-          docker run -d --name minio \
-            -p 9000:9000 \
-            -e MINIO_ROOT_USER=psat-minio \
-            -e MINIO_ROOT_PASSWORD=psat-minio-secret \
-            quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z server /data
+          # The upstream container images are no longer publicly pullable.
+          # Use the same official release, pinned independently of its download URL.
+          minio_dir=$(mktemp -d "$RUNNER_TEMP/psat-minio.XXXXXX")
+          curl -fSL --retry 3 --connect-timeout 10 --max-time 120 \
+            https://github.com/minio/minio/releases/download/RELEASE.2025-09-07T16-13-09Z/minio.linux-amd64.RELEASE.2025-09-07T16-13-09Z \
+            -o "$minio_dir/minio"
+          echo "7c5bd8512c6e966455b1d198209358b2d191c77a83ab377c4073281065fb855f  $minio_dir/minio" | sha256sum --check
+          chmod +x "$minio_dir/minio"
+          MINIO_ROOT_USER=psat-minio MINIO_ROOT_PASSWORD=psat-minio-secret \
+            "$minio_dir/minio" server "$minio_dir/data" \
+            --address 127.0.0.1:9000 --console-address 127.0.0.1:9001 \
+            > "$minio_dir/minio.log" 2>&1 &
+          minio_pid=$!
           for i in {1..30}; do
             if curl -sf http://localhost:9000/minio/health/live >/dev/null; then
               echo "minio ready"
               exit 0
             fi
+            if ! kill -0 "$minio_pid" 2>/dev/null; then
+              break
+            fi
             sleep 1
           done
           echo "minio failed to become ready"
-          docker logs minio
+          cat "$minio_dir/minio.log"
           exit 1
       - run: uv sync --dev
       - run: forge --version
