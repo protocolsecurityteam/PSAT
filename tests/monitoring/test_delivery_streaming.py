@@ -1,4 +1,4 @@
-"""Memory and exactness regressions for disposition's page visitor and spool."""
+"""Memory and exactness regressions for the bounded partition scanner."""
 
 from __future__ import annotations
 
@@ -14,7 +14,6 @@ import pytest
 import requests
 
 from services.monitoring import delivery_shape as ds
-from services.monitoring.delivery_spool import DeliverySpool, DeliverySpoolError
 from services.resolution.repos import event_logs_rpc as rpc
 
 HOLDER = "0x" + "11" * 20
@@ -200,63 +199,51 @@ def test_transport_and_fetcher_retries_share_getlogs_budget(budget, monkeypatch)
     assert cost.get_logs == len(calls) == budget
 
 
-def test_exact_spool_deduplicates_outside_sample_and_filters_cursor(tmp_path, monkeypatch):
-    monkeypatch.setenv("PSAT_DISPOSITION_SPOOL_DIR", str(tmp_path))
-    with DeliverySpool() as spool:
-        indices = list(range(100))
-        random.Random(7).shuffle(indices)
-        for pair in range(3):
-            for n in indices + [99, 98, 97, 1]:
-                log = rpc._decode_log(raw_log(n))
-                assert log is not None
-                spool.add(pair, log, meterable=True)
-        for pair in range(3):
-            count, sample = spool.summary(pair, cursor=80 + pair, keep=8)
-            assert count == 19 - pair
-            assert [r["block"] for r in sample] == list(range(81 + pair, 89 + pair))
-    assert list(tmp_path.iterdir()) == []
+def test_page_dedup_is_exact_beyond_sample_and_independent_of_order():
+    indices = list(range(100))
+    random.Random(7).shuffle(indices)
+    rows = [raw_log(n) for n in indices + [99, 98, 97, 1]]
+    measured = {(HOLDER, TOKEN): ds._Measured(0, 99, cursor=80)}
+    visit(
+        fetcher_for(lambda params: rows, cap=200),
+        lambda log: ds._attribute(log, recipient_topic=2, wanted={(HOLDER, TOKEN)}, measured=measured),
+        end=99,
+    )
+    entry = measured[(HOLDER, TOKEN)]
+    assert entry.delivery_count == 19
+    assert [r["block"] for r in entry.deliveries] == list(range(81, 89))
 
 
 @pytest.mark.parametrize(
-    "change", [{"data": "0x" + "f" * 64}, {"blockNumber": "0x2"}, {"transactionHash": "0x" + "ff" * 32}]
+    "change",
+    [
+        {"data": "0x" + "f" * 64},
+        {"blockNumber": "0x2"},
+        {"transactionHash": "0x" + "ff" * 32},
+        {"blockHash": "0x" + "ff" * 32},
+    ],
 )
-def test_conflicting_identity_or_position_discards_group(change):
-    with DeliverySpool() as spool:
-        first, second = (rpc._decode_log(r) for r in [raw_log(1), raw_log(1) | change])
-        assert first is not None and second is not None
-        spool.add(0, first, meterable=True)
-        with pytest.raises(DeliverySpoolError):
-            spool.add(0, second, meterable=True)
+def test_conflicting_identity_or_position_refuses_entire_page(change):
+    consumed = []
+    with pytest.raises(RuntimeError, match="conflict"):
+        visit(fetcher_for(lambda params: [raw_log(1), raw_log(1) | change]), consumed.append)
+    assert consumed == []
 
 
-def test_spool_quota_failure_and_cleanup(tmp_path, monkeypatch):
-    monkeypatch.setenv("PSAT_DISPOSITION_SPOOL_DIR", str(tmp_path))
-    monkeypatch.setattr(DeliverySpool, "MAX_BYTES", 32768)
-    with pytest.raises(DeliverySpoolError):
-        with DeliverySpool() as spool:
-            for n in range(2000):
-                log = rpc._decode_log(raw_log(n))
-                assert log is not None
-                spool.add(0, log, meterable=True)
-    assert list(tmp_path.iterdir()) == []
+def test_coordinated_partition_rejection_never_emits_partial_children():
+    consumed = []
+    calls = []
 
+    def wire(params):
+        calls.append(params)
+        return [raw_log(i) for i in range(4)]
 
-def test_spool_cleanup_on_cancellation(tmp_path, monkeypatch):
-    monkeypatch.setenv("PSAT_DISPOSITION_SPOOL_DIR", str(tmp_path))
-    with pytest.raises(KeyboardInterrupt):
-        with DeliverySpool():
-            if os.name == "posix":
-                assert list(tmp_path.iterdir()) == []  # also safe on SIGKILL
-            raise KeyboardInterrupt()
-    assert list(tmp_path.iterdir()) == []
-
-
-@pytest.mark.skipif(not Path("/dev/shm").is_dir(), reason="requires Linux tmpfs")
-def test_spool_refuses_memory_backed_filesystem(monkeypatch):
-    monkeypatch.setenv("PSAT_DISPOSITION_SPOOL_DIR", "/dev/shm")
-    with pytest.raises(DeliverySpoolError, match="memory-backed"):
-        with DeliverySpool():
-            pytest.fail("tmpfs would recreate the memory problem")
+    f = fetcher_for(wire)
+    with pytest.raises(rpc.RpcRangeTooLarge):
+        f.visit_logs(
+            event_address=[TOKEN], topics=TOPICS, from_block=0, to_block=9, consume=consumed.append, bisect=False
+        )
+    assert consumed == [] and len(calls) == 1
 
 
 def memory_run(n: int) -> dict:
@@ -300,7 +287,6 @@ def test_history_growth_does_not_grow_discovery_heap(tmp_path):
     for n in (80000, 240000):
         env = os.environ | {
             "PYTHONPATH": str(Path(__file__).resolve().parents[2]),
-            "PSAT_DISPOSITION_SPOOL_DIR": str(tmp_path),
         }
         completed = subprocess.run(
             [sys.executable, str(Path(__file__).resolve()), str(n)],

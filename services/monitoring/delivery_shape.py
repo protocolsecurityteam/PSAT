@@ -59,21 +59,20 @@ import os
 import threading
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import func as _sql_func
-from sqlalchemy import or_
+from sqlalchemy import or_, text
 from sqlalchemy.orm import Session
 
-from services.clients.rpc import get_transaction_receipt
+from services.clients.rpc import get_transaction_receipt, rpc_request
 from services.monitoring import asset_sweep, warn_degraded_once
 from services.monitoring.asset_sweep import (
     TRANSFER_BATCH_TOPIC0,
     TRANSFER_SINGLE_TOPIC0,
     TRANSFER_TOPIC0,
-    SweepCost,
     SweepOutcome,
     _addr_from_topic,
     _pad32,
@@ -85,14 +84,19 @@ from services.monitoring.delivery_evidence import (
     load_delivery_evidence,
     record_delivery_evidence,
 )
-from services.monitoring.delivery_spool import DeliverySpool
-from services.resolution.repos.event_logs_rpc import FetchedEventLog, RpcEventLogFetcher, RpcScanCancelled
+from services.resolution.repos.event_logs_rpc import (
+    FetchedEventLog,
+    RpcEventLogFetcher,
+    RpcRangeTooLarge,
+    RpcScanCancelled,
+)
 from utils.balance_status import (
     ASSET_SET_SOURCE_CHAIN_LOG_SWEEP,
     ASSET_SET_STATUS_AT_PAGE_CAP,
     DELIVERY_FAN_OUT_BASIS_RECEIPT,
     DELIVERY_FAN_OUT_BASIS_UNREADABLE,
     DELIVERY_SHAPE_HAS_DIRECT_DELIVERY,
+    DELIVERY_SHAPE_NOT_DETERMINED,
     TOKEN_REFERENCE_ABSENT_FROM_UNIVERSE,
     TOKEN_REFERENCE_IN_UNIVERSE,
     TOKEN_REFERENCE_NOT_DETERMINED,
@@ -115,6 +119,9 @@ DISPOSITION_REQUEST_BUDGET = int(os.getenv("PSAT_DISPOSITION_REQUEST_BUDGET", "5
 # single pair rather than the windows of every pair in it.
 DISPOSITION_TOKEN_BATCH = 40
 DISPOSITION_HOLDER_BATCH = 40
+# Preflight must leave budget for discovery and receipts. Shared checkpoint
+# heights are memoized and do not count again toward this per-cycle allowance.
+DISPOSITION_CHECKPOINT_READS = 40
 
 # Windows one cycle will page through before it stops and RECORDS what it proved.
 #
@@ -224,6 +231,12 @@ class DispositionCost:
     # Degraded external calls, by kind; also the warn-once-then-DEBUG cursor
     # (``warn_degraded_once``) for the failures that repeat per holder.
     degraded: dict[str, int] = field(default_factory=dict)
+    reserved: int = 0
+
+    @property
+    def spent(self) -> int:
+        """Budget already spent or reserved for closing the snapshot."""
+        return self.total + self.reserved
 
     @property
     def total(self) -> int:
@@ -270,6 +283,55 @@ class DispositionBudgetExceeded(RpcScanCancelled):
     """The cycle's request ceiling was reached; bisection cannot restore budget."""
 
 
+class DispositionHistoryChanged(RuntimeError):
+    """No evidence from this snapshot may be published."""
+
+
+class _ChainSnapshot:
+    """Canonical RPC snapshot, not a proof against a dishonest RPC provider.
+
+    A stable head hash anchors its ancestors under the coherent canonical-node
+    contract. Persisted cursor hashes detect reorganizations between cycles;
+    checking the head again rejects reorganizations during this cycle. Hashes
+    are shared across pairs, and one budget slot is reserved for the final read.
+    """
+
+    def __init__(self, rpc_url: str, chain_id: int, head: int, cost: DispositionCost):
+        self.rpc_url, self.chain_id, self.head, self.cost = rpc_url, chain_id, head, cost
+        self.hashes: dict[int, str] = {}
+        self.invalidated: set[tuple[int, str, str]] = set()
+
+    def block_hash(self, number: int, *, refresh: bool = False) -> str:
+        if not refresh and number in self.hashes:
+            return self.hashes[number]
+        if self.cost.spent >= DISPOSITION_REQUEST_BUDGET:
+            raise DispositionBudgetExceeded("disposition block checkpoint budget exhausted")
+        self.cost.head_reads += 1
+        raw = rpc_request(
+            self.rpc_url,
+            "eth_getBlockByNumber",
+            [hex(number), False],
+            chain_id=self.chain_id,
+            retries=0,
+            timeout=DISPOSITION_SCAN_TIMEOUT_SECONDS,
+        )
+        try:
+            value = raw["hash"]
+            if int(raw["number"], 16) != number or not isinstance(value, str) or not value.startswith("0x"):
+                raise ValueError("wrong block")
+            if len(value) != 66 or len(bytes.fromhex(value[2:])) != 32:
+                raise ValueError("invalid block hash")
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError("canonical block checkpoint unavailable") from exc
+        if not refresh:
+            self.hashes[number] = value.lower()
+        return value.lower()
+
+    def verify(self) -> None:
+        if self.block_hash(self.head, refresh=True) != self.hashes[self.head]:
+            raise DispositionHistoryChanged("canonical history changed during disposition scan")
+
+
 @dataclass(frozen=True)
 class _Pair:
     """One (holder, token) measurement, with the window it is measured over."""
@@ -306,6 +368,7 @@ class _Measured:
     delivery_count: int = 0
     deliveries: list[dict[str, Any]] = field(default_factory=list)
     aborted: bool = False
+    measured_through_hash: str | None = None
 
 
 class _DispositionFetcher(RpcEventLogFetcher):
@@ -339,7 +402,7 @@ class _DispositionFetcher(RpcEventLogFetcher):
         self._budget = budget
 
     def _count_get_logs(self) -> None:
-        if self._cost.total >= self._budget:
+        if self._cost.spent >= self._budget:
             raise DispositionBudgetExceeded(f"disposition request budget of {self._budget} reached")
         self._cost.get_logs += 1
 
@@ -745,13 +808,24 @@ def scan_delivery_shape(
     if not by_chain:
         return cost
 
-    stored = load_delivery_evidence(
-        session,
-        [(int(r.chain_id), r.holder_address) for group in by_chain.values() for r in group],
-    )
-
     for chain_id in sorted(by_chain):
         chain_requests = by_chain[chain_id]
+        # Monitor and resolution workers can ask about the same account. Hold
+        # ownership through the producer's commit, including absent rows and
+        # reorg resets, so two scanners cannot fold the same range twice.
+        owned = {
+            holder
+            for holder in sorted({r.holder_address for r in chain_requests})
+            if session.execute(
+                text("SELECT pg_try_advisory_xact_lock(hashtext('delivery_shape'), hashtext(:key))"),
+                {"key": f"{chain_id}:{holder}"},
+            ).scalar()
+        }
+        chain_requests = [r for r in chain_requests if r.holder_address in owned]
+        if not chain_requests:
+            cost.count("chains_busy")
+            continue
+        stored = load_delivery_evidence(session, [(chain_id, holder) for holder in owned])
         rpc_url = rpc_url_for(chain_id)
         if not rpc_url:
             logger.warning(
@@ -760,28 +834,55 @@ def scan_delivery_shape(
             )
             cost.count("chains_unscanned")
             continue
-        head_cost = SweepCost()
-        head = asset_sweep.sweep_head_block(rpc_url, chain_id=chain_id, cost=head_cost)
-        cost.head_reads += head_cost.head_reads
-        if head is None:
+        if cost.spent >= DISPOSITION_REQUEST_BUDGET:
+            break
+        cost.head_reads += 1
+        try:
+            raw_head = rpc_request(rpc_url, "eth_blockNumber", [], chain_id=chain_id, retries=0)
+            head = max(0, int(raw_head, 16) - asset_sweep.SWEEP_FINALITY_MARGIN)
+        except (RuntimeError, TypeError, ValueError):
             logger.warning(
                 "disposition: head unknown; the chain's holders are not scanned",
                 extra={"chain_id": chain_id, "holders": len(chain_requests)},
             )
             cost.count("chains_unscanned")
             continue
+        snapshot = _ChainSnapshot(rpc_url, chain_id, head, cost)
         try:
-            _scan_chain(
-                session,
-                chain_id=chain_id,
-                rpc_url=rpc_url,
-                head=head,
-                requests=chain_requests,
-                stored=stored,
-                cost=cost,
-                protocol_id=protocol_id,
-            )
+            cost.reserved += 1
+            try:
+                snapshot.block_hash(head)
+                budget_error = None
+                # The producer still owns the outer transaction. A failed final
+                # anchor check rolls back ALL writes from this chain snapshot.
+                with session.begin_nested():
+                    priority = _token_priority(
+                        session, chain_id=chain_id, requests=chain_requests, protocol_id=protocol_id
+                    )
+                    chain_stored, eligible = _check_history(session, chain_requests, stored, snapshot, priority)
+                    try:
+                        _scan_chain(
+                            session,
+                            chain_id=chain_id,
+                            rpc_url=rpc_url,
+                            head=head,
+                            requests=eligible,
+                            stored=chain_stored,
+                            cost=cost,
+                            priority=priority,
+                            snapshot=snapshot,
+                        )
+                    except DispositionBudgetExceeded as exc:
+                        budget_error = exc
+                    cost.reserved -= 1
+                    snapshot.verify()
+                snapshot.invalidated.clear()
+                if budget_error is not None:
+                    raise budget_error
+            finally:
+                cost.reserved = 0
         except DispositionBudgetExceeded as exc:
+            _invalidate_history(session, snapshot.invalidated)
             logger.warning(
                 "disposition: request budget exhausted on chain %s (%s) — remaining holders were NOT scanned and "
                 "wrote NO evidence; cost so far %d getLogs + %d receipts + %d head + %d creation",
@@ -793,7 +894,103 @@ def scan_delivery_shape(
                 cost.creation_lookups,
             )
             break
+        except DispositionHistoryChanged as exc:
+            # A rolled-back snapshot must not leave an old positive visible
+            # after we have observed that its history may no longer be valid.
+            _invalidate_history(
+                session, {(r.chain_id, r.holder_address, t.lower()) for r in chain_requests for t in r.tokens}
+            )
+            logger.warning("disposition: snapshot changed", extra={"chain_id": chain_id, "error": str(exc)})
+            cost.count("snapshots_rejected")
+        except RuntimeError as exc:
+            _invalidate_history(session, snapshot.invalidated)
+            logger.warning("disposition: snapshot not accepted", extra={"chain_id": chain_id, "error": str(exc)})
+            cost.count("snapshots_rejected")
     return cost
+
+
+def _invalidate_history(session: Session, keys: set[tuple[int, str, str]]) -> None:
+    """Withdraw disproven/unanchored claims even if their rebuild rolled back."""
+    from db.models import TokenDeliveryEvidence
+
+    for chain, holder, token in sorted(keys):
+        session.query(TokenDeliveryEvidence).filter_by(
+            chain_id=chain, holder_address=holder, token_address=token
+        ).update(
+            {"measured_through_hash": None, "delivery_shape": DELIVERY_SHAPE_NOT_DETERMINED, "caught_up": False},
+            synchronize_session="fetch",
+        )
+
+
+def _check_history(session, requests, stored, snapshot: _ChainSnapshot, priority):
+    """Rebuild unanchored/reorganized aggregates; never append to another fork.
+
+    A lower upstream head is not evidence of a reorg. Refuse that snapshot
+    rather than delete a checkpoint we cannot yet verify.
+
+    Bound uncached reads before discovery; actual scan work precedes gate-only
+    checks. Deferred pairs remain untouched and do not enter the carried path.
+    This is a work bound, not fairness against indefinitely failing priorities.
+    """
+    from db.models import TokenDeliveryEvidence
+
+    checked = dict(stored)
+    keys = {(r.chain_id, r.holder_address, token.lower()) for r in requests for token in r.tokens}
+    balances = {(r.chain_id, r.holder_address, t.lower()): raw for r in requests for t, raw in r.balances}
+
+    def order(key):
+        fact = checked.get(key)
+        needs_scan = (
+            fact is None
+            or getattr(fact, "measured_through_hash", None) is None
+            or (not _is_settled(fact) and _worth_scanning(fact, balances.get(key)))
+        )
+        return (not needs_scan, priority.get(key[2], 2), key[1], key[2])
+
+    allowance = min(
+        DISPOSITION_CHECKPOINT_READS,
+        max(0, (DISPOSITION_REQUEST_BUDGET - snapshot.cost.spent - DISPOSITION_MAX_DELIVERIES_PER_PAIR) // 2),
+    )
+    eligible: set[tuple[int, str, str]] = set()
+    for key in sorted(keys, key=order):
+        fact = checked.get(key)
+        if fact is None:
+            eligible.add(key)
+            continue
+        if fact.measured_through_block > snapshot.head:
+            raise RuntimeError("RPC head is behind a stored delivery checkpoint")
+        checkpoint = getattr(fact, "measured_through_hash", None)
+        if checkpoint is not None and fact.measured_through_block not in snapshot.hashes:
+            if allowance == 0:
+                continue
+            allowance -= 1
+        eligible.add(key)
+        if checkpoint is not None and snapshot.block_hash(fact.measured_through_block) == checkpoint:
+            continue
+        snapshot.invalidated.add(key)
+        session.query(TokenDeliveryEvidence).filter(
+            TokenDeliveryEvidence.chain_id == key[0],
+            TokenDeliveryEvidence.holder_address == key[1],
+            TokenDeliveryEvidence.token_address == key[2],
+        ).delete(synchronize_session="fetch")
+        checked.pop(key)
+        snapshot.cost.count("pairs_history_reset")
+    snapshot.cost.count("pairs_checkpoint_deferred", len(keys - eligible))
+    filtered = []
+    for request in requests:
+        tokens = tuple(t for t in request.tokens if (request.chain_id, request.holder_address, t.lower()) in eligible)
+        if tokens:
+            selected = {t.lower() for t in tokens}
+            filtered.append(
+                replace(
+                    request,
+                    tokens=tokens,
+                    typed_tokens=tuple(t for t in request.typed_tokens if t.lower() in selected),
+                    balances=tuple((t, raw) for t, raw in request.balances if t.lower() in selected),
+                    priced_dust_tokens=tuple(t for t in request.priced_dust_tokens if t.lower() in selected),
+                )
+            )
+    return checked, filtered
 
 
 # --- the universe memo ------------------------------------------------------
@@ -1181,7 +1378,8 @@ def _scan_chain(
     requests: Sequence[DispositionRequest],
     stored: Mapping[tuple[int, str, str], Any],
     cost: DispositionCost,
-    protocol_id: int | None = None,
+    priority: Mapping[str, int],
+    snapshot: _ChainSnapshot,
 ) -> None:
     """Decide what this cycle scans, scan a bounded slice of it, and record.
 
@@ -1226,6 +1424,8 @@ def _scan_chain(
             cost.count("pairs_considered")
             fact = stored.get((chain_id, request.holder_address, token))
             if fact is None:
+                if cost.spent >= DISPOSITION_REQUEST_BUDGET:
+                    raise DispositionBudgetExceeded("disposition creation lookup budget exhausted")
                 cost.count("pairs_fresh")
                 fresh.append(
                     _Pair(
@@ -1261,9 +1461,13 @@ def _scan_chain(
         max_block_range=max_block_range,
         min_bisect_span=min_bisect_span,
     )
-    priority = _token_priority(session, chain_id=chain_id, requests=requests, protocol_id=protocol_id)
 
     measured: dict[tuple[str, str], _Measured] = {}
+    # Discovery may spend every remaining request after a valid prefix. Keep
+    # enough to meter at least one light pair, or that same prefix can be
+    # discovered and discarded forever. Shared receipts make this conservative.
+    receipt_reserve = DISPOSITION_MAX_DELIVERIES_PER_PAIR if fresh or forward else 0
+    cost.reserved += receipt_reserve
     starved = False
     for group in (fresh, forward):
         if not group or starved:
@@ -1309,6 +1513,7 @@ def _scan_chain(
             measured=measured,
             priority=priority,
             cost=cost,
+            snapshot=snapshot,
         )
     for pair in carried:
         fact = stored.get((chain_id, pair.holder, pair.token))
@@ -1323,6 +1528,7 @@ def _scan_chain(
                 # A carried pair was not scanned; claiming the head for it would
                 # widen a published all-quantifier over unread blocks.
                 measured_through=int(fact.measured_through_block),
+                measured_through_hash=fact.measured_through_hash,
             ),
         )
 
@@ -1330,6 +1536,7 @@ def _scan_chain(
     # whose windows were proven whole reaches the writer before the budget error
     # leaves this function, so a cycle that ran out of requests still made
     # forward progress instead of repeating itself next hour.
+    cost.reserved -= receipt_reserve
     _resolve_fan_out(
         session,
         chain_id=chain_id,
@@ -1364,8 +1571,10 @@ def _slice_windows(pairs: Sequence[_Pair], *, cost: DispositionCost) -> int:
     holders = _chunk_count(len({p.holder for p in pairs}), DISPOSITION_HOLDER_BATCH)
     tokens = _chunk_count(len({p.token for p in pairs}), DISPOSITION_TOKEN_BATCH)
     typed = _chunk_count(len({p.token for p in pairs if p.typed}), DISPOSITION_TOKEN_BATCH)
-    passes = max(1, holders * (tokens + typed))
-    remaining = max(0, DISPOSITION_REQUEST_BUDGET - cost.total)
+    # One endpoint hash per partition as well as its signature passes. This
+    # estimate only sizes slices; the fetcher and reservations enforce budget.
+    passes = max(1, holders * (2 * tokens + typed))
+    remaining = max(0, DISPOSITION_REQUEST_BUDGET - cost.spent)
     return max(1, min(DISPOSITION_SLICE_WINDOWS, remaining // passes))
 
 
@@ -1455,198 +1664,91 @@ def _discover(
     measured: dict[tuple[str, str], _Measured],
     priority: Mapping[str, int],
     cost: DispositionCost,
+    snapshot: _ChainSnapshot | None = None,
 ) -> bool:
-    # Keep discovery off the ORM session: a failed page or spool must never
-    # leave an incrementally advanced evidence row for the producer to commit.
-    with DeliverySpool() as spool:
-        pair_ids = {key: i for i, key in enumerate(sorted({(p.holder, p.token) for p in pairs}))}
-        starved = _discover_passes(
-            fetcher,
-            pairs,
-            chain_id=chain_id,
-            from_block=from_block,
-            to_block=to_block,
-            measured=measured,
-            priority=priority,
-            cost=cost,
-            spool=spool,
-            pair_ids=pair_ids,
-        )
-        for key, pair_id in pair_ids.items():
-            entry = measured[key]
-            if not entry.aborted:
-                entry.delivery_count, entry.deliveries = spool.summary(
-                    pair_id,
-                    cursor=entry.cursor,
-                    keep=max(DELIVERY_ENTRIES_RETAINED, DISPOSITION_MAX_DELIVERIES_PER_PAIR),
-                )
-        return starved
+    """Fold complete, disjoint partitions into exact counts and eight samples.
 
+    A work unit covers one holder/token batch and one block range, including
+    BOTH signature passes for typed tokens. Nothing from an incomplete unit
+    escapes staging. Earlier completed units remain publishable on budget
+    exhaustion. A capped/rejected unit shrinks before retrying, with no disk
+    state and no whole-scan identity set.
 
-def _discover_passes(
-    fetcher: RpcEventLogFetcher,
-    pairs: Sequence[_Pair],
-    *,
-    chain_id: int,
-    from_block: int,
-    to_block: int,
-    measured: dict[tuple[str, str], _Measured],
-    priority: Mapping[str, int],
-    cost: DispositionCost,
-    spool: DeliverySpool,
-    pair_ids: Mapping[tuple[str, str], int],
-) -> bool:
-    """Fill *measured* with every delivery the requested pairs received.
-
-    The window is the caller's — it owns both the earliest start the group needs
-    and the slice boundary this cycle stops at. Tokens are batched in
-    ``priority`` order, so when a budget cuts the queue the tokens most likely to
-    be real are the ones already on the far side of the cut.
-
-    Returns whether the budget died here. IT IS NOT RAISED, and that is the
-    point: a budget death used to propagate out of the whole chain scan before
-    any evidence was written, so a chain that could not finish discovery in one
-    cycle wrote NOTHING and the next cycle repeated it identically — measured on
-    optimism, 4,974 requests an hour, forever. A pair is a claim on its own, and
-    the pairs whose windows WERE proven whole are recorded. What the death costs
-    is exactly the pairs it touched: the in-flight window's, and every window
-    that never ran, all marked aborted so they publish nothing.
+    Exact page-local dedup assumes an internally consistent canonical RPC
+    history. The chain-level checkpoint/snapshot guard detects reorganizations;
+    this is not a verifier for arbitrary fabricated cross-page identities.
     """
     wanted = {(p.holder, p.token) for p in pairs}
-
+    typed = {(p.holder, p.token) for p in pairs if p.typed}
+    goals = {key: measured[key].caught_up for key in wanted}
+    for key in wanted:
+        measured[key].aborted = True
     holders = sorted({p.holder for p in pairs})
     tokens = _ordered(sorted({p.token for p in pairs}), priority)
-    typed_tokens = _ordered(sorted({p.token for p in pairs if p.typed}), priority)
-
-    passes: list[tuple[list[str], list[str], list[Any], int]] = []
     for holder_batch in _chunks(holders, DISPOSITION_HOLDER_BATCH):
         padded = [_pad32(h) for h in holder_batch]
         for token_batch in _chunks(tokens, DISPOSITION_TOKEN_BATCH):
-            passes.append((holder_batch, token_batch, [[TRANSFER_TOPIC0], None, padded], _RECIPIENT_TOPIC_ERC20))
-        # ERC-1155's recipient sits in topic 3, so it needs its own pass or the
-        # scan sees 1155 sends and misses 1155 RECEIPTS. Inert on today's
-        # population (no typed receipt in it), and implemented anyway so a
-        # future one is measured rather than silently unmeasured.
-        for token_batch in _chunks(typed_tokens, DISPOSITION_TOKEN_BATCH):
-            passes.append(
-                (
-                    holder_batch,
-                    token_batch,
-                    [list(_ERC1155_TOPIC0S), None, None, padded],
-                    _RECIPIENT_TOPIC_ERC1155,
-                )
-            )
-
-    for index, (holder_batch, token_batch, topics, recipient_topic) in enumerate(passes):
-        try:
-            _run_pass(
-                fetcher,
-                event_address=token_batch,
-                topics=topics,
-                recipient_topic=recipient_topic,
-                from_block=from_block,
-                to_block=to_block,
-                wanted=wanted,
-                holder_batch=holder_batch,
-                token_batch=token_batch,
-                measured=measured,
-                chain_id=chain_id,
-                cost=cost,
-                spool=spool,
-                pair_ids=pair_ids,
-            )
-        except DispositionBudgetExceeded as exc:
-            logger.warning(
-                "disposition: request budget died mid-discovery; the passes that had completed are recorded, "
-                "the rest are aborted",
-                extra={
-                    "chain_id": chain_id,
-                    "from_block": from_block,
-                    "to_block": to_block,
-                    "passes_completed": index,
-                    "passes": len(passes),
-                    "error": str(exc),
-                },
-            )
-            # A pair covered by a pass that never ran has a delivery set nobody
-            # enumerated, which is a different claim rather than a smaller one.
-            for pending_holders, pending_tokens, _, _ in passes[index:]:
-                _abort(pending_holders, pending_tokens, measured, cost=cost)
-            return True
+            keys = wanted.intersection((h, t) for h in holder_batch for t in token_batch)
+            typed_tokens = sorted({t for h, t in keys.intersection(typed)})
+            lo = from_block
+            # Retain a successful smaller span for the rest of this batch:
+            # do not repeatedly pay for the same oversized parent.
+            span = fetcher.max_block_range
+            while lo <= to_block:
+                hi = min(to_block, lo + span - 1)
+                staged = {key: _Measured(from_block, hi, cursor=measured[key].cursor) for key in keys}
+                passes = [(token_batch, [[TRANSFER_TOPIC0], None, padded], _RECIPIENT_TOPIC_ERC20)]
+                if typed_tokens:
+                    passes.append(
+                        (typed_tokens, [list(_ERC1155_TOPIC0S), None, None, padded], _RECIPIENT_TOPIC_ERC1155)
+                    )
+                try:
+                    checkpoint = snapshot.block_hash(hi) if snapshot is not None else None
+                    for addresses, topics, recipient_topic in passes:
+                        fetcher.visit_logs(
+                            event_address=addresses,
+                            topics=topics,
+                            from_block=lo,
+                            to_block=hi,
+                            bisect=False,
+                            consume=lambda log, slot=recipient_topic: _attribute(
+                                log, recipient_topic=slot, wanted=keys, measured=staged
+                            ),
+                        )
+                except RpcRangeTooLarge:
+                    span = max(1, (hi - lo + 1) // 2)
+                    continue
+                except DispositionBudgetExceeded:
+                    cost.count("partitions_budget_stopped")
+                    return True
+                except RuntimeError as exc:
+                    # Malformed/conflicting pages and a refusal at the floor are
+                    # not observations. Keep only this batch's complete prefix.
+                    logger.warning(
+                        "disposition: partition incomplete; preserving only completed extents",
+                        extra={"chain_id": chain_id, "from_block": lo, "to_block": hi, "error": str(exc)},
+                    )
+                    cost.count("partitions_incomplete")
+                    break
+                for key, addition in staged.items():
+                    entry = measured[key]
+                    if hi <= entry.cursor:
+                        continue
+                    entry.delivery_count += addition.delivery_count
+                    entry.deliveries = _earliest(entry.deliveries + addition.deliveries)
+                    entry.measured_through = hi
+                    entry.measured_through_hash = checkpoint
+                    entry.caught_up = bool(goals[key]) and hi == to_block
+                    entry.aborted = False
+                lo = hi + 1
+    cost.count("pairs_aborted", sum(measured[key].aborted for key in wanted))
     return False
 
 
-def _abort(
-    holder_batch: Sequence[str],
-    token_batch: Sequence[str],
-    measured: Mapping[tuple[str, str], _Measured],
-    *,
-    cost: DispositionCost,
-) -> None:
-    """Mark every pair a window covered unproven, so it publishes nothing."""
-    for holder in holder_batch:
-        for token in token_batch:
-            entry = measured.get((holder, token))
-            if entry is not None and not entry.aborted:
-                entry.aborted = True
-                cost.count("pairs_aborted")
-
-
-def _run_pass(
-    fetcher: RpcEventLogFetcher,
-    *,
-    event_address: list[str],
-    topics: list[Any],
-    recipient_topic: int,
-    from_block: int,
-    to_block: int,
-    wanted: set[tuple[str, str]],
-    holder_batch: Sequence[str],
-    token_batch: Sequence[str],
-    measured: dict[tuple[str, str], _Measured],
-    chain_id: int,
-    cost: DispositionCost,
-    spool: DeliverySpool,
-    pair_ids: Mapping[tuple[str, str], int],
-) -> None:
-    if not event_address:
-        return
-    try:
-        fetcher.visit_logs(
-            event_address=list(event_address),
-            topics=topics,
-            from_block=from_block,
-            to_block=to_block,
-            consume=lambda log: _attribute(
-                log,
-                recipient_topic=recipient_topic,
-                wanted=wanted,
-                measured=measured,
-                spool=spool,
-                pair_ids=pair_ids,
-            ),
-        )
-    except DispositionBudgetExceeded:
-        raise
-    except RuntimeError as exc:
-        # The fetcher bisects on reject and on a page that reaches the cap;
-        # reaching here means it hit the bisect floor and could not prove the
-        # window whole. Every pair the window covered is aborted, because the
-        # logs that DID come back cannot be given a completeness they lack.
-        logger.warning(
-            "disposition: window could not be proven whole; its pairs publish nothing this cycle",
-            extra={
-                "chain_id": chain_id,
-                "from_block": from_block,
-                "to_block": to_block,
-                "holders": len(holder_batch),
-                "tokens": len(token_batch),
-                "exc_type": type(exc).__name__,
-                "error": str(exc),
-            },
-        )
-        _abort(holder_batch, token_batch, measured, cost=cost)
-        return
+def _earliest(deliveries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(deliveries, key=lambda r: (r["block"], r["log_index"]))[
+        : max(DELIVERY_ENTRIES_RETAINED, DISPOSITION_MAX_DELIVERIES_PER_PAIR)
+    ]
 
 
 def _attribute(
@@ -1655,26 +1757,27 @@ def _attribute(
     recipient_topic: int,
     wanted: set[tuple[str, str]],
     measured: dict[tuple[str, str], _Measured],
-    spool: DeliverySpool,
-    pair_ids: Mapping[tuple[str, str], int],
 ) -> None:
     if len(log.topics) <= recipient_topic:
         return
-    holder = _addr_from_topic(log.topics[recipient_topic])
-    token = (log.address or "").lower()
-    key = (holder, token)
+    key = (_addr_from_topic(log.topics[recipient_topic]), (log.address or "").lower())
     if key not in wanted:
         return
-    entry = measured.get(key)
-    if entry is None or entry.aborted:
+    entry = measured[key]
+    if entry.aborted or log.block_number <= entry.cursor:
         return
-    topic0 = log.topics[0].lower()
-    # ERC-20 and ERC-721 share this topic0 and are told apart by topic COUNT: a
-    # 721 indexes the token id as a fourth topic. The fan-out meter counts
-    # same-token 3-topic transfer LOGS, so a 4-topic delivery is outside what it
-    # can measure and is carried as an unreadable delivery rather than dropped.
-    meterable = topic0 == TRANSFER_TOPIC0 and len(log.topics) == 3
-    spool.add(pair_ids[key], log, meterable=meterable)
+    entry.delivery_count += 1
+    entry.deliveries = _earliest(
+        entry.deliveries
+        + [
+            {
+                "tx": "0x" + log.tx_hash.hex(),
+                "log_index": log.log_index,
+                "block": log.block_number,
+                "meterable": log.topics[0].lower() == TRANSFER_TOPIC0 and len(log.topics) == 3,
+            }
+        ]
+    )
 
 
 def _ordered(tokens: Sequence[str], priority: Mapping[str, int]) -> list[str]:
@@ -1767,12 +1870,12 @@ def _resolve_fan_out(
                 continue
             tx = record["tx"]
             if tx not in receipts:
-                if cost.total >= DISPOSITION_REQUEST_BUDGET:
+                if cost.spent >= DISPOSITION_REQUEST_BUDGET:
                     exhausted = True
                     break
                 cost.receipts += 1
                 receipts[tx] = get_transaction_receipt(
-                    rpc_url, tx, chain_id=chain_id, timeout=DISPOSITION_SCAN_TIMEOUT_SECONDS
+                    rpc_url, tx, chain_id=chain_id, timeout=DISPOSITION_SCAN_TIMEOUT_SECONDS, retries=0
                 )
                 if receipts[tx] is None:
                     # ``get_transaction_receipt`` logs the per-call failure at
@@ -1803,6 +1906,7 @@ def _resolve_fan_out(
             observed_balance_raw=entry.observed_balance_raw,
             caught_up=entry.caught_up,
             counts=cost.counts,
+            measured_through_hash=entry.measured_through_hash,
         )
         cost.count("pairs_recorded")
         cost.count(f"verdict_{shape}")

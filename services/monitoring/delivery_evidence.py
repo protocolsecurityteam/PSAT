@@ -137,6 +137,7 @@ class DeliveryFact:
     basis: str
     caught_up: bool = True
     observed_balance_raw: str | None = None
+    measured_through_hash: str | None = None
 
     @property
     def is_airdrop_only(self) -> bool:
@@ -322,6 +323,7 @@ def record_delivery_evidence(
     observed_balance_raw: str | None = None,
     caught_up: bool | None = None,
     counts: dict[str, int] | None = None,
+    measured_through_hash: str | None = None,
 ) -> str:
     """Accrete one pair's evidence. Returns the shape the row now publishes.
 
@@ -368,6 +370,8 @@ def record_delivery_evidence(
     """
     from db.models import TokenDeliveryEvidence
 
+    if measured_through_hash is not None and measured_through_block < scanned_from_block:
+        raise ValueError("a delivery checkpoint must anchor the actual measured extent")
     holder = str(holder_address or "").lower()
     token = str(token_address or "").lower()
     elided = _Tally(count=max(0, int(unmetered_elided)), unreadable=max(0, int(unmetered_elided)), min_fan_out=None)
@@ -392,6 +396,7 @@ def record_delivery_evidence(
                 token_address=token,
                 scanned_from_block=from_block,
                 measured_through_block=through,
+                measured_through_hash=measured_through_hash,
                 deliveries=_retained(list(deliveries)),
                 delivery_count=tally.count,
                 unreadable_deliveries=tally.unreadable,
@@ -468,6 +473,11 @@ def record_delivery_evidence(
             _bump(counts, "verdicts_changed")
     _set(row, "delivery_shape", shape)
     _set(row, "measured_through_block", through)
+    if measured_through_hash is not None and int(measured_through_block) == through:
+        _set(row, "measured_through_hash", measured_through_hash)
+    elif through > cursor:
+        # A hash for the old cursor cannot anchor a newly extended extent.
+        _set(row, "measured_through_hash", None)
     if caught_up is not None:
         _set(row, "caught_up", bool(caught_up))
     # Re-derived every pass, from the row's own columns as they now stand.
@@ -537,6 +547,7 @@ def load_delivery_evidence(
                     TokenDeliveryEvidence.fan_out_threshold_k,
                     TokenDeliveryEvidence.scanned_from_block,
                     TokenDeliveryEvidence.measured_through_block,
+                    TokenDeliveryEvidence.measured_through_hash,
                     TokenDeliveryEvidence.basis,
                     TokenDeliveryEvidence.caught_up,
                     TokenDeliveryEvidence.observed_balance_raw,
@@ -558,6 +569,7 @@ def load_delivery_evidence(
                 fan_out_threshold_k=int(row.fan_out_threshold_k),
                 scanned_from_block=int(row.scanned_from_block),
                 measured_through_block=int(row.measured_through_block),
+                measured_through_hash=row.measured_through_hash,
                 basis=str(row.basis or ""),
                 caught_up=bool(row.caught_up),
                 observed_balance_raw=(None if row.observed_balance_raw is None else str(row.observed_balance_raw)),
