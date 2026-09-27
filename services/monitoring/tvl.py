@@ -531,6 +531,7 @@ def refresh_contract_balances(
         # population, once per cycle: the universe assembly behind it is an
         # object-storage read no presentation path can afford to repeat.
         protocol_id=protocol_id,
+        detached_scan=True,
     )
     # Delivery evidence and protocol reference are independent chain facts.
     # Commit each proven prefix before the later balance/snapshot write so a

@@ -961,6 +961,159 @@ def _invalidate_history(session: Session, keys: set[tuple[int, str, str]]) -> No
         )
 
 
+def _claim_disposition_snapshot(
+    session: Session,
+    *,
+    chain_id: int,
+    holders: Sequence[str],
+    stored: Mapping[tuple[int, str, str], Any],
+) -> bool:
+    """Lock the holders and reject a scan whose input changed during RPC."""
+    for holder in holders:
+        if not session.execute(
+            text("SELECT pg_try_advisory_xact_lock(hashtext('delivery_shape'), hashtext(:key))"),
+            {"key": f"{chain_id}:{holder}"},
+        ).scalar():
+            return False
+    return load_delivery_evidence(session, [(chain_id, holder) for holder in holders]) == stored
+
+
+def scan_delivery_shape_detached(
+    session: Session,
+    requests: Sequence[DispositionRequest],
+    *,
+    rpc_url_for: Callable[[int], str | None],
+    cost: DispositionCost | None = None,
+    protocol_id: int | None = None,
+) -> DispositionCost:
+    """TVL scan with no checked-out DB connection during historical RPC work.
+
+    Observe immutable evidence in a short transaction, then compare it again
+    under holder advisory locks before publishing. A concurrent writer causes
+    this observation to be discarded; the next cycle reads its newer cursor.
+    """
+    from db.models import TokenDeliveryEvidence
+
+    cost = cost or DispositionCost()
+    by_chain: dict[int, list[DispositionRequest]] = {}
+    for request in requests:
+        if request.holder_address and request.tokens:
+            by_chain.setdefault(int(request.chain_id), []).append(request)
+    if not by_chain:
+        return cost
+    if cost.scan_deadline_at is None and DISPOSITION_SCAN_WALL_SECONDS > 0:
+        cost.scan_deadline_at = time.monotonic() + DISPOSITION_SCAN_WALL_SECONDS
+    overall_deadline = cost.scan_deadline_at
+    chains = sorted(by_chain)
+
+    for chain_index, chain_id in enumerate(chains):
+        if overall_deadline is not None:
+            remaining = overall_deadline - time.monotonic()
+            if remaining <= 0:
+                cost.count("scan_time_budget_stopped")
+                break
+            cost.scan_deadline_at = time.monotonic() + remaining / (len(chains) - chain_index)
+        chain_requests = by_chain[chain_id]
+        holders = sorted({r.holder_address for r in chain_requests})
+        rpc_url = rpc_url_for(chain_id)
+        if not rpc_url:
+            cost.count("chains_unscanned")
+            continue
+
+        # These are DeliveryFact values, not live ORM rows. commit() returns
+        # the checked-out connection before the first historical RPC request.
+        stored = load_delivery_evidence(session, [(chain_id, holder) for holder in holders])
+        priority = _token_priority(session, chain_id=chain_id, requests=chain_requests, protocol_id=protocol_id)
+        session.commit()
+        snapshot: _ChainSnapshot | None = None
+        staged: list[dict[str, Any]] = []
+        budget_error: DispositionBudgetExceeded | None = None
+        try:
+            cost.check_scan_deadline()
+            cost.head_reads += 1
+            raw_head = rpc_request(rpc_url, "eth_blockNumber", [], chain_id=chain_id, retries=0)
+            head = max(0, int(raw_head, 16) - asset_sweep.SWEEP_FINALITY_MARGIN)
+            snapshot = _ChainSnapshot(rpc_url, chain_id, head, cost)
+            cost.reserved += 1
+            snapshot.block_hash(head)
+            checked, eligible = _check_history(None, chain_requests, stored, snapshot, priority)
+            try:
+                _scan_chain(
+                    None,
+                    chain_id=chain_id,
+                    rpc_url=rpc_url,
+                    head=head,
+                    requests=eligible,
+                    stored=checked,
+                    cost=cost,
+                    priority=priority,
+                    snapshot=snapshot,
+                    staged=staged,
+                )
+            except DispositionBudgetExceeded as exc:
+                budget_error = exc
+            cost.reserved = 0
+            snapshot.verify()
+        except DispositionHistoryChanged:
+            # A reorg can invalidate an old positive even though this pass may
+            # publish none of its replacement. Withdraw it in a short txn.
+            if _claim_disposition_snapshot(session, chain_id=chain_id, holders=holders, stored=stored):
+                _invalidate_history(
+                    session, {(r.chain_id, r.holder_address, t.lower()) for r in chain_requests for t in r.tokens}
+                )
+                session.commit()
+            else:
+                cost.count("publication_conflicts")
+                session.rollback()
+            cost.count("snapshots_rejected")
+            continue
+        except (DispositionBudgetExceeded, RuntimeError, TypeError, ValueError) as exc:
+            session.rollback()
+            if snapshot is not None and snapshot.invalidated:
+                if _claim_disposition_snapshot(session, chain_id=chain_id, holders=holders, stored=stored):
+                    _invalidate_history(session, snapshot.invalidated)
+                    session.commit()
+                else:
+                    cost.count("publication_conflicts")
+                    session.rollback()
+            logger.warning("disposition: snapshot not accepted", extra={"chain_id": chain_id, "error": str(exc)})
+            cost.count("snapshots_rejected")
+            continue
+        finally:
+            cost.reserved = 0
+
+        assert snapshot is not None
+        try:
+            # Lock only the publication transaction. The evidence comparison
+            # is a CAS: even a new row for an initially absent pair invalidates
+            # this observation before any of its writes are applied.
+            if not _claim_disposition_snapshot(session, chain_id=chain_id, holders=holders, stored=stored):
+                cost.count("publication_conflicts")
+                session.rollback()
+                continue
+            for key in snapshot.invalidated:
+                session.query(TokenDeliveryEvidence).filter_by(
+                    chain_id=key[0], holder_address=key[1], token_address=key[2]
+                ).delete(synchronize_session="fetch")
+            for evidence in staged:
+                shape = record_delivery_evidence(session, **evidence)
+                cost.count("pairs_recorded")
+                cost.count(f"verdict_{shape}")
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        if budget_error is not None:
+            logger.warning(
+                "disposition: scan budget exhausted on chain %s (%s); published proven prefix",
+                chain_id,
+                budget_error,
+            )
+            if overall_deadline is None or time.monotonic() < cost.scan_deadline_at:
+                break
+    return cost
+
+
 def _check_history(session, requests, stored, snapshot: _ChainSnapshot, priority):
     """Rebuild unanchored/reorganized aggregates; never append to another fork.
 
@@ -1007,11 +1160,12 @@ def _check_history(session, requests, stored, snapshot: _ChainSnapshot, priority
         if checkpoint is not None and snapshot.block_hash(fact.measured_through_block) == checkpoint:
             continue
         snapshot.invalidated.add(key)
-        session.query(TokenDeliveryEvidence).filter(
-            TokenDeliveryEvidence.chain_id == key[0],
-            TokenDeliveryEvidence.holder_address == key[1],
-            TokenDeliveryEvidence.token_address == key[2],
-        ).delete(synchronize_session="fetch")
+        if session is not None:
+            session.query(TokenDeliveryEvidence).filter(
+                TokenDeliveryEvidence.chain_id == key[0],
+                TokenDeliveryEvidence.holder_address == key[1],
+                TokenDeliveryEvidence.token_address == key[2],
+            ).delete(synchronize_session="fetch")
         checked.pop(key)
         snapshot.cost.count("pairs_history_reset")
     snapshot.cost.count("pairs_checkpoint_deferred", len(keys - eligible))
@@ -1340,6 +1494,7 @@ def run_disposition(
     *,
     rpc_url_for: Callable[[int], str | None],
     protocol_id: int | None = None,
+    detached_scan: bool = False,
 ) -> DispositionCost:
     """The phase as a PRODUCER calls it: it can never fail the cycle.
 
@@ -1365,6 +1520,8 @@ def run_disposition(
             try:
                 written = record_protocol_reference(session, protocol_id=protocol_id, requests=requests)
             except Exception as exc:
+                if detached_scan:
+                    session.rollback()
                 logger.warning(
                     "disposition: protocol reference pass failed; every token stays not_determined",
                     extra={"protocol_id": protocol_id, "exc_type": type(exc).__name__, "error": str(exc)},
@@ -1373,8 +1530,18 @@ def run_disposition(
             else:
                 cost.count("reference_tokens_recorded", written)
         try:
-            scan_delivery_shape(session, requests, rpc_url_for=rpc_url_for, cost=cost, protocol_id=protocol_id)
+            if detached_scan:
+                # Commit the reference pass before the historical RPC scan.
+                # The detached path manages its own short read/write transactions.
+                session.commit()
+                scan_delivery_shape_detached(
+                    session, requests, rpc_url_for=rpc_url_for, cost=cost, protocol_id=protocol_id
+                )
+            else:
+                scan_delivery_shape(session, requests, rpc_url_for=rpc_url_for, cost=cost, protocol_id=protocol_id)
         except Exception as exc:
+            if detached_scan:
+                session.rollback()
             logger.warning(
                 "disposition scan failed; balances are unaffected and the pairs stay not_determined",
                 extra={
@@ -1409,7 +1576,7 @@ def disposition_cost_note(cost: DispositionCost) -> str:
 
 
 def _scan_chain(
-    session: Session,
+    session: Session | None,
     *,
     chain_id: int,
     rpc_url: str,
@@ -1419,6 +1586,7 @@ def _scan_chain(
     cost: DispositionCost,
     priority: Mapping[str, int],
     snapshot: _ChainSnapshot,
+    staged: list[dict[str, Any]] | None = None,
 ) -> None:
     """Decide what this cycle scans, scan a bounded slice of it, and record.
 
@@ -1584,6 +1752,7 @@ def _scan_chain(
         max_block_range=max_block_range,
         cost=cost,
         priority=priority,
+        staged=staged,
     )
     if starved:
         if cost.scan_deadline_at is not None and time.monotonic() >= cost.scan_deadline_at:
@@ -1827,7 +1996,7 @@ def _ordered(tokens: Sequence[str], priority: Mapping[str, int]) -> list[str]:
 
 
 def _resolve_fan_out(
-    session: Session,
+    session: Session | None,
     *,
     chain_id: int,
     rpc_url: str,
@@ -1835,6 +2004,7 @@ def _resolve_fan_out(
     max_block_range: int,
     cost: DispositionCost,
     priority: Mapping[str, int],
+    staged: list[dict[str, Any]] | None = None,
 ) -> None:
     """Meter each delivery, then record the pairs that were measured END TO END.
 
@@ -1939,8 +2109,7 @@ def _resolve_fan_out(
             )
         if exhausted:
             break
-        shape = record_delivery_evidence(
-            session,
+        evidence = dict(
             chain_id=chain_id,
             holder_address=holder,
             token_address=token,
@@ -1954,8 +2123,13 @@ def _resolve_fan_out(
             counts=cost.counts,
             measured_through_hash=entry.measured_through_hash,
         )
-        cost.count("pairs_recorded")
-        cost.count(f"verdict_{shape}")
+        if staged is not None:
+            staged.append(evidence)
+        else:
+            assert session is not None
+            shape = record_delivery_evidence(session, **evidence)
+            cost.count("pairs_recorded")
+            cost.count(f"verdict_{shape}")
     if exhausted:
         raise DispositionBudgetExceeded(f"disposition request budget of {DISPOSITION_REQUEST_BUDGET} reached")
 
@@ -2050,4 +2224,5 @@ __all__ = [
     "record_protocol_reference",
     "run_disposition",
     "scan_delivery_shape",
+    "scan_delivery_shape_detached",
 ]
