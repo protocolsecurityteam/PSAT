@@ -277,6 +277,7 @@ class DispositionCost:
                 "request_budget": DISPOSITION_REQUEST_BUDGET,
             },
         )
+
     def check_scan_deadline(self) -> None:
         if self.scan_deadline_at is not None and time.monotonic() >= self.scan_deadline_at:
             self.count("scan_time_budget_stopped")
