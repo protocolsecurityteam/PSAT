@@ -548,6 +548,38 @@ def test_a_partial_extent_is_not_disposable_until_catch_up_completes(db_session,
     assert whole.is_airdrop_only is True
 
 
+@pytest.mark.parametrize("detached", [False, True])
+def test_wall_time_budget_publishes_a_complete_prefix(db_session, wire, monkeypatch, detached):
+    from types import SimpleNamespace
+
+    clock = [0.0]
+    monkeypatch.setattr(delivery_shape, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(delivery_shape, "DISPOSITION_SCAN_WALL_SECONDS", 1.0)
+
+    def ticking_rpc(url, method, params, *args, **kwargs):
+        value = wire(url, method, params, *args, **kwargs)
+        if method == "eth_getLogs":
+            clock[0] = 2.0
+        return value
+
+    monkeypatch.setattr(delivery_shape, "rpc_request", ticking_rpc)
+    monkeypatch.setattr("services.resolution.repos.event_logs_rpc.rpc_request", ticking_rpc)
+    scan = delivery_shape.scan_delivery_shape_detached if detached else scan_delivery_shape
+    first = scan(db_session, [_request(chain_id=OPTIMISM)], rpc_url_for=_rpc_url_for)
+    db_session.commit()
+
+    row = _facts(db_session)[(HOLDER, TOKEN)]
+    assert first.counts["scan_time_budget_stopped"] >= 1
+    assert first.get_logs == 1
+    assert row.measured_through_block == CREATION + 9_999
+    assert row.caught_up is False
+
+    clock[0] = 0.0
+    wire.get_logs_calls.clear()
+    scan(db_session, [_request(chain_id=OPTIMISM)], rpc_url_for=_rpc_url_for)
+    assert int(wire.get_logs_calls[0]["fromBlock"], 16) == CREATION + 10_000
+
+
 def test_a_budget_death_in_discovery_still_records_the_pairs_it_proved(db_session, wire, monkeypatch):
     """Forward progress survives the ceiling, which is what stops the hourly loop.
 
@@ -1387,6 +1419,77 @@ def test_streamed_evidence_rolls_back_with_producer_transaction(db_session, wire
     assert _facts(db_session) == {}
 
 
+def test_detached_scan_releases_connection_and_commits_legacy_repair(db_session, wire, monkeypatch):
+    from services.monitoring.delivery_evidence import record_delivery_evidence
+
+    record_delivery_evidence(
+        db_session,
+        chain_id=CHAIN,
+        holder_address=HOLDER,
+        token_address=TOKEN,
+        scanned_from_block=CREATION,
+        measured_through_block=HEAD,
+        measured_through_hash=None,
+        deliveries=[],
+        scan_basis="legacy",
+        observed_balance_raw="1000",
+    )
+    db_session.commit()
+    original_rpc = delivery_shape.rpc_request
+
+    def detached_rpc(url, method, params, *args, **kwargs):
+        assert not db_session.in_transaction(), method
+        return original_rpc(url, method, params, *args, **kwargs)
+
+    monkeypatch.setattr(delivery_shape, "rpc_request", detached_rpc)
+    monkeypatch.setattr("services.resolution.repos.event_logs_rpc.rpc_request", detached_rpc)
+    monkeypatch.setattr("services.clients.rpc.rpc_request", detached_rpc)
+    first = delivery_shape.scan_delivery_shape_detached(
+        db_session, [_request(balances=((TOKEN, "1000"),))], rpc_url_for=_rpc_url_for
+    )
+    assert first.counts["pairs_history_reset"] == 1
+    assert _facts(db_session)[(HOLDER, TOKEN)].measured_through_hash == _tx(HEAD)
+    wire.get_logs_calls.clear()
+    second = delivery_shape.scan_delivery_shape_detached(
+        db_session, [_request(balances=((TOKEN, "1000"),))], rpc_url_for=_rpc_url_for
+    )
+    assert second.counts.get("pairs_history_reset", 0) == 0
+    assert wire.get_logs_calls == []
+
+
+def test_detached_scan_refuses_concurrent_evidence_change(db_session, wire, monkeypatch):
+    from sqlalchemy.orm import Session
+
+    from services.monitoring.delivery_evidence import record_delivery_evidence
+
+    original_rpc = delivery_shape.rpc_request
+    inserted = False
+
+    def concurrent_rpc(url, method, params, *args, **kwargs):
+        nonlocal inserted
+        if method == "eth_blockNumber" and not inserted:
+            inserted = True
+            with Session(db_session.get_bind()) as other:
+                record_delivery_evidence(
+                    other,
+                    chain_id=CHAIN,
+                    holder_address=HOLDER,
+                    token_address=TOKEN,
+                    scanned_from_block=CREATION,
+                    measured_through_block=HEAD,
+                    measured_through_hash=_tx(HEAD),
+                    deliveries=[],
+                    scan_basis="concurrent",
+                )
+                other.commit()
+        return original_rpc(url, method, params, *args, **kwargs)
+
+    monkeypatch.setattr(delivery_shape, "rpc_request", concurrent_rpc)
+    cost = delivery_shape.scan_delivery_shape_detached(db_session, [_request()], rpc_url_for=_rpc_url_for)
+    assert cost.counts["publication_conflicts"] == 1
+    assert _facts(db_session)[(HOLDER, TOKEN)].basis.endswith("concurrent")
+
+
 def test_streaming_preserves_receipt_priority_and_cache_across_pairs(db_session, wire):
     heavy = _addr("70ce9")
     wire.logs = [
@@ -1440,7 +1543,10 @@ def test_legacy_unanchored_evidence_is_rebuilt_not_extended(db_session, wire):
 
 
 @pytest.mark.parametrize("existing", [False, True])
-def test_snapshot_change_rolls_back_new_evidence_and_withdraws_old_positive(db_session, wire, monkeypatch, existing):
+@pytest.mark.parametrize("detached", [False, True])
+def test_snapshot_change_rolls_back_new_evidence_and_withdraws_old_positive(
+    db_session, wire, monkeypatch, existing, detached
+):
     if existing:
         _first_pass(wire, db_session)
         db_session.flush()
@@ -1456,7 +1562,8 @@ def test_snapshot_change_rolls_back_new_evidence_and_withdraws_old_positive(db_s
         return result
 
     monkeypatch.setattr(delivery_shape, "rpc_request", changing_rpc)
-    cost = scan_delivery_shape(db_session, [_request()], rpc_url_for=_rpc_url_for)
+    scan = delivery_shape.scan_delivery_shape_detached if detached else scan_delivery_shape
+    cost = scan(db_session, [_request()], rpc_url_for=_rpc_url_for)
     db_session.commit()
     assert cost.counts["snapshots_rejected"] == 1
     facts = _facts(db_session)

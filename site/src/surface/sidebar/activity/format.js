@@ -502,9 +502,10 @@ export function scannerHealth(contracts, now = Date.now()) {
   if (stamps.length === 0) return { tone: "muted", label: "no scan yet" };
   const youngest = Math.max(...stamps);
   const ageS = Math.round((now - youngest) / 1000);
-  // PROTOCOL_SCAN_INTERVAL default is 600s. Treat 2× as "lagging", 5× as "stalled".
+  // Production scanner cadence is hourly while RPC spend is being reduced.
+  // Treat 2× as "lagging", 5× as "stalled".
   let tone = "ok";
-  if (ageS > 600 * 2) tone = "warn";
-  if (ageS > 600 * 5) tone = "err";
+  if (ageS > 3600 * 2) tone = "warn";
+  if (ageS > 3600 * 5) tone = "err";
   return { tone, label: `scanned ${relativeTime(new Date(youngest).toISOString(), now)}` };
 }

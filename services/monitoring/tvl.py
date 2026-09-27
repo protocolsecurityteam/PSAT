@@ -515,15 +515,28 @@ def refresh_contract_balances(
         )
         if request is not None
     ]
+    delivery_requests = disposition_requests(
+        session, protocol_id=protocol_id, contract_ids=contract_ids, discovered=discovered
+    )
+    # Everything above this point is an input read or an external observation.
+    # Release its old transaction before the bounded historical scan: Neon can
+    # close an idle connection held through the preceding sweep and the scan,
+    # which used to roll back the same 594 history repairs every TVL cycle.
+    session.commit()
     disposition_cost = run_disposition(
         session,
-        disposition_requests(session, protocol_id=protocol_id, contract_ids=contract_ids, discovered=discovered),
+        delivery_requests,
         rpc_url_for=lambda cid: rpc_url_for_chain_id(cid),
         # Also refreshes the protocol-reference verdict for every token in the
         # population, once per cycle: the universe assembly behind it is an
         # object-storage read no presentation path can afford to repeat.
         protocol_id=protocol_id,
+        detached_scan=True,
     )
+    # Delivery evidence and protocol reference are independent chain facts.
+    # Commit each proven prefix before the later balance/snapshot write so a
+    # degraded balance does not charge the next cycle for the same history.
+    session.commit()
     # ``run_disposition`` emits its own timed per-cycle summary; only the counts
     # this cycle must carry onward are folded in here.
     for key, value in disposition_cost.counts.items():

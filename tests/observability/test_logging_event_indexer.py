@@ -65,7 +65,7 @@ def test_group_scan_failure_is_swallowed_warning_not_exception(caplog):
     """A group whose head fetch raises is counted in ``failed_groups`` and logged
     as a WARNING carrying ``exc_type`` — never a ``logger.exception`` traceback
     storm (the prod outage once emitted 2,172 ERROR tracebacks here)."""
-    session = _FakeSession([(1, _ADDR, _TOPIC, None)])
+    session = _FakeSession([(1, _ADDR, _TOPIC, None, 0, False)])
     sentinel = object()
     with caplog.at_level(logging.WARNING, logger="workers.event_log_indexer"):
         summary = scan_enrolled_events(
@@ -87,6 +87,23 @@ def test_group_scan_failure_is_swallowed_warning_not_exception(caplog):
     assert rec.exc_info is None  # no traceback attached
     assert getattr(rec, "exc_type", None) == "RuntimeError"
     assert getattr(rec, "event_address", None) == _ADDR
+
+
+def test_warm_head_failure_is_reported_without_crashing(caplog):
+    session = _FakeSession([(1, _ADDR, _TOPIC, None, 100, True), (1, "0x" + "12" * 20, _TOPIC, None, 100, True)])
+    sentinel = object()
+    with caplog.at_level(logging.WARNING, logger="workers.event_log_indexer"):
+        summary = scan_enrolled_events(
+            session,  # pyright: ignore[reportArgumentType]
+            fetchers={1: sentinel},  # pyright: ignore[reportArgumentType]
+            head_fetchers={1: _BoomHead()},
+            block_hash_fetchers={1: sentinel},  # pyright: ignore[reportArgumentType]
+            scan_mode="warm",
+        )
+    assert summary.failed_groups == 2
+    assert summary.windows_scanned == 0
+    assert len(caplog.records) == 1
+    assert getattr(caplog.records[0], "exc_type", None) == "RuntimeError"
 
 
 def test_total_outage_pass_degrades_the_heartbeat():
