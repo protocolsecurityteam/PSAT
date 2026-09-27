@@ -360,10 +360,9 @@ def get(
     backoff = _RATE_LIMIT_BACKOFF
 
     for attempt in range(_RATE_LIMIT_RETRIES + 1):
-        from services.clients.provider_permits import wait_etherscan_permit
         from services.clients.request_budget import charge_attempt
 
-        wait_etherscan_permit(_get_api_key(), token_page=action == "addresstokenbalance", rate=ETHERSCAN_RATE_LIMIT)
+        _wait_rate_limit()
         charge_attempt("etherscan")
         resp = requests.get(
             ETHERSCAN_API,
@@ -787,6 +786,7 @@ def get_token_balances_page(address: str, *, chain_id: int) -> TokenBalancePage:
     incomplete_because: str | None = None
 
     while pages_read < budget:
+        _throttle_token_balance_call()
         try:
             data = get(
                 "account",

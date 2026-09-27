@@ -1,4 +1,4 @@
-"""Small durable collection leases and provider permits, shared by processes."""
+"""Durable balance collection progress and leases, shared by balance producers."""
 
 from datetime import datetime
 from typing import Any
@@ -25,10 +25,3 @@ class BalanceCollectionState(Base):
     failures: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     outcome: Mapped[str | None] = mapped_column(String(32))
     payload: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
-
-
-class ProviderPermit(Base):
-    __tablename__ = "provider_permits"
-
-    quota_key: Mapped[str] = mapped_column(String(100), primary_key=True)
-    next_allowed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

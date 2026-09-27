@@ -143,11 +143,6 @@ def upgrade() -> None:
     )
     op.create_index("ix_balance_collection_state_next_attempt_at", "balance_collection_state", ["next_attempt_at"])
     op.create_table(
-        "provider_permits",
-        sa.Column("quota_key", sa.String(100), primary_key=True),
-        sa.Column("next_allowed_at", sa.DateTime(timezone=True), nullable=False),
-    )
-    op.create_table(
         "pending_effects_work",
         sa.Column("id", sa.BigInteger(), primary_key=True, autoincrement=True),
         sa.Column("protocol_id", sa.Integer(), sa.ForeignKey("protocols.id", ondelete="CASCADE"), nullable=False),
@@ -214,7 +209,7 @@ def downgrade() -> None:
     # re-upgrading leaves it unknown instead of inventing observation times.
     # Safe projection rules survive too; rollback needs compatible app readers.
     op.execute("DROP VIEW contract_balances_latest")
-    for table in ("pending_effects_work", "provider_permits", "balance_collection_state"):
+    for table in ("pending_effects_work", "balance_collection_state"):
         op.drop_table(table)
     for name in (
         "external_slug",

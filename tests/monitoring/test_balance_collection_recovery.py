@@ -268,31 +268,6 @@ def test_bounded_pass_rotates_to_unread_protocol(db_session, monkeypatch):
     assert len(seen) == 2
 
 
-def test_shared_provider_permits_wait_without_holding_a_connection(db_session, monkeypatch):
-    import time
-
-    import services.clients.provider_permits as permits
-
-    factory = sessionmaker(bind=db_session.get_bind(), expire_on_commit=False)
-    engine = db_session.get_bind()
-    db_session.commit()
-    monkeypatch.setattr(permits, "SessionLocal", factory)
-    sleep = time.sleep
-    waits = []
-
-    def waiting(seconds):
-        waits.append(seconds)
-        assert engine.pool.checkedout() == 0
-        sleep(seconds)
-
-    monkeypatch.setattr(permits.time, "sleep", waiting)
-    permits.wait_etherscan_permit("offline-test-key", token_page=True, rate=1000)
-    started = time.monotonic()
-    permits.wait_etherscan_permit("offline-test-key", token_page=True, rate=1000)
-    assert time.monotonic() - started >= 0.9
-    assert waits
-
-
 def test_shorter_consumer_freshness_overrides_daily_success_but_not_failure_backoff(db_session):
     from services.monitoring.balance_collection import order_subjects, release_claim
 

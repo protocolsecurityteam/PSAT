@@ -56,7 +56,6 @@ from db.models import (  # noqa: E402
     MonitoredEvent,
     Protocol,
     ProtocolSubscription,
-    ProviderPermit,
     ProxySubscription,
     ProxyUpgradeEvent,
     RoleHolderPlane,
@@ -676,7 +675,6 @@ def db_session():
         for model in [
             AuditContractCoverage,
             BalanceCollectionState,
-            ProviderPermit,
             MonitoredEvent,
             MonitoredContract,
             ProtocolSubscription,

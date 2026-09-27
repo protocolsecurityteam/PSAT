@@ -36,12 +36,6 @@ def charge_attempt(provider: str) -> None:
         budget.take(provider)
 
 
-def check_budget() -> None:
-    budget = _current.get()
-    if budget is not None:
-        budget.check()
-
-
 @contextmanager
 def request_budget(budget: RequestBudget):
     token = _current.set(budget)

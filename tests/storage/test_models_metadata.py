@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from db.models import Base
 
-EXPECTED_TABLE_COUNT = 64
+EXPECTED_TABLE_COUNT = 63
 
 EXPECTED_TABLES = [
     "address_labels",
@@ -61,7 +61,6 @@ EXPECTED_TABLES = [
     "protocol_scores_latest",
     "protocol_subscriptions",
     "protocols",
-    "provider_permits",
     "proxy_subscriptions",
     "proxy_upgrade_events",
     "restaking_positions",

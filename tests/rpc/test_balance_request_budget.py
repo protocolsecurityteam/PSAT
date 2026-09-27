@@ -23,10 +23,8 @@ def test_rpc_transport_retries_stop_at_pass_budget(monkeypatch):
     assert len(calls) == 2 and budget.attempts == {"rpc": 2}
 
 
-def test_etherscan_throttle_retries_each_need_a_permit_and_budget(monkeypatch):
-    import services.clients.provider_permits as permits
-
-    calls, quotas = [], []
+def test_etherscan_retries_keep_existing_throttle_and_consume_collection_budget(monkeypatch):
+    calls, waits = [], []
 
     def get(*args, **kwargs):
         calls.append(1)
@@ -35,12 +33,46 @@ def test_etherscan_throttle_retries_each_need_a_permit_and_budget(monkeypatch):
     monkeypatch.setattr(etherscan.requests, "get", get)
     monkeypatch.setattr(etherscan, "_get_api_key", lambda: "test-key")
     monkeypatch.setattr(etherscan.time, "sleep", lambda _: None)
-    monkeypatch.setattr(permits, "wait_etherscan_permit", lambda *a, **kw: quotas.append(kw))
+    monkeypatch.setattr(etherscan, "_wait_rate_limit", lambda: waits.append(1))
     budget = RequestBudget(limit=2)
     with request_budget(budget), pytest.raises(RequestBudgetExceeded):
         etherscan.get("account", "addresstokenbalance", chain_id=1, address="0x" + "1" * 40)
     assert len(calls) == 2 and budget.attempts == {"etherscan": 2}
-    assert all(q["token_page"] for q in quotas)
+    assert len(waits) >= len(calls)
+
+
+def test_etherscan_outside_collection_keeps_existing_retry_policy(monkeypatch):
+    calls, waits = [], []
+
+    def get(*args, **kwargs):
+        calls.append(1)
+        result = {"status": "0", "result": "rate limit"} if len(calls) <= 3 else {"status": "1", "result": []}
+        return SimpleNamespace(raise_for_status=lambda: None, json=lambda: result)
+
+    monkeypatch.setattr(etherscan.requests, "get", get)
+    monkeypatch.setattr(etherscan, "_get_api_key", lambda: "test-key")
+    monkeypatch.setattr(etherscan, "_wait_rate_limit", lambda: waits.append(1))
+    monkeypatch.setattr(etherscan.time, "sleep", lambda _: None)
+    # A finished collection must not leave its exhausted budget on other stages.
+    with request_budget(RequestBudget(limit=0)), pytest.raises(RequestBudgetExceeded):
+        etherscan.get("account", "balance", chain_id=1, address="0x" + "1" * 40)
+    waits.clear()
+    assert etherscan.get("account", "balance", chain_id=1, address="0x" + "1" * 40)["status"] == "1"
+    assert len(calls) == len(waits) == 4
+
+
+def test_rpc_outside_collection_keeps_existing_retry_policy(monkeypatch):
+    calls = []
+
+    def post(*args, **kwargs):
+        calls.append(1)
+        raise rpc.requests.Timeout("offline timeout")
+
+    monkeypatch.setattr(rpc, "_get_session", lambda: SimpleNamespace(post=post))
+    monkeypatch.setattr(rpc.time, "sleep", lambda _: None)
+    with pytest.raises(RuntimeError):
+        rpc.rpc_request("http://erpc.invalid/1", "eth_blockNumber", [], retries=3, chain_id=1)
+    assert len(calls) == 4
 
 
 @pytest.mark.parametrize("invalid", [None, "garbage", {"TokenAddress": "0x" + "2" * 40}])
