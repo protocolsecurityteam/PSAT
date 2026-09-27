@@ -93,20 +93,3 @@ def test_priced_holdings_are_offered_as_input_tokens_in_value_order(db_session):
     db_session.flush()
 
     assert _token_holdings_by_contract(db_session, p.id, 10) == {c.id: (large.lower(), small.lower())}
-
-
-@requires_postgres
-def test_holdings_use_observed_holder_instead_of_contract_address(db_session):
-    """Proxy holdings must stay attached to the account that was actually read."""
-    p = _protocol(db_session, "observed-holder")
-    contract_address = ADDR(0x5401)
-    observed = ADDR(0x5402)
-    c = _contract(db_session, p.id, contract_address)
-    token = ADDR(0x5411)
-    fetch = _fetch(db_session, c, observed=observed)
-    _row(db_session, c, fetch, token, None, observed=observed)
-    db_session.flush()
-
-    holdings = _asset_holdings_by_deployment(db_session, p.id)[observed.lower()]
-    assert [(h.holder, h.asset, h.usd_value) for h in holdings] == [(observed.lower(), token.lower(), None)]
-    assert contract_address.lower() not in _asset_holdings_by_deployment(db_session, p.id)

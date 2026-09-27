@@ -307,15 +307,65 @@ def _observed_summary(verdict: VerdictLike) -> dict[str, Any]:
 # and re-published as a DIFFERENT deployment's observation on every cache hit.
 # ``observed_residue`` is the state-plane column and is never a cache key.
 #
-# Movement identities are behavioral evidence. Recorded holdings USD is context,
-# not an exposure magnitude. Legacy scalar keys remain readable for dated rows;
-# consumers must refuse them as bounds without actual transfer-valuation evidence.
+# CONTRACT for the eventual scorer, in three states with ``reach_determined`` as
+# the discriminator:
+#   * ``reach_determined is True`` — MEASURED. ``observed_reach_value_usd`` is a
+#     conservative upper bound (a holder's full on-chain balance attributed when
+#     value provably leaves it) over ``observed_reach_holders``.
+#   * ``reach_determined is False`` (with ``reach_indeterminate: True``) — NOT
+#     measured: no holder was observed moving value, which is NOT "reach is
+#     nothing". ``observed_reach_value_usd`` is ABSENT on such a row and
+#     ``observed_reach_floor_usd`` carries the acting deployment's own balance as a
+#     floor. The floor used to be published as ``observed_reach_value_usd``
+#     itself, so a scorer reading the number and ignoring the flag scored "$0
+#     reach" for a zero-balance router that can move millions — an unproven
+#     value read as a proven zero.
+#     ``observed_reach_floor_usd`` is itself THREE-STATE and its absence is the
+#     third: the key is present with a positive figure (a witnessed floor),
+#     present at ``0.0`` (a balance row was read and summed to zero — weak, and
+#     still not a measured reach), or ABSENT beside ``reach_indeterminate: True``,
+#     meaning NO balance row was witnessed for the acting deployment at all and
+#     there is no floor to state. It is never ``null``; a scorer must read the
+#     KEY's presence, never a ``.get()`` that folds absence into a zero.
+#   * ``reach_determined is False`` WITHOUT ``reach_indeterminate`` — value WAS
+#     observed leaving a holder and its USD is NOT determined, because at least one
+#     (holder, asset) pair that moved has no priced holding on record.
+#     ``observed_reach_unvalued_pairs`` names those pairs — holder, asset and reason
+#     each — and ``observed_reach_priced_usd`` is the priced part, a partial floor,
+#     with ``observed_reach_priced_holders`` naming whose holdings it is made of. Read
+#     the pair key literally: an asset can be priced for one holder and unknown for
+#     another, and the two statements do not contradict each other.
+#     ``observed_reach_unvalued_assets`` is the narrower fact — the assets NO holder
+#     priced — and is published even when EMPTY on this branch, where ``[]`` is the
+#     earned negative and absence of the key means the branch never ran. Reach is
+#     measured PER (HOLDER, ASSET), and 1001 of 1376 local balance rows are unpriced,
+#     so this state is common and must lower confidence rather than produce a small
+#     number. ``observed_reach_unvalued_reasons`` says WHY, and not one of its values asserts
+#     the holder does not hold the asset: ``unpriced_holding`` (we have the row, no
+#     price), ``holdings_at_page_cap`` (the holder's stored rows reach the fetcher's
+#     one-page cap, so assets are probably missing), ``asset_not_in_recorded_holdings``
+#     (not in the set we recorded — and that set is not provably complete, because the
+#     stored rows already dropped every zero-balance entry the page returned). A
+#     scorer must read all three as CONFIDENCE GAPS, never as a small reach.
+#   * ``reach_tvl_check`` is the corroborating CEILING's outcome:
+#     ``within_protocol_tvl`` (the figure is at least possible),
+#     ``exceeds_protocol_tvl`` (REFUSED — ``observed_reach_rejected_usd`` and
+#     ``protocol_tvl_usd`` record the contradiction and there is no reach value), or
+#     ``skipped_no_tvl`` (no ``defillama_tvl`` snapshot — the ceiling did NOT run, and
+#     that is published rather than implied). The worst row in the DB asserted $3.489B
+#     against a protocol TVL of $3.297B with nothing checking. The ceiling bears on
+#     WHICHEVER figure the row publishes: ``observed_reach_value_usd`` on the measured
+#     branch and ``observed_reach_priced_usd`` on the partial-floor branch (the floor
+#     branch used to return before the check, so a floor above the protocol's own
+#     TVL was publishable with no ``reach_tvl_check`` at all). A refusal therefore means
+#     "the row's own USD was contradicted", and on the floor branch the unvalued-asset
+#     keys still stand beside it: the refusal is about the priced part, not about
+#     whether value moved. The key is ABSENT when the row publishes no USD at all
+#     (nothing priced) — absence is "no figure to check", never a check that passed.
+#   * ABSENCE of every key is NOT "no reach": this deployment has no fork
+#     observation of its own yet (its verdict came from a cache hit), so reach was
+#     never attempted here.
 _REACH_KEYS = (
-    "reach_observed_holdings_usd",
-    "reach_observed_holdings_pairs",
-    "reach_value_scope",
-    "reach_magnitude_state",
-    "reach_is_upper_bound",
     "observed_reach_value_usd",
     "observed_reach_holders",
     "reach_indeterminate",

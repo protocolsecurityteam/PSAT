@@ -32,7 +32,7 @@ from tests.support.scoring_builders import (
     sig,
     value_plane,
 )
-from utils.scoring_status import GRADE_STATE_COMPUTED, VALUE_STATE_PROVEN_REACH
+from utils.scoring_status import GRADE_STATE_COMPUTED, GRADE_STATE_NOT_DETERMINED, VALUE_STATE_PROVEN_REACH
 
 MERGE_SHARED = tuple("0x" + c * 40 for c in "1234")
 SAFE_MINORITY = "0x" + "e" * 40
@@ -222,13 +222,15 @@ def test_r11_a_proven_reach_with_no_magnitude_witness_is_unanswered(fold):
     assert unwitnessed_doc.findings[0]["value_at_stake_usd"] is None
     assert unwitnessed_doc.findings[0]["raw_points"] > 0
 
-    # Monetary exposure stays unknown while the security score and confidence
-    # remain available. An unmeasured numerator must not become zero exposure.
-    assert unwitnessed_doc.grade_state == GRADE_STATE_COMPUTED
-    assert 0.0 < unwitnessed_doc.grade_lambda < 100.0
-    assert unwitnessed_doc.confidence_pct is not None
-    assert unwitnessed_doc.grade_exposure is None
-    assert unwitnessed_doc.provenance["exposure_usd"] is None
+    # And the exposure ratio is WITHHELD rather than published as 100. No
+    # finding measured a numerator, so the ratio is a quantity nobody computed —
+    # publishing "0% of tracked value is exposed" out of it would be the same
+    # unproven-number move one axis over. λ is computed and carried in the
+    # withheld block; grade, exposure and confidence stand or fall together
+    # (ck_protocol_scores_grade_pairing), so the whole triple is not_determined.
+    assert unwitnessed_doc.grade_state == GRADE_STATE_NOT_DETERMINED
+    withheld = unwitnessed_doc.provenance["grade_withheld"]
+    assert 0.0 < withheld["grade_lambda_computed"] < 100.0
     assert witnessed_doc.grade_state == GRADE_STATE_COMPUTED
     assert witnessed["pct"] > 0.0
 
@@ -399,8 +401,8 @@ def test_r9_a_capped_magnitude_does_not_move_per_member_reach(fold):
     assert finding["weakness_by_entity"] == {
         KEY_C: WEAKNESS_SAFE_MINORITY,
         KEY_PROXY: WEAKNESS_SAFE_MAJORITY,
+        KEY_V: WEAKNESS_SAFE_MAJORITY,
     }
-    assert KEY_V in {row["entity"] for row in finding["undetermined_instances"]}
     assert finding["weakness"] == WEAKNESS_SAFE_MAJORITY
 
 

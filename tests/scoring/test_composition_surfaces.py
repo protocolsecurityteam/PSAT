@@ -333,23 +333,24 @@ def test_the_predicate_block_survives_and_claims_nothing_about_this_row(fold):
 
 
 def test_the_frontend_golden_was_regenerated_for_the_current_model_version():
-    """Current synthetic output is regenerated; legacy Etherfi stays historical.
+    """The residual staleness hole in the version-bump checklist, closed on the
+    side that actually runs in CI.
 
-    The current fixture is produced through the real fold with explicit offline
-    inputs. Its version and entire document must match the current generator.
-    """
+    `site/src/test/fixtures/score_etherfi.json` is the document the vitest
+    suites assert against, and a bump that edits `MODEL_VERSION` without
+    regenerating it leaves the page's tests pinned to the PREVIOUS model's
+    lambda, letter and ranking — all still internally consistent, so vitest
+    stays green and nothing anywhere reports that the golden is a version
+    behind. Asserting the stamp here makes the omission fail loudly in the
+    Python suite, which is where the bump is made."""
     import json
 
-    golden = json.loads((ROOT / "site" / "src" / "test" / "fixtures" / "score_current_synthetic.json").read_text())
+    golden = json.loads((ROOT / "site" / "src" / "test" / "fixtures" / "score_etherfi.json").read_text())
     assert golden["model_version"] == K.MODEL_VERSION, (
         f"the frontend golden is stamped {golden['model_version']!r} but MODEL_VERSION is "
-        f"{K.MODEL_VERSION!r} — regenerate site/src/test/fixtures/score_current_synthetic.json "
+        f"{K.MODEL_VERSION!r} — regenerate site/src/test/fixtures/score_etherfi.json "
         f"(see its README for the shape and the minified one-line write)"
     )
-
-    from tests.regenerate_current_score_fixture import current_document
-
-    assert golden == current_document()
 
 
 def test_the_ceiling_direction_stays_allow_listed_on_the_page():
@@ -384,18 +385,43 @@ def _trimmed_entry(fold, per_asset_state):
     return _gate_row(document)["reach_composed_magnitudes"][0]
 
 
-@pytest.mark.parametrize(
-    "states",
-    [
-        {"usdc": P.ASSET_PRICED, "other": P.ASSET_UNPRICED},
-        {"usdc": P.ASSET_PRICED},
-    ],
-)
-def test_unscoped_holdings_do_not_trim_an_independent_call_witness(fold, states):
-    entry = _trimmed_entry(fold, states)
-    assert entry["bounded_by"] == FOLD._BOUNDED_BY_WITNESS
-    assert entry["published_usd"] == 1_000_000.0
-    assert entry["destination_sheet_bound_direction"] is None
+def test_a_magnitude_trimmed_to_an_incomplete_sheet_publishes_that_it_is_incomplete(fold):
+    """U1-F4. ``min(witness, sheet)`` against a sheet nobody proved whole.
+
+    The published figure is $250k where the destination's own witness says $1M,
+    and the entry said the sheet capped it and stopped there. But this sheet
+    carries an asset no price answered, so it is a FLOOR over what was priced —
+    not an at-most on what is there to move — and a min against a floor hands
+    back a smaller number on a bound nothing established. The dollars stand;
+    what the entry may no longer do is call them a ceiling in silence.
+    """
+    entry = _trimmed_entry(fold, {"usdc": P.ASSET_PRICED, "other": P.ASSET_UNPRICED})
+
+    assert entry["bounded_by"] == FOLD._BOUNDED_BY_SHEET
+    assert entry["published_usd"] == _TRIMMING_SHEET
+    assert entry["destination_sheet_bound_direction"] == FOLD.BOUND_DIRECTION_NOT_DETERMINED
+    # The basis ENUMERATES the conjunct that failed, off the destination's own
+    # coverage, through the same derivation the per-entity ceiling records use —
+    # so a reader is pointed at a field that says something rather than at three
+    # candidate causes, two of which read empty here.
+    basis = entry["destination_sheet_bound_direction_basis"]
+    assert "assets_not_priced" in basis
+    assert "asset_list_proven_whole" not in basis
+    # And the entry's own sentence carries the caveat rather than leaving the
+    # typed field to be joined by somebody who thought to look.
+    assert FOLD._TRIMMED_TO_AN_UNPROVEN_CEILING in entry["reading"]
+
+
+def test_a_trim_onto_a_fully_covered_sheet_claims_the_ceiling_it_earned(fold):
+    """The negative path. Every asset observed at the destination is priced, so
+    the sheet IS an at-most and the entry says so with no caveat attached — a
+    disclosure that fired on every trim would say nothing about any of them."""
+    entry = _trimmed_entry(fold, {"usdc": P.ASSET_PRICED})
+
+    assert entry["bounded_by"] == FOLD._BOUNDED_BY_SHEET
+    assert entry["destination_sheet_bound_direction"] == FOLD.BOUND_DIRECTION_CEILING
+    assert "every asset observed at this entity" in entry["destination_sheet_bound_direction_basis"]
+    assert FOLD._TRIMMED_TO_AN_UNPROVEN_CEILING not in entry["reading"]
 
 
 def test_an_entry_no_sheet_bounded_publishes_no_direction_at_all(fold):

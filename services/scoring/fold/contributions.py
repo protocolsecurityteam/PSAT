@@ -10,10 +10,10 @@ from services.scoring.fold.ceilings import _PUBLISHED_CENT
 from services.scoring.fold.composition import _ComposedMagnitude
 from services.scoring.fold.gates import _is_number
 from services.scoring.fold.readings import (
-    _OBSERVED_SHEET_DOES_NOT_BOUND,
+    _DISPOSED_SHEET_DOES_NOT_BOUND,
     CEILING_KIND_COMPOSED,
     CEILING_KIND_SHEET,
-    SHEET_BOUND_REFUSED_BY_SCOPE,
+    SHEET_BOUND_REFUSED_BY_DISPOSITION,
     SHEET_CEILING_REFUSED_PREFIX,
 )
 from services.scoring.fold.types import _Instance
@@ -321,12 +321,19 @@ def _entity_contribution(
             return None, "native_only_flow+absent_native_row(not_determined)", None, False, None
         # Proven, and proven zero carries 0.0 — the pairing is enforced by Tri.
         held: float | None = float(native.value if native.value is not None else 0.0)
-        # Native-only valuation uses the independently observed native balance.
+        # A native-only flow is valued against the native holding, which no
+        # delivery-shape disposition touches — native ETH emits no Transfer log
+        # and has no delivery shape to read — so the trimming figure IS the held
+        # one on this arm.
         trim: float | None = held
         basis = "native_only_flow x native_balance"
     else:
-        # The observed total and a proven upper bound answer different questions.
-        # A generic capability may affect assets beyond the current snapshot.
+        # TWO figures, and they answer two questions. ``held`` is what the sheet
+        # DETERMINES the entity holds and is what the fallthrough below reports
+        # on; ``trim`` is what the sheet may BOUND A WITNESS with, which a
+        # disposed sheet's determined $0 may not do (``ValuePlane.trimming_total``
+        # states why). Reading one off the other would either trim a witnessed
+        # magnitude to a false zero or publish a determined sheet as unknown.
         held = value_plane.total(key)
         trim = value_plane.trimming_total(key)
         basis = "entity_holdings"
@@ -336,10 +343,17 @@ def _entity_contribution(
         state = instance.magnitude.state
         if state == MAGNITUDE_STATE_PROVEN_EXACT:
             if trim is None and held is not None:
-                # The snapshot does not cap this exact call witness.
+                # SYMMETRY WITH THE FLOOR BRANCH BELOW, and for the same reason:
+                # the sheet IS determined, at $0, by delivery-shape disposition,
+                # and may not trim. What differs is only the disclosure this
+                # state OWES — an exact witness publishes the dollars the call
+                # moves, not a figure the sheet failed to bound — so the refusal
+                # is named in the basis and carried as a reading, while the
+                # unbounded-figure keys stay off it. Without this the basis said
+                # "x entity_holdings" over a sheet that bounded nothing.
                 return (
                     magnitude,
-                    f"witnessed_reach(exact)+{SHEET_BOUND_REFUSED_BY_SCOPE}",
+                    f"witnessed_reach(exact)+{SHEET_BOUND_REFUSED_BY_DISPOSITION}",
                     {
                         "function": instance.signal.function_name,
                         "capability": instance.signal.claim_id,
@@ -349,7 +363,7 @@ def _entity_contribution(
                         # lands under the key that claims neither — the same
                         # registry the siblings read, never a hand-written key.
                         **_unbounded_figure(state, magnitude),
-                        "reading": _OBSERVED_SHEET_DOES_NOT_BOUND,
+                        "reading": _DISPOSED_SHEET_DOES_NOT_BOUND,
                     },
                     False,
                     state,
@@ -367,17 +381,24 @@ def _entity_contribution(
         if trim is not None:
             return min(trim, magnitude), f"witnessed_reach({_state_word(state)}) x {basis}", None, False, state
         if held is not None:
-            # Preserve the witnessed magnitude when the sheet cannot cap its scope.
+            # The sheet IS determined and still may not trim. Its own state says
+            # why: every reading on it arrived as a mass distribution, over an
+            # asset list that is not proven whole, so the $0 bounds what the
+            # entity HOLDS as a determined figure and says nothing about what is
+            # there to MOVE — the disposed assets are still held, and delivery
+            # shape is not a claim about worth. Published under its own token
+            # rather than the not_determined one below, because "the sheet is
+            # not determined" is FALSE here and a reader acts on that word.
             return (
                 magnitude,
-                f"witnessed_reach({_state_word(state)})+{SHEET_BOUND_REFUSED_BY_SCOPE}",
+                f"witnessed_reach({_state_word(state)})+{SHEET_BOUND_REFUSED_BY_DISPOSITION}",
                 {
                     "function": instance.signal.function_name,
                     "capability": instance.signal.claim_id,
                     "entity": key,
                     "witness_state": state,
                     **_unbounded_figure(state, magnitude),
-                    "reading": _OBSERVED_SHEET_DOES_NOT_BOUND,
+                    "reading": _DISPOSED_SHEET_DOES_NOT_BOUND,
                 },
                 False,
                 state,
@@ -459,10 +480,57 @@ def _entity_contribution(
 
 
 def _sheet_ceiling(instance: _Instance, key: str, value_plane: P.ValuePlane) -> tuple[float | None, str | None]:
-    """Value observed own holdings under proven code control.
+    """The controlled node's own priced sheet as an upper bound, or why not.
 
-    The record separately discloses coverage and freshness. The amount is scoped
-    to observed holdings; future deposits and downstream assets are outside it.
+    ``(usd, why)``. A number with its basis where the branch is EARNED; ``None``
+    with a typed refusal where the capability qualifies and the sheet does not;
+    ``(None, None)`` where the question does not arise at all, which is the state
+    the fall-through below this branch is written for and must not be confused
+    with a refusal.
+
+    Three conjuncts, and each of them is a different claim.
+
+    The CAPABILITY must be code control. Replacing what a node does removes the
+    node's own code from between the principal and what the node holds, and then
+    "how much can they move" has an answer nothing further has to witness: at
+    most what is there. Gate control has no such argument — the vault's own share
+    math, caps and caller conditions are all still standing and none of them has
+    been examined — so it stays where Phase 6 left it. The test is on the
+    capability and never on ``is_proxy``: ``exec.arbitrary`` on a contract that
+    was never a proxy dictates that contract's behaviour just as completely.
+
+    The ENTITY must be the controlled node itself — the deployment the capability
+    was witnessed on, compared under ``canonical`` so an implementation and its
+    proxy are the one entity they are. Code control expands over the closure, but
+    a downstream node that the controlled one merely governs is the gate-control
+    situation one level down: THAT node's code is still standing. Charging its
+    sheet here would restore the balance-sheet-as-a-reach error under a new name,
+    over a much larger population than the one this branch exists to price.
+
+    The SHEET must be determined AND COMPLETE, which is ``planes.ceiling_for``'s
+    question and not this one's. Its two admitting reasons both produce a figure
+    — a proven zero is a witness and publishes $0 rather than not_determined —
+    and its five refusals are published under their own tokens, because "no
+    balance was ever observed here", "the price lookup never answered" and "the
+    asset list was read at its page cap" are the work of three different
+    pipelines and a reader who cannot tell them apart cannot act on any of them.
+
+    The claim's own provenness is not re-tested here: :func:`_row_value` admits an
+    instance only where ``value_state`` is ``proven_reach``, so an unproven claim
+    never reaches this function with an entity to charge.
+
+    ANTI-GAMING (inv. 13), because a branch that reads a protocol's own balance
+    sheet invites the question. Both conjuncts are expensive to move and neither
+    is movable by presentation: to lower the figure a protocol must hold less, or
+    be genuinely non-upgradeable, and both of those are real facts about it
+    rather than facts about how it is described. The residual vector is the third
+    thing — obfuscating the proxy pattern so the upgrade capability cannot be
+    PROVEN — and it is named rather than claimed away. It fails closed the way
+    every capability detection in this pipeline fails closed: an unproven
+    capability produces no finding, so it produces NO ceiling row at all, not a
+    smaller one. What such a protocol buys is the absence of the row, which is
+    charged to confidence as an unanswered question, and not a cheaper number
+    standing in the document where the honest one would have been.
     """
     if instance.signal.claim_id not in K.CODE_CONTROL_CAPABILITIES:
         return None, None
@@ -470,8 +538,12 @@ def _sheet_ceiling(instance: _Instance, key: str, value_plane: P.ValuePlane) -> 
     canonical = value_plane.canonical(key)
     if canonical != value_plane.canonical(controlled):
         return None, None
-    usd, reason = P.observed_holdings_for(value_plane, canonical)
-    if usd is not None:
+    usd, reason = P.ceiling_for(value_plane, canonical)
+    if reason in P.CEILING_ADMITTING_REASONS:
+        # ``ceiling_for`` pairs a number with exactly the two admitting reasons,
+        # so this is the branch where ``usd`` is one — asserted by returning it
+        # rather than by a comment, since a ``None`` here would publish the
+        # refusal path's shape under the admission's name.
         return usd, f"code_control_sheet_ceiling({reason}) x entity_holdings"
     return None, f"{SHEET_CEILING_REFUSED_PREFIX}{reason})"
 

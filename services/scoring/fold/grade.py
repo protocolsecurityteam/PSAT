@@ -50,10 +50,11 @@ def _gap_reading(
         )
     if ceilings_excluded:
         parts.append(
-            "the entities under ceiling_entities_excluded_from_exposure are valued from observed "
-            "holdings at controlled nodes. Those figures do not measure extraction and are excluded "
-            "from this numerator without spending an exposure budget. Their individual records "
-            "disclose coverage and freshness; partial or stale holdings are not an upper bound"
+            "the entities under ceiling_entities_excluded_from_exposure are priced from their own "
+            "SHEET CEILING and are deliberately outside this numerator: what is proven there is an "
+            "at-most on a move nobody witnessed, which is not expected loss, and it spends none of "
+            "their exposure budget either — so their dollars are absent from the figure by rule "
+            "and not by a lookup that failed"
         )
     return "; ".join(parts)
 
@@ -238,7 +239,7 @@ def _grade(
     tracked = value_plane.tracked_total
     coverage = _exposure_coverage(findings, value_plane, tracked)
     if not tracked or not any_priced:
-        return grade_lambda, None, round(exposure, 2) if any_priced else None, gaps, coverage
+        return grade_lambda, None, round(exposure, 2), gaps, coverage
     return grade_lambda, round(100.0 * (1.0 - exposure / tracked), 3), round(exposure, 2), gaps, coverage
 
 

@@ -1,59 +1,60 @@
-"""Legacy delivery evidence must no longer exclude holdings or determine zero."""
+"""Retired delivery data is not read or applied to current balance scoring."""
 
-from services.scoring import fold as FOLD
+from sqlalchemy import event
+
+from db.models import ContractBalance, TokenDeliveryEvidence
 from services.scoring import planes as P
-from services.scoring.schema import PrincipalRef
-from tests.support.scoring_builders import EOA, facts, fold, magnitude, proven, reaches, sig  # noqa: F401
-
-KEY = "ethereum::0x" + "a" * 40
-TOKEN = "0x" + "1" * 40
+from tests.conftest import ADDR, requires_postgres
+from tests.support.effects_builders import _contract, _protocol
 
 
-def test_legacy_disposition_is_an_unpriced_observation():
-    plane = P.ValuePlane(
-        per_asset_state={KEY: {TOKEN: P.ASSET_AIRDROP_DELIVERED}},
+@requires_postgres
+def test_stored_delivery_classification_does_not_change_holdings(db_session):
+    protocol = _protocol(db_session, "retired-score-disposition")
+    address, token = ADDR(0x9901), ADDR(0x9902)
+    contract = _contract(db_session, protocol.id, address)
+    db_session.add_all(
+        [
+            ContractBalance(
+                contract_id=contract.id,
+                observed_address=address,
+                token_address=token,
+                raw_balance="100",
+                usd_value=None,
+            ),
+            ContractBalance(
+                contract_id=contract.id, observed_address=address, token_address=None, raw_balance="100", usd_value=1000
+            ),
+            TokenDeliveryEvidence(
+                chain_id=1,
+                holder_address=address,
+                token_address=token,
+                delivery_shape="fan_out_all",
+                scanned_from_block=0,
+                measured_through_block=100,
+                delivery_count=1,
+                deliveries=[{"tx": "0x01", "log_index": 1, "fan_out": 400}],
+                basis="legacy classification",
+                min_fan_out=400,
+                fan_out_threshold_k=25,
+            ),
+        ]
     )
-    assert plane.sheet_state(KEY) == P.SHEET_UNPRICED
-    assert plane.total(KEY) is None
-    assert P.ceiling_for(plane, KEY) == (None, P.CEILING_UNPRICED)
-    assert not FOLD._asset_coverage(plane, KEY)["complete"]
+    db_session.flush()
+    statements = []
 
+    def capture(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement.lower())
 
-def test_legacy_disposition_beside_priced_value_preserves_value_but_cannot_cap():
-    plane = P.ValuePlane(
-        per_asset={KEY: {"native": 50.0}},
-        per_asset_state={KEY: {"native": P.ASSET_PRICED, TOKEN: P.ASSET_AIRDROP_DELIVERED}},
-    )
-    assert plane.total(KEY) == 50
-    assert plane.trimming_total(KEY) is None
-    assert P.ceiling_for(plane, KEY)[0] is None
-
-
-def test_legacy_disposition_beside_zero_does_not_prove_empty():
-    plane = P.ValuePlane(
-        per_asset={KEY: {"native": 0.0}},
-        per_asset_state={KEY: {"native": P.ASSET_PROVEN_ZERO, TOKEN: P.ASSET_AIRDROP_DELIVERED}},
-        asset_set_proven_complete={KEY: {"source": "legacy_scan"}},
-        fresh_entities={KEY},
-    )
-    assert plane.sheet_state(KEY) == P.SHEET_UNPRICED
-    assert plane.total(KEY) is None
-
-
-def test_security_finding_survives_delivery_retirement(fold):
-    signal = sig(
-        deployment_address=KEY.split("::")[1],
-        authority_openness="restricted",
-        principal_state="enumerated",
-        principal_refs=(PrincipalRef(1, "ethereum", EOA),),
-        **proven(1.0),
-        **reaches(KEY),
-    )
-    legacy = P.ValuePlane(per_asset_state={KEY: {TOKEN: P.ASSET_AIRDROP_DELIVERED}}, contract_entities={KEY})
-    current = P.ValuePlane(per_asset_state={KEY: {TOKEN: P.ASSET_UNPRICED}}, contract_entities={KEY})
-    before = fold([signal], value=legacy, principals={1: facts(1, EOA, "eoa")})
-    after = fold([signal], value=current, principals={1: facts(1, EOA, "eoa")})
-    assert len(before.findings) == len(after.findings) == 1
-    assert before.grade_lambda == after.grade_lambda
-    assert before.confidence_pct == after.confidence_pct
-    assert after.findings[0].get("value_at_stake_usd") is None
+    engine = db_session.get_bind()
+    event.listen(engine, "before_cursor_execute", capture)
+    try:
+        plane = P.load_value_plane(db_session, protocol.id)
+    finally:
+        event.remove(engine, "before_cursor_execute", capture)
+    key = f"ethereum::{address}"
+    assert plane.per_asset_state[key][token] == P.ASSET_UNPRICED
+    assert plane.total(key) == 1000
+    assert plane.asset_disposition == {}
+    assert "asset_disposition" not in plane.provenance
+    assert not any("token_delivery_evidence" in sql or "token_protocol_references" in sql for sql in statements)

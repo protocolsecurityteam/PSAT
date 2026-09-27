@@ -439,6 +439,9 @@ from services.scoring.planes.value import (
     CEILING_ADMITTING_REASONS as CEILING_ADMITTING_REASONS,
 )
 from services.scoring.planes.value import (
+    CEILING_AIRDROP_DETERMINED as CEILING_AIRDROP_DETERMINED,
+)
+from services.scoring.planes.value import (
     CEILING_ALIAS_AMBIGUOUS as CEILING_ALIAS_AMBIGUOUS,
 )
 from services.scoring.planes.value import (
@@ -460,6 +463,21 @@ from services.scoring.planes.value import (
     CEILING_UNPRICED as CEILING_UNPRICED,
 )
 from services.scoring.planes.value import (
+    DISPOSITION_REFUSALS as DISPOSITION_REFUSALS,
+)
+from services.scoring.planes.value import (
+    DISPOSITION_REFUSED_ASSET_LIST_TRUNCATED as DISPOSITION_REFUSED_ASSET_LIST_TRUNCATED,
+)
+from services.scoring.planes.value import (
+    DISPOSITION_REFUSED_TYPED_RECEIPT_UNRESOLVED as DISPOSITION_REFUSED_TYPED_RECEIPT_UNRESOLVED,
+)
+from services.scoring.planes.value import (
+    DISPOSITION_REFUSED_UNPRICED_POSITIONS as DISPOSITION_REFUSED_UNPRICED_POSITIONS,
+)
+from services.scoring.planes.value import (
+    DISPOSITION_REFUSED_UNSCANNED_ACCOUNT as DISPOSITION_REFUSED_UNSCANNED_ACCOUNT,
+)
+from services.scoring.planes.value import (
     EMPTY_REFUSALS as EMPTY_REFUSALS,
 )
 from services.scoring.planes.value import (
@@ -473,6 +491,9 @@ from services.scoring.planes.value import (
 )
 from services.scoring.planes.value import (
     EMPTY_REFUSED_UNSCANNED_ACCOUNT as EMPTY_REFUSED_UNSCANNED_ACCOUNT,
+)
+from services.scoring.planes.value import (
+    SHEET_AIRDROP_DETERMINED as SHEET_AIRDROP_DETERMINED,
 )
 from services.scoring.planes.value import (
     SHEET_BELOW_RESOLUTION as SHEET_BELOW_RESOLUTION,
@@ -516,9 +537,6 @@ from services.scoring.planes.value import (
 from services.scoring.planes.value import (
     load_value_plane as load_value_plane,
 )
-from services.scoring.planes.value import (
-    observed_holdings_for as observed_holdings_for,
-)
 
 __all__ = [
     "ACT_AS_CALL_SITE_GATE_NOT_DELEGATED",
@@ -544,6 +562,7 @@ __all__ = [
     "ASSET_UNPRICED",
     "CEILING_ADMITTED",
     "CEILING_ADMITTING_REASONS",
+    "CEILING_AIRDROP_DETERMINED",
     "CEILING_ALIAS_AMBIGUOUS",
     "CEILING_ASSET_LIST_TRUNCATED",
     "CEILING_BELOW_RESOLUTION",
@@ -551,6 +570,11 @@ __all__ = [
     "CEILING_PROVEN_EMPTY",
     "CEILING_REASONS",
     "CEILING_UNPRICED",
+    "DISPOSITION_REFUSALS",
+    "DISPOSITION_REFUSED_ASSET_LIST_TRUNCATED",
+    "DISPOSITION_REFUSED_TYPED_RECEIPT_UNRESOLVED",
+    "DISPOSITION_REFUSED_UNPRICED_POSITIONS",
+    "DISPOSITION_REFUSED_UNSCANNED_ACCOUNT",
     "EMPTY_REFUSALS",
     "EMPTY_REFUSED_ASSET_SET_NOT_PROVEN_COMPLETE",
     "EMPTY_REFUSED_TYPED_RECEIPT_UNRESOLVED",
@@ -601,6 +625,7 @@ __all__ = [
     "SCOPE_NOT_DETERMINED",
     "SCOPE_ROLES",
     "SCOPE_STATE_VAR",
+    "SHEET_AIRDROP_DETERMINED",
     "SHEET_BELOW_RESOLUTION",
     "SHEET_NOT_DETERMINED",
     "SHEET_NO_ROWS",
@@ -640,7 +665,6 @@ __all__ = [
     "ValuePlane",
     "authority_deletability",
     "ceiling_for",
-    "observed_holdings_for",
     "load_act_as_plane",
     "load_audit_posture",
     "discovery_relation_entities",

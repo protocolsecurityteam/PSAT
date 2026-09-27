@@ -57,7 +57,7 @@ from services.scoring.fold import compute_protocol_score
 from services.scoring.persist import persist_score_document
 from services.scoring.schema import ScoreDocument
 from utils.logging import log_timed_phase
-from utils.scoring_status import MODEL_VERSION, SCORE_TRIGGER_DIRTY_LOOP, SCORE_TRIGGER_STALENESS_SWEEP
+from utils.scoring_status import SCORE_TRIGGER_DIRTY_LOOP, SCORE_TRIGGER_STALENESS_SWEEP
 
 logger = logging.getLogger(__name__)
 
@@ -185,9 +185,7 @@ def select_due_protocols(
             # NULLS FIRST as an ordering is not enough on its own: a protocol
             # that has never been scored must also PASS the age filter, and
             # ``computed_at < cutoff`` is false for NULL.
-            (ProtocolScoreLatest.computed_at.is_(None))
-            | (ProtocolScoreLatest.computed_at < cutoff)
-            | (ProtocolScoreLatest.model_version != MODEL_VERSION)
+            (ProtocolScoreLatest.computed_at.is_(None)) | (ProtocolScoreLatest.computed_at < cutoff)
         )
         .where(or_(ProtocolScoreQueue.protocol_id.is_(None), retry_ready))
         .order_by(ProtocolScoreLatest.computed_at.asc().nullsfirst(), Protocol.id.asc())

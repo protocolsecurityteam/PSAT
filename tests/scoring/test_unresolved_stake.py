@@ -47,12 +47,12 @@ def test_reached_and_behind_split_and_sum():
         plane,
         hops_not_determined=[{"reason": "gate_does_not_confer_this_scope"}],
     )
-    assert stake["ceiling_usd"] is None
+    assert stake["ceiling_usd"] == 1_250_000.0
     assert stake["entities_total"] == 2
     reached = stake["by_basis"]["reached_unwitnessed"]
     behind = stake["by_basis"]["behind_unestablished_hops"]
-    assert reached["ceiling_usd"] is None
-    assert behind["ceiling_usd"] is None
+    assert reached["ceiling_usd"] == 1_000_000.0
+    assert behind["ceiling_usd"] == 250_000.0
     # The closing witness is on the entry: the why-token class per entity for
     # reached, the hop's own refusal reason for the subtree behind it.
     assert reached["missing_witnesses"] == {"reach_magnitude_not_witnessed": 1}
@@ -61,14 +61,12 @@ def test_reached_and_behind_split_and_sum():
     assert reached["entities_itemized"] == [
         {
             "entity": REACHED,
-            "ceiling_usd": None,
-            "refusal": "asset_set_not_proven_complete",
+            "ceiling_usd": 1_000_000.0,
+            "refusal": None,
             "missing": ["reach_magnitude_not_witnessed"],
         }
     ]
-    assert behind["entities_itemized"] == [
-        {"entity": BEHIND, "ceiling_usd": None, "refusal": "asset_set_not_proven_complete"}
-    ]
+    assert behind["entities_itemized"] == [{"entity": BEHIND, "ceiling_usd": 250_000.0, "refusal": None}]
     # An unestablished hop is an earlier missing link than a magnitude: the
     # frontier is the furthest-back unanswered question.
     assert stake["proof_frontier"] == "reach"
@@ -101,8 +99,8 @@ def test_a_proven_empty_sheet_contributes_an_earned_zero():
         asset_set_proven_complete={REACHED: SCANNED},
     )
     stake = FOLD._unresolved_stake(_und(REACHED), _EMPTY_WITHHELD, set(), plane)
-    assert stake["ceiling_usd"] is None
-    assert stake["by_basis"]["reached_unwitnessed"]["entities_contributing"] == 0
+    assert stake["ceiling_usd"] == 0.0
+    assert stake["by_basis"]["reached_unwitnessed"]["entities_contributing"] == 1
 
 
 def test_an_implementation_alias_cannot_recount_its_sized_proxy():
@@ -116,7 +114,7 @@ def test_an_implementation_alias_cannot_recount_its_sized_proxy():
     # Unsized: two impls of one proxy are ONE pot, counted and summed once.
     stake = FOLD._unresolved_stake(_und(impl, impl2), _EMPTY_WITHHELD, set(), plane)
     assert stake["entities_total"] == 1
-    assert stake["ceiling_usd"] is None
+    assert stake["ceiling_usd"] == 9_000_000.0
 
 
 def test_no_unresolved_entities_is_the_earned_fully_determined_state():
@@ -174,13 +172,13 @@ def test_the_fold_stamps_the_row_and_publishes_the_rollup(fold):
     # Gate control with no magnitude witness: the reached sheet is not charged,
     # so the entity is unresolved and its own sheet is the at-most.
     assert finding["partial_proof"] is True
-    assert finding["unresolved_stake"]["ceiling_usd"] is None
+    assert finding["unresolved_stake"]["ceiling_usd"] == 2_000_000.0
     assert finding["unresolved_stake"]["proof_frontier"] == "magnitude"
     # The at-most in points: proven severity (0.75) x proven weakness (EOA 0.9)
     # x the $2M ceiling's band (0.5) x the scale — derived, not minted.
-    assert finding["unresolved_stake"]["points_ceiling"] is None
+    assert finding["unresolved_stake"]["points_ceiling"] == round(60.0 * 0.75 * 0.9 * 0.5, 4)
     levers = document.provenance["unresolved_levers"]
     assert levers["findings_admitted"] >= 1
-    assert levers["levers"][0]["ceiling_usd"] is None
+    assert levers["levers"][0]["ceiling_usd"] == 2_000_000.0
     assert levers["levers"][0]["points_ceiling"] == finding["unresolved_stake"]["points_ceiling"]
     assert levers["levers"][0]["principal_unit"] == finding["principal_unit"]

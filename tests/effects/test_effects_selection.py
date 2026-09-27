@@ -719,7 +719,7 @@ def test_candidate_carries_witnessed_value_holders_and_acting_floor(db_session):
     # asset worth nothing" indistinguishable from "this holder moved nothing".
     assert holders[(ADDR(0x9003).lower(), native)] == pytest.approx(0.0)
     # Acting floor is this deployment's own balance.
-    assert cand.acting_balance_usd is None  # observed holdings cannot bound future/external capabilities
+    assert cand.acting_balance_usd == pytest.approx(221_000_000.0)
 
 
 @requires_postgres

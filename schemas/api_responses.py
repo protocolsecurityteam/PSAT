@@ -140,9 +140,9 @@ class CompanyScoreResponse(TypedDict):
     trigger: str
     trigger_job_id: str | None
     grade_state: Any
-    grade_lambda: float | None
-    grade_exposure: float | None
-    confidence_pct: float | None
+    grade_lambda: Any
+    grade_exposure: Any
+    confidence_pct: Any
     perimeter_state: Any
     findings: Any
     earned_negatives: Any

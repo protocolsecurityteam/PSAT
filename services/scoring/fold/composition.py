@@ -15,7 +15,7 @@ from services.scoring.fold.readings import (
     _BOUNDED_BY_SHEET,
     _BOUNDED_BY_WITNESS,
     _COMPOSED_SOURCE_READINGS,
-    _OBSERVED_SHEET_DOES_NOT_BOUND,
+    _DISPOSED_SHEET_DOES_NOT_BOUND,
     _ORDER_COMPONENT_NAMES,
     _TRIMMED_TO_AN_UNPROVEN_CEILING,
     _WITNESS_STATE_CLAIM,
@@ -27,7 +27,7 @@ from services.scoring.fold.readings import (
     BOUND_DIRECTION_CEILING,
     BOUND_DIRECTION_NOT_DETERMINED,
     COMPOSITION_ARMS,
-    SHEET_BOUND_REFUSED_BY_SCOPE,
+    SHEET_BOUND_REFUSED_BY_DISPOSITION,
     _round_published,
     _sheet_ceiling_direction_basis,
 )
@@ -378,7 +378,7 @@ class _ComposedMagnitude:
             "composed_selector_tie": self._tie_json(),
             "reading": (
                 _COMPOSED_SOURCE_READINGS[self.bounded_by]
-                + (f". {_OBSERVED_SHEET_DOES_NOT_BOUND}" if self.sheet_bound_refused else "")
+                + (f". {_DISPOSED_SHEET_DOES_NOT_BOUND}" if self.sheet_bound_refused else "")
                 # Gated on the BASIS being present, not on the direction alone.
                 # The sentence's job is to point a reader at two fields, and the
                 # basis is null in the third state — a sheet exists and nobody
@@ -991,10 +991,16 @@ def _compose(
                     census["destination_magnitude_witnessed"] += 1
                     key = value_plane.canonical(hop.destination)
                     sheet = value_plane.trimming_total(key)
-                    # A known observed total is distinct from a bound on what
-                    # this capability may move, including assets outside the snapshot.
+                    # A sheet DETERMINED at $0 by delivery-shape disposition may
+                    # not trim: the disposed assets are still held and delivery
+                    # shape is not a claim about worth, so the sheet bounds what
+                    # the entity holds and not what is there to move. Recorded
+                    # rather than merged into "no sheet" — the entry publishes
+                    # ``sheet_not_determined``, and that word would be false.
                     refused = (
-                        SHEET_BOUND_REFUSED_BY_SCOPE if sheet is None and value_plane.total(key) is not None else None
+                        SHEET_BOUND_REFUSED_BY_DISPOSITION
+                        if sheet is None and value_plane.total(key) is not None
+                        else None
                     )
                     # R4: the witness bounds the call, the sheet bounds what is
                     # there to move. Neither alone, and never their sum.

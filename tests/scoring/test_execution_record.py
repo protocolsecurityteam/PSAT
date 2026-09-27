@@ -395,26 +395,32 @@ def _gapped_row(state: str) -> tuple[FunctionSignal, P.ValuePlane]:
 
 
 def test_case4_an_attribution_derived_magnitude_publishes_neither_exact_nor_floor():
-    """A legacy whole-wallet attribution supplies no monetary bound on the call."""
+    """Regression case 4. The attribution path credits a holder's WHOLE priced
+    balance off a constant-amount probe, so ``proven_exact`` is unearnable in
+    principle and ``proven_floor`` claims the opposite direction."""
     reach = D._flow_reach(
         {"reach_determined": True, "observed_reach_value_usd": 1_234.0, "observed_reach_holders": [VAULT]},
         cast(Any, D._ContractFacts(contract_id=1, protocol_id=1, chain="ethereum", address=C, functions=[])),
         KEY_C,
     )
-    assert reach.magnitude.state == "not_determined"
-    assert reach.magnitude.value is None
-    assert reach.bound == "floor"
+    assert reach.magnitude.state == MAGNITUDE_STATE_PROVEN_UPPER_BOUND
+    assert reach.magnitude.state not in (MAGNITUDE_STATE_PROVEN_EXACT, MAGNITUDE_STATE_PROVEN_FLOOR)
+    assert reach.basis == "observed_reach_value_usd(fork-proven)"
+    # The ENTITY-SET bound is a different axis and is untouched.
+    assert reach.bound == "exact"
 
 
-def test_case4_legacy_priced_holdings_do_not_become_a_call_floor():
-    """Legacy partially priced wallet totals do not prove a floor on transferred value."""
+def test_case4_the_genuine_floor_path_keeps_its_floor():
+    """The predicate is the BASIS, not "any observed_reach_* key": a partly priced
+    reach is a real floor and two composed ties turn on a floor beating an upper
+    bound."""
     reach = D._flow_reach(
         {"observed_reach_priced_usd": 900.0, "observed_reach_priced_holders": [VAULT]},
         cast(Any, D._ContractFacts(contract_id=1, protocol_id=1, chain="ethereum", address=C, functions=[])),
         KEY_C,
     )
-    assert reach.magnitude.state == "not_determined"
-    assert reach.magnitude.value is None
+    assert reach.magnitude.state == MAGNITUDE_STATE_PROVEN_FLOOR
+    assert reach.basis == "observed_reach_priced_usd(>= floor)"
 
 
 def test_case4_the_upper_bound_token_is_readable_by_the_fold(fold):
@@ -538,15 +544,14 @@ def test_an_upper_bound_is_refused_across_two_keys_rather_than_apportioned(fold)
         c for c in finding["witnessed_magnitude_caps"] if c["witness_state"] == MAGNITUDE_STATE_PROVEN_UPPER_BOUND
     )
     assert cap["published_sum_usd"] is None
-    assert cap["uncapped_sum_usd"] == 6_000.0
+    assert cap["uncapped_sum_usd"] == 4_000.0
 
 
-def test_an_exact_witness_over_two_keys_retains_one_budget_without_wallet_caps(fold):
-    """One exact call witness remains one budget; wallet totals cannot apportion it."""
+def test_an_exact_witness_over_two_keys_still_apportions(fold):
+    """The twin: the refusal above must be about the STATE, not the two-key shape."""
     finding = _eoa_finding(fold, *_two_key_row(MAGNITUDE_STATE_PROVEN_EXACT))
     assert finding["value_at_stake_usd"] == 3_000.0
-    assert set(finding["value_by_entity"]) == {KEY_C}
-    assert KEY_V in {row["entity"] for row in finding["undetermined_instances"]}
+    assert set(finding["value_by_entity"]) == {KEY_C, KEY_V}
 
 
 def test_the_floor_arm_is_not_vacuously_true_on_an_empty_contribution_set():

@@ -460,14 +460,14 @@ describe("qualifierForClaims — pause freeze specifics", () => {
 });
 
 describe("qualifierForClaims — mint backing", () => {
-  it("renders (inflow observed) only for inflow_observed === true", () => {
+  it("renders (backed) only for inflow_observed === true", () => {
     const fn = { claims: [observedClaim("supply.mint", { backing: { inflow_observed: true, minted: true } })] };
-    expect(qualifierForClaims(fn)).toBe("(inflow observed)");
+    expect(qualifierForClaims(fn)).toBe("(backed)");
   });
 
-  it("renders (no inflow observed) for a witnessed dilution (inflow_observed === false)", () => {
+  it("renders (unbacked) for a witnessed dilution (inflow_observed === false)", () => {
     const fn = { claims: [observedClaim("supply.mint", { backing: { inflow_observed: false, minted: true } })] };
-    expect(qualifierForClaims(fn)).toBe("(no inflow observed)");
+    expect(qualifierForClaims(fn)).toBe("(unbacked)");
   });
 
   it("suppresses when backing is absent (unknown, never 'backed' from absence)", () => {
@@ -484,17 +484,17 @@ describe("qualifierForClaims — wrap-shape backing on the chip (register #10)",
     claims: [claim("flow.in"), observedClaim("supply.mint", observed)],
   });
 
-  it("promotes (inflow observed) onto the value-in chip when the co-mint is backed", () => {
+  it("promotes (backed) onto the value-in chip when the co-mint is backed", () => {
     const fn = wrap({ backing: { inflow_observed: true, minted: true } });
     expect(primaryClaim(fn).claim_id).toBe("flow.in");
-    expect(qualifierForClaims(fn)).toBe("(inflow observed)");
-    expect(compactActionSummary(fn)).toBe("moves value in (inflow observed)");
+    expect(qualifierForClaims(fn)).toBe("(backed)");
+    expect(compactActionSummary(fn)).toBe("moves value in (backed)");
   });
 
-  it("promotes (no inflow observed) onto the value-in chip for a witnessed dilution", () => {
+  it("promotes (unbacked) onto the value-in chip for a witnessed dilution", () => {
     const fn = wrap({ backing: { inflow_observed: false, minted: true } });
-    expect(qualifierForClaims(fn)).toBe("(no inflow observed)");
-    expect(compactActionSummary(fn)).toBe("moves value in (no inflow observed)");
+    expect(qualifierForClaims(fn)).toBe("(unbacked)");
+    expect(compactActionSummary(fn)).toBe("moves value in (unbacked)");
   });
 
   it("suppresses when the co-mint carries no backing witness (unknown, not backed)", () => {
@@ -510,7 +510,7 @@ describe("qualifierForClaims — wrap-shape backing on the chip (register #10)",
   it("does not change pure-mint-primary behavior (no flow.in present)", () => {
     const fn = { claims: [observedClaim("supply.mint", { backing: { inflow_observed: true } })] };
     expect(primaryClaim(fn).claim_id).toBe("supply.mint");
-    expect(qualifierForClaims(fn)).toBe("(inflow observed)");
+    expect(qualifierForClaims(fn)).toBe("(backed)");
   });
 });
 

@@ -46,7 +46,7 @@ def test_f1_a_native_only_flow_is_still_bounded_by_its_witness(fold):
     )
     finding = fold([signal], value=plane).findings[0]
     assert finding["value_at_stake_usd"] == 10.0
-    assert finding["value_band"] == ">= <$100k"
+    assert finding["value_band"] == "<$100k"
 
 
 def test_f1_a_native_only_flow_with_no_native_row_is_not_determined(fold):
@@ -97,7 +97,7 @@ def test_f4_an_unpriced_entity_is_never_exposure_zero(fold):
     assert document.provenance["exposure_gaps"]
 
 
-def test_f11_unknown_exposure_preserves_lambda_confidence_and_deductions(fold):
+def test_f11_a_withheld_grade_publishes_no_derived_figure(fold):
     signal = sig(
         authority_openness="restricted",
         principal_state="enumerated",
@@ -108,16 +108,15 @@ def test_f11_unknown_exposure_preserves_lambda_confidence_and_deductions(fold):
     document = fold([signal], principals={1: facts(1, EOA, "eoa")}, value=value_plane({}))
     served = document.document()
 
-    assert served["grade_state"] == "computed"
-    assert served["grade_lambda"] is not None
-    assert served["confidence_pct"] is not None
-    assert served["grade_exposure"] is None
-    assert document.provenance["exposure_usd"] is None
-    assert served["model_parameters"]["confidence_detail"]["pct"] == served["confidence_pct"]
+    assert served["grade_state"] == "not_determined"
+    assert served["confidence_pct"] is None
+    assert "pct" not in served["model_parameters"]["confidence_detail"]
     for finding in served["findings"]:
-        assert finding["net_points_lambda"] > 0
-        assert finding["exposure_usd"] is None
-    assert "grade_withheld" not in document.provenance
+        assert "net_points_lambda" not in finding
+        assert "exposure_usd" not in finding
+    withheld = document.provenance["grade_withheld"]
+    assert withheld["grade_lambda_computed"] is not None
+    assert withheld["per_finding"]
 
 
 def test_f10_the_transitive_branch_reads_the_signals_value_state(fold):

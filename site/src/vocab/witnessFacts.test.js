@@ -80,9 +80,9 @@ describe("claimWitnessFacts — inspector verbose rows", () => {
 
   it("emits backing rows for both witnessed directions", () => {
     expect(claimWitnessFacts({ claims: [observedClaim("supply.mint", { backing: { inflow_observed: true } })] }))
-      .toContainEqual({ label: "Backing", value: "asset inflow observed; economic backing not determined" });
+      .toContainEqual({ label: "Backing", value: "matching asset inflow observed (backed)" });
     expect(claimWitnessFacts({ claims: [observedClaim("supply.mint", { backing: { inflow_observed: false } })] }))
-      .toContainEqual({ label: "Backing", value: "no asset inflow observed in this call; economic backing not determined" });
+      .toContainEqual({ label: "Backing", value: "no matching inflow — supply rose alone (dilution)" });
   });
 
   it("renders reach as an explicit UPPER BOUND, never exact", () => {
@@ -93,7 +93,7 @@ describe("claimWitnessFacts — inspector verbose rows", () => {
         witness: { effect_verdict_id: 1, observed: { observed_reach_value_usd: 55_200_000 } },
       }],
     };
-    expect(claimWitnessFacts(fn)).toContainEqual({ label: "Reach", value: "dollar magnitude not determined; recorded holdings do not bound this call" });
+    expect(claimWitnessFacts(fn)).toContainEqual({ label: "Reach (upper bound)", value: "up to ~$55.2M" });
   });
 
   it("names an unmeasured reach as not determined and the balance as a floor", () => {
@@ -118,7 +118,7 @@ describe("claimWitnessFacts — inspector verbose rows", () => {
     };
     expect(claimWitnessFacts(fn)).toContainEqual({
       label: "Reach",
-      value: "dollar magnitude not determined; recorded holdings do not bound this call",
+      value: "not determined (own balance floor up to ~$999)",
     });
   });
 
@@ -146,7 +146,7 @@ describe("claimWitnessFacts — inspector verbose rows", () => {
       label: "Destination",
       value: "not determined (no static classification, no sentinel landed)",
     });
-    expect(facts).toContainEqual({ label: "Reach", value: "dollar magnitude not determined; recorded holdings do not bound this call" });
+    expect(facts).toContainEqual({ label: "Reach (upper bound)", value: "up to ~$472.2M" });
   });
 
   it("renders a fork-proven caller-chosen destination on the chip and in the facts", () => {
@@ -204,7 +204,7 @@ describe("claimWitnessFacts — inspector verbose rows", () => {
     const facts = claimWitnessFacts(fn);
     expect(facts).toContainEqual({
       label: "Reach",
-      value: "dollar magnitude not determined; recorded holdings do not bound this call",
+      value: "not determined (measured figure exceeded protocol TVL and was refused)",
     });
     // The rejected figure must not also render as a reach.
     expect(JSON.stringify(facts)).not.toContain("3.5B");
@@ -239,7 +239,7 @@ describe("claimWitnessFacts — inspector verbose rows", () => {
     const reach = claimWitnessFacts(fn).filter((f) => f.label === "Reach");
     expect(reach).toHaveLength(1);
     expect(reach[0].value).toContain("1 holder/asset pair(s) of unknown value");
-    expect(reach[0].value).toContain("value not determined");
+    expect(reach[0].value).toContain("refused");
     // Still never the number.
     expect(reach[0].value).not.toContain("3.5B");
   });
@@ -298,7 +298,7 @@ describe("claimWitnessFacts — inspector verbose rows", () => {
     };
     expect(claimWitnessFacts(fn)).toContainEqual({
       label: "Reach",
-      value: "value not determined — 1 holder/asset pair(s) of unknown value",
+      value: "value not determined — 1 holder/asset pair(s) of unknown value, priced part up to ~$759 across 1 holder(s)",
     });
   });
 
@@ -338,7 +338,7 @@ describe("claimWitnessFacts — inspector verbose rows", () => {
     };
     expect(claimWitnessFacts(fn)).toContainEqual({
       label: "Reach",
-      value: "value not determined — 1 holder/asset pair(s) of unknown value",
+      value: "value not determined — 1 holder/asset pair(s) of unknown value, priced part up to ~$8.5M across 1 holder(s)",
     });
   });
 
@@ -362,7 +362,7 @@ describe("claimWitnessFacts — inspector verbose rows", () => {
     };
     expect(claimWitnessFacts(fn)).toContainEqual({
       label: "Reach",
-      value: "value not determined — 1 asset(s) of unknown value",
+      value: "value not determined — 1 asset(s) of unknown value, priced part up to ~$759 (holder attribution not recorded)",
     });
   });
 
@@ -381,7 +381,7 @@ describe("claimWitnessFacts — inspector verbose rows", () => {
     };
     expect(claimWitnessFacts(fn)).toContainEqual({
       label: "Reach",
-      value: "dollar magnitude not determined; recorded holdings do not bound this call",
+      value: "not determined (no downstream holder observed)",
     });
   });
 
@@ -403,7 +403,7 @@ describe("claimWitnessFacts — inspector verbose rows", () => {
     };
     expect(claimWitnessFacts(fn)).toContainEqual({
       label: "Reach",
-      value: "dollar magnitude not determined; recorded holdings do not bound this call",
+      value: "$0 — measured, no priced value reachable",
     });
   });
 
@@ -420,7 +420,7 @@ describe("claimWitnessFacts — inspector verbose rows", () => {
         },
       }],
     };
-    expect(claimWitnessFacts(fn)).toContainEqual({ label: "Reach", value: "dollar magnitude not determined; recorded holdings do not bound this call" });
+    expect(claimWitnessFacts(fn)).toContainEqual({ label: "Reach (upper bound)", value: "up to ~$55.2M" });
   });
 
   it("stays silent on an OLDER payload whose reach figure is zero", () => {
@@ -436,7 +436,7 @@ describe("claimWitnessFacts — inspector verbose rows", () => {
         witness: { effect_verdict_id: 1, observed: { observed_reach_value_usd: 0 } },
       }],
     };
-    expect(claimWitnessFacts(fn)).toContainEqual({label: "Reach", value: "dollar magnitude not determined; recorded holdings do not bound this call"});
+    expect(claimWitnessFacts(fn).some((f) => String(f.label).startsWith("Reach"))).toBe(false);
   });
 
   it("emits no rows when no witness facts are present (silence, not defaults)", () => {
@@ -605,7 +605,7 @@ describe("synthesis qualifiers — a seeded verdict never renders as a live one"
   // `input_seeded` / `contract_balance_seeded` travel on the behavioral witness
   // and both weaken it (services/effects/recipes.py `value_out`). Before this the
   // renderer received them and said nothing: 13 verdicts in the PR-161 corpus
-  // showed a measured "Reach" figure, and 2 showed a proven outflow
+  // showed a measured "Reach (upper bound)" figure, and 2 showed a proven outflow
   // whose payout only executed once the contract's own balance was overridden,
   // with the same sentence and the same "observed" provenance word as a verdict
   // witnessed in live state.
@@ -629,7 +629,7 @@ describe("synthesis qualifiers — a seeded verdict never renders as a live one"
   // control every arm below is diffed against.
   const UNSEEDED_FACTS = [
     { label: "Destination", value: "msg.sender (the caller)" },
-    { label: "Reach", value: "dollar magnitude not determined; recorded holdings do not bound this call" },
+    { label: "Reach (upper bound)", value: "up to ~$55.2M" },
   ];
   const UNSEEDED_ACTION = "moves value out (caller-chosen destination)";
   const UNSEEDED_LABEL = "moves value out (caller-chosen destination) · observed";
@@ -666,7 +666,7 @@ describe("synthesis qualifiers — a seeded verdict never renders as a live one"
     const fn = outflow({ input_seeded: true });
     expect(claimWitnessFacts(fn)).toEqual([
       { label: "Destination", value: "msg.sender (the caller)" },
-      { label: "Reach", value: "dollar magnitude not determined; recorded holdings do not bound this call; with seeded inputs" },
+      { label: "Reach (upper bound)", value: "up to ~$55.2M; with seeded inputs" },
     ]);
     expect(compactActionSummary(fn)).toBe(
       "moves value out (caller-chosen destination; with seeded inputs)",
@@ -685,8 +685,8 @@ describe("synthesis qualifiers — a seeded verdict never renders as a live one"
     const both = outflow({ input_seeded: true, contract_balance_seeded: true });
     for (const fn of [only, both]) {
       expect(claimWitnessFacts(fn)).toContainEqual({
-        label: "Reach",
-        value: "dollar magnitude not determined; recorded holdings do not bound this call; only if the contract were funded",
+        label: "Reach (upper bound)",
+        value: "up to ~$55.2M; only if the contract were funded",
       });
       expect(compactActionSummary(fn)).toBe(
         "moves value out (caller-chosen destination; only if the contract were funded)",
@@ -739,16 +739,16 @@ describe("synthesis qualifiers — a seeded verdict never renders as a live one"
     const seeded = mint({ inflow_observed: true, input_seeded: true });
     expect(claimWitnessFacts(seeded)).toContainEqual({
       label: "Backing",
-      value: "asset inflow observed; economic backing not determined; with seeded inputs",
+      value: "matching asset inflow observed (backed); with seeded inputs",
     });
-    expect(compactActionSummary(seeded)).toBe("moves value in (inflow observed; with seeded inputs)");
+    expect(compactActionSummary(seeded)).toBe("moves value in (backed; with seeded inputs)");
 
     // CONTROL: the same shape with the flags explicitly false renders unchanged.
     const plain = mint({ inflow_observed: true, input_seeded: false, contract_balance_seeded: false });
     expect(claimWitnessFacts(plain)).toEqual([
-      { label: "Backing", value: "asset inflow observed; economic backing not determined" },
+      { label: "Backing", value: "matching asset inflow observed (backed)" },
     ]);
-    expect(compactActionSummary(plain)).toBe("moves value in (inflow observed)");
+    expect(compactActionSummary(plain)).toBe("moves value in (backed)");
   });
 
   it("attributes the clause to the seeded claim, never to an unseeded sibling", () => {
@@ -771,8 +771,8 @@ describe("synthesis qualifiers — a seeded verdict never renders as a live one"
     };
     expect(compactActionSummary(fn)).toBe("moves value in");
     expect(claimWitnessFacts(fn)).toContainEqual({
-      label: "Reach",
-      value: "dollar magnitude not determined; recorded holdings do not bound this call; with seeded inputs",
+      label: "Reach (upper bound)",
+      value: "up to ~$8.5M; with seeded inputs",
     });
     expect(claimSummaryLine(fn).label).toBe(
       "moves value in · moves value out · observed (seeded) + standard",
@@ -791,16 +791,4 @@ describe("synthesis qualifiers — a seeded verdict never renders as a live one"
       "moves value out (caller-chosen destination; with seeded inputs) · standard",
     );
   });
-});
-
-it("keeps current holdings context separate from measured call magnitude", () => {
-  const facts = claimWitnessFacts({claims: [{claim_id: "flow.out", tier: "behavioral_observed",
-    witness: {effect_verdict_id: 1, observed: {
-      reach_value_scope: "recorded_holdings_of_assets_observed_moving",
-      reach_observed_holdings_usd: 1000,
-      reach_determined: false,
-    }}}]});
-  expect(facts).toContainEqual({label: "Observed transfers", value: "holder outflow witnessed; dollar magnitude not determined"});
-  expect(facts).toContainEqual({label: "Recorded holdings context", value: "~$1.0K — not a bound on this call"});
-  expect(facts.some((fact) => /upper bound|up to|backed/.test(fact.value))).toBe(false);
 });

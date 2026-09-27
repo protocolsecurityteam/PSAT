@@ -105,8 +105,8 @@ def compute_protocol_score(
     path — the population comes from the one pinned query and from nowhere else,
     so no caller can hand the fold a filtered or re-ordered population.
 
-    ``universe`` is a deprecated compatibility argument; delivery classification
-    no longer participates in valuation or confidence.
+    ``universe`` is a legacy compatibility argument; delivery classification
+    no longer participates in the balance input.
     """
     row_faults: list[dict[str, Any]] = []
     if signals is None:
@@ -397,12 +397,33 @@ def compute_protocol_score(
         ),
     }
 
-    # Lambda measures the security findings; dollar exposure is a separate
-    # question. Unknown balances or unmeasured movement cannot erase findings,
-    # their deductions, or the confidence assessment of those findings.
-    scored = bool(findings)
+    # The three grade figures stand or fall together, and so does everything
+    # derived from them. An exposure ratio with no priced denominator is not a
+    # 100 — it is a quantity that was never measured — so a protocol with
+    # findings but no priced value publishes the findings and parks every
+    # derived number under provenance instead of serving it beside a withheld
+    # grade.
+    scored = bool(findings) and grade_exposure is not None
     if not scored:
-        confidence.pop("pct", None)
+        withheld_rows = [
+            {
+                "principal_unit": finding["principal_unit"],
+                "capability": finding["capability"],
+                "net_points_lambda": finding.pop("net_points_lambda", None),
+                "exposure_usd": finding.pop("exposure_usd", None),
+            }
+            for finding in findings
+        ]
+        if findings:
+            provenance["grade_withheld"] = {
+                "grade_lambda_computed": grade_lambda,
+                "confidence_pct_computed": confidence.pop("pct", None),
+                "exposure_usd_computed": exposure_usd,
+                "per_finding": withheld_rows,
+                "reason": "no priced value in the perimeter, so the exposure denominator is not_determined",
+            }
+        else:
+            confidence.pop("pct", None)
 
     return ScoreDocument(
         protocol_id=protocol_id,

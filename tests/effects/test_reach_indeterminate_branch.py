@@ -1,4 +1,45 @@
-"""Unobserved reach remains unknown regardless of recorded current holdings."""
+"""REACHABILITY PIN for the reach-indeterminate branch of ``_add_reach``.
+
+The branch at ``services/effects/recipes.py:1704-1708`` (``if not reach_holders``)
+produced 0 rows on the
+PR-161 corpus, and a zero-population field is normally a defect (the L-16
+"unreachable branch" shape). This one is NOT: it is live code with a satisfiable
+three-conjunct precondition that simply did not occur here. It fires the moment a
+proven fork value-out moves an asset out of an address that is not one of the
+protocol's recorded holders — a zap / router / adapter moving value it does not
+itself hold. These tests are the artifact that keeps the zero classified as an
+unmet data precondition rather than as dead code, and they pin the exact payload.
+
+**THE FLOOR KEY IS ITSELF THREE-STATE.** ``acting_balance_usd`` is
+``float | None``, and the three states reach the consumer as three distinct
+payloads on this one branch:
+
+* ``observed_reach_floor_usd: <positive>`` — a balance row for the acting
+  deployment was read and summed above zero. A witnessed lower bound.
+* ``observed_reach_floor_usd: 0.0`` — a balance row WAS read and summed to zero.
+  A present zero is a witness and keeps its key.
+* **no ``observed_reach_floor_usd`` key at all** — the INNER join at
+  ``selection.py:303-308`` produced no ``deployment_balance`` entry for the acting
+  address, so nothing about its balance was witnessed and there is no floor to
+  state. Never ``null``, never ``0.0``. This absence used to be defaulted to
+  ``0.0`` at ``selection.py:1369``, which destroyed the honest absence the join had
+  gone out of its way to produce.
+
+**A ``0.0`` FLOOR IS STILL NOT A MEASURED REACH, AND STILL NOT A PROVEN ZERO
+BALANCE.** Carrying the absence through removes one of the three causes of a
+published ``0.0``, not all of them: ``coalesce(sum(usd_value), 0)`` in the same
+query still collapses a sheet whose rows are ALL UNPRICED into ``0.0``, so a
+present zero means "an empty priced sheet **or** an unpriced one". The
+consumer-side rule — a ``0.0`` floor is ``not_determined`` and may never be adopted
+as a value or a bound — therefore stays load-bearing. And on every arm the key that
+means MEASURED reach, ``observed_reach_value_usd``, is deliberately ABSENT;
+publishing the floor under that name is the exact regression that scored "$0 reach"
+for a zero-balance router able to move millions. Because the branch has zero
+realized rows on this corpus, that is a contract statement, not a measured claim
+(B14: no rule may be calibrated on it).
+
+No wire, no DB, no fixtures: ``_add_reach`` is called directly on stub inputs.
+"""
 
 from __future__ import annotations
 
@@ -40,10 +81,8 @@ def test_value_leaving_a_non_holder_is_indeterminate_not_zero_reach():
 
     assert concrete == {
         "reach_determined": False,
-        "reach_magnitude_state": "not_determined",
-        "reach_value_scope": "recorded_holdings_of_assets_observed_moving",
-        "reach_is_upper_bound": False,
         "reach_indeterminate": True,
+        "observed_reach_floor_usd": 250.0,
     }
 
 
@@ -61,10 +100,8 @@ def test_a_witnessed_zero_balance_still_publishes_a_floor_of_zero():
 
     assert concrete == {
         "reach_determined": False,
-        "reach_magnitude_state": "not_determined",
-        "reach_value_scope": "recorded_holdings_of_assets_observed_moving",
-        "reach_is_upper_bound": False,
         "reach_indeterminate": True,
+        "observed_reach_floor_usd": 0.0,
     }
 
 
@@ -84,9 +121,6 @@ def test_an_absent_acting_balance_publishes_no_floor_key_at_all():
 
     assert concrete == {
         "reach_determined": False,
-        "reach_magnitude_state": "not_determined",
-        "reach_value_scope": "recorded_holdings_of_assets_observed_moving",
-        "reach_is_upper_bound": False,
         "reach_indeterminate": True,
     }
     # Stated separately from the equality above: a ``null`` under the key would

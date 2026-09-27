@@ -229,7 +229,7 @@ def test_value_states_are_three_and_bounds_require_a_proven_reach():
         value_state=VALUE_STATE_PROVEN_REACH,
         value_entity_keys=("ethereum::0x1",),
         value_bound=VALUE_BOUND_FLOOR,
-        value_basis="observed_outgoing_transfers(magnitude_not_determined)",
+        value_basis="observed_reach_floor_usd",
     )
     assert reached.value_bound == VALUE_BOUND_FLOOR
 
@@ -275,16 +275,8 @@ def test_score_document_grade_and_confidence_are_determined_together():
         provenance={},
     )
     assert doc.document()["model_version"] == MODEL_VERSION
-    from dataclasses import replace
 
-    independent = replace(doc, grade_exposure=None)
-    assert independent.grade_lambda == -30.0
-    assert independent.confidence_pct == 71.0
-    assert independent.document()["grade_exposure"] is None
-    with pytest.raises(ValueError, match="no headline numbers"):
-        replace(independent, grade_state=GRADE_STATE_NOT_DETERMINED)
-
-    with pytest.raises(ValueError, match="requires lambda and confidence"):
+    with pytest.raises(ValueError, match="together"):
         ScoreDocument(
             protocol_id=1,
             model_version=MODEL_VERSION,
@@ -426,7 +418,7 @@ def test_signal_three_states_round_trip(db_session, scoring_protocol):
                 value_state=VALUE_STATE_PROVEN_REACH,
                 value_entity_keys=["ethereum::0xvault"],
                 value_bound=VALUE_BOUND_FLOOR,
-                value_basis="observed_outgoing_transfers(magnitude_not_determined)",
+                value_basis="observed_reach_floor_usd",
             ),
             _row(
                 fx,
@@ -729,15 +721,6 @@ def test_score_grade_pairing_is_enforced(db_session, scoring_protocol):
     db_session.commit()
 
 
-def test_computed_security_score_can_persist_unknown_exposure(db_session, scoring_protocol):
-    row = _score(scoring_protocol, grade_exposure=None)
-    db_session.add(row)
-    db_session.commit()
-    assert row.grade_lambda is not None
-    assert row.confidence_pct is not None
-    assert row.grade_exposure is None
-
-
 @pytest.mark.usefixtures("scoring_protocol")
 def test_score_document_is_inline_or_spilled_never_both(db_session, scoring_protocol):
     fx = scoring_protocol
@@ -1018,7 +1001,7 @@ def test_signal_row_seam_round_trips_all_three_states(db_session, scoring_protoc
             value_state=VALUE_STATE_PROVEN_REACH,
             value_entity_keys=(entity_key("ethereum", "0xVAULT"),),
             value_bound=VALUE_BOUND_FLOOR,
-            value_basis="observed_outgoing_transfers(magnitude_not_determined)",
+            value_basis="observed_reach_floor_usd",
             destination=Tri.proven(DESTINATION_STATE_NOT_APPLICABLE, DESTINATION_SHAPE_NOT_APPLICABLE),
             gate_inputs={"pause_effective": Tri.proven(SEVERITY_STATE_PROVEN, True).to_json()},
             citations=({"field": "observed_reach_floor_usd"},),

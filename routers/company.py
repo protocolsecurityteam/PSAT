@@ -400,9 +400,7 @@ def company_score(company_name: str) -> CompanyScoreResponse:
     contract, and a consumer must branch on them rather than assume a grade.
     In particular ``grade_state = not_determined`` is a computed verdict (the
     fold ran and could not determine a grade), which is why the numbers are
-    ``null`` beside it instead of zeroed. A computed security score may carry
-    ``grade_exposure = null`` when dollar exposure could not be measured; its
-    lambda and confidence remain valid independently of that missing value.
+    ``null`` beside it instead of zeroed.
 
     Two distinct 404s, told apart by ``detail`` because they are different
     facts and a client that treats them alike will report a typo'd protocol as
@@ -414,7 +412,6 @@ def company_score(company_name: str) -> CompanyScoreResponse:
     """
     from db.models import ProtocolScoreLatest
     from services.scoring.persist import ScoreDocumentUnavailable, load_score_document
-    from utils.scoring_status import MODEL_VERSION
 
     started = time.monotonic()
     with deps.SessionLocal() as session:
@@ -429,9 +426,6 @@ def company_score(company_name: str) -> CompanyScoreResponse:
         if row is None:
             _log_endpoint("/api/company/{name}/score", company=company_name, started=started, outcome="no_score")
             raise HTTPException(status_code=404, detail="No score has been computed for this protocol yet")
-
-        if row.model_version != MODEL_VERSION:
-            raise HTTPException(status_code=503, detail="Score is awaiting recomputation for current balance semantics")
 
         try:
             document = load_score_document(row)

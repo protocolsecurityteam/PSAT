@@ -79,8 +79,9 @@ function WithheldBanner({ doc }) {
 export default function ScoreBand({ companyName, contracts, score, error, onSelectEntity }) {
   const [open, setOpen] = useState(false);
   const bandRef = useRef(null);
-  // grade_state governs lambda/confidence. A computed security score may still
-  // have unknown dollar exposure; that does not withhold its score or findings.
+  // Branch on grade_state before any grade field is read: in the withheld state
+  // grade_lambda / grade_exposure / confidence_pct are null and the findings do
+  // not carry net_points_lambda at all.
   const state = error ? "error" : !score ? "loading" : score.grade_state || "absent";
   const view = useMemo(
     () => (score && score.findings ? projectScore(score, contracts) : null),

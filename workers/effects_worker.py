@@ -233,11 +233,6 @@ _NO_HASH_SAMPLE = 8
 # A strict whitelist: ``concrete`` is what a recipe chose to hand back, and only
 # these keys are per-deployment facts this table is meant to publish.
 _RESIDUE_JSON_KEYS = (
-    "reach_observed_holdings_usd",
-    "reach_observed_holdings_pairs",
-    "reach_value_scope",
-    "reach_magnitude_state",
-    "reach_is_upper_bound",
     "observed_reach_value_usd",
     "observed_reach_holders",
     "reach_indeterminate",

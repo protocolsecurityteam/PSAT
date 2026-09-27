@@ -279,7 +279,6 @@ def test_unseeded_probe_runs_first_and_no_seeding_happens_when_it_succeeds():
     assert eff.verdict == VERDICT_PROVEN
     assert eff.details["backing"] == {
         "inflow_observed": False,
-        "economic_backing": "not_determined",
         "minted": True,
         "input_seeded": False,
         "contract_balance_seeded": False,

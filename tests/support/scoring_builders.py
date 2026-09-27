@@ -143,13 +143,11 @@ def value_plane(
     alias: dict[str, str] | None = None,
     per_asset_state: dict[str, dict[str, str]] | None = None,
     asset_set_proven_complete: dict[str, dict] | None = None,
-    fresh_entities: set[str] | None = None,
 ) -> P.ValuePlane:
     plane = P.ValuePlane()
     plane.per_asset = per_asset or {}
     plane.per_asset_state = per_asset_state or {}
     plane.asset_set_proven_complete = asset_set_proven_complete or {}
-    plane.fresh_entities = fresh_entities or set()
     # The confidence perimeter's base population, as the DB would supply it.
     plane.contract_entities = set(contracts) | set(plane.per_asset) | set(plane.per_asset_state)
     plane.alias = alias or {}

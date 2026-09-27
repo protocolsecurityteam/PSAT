@@ -1239,9 +1239,9 @@ def test_zero_reach_floor_is_not_a_proven_bound(corpus):
     )
     signals = {s.function_name: s for s in corpus.signals(contract)}
     assert signals["zeroFloor"].value_state == VALUE_STATE_NOT_DETERMINED
-    assert "holdings_context_is_not_call_magnitude" in signals["zeroFloor"].witness_notes
+    assert "reach_floor_not_a_bound" in signals["zeroFloor"].witness_notes
     assert signals["absentFloor"].value_state == VALUE_STATE_NOT_DETERMINED
-    assert "holdings_context_is_not_call_magnitude" in signals["absentFloor"].witness_notes
+    assert "reach_floor_absent" in signals["absentFloor"].witness_notes
 
 
 def test_freeze_value_membership_is_gated_on_the_latch_proof(corpus):
@@ -1336,7 +1336,7 @@ def test_two_functions_reaching_one_vault_charge_it_once(corpus):
     flow = [f for f in document.findings if f["capability"] == "flow.out"]
     assert len(flow) == 1
     assert flow[0]["n_functions"] == 2
-    assert flow[0]["value_at_stake_usd"] is None
+    assert flow[0]["value_at_stake_usd"] == 1000.0
 
 
 def test_chain_aliases_collapse_to_one_entity(corpus):

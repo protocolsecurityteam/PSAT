@@ -440,8 +440,8 @@ function mintQualifier(claims) {
   if (!b) return null;
   // inflow_observed === false is a witnessed dilution signal (supply rose with
   // no matching inflow); absence of the field is unknown, never "backed".
-  if (b.inflow_observed === true) return "(inflow observed)";
-  if (b.inflow_observed === false) return "(no inflow observed)";
+  if (b.inflow_observed === true) return "(backed)";
+  if (b.inflow_observed === false) return "(unbacked)";
   return null;
 }
 

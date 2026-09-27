@@ -88,6 +88,8 @@ _AFFECTED_VERDICTS = f"""
     JOIN effect_verdicts v ON v.function_id = ef.id
     LEFT JOIN chain_names ON chain_names.name = regexp_replace(lower(trim(c.chain)), '[[:space:]_-]+', ' ', 'g')
     WHERE c.protocol_id IS NOT NULL AND v.effect_class IN ('value_out', 'supply')
+      AND v.verdict = 'unknown'
+
 """
 
 
@@ -101,6 +103,10 @@ _AFFECTED_EMPTY_PLANS = f"""
     JOIN effective_functions ef ON ef.contract_id = c.id
     LEFT JOIN chain_names ON chain_names.name = regexp_replace(lower(trim(c.chain)), '[[:space:]_-]+', ' ', 'g')
     WHERE c.protocol_id IS NOT NULL
+      AND NOT EXISTS (
+          SELECT 1 FROM effect_verdicts proven
+          WHERE proven.function_id = ef.id AND proven.verdict = 'proven'
+      )
 """
 _AFFECTED_WORK = (
     f"SELECT * FROM ({_AFFECTED_VERDICTS}) verdicts UNION SELECT * FROM ({_AFFECTED_EMPTY_PLANS}) empty_plans"
@@ -173,7 +179,8 @@ def upgrade() -> None:
     op.create_index("ix_pending_effects_due", "pending_effects_work", ["state", "next_attempt_at"])
     _create_latest_view(with_metadata=True)
 
-    # Only families which actually consumed balance evidence are invalidated.
+    # Recover only incomplete balance-dependent families. Existing proven
+    # verdicts retain their valuation policy and need no migration-driven rerun.
     # Empty-plan markers also need candidate selection retried: old balance
     # filters could suppress all plans. The current cascade determines eligibility.
     # Enrolling a supply task for every old pause/upgrade verdict creates work
@@ -191,13 +198,13 @@ def upgrade() -> None:
             (protocol_id, chain_id, deployment_address, contract_id, function_id, effect_family,
              reason, state, required_generation, consumed_generation, covered_tokens, attempts)
         SELECT protocol_id, chain_id, deployment_address, contract_id, function_id, effect_family,
-            'balance_semantics_changed', 'pending', 0, 0, '[]'::jsonb, 0
+            'balance_inputs_incomplete', 'pending', 0, 0, '[]'::jsonb, 0
         FROM ({_AFFECTED_WORK}) affected
         ON CONFLICT DO NOTHING
     """)
     op.execute("""
         INSERT INTO protocol_score_queue (protocol_id, reason, dirty_at)
-        SELECT id, 'balance_semantics_changed', now() FROM protocols
+        SELECT id, 'delivery_classification_retired', now() FROM protocols
         ON CONFLICT (protocol_id) DO UPDATE
             SET reason = EXCLUDED.reason, dirty_at = EXCLUDED.dirty_at
     """)

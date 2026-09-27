@@ -342,9 +342,8 @@ class ProtocolScore(Base):
             name="ck_protocol_scores_grade_state",
         ),
         CheckConstraint(
-            f"(grade_state = '{GRADE_STATE_COMPUTED}' AND grade_lambda IS NOT NULL AND confidence_pct IS NOT NULL) "
-            f"OR (grade_state <> '{GRADE_STATE_COMPUTED}' AND grade_lambda IS NULL "
-            "AND grade_exposure IS NULL AND confidence_pct IS NULL)",
+            f"(grade_state = '{GRADE_STATE_COMPUTED}') = "
+            "(grade_lambda IS NOT NULL AND grade_exposure IS NOT NULL AND confidence_pct IS NOT NULL)",
             name="ck_protocol_scores_grade_pairing",
         ),
         CheckConstraint(

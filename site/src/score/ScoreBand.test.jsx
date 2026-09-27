@@ -133,10 +133,7 @@ describe("ScoreBand — computed grade", () => {
   });
 
   it("does not render a retired delivery-derived zero badge", async () => {
-    // 1.4.0. A sheet whose remaining holdings all arrived by mass distribution
-    // publishes a $0 ceiling. A bare $0 in this cell reads as "this reaches
-    // nothing" — a different claim, and one nobody proved — so the figure is
-    // rendered with its reason attached, and the reason is about DELIVERY.
+    // Old documents can still contain this retired classification.
     const disposed = {
       ...ETHERFI,
       findings: ETHERFI.findings.map((f, i) =>
@@ -958,24 +955,4 @@ describe("ScoreBand — #score hash on an unopenable band", () => {
     expect(window.location.hash).toBe("");
     window.history.replaceState({}, "", "/");
   });
-});
-
-
-describe("ScoreBand — independent security score", () => {
-  it("shows lambda, confidence and deductions while monetary exposure is unknown", async () => {
-    const score = { ...ETHERFI, grade_state: "computed", grade_lambda: 79.39, confidence_pct: 23,
-      grade_exposure: null, provenance: { ...ETHERFI.provenance, exposure_usd: null } };
-    const { container } = renderBand({ score });
-    expect(screen.getByText("79.4")).toBeInTheDocument();
-    expect(screen.getByText(/confidence 23.0%/)).toBeInTheDocument();
-    expect(container.querySelector(".sc-grade-stats .sc-v")).toHaveTextContent("not determined");
-    expect(screen.queryByText("The grade is withheld.")).toBeNull();
-    expect(container.querySelector(".sc-ledger-bar")).toBeTruthy();
-    await openBreakdown();
-    expect(screen.getByText("Deductions")).toBeInTheDocument();
-    expect(container.querySelectorAll(".sc-frow").length).toBeGreaterThan(0);
-    expect(container.querySelector(".sc-shield")).toBeNull();
-  });
-
-
 });

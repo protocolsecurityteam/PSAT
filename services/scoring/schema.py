@@ -476,18 +476,6 @@ def signal_from_row(row: Any) -> FunctionSignal:
         if row.destination_state == NOT_DETERMINED
         else Tri.proven(row.destination_state, str(row.destination_shape))
     )
-    gate_inputs = dict(row.gate_inputs or {})
-    value_state, value_bound = row.value_state, row.value_bound
-    value_keys = tuple(row.value_entity_keys or ())
-    legacy_holdings = str(row.value_basis or "").startswith(
-        ("observed_reach_value_usd", "observed_reach_floor_usd", "observed_reach_priced_usd")
-    )
-    if legacy_holdings:
-        gate_inputs["reach_magnitude_usd"] = Tri[float].not_determined().to_json()
-        if value_state == "proven_no_reach" or str(row.value_basis).startswith("observed_reach_floor_usd"):
-            value_state, value_bound, value_keys = "not_determined", "not_determined", ()
-        elif value_state == "proven_reach":
-            value_bound = "floor"
     return FunctionSignal(
         job_id=row.job_id,
         protocol_id=row.protocol_id,
@@ -504,16 +492,15 @@ def signal_from_row(row: Any) -> FunctionSignal:
         authority_openness=row.authority_openness,
         principal_state=row.principal_state,
         principal_refs=tuple(PrincipalRef.from_json(r) for r in (row.principal_refs or ())),
-        value_state=value_state,
-        value_bound=value_bound,
-        value_entity_keys=value_keys,
+        value_state=row.value_state,
+        value_bound=row.value_bound,
+        value_entity_keys=tuple(row.value_entity_keys or ()),
         value_basis=row.value_basis,
         destination=destination,
         reach_gate_state=row.reach_gate_state,
-        gate_inputs=gate_inputs,
+        gate_inputs=dict(row.gate_inputs or {}),
         citations=tuple(row.citations or ()),
-        witness_notes=tuple(row.witness_notes or ())
-        + (("legacy_holdings_magnitude_withheld",) if legacy_holdings else ()),
+        witness_notes=tuple(row.witness_notes or ()),
         effect_verdict_id=row.effect_verdict_id,
     )
 
@@ -522,10 +509,9 @@ def signal_from_row(row: Any) -> FunctionSignal:
 class ScoreDocument:
     """What a fold emits and ``protocol_scores`` persists.
 
-    ``grade_state`` describes the security score and its confidence. A computed
-    score can have unknown dollar exposure; ``grade_exposure`` is independently
-    nullable. An undetermined security score carries no headline numbers.
-    This matches ``ck_protocol_scores_grade_pairing``.
+    ``grade`` and ``exposure`` are undetermined together with ``confidence_pct``
+    — a grade with no confidence is not a grade — which is why one
+    ``grade_state`` covers all three, matching ``ck_protocol_scores_grade_pairing``.
 
     ``model_parameters`` travels with every document rather than being read from
     code at display time: two scores are only comparable against the constants
@@ -580,11 +566,9 @@ class ScoreDocument:
         _check_member("trigger", self.trigger, SCORE_TRIGGERS)
         _check_member("perimeter_state", self.perimeter_state, PERIMETER_STATES)
         _check_member("grade_state", self.grade_state, GRADE_STATES)
-        if self.grade_state == GRADE_STATE_COMPUTED:
-            if self.grade_lambda is None or self.confidence_pct is None:
-                raise ValueError("a computed security score requires lambda and confidence")
-        elif any(value is not None for value in (self.grade_lambda, self.grade_exposure, self.confidence_pct)):
-            raise ValueError("an undetermined security score carries no headline numbers")
+        determined = (self.grade_lambda, self.grade_exposure, self.confidence_pct)
+        if (self.grade_state == GRADE_STATE_COMPUTED) != all(v is not None for v in determined):
+            raise ValueError("grade, exposure and confidence are determined together or not at all")
 
     def document(self) -> dict[str, Any]:
         """The JSONB payload persisted to ``protocol_scores.findings``.

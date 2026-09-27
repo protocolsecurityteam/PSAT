@@ -13,9 +13,13 @@ from services.scoring.schema import (
 from utils import execution_record as EX
 from utils.execution_record import PROVING_EXECUTION_KEY
 from utils.scoring_status import (
+    MAGNITUDE_STATE_PROVEN_FLOOR,
+    MAGNITUDE_STATE_PROVEN_UPPER_BOUND,
+    VALUE_BOUND_EXACT,
     VALUE_BOUND_FLOOR,
     VALUE_BOUND_NOT_DETERMINED,
     VALUE_STATE_NOT_DETERMINED,
+    VALUE_STATE_PROVEN_NO_REACH,
     VALUE_STATE_PROVEN_REACH,
     WITNESS_TIER_POLICY_DERIVED,
 )
@@ -24,8 +28,10 @@ from .claims import _tier
 from .facts import (
     REPOINT_ADMISSIBLE_TIERS,
     _ContractFacts,
+    _f,
     _is_true,
     _lower,
+    _proven_number,
 )
 
 logger = logging.getLogger("services.scoring.distill")
@@ -55,26 +61,87 @@ def _no_reach(basis: str, notes: tuple[str, ...] = ()) -> _Reach:
 
 
 def _flow_reach(observed: dict[str, Any], facts: _ContractFacts, acting_key: str) -> _Reach:
-    """Transfers witness behavior; observed holder totals do not size the call.
-
-    Both legacy observed_reach_*_usd scalars and the explicit new holdings
-    context sum wallet balances, not transferred quantities at a common quoted
-    observation. They cannot establish a floor, cap, or a no-reach conclusion.
-    """
-    if _is_true(observed.get("contract_balance_seeded")):
-        return _no_reach("contract_balance_seeded(not_determined)", ("reach_seeded_balance_only",))
+    """The magnitude a flow is PROVEN to reach, and whose value it is."""
+    reach_determined = _is_true(observed.get("reach_determined"))
+    value_usd = _f(observed.get("observed_reach_value_usd")) if reach_determined else None
     holders = [_lower(h) for h in (observed.get("observed_reach_holders") or []) if h]
-    if holders and not _is_true(observed.get("reach_indeterminate")):
-        keys = tuple(sorted({entity_key(facts.chain, holder) for holder in holders}))
+
+    if reach_determined and value_usd is not None:
+        keys = tuple(sorted({entity_key(facts.chain, h) for h in holders}))
+        if value_usd > 0.0 and not keys:
+            # A proven magnitude whose HOLDER was never named belongs to an
+            # entity this signal cannot identify. Attributing it to the analysed
+            # deployment is the entity misattribution the register measures in
+            # dollars, so the magnitude is published as unattributed instead.
+            return _no_reach("observed_reach_value_usd_without_holder(not_determined)", ("reach_holder_not_named",))
+        if value_usd <= 0.0 and not holders:
+            return _Reach(
+                state=VALUE_STATE_PROVEN_NO_REACH,
+                bound=VALUE_BOUND_NOT_DETERMINED,
+                entity_keys=(),
+                basis="observed_reach_value_usd=0(proven)",
+                magnitude=Tri[float].not_determined(),
+            )
+        return _Reach(
+            state=VALUE_STATE_PROVEN_REACH,
+            # The ENTITY-SET bound, and it is exact here: ``keys`` is every
+            # holder the observation named, not a floor over them. A different
+            # axis from the magnitude state below, which grades the DOLLARS.
+            bound=VALUE_BOUND_EXACT,
+            entity_keys=keys,
+            basis="observed_reach_value_usd(fork-proven)",
+            # F4. This is the ATTRIBUTION path: the probe moved a compile-time
+            # constant amount and ``recipes._add_reach`` credited the holder's
+            # ENTIRE priced balance for the pair, discarding the transferred
+            # value. Nothing here witnesses that the call moves that balance, so
+            # the figure is an upper bound on what one call moves — exactness is
+            # unearnable in principle on this path. It is not re-pointed at
+            # ``proven_floor`` either: that state's prose means "at least this
+            # much", and this figure bounds the opposite direction.
+            magnitude=_proven_number(MAGNITUDE_STATE_PROVEN_UPPER_BOUND, value_usd),
+            notes=("reach_holder_is_not_this_entity",) if holders and acting_key not in keys else (),
+        )
+
+    gated = _is_true(observed.get("reach_indeterminate"))
+    if "observed_reach_floor_usd" in observed:
+        floor = _f(observed.get("observed_reach_floor_usd"))
+        if gated and floor is not None and floor > 0.0:
+            return _Reach(
+                state=VALUE_STATE_PROVEN_REACH,
+                bound=VALUE_BOUND_FLOOR,
+                entity_keys=(acting_key,),
+                basis="observed_reach_floor_usd(>= floor, reach_indeterminate)",
+                magnitude=_proven_number(MAGNITUDE_STATE_PROVEN_FLOOR, floor),
+            )
+        # A 0.0 floor is "no proven bound": an all-unpriced sheet sums to the
+        # same zero as a proven-empty one, and an ungated floor is not the
+        # registered shape at all.
+        return _no_reach(
+            "observed_reach_floor_usd_zero(not_determined)" if gated else "observed_reach_floor_usd_ungated",
+            ("reach_floor_not_a_bound",),
+        )
+    if gated:
+        # The key's own ABSENCE is the third state: no balance row existed for
+        # the acting deployment, so there is no floor to state.
+        return _no_reach("observed_reach_floor_absent(not_determined)", ("reach_floor_absent",))
+
+    priced = _f(observed.get("observed_reach_priced_usd"))
+    if priced is not None:
+        priced_holders = [_lower(h) for h in (observed.get("observed_reach_priced_holders") or []) if h]
+        keys = tuple(sorted({entity_key(facts.chain, h) for h in priced_holders})) or (acting_key,)
         return _Reach(
             state=VALUE_STATE_PROVEN_REACH,
             bound=VALUE_BOUND_FLOOR,
             entity_keys=keys,
-            basis="observed_outgoing_transfers(magnitude_not_determined)",
-            magnitude=Tri[float].not_determined(),
-            notes=("holdings_context_is_not_call_magnitude",),
+            basis="observed_reach_priced_usd(>= floor)",
+            magnitude=_proven_number(MAGNITUDE_STATE_PROVEN_FLOOR, priced),
+            notes=("reach_partially_priced",),
         )
-    return _no_reach("reach_not_witnessed(not_determined)", ("holdings_context_is_not_call_magnitude",))
+    if _is_true(observed.get("contract_balance_seeded")):
+        # The contract's own balance was overridden before the payout, so the
+        # verdict proves a code capability, not an outflow of present treasury.
+        return _no_reach("contract_balance_seeded(not_determined)", ("reach_seeded_balance_only",))
+    return _no_reach("reach_not_witnessed(not_determined)")
 
 
 def _proving_execution_gate(facts: _ContractFacts, func: Any, entries: list[dict[str, Any]]) -> Tri[dict[str, Any]]:

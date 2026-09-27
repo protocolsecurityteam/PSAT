@@ -15,7 +15,6 @@ downstream.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, cast
 
@@ -120,7 +119,6 @@ def _fetch(
         swept_through_block=swept_through,
         typed_assets=typed,
         writer=BALANCE_WRITER_TVL,
-        observed_at=datetime.now(timezone.utc),
     )
     session.add(f)
     session.flush()
@@ -490,13 +488,9 @@ class TestReachInputsOnAMixedFetchContract:
 
         holdings = _asset_holdings_by_deployment(db_session, proto.id)
         items = holdings[proxy.address.lower()]
-        # Reads belong to the physical account observed, even when its code is
-        # also used by the proxy. Neither account inherits the other's assets.
-        assert {h.asset for h in items} == {"0x" + "91" * 20}
-        assert {h.completeness for h in items} == {HOLDINGS_COMPLETENESS_NOT_DETERMINED}
-        sibling_items = holdings[sibling.address.lower()]
-        assert {h.asset for h in sibling_items} == {"0x" + "92" * 20}
-        assert {h.completeness for h in sibling_items} == {HOLDINGS_COMPLETENESS_AT_PAGE_CAP}
+        assert {h.asset for h in items} == {"0x" + "91" * 20, "0x" + "92" * 20}
+        # WEAKEST WINS: the clean sibling does not launder the capped one.
+        assert {h.completeness for h in items} == {HOLDINGS_COMPLETENESS_AT_PAGE_CAP}
 
 
 @requires_postgres
@@ -530,7 +524,7 @@ class TestSnapshotDoesNotPublishAFailedReadAsMoney:
         db_session.commit()
         assert contracts_missing_current_rows(db_session, [c.id]) == set()
         _breakdown, partial = _read_existing_balances(db_session, proto.id)
-        assert partial is True  # legacy quantity/quote observation times remain unknown
+        assert partial is True  # Legacy observation times are unknown.
 
 
 @requires_postgres
@@ -766,8 +760,7 @@ class TestValuePlaneReadsAChainScanAsAnEmptySheet:
         assert plane.asset_set_is_proven_complete(key) is True
         assert plane.sheet_state(key) == P.SHEET_PROVEN_EMPTY
         assert plane.total(key) == 0.0
-        # A fetch-only zero has no fresh quantity row supporting a hard bound.
-        assert P.ceiling_for(plane, key) == (None, "observation_not_fresh")
+        assert P.ceiling_for(plane, key) == (0.0, P.CEILING_PROVEN_EMPTY)
         # The published record is the CARRIER's, not a sentence written here.
         record = plane.asset_set_proven_complete[key]
         assert record["swept_through_block"] == 21_000_000 and record["swept_from_block"] == 0
@@ -1097,7 +1090,6 @@ class TestValuePlaneReadsEntityKeyedSheets:
             swept_through_block=21_000_000,
             typed_assets=typed if typed is not None else [],
             writer=BALANCE_WRITER_TVL,
-            observed_at=datetime.now(timezone.utc),
         )
         session.add(f)
         session.flush()
@@ -1185,3 +1177,18 @@ class TestValuePlaneReadsEntityKeyedSheets:
         key = f"ethereum::{stranger.lower()}"
         assert plane.sheet_state(key) == P.SHEET_NO_ROWS
         assert plane.total(key) is None
+
+
+@requires_postgres
+def test_token_only_refresh_preserves_previous_native_zero_evidence(db_session):
+    from services.scoring import planes as P
+
+    proto = _protocol(db_session, "native-zero-token-only")
+    contract = _contract(db_session, proto.id, _addr("f1"))
+    _fetch(db_session, contract, native=NATIVE_STATUS_PROVEN_ZERO, block=25643300)
+    _fetch(db_session, contract, native="unattempted", assets=ASSET_SET_STATUS_RETURNED_ASSETS)
+    db_session.commit()
+    plane = P.load_value_plane(db_session, proto.id)
+    state = P.native_value_state(plane, f"ethereum::{contract.address}")
+    assert state.state == "proven_zero"
+    assert state.value == 0.0

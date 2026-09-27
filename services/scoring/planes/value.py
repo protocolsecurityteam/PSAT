@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import tuple_
@@ -23,6 +23,7 @@ from services.scoring.schema import coalesce_chain, entity_key
 from utils.balance_status import (
     ASSET_SET_SOURCE_CHAIN_LOG_SWEEP,
     ASSET_SET_STATUS_AT_PAGE_CAP,
+    STATUS_UNATTEMPTED,
     SWEEP_STATUS_COMPLETED,
 )
 
@@ -43,7 +44,20 @@ ASSET_PRICED = "priced"
 ASSET_BELOW_RESOLUTION = "priced_below_resolution"
 ASSET_PROVEN_ZERO = "proven_zero"
 ASSET_UNPRICED = "unpriced"
-# Legacy token retained only to read old hand-built documents conservatively.
+# Every incoming delivery of this asset to this entity's accounts arrived in a
+# transaction carrying at least K same-token transfer LOGS. The log count is the
+# meter — it is what the calibration corpus was measured in — and it is an UPPER
+# BOUND on the distinct recipients of that transaction, never a count of them:
+# one recipient credited twice raises the meter and lowers nothing.
+#
+# The claim is DELIVERY SHAPE and nothing else — never worth, never "spam",
+# never "scam", never "worthless". The reference corpus carries a class of FIVE
+# demonstrably real tokens with this delivery shape, of which the
+# protocol-reference conjunct spares three and condemns two: HEX (fan-out 199
+# x13, 399 x14, 400 x1, 500 x6), WETH and base USDC are spared; uniETH (one
+# delivery, 101) and USDtb (one delivery, 175) are in this state. Any
+# worth-naming would be a lie about all five; "arrived by mass distribution" is
+# true of every member, spared or not.
 ASSET_AIRDROP_DELIVERED = "airdrop_delivered"
 
 # --- what a whole balance sheet proves ---------------------------------------
@@ -52,6 +66,12 @@ SHEET_BELOW_RESOLUTION = "priced_below_resolution"
 SHEET_UNPRICED = "unpriced"
 SHEET_PROVEN_EMPTY = "proven_empty"
 SHEET_NO_ROWS = "no_rows"
+# The sixth state, and DISTINCT from ``proven_empty`` all the way to the
+# consumer: they are different witnesses. Proven-empty says nothing ever arrived
+# (every quantity witnessed zero over a list proven whole); this says what DID
+# arrive arrived as a mass distribution, so the sheet's determined content is
+# nil. Collapsing them would publish one witness under the other's name.
+SHEET_AIRDROP_DETERMINED = "airdrop_determined"
 
 # The states in which a sheet total is NOT a number. Kept apart from each other
 # all the way to the consumer: "every price lookup answered below the column's
@@ -78,6 +98,28 @@ EMPTY_REFUSALS = (
     EMPTY_REFUSED_UNPRICED_POSITIONS,
 )
 
+# --- why a sheet whose every reading is disposed may still not be determined --
+# The disposition claim has its OWN conjuncts and they are NOT proven-empty's,
+# which is why they are named apart rather than reusing the tokens above. The
+# completeness conjunct in particular is a different question: proven-empty
+# needs the asset LIST proven whole, because zeros over a list nobody
+# established say nothing; a disposition says only that the readings that ARE on
+# the sheet contribute nothing, so what it needs is that the list was not
+# observably CUT OFF. Requiring the stronger witness here would refuse every
+# sheet on the reference corpus (the sweep publishes ``returned_assets`` as
+# not_determined by design), so the claim is scoped in the basis instead: the
+# asset set is Etherscan-page-derived and is not proven whole.
+DISPOSITION_REFUSED_TYPED_RECEIPT_UNRESOLVED = "typed_receipt_unresolved"
+DISPOSITION_REFUSED_ASSET_LIST_TRUNCATED = "asset_list_truncated"
+DISPOSITION_REFUSED_UNSCANNED_ACCOUNT = "folded_account_never_scanned"
+DISPOSITION_REFUSED_UNPRICED_POSITIONS = "unpriced_positions_at_this_entity"
+DISPOSITION_REFUSALS = (
+    DISPOSITION_REFUSED_TYPED_RECEIPT_UNRESOLVED,
+    DISPOSITION_REFUSED_ASSET_LIST_TRUNCATED,
+    DISPOSITION_REFUSED_UNSCANNED_ACCOUNT,
+    DISPOSITION_REFUSED_UNPRICED_POSITIONS,
+)
+
 
 @dataclass
 class ValuePlane:
@@ -101,7 +143,6 @@ class ValuePlane:
     per_asset: dict[str, dict[str, float]] = field(default_factory=dict)
     per_asset_state: dict[str, dict[str, str]] = field(default_factory=dict)
     native_fact: dict[str, str] = field(default_factory=dict)
-    fresh_entities: set[str] = field(default_factory=set)
     # Entities whose latest asset-list read came back AT the endpoint's page cap:
     # the list is a prefix of what they hold, so the rows below it are a floor
     # over the sheet and nothing here bounds it from above. Only the truncated
@@ -141,6 +182,15 @@ class ValuePlane:
     # named here and aliased nowhere.
     alias_ambiguous: set[str] = field(default_factory=set)
     unpriced_positions: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    # Per (canonical entity, asset), the CARRIER RECORD of the delivery evidence
+    # that disposed that reading — the shape, K, the smallest fan-out measured,
+    # the delivery count, the block range the receipts were read across, the
+    # accounts the evidence was held at, and the carriers' own basis strings.
+    # Everything a narration says about a disposition derives from these fields,
+    # so a published sentence quotes the evidence rather than a claim authored
+    # beside it. Empty unless a universe was supplied to the loader: no universe,
+    # no condemnation.
+    asset_disposition: dict[str, dict[str, dict[str, Any]]] = field(default_factory=dict)
     annotations: list[dict[str, Any]] = field(default_factory=list)
     provenance: dict[str, Any] = field(default_factory=dict)
 
@@ -219,11 +269,79 @@ class ValuePlane:
             return EMPTY_REFUSED_UNPRICED_POSITIONS
         return None
 
-    def sheet_state(self, key: str) -> str:
-        """Describe observed quantities/prices without delivery classifications.
+    def disposition_refusal(self, key: str) -> str | None:
+        """Why this sheet's dispositions may not DETERMINE it, or ``None``.
 
-        A priced subset is useful context, not a whole-portfolio bound. A zero
-        sheet requires all quantities zero and independently proven coverage.
+        The disposition claim's own conjuncts, in the order that names the
+        ACTIONABLE cause rather than the order they nest in:
+
+        * a typed ERC-721/1155 receipt nobody could resolve. A disposition is a
+          fact about fungible deliveries and says nothing about an item the
+          entity may still hold, so a sheet carrying one is not determined at
+          any total.
+        * an asset list read AT the endpoint's page cap. The rows are a PREFIX
+          of the holdings, so disposing every one of them says nothing about the
+          entries the page never reached. This is the D1-parity gate, and it is
+          the only completeness conjunct: the stronger "list proven whole" is
+          not available on this corpus, so the claim is scoped in the basis
+          instead of being refused into silence.
+        * an account of this sheet that no scan reached at its own address — a
+          named, closable gap in a scan that otherwise ran.
+        * the cross-plane one, last: the restaking plane publishes quantities at
+          this node with no USD column, and a determined sheet beside them would
+          contradict a plane already in the same document.
+        """
+        canonical = self.canonical(key)
+        if self.typed_receipts_unresolved.get(canonical):
+            return DISPOSITION_REFUSED_TYPED_RECEIPT_UNRESOLVED
+        if canonical in self.asset_set_truncated:
+            return DISPOSITION_REFUSED_ASSET_LIST_TRUNCATED
+        if self.asset_set_accounts_unscanned.get(canonical):
+            return DISPOSITION_REFUSED_UNSCANNED_ACCOUNT
+        if self.unpriced_positions.get(canonical):
+            return DISPOSITION_REFUSED_UNPRICED_POSITIONS
+        return None
+
+    def sheet_state(self, key: str) -> str:
+        """What the entity's balance sheet PROVES, in one of six states.
+
+        ``priced`` — at least one determined non-zero reading, so ``total`` is a
+        floor over what was priced. ``priced_below_resolution`` — every price
+        lookup that answered landed on the storage column's floor, which is a
+        holding of *at most* that floor per row and never a proven zero.
+        ``unpriced`` — rows exist and no lookup answered. ``proven_empty`` — every
+        asset's QUANTITY is proven zero AND the asset list those quantities cover
+        is proven whole, the only witness under which 0.00 is a number rather
+        than a rounding artefact. ``airdrop_determined`` — every asset left on
+        the sheet either arrived only in mass distributions or is a witnessed
+        zero. ``no_rows`` — nothing observed.
+
+        The priced branch asks the reading's STATE first and its magnitude only
+        as a second carrier. A determined non-zero reading small enough for some
+        presentation rounding to render it 0.0 is still a determined non-zero
+        reading, and a branch that could only see the float would let it fall
+        through to the branches below — where, with the completeness conjunct
+        satisfied, it would publish ``proven_empty``: "every asset's quantity is
+        proven zero" asserted of a sheet whose quantity was proven NOT zero. The
+        magnitude may be rounded; the witness may not be. The magnitude arm stays
+        because a plane may carry values without the state map beside them, and a
+        determined non-zero dollar figure is itself a priced reading's witness.
+
+        ``proven_empty`` and ``airdrop_determined`` are DIFFERENT witnesses and
+        never collapse: "nothing ever arrived" is not "what arrived arrived as a
+        mass distribution", and only the first says the accounts are bare. The
+        disposition arm is asked AFTER ``priced_below_resolution`` and
+        ``unpriced``, so a sheet holding disposed readings beside one asset
+        nobody priced stays ``unpriced`` — the disposition covers the readings it
+        names and nothing else.
+
+        The empty claim is the only one with a SET conjunct, and it is fail-
+        closed: zeros over a list nobody established say nothing about the
+        entity, so a refused empty publishes ``unpriced`` — something was
+        observed here and no number covers it — never a $0. The refusal is
+        reasoned in :meth:`proven_empty_refusal`; a hand-built plane that carries
+        no completeness witness therefore answers ``unpriced``, which is the
+        direction that cannot publish a false negative.
         """
         canonical = self.canonical(key)
         values = self.per_asset.get(canonical) or {}
@@ -234,9 +352,13 @@ class ValuePlane:
             return SHEET_BELOW_RESOLUTION
         if any(state == ASSET_UNPRICED for state in states.values()):
             return SHEET_UNPRICED
-        # Legacy classifications cannot establish worth or a zero quantity.
-        if ASSET_AIRDROP_DELIVERED in states.values():
-            return SHEET_UNPRICED
+        if any(state == ASSET_AIRDROP_DELIVERED for state in states.values()) and all(
+            state in (ASSET_AIRDROP_DELIVERED, ASSET_PROVEN_ZERO) for state in states.values()
+        ):
+            # Refused, this sheet publishes ``unpriced``: something WAS observed
+            # here and no number covers it, which is what that state means. The
+            # direction that cannot publish a false determination.
+            return SHEET_AIRDROP_DETERMINED if self.disposition_refusal(canonical) is None else SHEET_UNPRICED
         if values or any(state == ASSET_PROVEN_ZERO for state in states.values()):
             return SHEET_PROVEN_EMPTY if self.proven_empty_refusal(canonical) is None else SHEET_UNPRICED
         if self.typed_receipts_unresolved.get(canonical):
@@ -248,24 +370,50 @@ class ValuePlane:
         return SHEET_NO_ROWS
 
     def total(self, key: str) -> float | None:
-        """Observed priced holdings, or unknown; legacy dispositions never zero."""
+        """The entity's priced holdings, or ``None`` when they are not a number.
+
+        ``None`` is not zero, and the three ways of not being a number are kept
+        apart in ``sheet_state``: an entity whose every row is unpriced, one whose
+        every price rounded to the storage floor, and one proven to hold nothing
+        are different facts, and only the last may reach a consumer as ``0.0``.
+
+        A sheet whose every reading is disposed answers ``0.0`` too, under its
+        own state and its own witness: the determined content of the sheet is
+        nil. What that number may be USED for is narrower than what a priced
+        total may be used for — see :meth:`trimming_total`.
+        """
         state = self.sheet_state(key)
-        if state == SHEET_PROVEN_EMPTY:
+        if state in (SHEET_PROVEN_EMPTY, SHEET_AIRDROP_DETERMINED):
             return 0.0
         if state in SHEET_NOT_DETERMINED:
             return None
         assets = self.per_asset.get(self.canonical(key)) or {}
         return _round_presented(sum(sorted(assets.values())))
 
-    def trimming_total(self, key: str, *, current_holdings_only: bool = False) -> float | None:
-        """A current sheet cannot cap future deposits, minting or external assets.
+    def trimming_total(self, key: str) -> float | None:
+        """:meth:`total`, except that a DISPOSED sheet trims nothing.
 
-        Existing generic reach witnesses do not carry a current-holdings scope,
-        so callers must establish that scope explicitly before any trimming.
+        The two accessors differ on exactly one state, and the difference is the
+        difference between two questions a sheet is asked.
+
+        ``total`` answers "what does this entity HOLD, as a determined figure" —
+        and on an ``airdrop_determined`` sheet a determined $0 is the honest
+        answer: nothing on it carries a number, and what is on it arrived as a
+        mass distribution.
+
+        A trim site asks something else: "how much is there to MOVE", used to
+        bound a witnessed magnitude from above. The disposed assets are still
+        HELD — a delivery-shape claim says how they arrived and never that they
+        are worth nothing, and two of the tokens measured into this state are
+        real — so trimming a witnessed magnitude to $0 here would publish "this
+        call moves nothing" on the strength of evidence that says no such thing.
+        A determined $0 is a real ceiling on what the sheet HOLDS and is not a
+        witness of what is there to MOVE, so the trim sites get ``None`` and the
+        witness stands alone.
         """
-        if not current_holdings_only:
+        if self.sheet_state(key) == SHEET_AIRDROP_DETERMINED:
             return None
-        return ceiling_for(self, key)[0]
+        return self.total(key)
 
     @property
     def tracked_total(self) -> float:
@@ -276,9 +424,22 @@ class ValuePlane:
         return round(sum(sorted(t for t in totals if t is not None)), 2)
 
 
-# Value-side ceiling outcomes; callers also need a compatible capability scope.
+# --- the sheet ceiling -------------------------------------------------------
+# The closed vocabulary ``ceiling_for`` answers in. Three of the eight are
+# ADMITS and five are refusals, and the split is not readable from the names —
+# ``no_rows``, ``below_resolution`` and ``unpriced`` refuse for three different
+# unmeasured reasons and ``asset_list_truncated`` for a fourth, while
+# ``proven_empty`` and ``airdrop_determined`` are EARNED NEGATIVES that admit a
+# $0 ceiling on two different witnesses. Kept as eight tokens rather than a bool
+# plus a note because the refusals are the work list: "no balance was ever
+# observed", "the price lookup never answered" and "the asset list was cut off
+# at the endpoint's page cap" are answered by different pipelines.
 CEILING_ADMITTED = "admitted"
 CEILING_PROVEN_EMPTY = "proven_empty"
+# The third admit. Grouped with the admits below because it produces a figure:
+# the sheet's determined content is nil. Its claim is DELIVERY SHAPE and never
+# worth — see :data:`ASSET_AIRDROP_DELIVERED`.
+CEILING_AIRDROP_DETERMINED = "airdrop_determined"
 CEILING_NO_ROWS = "no_rows"
 CEILING_BELOW_RESOLUTION = "below_resolution"
 CEILING_UNPRICED = "unpriced"
@@ -288,19 +449,18 @@ CEILING_ALIAS_AMBIGUOUS = "alias_ambiguous"
 CEILING_REASONS = (
     CEILING_ADMITTED,
     CEILING_PROVEN_EMPTY,
+    CEILING_AIRDROP_DETERMINED,
     CEILING_NO_ROWS,
     CEILING_BELOW_RESOLUTION,
     CEILING_UNPRICED,
     CEILING_ASSET_LIST_TRUNCATED,
     CEILING_ALIAS_AMBIGUOUS,
-    "asset_set_not_proven_complete",
-    "observation_not_fresh",
 )
 
 # The reasons under which a ceiling WAS established. Named, because a census that
 # counted admits by testing ``reason == "admitted"`` would drop every proven-zero
 # ceiling into the refusals and report an under-claim as a coverage gap.
-CEILING_ADMITTING_REASONS = (CEILING_ADMITTED, CEILING_PROVEN_EMPTY)
+CEILING_ADMITTING_REASONS = (CEILING_ADMITTED, CEILING_PROVEN_EMPTY, CEILING_AIRDROP_DETERMINED)
 
 # The three sheet states that are not a number, each under its own token. A
 # ``.get`` with a default would let a sixth sheet state refuse under a reason
@@ -313,51 +473,69 @@ _CEILING_REFUSALS: dict[str, str] = {
 
 
 def ceiling_for(plane: ValuePlane, key: str) -> tuple[float | None, str]:
-    """Value-side requirements for a bound on current observed holdings only.
+    """The most an entity's own priced sheet can bound a code seizure at.
 
-    Callers separately need a capability scoped to these holdings. An indexed
-    provider page, an old scan or a partly priced sheet does not prove a bound.
+    Answers ONLY the value-side conjuncts of the admission rule: that the sheet
+    is determined, and that the key is not an implementation two proxies share.
+    The capability-side conjuncts — that the capability is code control, and that
+    it is proven for this principal over this node — are the caller's, and this
+    function must never be read as having checked them.
+
+    ``(usd, reason)``, with ``reason`` from ``CEILING_REASONS`` and ``usd`` a
+    number on exactly the two admitting reasons, so a caller may branch on
+    ``usd is not None`` and get the same answer the reason gives. The two admits
+    stay distinct tokens all the way out: ``proven_empty`` is a PROVEN $0 —
+    every asset's quantity witnessed zero — and refusing it would publish
+    ``not_determined`` where an earned negative exists, while reporting it as a
+    plain ``admitted`` would hide that the $0 is a witness rather than an
+    absence. Both admits band at the floor; only the state distinguishes them.
+
+    The alias conjunct is tested on the key AS PASSED, which is safe under the
+    caller's canonicalisation: an ambiguous implementation is aliased onto
+    nothing, so ``canonical()`` is the identity on it and folding first cannot
+    launder the ambiguity away. Everywhere else the sheet is read at the
+    canonical key, which ``sheet_state`` and ``total`` already do for themselves.
+
+    A TRUNCATED asset list refuses before the state is read, and refuses the
+    admits as well as the refusals. The rows under a page-capped read are a
+    prefix of what the entity holds, so the sheet totals a floor over the
+    holdings — and a floor published as an at-most is a false upper bound on the
+    security claim this figure exists to make. The state cannot carry that fact:
+    ``priced`` says a reading was determined and says nothing about how much of
+    the list was read, so a capped sheet and a whole one answer it identically.
+    It is refused under its own token rather than folded into ``unpriced``
+    because "the list is incomplete" is closed by paging or sweeping the chain,
+    which is not the pipeline that answers "nobody priced these rows".
+
+    ``fold._entity_contribution`` and ``fold._unresolved_stake`` are the
+    callers, both with canonical keys. Every reason is pinned by ``tests/test_value_plane_ceiling.py``
+    over hand-built planes, because the corpus does not carry all of them: it now
+    carries proven-empty sheets in quantity — the chain-log sweep earned them —
+    but no ambiguous alias and no unregistered sheet state, so those two are
+    reachable only by construction.
     """
-    key = plane.canonical(key)
     if key in plane.alias_ambiguous:
         return None, CEILING_ALIAS_AMBIGUOUS
     if plane.asset_set_is_truncated(key):
         return None, CEILING_ASSET_LIST_TRUNCATED
     state = plane.sheet_state(key)
-    if state in _CEILING_REFUSALS:
-        return None, _CEILING_REFUSALS[state]
-    if state not in (SHEET_PRICED, SHEET_PROVEN_EMPTY):
-        raise ValueError(f"sheet state {state!r} has no registered ceiling reason")
-    if not plane.asset_set_is_proven_complete(key):
-        return None, "asset_set_not_proven_complete"
-    if key not in plane.fresh_entities:
-        return None, "observation_not_fresh"
-    if (
-        plane.unpriced_positions.get(key)
-        or plane.unresolved_typed_receipts(key)
-        or any(state not in (ASSET_PRICED, ASSET_PROVEN_ZERO) for state in plane.per_asset_state.get(key, {}).values())
-    ):
-        return None, CEILING_UNPRICED
+    if state == SHEET_PRICED:
+        return plane.total(key), CEILING_ADMITTED
     if state == SHEET_PROVEN_EMPTY:
+        # Written as a literal rather than read back from ``total()``: the
+        # witness here is the state — every quantity proven zero — and the
+        # figure it implies is $0 whatever the sum of an empty sheet computes to.
         return 0.0, CEILING_PROVEN_EMPTY
-    return plane.total(key), CEILING_ADMITTED
-
-
-def observed_holdings_for(plane: ValuePlane, key: str) -> tuple[float | None, str]:
-    """Price the observed portion of a controlled node's own holdings.
-
-    Positive observations remain useful when inventory or freshness is unknown.
-    They do not establish an upper bound on the full capability. Only the
-    stricter bound predicate can admit zero: missing assets must not become a
-    claim that there is nothing at risk.
-    """
-    key = plane.canonical(key)
-    if key in plane.alias_ambiguous:
-        return None, CEILING_ALIAS_AMBIGUOUS
-    total = plane.total(key)
-    if total is not None and total > 0:
-        return total, CEILING_ADMITTED
-    return ceiling_for(plane, key)
+    if state == SHEET_AIRDROP_DETERMINED:
+        # A literal for the same reason the branch above is one: the witness is
+        # the state — every reading on the sheet arrived as a mass distribution,
+        # or is a proven zero — and the figure it implies is $0 whatever the sum
+        # of a sheet with no determined readings computes to.
+        return 0.0, CEILING_AIRDROP_DETERMINED
+    refusal = _CEILING_REFUSALS.get(state)
+    if refusal is None:
+        raise ValueError(f"sheet state {state!r} has no registered ceiling reason")
+    return None, refusal
 
 
 _EPOCH = datetime.min
@@ -411,24 +589,13 @@ def _is_proven_zero_quantity(row: Any) -> bool:
     minting a proven zero out of a value nobody could read.
     """
     try:
-        return int(str(row.raw_balance)) == 0
+        return float(str(row.raw_balance)) == 0.0
     except (TypeError, ValueError):
         return False
 
 
-def _observation_fresh(row: Any) -> bool:
-    observed = getattr(row, "observed_at", None)
-    if not isinstance(observed, datetime):
-        return False
-    if observed.tzinfo is None:
-        observed = observed.replace(tzinfo=timezone.utc)
-    return timedelta(0) <= datetime.now(timezone.utc) - observed <= timedelta(hours=1)
-
-
 def _asset_reading(row: Any) -> tuple[float | None, str]:
     """One row's dollar reading and the state that reading is in."""
-    if _is_proven_zero_quantity(row):
-        return 0.0, ASSET_PROVEN_ZERO
     usd = _float(row.usd_value)
     if usd is None:
         # NULL usd_value is not_determined, never 0: nothing separates a
@@ -639,6 +806,7 @@ def load_entity_alias(session: Session, protocol_id: int) -> tuple[dict[str, str
 
 
 def load_value_plane(session: Session, protocol_id: int, *, universe: ProtocolUniverse | None = None) -> ValuePlane:
+    """Load current balances under existing valuation rules; universe is a legacy argument."""
     from db.models import Contract, ContractBalanceFetch, ContractBalanceLatest, RestakingPositionLatest
     from services.monitoring.balance_reads import (
         ObservationSubject,
@@ -726,20 +894,6 @@ def load_value_plane(session: Session, protocol_id: int, *, universe: ProtocolUn
             fetched.append(row.fetched_at)
         observations[(key, asset)][_lower(row.observed_address)].append(row)
 
-    freshness: dict[str, list[bool]] = defaultdict(list)
-    for (key, _asset), accounts in observations.items():
-        for readings in accounts.values():
-            row, _ = _latest_observation(readings)
-            quote_at = getattr(row, "price_observed_at", None)
-            quote_fresh = _is_proven_zero_quantity(row) or (
-                isinstance(quote_at, datetime)
-                and timedelta(0)
-                <= datetime.now(timezone.utc) - quote_at.replace(tzinfo=quote_at.tzinfo or timezone.utc)
-                <= timedelta(hours=1)
-            )
-            freshness[key].append(_observation_fresh(row) and quote_fresh)
-    plane.fresh_entities = {key for key, flags in freshness.items() if flags and all(flags)}
-
     per_asset, per_asset_state, reduction = _reduce_observations(observations)
     plane.per_asset = per_asset
     plane.per_asset_state = per_asset_state
@@ -769,7 +923,9 @@ def load_value_plane(session: Session, protocol_id: int, *, universe: ProtocolUn
             .all()
         )
     for fetch in fetch_rows:
-        latest_fetch[_balance_account(fetch)] = fetch
+        # A token-only pass makes no new statement about the native balance.
+        if fetch.native_status != STATUS_UNATTEMPTED:
+            latest_fetch[_balance_account(fetch)] = fetch
     # Completeness is a property of THE ROW SET, so it is read from the fetch
     # whose rows this plane just loaded — never from the latest fetch, which may
     # be a later failure that would withdraw the truncation while the truncated
@@ -822,8 +978,7 @@ def load_value_plane(session: Session, protocol_id: int, *, universe: ProtocolUn
                 }
             )
         if (
-            _observation_fresh(fetch)
-            and fetch.asset_set_source == ASSET_SET_SOURCE_CHAIN_LOG_SWEEP
+            fetch.asset_set_source == ASSET_SET_SOURCE_CHAIN_LOG_SWEEP
             and fetch.sweep_status == SWEEP_STATUS_COMPLETED
             and fetch.swept_through_block is not None
             and entries is not None
@@ -973,6 +1128,8 @@ def load_value_plane(session: Session, protocol_id: int, *, universe: ProtocolUn
             }
         )
 
+    # Delivery classification is retired: retain the original quantity/price reading.
+
     # ``native_status = proven_zero`` becomes a real ASSET reading, on the sheets
     # whose asset list a chain scan proved whole. The pair is what carries the
     # claim: the scan says the ERC-20 list is everything that ever arrived, the
@@ -1006,6 +1163,7 @@ def load_value_plane(session: Session, protocol_id: int, *, universe: ProtocolUn
             SHEET_BELOW_RESOLUTION,
             SHEET_UNPRICED,
             SHEET_PROVEN_EMPTY,
+            SHEET_AIRDROP_DETERMINED,
             SHEET_NO_ROWS,
         ),
         0,
@@ -1126,10 +1284,6 @@ def load_value_plane(session: Session, protocol_id: int, *, universe: ProtocolUn
             "taken over the observations alone could only ever report 0 there, which is not "
             "the same fact"
         ),
-        "balance_semantics_version": "2-current-observations",
-        "fresh_entities": len(plane.fresh_entities),
-        "observation_time_scope": "Row observation and quote times are distinct; fetched_at is publication time.",
-        "holdings_are_context": "Observed priced holdings do not bound generic code control or future/external assets.",
         "asset_set_completeness": {
             "entities_proven_complete": len(plane.asset_set_proven_complete),
             "entities_proven_truncated": len(plane.asset_set_truncated),

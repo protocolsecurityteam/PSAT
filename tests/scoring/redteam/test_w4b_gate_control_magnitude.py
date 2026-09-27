@@ -72,9 +72,13 @@ def test_w4b_a_gate_composes_the_destination_functions_own_witness(fold):
     )
 
 
-def test_w4b_composition_preserves_destination_witness_without_wallet_trimming(fold):
-    """The destination call witness bounds composition; present holdings are context only."""
-    for sheet, expected in ((5_000_000.0, 1_000_000.0), (250_000.0, 1_000_000.0)):
+def test_w4b_no_composed_magnitude_exceeds_the_destinations_own_bound(fold):
+    """The anti-composition regression test.
+
+    The destination's witness is the ceiling and the destination's sheet is the
+    other ceiling; the published figure clears neither, whichever is lower.
+    """
+    for sheet, expected in ((5_000_000.0, 1_000_000.0), (250_000.0, 250_000.0)):
         document = fold(
             _composing_signals(),
             principals=_composing_principals(),
@@ -84,7 +88,7 @@ def test_w4b_composition_preserves_destination_witness_without_wallet_trimming(f
         composed = row["reach_composed_magnitudes"][0]
         assert composed["published_usd"] == expected
         assert composed["published_usd"] <= composed["flow_out_witness"]["usd"]
-        assert composed["bounded_by"] == FOLD._BOUNDED_BY_WITNESS
+        assert composed["published_usd"] <= sheet
         assert row["value_at_stake_usd"] == expected
 
 
@@ -131,13 +135,7 @@ def test_b7_every_contribution_a_ceiling_with_no_coverage_gap_publishes_a_ceilin
         _composing_signals(),
         principals=_composing_principals(),
         **_composing_case(
-            value=value_plane(
-                {KEY_V: {"usdc": 5_000_000.0}},
-                contracts=(KEY_C,),
-                alias={KEY_C: KEY_V},
-                asset_set_proven_complete={KEY_V: {"source": "chain_log_sweep"}},
-                fresh_entities={KEY_V},
-            ),
+            value=value_plane({KEY_V: {"usdc": 5_000_000.0}}, contracts=(KEY_C,), alias={KEY_C: KEY_V}),
         ),
     )
     row = _gate_row(document)

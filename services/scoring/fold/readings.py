@@ -182,12 +182,25 @@ def _round_published(value: float) -> float:
     return rounded if rounded != 0.0 or value == 0.0 else value
 
 
-# An observed dollar total does not establish the scope needed to cap a call.
-SHEET_BOUND_REFUSED_BY_SCOPE = "observed_holdings_do_not_bound_capability"
+# The token a figure carries where a sheet EXISTS, is determined, and still may
+# not bound a witness. One token, used at both trim sites and published on both
+# surfaces, so the two cannot drift into describing the same fact differently.
+SHEET_BOUND_REFUSED_BY_DISPOSITION = "sheet_determined_by_disposition_does_not_bound"
 
-_OBSERVED_SHEET_DOES_NOT_BOUND = (
-    "the observed holdings do not establish an upper bound on this capability; "
-    "the witnessed magnitude stands without being capped by the balance snapshot"
+
+# And what that token means, in the one sentence both surfaces publish. It says
+# what the sheet DOES determine as well as what it does not, because the
+# alternative reading — "the sheet is not determined" — is false here and is the
+# word a reader would otherwise act on.
+_DISPOSED_SHEET_DOES_NOT_BOUND = (
+    "a witnessed magnitude charged against an entity whose sheet IS determined, at $0, by "
+    "delivery-shape disposition: every reading on it arrived only in transactions carrying at "
+    "least the published fan-out threshold of same-token transfer LOGS. That determination is "
+    "over the "
+    "readings observed, on an asset list that is NOT proven whole, and it is a claim about how "
+    "the holdings arrived and never about what they are worth — two of the tokens measured into "
+    "that state on this corpus are real ones. So the $0 bounds what the entity HOLDS and not "
+    "what is there to MOVE, the sheet does not trim this figure, and the witness stands alone"
 )
 
 
@@ -263,21 +276,64 @@ CEILING_REFUSAL_REASONS = tuple(r for r in P.CEILING_REASONS if r not in P.CEILI
 # only shape in which coverage is trivially whole: a sheet whose every quantity
 # is witnessed zero has nothing left over to be uncovered.
 #
+# The AIRDROP-DETERMINED admit carries BOTH arms, and its partial one is the
+# COMMON case rather than an unreachable combination. Coverage there is earned,
+# not implied: a disposition says an asset's contribution is nil and says
+# nothing about whether the LIST is whole, so a disposed sheet clears
+# ``_asset_coverage["complete"]`` only where the list is separately proven — and
+# the below-resolution readings that sit beside the disposed ones on this corpus
+# are not disposed and not priced, which is exactly the partial arm.
 _CEILING_SOURCE_READINGS = {
     (P.CEILING_ADMITTED, True): (
-        "the dollars cover this controlled node's complete, freshly priced inventory. "
-        "They bound only the holdings at those observations; future deposits, mint authority "
-        "and assets elsewhere are outside the figure. No call demonstrated moving this amount"
+        "the dollars are THIS entity's own priced holdings, and every asset observed at it was "
+        "priced — so the figure is an AT-MOST on what replacing this node's code can move from "
+        "it. The principal can replace that code, so none of the code that would have stood "
+        "between them and these holdings is still standing; what is not witnessed is the other "
+        "direction, that replaced code reaches every asset in the total, and an accounting entry "
+        "rather than a held balance is inside the sheet and outside the move"
     ),
     (P.CEILING_ADMITTED, False): (
-        "the dollars value the last observed priced holdings of this controlled node. "
-        "Coverage or freshness is incomplete, so this amount does not bound the present "
-        "holdings or the capability. Unpriced and unobserved assets retain unknown value"
+        "the dollars are THIS entity's own priced holdings and they DO NOT bound the move: the "
+        "sheet does not cover everything observed here, so the total is a floor over what was "
+        "priced and the entity holds more than it. What the figure bounds from above is the "
+        "COVERED PORTION — replacing this node's code can move no more of those assets than the "
+        "sum of them — and what the part it does not cover adds is not_determined here, which is "
+        "why bound_direction is not a ceiling on this entry"
     ),
     (P.CEILING_PROVEN_EMPTY, True): (
-        "the complete, fresh inventory has zero quantities at its observations. The zero "
-        "covers those holdings only; later deposits and other effects remain outside this scope"
+        "the ceiling is a PROVEN ZERO and not a missing number: every asset observed at this "
+        "entity carries a quantity witnessed zero, so replacing its code can move nothing from "
+        "it. This is an earned negative — a sheet nobody priced publishes not_determined instead "
+        "— and it bands at the floor for the same reason any small figure does"
     ),
+    (P.CEILING_AIRDROP_DETERMINED, True): (
+        "the ceiling is a DETERMINED ZERO of a different kind: every asset observed at this "
+        "entity either carries a quantity witnessed zero or arrived ONLY in transactions "
+        "carrying at least the published fan-out threshold of same-token transfer LOGS, so this "
+        "sheet's determined content is nil and replacing the node's code moves nothing the "
+        "document can price. The claim is DELIVERY SHAPE and never worth — real tokens have "
+        "been measured arriving this way — and the asset list it covers is the one the index "
+        "returned, refused only where that list was read AT the page cap"
+    ),
+    (P.CEILING_AIRDROP_DETERMINED, False): (
+        "the ceiling is a determined zero of what this sheet PRICES: nothing observed at this "
+        "entity carries a determined dollar reading above zero, and every reading that is not a "
+        "witnessed zero arrived only in transactions carrying at least the published fan-out "
+        "threshold of same-token transfer LOGS. It is NOT a figure over the disposed assets "
+        "themselves — the claim admitting it is DELIVERY SHAPE, which says how they arrived and "
+        "never what they are worth — and the coverage is not whole either, so what the part it "
+        "does not cover adds is not_determined"
+    ),
+    # ``(PROVEN_EMPTY, False)`` is ABSENT, and its absence is a rule rather than
+    # an omission. It described a proven-empty priced sheet at a node the
+    # restaking plane also carries unpriced positions for; the sheet plane now
+    # REFUSES the empty state there outright (``ValuePlane.proven_empty_refusal``
+    # — a $0 beside those positions both contradicts a plane already in this
+    # document and bounds a magnitude at zero over holdings nobody priced), so
+    # such an entity publishes ``unpriced`` and earns no ceiling at all. A
+    # sentence nothing can publish is removed on the same rule the uncalibrated
+    # register is kept by, and the lookup below stays strict so a fifth
+    # combination raises instead of borrowing one of these.
 }
 
 
@@ -285,9 +341,11 @@ _CEILING_SOURCE_READINGS = {
 # it is constant: it states what the entry does NOT claim, and asserts nothing
 # about the row's own data.
 _CEILING_CLOSING = (
-    ". The scope is this node's observed holdings. Downstream contracts keep their own code "
-    "and require separate evidence. This valuation weights the capability finding; it does "
-    "not measure an extraction or contribute to the monetary exposure numerator"
+    ". Whatever it bounds, it bounds from ABOVE and is never an amount — nothing here says the "
+    "principal moves this — and it is scoped to THIS node: what the node in turn governs keeps "
+    "its own rules, because that node's code is still standing. It charges no exposure for the "
+    "same reason: an upper bound on an unwitnessed move is not expected loss, and spending an "
+    "entity's exposure budget on one would displace a row that measured a real extraction there"
 )
 
 
@@ -298,10 +356,15 @@ _CEILING_CLOSING = (
 # stop.
 _SHEET_CEILING_DIRECTION_BASIS = {
     True: (
-        "the observed inventory is complete, freshly priced and has no unresolved positions; "
-        "the bound covers only this node's holdings at those observations"
+        "every asset observed at this entity carries a determined reading — a price, or a "
+        "QUANTITY witnessed zero, which is worth nothing at any price — and no position carries "
+        "an absent USD column, so the total covers the holdings and bounds the move from above"
     ),
-    False: ("the amount remains useful as observed holdings, but cannot bound current holdings. Missing evidence: "),
+    False: (
+        "the priced sheet does not cover everything observed at this entity, so the total is a "
+        "floor over what was priced and bounds the holdings in neither direction. What it does "
+        "not cover, on this entity: "
+    ),
 }
 
 
@@ -319,11 +382,24 @@ _SHEET_CEILING_DIRECTION_BASIS = {
 # corrected and the reading's stem was left asserting the same false premise.
 # Each entry is (published field, the value that FAILS the conjunct, the clause).
 _SHEET_CEILING_INCOMPLETE_CAUSES: tuple[tuple[str, bool, str], ...] = (
-    ("assets_not_priced", True, "observed assets have unknown prices"),
-    ("unpriced_positions", True, "restaking positions have unknown values"),
-    ("asset_list_proven_whole", False, "the observed asset list is not proven complete"),
-    ("observation_fresh", False, "balance and quote observations are stale or their timestamps are unknown"),
-    ("typed_receipts_unresolved", True, "held typed receipts remain unresolved"),
+    (
+        "assets_not_priced",
+        True,
+        "assets observed here that no price lookup answered for (assets_not_priced)",
+    ),
+    (
+        "unpriced_positions",
+        True,
+        "positions the restaking plane carries at this node with no USD column at all (unpriced_positions)",
+    ),
+    (
+        "asset_list_proven_whole",
+        False,
+        "the asset LIST itself is not proven whole (asset_list_proven_whole, "
+        "asset_set_completeness): the rows are what an index returned, and a disposition covers "
+        "the readings observed and never the holdings, so nothing here establishes that these "
+        "assets are all the entity has",
+    ),
 )
 
 
@@ -343,7 +419,7 @@ def _coverage_shortfall(coverage: dict[str, Any]) -> str:
 # with. Only the framing differs — one sentence answers "why is this not a
 # ceiling", the other "what does this figure leave out" — and the fact itself is
 # derived once.
-_CEILING_COVERAGE_SHORTFALL_PREFIX = ". Missing evidence at this entity: "
+_CEILING_COVERAGE_SHORTFALL_PREFIX = ". What it does not cover, on this entity: "
 
 
 def _sheet_ceiling_direction_basis(coverage: dict[str, Any], complete: bool) -> str:

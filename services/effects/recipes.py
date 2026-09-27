@@ -1290,7 +1290,6 @@ def supply(
             concrete["backing_mint_transfers"] = len(minted)
             details["backing"] = {
                 "inflow_observed": bool(inflow),
-                "economic_backing": "not_determined",
                 "minted": bool(minted),
                 # Whether the acting principal had to be given the input asset before
                 # the mint would execute at all. It records HOW the call was reached,
@@ -1576,54 +1575,242 @@ def _add_reach(
     acting_balance_usd: float | None,
     protocol_tvl_usd: float | None = None,
 ) -> None:
-    """Record observed holder/asset movement and contextual holdings separately.
+    """Downstream value-reach. From the SAME fork execution of F, a value-holder
+    from which value provably LEFT (a ``Transfer`` out in this call's logs) is a
+    fork-OBSERVED reach; its full on-chain USD is attributed as reached (a
+    conservative upper bound). Downstream value is NEVER imputed via the
+    control-graph reference heuristic (``control_graph_edges`` carries no fund-flow
+    edge). Skipped entirely when no value-holder set was supplied (nothing to
+    measure), leaving the verdict shape unchanged.
 
-    Transfer presence proves behavior. A holder's entire recorded balance does
-    not measure the amount moved, and cannot bound future or external assets.
-    Preserve useful portfolio context without publishing a dollar magnitude.
-    External TVL is a separately scoped reference and never rejects this evidence.
-    """
+    THREE STATES, and ``reach_determined`` is the one key that tells them apart:
+
+    * ``reach_determined: True`` + ``observed_reach_value_usd`` +
+      ``observed_reach_holders`` + ``observed_reach_assets`` — measured, and every
+      asset that moved had a priced holding. The USD is an upper bound.
+    * ``reach_determined: False`` + ``reach_indeterminate: True`` +
+      ``observed_reach_floor_usd`` — NOTHING was witnessed leaving a holder, which is
+      not the same as "reach is nothing": this branch fires for any zap / router /
+      adapter that moves value it does not itself hold (18 armed ``flow.out``
+      functions on 6 zero-balance contracts locally). It used to publish the acting
+      deployment's own balance as ``observed_reach_value_usd``, so a consumer reading
+      the number and ignoring the flag got **"$0 reach" for a function that may move
+      millions** — a proven-absence sentence minted out of a non-observation. The
+      floor is still recorded, under a name that says what it is, and the key that
+      means "measured reach" is ABSENT.
+    * ``reach_determined: False`` + ``reach_indeterminate: True`` and NO
+      ``observed_reach_floor_usd`` — the same non-observation, and no balance row was
+      witnessed for the acting deployment either (``acting_balance_usd is None``), so
+      there is no floor to state. The floor key's ABSENCE is the witness; it is never
+      published as ``null`` and never as ``0.0``. A floor of ``0.0`` on this branch
+      means a balance row WAS read and summed to zero — a different, weaker-but-real
+      fact — which is why the two cannot share a payload.
+    * ``reach_determined: False`` WITHOUT ``reach_indeterminate`` +
+      ``observed_reach_holders`` / ``observed_reach_assets`` /
+      ``observed_reach_unvalued_pairs`` — value WAS witnessed leaving a holder and
+      its USD is not determined, because at least one (holder, asset) pair that moved
+      has no priced holding on record. ``observed_reach_priced_usd`` carries the part
+      that IS priced (a partial floor), with ``observed_reach_priced_holders`` naming
+      whose holdings it came from; both are omitted when that part is nothing, and the
+      figure is withheld when the TVL ceiling refuses it
+      (``reach_tvl_check: exceeds_protocol_tvl`` + ``observed_reach_rejected_usd`` +
+      ``protocol_tvl_usd`` then record the contradiction, exactly as on the measured
+      branch). This is the unpriced-asset case: 1001 of 1376 local
+      ``contract_balances`` rows are unpriced, and the recoverETH row moved native ETH
+      out of a deployment with no native balance row at all — "holds nothing", "not
+      fetched" and "fetch failed" are one shape there, so the only honest USD is
+      *unknown*.
+    * every key absent — no holder set was supplied, so nothing was even attempted.
+
+    THE UNVALUED DISCLOSURE IS KEYED THE WAY THE ARITHMETIC IS — per (holder, asset).
+    It used to be a set of ASSETS while the pricing loop ran per pair, so an asset
+    priced for holder A and unrecorded for holder B was published as unvaluable
+    *tout court* beside a concrete USD figure computed from A. On three PR-161 rows
+    that produced a payload asserting both halves of a contradiction: verdict 198
+    (``PriorityWithdrawalQueue.requestWithdrawWithWeETH``) named weETH as the ONLY
+    asset that moved, named weETH as the ONLY asset that could not be valued, and
+    published ``observed_reach_priced_usd: 8471736.29`` — every dollar of it the
+    BoringVault holder's weETH row, a holder the disclosure never connected to the
+    figure. Three keys keep the two facts apart now:
+
+    * ``observed_reach_unvalued_pairs`` — the disclosure proper: one
+      ``{holder, asset, reason}`` per pair whose USD is not known.
+    * ``observed_reach_unvalued_assets`` — the assets NO holder priced (an asset that
+      moved and contributed nothing to the figure). Published on this branch even when
+      EMPTY, because on this branch it is computed: ``[]`` is the earned negative
+      "every asset that moved was priced for at least one holder", and absence of the
+      key means the branch never ran.
+    * ``observed_reach_priced_holders`` — whose holdings the figure is made of,
+      published beside every figure this branch publishes. It is deliberately absent
+      on the measured branch, where ``reach_determined: True`` already says every
+      holder in ``observed_reach_holders`` was priced.
+
+    Writes to ``concrete``, NOT ``details``. Every value here is
+    per-deployment — the holders are addresses and the USD is this protocol's
+    balance sheet at this block — while ``details`` is the code-plane witness the
+    behavioral cache stores and re-publishes to every OTHER deployment sharing the
+    bytecode. Reach in ``details`` meant a second deployment's verdict named the
+    first one's holders and USD as its own.
+
+    ASSET-SCOPED MATCHING. ``transfers_out`` is asked per (holder, asset), where
+    the asset is the ``Transfer`` log's EMITTER — the token contract, or
+    ``NATIVE_ASSET_LOG_EMITTER`` for a native move (measured against the live node,
+    see that constant). Asset-blind matching is what published $3.489B of reach for
+    ``WeETH.recoverETH``: the contract-balance seed gave the proxy synthetic native
+    ETH, ``traceTransfers`` emitted one synthetic ``Transfer`` out of it, and the
+    holder's ENTIRE balance — 99.99% of it eETH — was attributed as reached. Two rows
+    of that shape carried 64.96% of all published reach USD in the DB and both are
+    truly $0.
+
+    Note what is NOT done: this does not pass ``only_asset`` to a single whole-holder
+    match — a synthetic native log has no token emitter, so that would have matched
+    nothing and under-claimed 100%. The
+    INPUT changed: holdings arrive per asset, native included, keyed on the emitter
+    the node actually uses.
+
+    ONE ADD PER (HOLDER, ASSET), never per LOG. The attributed figure is a whole
+    recorded balance, so a second Transfer log of the same asset out of the same
+    holder must contribute nothing: summing per log published a MULTIPLE of the
+    balance in the field that documents itself as an upper bound."""
     if not value_holders:
         return
-    known = {(h.holder.lower(), h.asset.lower()): h.usd_value for h in value_holders}
-    completeness = {h.holder.lower(): h.completeness for h in value_holders}
-    moved = {
-        (holder, asset)
-        for holder in sorted({h.holder.lower() for h in value_holders})
-        for _frm, _to, _value, asset in transfers_out_with_asset(base_call, holder)
+    priced_usd = 0.0
+    priced_any = False
+    # Both sides of the disclosure are accumulated per (holder, asset) — the key the
+    # arithmetic uses. Publishing the unvalued side per ASSET is what let one asset be
+    # named as the only thing that moved AND the only thing that could not be valued,
+    # next to a figure made of a different holder's balance.
+    unvalued_pairs: list[dict[str, str]] = []
+    priced_holders: set[str] = set()
+    priced_assets: set[str] = set()
+    reach_holders: set[str] = set()
+    reach_assets: set[str] = set()
+    # (holder, asset) -> the priced holding, or None when we hold it unpriced. A
+    # (holder, asset) pair MISSING from this map is the third case: value left that
+    # holder in an asset we have no balance row for at all.
+    known: dict[tuple[str, str], float | None] = {
+        (h.holder.lower(), h.asset.lower()): h.usd_value for h in value_holders
     }
-    concrete["reach_determined"] = False
-    concrete["reach_magnitude_state"] = "not_determined"
-    concrete["reach_value_scope"] = "recorded_holdings_of_assets_observed_moving"
-    concrete["reach_is_upper_bound"] = False
-    if not moved:
-        concrete["reach_indeterminate"] = True
-        return
-    concrete["observed_reach_holders"] = sorted({h for h, _ in moved})
-    concrete["observed_reach_assets"] = sorted({a for _, a in moved})
-    unvalued = []
-    priced_pairs = []
+    # Uniform per holder (see ``AssetHolding.completeness``): what is KNOWN about an
+    # asset absent from ``known`` for that holder. Two states, and neither is "the
+    # list is whole" — nothing recorded can prove that (``selection
+    # ._completeness_from_fetch`` registers no ``complete`` member),
+    # so the reason an absent asset gets is "not in the holdings we recorded, which
+    # are not provably all of them", never "this holder does not hold it".
+    completeness: dict[str, str] = {h.holder.lower(): h.completeness for h in value_holders}
+    # The (holder, asset) PAIRS value provably left, deduped BEFORE any USD is added.
+    # Deduping is not tidiness: the figure attributed for a pair is the holder's WHOLE
+    # recorded balance for that asset (the documented conservative upper bound), and a
+    # single call legitimately emits several Transfer logs of the same asset out of the
+    # same holder — the shape ``_resolve_destination_shape`` names one screen up, "a
+    # withdrawal that emits several Transfer logs (burn + send, or send + fee to the
+    # same address)". Adding once per LOG published a MULTIPLE of the entire balance
+    # and called it an upper bound; two logs made a $100 holding read as $200 reach.
+    moved: set[tuple[str, str]] = set()
+    for holder in sorted({h.holder.lower() for h in value_holders}):
+        for _frm, _to, _value, asset in transfers_out_with_asset(base_call, holder):
+            moved.add((holder, asset))
     for holder, asset in sorted(moved):
-        value = known.get((holder, asset))
-        if value is None:
-            reason = (
-                "unpriced_holding"
-                if (holder, asset) in known
-                else _UNVALUED_REASON_BY_COMPLETENESS[completeness.get(holder, HOLDINGS_NOT_DETERMINED)]
-            )
-            unvalued.append({"holder": holder, "asset": asset, "reason": reason})
+        reach_holders.add(holder)
+        reach_assets.add(asset)
+        if (holder, asset) not in known:
+            # No balance row at all for this (holder, asset): value left in an asset
+            # we never recorded. Absence there conflates "holds nothing", "not
+            # fetched" and "fetch failed", so it is not a zero. The reason names which
+            # of the two things we know, and neither is "the holder does not hold it":
+            # ``holdings_at_page_cap`` when the holder's stored rows reach the
+            # fetcher's one-page cap (assets are probably missing), otherwise
+            # ``asset_not_in_recorded_holdings`` — recorded, not proven-complete.
+            reason = _UNVALUED_REASON_BY_COMPLETENESS[completeness.get(holder, HOLDINGS_NOT_DETERMINED)]
+            unvalued_pairs.append({"holder": holder, "asset": asset, "reason": reason})
+            continue
+        usd = known[(holder, asset)]
+        if usd is None:
+            # Held, but unpriced. Per PAIR: this says nothing about another holder's
+            # holding of the same asset, and it never did — the old asset-keyed set
+            # said it anyway.
+            unvalued_pairs.append({"holder": holder, "asset": asset, "reason": "unpriced_holding"})
         else:
-            priced_pairs.append((holder, asset, value))
-    if priced_pairs:
-        concrete["reach_observed_holdings_usd"] = sum(value for _, _, value in priced_pairs)
-        concrete["reach_observed_holdings_pairs"] = [{"holder": h, "asset": a} for h, a, _ in priced_pairs]
-        concrete["observed_reach_priced_holders"] = sorted({h for h, _, _ in priced_pairs})
-    if unvalued:
-        concrete["observed_reach_unvalued_pairs"] = unvalued
-        priced_assets = {a for _, a, _ in priced_pairs}
-        concrete["observed_reach_unvalued_assets"] = sorted({p["asset"] for p in unvalued} - priced_assets)
-        concrete["observed_reach_unvalued_reasons"] = sorted({p["reason"] for p in unvalued})
-    concrete["reach_tvl_check"] = "external_reference_only"
+            priced_usd += usd
+            priced_any = True
+            priced_holders.add(holder)
+            priced_assets.add(asset)
+    if not reach_holders:
+        concrete["reach_determined"] = False
+        concrete["reach_indeterminate"] = True
+        if acting_balance_usd is not None:
+            concrete["observed_reach_floor_usd"] = acting_balance_usd
+        return
+    concrete["observed_reach_holders"] = sorted(reach_holders)
+    concrete["observed_reach_assets"] = sorted(reach_assets)
+    if unvalued_pairs:
+        # Witnessed, and NOT valued. The priced part is a floor, never the answer.
+        concrete["reach_determined"] = False
+        # Sorted by (holder, asset) already: the loop above walks ``sorted(moved)``.
+        concrete["observed_reach_unvalued_pairs"] = unvalued_pairs
+        # The assets NO holder priced. An asset that IS priced for some holder is not
+        # one of them, however many other holders moved it unvalued — that is the whole
+        # correction, and ``[]`` here is the earned negative, not a missing answer.
+        concrete["observed_reach_unvalued_assets"] = sorted({p["asset"] for p in unvalued_pairs} - priced_assets)
+        concrete["observed_reach_unvalued_reasons"] = sorted({p["reason"] for p in unvalued_pairs})
+        if priced_any:
+            # WHOSE holdings the figure is. Published beside the figure on both arms
+            # below — a refused figure is still a figure, and the contradiction the
+            # ceiling records is only inspectable if its subjects are named.
+            concrete["observed_reach_priced_holders"] = sorted(priced_holders)
+            # The CEILING applies to the partial floor too. It used to guard only
+            # the branch below, so a floor ABOVE the protocol's own measured TVL was
+            # publishable with no ``reach_tvl_check`` at all — the same contradiction on
+            # the sibling key, and worse on this branch than on a measured total: the
+            # floor is a LOWER bound over a subset of the assets that moved, so a floor
+            # above the ceiling cannot be explained by the upper bound being loose.
+            # Refused the same way (recorded, never clamped) and the unvalued-asset
+            # disclosure stands either way — the two facts are independent.
+            tvl_state, tvl_note = _reach_tvl_state(priced_usd, protocol_tvl_usd)
+            concrete["reach_tvl_check"] = tvl_state
+            if tvl_state == REACH_TVL_EXCEEDED:
+                logger.warning(
+                    "reach floor %.2f exceeds protocol TVL %.2f — refusing the figure; "
+                    "priced_holders=%s unvalued_pairs=%s",
+                    priced_usd,
+                    protocol_tvl_usd or 0.0,
+                    sorted(priced_holders),
+                    [(p["holder"], p["asset"]) for p in unvalued_pairs],
+                )
+                concrete["observed_reach_rejected_usd"] = priced_usd
+                concrete["protocol_tvl_usd"] = protocol_tvl_usd
+            else:
+                if tvl_note is not None:
+                    logger.warning("reach TVL ceiling not applied: %s", tvl_note)
+                concrete["observed_reach_priced_usd"] = priced_usd
+        # ``priced_any`` False publishes NO ``reach_tvl_check``: there is no figure for a
+        # ceiling to bear on, and ``within_protocol_tvl`` over an absent number would
+        # read as a check that passed. Absence of the key here means "no figure", which
+        # is exactly what the absent ``observed_reach_priced_usd`` beside it says.
+        return
+    # CORROBORATING CEILING: no exercise of one function can reach more value than the
+    # protocol holds. The worst published row asserted $3.489B against a protocol TVL
+    # of $3.297B, and nothing checked. A sum above the ceiling is not clamped (a clamp
+    # would invent a number nothing measured) — it is refused, with both figures
+    # recorded so the contradiction is inspectable.
+    tvl_state, tvl_note = _reach_tvl_state(priced_usd, protocol_tvl_usd)
+    concrete["reach_tvl_check"] = tvl_state
+    if tvl_state == REACH_TVL_EXCEEDED:
+        logger.warning(
+            "reach %.2f exceeds protocol TVL %.2f — refusing the figure; holders=%s assets=%s",
+            priced_usd,
+            protocol_tvl_usd or 0.0,
+            sorted(reach_holders),
+            sorted(reach_assets),
+        )
+        concrete["reach_determined"] = False
+        concrete["observed_reach_rejected_usd"] = priced_usd
+        concrete["protocol_tvl_usd"] = protocol_tvl_usd
+        return
+    if tvl_note is not None:
+        logger.warning("reach TVL ceiling not applied: %s", tvl_note)
+    concrete["reach_determined"] = True
+    concrete["observed_reach_value_usd"] = priced_usd
 
 
 # The three answers of the reach-vs-TVL ceiling. ``skipped_no_tvl`` is published, not
@@ -1647,8 +1834,18 @@ REACH_TVL_SKIPPED = "skipped_no_tvl"
 
 
 def _reach_tvl_state(reached_usd: float, protocol_tvl_usd: float | None) -> tuple[str, str | None]:
-    """External TVL has a different scope and cannot reject observed reach."""
-    return "external_reference_only", None
+    """``(state, log_note)`` for the reach-vs-TVL ceiling.
+
+    Reads ONLY a caller-supplied ``defillama_tvl`` figure (see
+    ``selection._protocol_tvl_usd``): ``tvl_snapshots.total_usd`` and
+    ``contract_breakdown`` are NULL on every local row, so a ceiling written against
+    them could never fire.
+    """
+    if protocol_tvl_usd is None or protocol_tvl_usd <= 0:
+        return REACH_TVL_SKIPPED, "no defillama_tvl snapshot for this protocol"
+    if reached_usd > protocol_tvl_usd:
+        return REACH_TVL_EXCEEDED, None
+    return REACH_TVL_WITHIN, None
 
 
 def _sim_precondition_unknown(effect_class: str, gate_ref: str, transcript: dict[str, Any]) -> ObservedEffect:

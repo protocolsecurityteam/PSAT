@@ -73,10 +73,9 @@ def test_r4_a_capped_split_between_keys_is_published_as_order_determined(fold):
     )
     finding = document.findings[0]
     assert finding["value_at_stake_usd"] == 100.0
-    assert finding["value_by_entity"] == {KEY_C: 100.0}
-    assert KEY_V in {row["entity"] for row in finding["undetermined_instances"]}
+    assert finding["value_by_entity"] == {KEY_C: 60.0, KEY_V: 40.0}
     cap = finding["witnessed_magnitude_caps"][0]
-    assert cap["uncapped_sum_usd"] == 200.0
+    assert cap["uncapped_sum_usd"] == 120.0
     assert "not by evidence" in cap["reading"]
 
 
@@ -176,8 +175,14 @@ def test_r4_one_key_keeps_its_floor_witness_exactly(fold):
     assert finding["witnessed_magnitude_caps"] == []
 
 
-def test_r4_a_floor_magnitude_is_not_trimmed_to_present_holdings(fold):
-    """An independently proven floor is not reduced by an unscoped present wallet total."""
+def test_r4_a_floor_magnitude_is_bounded_by_the_entity_it_is_charged_against(fold):
+    """A floor witness is not licence to publish more than the entity holds.
+
+    The exact branch has always taken ``min(sheet, witness)``; the floor branch
+    returned the witness untouched, so a $28M floor charged against a $1k sheet
+    published $28M — the balance-sheet substitution inverted, with the word
+    "floor" hiding which direction the error runs in.
+    """
     signal = flow_sig(
         function_name="withdraw",
         authority_openness="open",
@@ -189,10 +194,10 @@ def test_r4_a_floor_magnitude_is_not_trimmed_to_present_holdings(fold):
     )
     document = fold([signal], value=value_plane({KEY_C: {"usdc": 1_000.0}}))
     finding = document.findings[0]
-    assert finding["value_by_entity"] == {KEY_C: 28_000_000.0}
-    assert finding["value_at_stake_usd"] == 28_000_000.0
-    # Present holdings do not refute an independently witnessed call floor.
-    assert finding["unbounded_floor_magnitudes"][0]["witnessed_floor_usd"] == 28_000_000.0
+    assert finding["value_by_entity"] == {KEY_C: 1_000.0}
+    assert finding["value_at_stake_usd"] == 1_000.0
+    # Nothing was left unbounded: the sheet did the bounding.
+    assert finding["unbounded_floor_magnitudes"] == []
 
 
 def test_r4_a_floor_against_an_undetermined_sheet_is_disclosed_not_absorbed(fold):
@@ -381,7 +386,14 @@ def test_s5_an_entity_holding_unpriced_assets_makes_the_value_a_floor(fold):
 
 
 def test_s5_one_priced_asset_beside_unanswered_ones_is_not_a_priced_entity(fold):
-    """A partial priced sheet neither supplies a ceiling nor allocates a shared call witness."""
+    """The sheet state ranks ``priced`` first; the per-asset map holds the truth.
+
+    An entity with one answered price and a hundred unanswered rows reads as
+    ``priced`` at sheet level, so consulting that state published its one
+    answered asset as the entity's value. The dominant real shape — balance rows
+    whose ``usd_value`` is NULL beside rows that priced — has to make the total a
+    floor, and an asset priced at the storage floor is the same shortfall.
+    """
     signal = sig(
         authority_openness="restricted",
         principal_state="enumerated",
@@ -403,7 +415,7 @@ def test_s5_one_priced_asset_beside_unanswered_ones_is_not_a_priced_entity(fold)
     document = fold([signal], principals={1: facts(1, EOA, "eoa")}, value=plane)
     finding = document.findings[0]
     assert plane.sheet_state(KEY_C) == P.SHEET_PRICED
-    assert KEY_V in {row["entity"] for row in finding["undetermined_instances"]}
+    assert finding["undetermined_instances"] == []
     assert finding["value_at_stake_bound_direction"] == FOLD.BOUND_DIRECTION_FLOOR
     assert finding["value_at_stake_is_floor"] is True
     # A reading at the storage floor is a holding the total does not carry, so
@@ -413,8 +425,14 @@ def test_s5_one_priced_asset_beside_unanswered_ones_is_not_a_priced_entity(fold)
     assert finding["entities_priced_from_a_composed_ceiling"] == []
 
 
-def test_s5_complete_holdings_do_not_invent_a_magnitude(fold):
-    """Explicit coverage removes a coverage shortfall without inventing capability magnitude."""
+def test_s5_a_fully_priced_entity_earns_its_hard_band(fold):
+    """The flag is an earned negative in the other direction and must stay off.
+
+    Asked of GATE control: the coverage axis is the subject, and the row must
+    reach the no-total case to show that ``is_floor`` stays off over an absent
+    figure rather than over a small one. Code control over the same sheet now
+    publishes a ceiling, which is a different case and is pinned as one.
+    """
     signal = sig(
         claim_id="authority.replace",
         authority_openness="restricted",
@@ -427,8 +445,6 @@ def test_s5_complete_holdings_do_not_invent_a_magnitude(fold):
         {KEY_C: {"usdc": 5_000_000.0}},
         per_asset_state={KEY_C: {"usdc": P.ASSET_PRICED, "weth": P.ASSET_PROVEN_ZERO}},
     )
-    plane.asset_set_proven_complete[KEY_C] = {"source": "chain_log_sweep"}
-    plane.fresh_entities.add(KEY_C)
     document = fold([signal], principals={1: facts(1, EOA, "eoa")}, value=plane)
     finding = document.findings[0]
     assert finding["value_at_stake_is_floor"] is False
@@ -441,7 +457,16 @@ def test_s5_complete_holdings_do_not_invent_a_magnitude(fold):
 
 
 def test_b7_two_absent_coverage_signals_do_not_add_up_to_an_exact_total(fold):
-    """Complete holdings coverage alone does not turn a call floor into an exact total."""
+    """The fall-through, and why it is not a fourth claim.
+
+    Neither coverage signal fires here: no instance is undetermined and the
+    entity's sheet covers everything it holds. That says nothing about the
+    DIRECTION of the figures summed — this call's own witness is a proven FLOOR,
+    trimmed to the sheet — so publishing "exact" would mint a two-sided claim
+    out of the absence of two unrelated signals, which is the B7 defect on a new
+    arm. The band carries no qualifier, exactly as it did before this field
+    existed, and the direction says what was established: nothing.
+    """
     signal = sig(
         authority_openness="restricted",
         principal_state="enumerated",
@@ -451,8 +476,6 @@ def test_b7_two_absent_coverage_signals_do_not_add_up_to_an_exact_total(fold):
         **reaches(KEY_C),
     )
     plane = value_plane({KEY_C: {"usdc": 5_000_000.0}}, per_asset_state={KEY_C: {"usdc": P.ASSET_PRICED}})
-    plane.asset_set_proven_complete[KEY_C] = {"source": "chain_log_sweep"}
-    plane.fresh_entities.add(KEY_C)
     finding = fold([signal], principals={1: facts(1, EOA, "eoa")}, value=plane).findings[0]
     assert finding["value_at_stake_usd"] == 1_000_000.0
     assert finding["undetermined_instances"] == []

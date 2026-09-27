@@ -165,12 +165,45 @@ class Candidate:
     # flow.*/supply.* claim, re-enrolled for exactly those value/supply families
     # (never the whole class set — we don't re-simulate what's already explained).
     restrict_families: frozenset[str] | None = None
-    # Recorded per-asset holdings identify holders to examine. Dollar totals
-    # remain contextual observations, never capability floors or upper bounds.
+    # Downstream value-reach inputs. ``value_holders`` is the protocol's
+    # WITNESSED value-holder set from ``contract_balances`` — NOT control_graph_edges
+    # (which has no fund-flow edge) — against which the fork value-reach probe
+    # measures value that provably LEAVES a holder when the call runs.
+    # ``acting_balance_usd`` is this function's own deployment balance, the floor
+    # when downstream reach is fork-observed to be nothing. Shared by reference
+    # across a protocol's candidates (small, immutable), so carrying it
+    # per-candidate is cheap.
+    #
+    # ``None`` is a THIRD state and must stay one all the way to the verdict: the
+    # balance join below is INNER precisely so a contract with no current row
+    # produces no ``deployment_balance`` key, and defaulting that absence to
+    # ``0.0`` here would hand ``_add_reach`` a floor it never witnessed. A PRESENT
+    # ``0.0`` is a witness and keeps publishing a floor.
+    #
+    # PER ASSET, not per holder. This was ``(address, usd)`` — one summed
+    # figure per holder — and the reach probe matched ANY ``Transfer`` out of that
+    # holder against the whole sum. The weETH proxy's $3.489B is 99.99% eETH, the
+    # probe's synthetic native-ETH move matched it, and the row published $3.489B of
+    # reach for a call that moved $0 of ETH: 64.96% of ALL published reach USD in the
+    # DB came from two such rows, both truly $0. Matching now pins the asset (the
+    # ``Transfer`` log's EMITTER), so an asset that moved contributes only its own
+    # holding and a moved asset we hold no priced record for contributes NOTHING but
+    # marks the total not-determined.
+    #
+    # ``usd_value`` stays ``float`` (and nullable) where ``value_at_stake_usd`` is
+    # ``Decimal``: unlike the sort key it is PUBLISHED — it reaches
+    # ``observed_reach_value_usd`` in the verdict's jsonb, which ``json.dumps``
+    # cannot encode from a Decimal. Each is a single exact-to-float conversion of one
+    # stored cell, never a sum over a set, so the conversion is the last step rather
+    # than the first and no order-dependence survives it. Whoever changes them to
+    # Decimal must give the jsonb path an encoder first.
     value_holders: tuple[AssetHolding, ...] = ()
-    # Legacy recipe argument retained for compatibility; selection leaves it unknown.
     acting_balance_usd: float | None = None
-    # Separately scoped external reference, never a mathematical reach ceiling.
+    # The protocol's independently-measured TVL (``tvl_snapshots.defillama_tvl``), or
+    # ``None`` when there is no snapshot. A corroborating CEILING for the reach figure:
+    # no exercise of one function can reach more value than the protocol holds, and the
+    # worst published row asserted $3.489B against a protocol TVL of $3.297B. ``None``
+    # means the check is skipped, and the recipe records that it was.
     protocol_tvl_usd: float | None = None
     # Priced holdings plus function-named getters resolved on this chain and
     # deployment. The worker persists deferred identities and bounds each attempt.
@@ -403,9 +436,7 @@ class AssetHolding(NamedTuple):
     completeness: str = HOLDINGS_COMPLETENESS_NOT_DETERMINED
 
 
-def _asset_holdings_by_deployment(
-    session: Session, protocol_id: int, chain_id: int | None = None
-) -> dict[str, tuple[AssetHolding, ...]]:
+def _asset_holdings_by_deployment(session: Session, protocol_id: int) -> dict[str, tuple[AssetHolding, ...]]:
     """``deployment address -> its per-ASSET holdings``.
 
     Keyed on the address that HOLDS the money (the proxy), because that is the only
@@ -422,15 +453,13 @@ def _asset_holdings_by_deployment(
             ContractBalanceLatest.token_address,
             ContractBalanceLatest.usd_value,
             ContractBalanceLatest.raw_balance,
-            # Preserve the actual holder when balances were read against a proxy.
-            ContractBalanceLatest.observed_address,
             ContractBalanceFetch.asset_set_status,
         )
         .join(ContractBalanceLatest, ContractBalanceLatest.contract_id == Contract.id)
         # OUTER: a legacy row (``fetch_id IS NULL``) has no fetch to join to, and
         # dropping it would silently withdraw every pre-migration holding.
         .outerjoin(ContractBalanceFetch, ContractBalanceFetch.id == ContractBalanceLatest.fetch_id)
-        .where(Contract.protocol_id == protocol_id, _contract_chain_matches(chain_id) if chain_id else literal(True))
+        .where(Contract.protocol_id == protocol_id)
     ).all()
     holders = _deployment_by_contract(session, protocol_id)
     addresses: dict[int, str] = {
@@ -445,10 +474,9 @@ def _asset_holdings_by_deployment(
         token_address,
         usd,
         raw_balance,
-        observed_address,
         asset_set_status,
     ) in rows:
-        holder = _addr(observed_address) or holders.get(contract_id) or _addr(addresses.get(contract_id))
+        holder = holders.get(contract_id) or _addr(addresses.get(contract_id))
         if holder is None:
             continue
         # Only a strictly positive quantity proves that this holder owns the asset.
@@ -1348,9 +1376,7 @@ def select_candidates(
     #
     value_holders = tuple(
         holding
-        for holdings_for_deployment in _asset_holdings_by_deployment(
-            session, protocol_id, chain_id or (scope.chain_id if scope else None)
-        ).values()
+        for holdings_for_deployment in _asset_holdings_by_deployment(session, protocol_id).values()
         for holding in holdings_for_deployment
     )
     holdings = _token_holdings_by_contract(session, protocol_id, None)
@@ -1388,6 +1414,8 @@ def select_candidates(
         prins = principals.get(fid, [])
         seeds = {addr, *prins}
         deployment_addr = _addr(deployment) or ""
+        acting = deployment_addr or addr
+        acting_balance = graph.deployment_balance.get(acting)
         candidates.append(
             Candidate(
                 function_id=fid,
@@ -1401,7 +1429,7 @@ def select_candidates(
                 deployment_address=deployment_addr,
                 restrict_families=families,
                 value_holders=value_holders,
-                acting_balance_usd=None,
+                acting_balance_usd=None if acting_balance is None else float(acting_balance),
                 protocol_tvl_usd=protocol_tvl,
                 input_token_addresses=holdings.get(holder_ids.get(fid) or -1, ()),
                 membership_exact=_membership_exact(capability_expr),
