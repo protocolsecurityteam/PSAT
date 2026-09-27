@@ -7,6 +7,7 @@ from typing import Any, cast
 from ..record_ordering import attach_record_ordering
 from ..summaries import _action_summary, _effect_labels
 from ..token_slots import derive_token_slots
+from .origins import _ENGINE_BUNDLE_SCOPE
 from .selectors import _function_full_name, _own_selector
 from .sinks import _build_sink_records, _is_externally_observable, _is_state_changing_entry_point
 from .state_writes import _state_write_facts
@@ -217,24 +218,28 @@ def build_effects(contract: Any) -> EffectsArtifact:
     """Return the ``effects`` artifact for ``contract``: one
     ``EffectInfo`` per externally-observable function (external,
     public, fallback, receive)."""
-    functions: dict[str, EffectInfo] = {}
-    chosen_fn: dict[str, Any] = {}
-    for fn in getattr(contract, "functions", []) or []:
-        if not _is_externally_observable(fn):
-            continue
-        info = _effect_info_for_function(fn)
-        signature = info["function"]
-        existing = functions.get(signature)
-        if existing is None or _record_prefers(info, fn, existing, chosen_fn[signature]):
-            functions[signature] = info
-            chosen_fn[signature] = fn
+    cache_token = _ENGINE_BUNDLE_SCOPE.set({})
+    try:
+        functions: dict[str, EffectInfo] = {}
+        chosen_fn: dict[str, Any] = {}
+        for fn in getattr(contract, "functions", []) or []:
+            if not _is_externally_observable(fn):
+                continue
+            info = _effect_info_for_function(fn)
+            signature = info["function"]
+            existing = functions.get(signature)
+            if existing is None or _record_prefers(info, fn, existing, chosen_fn[signature]):
+                functions[signature] = info
+                chosen_fn[signature] = fn
 
-    artifact: EffectsArtifact = {
-        "schema_version": SCHEMA_VERSION,
-        "contract_name": getattr(contract, "name", None),
-        "functions": functions,
-    }
-    token_slots = derive_token_slots(contract)
-    if token_slots is not None:
-        artifact["token_slots"] = cast("TokenSlots", token_slots)
-    return artifact
+        artifact: EffectsArtifact = {
+            "schema_version": SCHEMA_VERSION,
+            "contract_name": getattr(contract, "name", None),
+            "functions": functions,
+        }
+        token_slots = derive_token_slots(contract)
+        if token_slots is not None:
+            artifact["token_slots"] = cast("TokenSlots", token_slots)
+        return artifact
+    finally:
+        _ENGINE_BUNDLE_SCOPE.reset(cache_token)

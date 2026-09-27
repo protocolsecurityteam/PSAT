@@ -328,6 +328,8 @@ def test_worker_failure_is_one_line_with_structured_fields(
     assert record.exc_message == "boom"
     assert record.failure_kind == "terminal"
     assert record.job_name == job.name
+    assert record.process_rss_peak_sampled_bytes >= record.process_rss_start_bytes
+    assert record.process_rss_peak_sampled_bytes >= record.process_rss_end_bytes
     # Terminal: the job really failed, so the traceback belongs on the line.
     assert record.exc_info is not None
 

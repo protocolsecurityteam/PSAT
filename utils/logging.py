@@ -294,6 +294,9 @@ def configure_logging(level: int | str | None = None) -> None:
     """
     root = logging.getLogger()
     if getattr(root, _CONFIGURED_FLAG, False):
+        from utils.memory import start_memory_sampler
+
+        start_memory_sampler()
         return
     if level is None:
         level = os.getenv("PSAT_LOG_LEVEL", "INFO").upper()
@@ -305,6 +308,9 @@ def configure_logging(level: int | str | None = None) -> None:
     root.setLevel(level)
     _install_third_party_log_hygiene()
     setattr(root, _CONFIGURED_FLAG, True)
+    from utils.memory import start_memory_sampler
+
+    start_memory_sampler()
 
 
 @contextmanager
@@ -418,6 +424,7 @@ def log_timed_phase(
     *,
     durations_ms: dict[str, int] | None = None,
     record_metric: bool = True,
+    log_failure: bool = False,
     **fields: Any,
 ) -> Iterator[dict[str, Any]]:
     """Time a pipeline sub-step and, on success, emit one ``phase complete``
@@ -444,10 +451,9 @@ def log_timed_phase(
       ``record_metric`` is set; a no-op outside a worker job context) — *even if
       the block raises*, so an aggregate emitted by an outer handler still sees
       the partial cost.
-    * The INFO line is emitted only on a clean exit. A raising block is left to
-      the worker's failure handler to log/record, so this never double-logs a
-      failure nor mislabels one as "complete" (which also keeps it clear of the
-      ``logger.warning``-in-except level contract).
+    * By default, the INFO line is emitted only on a clean exit. A caller may
+      request a duration-only INFO line on failure when persistence of the
+      stage-timing artifact is not assured; the worker still logs the error.
     """
     start = time.monotonic()
     extra: dict[str, Any] = dict(fields)
@@ -467,6 +473,13 @@ def log_timed_phase(
                 phase,
                 ms,
                 extra={"duration_ms": ms, "phase": phase, **extra},
+            )
+        elif log_failure:
+            logger.info(
+                "phase ended with error: %s (%dms)",
+                phase,
+                ms,
+                extra={"duration_ms": ms, "phase": phase, "outcome": "failed", **extra},
             )
 
 

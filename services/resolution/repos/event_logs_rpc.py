@@ -345,8 +345,12 @@ class RpcEventLogFetcher:
             time.sleep(TIMEOUT_RETRY_BACKOFF_SECONDS)
             try:
                 raw_logs = self._request_logs(params)
+            except RpcScanCancelled:
+                raise
             except RuntimeError as exc:
                 return self._reject_window(event_address, topics, from_block, to_block, exc, window_stats)
+        except RpcScanCancelled:
+            raise
         except RuntimeError as exc:
             return self._reject_window(event_address, topics, from_block, to_block, exc, window_stats)
         # A page whose length reaches the cap is indistinguishable from a page the

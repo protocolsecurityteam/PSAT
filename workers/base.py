@@ -39,6 +39,7 @@ from utils.memory import (
     count_sibling_python_procs,
     current_rss_bytes,
     mb,
+    start_job_rss_span,
 )
 from workers.retry_policy import classify, compute_next_attempt, max_retries
 
@@ -302,6 +303,7 @@ class BaseWorker:
                 inflight_registered = True
             heartbeat_stop = threading.Event()
             heartbeat_thread: threading.Thread | None = None
+            rss_span = None
 
             def _background_heartbeat() -> None:
                 while not heartbeat_stop.wait(_job_heartbeat_interval_s()):
@@ -333,13 +335,21 @@ class BaseWorker:
             try:
                 logger.info("Worker %s claimed job %s", self.worker_id, job.id)
                 t0 = time.monotonic()
-                rss_before = current_rss_bytes()
+                rss_span = start_job_rss_span()
+                rss_before = rss_span.start_bytes
+
+                def finish_memory_span() -> None:
+                    # A shared process can run K jobs concurrently: this is
+                    # process RSS observed during the job, not its allocation.
+                    stage_metrics.update(rss_span.finish())
+
                 started_at_iso = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
                 try:
                     self.process(session, job)
                     elapsed = time.monotonic() - t0
                     ended_at_iso = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
                     rss_after = current_rss_bytes()
+                    finish_memory_span()
                     rss_delta_mb = (rss_after - rss_before) / (1024 * 1024)
                     logger.info(
                         "[JOB] worker=%s job=%s stage=%s elapsed_s=%.1f rss_mb=%s delta_mb=%+.0f cgroup_used_mb=%s",
@@ -399,6 +409,7 @@ class BaseWorker:
                 except JobHandledDirectly:
                     elapsed = time.monotonic() - t0
                     ended_at_iso = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+                    finish_memory_span()
                     # Fresh session — process() may have left the original in an inconsistent state.
                     try:
                         fresh_for_timing = SessionLocal()
@@ -419,9 +430,15 @@ class BaseWorker:
                         "Worker %s: job %s handled directly by process()",
                         self.worker_id,
                         job.id,
-                        extra={"duration_ms": int(elapsed * 1000), "phase": "job", "outcome": "handled_directly"},
+                        extra={
+                            "duration_ms": int(elapsed * 1000),
+                            "phase": "job",
+                            "outcome": "handled_directly",
+                            **rss_span.finish(),
+                        },
                     )
                 except LeaseLost as lease_exc:
+                    finish_memory_span()
                     # The row's lease has rolled to a sibling worker (e.g.
                     # the long-task heartbeat tripped the sweep, then a
                     # sibling claim_job acquired the row). Bailing here
@@ -433,10 +450,11 @@ class BaseWorker:
                         self.worker_id,
                         job.id,
                         lease_exc,
-                        extra={"phase": "job", "outcome": "lease_lost"},
+                        extra={"phase": "job", "outcome": "lease_lost", **rss_span.finish()},
                     )
                     return
                 except Exception as exc:
+                    finish_memory_span()
                     from utils.secrets import sanitize_string
 
                     # A failed flush/commit inside ``process()`` leaves the
@@ -507,6 +525,7 @@ class BaseWorker:
                             "retry_count": new_retry_count if will_retry else prior_retry_count,
                             "next_attempt_at": next_attempt_at.isoformat() if next_attempt_at else None,
                             "failure_kind": kind,
+                            **rss_span.finish(),
                         },
                     )
                     # Append the job-failing exception alongside any degraded
@@ -632,6 +651,8 @@ class BaseWorker:
                                 "Could not update job %s for retry/terminal even with fresh session", job.id
                             )
             finally:
+                if rss_span is not None:
+                    rss_span.finish()
                 heartbeat_stop.set()
                 if heartbeat_thread is not None:
                     heartbeat_thread.join(timeout=1)

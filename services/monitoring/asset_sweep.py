@@ -44,6 +44,7 @@ from services.resolution.repos.event_logs_rpc import (
     MIN_BISECT_SPAN,
     FetchedEventLog,
     RpcEventLogFetcher,
+    RpcScanCancelled,
 )
 from utils.balance_status import (
     SWEEP_STATUS_COMPLETED,
@@ -58,6 +59,7 @@ from utils.balance_status import (
     TYPED_STANDARD_TRANSFER_NO_ID,
     TYPED_STANDARDS,
 )
+from utils.logging import log_timed_phase
 
 logger = logging.getLogger(__name__)
 
@@ -246,13 +248,10 @@ class SweepCost:
         return self.get_logs + self.multicall + self.head_reads
 
 
-class SweepBudgetExceeded(RuntimeError):
+class SweepBudgetExceeded(RpcScanCancelled):
     """The cycle's request ceiling was reached mid-scan.
 
-    A RuntimeError subclass so the fetcher's bisect-on-reject path treats it like
-    any other upstream refusal — except that bisecting spends MORE requests, so
-    the budget check fires again immediately at the narrower span and the whole
-    scan unwinds instead of grinding down to the floor.
+    A local cancellation: bisection cannot recover a spent request budget.
     """
 
 
@@ -260,15 +259,20 @@ class _CountingFetcher(RpcEventLogFetcher):
     """The sweep's OWN fetcher: explicit ``result_cap``, counted and budgeted."""
 
     def __init__(self, rpc_url: str, *, chain_id: int, cost: SweepCost, result_cap: int, budget: int) -> None:
-        super().__init__(rpc_url, chain_id=chain_id, result_cap=result_cap)
+        super().__init__(rpc_url, chain_id=chain_id, result_cap=result_cap, before_retry=self._charge)
         self._cost = cost
         self._budget = budget
 
-    def _fetch_range(self, event_address, topics, from_block, to_block, window_stats=None):
+    def _charge(self) -> None:
         if self._cost.total >= self._budget:
             raise SweepBudgetExceeded(f"sweep request budget of {self._budget} reached")
         self._cost.get_logs += 1
-        return super()._fetch_range(event_address, topics, from_block, to_block, window_stats)
+
+    def _request_logs(self, params):
+        # Both fetch_logs and visit_logs pass here; rpc_request calls
+        # before_retry for transport retries within one call.
+        self._charge()
+        return super()._request_logs(params)
 
 
 def _pad32(address: str) -> str:
@@ -416,12 +420,24 @@ def discover_recipient_assets(
         slots: list[object] = [list(topic0s), None, None, None][: position + 1]
         slots[position] = padded
         try:
-            logs = scanner.fetch_logs(
-                event_address=None,
-                topics=slots,
-                from_block=from_block,
-                to_block=to_block,
-            )
+            count = 0
+            requests_before = cost.get_logs
+
+            def consume(log: FetchedEventLog) -> None:
+                nonlocal count
+                count += 1
+                _attribute_log(log, position=position, wanted=wanted, erc20=erc20, typed=typed)
+
+            with log_timed_phase(logger, f"asset_sweep_recipient_{position}") as phase:
+                scanner.visit_logs(
+                    consume=consume,
+                    event_address=None,
+                    topics=slots,
+                    from_block=from_block,
+                    to_block=to_block,
+                )
+                phase["accepted_logs"] = count
+                phase["get_logs"] = cost.get_logs - requests_before
         except SweepBudgetExceeded as exc:
             # Once per SweepCost — which is one per producer pass (a protocol's
             # contract sweep, or the entity cohort's own allowance), not one per
@@ -458,7 +474,6 @@ def discover_recipient_assets(
                     f"(bisect floor {MIN_BISECT_SPAN}, cap {SWEEP_RESULT_CAP}): {exc}"
                 ),
             )
-        _attribute(logs, position=position, wanted=wanted, erc20=erc20, typed=typed)
     return erc20, typed, None
 
 
@@ -531,44 +546,43 @@ def _discover_with_isolation(
     return merged_erc20, merged_typed, merged_failures
 
 
-def _attribute(
-    logs: list[FetchedEventLog],
+def _attribute_log(
+    log: FetchedEventLog,
     *,
     position: int,
     wanted: set[str],
     erc20: dict[str, set[str]],
     typed: dict[str, dict[str, TypedSighting]],
 ) -> None:
-    for log in logs:
-        if len(log.topics) <= position or not log.address:
-            continue
-        holder = _addr_from_topic(log.topics[position])
-        if holder not in wanted:
-            continue
-        topic0 = log.topics[0]
-        token = log.address.lower()
-        # A 4-topic Transfer indexes tokenId: ERC-721. A 3-topic one is the
-        # ERC-20 shape. The 1155 topic0s are typed by definition. The standard is
-        # RECORDED here rather than derived and dropped: it decides which selector
-        # can read the holding later, and the logs it comes from are not stored.
-        if topic0 in _ERC1155_TOPIC0S:
-            sighting = typed[holder].setdefault(token, TypedSighting())
-            sighting.observe(TYPED_STANDARD_ERC1155)
-            ids = _single_ids(log.data_words) if topic0 == TRANSFER_SINGLE_TOPIC0 else _batch_ids(log.data_words)
-            if ids is None:
-                sighting.malformed = True
-            else:
-                sighting.ids.update(ids)
-        elif topic0 == TRANSFER_TOPIC0 and len(log.topics) >= 4:
-            sighting = typed[holder].setdefault(token, TypedSighting())
-            sighting.observe(TYPED_STANDARD_ERC721)
-            token_id = _int_word(log.topics[3])
-            if token_id is None:
-                sighting.malformed = True
-            else:
-                sighting.ids.add(str(token_id))
-        elif topic0 == TRANSFER_TOPIC0:
-            erc20[holder].add(token)
+    if len(log.topics) <= position or not log.address:
+        return
+    holder = _addr_from_topic(log.topics[position])
+    if holder not in wanted:
+        return
+    topic0 = log.topics[0]
+    token = log.address.lower()
+    # A 4-topic Transfer indexes tokenId: ERC-721. A 3-topic one is the
+    # ERC-20 shape. The 1155 topic0s are typed by definition. The standard is
+    # RECORDED here rather than derived and dropped: it decides which selector
+    # can read the holding later, and the logs it comes from are not stored.
+    if topic0 in _ERC1155_TOPIC0S:
+        sighting = typed[holder].setdefault(token, TypedSighting())
+        sighting.observe(TYPED_STANDARD_ERC1155)
+        ids = _single_ids(log.data_words) if topic0 == TRANSFER_SINGLE_TOPIC0 else _batch_ids(log.data_words)
+        if ids is None:
+            sighting.malformed = True
+        else:
+            sighting.ids.update(ids)
+    elif topic0 == TRANSFER_TOPIC0 and len(log.topics) >= 4:
+        sighting = typed[holder].setdefault(token, TypedSighting())
+        sighting.observe(TYPED_STANDARD_ERC721)
+        token_id = _int_word(log.topics[3])
+        if token_id is None:
+            sighting.malformed = True
+        else:
+            sighting.ids.add(str(token_id))
+    elif topic0 == TRANSFER_TOPIC0:
+        erc20[holder].add(token)
 
 
 def read_balances(

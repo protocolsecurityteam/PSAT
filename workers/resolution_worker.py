@@ -73,7 +73,7 @@ from services.resolution.role_holder_plane import (
 from services.resolution.tracking import build_control_snapshot
 from utils.balance_status import ASSET_SET_STATUS_FETCH_FAILED, BALANCE_WRITER_RESOLUTION
 from utils.chains import UnknownChainError, chain_by_id, chain_enabled
-from utils.logging import record_degraded, record_stage_metric
+from utils.logging import log_timed_phase, record_degraded, record_stage_metric
 from workers.base import BaseWorker
 
 logger = logging.getLogger("workers.resolution_worker")
@@ -338,6 +338,7 @@ class ResolutionWorker(BaseWorker):
             "resolution phase complete: recursive graph",
             extra={"duration_ms": int((time.monotonic() - t0) * 1000), "phase": "recursive_graph"},
         )
+        record_stage_metric("phase_ms_recursive_graph", int((time.monotonic() - t0) * 1000))
 
         graph_nodes = len(resolved_graph.get("nodes", [])) if resolved_graph else 0
         graph_edges = len(resolved_graph.get("edges", [])) if resolved_graph else 0
@@ -762,21 +763,23 @@ class ResolutionWorker(BaseWorker):
         sweeps: dict[ObservationSubject, SweepOutcome] = {}
         sweep_cost = None
         if escalation is not None and contract.address:
-            sweeps, sweep_cost = run_sweeps(
-                [
-                    SweepRequest(
-                        subject=subject,
-                        address=contract.address,
-                        chain_id=chain_id,
-                        from_block=sweep_from_block(session, subject=subject),
-                        reason=escalation,
-                        known_assets=known_swept_assets(session, subject=subject),
-                        known_typed=known_typed_assets(session, subject=subject),
-                        union_from_block=scanned_from_block(session, subject=subject),
-                    )
-                ],
-                rpc_url_for=lambda cid: rpc_url_for_chain_id(cid),
-            )
+            with log_timed_phase(logger, "resolution_asset_sweep", escalation=escalation):
+                sweeps, sweep_cost = run_sweeps(
+                    [
+                        SweepRequest(
+                            subject=subject,
+                            address=contract.address,
+                            chain_id=chain_id,
+                            from_block=sweep_from_block(session, subject=subject),
+                            reason=escalation,
+                            known_assets=known_swept_assets(session, subject=subject),
+                            known_typed=known_typed_assets(session, subject=subject),
+                            union_from_block=scanned_from_block(session, subject=subject),
+                        )
+                    ],
+                    rpc_url_for=lambda cid: rpc_url_for_chain_id(cid),
+                )
+            record_stage_metric("asset_sweep_get_logs", sweep_cost.get_logs)
 
         # THIRD PHASE, still before the write: how each unpriced holding
         # ARRIVED. Scoped to this contract, but grouped by the account the
@@ -821,30 +824,31 @@ class ResolutionWorker(BaseWorker):
                 # part of that set.
                 logger.info("Job %s: disposition: %s", job.id, disposition_cost_note(disposition_cost))
 
-        recorded = record_observation(
-            session,
-            subject=subject,
-            chain_id=chain_id,
-            native=NativeReading(
-                wei=eth_wei,
-                block_number=native_block,
-                failed=native_failed and native_block is None,
-                price_usd=native_price,
-                symbol=native_symbol,
-                name=native_name,
-            ),
-            page=page,
-            writer=BALANCE_WRITER_RESOLUTION,
-            sweep=cast(SweepOutcome | None, sweeps.get(subject)),
-            escalation=escalation,
-            cost_note=(
-                f"cycle scan cost {sweep_cost.get_logs} getLogs + {sweep_cost.multicall} multicall + "
-                f"{sweep_cost.head_reads} head over 1 escalated contract"
-                if sweep_cost is not None
-                else None
-            ),
-        )
-        session.commit()
+        with log_timed_phase(logger, "resolution_balance_write"):
+            recorded = record_observation(
+                session,
+                subject=subject,
+                chain_id=chain_id,
+                native=NativeReading(
+                    wei=eth_wei,
+                    block_number=native_block,
+                    failed=native_failed and native_block is None,
+                    price_usd=native_price,
+                    symbol=native_symbol,
+                    name=native_name,
+                ),
+                page=page,
+                writer=BALANCE_WRITER_RESOLUTION,
+                sweep=cast(SweepOutcome | None, sweeps.get(subject)),
+                escalation=escalation,
+                cost_note=(
+                    f"cycle scan cost {sweep_cost.get_logs} getLogs + {sweep_cost.multicall} multicall + "
+                    f"{sweep_cost.head_reads} head over 1 escalated contract"
+                    if sweep_cost is not None
+                    else None
+                ),
+            )
+            session.commit()
         logger.info(
             "Job %s: stored %d balance(s) for %s",
             job.id,

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+from contextvars import ContextVar
 from typing import Any, Literal, NamedTuple, TypedDict
-from weakref import WeakKeyDictionary
 
 from ..predicate_types import TARGET_KIND_STORAGE_NO_SETTER, TARGET_KIND_STORAGE_SETTER
 from ..provenance import ProvenanceEngine, is_top
@@ -115,10 +115,12 @@ class _EngineBundle:
         self.param_indexes = param_indexes
 
 
-# Per-function memo of the context-independent bundle, keyed by the Slither
-# function object (weak so it dies with the Slither instance). Collapses the
-# prior O(entries × helpers) engine rebuilds to one run per function per pass.
-_ENGINE_BUNDLE: WeakKeyDictionary[Any, _EngineBundle] = WeakKeyDictionary()
+# The bundle holds its function through ProvenanceEngine.function. A process-wide
+# weak-key dictionary would therefore keep both its keys and their Slither
+# compilation units alive. build_effects scopes this memo to one artifact pass.
+_ENGINE_BUNDLE_SCOPE: ContextVar[dict[Any, _EngineBundle] | None] = ContextVar(
+    "psat_effects_engine_bundle", default=None
+)
 
 
 def _param_indexes_of(unit: Any) -> dict[str, int]:
@@ -142,7 +144,11 @@ def _param_indexes_of(unit: Any) -> dict[str, int]:
 
 
 def _engine_bundle_for(unit: Any) -> _EngineBundle:
-    cached = _ENGINE_BUNDLE.get(unit)
+    cache = _ENGINE_BUNDLE_SCOPE.get()
+    try:
+        cached = cache.get(unit) if cache is not None else None
+    except TypeError:  # pragma: no cover — unit not hashable
+        cached = None
     if cached is not None:
         return cached
     from slither.core.cfg.node import NodeType
@@ -176,10 +182,11 @@ def _engine_bundle_for(unit: Any) -> _EngineBundle:
                     if base:
                         merged.add(base)
     bundle = _EngineBundle(engine, param_names, merged, def_by_id, param_indexes)
-    try:
-        _ENGINE_BUNDLE[unit] = bundle
-    except TypeError:  # pragma: no cover — unit not weak-referenceable
-        pass
+    if cache is not None:
+        try:
+            cache[unit] = bundle
+        except TypeError:  # pragma: no cover — unit not hashable
+            pass
     return bundle
 
 
