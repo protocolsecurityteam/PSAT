@@ -127,7 +127,11 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
         # Try by address
         job = session.execute(
             select(Job)
-            .where(Job.address == run_name, Job.status == JobStatus.completed)
+            .where(
+                Job.address == run_name,
+                Job.status == JobStatus.completed,
+                Job.request["effects_resume_work_id"].astext.is_(None),
+            )
             .order_by(Job.updated_at.desc())
             .limit(1)
         ).scalar_one_or_none()
@@ -241,7 +245,12 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
     request = job.request if isinstance(job.request, dict) else {}
     proxy_address = request.get("proxy_address")
     if proxy_address:
-        proxy_stmt = select(Job).where(Job.address == proxy_address).order_by(Job.updated_at.desc()).limit(1)
+        proxy_stmt = (
+            select(Job)
+            .where(Job.address == proxy_address, Job.request["effects_resume_work_id"].astext.is_(None))
+            .order_by(Job.updated_at.desc())
+            .limit(1)
+        )
         proxy_job = session.execute(proxy_stmt).scalar_one_or_none()
         if proxy_job:
             proxy_artifacts = _artifacts_or_degrade(session, proxy_job.id, not_determined, body_absent)
@@ -257,7 +266,12 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
     is_proxy = contract_row.is_proxy if contract_row else False
     impl_addr = contract_row.implementation if contract_row else None
     if is_proxy and impl_addr:
-        impl_stmt = select(Job).where(Job.address == impl_addr).order_by(Job.updated_at.desc()).limit(1)
+        impl_stmt = (
+            select(Job)
+            .where(Job.address == impl_addr, Job.request["effects_resume_work_id"].astext.is_(None))
+            .order_by(Job.updated_at.desc())
+            .limit(1)
+        )
         impl_job = session.execute(impl_stmt).scalar_one_or_none()
         if impl_job:
             _inherit_from_impl(session, payload, job, impl_job, impl_addr, not_determined, body_absent)

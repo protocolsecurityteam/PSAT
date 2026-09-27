@@ -3042,3 +3042,34 @@ def test_pending_balance_effects_are_visible_and_prevent_settled_score(db_sessio
     db_session.flush()
     assert _balance_effects_coverage(db_session, protocol) == {"incomplete": 0, "degraded": 0}
     assert perimeter_state(db_session, protocol.id)[0] == "settled"
+
+
+def test_effects_recovery_keeps_original_analysis_and_alias_metadata(db_session):
+    p = _add_protocol(db_session, f"recovery-surface-{uuid.uuid4().hex[:8]}")
+    address = _addr("recovery-alias")
+    original = _add_job(db_session, address=address, protocol_id=p.id, request={"chain": "mainnet"})
+    contract = _add_contract(db_session, address=address, job=original, protocol_id=p.id, chain="mainnet")
+    recovery = _add_job(db_session, address=address, protocol_id=p.id, request={"chain": "ethereum"})
+    recovery.request = dict(recovery.request, effects_resume_work_id=42, effects_function_ids=[1])
+    recovery.updated_at = original.updated_at + timedelta(minutes=1)
+    db_session.flush()
+    _, jobs = resolve_company_jobs(db_session, p.name)
+    assert [j.id for j in jobs] == [original.id]
+    assert prefetch_contracts(db_session, jobs)[original.id].id == contract.id
+
+
+def test_implementation_lookup_does_not_choose_effects_only_recovery(db_session):
+    p = _add_protocol(db_session, f"recovery-impl-{uuid.uuid4().hex[:8]}")
+    proxy_address, impl_address = _addr("recovery-proxy"), _addr("recovery-impl")
+    proxy = _add_job(db_session, address=proxy_address, protocol_id=p.id)
+    original = _add_job(db_session, address=impl_address, protocol_id=p.id)
+    _add_contract(
+        db_session, address=proxy_address, job=proxy, protocol_id=p.id, is_proxy=True, implementation=impl_address
+    )
+    _add_contract(db_session, address=impl_address, job=original, protocol_id=p.id)
+    retry = _add_job(db_session, address=impl_address, protocol_id=p.id)
+    retry.request = dict(retry.request, effects_resume_work_id=42)
+    retry.updated_at = original.updated_at + timedelta(minutes=1)
+    db_session.flush()
+    implementations, _ = resolve_implementation_contracts(db_session, [proxy], prefetch_contracts(db_session, [proxy]))
+    assert {j.id for j in implementations.values()} == {original.id}

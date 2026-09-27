@@ -340,3 +340,113 @@ def test_aggregate_failure_does_not_rollback_or_refetch_successful_observations(
     snapshot, _ = tvl.take_tvl_snapshot(db_session, protocol_id)
     assert snapshot is not None and snapshot.total_usd == 2020
     assert counts == {"native": 1, "tokens": 1}
+
+
+@pytest.mark.parametrize("limit", [2, 64])
+def test_tight_hourly_budget_eventually_attempts_every_account_and_class(db_session, monkeypatch, limit):
+    """Successful native batches must not continually jump ahead of unread tokens."""
+    import services.monitoring.balance_collection as collector
+    from services.clients.request_budget import RequestBudget, charge_attempt
+
+    targets = [make_target(db_session)[1] for _ in range(6)]
+    factory = sessionmaker(bind=db_session.get_bind(), expire_on_commit=False)
+    monkeypatch.setenv("PSAT_BALANCE_SUBJECTS_PER_PASS", str(limit))
+    seen_native, seen_tokens = set(), set()
+
+    def pinned(addresses, **kwargs):
+        charge_attempt("rpc")
+        charge_attempt("rpc")
+        seen_native.update(addresses)
+        return 100, {a: 10**18 for a in addresses}
+
+    def quote(chain):
+        charge_attempt("etherscan")
+        return 2000
+
+    def page(address, **kwargs):
+        charge_attempt("etherscan")
+        seen_tokens.add(address)
+        return TokenBalancePage([], 0, "returned_empty")
+
+    monkeypatch.setattr(collector, "pinned_native_balances", pinned)
+    monkeypatch.setattr(collector, "get_native_price", quote)
+    monkeypatch.setattr(collector, "fetch_asset_page", page)
+    for _ in range(10):
+        budget = RequestBudget(limit=4)
+        collect_balances(targets, writer="tvl", session_factory=factory, budget=budget)
+        assert sum(budget.attempts.values()) <= 4
+        # Advance a full monitoring interval while preserving relative attempt order.
+        db_session.expire_all()
+        for state in db_session.scalars(select(BalanceCollectionState)):
+            for name in ("last_attempt_at", "next_attempt_at", "observed_at"):
+                value = getattr(state, name)
+                if value is not None:
+                    setattr(state, name, value - timedelta(hours=2))
+        db_session.commit()
+    expected = {t.subject.address for t in targets}
+    assert seen_native == seen_tokens == expected
+
+
+def test_budget_does_not_claim_or_postpone_unattempted_accounts(db_session, monkeypatch):
+    import services.monitoring.balance_collection as collector
+    from services.clients.request_budget import RequestBudget, charge_attempt
+
+    targets = [make_target(db_session)[1] for _ in range(4)]
+    factory = sessionmaker(bind=db_session.get_bind(), expire_on_commit=False)
+    monkeypatch.setattr(
+        collector,
+        "pinned_native_balances",
+        lambda addresses, **kw: (charge_attempt("rpc") or 100, {a: 0 for a in addresses}),
+    )
+    monkeypatch.setattr(collector, "get_native_price", lambda chain: charge_attempt("etherscan") or 2000)
+    collect_balances(targets, writer="tvl", session_factory=factory, budget=RequestBudget(limit=1))
+    db_session.expire_all()
+    assert not db_session.scalars(
+        select(BalanceCollectionState).where(BalanceCollectionState.read_class == "tokens")
+    ).all()
+
+
+def test_warm_collection_is_read_only_and_does_not_repeat_provider_work(db_session, monkeypatch):
+    from sqlalchemy import event
+
+    import services.monitoring.balance_collection as collector
+
+    targets = [make_target(db_session)[1] for _ in range(64)]
+    factory = sessionmaker(bind=db_session.get_bind(), expire_on_commit=False)
+    calls = []
+    monkeypatch.setattr(
+        collector,
+        "pinned_native_balances",
+        lambda addresses, **kw: (calls.append("native") or 100, {a: 10**18 for a in addresses}),
+    )
+    monkeypatch.setattr(collector, "get_native_price", lambda chain: calls.append("quote") or 2000)
+    monkeypatch.setattr(
+        collector,
+        "fetch_asset_page",
+        lambda *a, **kw: calls.append("tokens") or TokenBalancePage([], 0, "returned_empty"),
+    )
+    engine = db_session.get_bind()
+    counts = {"statements": 0, "commits": 0}
+
+    def statement(*args):
+        counts["statements"] += 1
+
+    def commit(*args):
+        counts["commits"] += 1
+
+    event.listen(engine, "before_cursor_execute", statement)
+    event.listen(engine, "commit", commit)
+    try:
+        collect_balances(targets, writer="tvl", session_factory=factory)
+        cold = dict(counts)
+        counts.update(statements=0, commits=0)
+        before = list(calls)
+        report = collect_balances(targets, writer="tvl", session_factory=factory)
+    finally:
+        event.remove(engine, "before_cursor_execute", statement)
+        event.remove(engine, "commit", commit)
+    print(f"64-account collector: cold={cold}, warm={counts}")
+    assert calls == before
+    assert report.reused == 128 and report.committed == 0
+    assert counts["commits"] == 0
+    assert counts["statements"] <= 400

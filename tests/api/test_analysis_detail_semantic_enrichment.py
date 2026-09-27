@@ -270,3 +270,21 @@ def test_principal_label_payload_narrows_confidence_and_the_duplicate_label():
     assert out["label"] == "raw-label"
     assert out["display_name"] == "Pretty Name"
     assert out["naming_rule"] == "medium"
+
+
+@requires_postgres
+def test_address_lookup_keeps_full_analysis_after_effects_recovery(api_client, db_session):
+    from datetime import timedelta
+
+    from db.queue import store_artifact
+
+    address = "0x" + uuid.uuid4().hex + "11" * 4
+    original = _seed_completed_job(db_session, address=address)
+    store_artifact(db_session, original.id, "predicate_trees", data=_semantic_artifact())
+    retry = _seed_completed_job(db_session, address=address)
+    retry.request = dict(retry.request, effects_resume_work_id=42)
+    retry.updated_at = original.updated_at + timedelta(minutes=1)
+    db_session.commit()
+    response = api_client.get(f"/api/analyses/{address}")
+    assert response.status_code == 200
+    assert response.json()["predicate_trees"]["schema_version"] == "semantic"

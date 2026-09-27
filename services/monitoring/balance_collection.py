@@ -14,7 +14,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 
-from sqlalchemy import case, func, select, tuple_
+from sqlalchemy import exists, func, literal, select, tuple_
 from sqlalchemy.dialects.postgresql import insert
 
 from db.models import ContractBalanceFetch, SessionLocal
@@ -83,25 +83,21 @@ def _key(target: CollectionSubject, read_class: str) -> dict:
 
 def claim_read(target, read_class, *, max_age_seconds: int | None = None, session_factory=SessionLocal) -> Claim:
     with session_factory() as session:
-        now = session.execute(select(func.clock_timestamp())).scalar_one()
         key = _key(target, read_class)
-        session.execute(insert(BalanceCollectionState).values(**key).on_conflict_do_nothing())
-        state = session.get(BalanceCollectionState, tuple(key.values()), with_for_update=True)
-        assert state is not None
-        if state.lease_until is not None and state.lease_until > now:
-            reason = "leased"
-        elif (
-            state.next_attempt_at is not None
-            and state.next_attempt_at > now
-            and not (
-                state.outcome == "success"
-                and state.observed_at is not None
-                and max_age_seconds is not None
-                and (now - state.observed_at).total_seconds() >= max_age_seconds
-            )
-        ):
-            reason = "backoff" if state.failures else "fresh"
+        query = select(BalanceCollectionState, func.clock_timestamp()).filter_by(**key)
+        existing = session.execute(query).one_or_none()
+        if existing is not None:
+            state, now = existing
+            reason = _read_reason(state, now, max_age_seconds)
+            if reason != "due":
+                # Cached/backed-off work is read-only. Publication independently
+                # checks generation before writing, so this needs no row lock.
+                return Claim(target, read_class, None, state.generation, state.payload, state.observed_at, reason)
         else:
+            session.execute(insert(BalanceCollectionState).values(**key).on_conflict_do_nothing())
+        state, now = session.execute(query.with_for_update().execution_options(populate_existing=True)).one()
+        reason = _read_reason(state, now, max_age_seconds)
+        if reason == "due":
             owner = str(uuid.uuid4())
             state.generation += 1
             state.lease_owner = owner
@@ -111,7 +107,6 @@ def claim_read(target, read_class, *, max_age_seconds: int | None = None, sessio
             session.commit()
             return result
         result = Claim(target, read_class, None, state.generation, state.payload, state.observed_at, reason)
-        session.commit()
         return result
 
 
@@ -176,14 +171,27 @@ def reprice_unpriced_native(claim: Claim, *, writer: str, session_factory=Sessio
 
 
 def _publish(session, claim: Claim, payload: dict, observed_at: datetime, writer: str):
+    from db.models import ContractBalance
+
     subject = claim.target.subject
     # A cached physical read can be published to another eligible protocol subject,
     # but never stamped as a new observation or repeatedly inserted into its history.
     status_col = (
         ContractBalanceFetch.native_status if claim.read_class == "native" else ContractBalanceFetch.asset_set_status
     )
-    exists = session.scalar(
-        select(ContractBalanceFetch.id)
+    unpriced_native = (
+        exists(
+            select(ContractBalance.id).where(
+                ContractBalance.fetch_id == ContractBalanceFetch.id,
+                ContractBalance.token_address.is_(None),
+                ContractBalance.price_usd.is_(None),
+            )
+        )
+        if claim.read_class == "native" and payload.get("price_usd") is not None
+        else literal(False)
+    )
+    previous = session.execute(
+        select(ContractBalanceFetch.id, unpriced_native)
         .where(
             *subject.filters(ContractBalanceFetch),
             ContractBalanceFetch.observed_at == observed_at,
@@ -191,20 +199,9 @@ def _publish(session, claim: Claim, payload: dict, observed_at: datetime, writer
         )
         .order_by(ContractBalanceFetch.id.desc())
         .limit(1)
-    )
-    if exists is not None:
-        if claim.read_class != "native" or payload.get("price_usd") is None:
-            return False
-        from db.models import ContractBalance
-
-        old = session.scalar(
-            select(ContractBalance).where(
-                ContractBalance.fetch_id == exists,
-                ContractBalance.token_address.is_(None),
-            )
-        )
-        if old is None or old.price_usd is not None:
-            return False
+    ).one_or_none()
+    if previous is not None and not previous[1]:
+        return False
     native = NativeReading(None, None, False, None, "", "", attempted=False)
     page = TokenBalancePage([], None, STATUS_UNATTEMPTED)
     if claim.read_class == "native":
@@ -239,7 +236,7 @@ def publish_reuse(claim: Claim, *, writer, session_factory=SessionLocal) -> bool
         written = _publish(session, claim, claim.payload, claim.observed_at, writer)
         if written:
             _dirty(session, claim.target)
-        session.commit()
+            session.commit()
         return written
 
 
@@ -310,45 +307,75 @@ def release_claim(claim: Claim, *, session_factory=SessionLocal):
         session.commit()
 
 
-def order_subjects(subjects, *, ttl=FRESH_SECONDS, session_factory=SessionLocal):
-    """Due accounts first, then oldest attempts; a fresh prefix cannot starve a retry."""
+def _read_reason(state, now, max_age_seconds):
+    if state is None:
+        return "due"
+    if state.lease_until is not None and state.lease_until > now:
+        return "leased"
+    if (
+        state.next_attempt_at is not None
+        and state.next_attempt_at > now
+        and not (
+            state.outcome == "success"
+            and state.observed_at is not None
+            and max_age_seconds is not None
+            and (now - state.observed_at).total_seconds() >= max_age_seconds
+        )
+    ):
+        return "fresh" if state.outcome == "success" else "backoff"
+    return "due"
+
+
+def _read_schedule(subjects, *, ttl, session_factory):
+    """Order by the oldest due component, not a sibling's recent successful read.
+
+    This is only a scheduling snapshot. claim_read rechecks ownership/freshness
+    under lock immediately before each bounded unit of provider work.
+    """
     if not subjects:
-        return [], set()
-    keys = [(s.chain_id, s.subject.address.lower()) for s in subjects]
+        return [], set(), {}
+    keys = {(s.chain_id, s.subject.address.lower()) for s in subjects}
     with session_factory() as session:
-        now = session.execute(select(func.clock_timestamp())).scalar_one()
+        now = session.scalar(select(func.clock_timestamp()))
         rows = session.execute(
             select(
                 BalanceCollectionState.chain_id,
                 BalanceCollectionState.address,
-                func.max(BalanceCollectionState.last_attempt_at),
-                func.min(BalanceCollectionState.next_attempt_at),
-                func.count(),
-                func.min(case((BalanceCollectionState.outcome == "success", BalanceCollectionState.observed_at))),
+                BalanceCollectionState.read_class,
+                BalanceCollectionState.last_attempt_at,
+                BalanceCollectionState.next_attempt_at,
+                BalanceCollectionState.lease_until,
+                BalanceCollectionState.outcome,
+                BalanceCollectionState.observed_at,
+                BalanceCollectionState.failures,
+            ).where(
+                tuple_(BalanceCollectionState.chain_id, BalanceCollectionState.address).in_(keys),
+                BalanceCollectionState.read_class.in_(("native", "tokens")),
             )
-            .where(tuple_(BalanceCollectionState.chain_id, BalanceCollectionState.address).in_(keys))
-            .group_by(BalanceCollectionState.chain_id, BalanceCollectionState.address)
         ).all()
-    times = {(chain, address): when for chain, address, when, _due, _count, _observed in rows}
-    due = {
-        (chain, address)
-        for chain, address, _when, eligible, count, observed in rows
-        if count < 2
-        or eligible is None
-        or eligible <= now
-        or (observed is not None and (now - observed).total_seconds() >= ttl)
-    }
-    due.update(set(keys) - set(times))
+    states = {(r.chain_id, r.address, r.read_class): r for r in rows}
     floor = datetime.min.replace(tzinfo=timezone.utc)
+    priorities = {}
+    for chain, address in keys:
+        for read_class in ("native", "tokens"):
+            key = (chain, address, read_class)
+            state = states.get(key)
+            due = _read_reason(state, now, ttl) == "due"
+            priorities[key] = (not due, (state.last_attempt_at if state else None) or floor)
+    due_accounts = {(chain, address) for (chain, address, _), priority in priorities.items() if not priority[0]}
     ordered = sorted(
         subjects,
         key=lambda s: (
-            (s.chain_id, s.subject.address.lower()) not in due,
-            times.get((s.chain_id, s.subject.address.lower())) or floor,
+            min(priorities[(s.chain_id, s.subject.address.lower(), cls)] for cls in ("native", "tokens")),
             s.chain_id,
             s.subject.address.lower(),
         ),
     )
+    return ordered, due_accounts, priorities
+
+
+def order_subjects(subjects, *, ttl=FRESH_SECONDS, session_factory=SessionLocal):
+    ordered, due, _ = _read_schedule(subjects, ttl=ttl, session_factory=session_factory)
     return ordered, due
 
 
@@ -367,14 +394,35 @@ def collect_balances(
         seconds=float(os.getenv("PSAT_BALANCE_PASS_SECONDS", "120")),
     )
     pending: list[Claim] = []
-    ordered, due = order_subjects(subjects, ttl=ttl, session_factory=session_factory)
+    ordered, due, priorities = _read_schedule(subjects, ttl=ttl, session_factory=session_factory)
     limit = max(1, int(os.getenv("PSAT_BALANCE_SUBJECTS_PER_PASS", "64")))
     subjects = ordered[:limit]
     report.deferred += sum((s.chain_id, s.subject.address.lower()) in due for s in ordered[limit:])
+    # Native multicalls remain batched. Token reads and native batches compete
+    # by their oldest attempt; neither class always runs first. Acquire leases
+    # only when a unit is about to run, so budget-deferred work keeps its place.
+    units = []
+    for target in subjects:
+        units.append((priorities[tuple(_key(target, "tokens").values())], "tokens", [target]))
+    for chain_id in sorted({s.chain_id for s in subjects}):
+        natives = [s for s in subjects if s.chain_id == chain_id]
+        for offset in range(0, len(natives), 100):
+            group = natives[offset : offset + 100]
+            priority = min(priorities[tuple(_key(s, "native").values())] for s in group)
+            units.append((priority, "native", group))
+    units.sort(key=lambda item: (item[0], item[1]))
+    unstarted = units
+    quotes: dict[int, tuple[float | None, datetime | None]] = {}
     with request_budget(budget):
         try:
-            for target in subjects:
-                for read_class in ("native", "tokens"):
+            for index, (priority, read_class, targets) in enumerate(units):
+                if not priority[0]:
+                    budget.check()
+                unstarted = units[index + 1 :]
+                if heartbeat:
+                    heartbeat()
+                group = []
+                for target in targets:
                     claim = claim_read(target, read_class, max_age_seconds=ttl, session_factory=session_factory)
                     if claim.observed_at is not None:
                         report.oldest_observed_at = min(
@@ -382,21 +430,17 @@ def collect_balances(
                         )
                     if claim.owner:
                         pending.append(claim)
+                        group.append(claim)
                     else:
                         if claim.reason == "fresh":
                             claim = reprice_unpriced_native(claim, writer=writer, session_factory=session_factory)
                         report.reused += int(claim.reason == "fresh")
                         report.deferred += int(claim.reason != "fresh")
                         report.committed += int(publish_reuse(claim, writer=writer, session_factory=session_factory))
-            quotes: dict[int, tuple[float | None, datetime | None]] = {}
-            # Process small native batches per chain; a very large protocol never
-            # creates one unbounded multicall payload or holds a lease indefinitely.
-            chains = sorted({c.target.chain_id for c in pending})
-            for chain_id in chains:
-                native_claims = [c for c in pending if c.target.chain_id == chain_id and c.read_class == "native"]
-                for offset in range(0, len(native_claims), 100):
-                    budget.check()
-                    group = native_claims[offset : offset + 100]
+                if not group:
+                    continue
+                chain_id = group[0].target.chain_id
+                if read_class == "native":
                     block, quantities = pinned_native_balances(
                         [c.target.subject.address for c in group], chain_id=chain_id
                     )
@@ -406,8 +450,8 @@ def collect_balances(
                         try:
                             quotes[quote_chain] = read_native_quote(quote_chain, session_factory=session_factory)
                         except RequestBudgetExceeded:
-                            # Quantities already acquired must survive a quote budget
-                            # failure. Publish them unpriced before yielding the pass.
+                            # Persist acquired quantities even when their quote
+                            # cannot fit into this pass's remaining budget.
                             quotes[quote_chain] = (None, None)
                         except Exception as exc:
                             logger.warning(
@@ -444,33 +488,35 @@ def collect_balances(
                             )
                         )
                         pending.remove(claim)
-            # Oldest pending physical account first prevents prefix starvation
-            # when a large protocol cannot finish in one provider budget.
-            for claim in [c for c in pending if c.read_class == "tokens"]:
-                budget.check()
-                if heartbeat:
-                    heartbeat()
-                page = fetch_asset_page(claim.target.subject.address, chain_id=claim.target.chain_id)
-                outcome = (
-                    "failed"
-                    if page.status == ASSET_SET_STATUS_FETCH_FAILED
-                    else "partial"
-                    if page.status == ASSET_SET_STATUS_AT_PAGE_CAP
-                    else "success"
-                )
-                report.attempted += 1
-                report.fetched += int(outcome != "failed")
-                report.failed += int(outcome == "failed")
-                report.partial += int(outcome == "partial")
-                report.committed += int(
-                    finish_read(
-                        claim, asdict(page), outcome=outcome, writer=writer, ttl=ttl, session_factory=session_factory
+                else:
+                    claim = group[0]
+                    page = fetch_asset_page(claim.target.subject.address, chain_id=chain_id)
+                    outcome = (
+                        "failed"
+                        if page.status == ASSET_SET_STATUS_FETCH_FAILED
+                        else "partial"
+                        if page.status == ASSET_SET_STATUS_AT_PAGE_CAP
+                        else "success"
                     )
-                )
-                pending.remove(claim)
+                    report.attempted += 1
+                    report.fetched += int(outcome != "failed")
+                    report.failed += int(outcome == "failed")
+                    report.partial += int(outcome == "partial")
+                    report.committed += int(
+                        finish_read(
+                            claim,
+                            asdict(page),
+                            outcome=outcome,
+                            writer=writer,
+                            ttl=ttl,
+                            session_factory=session_factory,
+                        )
+                    )
+                    pending.remove(claim)
         except RequestBudgetExceeded:
-            report.deferred += len(pending)
+            report.deferred += sum(len(targets) for priority, _cls, targets in unstarted if not priority[0])
         finally:
+            report.deferred += len(pending)
             for claim in pending:
                 release_claim(claim, session_factory=session_factory)
             logger.info(
