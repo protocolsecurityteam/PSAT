@@ -548,6 +548,36 @@ def test_a_partial_extent_is_not_disposable_until_catch_up_completes(db_session,
     assert whole.is_airdrop_only is True
 
 
+def test_wall_time_budget_publishes_a_complete_prefix(db_session, wire, monkeypatch):
+    from types import SimpleNamespace
+
+    clock = [0.0]
+    monkeypatch.setattr(delivery_shape, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(delivery_shape, "DISPOSITION_SCAN_WALL_SECONDS", 1.0)
+
+    def ticking_rpc(url, method, params, *args, **kwargs):
+        value = wire(url, method, params, *args, **kwargs)
+        if method == "eth_getLogs":
+            clock[0] = 2.0
+        return value
+
+    monkeypatch.setattr(delivery_shape, "rpc_request", ticking_rpc)
+    monkeypatch.setattr("services.resolution.repos.event_logs_rpc.rpc_request", ticking_rpc)
+    first = scan_delivery_shape(db_session, [_request(chain_id=OPTIMISM)], rpc_url_for=_rpc_url_for)
+    db_session.commit()
+
+    row = _facts(db_session)[(HOLDER, TOKEN)]
+    assert first.counts["scan_time_budget_stopped"] >= 1
+    assert first.get_logs == 1
+    assert row.measured_through_block == CREATION + 9_999
+    assert row.caught_up is False
+
+    clock[0] = 0.0
+    wire.get_logs_calls.clear()
+    scan_delivery_shape(db_session, [_request(chain_id=OPTIMISM)], rpc_url_for=_rpc_url_for)
+    assert int(wire.get_logs_calls[0]["fromBlock"], 16) == CREATION + 10_000
+
+
 def test_a_budget_death_in_discovery_still_records_the_pairs_it_proved(db_session, wire, monkeypatch):
     """Forward progress survives the ceiling, which is what stops the hourly loop.
 

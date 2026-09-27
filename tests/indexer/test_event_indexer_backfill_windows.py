@@ -465,6 +465,49 @@ def test_many_warm_groups_do_not_consume_windows_or_trigger_busy_cadence(session
 
 
 @requires_postgres
+def test_warm_sweep_covers_more_than_backfill_budget_without_busy_repeats(session):
+    from db.models import IndexedEventCursor
+
+    addresses = [f"0x{i + 1:040x}" for i in range(182)]
+    for address in addresses:
+        enroll_event_cursor(session, chain_id=1, event_address=address, topic0=_TOPIC, start_block=_TARGET - 10)
+    session.execute(update(IndexedEventCursor).values(backfill_complete=True))
+    cold_address = "0x" + "ff" * 20
+    enroll_event_cursor(session, chain_id=1, event_address=cold_address, topic0=_TOPIC)
+    session.commit()
+
+    fetcher = _RangeCappedFetcher()
+    fetchers, heads, hashes = _maps(fetcher)
+    warm = scan_enrolled_events(
+        session,
+        fetchers=fetchers,
+        head_fetchers=heads,
+        block_hash_fetchers=hashes,
+        scan_mode="warm",
+        max_windows_per_pass=100,
+    )
+    assert warm.windows_scanned == 182
+    assert not warm.budget_exhausted
+    assert all(_cursor_block(session, address) == _TARGET for address in addresses)
+    assert _cursor_block(session, cold_address) == 0
+
+    cold = scan_enrolled_events(
+        session,
+        fetchers=fetchers,
+        head_fetchers=heads,
+        block_hash_fetchers=hashes,
+        scan_mode="cold",
+        max_block_span=_MAX_SAFE_SPAN,
+        max_windows_per_cursor=2,
+        max_windows_per_pass=2,
+    )
+    assert cold.windows_scanned == 2
+    assert cold.budget_exhausted
+    assert _cursor_block(session, cold_address) == 2 * _MAX_SAFE_SPAN
+    assert len(fetcher.requested_spans) == 184
+
+
+@requires_postgres
 def test_exact_budget_finishing_last_cold_group_is_not_busy(session):
     enroll_event_cursor(session, chain_id=1, event_address=_AUTHORITY, topic0=_TOPIC, start_block=_TARGET - 10)
     session.commit()

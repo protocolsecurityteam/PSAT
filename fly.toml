@@ -18,6 +18,10 @@ kill_timeout = 30
   PSAT_EDGE_MODE = "cloudflare"
   PSAT_SITE_ORIGIN = "https://snif.sh"
   PSAT_SUPPORTED_CHAIN_IDS = "1,8453"
+  # Temporary RPC-spend control: scanner and state poller previously ran every
+  # ten minutes. TVL already runs hourly; the event-log indexer stays separate.
+  PROTOCOL_SCAN_INTERVAL = "3600"
+  PROTOCOL_POLL_INTERVAL = "3600"
   PSAT_COMPANY_MAX_INFLIGHT = "2"
   PSAT_COMPANY_MAX_QUEUED = "8"
   PSAT_COMPANY_QUEUE_TIMEOUT = "30"

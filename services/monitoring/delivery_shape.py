@@ -113,6 +113,10 @@ logger = logging.getLogger(__name__)
 # sharing the other's ceiling would let a wide disposition run starve the sweep
 # of the requests its own negative depends on.
 DISPOSITION_REQUEST_BUDGET = int(os.getenv("PSAT_DISPOSITION_REQUEST_BUDGET", "5000"))
+# An hourly producer must publish proven prefixes before an idle database
+# transaction outlives its connection. This bounds one scan's wall time while
+# retaining the existing partial-extent publication path on budget exhaustion.
+DISPOSITION_SCAN_WALL_SECONDS = float(os.getenv("PSAT_DISPOSITION_SCAN_WALL_SECONDS", "180"))
 
 # Tokens per ``eth_getLogs`` address filter, and holders per recipient-topic
 # OR-set. Both are OR-sets inside ONE request, so a batch costs the windows of a
@@ -188,12 +192,12 @@ DISPOSITION_MAX_DELIVERIES_PER_PAIR = 8
 # Optimism's upstream hard-caps the range: ``eth_getLogs`` there answers
 # ``-32012 request exceeded max allowed range: ... up to a 10,000 block range``,
 # so 10,000 is not a tuning choice, it is the largest window that gets served.
-# Everywhere else the window is sized so a creation-block-to-head range is ONE
-# request — measured on ethereum and base, where a single window returned the
-# whole history of a 40-token batch. Paging those chains into smaller windows
-# would multiply the request count by ~26 (ethereum) and ~50 (base) for
-# identical data.
-_DEFAULT_SCAN_WINDOW = (1_000_000_000, 10_000)
+# Ethereum and Base use the proxy's one-million-block forwarding threshold.
+# The old billion-block request was rejected at eRPC's two-million-block network
+# ceiling before reaching any provider, then repeatedly bisected by the client.
+# A 1,000-block floor still rejects any page that reaches the 40,000-log cap;
+# it only allows a dense valid range to be split further than the old 10,000.
+_DEFAULT_SCAN_WINDOW = (1_000_000, 1_000)
 _CHAIN_SCAN_WINDOW: dict[int, tuple[int, int]] = {
     # optimism: upstream range cap, with one level of bisect headroom below it
     # so a dense window can still be narrowed rather than abandoned outright.
@@ -232,6 +236,7 @@ class DispositionCost:
     # (``warn_degraded_once``) for the failures that repeat per holder.
     degraded: dict[str, int] = field(default_factory=dict)
     reserved: int = 0
+    scan_deadline_at: float | None = None
 
     @property
     def spent(self) -> int:
@@ -244,6 +249,11 @@ class DispositionCost:
 
     def count(self, key: str, n: int = 1) -> None:
         self.counts[key] = self.counts.get(key, 0) + n
+
+    def check_scan_deadline(self) -> None:
+        if self.scan_deadline_at is not None and time.monotonic() >= self.scan_deadline_at:
+            self.count("scan_time_budget_stopped")
+            raise DispositionTimeBudgetExceeded("disposition scan wall-time budget exhausted")
 
 
 @dataclass(frozen=True)
@@ -283,6 +293,10 @@ class DispositionBudgetExceeded(RpcScanCancelled):
     """The cycle's request ceiling was reached; bisection cannot restore budget."""
 
 
+class DispositionTimeBudgetExceeded(DispositionBudgetExceeded):
+    """The scan must publish its proven prefix before its DB transaction ages out."""
+
+
 class DispositionHistoryChanged(RuntimeError):
     """No evidence from this snapshot may be published."""
 
@@ -306,6 +320,8 @@ class _ChainSnapshot:
             return self.hashes[number]
         if self.cost.spent >= DISPOSITION_REQUEST_BUDGET:
             raise DispositionBudgetExceeded("disposition block checkpoint budget exhausted")
+        if not refresh:
+            self.cost.check_scan_deadline()
         self.cost.head_reads += 1
         raw = rpc_request(
             self.rpc_url,
@@ -402,6 +418,7 @@ class _DispositionFetcher(RpcEventLogFetcher):
         self._budget = budget
 
     def _count_get_logs(self) -> None:
+        self._cost.check_scan_deadline()
         if self._cost.spent >= self._budget:
             raise DispositionBudgetExceeded(f"disposition request budget of {self._budget} reached")
         self._cost.get_logs += 1
@@ -431,6 +448,7 @@ def creation_block(holder_address: str, *, chain_id: int, cost: DispositionCost)
             return 0 if cached is None else cached
     from services.clients.etherscan import get_contract_creation_block
 
+    cost.check_scan_deadline()
     cost.creation_lookups += 1
     try:
         block = get_contract_creation_block(holder_address, chain_id=chain_id)
@@ -808,7 +826,20 @@ def scan_delivery_shape(
     if not by_chain:
         return cost
 
-    for chain_id in sorted(by_chain):
+    if cost.scan_deadline_at is None and DISPOSITION_SCAN_WALL_SECONDS > 0:
+        cost.scan_deadline_at = time.monotonic() + DISPOSITION_SCAN_WALL_SECONDS
+    overall_deadline_at = cost.scan_deadline_at
+
+    chain_ids = sorted(by_chain)
+    for chain_index, chain_id in enumerate(chain_ids):
+        if overall_deadline_at is not None:
+            remaining = overall_deadline_at - time.monotonic()
+            if remaining <= 0:
+                cost.count("scan_time_budget_stopped")
+                break
+            # An active Ethereum repair must not consume Base's entire cycle.
+            # Unused time from an earlier chain remains available to later ones.
+            cost.scan_deadline_at = time.monotonic() + remaining / (len(chain_ids) - chain_index)
         chain_requests = by_chain[chain_id]
         # Monitor and resolution workers can ask about the same account. Hold
         # ownership through the producer's commit, including absent rows and
@@ -835,6 +866,12 @@ def scan_delivery_shape(
             cost.count("chains_unscanned")
             continue
         if cost.spent >= DISPOSITION_REQUEST_BUDGET:
+            break
+        try:
+            cost.check_scan_deadline()
+        except DispositionTimeBudgetExceeded:
+            if overall_deadline_at is not None and time.monotonic() < overall_deadline_at:
+                continue
             break
         cost.head_reads += 1
         try:
@@ -884,7 +921,7 @@ def scan_delivery_shape(
         except DispositionBudgetExceeded as exc:
             _invalidate_history(session, snapshot.invalidated)
             logger.warning(
-                "disposition: request budget exhausted on chain %s (%s) — remaining holders were NOT scanned and "
+                "disposition: scan budget exhausted on chain %s (%s) — remaining holders were NOT scanned and "
                 "wrote NO evidence; cost so far %d getLogs + %d receipts + %d head + %d creation",
                 chain_id,
                 exc,
@@ -893,6 +930,8 @@ def scan_delivery_shape(
                 cost.head_reads,
                 cost.creation_lookups,
             )
+            if overall_deadline_at is not None and time.monotonic() >= cost.scan_deadline_at:
+                continue
             break
         except DispositionHistoryChanged as exc:
             # A rolled-back snapshot must not leave an old positive visible
@@ -1547,6 +1586,8 @@ def _scan_chain(
         priority=priority,
     )
     if starved:
+        if cost.scan_deadline_at is not None and time.monotonic() >= cost.scan_deadline_at:
+            raise DispositionTimeBudgetExceeded("disposition scan wall-time budget exhausted")
         raise DispositionBudgetExceeded(f"disposition request budget of {DISPOSITION_REQUEST_BUDGET} reached")
 
 
@@ -1870,6 +1911,11 @@ def _resolve_fan_out(
                 continue
             tx = record["tx"]
             if tx not in receipts:
+                try:
+                    cost.check_scan_deadline()
+                except DispositionTimeBudgetExceeded:
+                    exhausted = True
+                    break
                 if cost.spent >= DISPOSITION_REQUEST_BUDGET:
                     exhausted = True
                     break
