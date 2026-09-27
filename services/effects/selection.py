@@ -94,6 +94,9 @@ _ENROLLMENT_TRANSPARENT_CLAIM_IDS = frozenset({"rate_limit.consume", "delegateca
 # neither source nor sink (routed labels are static-only by design).
 _PUBLIC_ADMISSION_CLAIM_IDS = ("flow.out", "supply.mint")
 
+# Preserve the existing bound on caller-supplied token inputs.
+_MAX_TOKEN_ARG_CANDIDATES = 2
+
 # How many cap-dropped candidates the drop WARNING names individually. The count
 # is always exact; this only bounds the sample (mirrors seeding's ``_SKIP_SAMPLE``).
 _DROPPED_SAMPLE = 8
@@ -205,17 +208,13 @@ class Candidate:
     # worst published row asserted $3.489B against a protocol TVL of $3.297B. ``None``
     # means the check is skipped, and the recipe records that it was.
     protocol_tvl_usd: float | None = None
-    # Priced holdings plus function-named getters resolved on this chain and
-    # deployment. The worker persists deferred identities and bounds each attempt.
+    # The deployment's richest priced holdings for caller-supplied token parameters.
     input_token_addresses: tuple[str, ...] = ()
     # The resolver marked this function's caller set an EXACT ``finite_set`` —
     # it claims to have enumerated exactly who may call F. If the probe, run as that
     # sole/named member, is then rejected by a canonical gate error, the
     # enumeration named the wrong holder (an authority-plane discrepancy).
     membership_exact: bool = False
-    balance_generation: int = 0
-    deferred_token_addresses: tuple[str, ...] = ()
-    token_inputs_pending: bool = False
 
     @property
     def probe_target(self) -> str:
@@ -570,13 +569,11 @@ def _protocol_tvl_usd(session: Session, protocol_id: int) -> float | None:
     return None if value is None else float(value)
 
 
-def _token_holdings_by_contract(session: Session, protocol_id: int, limit: int | None) -> dict[int, tuple[str, ...]]:
-    """Priced holding candidates, before function-specific token getter enrichment.
+def _token_holdings_by_contract(session: Session, protocol_id: int, limit: int) -> dict[int, tuple[str, ...]]:
+    """The deployment's richest priced holdings, within the existing token cap.
 
-    Unpriced relevant tokens are resolved by named getters at the pinned probe
-    block, independent of this ranking. No delivery classification is consulted.
-    The worker keeps a durable cursor when a function has more candidate inputs
-    than its per-attempt token budget.
+    Current partial observations can supply identities; unpriced holdings remain
+    ineligible as caller-supplied token arguments.
     """
     rows = session.execute(
         select(
@@ -625,7 +622,7 @@ def _token_holdings_by_contract(session: Session, protocol_id: int, limit: int |
         if addr is None:
             continue
         holdings = out.setdefault(contract_id, [])
-        if addr not in holdings and (limit is None or len(holdings) < limit):
+        if addr not in holdings and len(holdings) < limit:
             holdings.append(addr)
     return {cid: tuple(v) for cid, v in out.items()}
 
@@ -1379,7 +1376,7 @@ def select_candidates(
         for holdings_for_deployment in _asset_holdings_by_deployment(session, protocol_id).values()
         for holding in holdings_for_deployment
     )
-    holdings = _token_holdings_by_contract(session, protocol_id, None)
+    holdings = _token_holdings_by_contract(session, protocol_id, _MAX_TOKEN_ARG_CANDIDATES)
     from services.effects.balance_dependencies import balance_owners
 
     holder_chain = chain_id or (scope.chain_id if scope else None)
@@ -1446,8 +1443,6 @@ def select_candidates(
     if resource_cap is not None and len(candidates) > resource_cap:
         kept, dropped = candidates[:resource_cap], candidates[resource_cap:]
         _log_dropped(protocol_id, resource_cap, dropped)
-        if funnel is not None:
-            funnel["deferred_candidates"] = dropped
         if funnel is not None:
             funnel["cap_dropped"] = len(dropped)
             funnel["selected"] = len(kept)

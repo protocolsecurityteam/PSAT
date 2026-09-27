@@ -63,56 +63,6 @@ def _create_latest_view(*, with_metadata: bool) -> None:
     """)
 
 
-# Frozen canonical names and known legacy aliases as of this revision. A NULL
-# verdict chain is recoverable only from an explicit contract chain, never ETH
-# by default. Current effect_verdicts disallow NULL, but old imported data can
-# predate that invariant; retaining this guard makes the backfill fail closed.
-_CHAIN_NAMES = """
-    ('ethereum', 1), ('mainnet', 1), ('eth', 1), ('ethereum mainnet', 1), ('eth mainnet', 1),
-    ('arbitrum', 42161), ('arbitrum one', 42161),
-    ('optimism', 10), ('optimistic ethereum', 10),
-    ('polygon', 137), ('polygon pos', 137), ('matic', 137),
-    ('base', 8453), ('base mainnet', 8453),
-    ('avalanche', 43114), ('avalanche c chain', 43114), ('avax', 43114),
-    ('bsc', 56), ('bnb', 56), ('bnb chain', 56), ('binance smart chain', 56),
-    ('linea', 59144), ('scroll', 534352), ('zksync', 324), ('zk sync', 324),
-    ('blast', 81457), ('mode', 34443), ('berachain', 80094)
-"""
-_AFFECTED_VERDICTS = f"""
-    WITH chain_names(name, chain_id) AS (VALUES {_CHAIN_NAMES})
-    SELECT DISTINCT c.protocol_id, COALESCE(v.chain_id, chain_names.chain_id) AS chain_id,
-        lower(COALESCE(NULLIF(ef.deployment_address, ''), c.address)) AS deployment_address,
-        c.id AS contract_id, ef.id AS function_id, v.effect_class AS effect_family
-    FROM effective_functions ef
-    JOIN contracts c ON c.id = ef.contract_id
-    JOIN effect_verdicts v ON v.function_id = ef.id
-    LEFT JOIN chain_names ON chain_names.name = regexp_replace(lower(trim(c.chain)), '[[:space:]_-]+', ' ', 'g')
-    WHERE c.protocol_id IS NOT NULL AND v.effect_class IN ('value_out', 'supply')
-      AND v.verdict = 'unknown'
-
-"""
-
-
-_AFFECTED_EMPTY_PLANS = f"""
-    WITH chain_names(name, chain_id) AS (VALUES {_CHAIN_NAMES})
-    SELECT DISTINCT c.protocol_id, chain_names.chain_id,
-        lower(COALESCE(NULLIF(ef.deployment_address, ''), c.address)) AS deployment_address,
-        c.id AS contract_id, ef.id AS function_id, 'candidate_selection' AS effect_family
-    FROM effects_plan_markers marker
-    JOIN contracts c ON c.id = marker.contract_id
-    JOIN effective_functions ef ON ef.contract_id = c.id
-    LEFT JOIN chain_names ON chain_names.name = regexp_replace(lower(trim(c.chain)), '[[:space:]_-]+', ' ', 'g')
-    WHERE c.protocol_id IS NOT NULL
-      AND NOT EXISTS (
-          SELECT 1 FROM effect_verdicts proven
-          WHERE proven.function_id = ef.id AND proven.verdict = 'proven'
-      )
-"""
-_AFFECTED_WORK = (
-    f"SELECT * FROM ({_AFFECTED_VERDICTS}) verdicts UNION SELECT * FROM ({_AFFECTED_EMPTY_PLANS}) empty_plans"
-)
-
-
 def upgrade() -> None:
     op.add_column("protocols", sa.Column("last_balance_attempt_at", sa.DateTime(timezone=True), nullable=True))
     op.execute("DROP VIEW contract_balances_latest")
@@ -124,9 +74,6 @@ def upgrade() -> None:
     ):
         op.add_column("contract_balances", sa.Column(name, typ, nullable=True))
     for name, typ in (
-        ("external_slug", sa.String(255)),
-        ("external_observed_at", sa.DateTime(timezone=True)),
-        ("external_retrieved_at", sa.DateTime(timezone=True)),
         ("holdings_observed_at", sa.DateTime(timezone=True)),
         ("holdings_partial", sa.Boolean()),
         ("valuation_partial", sa.Boolean()),
@@ -161,13 +108,6 @@ def upgrade() -> None:
         sa.Column("effect_family", sa.String(50), nullable=False),
         sa.Column("reason", sa.String(80), nullable=False),
         sa.Column("state", sa.String(20), nullable=False),
-        sa.Column("required_generation", sa.BigInteger(), nullable=False),
-        sa.Column("consumed_generation", sa.BigInteger(), nullable=False),
-        sa.Column("input_fingerprint", sa.String(64)),
-        sa.Column("evidence_fingerprint", sa.String(64)),
-        sa.Column("evidence_generation", sa.BigInteger(), nullable=False, server_default="0"),
-        sa.Column("covered_tokens", postgresql.JSONB(), nullable=False),
-        sa.Column("candidate_tokens", postgresql.JSONB(), nullable=False, server_default=sa.text("'[]'::jsonb")),
         sa.Column("attempts", sa.Integer(), nullable=False),
         sa.Column("next_attempt_at", sa.DateTime(timezone=True)),
         sa.Column("queued_job_id", postgresql.UUID(), sa.ForeignKey("jobs.id", ondelete="SET NULL")),
@@ -179,29 +119,6 @@ def upgrade() -> None:
     op.create_index("ix_pending_effects_due", "pending_effects_work", ["state", "next_attempt_at"])
     _create_latest_view(with_metadata=True)
 
-    # Recover only incomplete balance-dependent families. Existing proven
-    # verdicts retain their valuation policy and need no migration-driven rerun.
-    # Empty-plan markers also need candidate selection retried: old balance
-    # filters could suppress all plans. The current cascade determines eligibility.
-    # Enrolling a supply task for every old pause/upgrade verdict creates work
-    # that the function can never execute and therefore can never complete.
-    op.execute(f"""
-        DO $$
-        BEGIN
-            IF EXISTS (SELECT 1 FROM ({_AFFECTED_WORK}) affected WHERE chain_id IS NULL) THEN
-                RAISE EXCEPTION 'Balance migration: affected legacy effects work has no chain; repair its contract chain first';
-            END IF;
-        END $$
-    """)
-    op.execute(f"""
-        INSERT INTO pending_effects_work
-            (protocol_id, chain_id, deployment_address, contract_id, function_id, effect_family,
-             reason, state, required_generation, consumed_generation, covered_tokens, attempts)
-        SELECT protocol_id, chain_id, deployment_address, contract_id, function_id, effect_family,
-            'balance_inputs_incomplete', 'pending', 0, 0, '[]'::jsonb, 0
-        FROM ({_AFFECTED_WORK}) affected
-        ON CONFLICT DO NOTHING
-    """)
     op.execute("""
         INSERT INTO protocol_score_queue (protocol_id, reason, dirty_at)
         SELECT id, 'delivery_classification_retired', now() FROM protocols
@@ -219,9 +136,6 @@ def downgrade() -> None:
     for table in ("pending_effects_work", "balance_collection_state"):
         op.drop_table(table)
     for name in (
-        "external_slug",
-        "external_observed_at",
-        "external_retrieved_at",
         "holdings_observed_at",
         "holdings_partial",
         "valuation_partial",

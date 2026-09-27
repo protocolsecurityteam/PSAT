@@ -56,11 +56,9 @@ def test_stored_transfer_valuation_survives_redistillation_and_row_loading():
     assert restored.witness_notes == original.witness_notes
 
 
-def test_tvl_serialization_preserves_measured_zero_and_separate_scope():
-    result = snapshot_payload(SimpleNamespace(total_usd=0, defillama_tvl=0, external_slug="series"))
+def test_tvl_serialization_preserves_measured_zero_and_unknown_coverage():
+    result = snapshot_payload(SimpleNamespace(total_usd=0, defillama_tvl=0))
     assert result["total_usd"] == result["defillama_tvl"] == 0
     assert result["holdings_partial"] is None
-    assert result["external_source"] == "DefiLlama"
-    assert result["external_slug"] == "series"
     assert result["holdings_observed_at"] is None
     assert snapshot_payload(None)["total_usd"] is None

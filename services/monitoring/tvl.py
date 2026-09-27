@@ -93,16 +93,10 @@ def fetch_defillama_tvl(protocol_name: str) -> dict | None:
         logger.warning("DefiLlama fetch failed for %s: %s", slug, exc)
         return None
 
-    external_observed_at = None
     tvl = data.get("tvl")
     if isinstance(tvl, list):
         # Historical time series — grab the latest entry
         point = tvl[-1] if tvl and isinstance(tvl[-1], dict) else {}
-        if isinstance(point.get("date"), (int, float)):
-            try:
-                external_observed_at = datetime.fromtimestamp(point["date"], tz=timezone.utc)
-            except (ValueError, OverflowError, OSError):
-                pass
         tvl = point.get("totalLiquidityUSD")
     elif not isinstance(tvl, (int, float)):
         tvl = None
@@ -128,9 +122,6 @@ def fetch_defillama_tvl(protocol_name: str) -> dict | None:
 
     return {
         "tvl": float(tvl) if tvl is not None else None,
-        "slug": slug,
-        "observed_at": external_observed_at,
-        "retrieved_at": datetime.now(timezone.utc),
         "chain_breakdown": chain_breakdown,
     }
 
@@ -547,9 +538,6 @@ def take_tvl_snapshot(
         chain_breakdown=chain_breakdown,
         contract_breakdown=contract_breakdown or None,
         source=source,
-        external_slug=dl_result.get("slug") if dl_result else None,
-        external_observed_at=dl_result.get("observed_at") if dl_result else None,
-        external_retrieved_at=dl_result.get("retrieved_at") if dl_result else None,
         holdings_observed_at=min(
             (datetime.fromisoformat(e["observed_at"]) for e in contract_breakdown.values() if e.get("observed_at")),
             default=None,

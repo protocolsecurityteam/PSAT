@@ -388,11 +388,19 @@ def synthesize_timelock(
 
 
 def _token_arg_candidates(candidate: Candidate, token_params: Sequence[int]) -> tuple[str, ...]:
-    """Bounded token inputs with holdings or resolved function-getter evidence.
+    """Assets the acting deployment PROVABLY holds, offered only to a function
+    that actually has a token parameter.
 
-    A quote is not required for a named relevant token. Simulated transfers
-    establish behavior, not economic backing or dollar magnitude.
-    """
+    They exist because a caller-supplied token slot has no getter behind it: the
+    identity has to come from somewhere, and the only honest "somewhere" is real
+    on-chain state. ``contract_balances`` is a measurement of this deployment at
+    this block, ordered by USD, and :func:`selection.select_candidates` keeps only
+    the PRICED entries — an unpriced holding is usually an airdropped spam token,
+    and a mint witnessed against one would read as backed while being worthless.
+
+    A candidate that the function does not accept can only make the call revert.
+    It can never invent a witness: backing is counted from Transfers the
+    execution EMITTED, and writing an address into calldata emits nothing."""
     return tuple(candidate.input_token_addresses) if token_params else ()
 
 

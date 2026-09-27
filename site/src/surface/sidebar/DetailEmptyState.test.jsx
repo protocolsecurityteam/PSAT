@@ -190,12 +190,16 @@ describe("balance evidence coverage", () => {
     expect(screen.getByRole("status")).toHaveTextContent("3 balance-dependent analysis checks incomplete");
     expect(screen.getByRole("status")).toHaveTextContent("1 await recovery after retries");
   });
-  it("shows gross holdings and external TVL separately, preserving measured zero", () => {
+  it("preserves the single tracked TVL value, measured zero, and partial metadata", () => {
     renderPanel({companyData: companyData({tvl: {total_usd: 0, defillama_tvl: 1000000,
-      external_slug: "protocol-series", holdings_partial: true, valuation_partial: true}})});
+      holdings_partial: true, valuation_partial: true}})});
     expect(screen.getByText("$0.00")).toBeInTheDocument();
-    expect(screen.getByText(/Gross tracked holdings/)).toBeInTheDocument();
-    expect(screen.getByText(/External TVL · DefiLlama/)).toBeInTheDocument();
-    expect(screen.getByText(/protocol-series/)).toBeInTheDocument();
+    expect(screen.getByText(/TVL · tracked · coverage partial\/unknown/)).toBeInTheDocument();
+    expect(screen.queryByText("$1.0M")).not.toBeInTheDocument();
+  });
+  it("keeps the existing DefiLlama fallback when tracked TVL is unavailable", () => {
+    renderPanel({companyData: companyData({tvl: {total_usd: null, defillama_tvl: 1000000}})});
+    expect(screen.getByText(/TVL · DefiLlama/)).toBeInTheDocument();
+    expect(screen.queryByText(/coverage partial/)).not.toBeInTheDocument();
   });
 });

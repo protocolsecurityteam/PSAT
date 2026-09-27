@@ -1,22 +1,19 @@
-"""Durable recovery of effects work whose balance inputs are incomplete.
+"""Resume selected effects once deferred token collection supplies their inputs.
 
-All writes use the caller's transaction. Enqueue and pending ownership are atomic;
-a worker crash is recovered by the ordinary job lease machinery.
+This is a collection dependency, not a general effects retry or coverage queue.
+All writes use the caller's transaction; completed work is never rearmed.
 """
 
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
 import uuid
-from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import and_, exists, func, or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.dialects.postgresql import insert
 
-from db.models import Contract, ContractBalanceFetch, ContractBalanceLatest, Job, JobStage, JobStatus
+from db.models import Contract, ContractBalanceFetch, EffectVerdict, Job, JobStage, JobStatus
 from db.models.balance_work import PendingEffectsWork
 from services.effects.config import EFFECT_CLASS_SUPPLY, EFFECT_CLASS_VALUE_OUT
 from utils.chains import UnknownChainError, chain_by_id, chain_by_name
@@ -24,15 +21,6 @@ from utils.chains import UnknownChainError, chain_by_id, chain_by_name
 logger = logging.getLogger(__name__)
 DEPENDENT_FAMILIES = frozenset({EFFECT_CLASS_SUPPLY, EFFECT_CLASS_VALUE_OUT})
 MAX_ATTEMPTS = 4
-SEMANTICS_VERSION = 2
-# Independent calldata has no portfolio identity prerequisite. Persist this
-# dependency kind in the fingerprint slot, so unrelated arrivals cannot rearm it.
-INVENTORY_INDEPENDENT = "independent:v2"
-
-
-def token_fingerprint(tokens):
-    """Identity/eligibility only: quantity or price fluctuations do not re-probe."""
-    return hashlib.sha256(json.dumps([SEMANTICS_VERSION, sorted(set(tokens))]).encode()).hexdigest()
 
 
 def balance_owners(session, protocol_id, chain_id, addresses):
@@ -52,75 +40,6 @@ def balance_owners(session, protocol_id, chain_id, addresses):
     return owners
 
 
-def evidence_inputs(session, owner_ids):
-    """Batch bounded current read evidence; historical rows never reach Python."""
-    if not owner_ids:
-        return {}
-    observations = {}
-    queries = (
-        (
-            "generation",
-            select(ContractBalanceFetch.contract_id, func.max(ContractBalanceFetch.id))
-            .where(ContractBalanceFetch.contract_id.in_(owner_ids))
-            .group_by(ContractBalanceFetch.contract_id),
-        ),
-        (
-            "native",
-            select(ContractBalanceFetch.contract_id, ContractBalanceFetch.native_status)
-            .where(
-                ContractBalanceFetch.contract_id.in_(owner_ids),
-                ContractBalanceFetch.native_status.in_(("proven_zero", "proven_nonzero")),
-                ContractBalanceFetch.block_number.is_not(None),
-            )
-            .distinct(ContractBalanceFetch.contract_id)
-            .order_by(ContractBalanceFetch.contract_id, ContractBalanceFetch.id.desc()),
-        ),
-        (
-            "assets",
-            select(ContractBalanceFetch.contract_id, ContractBalanceFetch.asset_set_status)
-            .where(
-                ContractBalanceFetch.contract_id.in_(owner_ids),
-                ContractBalanceFetch.asset_set_status.in_(("returned_assets", "returned_empty", "at_page_cap")),
-            )
-            .distinct(ContractBalanceFetch.contract_id)
-            .order_by(ContractBalanceFetch.contract_id, ContractBalanceFetch.id.desc()),
-        ),
-    )
-    for field, query in queries:
-        for cid, value in session.execute(query):
-            observations.setdefault(cid, {})[field] = value
-    for cid, token, raw in session.execute(
-        select(
-            ContractBalanceLatest.contract_id, ContractBalanceLatest.token_address, ContractBalanceLatest.raw_balance
-        ).where(ContractBalanceLatest.contract_id.in_(owner_ids))
-    ):
-        observations.setdefault(cid, {}).setdefault("quantities", []).append(
-            (token.lower() if token else "native", str(raw))
-        )
-    from services.monitoring.balance_reads import partial_asset_rows
-
-    protocol_ids = session.scalars(select(Contract.protocol_id).where(Contract.id.in_(owner_ids)).distinct()).all()
-    for protocol_id in protocol_ids:
-        if protocol_id is None:
-            continue
-        for cid, partials in partial_asset_rows(session, protocol_id).items():
-            if cid in observations:
-                observations[cid]["partial_quantities"] = [
-                    (row.token_address.lower(), str(row.raw_balance)) for row in partials if row.token_address
-                ]
-    return observations
-
-
-def evidence_snapshot(inputs, owner_id, tokens):
-    """Required quantity/read-quality progress, excluding quotes and block churn."""
-    data = inputs.get(owner_id, {})
-    relevant = {t.lower() for t in tokens} or {"native"}
-    quantities = sorted((token, raw) for token, raw in data.get("quantities", ()) if token in relevant)
-    partial_quantities = sorted((token, raw) for token, raw in data.get("partial_quantities", ()) if token in relevant)
-    payload = [data.get("native") if "native" in relevant else None, data.get("assets"), quantities, partial_quantities]
-    return data.get("generation", 0), hashlib.sha256(json.dumps(payload).encode()).hexdigest()
-
-
 def needs_token_inventory(session, candidate):
     """Only a token argument/executor payload needs a discovered token universe."""
     from services.effects.calldata.executor import executor_call
@@ -132,59 +51,13 @@ def needs_token_inventory(session, candidate):
     facts = load_contract_facts(session, candidate.contract_address)
     fn = resolve_function(facts, candidate.selector) if facts else None
     if fn is None:
-        return True  # no static proof that this family is independent
+        return False  # missing facts do not establish a collection dependency
     types = _parse_arg_types(fn.canonical_signature)
     if types is None:
-        return True
+        return False
     roles = address_param_roles(fn, types, frozenset(_flow_directions(fn)))
     executor = executor_call(fn, types, held_tokens=(), recipient=candidate.probe_target)
     return "token" in roles.values() or executor is not None
-
-
-def accepted_generations(session, contract_ids):
-    if not contract_ids:
-        return {}
-    rows = session.execute(
-        select(ContractBalanceFetch.contract_id, ContractBalanceFetch.id)
-        .where(
-            ContractBalanceFetch.contract_id.in_(contract_ids),
-            ContractBalanceFetch.asset_set_status.in_(("returned_assets", "returned_empty", "at_page_cap")),
-            ContractBalanceFetch.asset_set_source == "etherscan_pages",
-        )
-        .distinct(ContractBalanceFetch.contract_id)
-        .order_by(ContractBalanceFetch.contract_id, ContractBalanceFetch.id.desc())
-    ).all()
-    return {cid: generation for cid, generation in rows}
-
-
-def inventory_fingerprints(session, contract_ids):
-    """Identity changes can require new probes; quote/amount changes cannot."""
-    from services.monitoring.balance_reads import positive_raw_balance
-
-    if not contract_ids:
-        return {}
-    rows = session.execute(
-        select(
-            ContractBalanceLatest.contract_id, ContractBalanceLatest.token_address, ContractBalanceLatest.raw_balance
-        ).where(ContractBalanceLatest.contract_id.in_(contract_ids))
-    ).all()
-    assets = {cid: [] for cid in contract_ids}
-    for cid, token, raw in rows:
-        if token and positive_raw_balance(raw):
-            assets[cid].append(token.lower())
-    from db.models import Contract
-    from services.monitoring.balance_reads import partial_asset_rows
-
-    protocol_ids = session.scalars(select(Contract.protocol_id).where(Contract.id.in_(contract_ids)).distinct()).all()
-    for protocol_id in protocol_ids:
-        if protocol_id is None:
-            continue
-        for cid, partials in partial_asset_rows(session, protocol_id).items():
-            if cid in assets:
-                assets[cid].extend(
-                    r.token_address.lower() for r in partials if r.token_address and positive_raw_balance(r.raw_balance)
-                )
-    return {cid: token_fingerprint(tokens) for cid, tokens in assets.items()}
 
 
 def dependent_families(session, candidate):
@@ -207,25 +80,41 @@ def dependent_families(session, candidate):
     return frozenset(families)
 
 
-def prepare_work(session, candidates, *, protocol_id, chain_id, selected_ids, job_id=None):
-    """Persist prerequisites AND resource deferrals before any simulation runs."""
+def collected_owners(session, owner_ids):
+    """An accepted empty portfolio also resolves the collection prerequisite."""
+    if not owner_ids:
+        return set()
+    return set(
+        session.scalars(
+            select(ContractBalanceFetch.contract_id)
+            .where(
+                ContractBalanceFetch.contract_id.in_(owner_ids),
+                ContractBalanceFetch.asset_set_status.in_(("returned_assets", "returned_empty")),
+            )
+            .distinct()
+        )
+    )
+
+
+def prepare_work(session, candidates, *, protocol_id, chain_id, job_id):
+    """Remember missing collection inputs for already-selected functions only.
+
+    Existing probes still run: their getter/seeding paths may succeed without a
+    portfolio. No resource-cap exclusions, unknown verdict backfill, or new token
+    eligibility is introduced here.
+    """
     owners = balance_owners(session, protocol_id, chain_id, [c.probe_target for c in candidates])
-    owner_ids = list(owners.values())
-    evidence = evidence_inputs(session, owner_ids)
-    owner_generations = accepted_generations(session, owner_ids)
-    fingerprints = inventory_fingerprints(session, owner_ids)
-    generations = {c.function_id: owner_generations.get(owners.get(c.probe_target.lower()), 0) for c in candidates}
-    inventory_required = {c.function_id: needs_token_inventory(session, c) for c in candidates}
+    collected = collected_owners(session, list(owners.values()))
+    families = {c.function_id: dependent_families(session, c) for c in candidates}
+    ready = {
+        c.function_id: bool(c.input_token_addresses) or owners.get(c.probe_target.lower()) in collected
+        for c in candidates
+    }
     inserts = []
     for c in candidates:
-        families = dependent_families(session, c)
-        if c.function_id not in selected_ids:
-            families = families | {"candidate_selection"}
-        for family in families:
-            owner_id = owners.get(c.probe_target.lower())
-            generation = generations.get(c.function_id, 0)
-            evidence_generation, evidence_fingerprint = evidence_snapshot(evidence, owner_id, c.input_token_addresses)
-            reason = "resource_cap" if c.function_id not in selected_ids else "balance_inputs_pending"
+        if ready[c.function_id] or c.probe_target.lower() not in owners or not needs_token_inventory(session, c):
+            continue
+        for family in families[c.function_id]:
             inserts.append(
                 dict(
                     protocol_id=protocol_id,
@@ -234,17 +123,8 @@ def prepare_work(session, candidates, *, protocol_id, chain_id, selected_ids, jo
                     contract_id=c.contract_id,
                     function_id=c.function_id,
                     effect_family=family,
-                    reason=reason,
+                    reason="balance_inputs_pending",
                     state="pending",
-                    required_generation=generation,
-                    consumed_generation=0,
-                    input_fingerprint=(
-                        fingerprints.get(owner_id) if inventory_required[c.function_id] else INVENTORY_INDEPENDENT
-                    ),
-                    evidence_generation=evidence_generation,
-                    evidence_fingerprint=evidence_fingerprint,
-                    covered_tokens=[],
-                    candidate_tokens=list(c.input_token_addresses),
                     attempts=0,
                 )
             )
@@ -257,106 +137,68 @@ def prepare_work(session, candidates, *, protocol_id, chain_id, selected_ids, jo
         .where(
             PendingEffectsWork.protocol_id == protocol_id,
             PendingEffectsWork.chain_id == chain_id,
-            PendingEffectsWork.function_id.in_([c.function_id for c in candidates]),
+            PendingEffectsWork.function_id.in_(families),
+            PendingEffectsWork.state.in_(("pending", "queued")),
         )
         .with_for_update()
     ).all()
     by_function = {c.function_id: c for c in candidates}
+    owned = {}
     for row in rows:
-        if job_id and row.queued_job_id and row.queued_job_id != job_id:
+        c = by_function[row.function_id]
+        if row.effect_family not in families[c.function_id] or row.deployment_address != c.probe_target.lower():
+            continue
+        if row.queued_job_id and row.queued_job_id != job_id:
             owner = session.get(Job, row.queued_job_id)
             if owner is not None and owner.status not in (JobStatus.completed, JobStatus.failed_terminal):
                 continue
-        row.candidate_tokens = sorted(
-            set(row.candidate_tokens or ()) | set(by_function[row.function_id].input_token_addresses)
+        row.queued_job_id = job_id
+        row.state = "queued"
+        # Capture inputs actually supplied to this analysis, not observations
+        # published concurrently while its probes are running.
+        row._inputs_ready = ready[c.function_id]
+        owned[(row.function_id, row.effect_family)] = row
+    return owned
+
+
+def finish_work(session, rows, *, job_id):
+    """Close after input-backed analysis or proof; otherwise await collection.
+
+    Call after verdict/claim persistence. An unknown result with available inputs
+    is an ordinary analysis outcome, not a reason for another collection retry.
+    """
+    owned = [row for row in rows.values() if row.queued_job_id == job_id]
+    waiting = [row.function_id for row in owned if not row._inputs_ready]
+    proofs = (
+        set(
+            session.execute(
+                select(EffectVerdict.function_id, EffectVerdict.chain_id, EffectVerdict.effect_class).where(
+                    EffectVerdict.function_id.in_(waiting), EffectVerdict.verdict == "proven"
+                )
+            )
         )
-        owner_id = owners.get(row.deployment_address.lower())
-        fingerprint = fingerprints.get(owner_id) if inventory_required[row.function_id] else INVENTORY_INDEPENDENT
-        if row.input_fingerprint != fingerprint:
-            row.input_fingerprint = fingerprint
-            row.state = "pending"
-            row.reason = "asset_inputs_changed"
-            row.attempts = 0
-        row.evidence_generation, row.evidence_fingerprint = evidence_snapshot(evidence, owner_id, row.candidate_tokens)
-        # Preserve the inputs captured before probing; later getter identities must
-        # not accidentally acknowledge a concurrently published observation.
-        row._probe_evidence = (evidence, owner_id)
-        if job_id and row.function_id in selected_ids and row.state != "complete":
-            row.queued_job_id = job_id
-            row.state = "queued"
-    return {(r.function_id, r.effect_family): r for r in rows}, generations
-
-
-def should_block(row, generation, *, requires_inventory=True, tokens=()):
-    return row is not None and requires_inventory and generation == 0 and not tokens
-
-
-def finish_work(row, *, generation, tokens, remaining, succeeded, job_id):
-    """A bounded degraded outcome remains visible; a changed input can revive it."""
-    row.required_generation = generation
-    row.queued_job_id = None
-    row.attempts += 1
-    row.next_attempt_at = datetime.now(timezone.utc) + timedelta(minutes=min(60, 2**row.attempts))
-    if succeeded:
-        row.consumed_generation = generation
-        row.covered_tokens = sorted(set(row.covered_tokens or ()) | set(tokens))
-        if not remaining:
-            row.state = "complete"
-            row.reason = "covered"
-            row.attempts = 0
-            row.next_attempt_at = None
-            return
-        row.reason = "token_budget"
-        row.attempts = 0  # durable progress earns the next bounded chunk
-    else:
-        row.reason = "probe_incomplete"
-    row.state = "degraded" if row.attempts >= MAX_ATTEMPTS else "pending"
+        if waiting
+        else set()
+    )
+    for row in owned:
+        resolved = row._inputs_ready or (row.function_id, row.chain_id, row.effect_family) in proofs
+        row.state = "complete" if resolved else "pending"
+        row.reason = "collection_resolved" if resolved else "balance_inputs_pending"
+        row.queued_job_id = None
+        row.next_attempt_at = None
+    pending = sum(row.state == "pending" for row in rows.values())
+    if pending:
+        logger.info("effects awaiting token collection job=%s dependencies=%d", job_id, pending)
 
 
 def reconcile_pending_effects(session, protocol_id=None, limit=25):
-    """Queue targeted effects retries, using durable pending rows as the outbox.
+    """Queue only recorded collection gaps, retaining ordinary job lease recovery."""
+    from services.effects.selection import _MAX_TOKEN_ARG_CANDIDATES, _token_holdings_by_contract
 
-    Call in a short transaction periodically, including after balance publication.
-    No provider calls, internal commits, or dependence on a best-effort callback.
-    """
     now = datetime.now(timezone.utc)
-    usable_fetch = exists(
-        select(ContractBalanceFetch.id).where(
-            ContractBalanceFetch.contract_id == Contract.id,
-            Contract.protocol_id == PendingEffectsWork.protocol_id,
-            ContractBalanceFetch.chain_id == PendingEffectsWork.chain_id,
-            func.lower(ContractBalanceFetch.observed_address) == PendingEffectsWork.deployment_address,
-            ContractBalanceFetch.id > PendingEffectsWork.evidence_generation,
-        )
-    )
     query = select(PendingEffectsWork).where(
-        or_(
-            and_(
-                PendingEffectsWork.state.in_(("pending", "queued")),
-                or_(PendingEffectsWork.next_attempt_at.is_(None), PendingEffectsWork.next_attempt_at <= now),
-                or_(
-                    usable_fetch,
-                    PendingEffectsWork.effect_family == "candidate_selection",
-                    PendingEffectsWork.required_generation > 0,
-                    PendingEffectsWork.state == "queued",
-                    PendingEffectsWork.reason.in_(
-                        (
-                            "resource_cap",
-                            "resume_job_interrupted",
-                            "token_budget",
-                            "probe_incomplete",
-                            "planning_incomplete",
-                            "token_getter_pending",
-                        )
-                    ),
-                ),
-            ),
-            and_(
-                PendingEffectsWork.state.in_(("complete", "degraded")),
-                or_(PendingEffectsWork.state != "complete", PendingEffectsWork.effect_family != "candidate_selection"),
-                usable_fetch,
-            ),
-        )
+        PendingEffectsWork.state.in_(("pending", "queued")),
+        or_(PendingEffectsWork.next_attempt_at.is_(None), PendingEffectsWork.next_attempt_at <= now),
     )
     if protocol_id is not None:
         query = query.where(PendingEffectsWork.protocol_id == protocol_id)
@@ -368,65 +210,30 @@ def reconcile_pending_effects(session, protocol_id=None, limit=25):
     grouped_addresses = {}
     for row in rows:
         grouped_addresses.setdefault((row.protocol_id, row.chain_id), []).append(row.deployment_address)
-    grouped_owners = {
-        key: balance_owners(session, key[0], key[1], addresses) for key, addresses in grouped_addresses.items()
+    owners = {key: balance_owners(session, key[0], key[1], addresses) for key, addresses in grouped_addresses.items()}
+    collected = collected_owners(session, [cid for group in owners.values() for cid in group.values()])
+    holdings = {
+        pid: _token_holdings_by_contract(session, pid, _MAX_TOKEN_ARG_CANDIDATES)
+        for pid in {r.protocol_id for r in rows}
     }
-    owner_by_row = {
-        row.id: grouped_owners[(row.protocol_id, row.chain_id)].get(row.deployment_address.lower()) for row in rows
-    }
-    owner_ids = [cid for cid in owner_by_row.values() if cid is not None]
-    evidence = evidence_inputs(session, owner_ids)
-    generations = accepted_generations(session, owner_ids)
-    fingerprints = inventory_fingerprints(session, owner_ids)
     count = 0
     for row in rows:
+        row.updated_at = now
         if row.queued_job_id:
             job = session.get(Job, row.queued_job_id)
             if job is not None and job.status not in (JobStatus.completed, JobStatus.failed_terminal):
-                row.updated_at = now
                 continue
             row.queued_job_id = None
             row.attempts += 1
             row.reason = "resume_job_interrupted"
             row.state = "degraded" if row.attempts >= MAX_ATTEMPTS else "pending"
             row.next_attempt_at = now + timedelta(minutes=min(60, 2**row.attempts))
-            row.updated_at = now
             continue
-        owner_id = owner_by_row[row.id]
-        generation = generations.get(owner_id, 0)
-        fingerprint = (
-            INVENTORY_INDEPENDENT if row.input_fingerprint == INVENTORY_INDEPENDENT else fingerprints.get(owner_id)
-        )
-        changed = fingerprint != row.input_fingerprint
-        evidence_generation, evidence_fingerprint = evidence_snapshot(evidence, owner_id, row.candidate_tokens)
-        progressed = evidence_fingerprint != row.evidence_fingerprint
-        row.evidence_generation = evidence_generation
-        row.evidence_fingerprint = evidence_fingerprint
-        if row.state in ("complete", "degraded") and not changed and not (row.state == "degraded" and progressed):
-            row.consumed_generation = generation
-            row.updated_at = now
-            continue
-        if changed or (row.state == "degraded" and progressed):
-            row.state = "pending"
-            row.reason = "asset_inputs_changed"
-            row.input_fingerprint = fingerprint
-            row.attempts = 0
-            row.next_attempt_at = None
-        if not generation and row.effect_family != "candidate_selection" and row.reason == "balance_inputs_pending":
-            # Rotate the fair scan without spending an attempt on absent evidence.
-            row.updated_at = now
-            continue
-        if row.next_attempt_at and row.next_attempt_at > now:
-            row.updated_at = now
+        owner_id = owners[(row.protocol_id, row.chain_id)].get(row.deployment_address)
+        if owner_id is None or (owner_id not in collected and not holdings[row.protocol_id].get(owner_id)):
+            row.next_attempt_at = now + timedelta(minutes=1)
             continue
         job_id = uuid.uuid4()
-        request = {
-            "address": row.deployment_address,
-            "chain": chain_by_id(row.chain_id).name,
-            "protocol_id": row.protocol_id,
-            "effects_resume_work_id": row.id,
-            "effects_function_ids": [row.function_id],
-        }
         job = Job(
             id=job_id,
             address=row.deployment_address,
@@ -434,95 +241,21 @@ def reconcile_pending_effects(session, protocol_id=None, limit=25):
             protocol_id=row.protocol_id,
             stage=JobStage.effects,
             status=JobStatus.queued,
-            request=request,
-            detail="Retrying incomplete balance-dependent effects",
+            request={
+                "address": row.deployment_address,
+                "chain": chain_by_id(row.chain_id).name,
+                "protocol_id": row.protocol_id,
+                "effects_resume_work_id": row.id,
+                "effects_function_ids": [row.function_id],
+            },
+            detail="Resuming effects after token collection",
         )
         session.add(job)
-        session.flush([job])  # satisfy the FK before the pending-row update
+        session.flush([job])
         row.queued_job_id = job_id
-        row.required_generation = generation
         row.state = "queued"
-        row.updated_at = now
+        row.next_attempt_at = None
         count += 1
     if count:
         logger.info("effects balance recovery queued=%d protocol_id=%s", count, protocol_id)
     return count
-
-
-def with_relevant_tokens(session, candidate, ctx, covered=(), cache=None):
-    """Resolve function-named token getters on THIS chain/deployment/block.
-
-    This is the same bounded identity operation seeding uses. A source literal,
-    discovery match, or unsolicited unpriced holding is never relevance evidence.
-    Resolved getter identities need no price or present positive balance: future
-    deposits and minting remain valid security questions.
-    """
-    from eth_utils.crypto import keccak
-
-    from services.effects.calldata.facts import load_contract_facts, resolve_function
-    from services.effects.calldata.seeding import input_token_hints
-    from services.effects.seeding import budget_of
-    from services.effects.simulate import SimCall
-
-    cache = cache if cache is not None else {}
-    facts = load_contract_facts(session, candidate.contract_address)
-    fn = resolve_function(facts, candidate.selector) if facts is not None else None
-    required = set(h for h in input_token_hints(fn, include_default_asset=False) if h.endswith("()")) if fn else set()
-    getters = tuple(h for h in input_token_hints(fn) if h.endswith("()")) if fn else ()
-    key = (ctx.chain_id, candidate.probe_target.lower(), ctx.block, getters, tuple(sorted(required)))
-    cached = cache.get(key)
-    if cached is None:
-        relevant = []
-        incomplete = False
-        budget = budget_of(ctx.effective_seeder())
-        permitted = not getters or (
-            budget.take_identity(candidate.probe_target) if budget is not None else len(cache) < 8
-        )
-        if getters and ctx.block > 0 and permitted:
-            calls = [SimCall(to=candidate.probe_target, data="0x" + keccak(text=sig)[:4].hex()) for sig in getters[:8]]
-            incomplete = bool(required - set(getters[:8]))
-            try:
-                if ctx.on_requests:
-                    ctx.on_requests(1)
-                if ctx.simulate_supported:
-                    results = ctx.simulate(calls, hex(ctx.block), None).calls
-                elif getattr(ctx, "call_batch", None) is not None:
-                    results = ctx.call_batch([{"to": c.to, "data": c.data} for c in calls], hex(ctx.block))
-                else:
-                    results = ()
-                for index, sig in enumerate(getters[:8]):
-                    item = results[index] if index < len(results) else None
-                    raw = item.return_data.removeprefix("0x") if item else ""
-                    try:
-                        valid = bool(
-                            item and item.success and len(raw) == 64 and int(raw[:24], 16) == 0 and int(raw[24:], 16)
-                        )
-                    except ValueError:
-                        valid = False
-                    if valid:
-                        relevant.append("0x" + raw[24:].lower())
-                    elif sig in required:
-                        incomplete = True
-            except Exception:
-                incomplete = bool(required)
-                logger.info(
-                    "effects token getter unavailable chain=%s deployment=%s", ctx.chain_id, candidate.probe_target
-                )
-        elif getters:
-            incomplete = bool(required)
-        cache[key] = (relevant, incomplete)
-    else:
-        relevant, incomplete = cached
-    arbitrary_inputs = (
-        [*candidate.input_token_addresses, *sorted(covered)] if needs_token_inventory(session, candidate) else []
-    )
-    tokens = list(dict.fromkeys([*relevant, *arbitrary_inputs]))
-    untried = [t for t in tokens if t not in covered]
-    # A regular analysis with all identities covered still has normal useful inputs.
-    selected = (untried or tokens)[:1]
-    return replace(
-        candidate,
-        input_token_addresses=tuple(selected),
-        deferred_token_addresses=tuple(untried[1:]),
-        token_inputs_pending=incomplete,
-    )

@@ -561,9 +561,6 @@ class TvlSnapshot(Base):
     )
     source: Mapped[str] = mapped_column(String(20), nullable=False, default="on_chain")
 
-    external_slug: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    external_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    external_retrieved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     holdings_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     holdings_partial: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     valuation_partial: Mapped[bool | None] = mapped_column(Boolean, nullable=True)

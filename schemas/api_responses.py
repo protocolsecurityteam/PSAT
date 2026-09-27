@@ -82,15 +82,9 @@ class JobStageTimingsResponse(TypedDict):
 
 
 class TvlSummary(TypedDict):
-    semantics_version: str
-    holdings_scope: str
     holdings_observed_at: str | None
     holdings_partial: bool | None
     valuation_partial: bool | None
-    external_source: str | None
-    external_slug: str | None
-    external_observed_at: str | None
-    external_retrieved_at: str | None
     total_usd: float | None
     defillama_tvl: float | None
     source: str | None

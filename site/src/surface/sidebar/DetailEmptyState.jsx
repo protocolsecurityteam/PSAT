@@ -253,8 +253,8 @@ export function DetailEmptyState({
   }
 
   const tvl = companyData.tvl || null;
-  const tvlUsd = tvl?.total_usd ?? null;
-  const externalTvl = tvl?.defillama_tvl ?? null;
+  const tvlUsd = tvl ? (tvl.total_usd ?? tvl.defillama_tvl ?? null) : null;
+  const tvlSource = tvl && tvl.total_usd == null && tvl.defillama_tvl != null ? "DefiLlama" : "tracked";
   const reports = projection?.posture?.reportsOnFile ?? null;
 
   return (
@@ -345,26 +345,20 @@ export function DetailEmptyState({
         </div>
       </div>
 
-      {(tvlUsd != null || externalTvl != null || tops.length > 0) && (
+      {(tvlUsd != null || tops.length > 0) && (
         <div className="ps-glance-card">
           {tvlUsd != null && (
             <div className="ps-glance-vhead">
               <span className="ps-glance-tvl">{formatUsd(tvlUsd) || "$0.00"}</span>
               <span className="ps-glance-vsrc">
-                {["Gross tracked holdings", tvl?.holdings_partial !== false ? "coverage partial/unknown" : null, tvl?.valuation_partial !== false ? "valuation partial/unknown" : null, tvl?.holdings_observed_at ? shortDate(tvl.holdings_observed_at) : "observation time unknown"]
+                {["TVL", tvlSource,
+                  tvlSource === "tracked" && tvl?.holdings_partial !== false ? "coverage partial/unknown" : null,
+                  tvlSource === "tracked" && tvl?.valuation_partial !== false ? "valuation partial/unknown" : null,
+                  tvlSource === "tracked"
+                    ? (tvl?.holdings_observed_at ? shortDate(tvl.holdings_observed_at) : "observation time unknown")
+                    : (tvl?.timestamp ? shortDate(tvl.timestamp) : null)]
                   .filter(Boolean)
                   .join(" · ")}
-              </span>
-            </div>
-          )}
-          {externalTvl != null && (
-            <div className="ps-glance-vhead">
-              <span className="ps-glance-tvl">{formatUsd(externalTvl) || "$0.00"}</span>
-              <span className="ps-glance-vsrc">
-                {["External TVL · DefiLlama", tvl?.external_slug || "series unknown",
-                  tvl?.external_observed_at ? shortDate(tvl.external_observed_at) : "upstream time unknown",
-                  tvl?.external_retrieved_at ? `retrieved ${shortDate(tvl.external_retrieved_at)}` : null]
-                  .filter(Boolean).join(" · ")}
               </span>
             </div>
           )}

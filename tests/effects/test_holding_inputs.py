@@ -93,3 +93,24 @@ def test_priced_holdings_are_offered_as_input_tokens_in_value_order(db_session):
     db_session.flush()
 
     assert _token_holdings_by_contract(db_session, p.id, 10) == {c.id: (large.lower(), small.lower())}
+
+
+@requires_postgres
+def test_selected_candidates_keep_two_priced_tokens_and_resource_cap(db_session):
+    p = _protocol(db_session, "original-analysis-caps")
+    deployment = ADDR(0x5401)
+    c = _contract(db_session, p.id, deployment)
+    for i in range(3):
+        fn = _fn(db_session, c.id, name=f"withdraw{i}", selector=f"0xdd00001{i}", effect_targets=["S"])
+        _principal(db_session, fn.id, ADDR(0x5499))
+    fetch = _fetch(db_session, c, observed=deployment)
+    for token, usd in [(ADDR(0x5411), 1000), (ADDR(0x5412), 100), (ADDR(0x5413), 10), (ADDR(0x5414), None)]:
+        _row(db_session, c, fetch, token, usd, observed=deployment)
+    db_session.flush()
+    funnel = {}
+    candidates = select_candidates(db_session, p.id, resource_cap=1, funnel=funnel)
+    assert len(candidates) == 1
+    assert candidates[0].input_token_addresses == (ADDR(0x5411).lower(), ADDR(0x5412).lower())
+    assert len(candidates[0].value_holders) == 4  # Holdings evidence retains unpriced assets.
+    assert funnel["cap_dropped"] == 2
+    assert "deferred_candidates" not in funnel
