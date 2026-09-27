@@ -968,7 +968,7 @@ describe("ScoreBand — independent security score", () => {
     const { container } = renderBand({ score });
     expect(screen.getByText("79.4")).toBeInTheDocument();
     expect(screen.getByText(/confidence 23.0%/)).toBeInTheDocument();
-    expect(screen.getByText("dollar exposure not measured")).toBeInTheDocument();
+    expect(container.querySelector(".sc-grade-stats .sc-v")).toHaveTextContent("not determined");
     expect(screen.queryByText("The grade is withheld.")).toBeNull();
     expect(container.querySelector(".sc-ledger-bar")).toBeTruthy();
     await openBreakdown();
@@ -977,13 +977,5 @@ describe("ScoreBand — independent security score", () => {
     expect(container.querySelector(".sc-shield")).toBeNull();
   });
 
-  it("labels the holdings scope and incomplete freshness without claiming a cap", async () => {
-    const first = { ...ETHERFI.findings[0], value_at_stake_bound_direction: "not_determined",
-      reach_sheet_ceiling_magnitudes: [{ value_scope: "observed_own_holdings",
-        asset_list_proven_whole: false, observation_fresh: false, bound_direction: "not_determined" }] };
-    renderBand({ score: { ...ETHERFI, findings: [first] } });
-    await openBreakdown();
-    expect(screen.getByText("Observed own holdings · coverage incomplete · freshness not established")).toBeInTheDocument();
-    expect(screen.getByTitle(/future deposits and assets elsewhere/)).toBeInTheDocument();
-  });
+
 });

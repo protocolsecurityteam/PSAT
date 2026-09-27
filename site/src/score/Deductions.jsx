@@ -22,23 +22,6 @@ function SheetDispositionBadge({ disposition }) {
   );
 }
 
-function HoldingsScope({ finding }) {
-  const observations = (finding?.reach_sheet_ceiling_magnitudes || [])
-    .filter((entry) => entry?.value_scope === "observed_own_holdings");
-  if (observations.length === 0) return null;
-  const coverageIncomplete = observations.some((entry) =>
-    entry.asset_list_proven_whole !== true || entry.assets_not_priced?.length > 0 ||
-    entry.unpriced_positions > 0 || entry.typed_receipts_unresolved > 0);
-  const freshnessUnknown = observations.some((entry) => entry.observation_fresh !== true);
-  return (
-    <span className="sc-fl" title="Observed holdings at the controlled contract; future deposits and assets elsewhere are outside this figure.">
-      Observed own holdings
-      {coverageIncomplete ? " · coverage incomplete" : ""}
-      {freshnessUnknown ? " · freshness not established" : ""}
-    </span>
-  );
-}
-
 function DeductionRow({ row, onSelect }) {
   const { value } = row;
   return (
@@ -76,7 +59,6 @@ function DeductionRow({ row, onSelect }) {
         ) : (
           <span className="sc-nd">value not determined</span>
         )}
-        <HoldingsScope finding={row.finding} />
         <SheetDispositionBadge disposition={row.sheetDisposition} />
       </span>
     </div>
