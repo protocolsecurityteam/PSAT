@@ -136,18 +136,10 @@ def _asset_coverage(value_plane: P.ValuePlane, canonical: str) -> dict[str, Any]
     account: the plane reduces observations to the latest per (entity, asset) at
     load, so those are gone by the time this runs and are not claimed.
 
-    Two conjuncts of ``complete`` are about the LIST rather than the readings on
-    it, and both are asked because a per-reading answer cannot reach them:
-
-    * a list read AT the endpoint's page cap can never be complete. The stored
-      rows are a prefix of the holdings, so every one of them being answered
-      says nothing about the entries the page never reached.
-    * a DISPOSED reading does not extend coverage over the list. A disposition
-      says one asset's contribution is nil; it does not say the list is whole,
-      and reading it as though it did is how a sheet assembled from a
-      third-party page would come to publish a full-coverage upper bound. So a
-      sheet carrying any disposed asset must have its list separately proven —
-      by the chain's own transfer history — before it clears here.
+    A complete inventory requires positive coverage evidence, resolved prices
+    and positions, and fresh balance and quote observations. A short provider
+    page alone does not establish coverage. Partial observations remain useful
+    for the separately scoped code-control valuation.
     """
     values = value_plane.per_asset.get(canonical) or {}
     states = value_plane.per_asset_state.get(canonical) or {}
@@ -191,10 +183,13 @@ def _asset_coverage(value_plane: P.ValuePlane, canonical: str) -> dict[str, Any]
         # conjunct is one the sentence beside it cannot name.
         "asset_list_proven_whole": list_is_whole,
         "unpriced_positions": len(positions),
+        "typed_receipts_unresolved": len(value_plane.unresolved_typed_receipts(canonical)),
+        "observation_fresh": canonical in value_plane.fresh_entities,
         "complete": bool(names)
         and not not_priced
         and not disposed
         and not positions
+        and not value_plane.unresolved_typed_receipts(canonical)
         and list_is_whole
         and canonical in value_plane.fresh_entities,
     }
@@ -234,7 +229,7 @@ def _reconcile_sheet_ceilings(
     for entity in sorted(ceiling_kinds):
         if ceiling_kinds[entity] != CEILING_KIND_SHEET:
             continue
-        usd, reason = P.ceiling_for(value_plane, entity)
+        usd, reason = P.observed_holdings_for(value_plane, entity)
         if usd is not None and _round_published(per_entity[entity]) == _round_published(usd):
             continue
         del ceiling_kinds[entity]
@@ -378,8 +373,8 @@ _CEILING_KIND_CLAUSES = {
         "reach_composed_magnitudes[])"
     ),
     CEILING_KIND_SHEET: (
-        "priced from a SHEET CEILING — the controlled node's own priced holdings, which bound "
-        "from above what replacing that node's code can move at it (see "
+        "valued from the controlled node's observed own holdings, with coverage and freshness "
+        "published separately (see "
         "reach_sheet_ceiling_magnitudes[])"
     ),
 }
@@ -391,8 +386,8 @@ _CEILING_KIND_CLAUSES = {
 _CEILING_KIND_BOUNDS = {
     CEILING_KIND_COMPOSED: "Each composed figure bounds ONE call to the destination function",
     CEILING_KIND_SHEET: (
-        "Each sheet figure bounds what replacing ONE node's code can move AT THAT NODE, and "
-        "nothing about what that node in turn governs"
+        "Each complete fresh sheet figure bounds only that node's holdings at the observations; "
+        "future deposits, mint authority and downstream assets are outside that scope"
     ),
 }
 
@@ -605,7 +600,7 @@ def _sheet_ceiling_records(
     """
     records: list[dict[str, Any]] = []
     for entity in sorted(sheet_ceilings):
-        usd, reason = P.ceiling_for(value_plane, entity)
+        usd, reason = P.observed_holdings_for(value_plane, entity)
         coverage = _asset_coverage(value_plane, entity)
         complete = coverage.pop("complete")
 
@@ -631,6 +626,7 @@ def _sheet_ceiling_records(
                 "sheet_state": value_plane.sheet_state(entity),
                 "ceiling_reason": reason,
                 "bound_direction": (BOUND_DIRECTION_CEILING if complete else BOUND_DIRECTION_NOT_DETERMINED),
+                "value_scope": "observed_own_holdings",
                 "bound_direction_basis": _sheet_ceiling_direction_basis(coverage, complete),
                 # What proves the asset list this figure is summed over is the
                 # WHOLE list, carried from the observation record rather than
@@ -731,9 +727,8 @@ def _ceiling_untightened(
             )
     if sheet_ceilings:
         parts.append(
-            f"each of the {len(sheet_ceilings)} sheet figure(s) is that node's WHOLE priced sheet, and "
-            "nothing here witnesses that replaced code reaches every asset on it — an accounting "
-            "entry, or a balance another contract holds, is inside the sheet and outside the move"
+            f"the {len(sheet_ceilings)} holdings figure(s) value observed assets at controlled nodes; "
+            "no call demonstrated extracting those amounts, and other assets and times are outside the scope"
         )
     return "and nothing here tightens it: " + "; ".join(parts)
 
@@ -794,8 +789,8 @@ def _ceiling_bearing_basis(
                 + _ceiling_source_phrase(composed_ceilings, sheet_ceilings, all_of_them=True)
                 + "; no instance is not_determined, no entity holds assets the priced sheet does not "
                 "cover, and no hop of this row was left undetermined or withheld behind one — so "
-                "nothing this row reaches is missing from the sum and the total bounds this "
-                "principal from ABOVE. " + _ceiling_bound_phrase(composed_ceilings, sheet_ceilings)
+                "the total bounds only the stated observation scopes. "
+                + _ceiling_bound_phrase(composed_ceilings, sheet_ceilings)
             )
             + (f"; {len(proven_no_reach)} instance(s) proven_no_reach" if proven_no_reach else "")
             + scoped
@@ -812,6 +807,9 @@ def _ceiling_bearing_basis(
         missing.append(clause)
     if partially_priced:
         missing.append(f"{len(partially_priced)} entity(ies) holding assets the priced sheet does not cover")
+    incomplete_observations = sum(not _asset_coverage(value_plane, key)["complete"] for key in sheet_ceilings)
+    if incomplete_observations:
+        missing.append(f"{incomplete_observations} holdings observation(s) lack a complete fresh inventory")
     if hops_not_determined:
         missing.append(f"{len(hops_not_determined)} hop(s) not_determined withholding reach")
     behind = withheld_behind_hops.get("entities") or 0
@@ -824,8 +822,9 @@ def _ceiling_bearing_basis(
     basis = (
         f"bounded in NEITHER direction: {counted} "
         + _ceiling_source_phrase(composed_ceilings, sheet_ceilings, all_of_them=False)
-        + " — a ceiling does not become a floor "
-        f"by being summed, {untightened}; " + ", ".join(missing) + " leave the sum short of a ceiling on the row too"
+        + f"; the figures retain their individual scopes, {untightened}; "
+        + ", ".join(missing)
+        + " prevent a bound on the row total"
     )
     if proven_no_reach:
         basis += f"; {len(proven_no_reach)} instance(s) proven_no_reach"
@@ -1050,9 +1049,9 @@ def _sheet_ceiling_totals_reading(
         + disagreement
         + "."
         + buckets
-        + ". The dollars are an AT-MOST and never an amount: they bound what replacing each "
-        "node's code can move AT THAT NODE, they say nothing about what those nodes in turn "
-        "govern, and they are deliberately outside exposure_usd — an upper bound on a move "
-        "nobody witnessed is not expected loss, and charging one would displace a row that "
-        "measured a real extraction. They must never be rendered as dollars at risk"
+        + ". These dollars value observed holdings at controlled nodes. Only records with "
+        "complete fresh coverage establish a bound, scoped to those holdings at their observations. "
+        "Partial or stale records do not bound current holdings. Future deposits and assets "
+        "elsewhere are outside the scope. The figures do not measure extraction and remain "
+        "outside exposure_usd; economic overlap between different entities is not resolved here"
     )

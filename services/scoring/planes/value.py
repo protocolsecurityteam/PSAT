@@ -349,6 +349,23 @@ def ceiling_for(plane: ValuePlane, key: str) -> tuple[float | None, str]:
     return plane.total(key), CEILING_ADMITTED
 
 
+def observed_holdings_for(plane: ValuePlane, key: str) -> tuple[float | None, str]:
+    """Price the observed portion of a controlled node's own holdings.
+
+    Positive observations remain useful when inventory or freshness is unknown.
+    They do not establish an upper bound on the full capability. Only the
+    stricter bound predicate can admit zero: missing assets must not become a
+    claim that there is nothing at risk.
+    """
+    key = plane.canonical(key)
+    if key in plane.alias_ambiguous:
+        return None, CEILING_ALIAS_AMBIGUOUS
+    total = plane.total(key)
+    if total is not None and total > 0:
+        return total, CEILING_ADMITTED
+    return ceiling_for(plane, key)
+
+
 _EPOCH = datetime.min
 
 # Every counter the reduction publishes, so a rule that never fired reports a

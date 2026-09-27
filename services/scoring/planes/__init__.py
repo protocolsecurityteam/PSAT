@@ -522,6 +522,9 @@ from services.scoring.planes.value import (
 from services.scoring.planes.value import (
     load_value_plane as load_value_plane,
 )
+from services.scoring.planes.value import (
+    observed_holdings_for as observed_holdings_for,
+)
 
 __all__ = [
     "ACT_AS_CALL_SITE_GATE_NOT_DELEGATED",
@@ -645,6 +648,7 @@ __all__ = [
     "ValuePlane",
     "authority_deletability",
     "ceiling_for",
+    "observed_holdings_for",
     "load_act_as_plane",
     "load_audit_posture",
     "discovery_relation_entities",

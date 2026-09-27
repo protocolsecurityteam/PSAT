@@ -275,8 +275,16 @@ def test_score_document_grade_and_confidence_are_determined_together():
         provenance={},
     )
     assert doc.document()["model_version"] == MODEL_VERSION
+    from dataclasses import replace
 
-    with pytest.raises(ValueError, match="together"):
+    independent = replace(doc, grade_exposure=None)
+    assert independent.grade_lambda == -30.0
+    assert independent.confidence_pct == 71.0
+    assert independent.document()["grade_exposure"] is None
+    with pytest.raises(ValueError, match="no headline numbers"):
+        replace(independent, grade_state=GRADE_STATE_NOT_DETERMINED)
+
+    with pytest.raises(ValueError, match="requires lambda and confidence"):
         ScoreDocument(
             protocol_id=1,
             model_version=MODEL_VERSION,
@@ -719,6 +727,15 @@ def test_score_grade_pairing_is_enforced(db_session, scoring_protocol):
         )
     )
     db_session.commit()
+
+
+def test_computed_security_score_can_persist_unknown_exposure(db_session, scoring_protocol):
+    row = _score(scoring_protocol, grade_exposure=None)
+    db_session.add(row)
+    db_session.commit()
+    assert row.grade_lambda is not None
+    assert row.confidence_pct is not None
+    assert row.grade_exposure is None
 
 
 @pytest.mark.usefixtures("scoring_protocol")

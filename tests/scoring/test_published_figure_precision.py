@@ -100,8 +100,12 @@ def test_subcent_holdings_are_preserved_as_context_without_capping_upgrade(fold)
     plane = value_plane({KEY_C: {"usdc": SUB_CENT_SHEET}}, per_asset_state={KEY_C: {"usdc": P.ASSET_PRICED}})
     finding = _cc_row(fold([_code_control_signal()], principals={1: facts(1, EOA, "eoa")}, value=plane))
     assert plane.total(KEY_C) == SUB_CENT_SHEET
-    assert finding["reach_sheet_ceiling_magnitudes"] == []
-    assert finding["value_at_stake_usd"] is None
+    [observation] = finding["reach_sheet_ceiling_magnitudes"]
+    assert observation["published_usd"] == SUB_CENT_SHEET
+    assert observation["value_scope"] == "observed_own_holdings"
+    assert observation["bound_direction"] == FOLD.BOUND_DIRECTION_NOT_DETERMINED
+    assert finding["value_at_stake_usd"] == SUB_CENT_SHEET
+    assert finding["value_at_stake_bound_direction"] == FOLD.BOUND_DIRECTION_NOT_DETERMINED
     assert FOLD._round_published(SUB_CENT_SHEET) == SUB_CENT_SHEET
     assert FOLD._round_published(1234.5678) == 1234.57
 

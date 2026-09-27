@@ -522,9 +522,10 @@ def signal_from_row(row: Any) -> FunctionSignal:
 class ScoreDocument:
     """What a fold emits and ``protocol_scores`` persists.
 
-    ``grade`` and ``exposure`` are undetermined together with ``confidence_pct``
-    — a grade with no confidence is not a grade — which is why one
-    ``grade_state`` covers all three, matching ``ck_protocol_scores_grade_pairing``.
+    ``grade_state`` describes the security score and its confidence. A computed
+    score can have unknown dollar exposure; ``grade_exposure`` is independently
+    nullable. An undetermined security score carries no headline numbers.
+    This matches ``ck_protocol_scores_grade_pairing``.
 
     ``model_parameters`` travels with every document rather than being read from
     code at display time: two scores are only comparable against the constants
@@ -579,9 +580,11 @@ class ScoreDocument:
         _check_member("trigger", self.trigger, SCORE_TRIGGERS)
         _check_member("perimeter_state", self.perimeter_state, PERIMETER_STATES)
         _check_member("grade_state", self.grade_state, GRADE_STATES)
-        determined = (self.grade_lambda, self.grade_exposure, self.confidence_pct)
-        if (self.grade_state == GRADE_STATE_COMPUTED) != all(v is not None for v in determined):
-            raise ValueError("grade, exposure and confidence are determined together or not at all")
+        if self.grade_state == GRADE_STATE_COMPUTED:
+            if self.grade_lambda is None or self.confidence_pct is None:
+                raise ValueError("a computed security score requires lambda and confidence")
+        elif any(value is not None for value in (self.grade_lambda, self.grade_exposure, self.confidence_pct)):
+            raise ValueError("an undetermined security score carries no headline numbers")
 
     def document(self) -> dict[str, Any]:
         """The JSONB payload persisted to ``protocol_scores.findings``.

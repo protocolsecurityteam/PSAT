@@ -30,7 +30,7 @@ def test_indexed_priced_subset_is_context_not_a_hard_bound():
     assert value.trimming_total(KEY) is None
 
 
-def test_even_complete_current_sheet_does_not_bound_future_upgrade_capability():
+def test_complete_current_sheet_values_own_code_control_scope():
     value = plane()
     value.asset_set_proven_complete[KEY] = {"source": "explicit_test_witness"}
     assert P.ceiling_for(value, KEY) == (100, P.CEILING_ADMITTED)
@@ -40,8 +40,8 @@ def test_even_complete_current_sheet_does_not_bound_future_upgrade_capability():
         )
     )
     usd, reason = _sheet_ceiling(instance, KEY, value)
-    assert usd is None
-    assert "capability_scope_not_proven" in reason
+    assert usd == 100
+    assert "code_control_sheet_ceiling" in reason
     assert value.trimming_total(KEY) is None
     assert value.trimming_total(KEY, current_holdings_only=True) == 100
 

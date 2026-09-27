@@ -31,6 +31,6 @@ def test_priced_holdings_do_not_answer_the_magnitude_question(fold):
         assert census["sheet_ceiling_by_capability"] == {}
         assert census["by_capability"]["upgrade.implementation"] == [0, 1]
         provenance = document.provenance["sheet_ceilings"]
-        assert provenance["entities_priced_from_a_sheet_ceiling"] == 0
+        assert provenance["entities_priced_from_a_sheet_ceiling"] == (1 if dollars else 0)
         assert provenance["signals_credited_in_confidence"] == 0
-        assert provenance["entities_by_capability"] == {}
+        assert provenance["entities_by_capability"] == ({"upgrade.implementation": 1} if dollars else {})

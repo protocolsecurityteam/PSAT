@@ -61,7 +61,10 @@ _CREDIT_PATH_CLAUSES = {
         "which carries an act-as witness — the same kind of answer reached through one more "
         "join, itemised per row under reach_composed_magnitudes"
     ),
-    CREDIT_PATH_SHEET_CEILING: "retired sheet-only attribution (no confidence credit)",
+    CREDIT_PATH_SHEET_CEILING: (
+        "a complete, freshly priced inventory of the controlled node's own holdings; "
+        "the bound covers those holdings and excludes future deposits and external assets"
+    ),
 }
 
 
@@ -75,7 +78,7 @@ def _credit_path_reading(counts: dict[str, int]) -> str:
     """
     parts = [f"{counts.get(path, 0)} from {clause}" for path, clause in _CREDIT_PATH_CLAUSES.items()]
     return (
-        "call and composed witnesses supply answers; retired sheet-only attribution receives no credit: "
+        "call witnesses, composed witnesses and complete fresh holdings bounds supply scoped answers: "
         + "; ".join(parts)
         + ". They are not equally strong and are counted apart so a consumer can subtract "
         "whichever of them it does not want to credit"
@@ -152,9 +155,9 @@ def _confidence(
 
     ``ceiling_signals`` is the fold's OTHER answer to the magnitude question and
     the THIRD credit path: the signals whose controlled node was priced from its
-    own SHEET. It is consumed exactly as the fold built it and is never
-    re-derived here — a second derivation of "which signals got an answer" is
-    precisely what drifts from the rows that publish one.
+    own SHEET. The fold supplies the standing signal population; only complete,
+    fresh inventories earn magnitude credit. Partial or stale observations still
+    value findings, but leave the full magnitude question unanswered.
 
     What that population IS matters as much as that it is credited. It is
     per-entity and STANDING: the signals whose sheet ceiling is the figure the
@@ -299,7 +302,12 @@ def _confidence(
             own = _gate(signal, "reach_magnitude_usd").is_determined
             identity = _signal_identity(signal)
             by_composition = not own and identity in (composed_signals or set())
-            by_ceiling = False  # Present holdings do not bound generic capability scope.
+            by_ceiling = (
+                not own
+                and not by_composition
+                and identity in (ceiling_signals or set())
+                and P.ceiling_for(value_plane, key)[0] is not None
+            )
             magnitude[key][1] += 1
             magnitude_census[signal.claim_id][1] += 1
             if own or by_composition or by_ceiling:

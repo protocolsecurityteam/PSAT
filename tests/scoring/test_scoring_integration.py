@@ -1540,3 +1540,26 @@ def test_targeted_signal_distillation_rejects_contracts_outside_job_protocol(fx)
         distill_job_signals(fx.session, other_job, contract_ids=[contract.id])
     with pytest.raises(ValueError, match="must exist in the recovery job's protocol"):
         distill_job_signals(fx.session, fx.job, contract_ids=[-1])
+
+
+def test_computed_security_score_api_preserves_unknown_exposure(fx, api_client):
+    document = _document(
+        fx.protocol.id,
+        grade_state=GRADE_STATE_COMPUTED,
+        grade_lambda=79.39,
+        confidence_pct=23.0,
+        grade_exposure=None,
+        findings=[{"capability": "upgrade.implementation", "net_points_lambda": 20.61, "exposure_usd": None}],
+        provenance={"exposure_usd": None},
+    )
+    persist_score_document(fx.session, document)
+    fx.session.commit()
+    response = api_client.get(f"/api/company/{fx.protocol.name}/score")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["grade_state"] == GRADE_STATE_COMPUTED
+    assert body["grade_lambda"] == 79.39
+    assert body["confidence_pct"] == 23.0
+    assert body["grade_exposure"] is None
+    assert body["provenance"]["exposure_usd"] is None
+    assert body["findings"][0]["exposure_usd"] is None

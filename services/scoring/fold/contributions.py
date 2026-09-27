@@ -480,11 +480,10 @@ def _entity_contribution(
 
 
 def _sheet_ceiling(instance: _Instance, key: str, value_plane: P.ValuePlane) -> tuple[float | None, str | None]:
-    """Keep generic code-control findings unquantified by present holdings.
+    """Value observed own holdings under proven code control.
 
-    A present balance sheet cannot bound the complete capability: upgrades may
-    affect future deposits, minting and assets held elsewhere. No current signal
-    carries the narrower scope needed to apply a current-holdings bound.
+    The record separately discloses coverage and freshness. The amount is scoped
+    to observed holdings; future deposits and downstream assets are outside it.
     """
     if instance.signal.claim_id not in K.CODE_CONTROL_CAPABILITIES:
         return None, None
@@ -492,10 +491,10 @@ def _sheet_ceiling(instance: _Instance, key: str, value_plane: P.ValuePlane) -> 
     canonical = value_plane.canonical(key)
     if canonical != value_plane.canonical(controlled):
         return None, None
-    # Generic code control also reaches future deposits and external assets.
-    # No existing signal proves its complete capability is limited to the
-    # balances observed here, so preserve the finding without a sheet cap.
-    return None, f"{SHEET_CEILING_REFUSED_PREFIX}capability_scope_not_proven)"
+    usd, reason = P.observed_holdings_for(value_plane, canonical)
+    if usd is not None:
+        return usd, f"code_control_sheet_ceiling({reason}) x entity_holdings"
+    return None, f"{SHEET_CEILING_REFUSED_PREFIX}{reason})"
 
 
 def _state_word(state: str) -> str:

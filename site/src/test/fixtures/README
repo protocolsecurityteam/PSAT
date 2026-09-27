@@ -6,5 +6,7 @@ score_etherfi.json remains the legacy 1.4.1 document for backward-compatible
 reader regressions; the original analysis inputs are unavailable here.
 score_current_synthetic.json is generated through the current fold with explicit
 synthetic inputs (not an Etherfi replay). It preserves an upgrade finding with
-$2M observed holdings while withholding unsupported dollar magnitude and score.
+$2M observed holdings with a numeric security score/confidence and separately unknown dollar exposure.
+Its holdings amount is scoped to observed own holdings, with incomplete coverage
+and freshness explicitly recorded; it is not a claim about future assets.
 Regenerate using: .venv/bin/python -m tests.regenerate_current_score_fixture
