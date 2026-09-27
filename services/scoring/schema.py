@@ -476,6 +476,18 @@ def signal_from_row(row: Any) -> FunctionSignal:
         if row.destination_state == NOT_DETERMINED
         else Tri.proven(row.destination_state, str(row.destination_shape))
     )
+    gate_inputs = dict(row.gate_inputs or {})
+    value_state, value_bound = row.value_state, row.value_bound
+    value_keys = tuple(row.value_entity_keys or ())
+    legacy_holdings = str(row.value_basis or "").startswith(
+        ("observed_reach_value_usd", "observed_reach_floor_usd", "observed_reach_priced_usd")
+    )
+    if legacy_holdings:
+        gate_inputs["reach_magnitude_usd"] = Tri[float].not_determined().to_json()
+        if value_state == "proven_no_reach" or str(row.value_basis).startswith("observed_reach_floor_usd"):
+            value_state, value_bound, value_keys = "not_determined", "not_determined", ()
+        elif value_state == "proven_reach":
+            value_bound = "floor"
     return FunctionSignal(
         job_id=row.job_id,
         protocol_id=row.protocol_id,
@@ -492,15 +504,16 @@ def signal_from_row(row: Any) -> FunctionSignal:
         authority_openness=row.authority_openness,
         principal_state=row.principal_state,
         principal_refs=tuple(PrincipalRef.from_json(r) for r in (row.principal_refs or ())),
-        value_state=row.value_state,
-        value_bound=row.value_bound,
-        value_entity_keys=tuple(row.value_entity_keys or ()),
+        value_state=value_state,
+        value_bound=value_bound,
+        value_entity_keys=value_keys,
         value_basis=row.value_basis,
         destination=destination,
         reach_gate_state=row.reach_gate_state,
-        gate_inputs=dict(row.gate_inputs or {}),
+        gate_inputs=gate_inputs,
         citations=tuple(row.citations or ()),
-        witness_notes=tuple(row.witness_notes or ()),
+        witness_notes=tuple(row.witness_notes or ())
+        + (("legacy_holdings_magnitude_withheld",) if legacy_holdings else ()),
         effect_verdict_id=row.effect_verdict_id,
     )
 

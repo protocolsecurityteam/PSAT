@@ -229,7 +229,7 @@ def test_value_states_are_three_and_bounds_require_a_proven_reach():
         value_state=VALUE_STATE_PROVEN_REACH,
         value_entity_keys=("ethereum::0x1",),
         value_bound=VALUE_BOUND_FLOOR,
-        value_basis="observed_reach_floor_usd",
+        value_basis="observed_outgoing_transfers(magnitude_not_determined)",
     )
     assert reached.value_bound == VALUE_BOUND_FLOOR
 
@@ -418,7 +418,7 @@ def test_signal_three_states_round_trip(db_session, scoring_protocol):
                 value_state=VALUE_STATE_PROVEN_REACH,
                 value_entity_keys=["ethereum::0xvault"],
                 value_bound=VALUE_BOUND_FLOOR,
-                value_basis="observed_reach_floor_usd",
+                value_basis="observed_outgoing_transfers(magnitude_not_determined)",
             ),
             _row(
                 fx,
@@ -1001,7 +1001,7 @@ def test_signal_row_seam_round_trips_all_three_states(db_session, scoring_protoc
             value_state=VALUE_STATE_PROVEN_REACH,
             value_entity_keys=(entity_key("ethereum", "0xVAULT"),),
             value_bound=VALUE_BOUND_FLOOR,
-            value_basis="observed_reach_floor_usd",
+            value_basis="observed_outgoing_transfers(magnitude_not_determined)",
             destination=Tri.proven(DESTINATION_STATE_NOT_APPLICABLE, DESTINATION_SHAPE_NOT_APPLICABLE),
             gate_inputs={"pause_effective": Tri.proven(SEVERITY_STATE_PROVEN, True).to_json()},
             citations=({"field": "observed_reach_floor_usd"},),

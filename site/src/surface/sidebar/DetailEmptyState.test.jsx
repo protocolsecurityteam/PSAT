@@ -182,3 +182,20 @@ describe("DetailEmptyState — freshness and value", () => {
     expect(screen.getByText("$3.2B")).toBeInTheDocument();
   });
 });
+
+
+describe("balance evidence coverage", () => {
+  it("shows incomplete dependent analysis even if jobs have completed", () => {
+    renderPanel({companyData: companyData({analysis_pending_balance_effects: {incomplete: 3, degraded: 1}})});
+    expect(screen.getByRole("status")).toHaveTextContent("3 balance-dependent analysis checks incomplete");
+    expect(screen.getByRole("status")).toHaveTextContent("1 await recovery after retries");
+  });
+  it("shows gross holdings and external TVL separately, preserving measured zero", () => {
+    renderPanel({companyData: companyData({tvl: {total_usd: 0, defillama_tvl: 1000000,
+      external_slug: "protocol-series", holdings_partial: true, valuation_partial: true}})});
+    expect(screen.getByText("$0.00")).toBeInTheDocument();
+    expect(screen.getByText(/Gross tracked holdings/)).toBeInTheDocument();
+    expect(screen.getByText(/External TVL · DefiLlama/)).toBeInTheDocument();
+    expect(screen.getByText(/protocol-series/)).toBeInTheDocument();
+  });
+});

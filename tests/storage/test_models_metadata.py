@@ -11,13 +11,14 @@ from __future__ import annotations
 
 from db.models import Base
 
-EXPECTED_TABLE_COUNT = 61
+EXPECTED_TABLE_COUNT = 64
 
 EXPECTED_TABLES = [
     "address_labels",
     "artifacts",
     "audit_contract_coverage",
     "audit_reports",
+    "balance_collection_state",
     "bytecode_cache",
     "contract_balance_fetches",
     "contract_balances",
@@ -52,6 +53,7 @@ EXPECTED_TABLES = [
     "monitored_events",
     "monitoring_enrollment_queue",
     "ops_kv",
+    "pending_effects_work",
     "principal_labels",
     "protocol_deployers",
     "protocol_score_queue",
@@ -59,6 +61,7 @@ EXPECTED_TABLES = [
     "protocol_scores_latest",
     "protocol_subscriptions",
     "protocols",
+    "provider_permits",
     "proxy_subscriptions",
     "proxy_upgrade_events",
     "restaking_positions",

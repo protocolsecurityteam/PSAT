@@ -46,7 +46,7 @@ def test_f1_a_native_only_flow_is_still_bounded_by_its_witness(fold):
     )
     finding = fold([signal], value=plane).findings[0]
     assert finding["value_at_stake_usd"] == 10.0
-    assert finding["value_band"] == "<$100k"
+    assert finding["value_band"] == ">= <$100k"
 
 
 def test_f1_a_native_only_flow_with_no_native_row_is_not_determined(fold):

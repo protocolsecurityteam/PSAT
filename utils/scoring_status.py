@@ -276,4 +276,4 @@ NO_SELECTOR = ""
 
 # The model version every score row is stamped with until a second protocol
 # exists to calibrate against. Any constant change bumps it (strategy §7.2).
-MODEL_VERSION = "1.4.1-provisional"
+MODEL_VERSION = "1.5.0-provisional"

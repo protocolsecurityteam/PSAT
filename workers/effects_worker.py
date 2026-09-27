@@ -39,7 +39,7 @@ import logging
 import os
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -61,6 +61,16 @@ from db.effect_cache import (
 from db.models import EffectBehaviorCache, EffectiveFunction, EffectVerdict, Job, JobStage
 from db.queue import advance_job, store_artifact
 from services.effects import claims_bridge
+from services.effects.balance_dependencies import (
+    DEPENDENT_FAMILIES,
+    evidence_snapshot,
+    finish_work,
+    needs_token_inventory,
+    prepare_work,
+    reconcile_pending_effects,
+    should_block,
+    with_relevant_tokens,
+)
 from services.effects.config import (
     EFFECT_CLASS_VALUE_OUT,
     SCOPE_KERNEL,
@@ -223,6 +233,11 @@ _NO_HASH_SAMPLE = 8
 # A strict whitelist: ``concrete`` is what a recipe chose to hand back, and only
 # these keys are per-deployment facts this table is meant to publish.
 _RESIDUE_JSON_KEYS = (
+    "reach_observed_holdings_usd",
+    "reach_observed_holdings_pairs",
+    "reach_value_scope",
+    "reach_magnitude_state",
+    "reach_is_upper_bound",
     "observed_reach_value_usd",
     "observed_reach_holders",
     "reach_indeterminate",
@@ -470,7 +485,9 @@ class _Counters:
     def selection_fields(self) -> dict[str, Any]:
         """The funnel under the one key spelling every sink publishes it with —
         the phase span, the stage metrics, and the completion summary."""
-        return {f"selection_{name}": value for name, value in self.selection_funnel.items()}
+        return {
+            f"selection_{name}": value for name, value in self.selection_funnel.items() if name != "deferred_candidates"
+        }
 
 
 class EffectsWorker(BaseWorker):
@@ -644,6 +661,14 @@ class EffectsWorker(BaseWorker):
 
     # -- main entry --------------------------------------------------------
 
+    def _claim_job(self, session: Session) -> Job | None:
+        now = time.monotonic()
+        if now - getattr(self, "_last_balance_reconcile", float("-inf")) >= 60:
+            reconcile_pending_effects(session)
+            session.commit()
+            self._last_balance_reconcile = now
+        return super()._claim_job(session)
+
     def process(self, session: Session, job: Job) -> None:
         try:
             self._process(session, job)
@@ -666,9 +691,36 @@ class EffectsWorker(BaseWorker):
             candidates = self._select(session, job, funnel=counters.selection_funnel)
             # ``selection_selected`` IS the candidate count — no second spelling.
             ph.update(counters.selection_fields())
+        self._balance_work = {}
+        self._balance_generations = {}
+        self._balance_getter_cache = {}
+        deferred = counters.selection_funnel.pop("deferred_candidates", [])
+        if (candidates or deferred) and isinstance(job.protocol_id, int):
+            self._balance_work, self._balance_generations = prepare_work(
+                session,
+                [*candidates, *deferred],
+                protocol_id=job.protocol_id,
+                chain_id=_chain_id_for_job(job),
+                selected_ids={c.function_id for c in candidates},
+                job_id=job.id,
+            )
+            # The existing job lease owns these dependencies while provider work
+            # runs. Commit the durable intent before probes or transcript writes.
+            session.commit()
         counters.candidates_in = len(candidates)
 
         if not candidates:
+            resume_id = (job.request or {}).get("effects_resume_work_id")
+            if resume_id:
+                from db.models.balance_work import PendingEffectsWork
+
+                work = session.get(PendingEffectsWork, resume_id)
+                if work is not None:
+                    work.state = "complete"
+                    work.reason = "not_applicable"
+                    work.queued_job_id = None
+            if self._balance_work:
+                self._record_balance_coverage(session, job)
             # Inert, wire-free: emit the remaining phase spans for a complete
             # timeline and write zero metrics. No seam is ever constructed.
             for phase in _PHASES_AFTER_SELECTION:
@@ -699,6 +751,57 @@ class EffectsWorker(BaseWorker):
 
         # tier1_probes / tier2_fork → run recipes for misses + audit re-runs.
         self._run_probes(items, durations_ms, counters, seams)
+        handled_dependencies = set()
+        seed_budget = seeding_budget_of(ctx.effective_seeder())
+        budget_exhausted = seed_budget is not None and seed_budget.exhausted_any
+        dependency_items: dict[tuple[int, str], list[_Item]] = {}
+        for it in items:
+            dependency_items.setdefault((it.candidate.function_id, it.effect_class), []).append(it)
+        for key, group in dependency_items.items():
+            row = self._balance_work.get(key)
+            if row is not None and row.state != "complete" and row.queued_job_id == job.id:
+                handled_dependencies.add(key)
+                cand = group[0].candidate
+                finish_work(
+                    row,
+                    generation=cand.balance_generation,
+                    tokens=cand.input_token_addresses,
+                    remaining=cand.deferred_token_addresses,
+                    succeeded=not budget_exhausted
+                    and all(it.probed is not None and it.probed.verdict != VERDICT_UNKNOWN for it in group),
+                    job_id=job.id,
+                )
+
+        candidates_by_id = {c.function_id: c for c in candidates}
+        for key, row in self._balance_work.items():
+            if (
+                key in handled_dependencies
+                or row.state == "complete"
+                or row.queued_job_id != job.id
+                or row.function_id not in {c.function_id for c in candidates}
+            ):
+                continue
+            generation = self._balance_generations.get(row.function_id, 0)
+            if row.effect_family == "candidate_selection":
+                row.state = "complete"
+                row.reason = "selected"
+                row.queued_job_id = None
+            elif (
+                generation
+                or row.reason != "balance_inputs_pending"
+                or not should_block(
+                    row,
+                    generation,
+                    requires_inventory=needs_token_inventory(session, candidates_by_id[row.function_id]),
+                    tokens=row.candidate_tokens,
+                )
+            ):
+                finish_work(row, generation=generation, tokens=(), remaining=(), succeeded=False, job_id=job.id)
+                row.reason = "planning_incomplete"
+            else:
+                row.state = "pending"
+                row.queued_job_id = None
+        self._record_balance_coverage(session, job)
 
         # verdict_write → cache + state-plane persistence + discrepancy routing,
         # then mint proven verdicts into registry claims on the matching
@@ -742,6 +845,34 @@ class EffectsWorker(BaseWorker):
             },
         )
 
+    def _record_balance_coverage(self, session: Session, job: Job) -> None:
+        pending = sum(r.state != "complete" for r in self._balance_work.values())
+        store_artifact(
+            session,
+            job.id,
+            "effects_balance_coverage",
+            {
+                "semantics_version": 2,
+                "pending": pending,
+                "dependencies": [
+                    {
+                        "function_id": r.function_id,
+                        "family": r.effect_family,
+                        "state": r.state,
+                        "reason": r.reason,
+                        "generation": r.required_generation,
+                    }
+                    for r in list(self._balance_work.values())[:20]
+                ],
+            },
+        )
+        if pending:
+            record_degraded(
+                phase="effects_balance_coverage",
+                exc=RuntimeError(f"{pending} effects dependencies incomplete"),
+                context={"pending": pending},
+            )
+
     # -- phase helpers -----------------------------------------------------
 
     def _select(self, session: Session, job: Job, *, funnel: dict[str, Any] | None = None) -> list[Candidate]:
@@ -779,7 +910,32 @@ class EffectsWorker(BaseWorker):
         # No address ⇒ a company/root job, which owns no contract of its own; it
         # falls back to protocol-wide selection so such a job still covers the
         # protocol rather than planning nothing.
-        return select_candidates(session, protocol_id, resource_cap=_resource_cap(), scope=scope, funnel=funnel)
+        resume_ids = (job.request or {}).get("effects_function_ids")
+        if resume_ids:
+            # Explicit recovery bypasses ownership and empty-plan markers, but is
+            # narrowed to exactly the durable function dependency on this chain.
+            candidates = select_candidates(
+                session,
+                protocol_id,
+                scope=None,
+                funnel=funnel,
+                chain_id=_chain_id_for_job(job),
+                function_ids=resume_ids,
+            )
+            from db.models.balance_work import PendingEffectsWork
+
+            work = session.get(PendingEffectsWork, (job.request or {}).get("effects_resume_work_id"))
+            if work is not None and work.effect_family in DEPENDENT_FAMILIES:
+                candidates = [replace(c, restrict_families=frozenset({work.effect_family})) for c in candidates]
+            return candidates
+        return select_candidates(
+            session,
+            protocol_id,
+            resource_cap=_resource_cap(),
+            scope=scope,
+            funnel=funnel,
+            chain_id=_chain_id_for_job(job),
+        )
 
     def _preflight(self, seams: _Seams, durations_ms: dict[str, int]) -> tuple[bool, int]:
         """Capability probe + the ONE ``eth_blockNumber`` that pins every Tier-1
@@ -902,6 +1058,33 @@ class EffectsWorker(BaseWorker):
             # the exact count behind the one summary record.
             no_hash_candidates: list[int] = []
             for cand in candidates:
+                rows = [
+                    r
+                    for (fid, family), r in getattr(self, "_balance_work", {}).items()
+                    if fid == cand.function_id and family in DEPENDENT_FAMILIES
+                ]
+                covered = set.intersection(*(set(r.covered_tokens or ()) for r in rows)) if rows else set()
+                if rows:
+                    historical_candidates = sorted({token for r in rows for token in (r.candidate_tokens or ())})
+                    cand = replace(
+                        cand,
+                        input_token_addresses=tuple(
+                            dict.fromkeys([*cand.input_token_addresses, *historical_candidates])
+                        ),
+                    )
+                    cand = with_relevant_tokens(session, cand, ctx, covered, self._balance_getter_cache)
+                    for row in rows:
+                        row.candidate_tokens = sorted(
+                            (set(row.candidate_tokens or ()) if needs_token_inventory(session, cand) else set())
+                            | set(cand.input_token_addresses)
+                            | set(cand.deferred_token_addresses)
+                        )
+                        captured = getattr(row, "_probe_evidence", None)
+                        if captured is not None:
+                            row.evidence_generation, row.evidence_fingerprint = evidence_snapshot(
+                                captured[0], captured[1], row.candidate_tokens
+                            )
+                    cand = replace(cand, balance_generation=self._balance_generations.get(cand.function_id, 0))
                 try:
                     resolved = hash_resolver(session, cand)
                 except Exception as exc:
@@ -953,6 +1136,30 @@ class EffectsWorker(BaseWorker):
                 if plans:
                     contracts_with_plans.add(cand.contract_id)
                 for plan in plans:
+                    work = getattr(self, "_balance_work", {}).get((cand.function_id, plan.effect_class))
+                    if should_block(
+                        work,
+                        cand.balance_generation,
+                        requires_inventory=needs_token_inventory(session, cand),
+                        tokens=cand.input_token_addresses,
+                    ) or (
+                        work is not None
+                        and (
+                            (cand.token_inputs_pending and needs_token_inventory(session, cand))
+                            or (job is not None and work.state != "complete" and work.queued_job_id != job.id)
+                        )
+                    ):
+                        unclean_contracts.add(cand.contract_id)
+                        if work is not None:
+                            work.reason = (
+                                "token_getter_pending" if cand.token_inputs_pending else "balance_inputs_pending"
+                            )
+                        record_degraded(
+                            phase="effects_balance_inputs",
+                            exc=RuntimeError("balance inputs pending"),
+                            context={"function_id": cand.function_id, "family": plan.effect_class},
+                        )
+                        continue
                     behavior_hash = plan.behavior_hash or kernel_hash
                     surface = surface_hash if plan.scope != SCOPE_KERNEL else ""
                     staged.append((cand, plan, behavior_hash, surface))
@@ -971,6 +1178,14 @@ class EffectsWorker(BaseWorker):
                         "function_ids_sample": no_hash_candidates[:_NO_HASH_SAMPLE],
                     },
                 )
+            unclean_contracts.update(
+                c.contract_id
+                for c in candidates
+                if any(
+                    fid == c.function_id and r.state != "complete"
+                    for (fid, _), r in getattr(self, "_balance_work", {}).items()
+                )
+            )
             self._mark_empty_planning(
                 session, job, planned_per_contract, unclean_contracts, contracts_with_plans, counters
             )
@@ -998,6 +1213,11 @@ class EffectsWorker(BaseWorker):
                         contract_surface_hash=surface,
                         gate_ref=plan.gate_ref,
                     )
+                work = getattr(self, "_balance_work", {}).get((cand.function_id, plan.effect_class))
+                if work is not None and work.state != "complete":
+                    # The shared code cache remains intact. Deployment evidence
+                    # with changed/missing inputs must be observed at this target.
+                    cached = None
                 # First re-encounter of a shared hash (writer left audit_status
                 # None) triggers the self-audit re-simulation.
                 needs_audit = cached is not None and cached.audit_status is None
@@ -1296,7 +1516,16 @@ class EffectsWorker(BaseWorker):
         session.flush()
         try:
             with session.begin_nested():
-                grouped = distill_job_signals(session, job)
+                resume_id = (job.request or {}).get("effects_resume_work_id")
+                if resume_id:
+                    from db.models.balance_work import PendingEffectsWork
+
+                    resumed_work = session.get(PendingEffectsWork, int(resume_id))
+                    if resumed_work is None:
+                        raise RuntimeError("effects recovery dependency disappeared")
+                    grouped = distill_job_signals(session, job, contract_ids=[resumed_work.contract_id])
+                else:
+                    grouped = distill_job_signals(session, job)
         except Exception as exc:
             # A real degradation, not a side-effect: this job's contracts are
             # now absent from the fold's population, so the protocol's next

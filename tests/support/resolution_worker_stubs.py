@@ -73,6 +73,7 @@ def _patch_all(monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> dict[str, A
     dependencies = overrides.get("dependencies", None)  # None = no artifact
 
     artifact_store: dict[str, Any] = {}
+    balance_calls: list[Any] = []
 
     def fake_get_artifact(_session: Any, _job_id: Any, name: str) -> Any:
         lookup: dict[str, Any] = {
@@ -106,8 +107,15 @@ def _patch_all(monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> dict[str, A
         nested_artifacts_override: Any = None,
         **_kw: Any,  # absorb classify_cache, initial_graph, future kwargs
     ) -> tuple[dict, dict]:
+        assert balance_calls, "initial balances must precede graph/effects input construction"
         return resolved_graph, {}
 
+    # Pipeline orchestration tests isolate collection; dedicated DB tests cover
+    # its separate commits. Keep an order witness for the graph stage below.
+    monkeypatch.setattr(
+        "workers.resolution_worker.ResolutionWorker._fetch_balances",
+        lambda *args, **kwargs: balance_calls.append(args),
+    )
     monkeypatch.setattr("workers.resolution_worker.get_artifact", fake_get_artifact)
     monkeypatch.setattr("workers.resolution_worker.store_artifact", fake_store_artifact)
     monkeypatch.setattr("workers.resolution_worker.create_job", fake_create_job)
@@ -120,6 +128,7 @@ def _patch_all(monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> dict[str, A
     monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
 
     return {
+        "balance_calls": balance_calls,
         "store_calls": store_calls,
         "create_job_calls": create_job_calls,
         "artifact_store": artifact_store,

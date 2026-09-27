@@ -480,57 +480,11 @@ def _entity_contribution(
 
 
 def _sheet_ceiling(instance: _Instance, key: str, value_plane: P.ValuePlane) -> tuple[float | None, str | None]:
-    """The controlled node's own priced sheet as an upper bound, or why not.
+    """Keep generic code-control findings unquantified by present holdings.
 
-    ``(usd, why)``. A number with its basis where the branch is EARNED; ``None``
-    with a typed refusal where the capability qualifies and the sheet does not;
-    ``(None, None)`` where the question does not arise at all, which is the state
-    the fall-through below this branch is written for and must not be confused
-    with a refusal.
-
-    Three conjuncts, and each of them is a different claim.
-
-    The CAPABILITY must be code control. Replacing what a node does removes the
-    node's own code from between the principal and what the node holds, and then
-    "how much can they move" has an answer nothing further has to witness: at
-    most what is there. Gate control has no such argument — the vault's own share
-    math, caps and caller conditions are all still standing and none of them has
-    been examined — so it stays where Phase 6 left it. The test is on the
-    capability and never on ``is_proxy``: ``exec.arbitrary`` on a contract that
-    was never a proxy dictates that contract's behaviour just as completely.
-
-    The ENTITY must be the controlled node itself — the deployment the capability
-    was witnessed on, compared under ``canonical`` so an implementation and its
-    proxy are the one entity they are. Code control expands over the closure, but
-    a downstream node that the controlled one merely governs is the gate-control
-    situation one level down: THAT node's code is still standing. Charging its
-    sheet here would restore the balance-sheet-as-a-reach error under a new name,
-    over a much larger population than the one this branch exists to price.
-
-    The SHEET must be determined AND COMPLETE, which is ``planes.ceiling_for``'s
-    question and not this one's. Its two admitting reasons both produce a figure
-    — a proven zero is a witness and publishes $0 rather than not_determined —
-    and its five refusals are published under their own tokens, because "no
-    balance was ever observed here", "the price lookup never answered" and "the
-    asset list was read at its page cap" are the work of three different
-    pipelines and a reader who cannot tell them apart cannot act on any of them.
-
-    The claim's own provenness is not re-tested here: :func:`_row_value` admits an
-    instance only where ``value_state`` is ``proven_reach``, so an unproven claim
-    never reaches this function with an entity to charge.
-
-    ANTI-GAMING (inv. 13), because a branch that reads a protocol's own balance
-    sheet invites the question. Both conjuncts are expensive to move and neither
-    is movable by presentation: to lower the figure a protocol must hold less, or
-    be genuinely non-upgradeable, and both of those are real facts about it
-    rather than facts about how it is described. The residual vector is the third
-    thing — obfuscating the proxy pattern so the upgrade capability cannot be
-    PROVEN — and it is named rather than claimed away. It fails closed the way
-    every capability detection in this pipeline fails closed: an unproven
-    capability produces no finding, so it produces NO ceiling row at all, not a
-    smaller one. What such a protocol buys is the absence of the row, which is
-    charged to confidence as an unanswered question, and not a cheaper number
-    standing in the document where the honest one would have been.
+    A present balance sheet cannot bound the complete capability: upgrades may
+    affect future deposits, minting and assets held elsewhere. No current signal
+    carries the narrower scope needed to apply a current-holdings bound.
     """
     if instance.signal.claim_id not in K.CODE_CONTROL_CAPABILITIES:
         return None, None
@@ -538,14 +492,10 @@ def _sheet_ceiling(instance: _Instance, key: str, value_plane: P.ValuePlane) -> 
     canonical = value_plane.canonical(key)
     if canonical != value_plane.canonical(controlled):
         return None, None
-    usd, reason = P.ceiling_for(value_plane, canonical)
-    if reason in P.CEILING_ADMITTING_REASONS:
-        # ``ceiling_for`` pairs a number with exactly the two admitting reasons,
-        # so this is the branch where ``usd`` is one — asserted by returning it
-        # rather than by a comment, since a ``None`` here would publish the
-        # refusal path's shape under the admission's name.
-        return usd, f"code_control_sheet_ceiling({reason}) x entity_holdings"
-    return None, f"{SHEET_CEILING_REFUSED_PREFIX}{reason})"
+    # Generic code control also reaches future deposits and external assets.
+    # No existing signal proves its complete capability is limited to the
+    # balances observed here, so preserve the finding without a sheet cap.
+    return None, f"{SHEET_CEILING_REFUSED_PREFIX}capability_scope_not_proven)"
 
 
 def _state_word(state: str) -> str:

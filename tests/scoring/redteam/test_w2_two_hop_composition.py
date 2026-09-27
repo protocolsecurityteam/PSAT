@@ -197,14 +197,9 @@ def test_w2_case4_a_parameter_bound_link_with_no_acl_row_stays_refused(fold):
     assert row["reach_composition_census"]["longest_composed_chain"] == 0
 
 
-def test_w2_case5_no_composed_magnitude_exceeds_the_bound_over_two_hops(fold):
-    """Regression case 5. The anti-composition property, re-asserted at length 2.
-
-    Two ceilings and the published figure clears neither: the destination's own
-    witness, and the destination's determined sheet. A longer chain can only
-    ever make the path harder to witness, never the number larger.
-    """
-    for sheet, expected in ((5_000_000.0, 1_000_000.0), (250_000.0, 250_000.0)):
+def test_w2_case5_two_hops_preserve_call_witness_without_wallet_trimming(fold):
+    """Two-hop composition preserves an independent witness when wallet holdings are lower."""
+    for sheet, expected in ((5_000_000.0, 1_000_000.0), (250_000.0, 1_000_000.0)):
         document = fold(
             _composing_signals(),
             principals=_composing_principals(),
@@ -214,7 +209,7 @@ def test_w2_case5_no_composed_magnitude_exceeds_the_bound_over_two_hops(fold):
         assert entry["act_as_chain_length"] == 2
         assert entry["published_usd"] == expected
         assert entry["published_usd"] <= entry["flow_out_witness"]["usd"]
-        assert entry["published_usd"] <= sheet
+        assert entry["bounded_by"] == FOLD._BOUNDED_BY_WITNESS
         assert _gate_row(document)["value_at_stake_usd"] == expected
 
 

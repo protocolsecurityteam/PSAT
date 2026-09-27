@@ -205,7 +205,9 @@ _ERC4626_ASSET_GETTER = "asset()"
 SELF_TOKEN_HINT = "__self__"
 
 
-def input_token_hints(fn: FunctionFacts, *, token_addresses: Sequence[str] = ()) -> tuple[str, ...]:
+def input_token_hints(
+    fn: FunctionFacts, *, token_addresses: Sequence[str] = (), include_default_asset: bool = True
+) -> tuple[str, ...]:
     """Candidate input assets for the seeded retry, most specific first, plus
     :data:`SELF_TOKEN_HINT` last. An entry is either a zero-arg getter signature
     to call on the probe target or an already-resolved token ADDRESS.
@@ -255,7 +257,8 @@ def input_token_hints(fn: FunctionFacts, *, token_addresses: Sequence[str] = ())
         _add(flow.get("token_var"))
 
     hints = [f"{name}()" for name in names]
-    hints.append(_ERC4626_ASSET_GETTER)
+    if include_default_asset:
+        hints.append(_ERC4626_ASSET_GETTER)
     hints.extend(addr.lower() for addr in token_addresses if _RESOLVED_ADDRESS.match(addr or ""))
     hints.append(SELF_TOKEN_HINT)
     return tuple(dict.fromkeys(hints))

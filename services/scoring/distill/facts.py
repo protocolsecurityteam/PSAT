@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import math
 from collections import defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -158,17 +159,36 @@ class _ContractFacts:
     transcripts: _TranscriptReader | None = None
 
 
-def distill_job_signals(session: Session, job: Any) -> dict[int, list[FunctionSignal]]:
+def distill_job_signals(
+    session: Session, job: Any, *, contract_ids: Iterable[int] | None = None
+) -> dict[int, list[FunctionSignal]]:
     """One job's planes → its contracts' signal rows, grouped by ``contract_id``.
 
     Grouped by ``contract_id`` and never by ``(contract_id, deployment_address)``:
     the replace that persists these rows is scoped by contract alone, so a
     contract whose functions appear at two deployment addresses must arrive in
     ONE group or the second call would delete the first's rows.
+
+    Targeted effects recovery owns no contracts through Job.id. Its explicit
+    code-contract IDs select complete contracts, including sibling functions,
+    while still requiring membership in the recovery job's protocol.
     """
     from db.models import Contract
 
-    contracts = session.query(Contract).filter(Contract.job_id == job.id).order_by(Contract.id).all()
+    query = session.query(Contract)
+    if contract_ids is None:
+        contracts = query.filter(Contract.job_id == job.id).order_by(Contract.id).all()
+    else:
+        requested = {int(contract_id) for contract_id in contract_ids}
+        if job.protocol_id is None:
+            raise ValueError("targeted signal distillation requires a protocol")
+        contracts = (
+            query.filter(Contract.id.in_(requested), Contract.protocol_id == job.protocol_id)
+            .order_by(Contract.id)
+            .all()
+        )
+        if {contract.id for contract in contracts} != requested:
+            raise ValueError("targeted signal contracts must exist in the recovery job's protocol")
     out: dict[int, list[FunctionSignal]] = {}
     orphaned: list[int] = []
     for contract in contracts:
@@ -178,7 +198,15 @@ def distill_job_signals(session: Session, job: Any) -> dict[int, list[FunctionSi
             # counted where the job can see it instead of vanishing here.
             orphaned.append(int(contract.id))
             continue
-        out[contract.id] = distill_contract_signals(session, contract, job_id=job.id)
+        if contract_ids is None:
+            out[contract.id] = distill_contract_signals(session, contract, job_id=job.id)
+        else:
+            out[contract.id] = distill_contract_signals(
+                session,
+                contract,
+                job_id=job.id,
+                facts_job_id=contract.job_id or job.id,
+            )
     record_stage_metric("score_signal_contracts_skipped_null_protocol", len(orphaned))
     if orphaned:
         logger.warning(
@@ -193,11 +221,15 @@ def distill_job_signals(session: Session, job: Any) -> dict[int, list[FunctionSi
     return out
 
 
-def distill_contract_signals(session: Session, contract: Any, *, job_id: Any) -> list[FunctionSignal]:
+def distill_contract_signals(
+    session: Session, contract: Any, *, job_id: Any, facts_job_id: Any = None
+) -> list[FunctionSignal]:
     """Every signal for one contract. The unit both feeding modes share."""
     from .signals import _signals_for_function
 
-    facts = _load_contract_facts(session, contract, job_id=job_id)
+    # A recovery job reruns effects only. Flow-asset artifacts still belong to
+    # the original analysis job; signal provenance belongs to this new pass.
+    facts = _load_contract_facts(session, contract, job_id=facts_job_id or job_id)
     signals: list[FunctionSignal] = []
     for func in facts.functions:
         signals.extend(_signals_for_function(facts, func, job_id=job_id))

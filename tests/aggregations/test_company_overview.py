@@ -55,10 +55,8 @@ from utils.balance_status import (
     BALANCE_WRITER_TVL,
     DELIVERY_SHAPE_FAN_OUT_ALL,
     DELIVERY_SHAPE_HAS_DIRECT_DELIVERY,
-    DELIVERY_SHAPE_NOT_DETERMINED,
     TOKEN_REFERENCE_ABSENT_FROM_UNIVERSE,
     TOKEN_REFERENCE_IN_UNIVERSE,
-    TOKEN_REFERENCE_NOT_DETERMINED,
 )
 
 pytestmark = requires_postgres
@@ -100,7 +98,13 @@ def test_prefetch_balance_provenance_is_narrow_and_keeps_both_current_fetches(db
                 contract_id=contract.id, fetch_id=historical.id, token_address=_addr("old"), raw_balance="1"
             ),
             ContractBalance(contract_id=contract.id, fetch_id=tokens.id, token_address=_addr("token"), raw_balance="2"),
-            ContractBalance(contract_id=contract.id, fetch_id=native.id, token_address=None, raw_balance="3"),
+            ContractBalance(
+                contract_id=contract.id,
+                fetch_id=native.id,
+                token_address=None,
+                raw_balance="3",
+                source="pinned_native_read",
+            ),
         ]
     )
     db_session.commit()
@@ -116,12 +120,17 @@ def test_prefetch_balance_provenance_is_narrow_and_keeps_both_current_fetches(db
     finally:
         event.remove(engine, "before_cursor_execute", capture)
     provenance = children["balance_fetches"]
-    assert set(provenance) == {tokens.id, native.id}
-    assert historical.id not in provenance and failed.id not in provenance
-    assert provenance[tokens.id].asset_set_status == "at_page_cap"
+    assert set(provenance) == {historical.id, native.id}
+    assert tokens.id not in provenance and failed.id not in provenance
+    assert provenance[historical.id].asset_set_status == "returned_assets"
     assert provenance[native.id].chain_id == 8453
     assert not any("typed_assets" in sql or "asset_set_basis" in sql for sql in statements)
-    assert {b.fetch_id for b in children["balances"][contract.id]} == {tokens.id, native.id}
+    payload = build_company_overview(db_session, p.name)
+    entry = next(e for e in payload["contracts"] if e["address"] == addr)
+    native_row = next(b for b in entry["balances"] if b["token_address"] is None)
+    assert native_row["source"] == "pinned_native_read"
+
+    assert {b.fetch_id for b in children["balances"][contract.id]} == {historical.id, native.id}
 
 
 def test_resolve_company_jobs_protocol_path(db_session):
@@ -2613,28 +2622,10 @@ def test_an_airdrop_delivered_row_is_published_labelled_and_not_presented_as_a_h
 
     # (a) STILL RETURNED. A suppressed row would be an unwitnessed deletion.
     assert set(by_symbol) == {"JUNK", "REAL", "UNK", "SPARED"}
-    # (b) LABELLED on both planes — with the evidence row's own basis.
-    assert by_symbol["JUNK"]["delivery_shape"] == DELIVERY_SHAPE_FAN_OUT_ALL
-    assert by_symbol["JUNK"]["delivery_shape_basis"] == "scan 0..100"
-    assert by_symbol["JUNK"]["reference_shape"] == TOKEN_REFERENCE_ABSENT_FROM_UNIVERSE
-    assert by_symbol["JUNK"]["disposition_state"] == "disposed"
-    # The three fail-closed directions: an earned negative, an unmeasured pair, and a
-    # mass-distributed token the protocol's own discovery names. NONE is disposed.
-    assert by_symbol["REAL"]["delivery_shape"] == DELIVERY_SHAPE_HAS_DIRECT_DELIVERY
-    assert by_symbol["UNK"]["delivery_shape"] == DELIVERY_SHAPE_NOT_DETERMINED
-    assert by_symbol["UNK"]["delivery_shape_basis"] is None
-    assert by_symbol["UNK"]["reference_shape"] == TOKEN_REFERENCE_NOT_DETERMINED
-    assert by_symbol["SPARED"]["delivery_shape"] == DELIVERY_SHAPE_FAN_OUT_ALL
-    assert by_symbol["SPARED"]["reference_shape"] == TOKEN_REFERENCE_IN_UNIVERSE
-    assert [by_symbol[s]["disposition_state"] for s in ("REAL", "UNK", "SPARED")] == ["presented"] * 3
-    # (c) COUNTED, as named numbers rather than an inference from the rows — and the
-    # two counts are DIFFERENT, which is the whole point: two rows arrived as mass
-    # distributions and only one of them is withheld.
-    cov = entry["holdings_coverage"]
-    assert cov["airdrop_delivered_rows"] == 2
-    assert cov["disposed_rows"] == 1
-    assert "worth" in cov["delivery_shape_reading"]
-    # The priced row's dollars are untouched: delivery shape is not a price.
+    # Historical delivery evidence is not consumed by current presentation.
+    assert all("disposition_state" not in row and "delivery_shape" not in row for row in by_symbol.values())
+    assert by_symbol["JUNK"]["usd_value"] is None
+    assert "disposed_rows" not in entry["holdings_coverage"]
     assert entry["total_usd"] == 700.0
 
 
@@ -2707,11 +2698,9 @@ def test_a_priced_airdrop_delivered_row_is_presented_and_counts_toward_the_total
 
     payload = build_company_overview(db_session, p.name)
     entry = next(e for e in payload["contracts"] if e["address"] == addr)
-    assert entry["balances"][0]["delivery_shape"] == DELIVERY_SHAPE_FAN_OUT_ALL
-    assert entry["balances"][0]["reference_shape"] == TOKEN_REFERENCE_ABSENT_FROM_UNIVERSE
-    assert entry["balances"][0]["disposition_state"] == "presented"
-    assert entry["holdings_coverage"]["airdrop_delivered_rows"] == 1
-    assert entry["holdings_coverage"]["disposed_rows"] == 0
+    assert "disposition_state" not in entry["balances"][0]
+    assert "delivery_shape" not in entry["balances"][0]
+    assert "disposed_rows" not in entry["holdings_coverage"]
     assert entry["total_usd"] == 1234.0
 
 
@@ -3124,3 +3113,42 @@ def test_fund_flow_capabilities_agree_with_controls_detail(db_session):
     target_entry = next(c for c in payload["contracts"] if c["address"] == t_addr)
     assert "upgradeable" in target_entry["capabilities"]
     assert "upgradeable" not in flow["capabilities"]
+
+
+def test_pending_balance_effects_are_visible_and_prevent_settled_score(db_session):
+    from db.models import PendingEffectsWork
+    from services.aggregations.company_overview.payload import _balance_effects_coverage
+    from services.scoring.planes.provenance import perimeter_state
+
+    protocol = _add_protocol(db_session, f"pending-balances-{uuid.uuid4().hex[:8]}")
+    address = _addr("pending-balances")
+    job = _add_job(db_session, address=address, protocol_id=protocol.id, status=JobStatus.completed)
+    contract = _add_contract(db_session, address=address, job=job, protocol_id=protocol.id)
+    function = EffectiveFunction(
+        contract_id=contract.id,
+        deployment_address=address,
+        selector="0x12345678",
+        function_name="withdraw",
+        abi_signature="withdraw()",
+    )
+    db_session.add(function)
+    db_session.flush()
+    pending = PendingEffectsWork(
+        protocol_id=protocol.id,
+        contract_id=contract.id,
+        function_id=function.id,
+        chain_id=8453,
+        deployment_address=address,
+        effect_family="value_out",
+        state="degraded",
+    )
+    db_session.add(pending)
+    db_session.flush()
+    assert _balance_effects_coverage(db_session, protocol) == {"incomplete": 1, "degraded": 1}
+    state, evidence = perimeter_state(db_session, protocol.id)
+    assert state == "unsettled"
+    assert evidence["pending_balance_effects"] == 1
+    pending.state = "complete"
+    db_session.flush()
+    assert _balance_effects_coverage(db_session, protocol) == {"incomplete": 0, "degraded": 0}
+    assert perimeter_state(db_session, protocol.id)[0] == "settled"

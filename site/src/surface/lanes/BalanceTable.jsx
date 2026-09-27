@@ -21,32 +21,6 @@ function usdCell(row) {
   return { text: formatted || "$0.00", className: "ps-balance-usd" };
 }
 
-// Whether the backend WITHHELD this balance from the holdings claim. The row is
-// still PUBLISHED and LABELLED — a suppressed row is a deletion nobody can see —
-// but it is not presented as a position this contract holds, so it is out of the
-// holdings list, out of the holdings count, and shown under its own heading.
-//
-// READ THE BACKEND'S VERDICT; DO NOT RE-DERIVE IT. `disposition_state` exists
-// precisely so a consumer does not restate the rule, and restating it is how
-// this page went wrong: it split on `delivery_shape === "fan_out_all"` alone,
-// which is only HALF the conjunction. The other half is the protocol-reference
-// conjunct, and without it the page withheld HEX, WETH and base USDC — real
-// assets, one of them a fully-liquid stablecoin — that the score itself spares.
-// A page that re-derives a two-part rule will sooner or later carry one part.
-//
-// A DELIVERY claim, never a worth claim. Real tokens arrive this way (uniETH at
-// fan-out 101, HEX at 199/399/399), so the label says how the balance arrived
-// and the word "spam" appears nowhere: that would be a claim the evidence does
-// not carry.
-const DISPOSED = "disposed";
-
-export function isAirdropDelivered(row) {
-  // Absence of the field is NOT disposal: a payload from before this field
-  // existed, or a row the backend declined to judge, must keep its place in the
-  // holdings list. Fail closed toward showing a real holding.
-  return row?.disposition_state === DISPOSED;
-}
-
 // Whether this contract's holdings list can be reported as the whole set.
 // `holdings_coverage.state` is two-valued by construction — the backend cannot
 // prove completeness (see company_overview) — so this only ever answers
@@ -56,12 +30,12 @@ export function isAirdropDelivered(row) {
 function coverageNote(machine) {
   const cov = machine?.holdings_coverage;
   if (cov?.state !== "may_be_incomplete") return null;
-  return `Holdings may be incomplete: the fetch returned a full page (${cov.page_cap}). Assets beyond it were never read, so this list and any total from it are lower bounds.`;
+  return `Holdings may be incomplete: the provider read was interrupted or capped. Retained observations may be older; omitted assets are unknown.`;
 }
 
 function BalanceRow({ row }) {
   const human = Number(row.raw_balance) / 10 ** row.decimals;
-  const amount =
+  const amount = row.decimals_known === false || row.decimals_known === null ? "quantity scale unknown" :
     human >= 1e6
       ? `${(human / 1e6).toFixed(1)}M`
       : human >= 1e3
@@ -76,7 +50,7 @@ function BalanceRow({ row }) {
         <span className="ps-balance-symbol">{row.token_symbol}</span>
         <span className="ps-balance-name">{row.token_name}</span>
       </div>
-      <div className="ps-balance-values">
+      <div className="ps-balance-values" title={row.observed_at ? `Observed ${row.observed_at}` : "Observation time unknown"}>
         <span className="ps-balance-amount">{amount}</span>
         <span className={usd.className}>{usd.text}</span>
       </div>
@@ -86,14 +60,14 @@ function BalanceRow({ row }) {
 
 export function BalanceTable({ machine }) {
   const [hideDust, setHideDust] = useState(true);
-  const [showWithheld, setShowWithheld] = useState(false);
 
   const note = coverageNote(machine);
 
-  if (!machine.balances || machine.balances.length === 0) {
+  const holdings = machine.balances || [];
+  const partialObservations = machine.partial_balance_observations || [];
+  if (holdings.length === 0 && partialObservations.length === 0) {
     // An empty list is not "holds nothing": the fetch conflates no-tokens with a
-    // failed read, and the failure is recorded only in the operational log
-    // (services/clients/etherscan.get_token_balances). Say what is known.
+    // failed or unattempted class. Say only what was recorded.
     return <div className="ps-lane-empty">No token balances recorded</div>;
   }
 
@@ -104,45 +78,15 @@ export function BalanceTable({ machine }) {
   // it is acting on, and each kept row carries its own "not priced" cell.
   const isUnpriced = (b) => (b?.usd_value_state ? b.usd_value_state !== "measured" : b?.usd_value == null);
   const isDust = (b) => !isUnpriced(b) && b.usd_value < 10;
-  // The SECOND reason to fold a row out of the default view, and the only one
-  // that may act on an unpriced row: the protocol's own discovery does not name
-  // this token at all. Locally that separates 2,432 unpriced readings (CANA,
-  // SKIMCHI — hand-sent dust the disposition rule correctly declines to withhold,
-  // because it did not arrive by mass distribution) from the 23 unpriced readings
-  // the protocol does name (weETHs, an ether.fi wrapper), which stay listed.
-  //
-  // TWO CONJUNCTS, BOTH REQUIRED, and the reference conjunct is READ, never
-  // re-derived: `absent_from_universe` is an EARNED negative (see
-  // utils/balance_status), so a missing reference row publishes `not_determined`
-  // and a row carrying no key at all reads as undefined — neither is a proven
-  // absence, and both stay VISIBLE. Fail toward showing, the same direction as
-  // the disposition rule above. A priced row is never folded on this ground: a
-  // measured dollar figure is a fact about worth that discovery cannot overturn.
-  const isUnknownToProtocol = (b) => isUnpriced(b) && b?.reference_shape === "absent_from_universe";
-  // ONE hidden group, two admissions into it. Splitting these into two toggles
-  // would ask the reader to reason about a filter matrix to answer "what is this
-  // contract holding"; folding them into one keeps the default view honest and
-  // the button label names each ground it acted on.
-  const isFolded = (b) => isDust(b) || isUnknownToProtocol(b);
-  // Split BEFORE the fold filter: the two questions are independent, and an
-  // airdrop-delivered row must be listed whatever it is worth.
-  const holdings = machine.balances.filter((b) => !isAirdropDelivered(b));
-  const airdropped = machine.balances.filter(isAirdropDelivered);
-  const filtered = hideDust ? holdings.filter((b) => !isFolded(b)) : holdings;
+  const filtered = hideDust ? holdings.filter((b) => !isDust(b)) : holdings;
   const hiddenCount = holdings.length - filtered.length;
-  const unknownFolded = hideDust ? holdings.filter(isUnknownToProtocol).length : 0;
-  // The button names every ground it is acting on. When nothing was folded for
-  // the reference ground the label must not mention it — a permanent mention
-  // would claim a filter the view is not applying.
-  const filterLabel = unknownFolded
-    ? `Hide priced <$10 and unnamed by discovery (${hiddenCount})`
-    : `Hide priced <$10 (${hiddenCount})`;
+  const filterLabel = `Hide priced <$10 (${hiddenCount})`;
 
   return (
     <section className="ps-balance-section">
       <div className="ps-balance-header">
         <span>Balances</span>
-        {machine.total_usd ? <span className="ps-balance-total">{formatUsd(machine.total_usd)}</span> : null}
+        {machine.total_usd != null ? <span className="ps-balance-total">{formatUsd(machine.total_usd) || "$0.00"} observed</span> : null}
       </div>
       {note ? <div className="ps-balance-coverage" role="note">{note}</div> : null}
       <button
@@ -164,33 +108,13 @@ export function BalanceTable({ machine }) {
           </div>
         )}
       </div>
-      {airdropped.length > 0 ? (
-        // COLLAPSED, NOT SUPPRESSED. The rows stay reachable in one click and
-        // keep their label; only the default density changes.
-        <div className="ps-balance-withheld">
-          <button
-            type="button"
-            className="ps-balance-withheld-toggle"
-            aria-expanded={showWithheld}
-            onClick={() => setShowWithheld((v) => !v)}
-          >
-            <span>
-              {airdropped.length} {airdropped.length === 1 ? "token" : "tokens"} arrived by mass distribution and{" "}
-              {airdropped.length === 1 ? "is not a position" : "are not positions"}
-            </span>
-            <span className="ps-balance-caret">{showWithheld ? "▾" : "▸"}</span>
-          </button>
-          {showWithheld ? (
-            // The toggle line itself carries the whole claim ("arrived by mass
-            // distribution", "not positions"); the expanded view is just the rows.
-            <div className="ps-balance-list">
-              {airdropped.map((b, i) => (
-                <BalanceRow key={i} row={b} />
-              ))}
-            </div>
-          ) : null}
-        </div>
-      ) : null}
+      {machine.partial_balance_observations?.length > 0 && (
+        <details className="ps-balance-partial">
+          <summary>Newer partial observations ({machine.partial_balance_observations.length})</summary>
+          <div role="note">Separate provider prefix; not added to the retained total.</div>
+          {machine.partial_balance_observations.map((row, i) => <BalanceRow key={i} row={row} />)}
+        </details>
+      )}
     </section>
   );
 }

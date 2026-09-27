@@ -9,10 +9,19 @@ explicit not-determined state instead of destroying what was previously known.
 
 from __future__ import annotations
 
-import pytest
-from sqlalchemy import select, text
+from datetime import datetime, timedelta, timezone
 
-from db.models import Contract, ContractBalance, ContractBalanceFetch, ContractBalanceLatest, Protocol
+import pytest
+from sqlalchemy import select, text, update
+
+from db.models import (
+    BalanceCollectionState,
+    Contract,
+    ContractBalance,
+    ContractBalanceFetch,
+    ContractBalanceLatest,
+    Protocol,
+)
 from services.monitoring.balance_observation import NativeReading
 from services.monitoring.balance_reads import PINNED_FINALITY_MARGIN
 from services.monitoring.tvl import refresh_contract_balances
@@ -113,14 +122,34 @@ def _stub_etherscan(monkeypatch, *, wei, token_page=None):
     )
 
 
-def _fetches(session, contract_id: int) -> list[ContractBalanceFetch]:
+def _fetches(session, contract_id: int, read_class: str | None = None) -> list[ContractBalanceFetch]:
     return list(
         session.execute(
             select(ContractBalanceFetch)
             .where(ContractBalanceFetch.contract_id == contract_id)
+            .where(
+                ContractBalanceFetch.native_status != "unattempted"
+                if read_class == "native"
+                else ContractBalanceFetch.asset_set_status != "unattempted"
+                if read_class == "tokens"
+                else True
+            )
             .order_by(ContractBalanceFetch.id)
         ).scalars()
     )
+
+
+def _make_due(session):
+    """Advance read eligibility for tests intentionally requesting a new observation."""
+    session.execute(
+        update(BalanceCollectionState).values(next_attempt_at=datetime.now(timezone.utc) - timedelta(seconds=1))
+    )
+    session.commit()
+
+
+def _refresh_due(session, protocol_id):
+    _make_due(session)
+    return refresh_contract_balances(session, protocol_id)
 
 
 def _rows(session, contract_id: int) -> list[ContractBalance]:
@@ -154,7 +183,7 @@ class TestPinnedRowIsByteExact:
         _stub_pinned(monkeypatch, {addr: 3_000_000_000_000_000_000})
         _stub_etherscan(monkeypatch, wei=999)  # must NOT be used — pinned wins
 
-        refresh_contract_balances(db_session, proto.id)
+        _refresh_due(db_session, proto.id)
 
         rows = _rows(db_session, c.id)
         assert len(rows) == 1
@@ -170,7 +199,7 @@ class TestPinnedRowIsByteExact:
         assert row.price_block_number is None
         assert row.price_usd == 2000.0
 
-        fetch = _fetches(db_session, c.id)[0]
+        fetch = _fetches(db_session, c.id, "native")[0]
         assert (fetch.native_status, fetch.block_number, fetch.observed_address, fetch.writer) == (
             NATIVE_STATUS_PROVEN_NONZERO,
             BLOCK,
@@ -192,22 +221,23 @@ class TestPinnedFailureIsNonDestructive:
 
         _stub_pinned(monkeypatch, {addr: 5_000_000_000_000_000_000})
         _stub_etherscan(monkeypatch, wei=0)
-        refresh_contract_balances(db_session, proto.id)
+        _refresh_due(db_session, proto.id)
         before = [(r.id, r.raw_balance, r.block_number) for r in _rows(db_session, c.id)]
         assert before and before[0][2] == BLOCK
 
         # Everything fails on the second cycle.
         _stub_unpinned(monkeypatch)
         _stub_etherscan(monkeypatch, wei=RuntimeError("boom"), token_page=failed_page())
-        refresh_contract_balances(db_session, proto.id)
+        _refresh_due(db_session, proto.id)
 
         after = [(r.id, r.raw_balance, r.block_number) for r in _rows(db_session, c.id)]
         # No row deleted, no row written, the pre-existing block untouched.
         assert after == before
 
-        fetch = _fetches(db_session, c.id)[-1]
+        fetch = _fetches(db_session, c.id, "native")[-1]
         assert fetch.native_status == NATIVE_STATUS_FETCH_FAILED
-        assert fetch.asset_set_status == ASSET_SET_STATUS_FETCH_FAILED
+        assert fetch.asset_set_status == "unattempted"
+        assert _fetches(db_session, c.id, "tokens")[-1].asset_set_status == ASSET_SET_STATUS_FETCH_FAILED
         assert fetch.block_number is None
         # And the view still publishes the last good observation.
         assert [r.id for r in _view(db_session, c.id)] == [before[0][0]]
@@ -224,8 +254,8 @@ class TestUnpinnedZeroIsNotAProvenZero:
 
         _stub_pinned(monkeypatch, {_addr("31"): 0})
         _stub_etherscan(monkeypatch, wei=0)
-        refresh_contract_balances(db_session, proto.id)
-        f = _fetches(db_session, pinned_c.id)[0]
+        _refresh_due(db_session, proto.id)
+        f = _fetches(db_session, pinned_c.id, "native")[0]
         assert (f.native_status, f.block_number) == (NATIVE_STATUS_PROVEN_ZERO, BLOCK)
         # A proven zero is an OBSERVATION and is written as one. A quantity
         # witnessed zero at a named height is the earned negative the value
@@ -239,8 +269,8 @@ class TestUnpinnedZeroIsNotAProvenZero:
         # Same observed value, unpinned path.
         _stub_unpinned(monkeypatch)
         _stub_etherscan(monkeypatch, wei=0)
-        refresh_contract_balances(db_session, proto.id)
-        f2 = _fetches(db_session, pinned_c.id)[-1]
+        _refresh_due(db_session, proto.id)
+        f2 = _fetches(db_session, pinned_c.id, "native")[-1]
         assert (f2.native_status, f2.block_number) == (NATIVE_STATUS_NOT_DETERMINED, None)
         # And it writes NOTHING: a zero at an unrecorded moment proves zero at no
         # height, so there is no observation to persist. The pinned row from the
@@ -287,12 +317,12 @@ class TestErc20FailureIsNotAnEmptyHolding:
         }
         _stub_unpinned(monkeypatch)
         _stub_etherscan(monkeypatch, wei=0, token_page=page([tok]))
-        refresh_contract_balances(db_session, proto.id)
+        _refresh_due(db_session, proto.id)
         first = [r.id for r in _rows(db_session, c.id)]
         assert len(first) == 1
 
         _stub_etherscan(monkeypatch, wei=0, token_page=failed_page())
-        refresh_contract_balances(db_session, proto.id)
+        _refresh_due(db_session, proto.id)
 
         assert [r.id for r in _rows(db_session, c.id)] == first
         assert [r.id for r in _view(db_session, c.id)] == first
@@ -315,11 +345,12 @@ class TestSwallowPathsReachFetchFailed:
         db_session.commit()
         _stub_unpinned(monkeypatch)
         _stub_etherscan(monkeypatch, wei=RuntimeError("eth down"), token_page=page([]))
-        refresh_contract_balances(db_session, proto.id)
-        f = _fetches(db_session, c.id)[0]
+        _refresh_due(db_session, proto.id)
+        f = _fetches(db_session, c.id, "native")[0]
         assert f.native_status == NATIVE_STATUS_FETCH_FAILED
         assert f.native_status != NATIVE_STATUS_PROVEN_ZERO
-        assert f.asset_set_status == ASSET_SET_STATUS_RETURNED_EMPTY
+        assert f.asset_set_status == "unattempted"
+        assert _fetches(db_session, c.id, "tokens")[-1].asset_set_status == ASSET_SET_STATUS_RETURNED_EMPTY
         assert _rows(db_session, c.id) == []
 
     def test_erc20_swallow(self, db_session, monkeypatch):
@@ -328,8 +359,8 @@ class TestSwallowPathsReachFetchFailed:
         db_session.commit()
         _stub_unpinned(monkeypatch)
         _stub_etherscan(monkeypatch, wei=1, token_page=failed_page())
-        refresh_contract_balances(db_session, proto.id)
-        f = _fetches(db_session, c.id)[0]
+        _refresh_due(db_session, proto.id)
+        f = _fetches(db_session, c.id, "tokens")[0]
         assert f.asset_set_status == ASSET_SET_STATUS_FETCH_FAILED
         assert f.asset_set_status != ASSET_SET_STATUS_RETURNED_EMPTY
 
@@ -345,11 +376,11 @@ class TestEmptyPageVsFailedPage:
         _stub_unpinned(monkeypatch)
 
         _stub_etherscan(monkeypatch, wei=0, token_page=page([]))
-        refresh_contract_balances(db_session, proto.id)
+        _refresh_due(db_session, proto.id)
         _stub_etherscan(monkeypatch, wei=0, token_page=failed_page())
-        refresh_contract_balances(db_session, proto.id)
+        _refresh_due(db_session, proto.id)
 
-        empty, failed = _fetches(db_session, c.id)
+        empty, failed = _fetches(db_session, c.id, "tokens")
         assert (empty.asset_set_status, empty.asset_page_length) == (ASSET_SET_STATUS_RETURNED_EMPTY, 0)
         assert (failed.asset_set_status, failed.asset_page_length) == (ASSET_SET_STATUS_FETCH_FAILED, None)
 
@@ -381,9 +412,9 @@ class TestAtPageCapAsksTheRawPage:
         ]
         _stub_unpinned(monkeypatch)
         _stub_etherscan(monkeypatch, wei=0, token_page=page(rows, page_length=100))
-        refresh_contract_balances(db_session, proto.id)
+        _refresh_due(db_session, proto.id)
 
-        f = _fetches(db_session, c.id)[0]
+        f = _fetches(db_session, c.id, "tokens")[0]
         assert f.asset_set_status == "at_page_cap"
         assert f.asset_page_length == 100
         assert len(_rows(db_session, c.id)) == 60
@@ -418,10 +449,10 @@ class TestObservedAddressPerWriter:
 
         _stub_pinned(monkeypatch, {proxy_addr: 7})
         _stub_etherscan(monkeypatch, wei=0)
-        refresh_contract_balances(db_session, proto.id)
+        _refresh_due(db_session, proto.id)
 
         fetches = _fetches(db_session, proxy.id)
-        assert len(fetches) == 1
+        assert len(fetches) == 2
         assert fetches[0].observed_address == proxy_addr
         assert [r.observed_address for r in _rows(db_session, proxy.id)] == [proxy_addr]
 
@@ -451,14 +482,15 @@ class TestObservedAddressPerWriter:
         _stub_pinned(monkeypatch, {proxy_addr: 4})
         monkeypatch.setattr("services.clients.etherscan.get_eth_balance", lambda a, **k: read_at.append(a) or 0)
         monkeypatch.setattr("services.clients.etherscan.get_native_price", lambda *a, **k: 1.0)
+        monkeypatch.setattr("services.clients.etherscan.get_eth_price", lambda *a, **k: 1.0)
         monkeypatch.setattr("services.clients.etherscan.get_token_balances_page", lambda a, **k: page([]))
         monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
 
         cast(Any, worker)._fetch_balances(db_session, job, impl, chain_id=1)
 
-        assert read_at == [proxy_addr]
+        assert read_at == []  # A pinned native answer suppresses the redundant fallback.
         fetches = _fetches(db_session, proxy.id)
-        assert len(fetches) == 1
+        assert len(fetches) == 2
         assert fetches[0].observed_address == proxy_addr
         assert fetches[0].block_number == BLOCK
         assert [r.observed_address for r in _rows(db_session, proxy.id)] == [proxy_addr]
@@ -486,9 +518,9 @@ class TestShortReturndataIsNotZero:
 
         _stub_pinned(monkeypatch, None, raw={addr: (True, returndata)})
         _stub_etherscan(monkeypatch, wei=0)
-        refresh_contract_balances(db_session, proto.id)
+        _refresh_due(db_session, proto.id)
 
-        f = _fetches(db_session, c.id)[0]
+        f = _fetches(db_session, c.id, "native")[0]
         assert f.native_status == NATIVE_STATUS_NOT_DETERMINED
         assert f.native_status != NATIVE_STATUS_PROVEN_ZERO
         assert f.block_number is None
@@ -515,7 +547,7 @@ class TestTokenRowsNeverInheritTheNativeHeight:
         }
         _stub_pinned(monkeypatch, {addr: 8})
         _stub_etherscan(monkeypatch, wei=0, token_page=page([tok]))
-        refresh_contract_balances(db_session, proto.id)
+        _refresh_due(db_session, proto.id)
 
         rows = {r.token_address: r for r in _rows(db_session, c.id)}
         assert rows[None].block_number == BLOCK
@@ -569,9 +601,9 @@ class TestInsertOnlyHistory:
 
         _stub_pinned(monkeypatch, {addr: 1}, head=HEAD)
         _stub_etherscan(monkeypatch, wei=0)
-        refresh_contract_balances(db_session, proto.id)
+        _refresh_due(db_session, proto.id)
         _stub_pinned(monkeypatch, {addr: 2}, head=HEAD + 1)
-        refresh_contract_balances(db_session, proto.id)
+        _refresh_due(db_session, proto.id)
 
         rows = _rows(db_session, c.id)
         assert [(r.raw_balance, r.block_number) for r in rows] == [("1", BLOCK), ("2", BLOCK + 1)]
@@ -603,11 +635,11 @@ class TestSoldAssetDisappears:
         }
         _stub_unpinned(monkeypatch)
         _stub_etherscan(monkeypatch, wei=0, token_page=page([tok]))
-        refresh_contract_balances(db_session, proto.id)
+        _refresh_due(db_session, proto.id)
         assert len(_view(db_session, c.id)) == 1
 
         _stub_etherscan(monkeypatch, wei=0, token_page=page([]))
-        refresh_contract_balances(db_session, proto.id)
+        _refresh_due(db_session, proto.id)
 
         assert _view(db_session, c.id) == []
         # ...but the history is still there. Insert-only means nothing is lost.
@@ -659,6 +691,7 @@ class TestHalvesFailIndependently:
         monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
         worker = ResolutionWorker()
         job = SimpleNamespace(id="j1", address=contract.address, request={}, chain_id=1)
+        _make_due(db_session)
         cast(Any, worker)._fetch_balances(db_session, job, contract, chain_id=1)
 
     def test_token_half_succeeding_persists_its_rows(self, db_session, monkeypatch):
@@ -687,7 +720,7 @@ class TestHalvesFailIndependently:
             (None, fetch.native_status),
             ("0x" + "f1" * 20, fetch.asset_set_status),
         ):
-            if status != "fetch_failed":
+            if status not in ("fetch_failed", "unattempted"):
                 assert row_class in by_class, f"{status} promised rows for {row_class} and wrote none"
                 assert by_class[row_class].fetch_id == fetch.id
 
@@ -711,9 +744,10 @@ class TestHalvesFailIndependently:
         # genuinely not known this cycle.
         self._worker_fetch(db_session, monkeypatch, c, native_raises=True, pinned=False)
 
-        fetch = _fetches(db_session, c.id)[-1]
+        fetch = _fetches(db_session, c.id, "native")[-1]
         assert fetch.native_status == NATIVE_STATUS_FETCH_FAILED
-        assert fetch.asset_set_status == ASSET_SET_STATUS_RETURNED_ASSETS
+        assert fetch.asset_set_status == "unattempted"
+        assert _fetches(db_session, c.id, "tokens")[-1].asset_set_status == ASSET_SET_STATUS_RETURNED_ASSETS
         view_native = [r for r in _view(db_session, c.id) if r.token_address is None]
         # The last thing actually observed is still published.
         assert [r.id for r in view_native] == [r.id for r in first_native]
@@ -810,7 +844,7 @@ class TestEntityKeyedRecordsReachTheView:
         db_session.commit()
         _stub_pinned(monkeypatch, {address: 11}, head=HEAD)
         _stub_etherscan(monkeypatch, wei=0)
-        refresh_contract_balances(db_session, proto.id)
+        _refresh_due(db_session, proto.id)
 
         _observe_entity(db_session, "ethereum", address, wei=99, block=BLOCK + 5)
         db_session.flush()

@@ -82,10 +82,19 @@ class JobStageTimingsResponse(TypedDict):
 
 
 class TvlSummary(TypedDict):
+    semantics_version: str
+    holdings_scope: str
+    holdings_observed_at: str | None
+    holdings_partial: bool | None
+    valuation_partial: bool | None
+    external_source: str | None
+    external_slug: str | None
+    external_observed_at: str | None
+    external_retrieved_at: str | None
     total_usd: float | None
     defillama_tvl: float | None
     source: str | None
-    timestamp: str
+    timestamp: str | None
 
 
 class ReachBlock(TypedDict):
@@ -101,6 +110,7 @@ class CompanyOverviewResponse(TypedDict):
     protocol_id: int | None
     contract_count: int
     tvl: TvlSummary | None
+    analysis_pending_balance_effects: dict[str, int]
     contracts: list[dict[str, Any]]
     principals: list[dict[str, Any]]
     ownership_hierarchy: list[dict[str, Any]]
@@ -316,18 +326,11 @@ class SubscriptionItem(TypedDict):
     created_at: str | None
 
 
-class TvlPoint(TypedDict):
-    timestamp: str
-    total_usd: float | None
-    defillama_tvl: float | None
-    source: str | None
+class TvlPoint(TvlSummary):
+    pass
 
 
-class TvlCurrent(TypedDict):
-    total_usd: float | None
-    defillama_tvl: float | None
-    source: str | None
-    timestamp: str | None
+class TvlCurrent(TvlSummary):
     contract_breakdown: dict[str, Any] | None
     chain_breakdown: dict[str, Any] | None
 

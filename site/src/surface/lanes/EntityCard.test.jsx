@@ -258,7 +258,7 @@ describe("EntityCard balances tab count", () => {
     ...over,
   });
 
-  it("counts the holdings the BACKEND presents, not the ones the page re-judges", () => {
+  it("counts all recorded holdings, including legacy disposed rows", () => {
     // The regression this pins: the count split on delivery_shape alone, so a
     // mass-distributed token the protocol's own discovery names — HEX, WETH,
     // base USDC on the reference corpus — was dropped from the count while the
@@ -279,7 +279,7 @@ describe("EntityCard balances tab count", () => {
       />,
     );
     const tab = card.getByText("Balances").closest("button");
-    expect(within(tab).getByText("2")).toBeInTheDocument();
+    expect(within(tab).getByText("3")).toBeInTheDocument();
   });
 
   it("counts a row carrying no verdict — an unjudged holding is still a holding", () => {

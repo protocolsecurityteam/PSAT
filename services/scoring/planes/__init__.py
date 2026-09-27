@@ -463,21 +463,6 @@ from services.scoring.planes.value import (
     CEILING_UNPRICED as CEILING_UNPRICED,
 )
 from services.scoring.planes.value import (
-    DISPOSITION_REFUSALS as DISPOSITION_REFUSALS,
-)
-from services.scoring.planes.value import (
-    DISPOSITION_REFUSED_ASSET_LIST_TRUNCATED as DISPOSITION_REFUSED_ASSET_LIST_TRUNCATED,
-)
-from services.scoring.planes.value import (
-    DISPOSITION_REFUSED_TYPED_RECEIPT_UNRESOLVED as DISPOSITION_REFUSED_TYPED_RECEIPT_UNRESOLVED,
-)
-from services.scoring.planes.value import (
-    DISPOSITION_REFUSED_UNPRICED_POSITIONS as DISPOSITION_REFUSED_UNPRICED_POSITIONS,
-)
-from services.scoring.planes.value import (
-    DISPOSITION_REFUSED_UNSCANNED_ACCOUNT as DISPOSITION_REFUSED_UNSCANNED_ACCOUNT,
-)
-from services.scoring.planes.value import (
     EMPTY_REFUSALS as EMPTY_REFUSALS,
 )
 from services.scoring.planes.value import (
@@ -526,9 +511,6 @@ from services.scoring.planes.value import (
     _reduce_observations as _reduce_observations,
 )
 from services.scoring.planes.value import (
-    _resolve_asset_disposition as _resolve_asset_disposition,
-)
-from services.scoring.planes.value import (
     ceiling_for as ceiling_for,
 )
 from services.scoring.planes.value import (
@@ -573,11 +555,6 @@ __all__ = [
     "CEILING_PROVEN_EMPTY",
     "CEILING_REASONS",
     "CEILING_UNPRICED",
-    "DISPOSITION_REFUSALS",
-    "DISPOSITION_REFUSED_ASSET_LIST_TRUNCATED",
-    "DISPOSITION_REFUSED_TYPED_RECEIPT_UNRESOLVED",
-    "DISPOSITION_REFUSED_UNPRICED_POSITIONS",
-    "DISPOSITION_REFUSED_UNSCANNED_ACCOUNT",
     "EMPTY_REFUSALS",
     "EMPTY_REFUSED_ASSET_SET_NOT_PROVEN_COMPLETE",
     "EMPTY_REFUSED_TYPED_RECEIPT_UNRESOLVED",

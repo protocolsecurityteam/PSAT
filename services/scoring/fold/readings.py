@@ -276,13 +276,6 @@ CEILING_REFUSAL_REASONS = tuple(r for r in P.CEILING_REASONS if r not in P.CEILI
 # only shape in which coverage is trivially whole: a sheet whose every quantity
 # is witnessed zero has nothing left over to be uncovered.
 #
-# The AIRDROP-DETERMINED admit carries BOTH arms, and its partial one is the
-# COMMON case rather than an unreachable combination. Coverage there is earned,
-# not implied: a disposition says an asset's contribution is nil and says
-# nothing about whether the LIST is whole, so a disposed sheet clears
-# ``_asset_coverage["complete"]`` only where the list is separately proven — and
-# the below-resolution readings that sit beside the disposed ones on this corpus
-# are not disposed and not priced, which is exactly the partial arm.
 _CEILING_SOURCE_READINGS = {
     (P.CEILING_ADMITTED, True): (
         "the dollars are THIS entity's own priced holdings, and every asset observed at it was "
@@ -305,24 +298,6 @@ _CEILING_SOURCE_READINGS = {
         "entity carries a quantity witnessed zero, so replacing its code can move nothing from "
         "it. This is an earned negative — a sheet nobody priced publishes not_determined instead "
         "— and it bands at the floor for the same reason any small figure does"
-    ),
-    (P.CEILING_AIRDROP_DETERMINED, True): (
-        "the ceiling is a DETERMINED ZERO of a different kind: every asset observed at this "
-        "entity either carries a quantity witnessed zero or arrived ONLY in transactions "
-        "carrying at least the published fan-out threshold of same-token transfer LOGS, so this "
-        "sheet's determined content is nil and replacing the node's code moves nothing the "
-        "document can price. The claim is DELIVERY SHAPE and never worth — real tokens have "
-        "been measured arriving this way — and the asset list it covers is the one the index "
-        "returned, refused only where that list was read AT the page cap"
-    ),
-    (P.CEILING_AIRDROP_DETERMINED, False): (
-        "the ceiling is a determined zero of what this sheet PRICES: nothing observed at this "
-        "entity carries a determined dollar reading above zero, and every reading that is not a "
-        "witnessed zero arrived only in transactions carrying at least the published fan-out "
-        "threshold of same-token transfer LOGS. It is NOT a figure over the disposed assets "
-        "themselves — the claim admitting it is DELIVERY SHAPE, which says how they arrived and "
-        "never what they are worth — and the coverage is not whole either, so what the part it "
-        "does not cover adds is not_determined"
     ),
     # ``(PROVEN_EMPTY, False)`` is ABSENT, and its absence is a rule rather than
     # an omission. It described a proven-empty priced sheet at a node the

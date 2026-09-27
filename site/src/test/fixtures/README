@@ -1,3 +1,10 @@
 score_etherfi.json is a regenerated score document (see routers/company.py's payload
 shape). Write it back MINIFIED and on ONE line — `json.dumps(doc, separators=(",", ":"))`,
 no trailing newline. Pretty-printing it turns a 20-line regeneration into a 41,000-line diff.
+
+score_etherfi.json remains the legacy 1.4.1 document for backward-compatible
+reader regressions; the original analysis inputs are unavailable here.
+score_current_synthetic.json is generated through the current fold with explicit
+synthetic inputs (not an Etherfi replay). It preserves an upgrade finding with
+$2M observed holdings while withholding unsupported dollar magnitude and score.
+Regenerate using: .venv/bin/python -m tests.regenerate_current_score_fixture

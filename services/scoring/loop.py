@@ -52,12 +52,12 @@ from sqlalchemy.orm import Session
 from db.queue import HEARTBEAT_PROTOCOL_SCORE, record_heartbeat
 from services.monitoring import emit_monitor_cycle
 from services.scoring.dirty import SCORE_DIRTY_STALENESS_SWEEP
-from services.scoring.distill import ProtocolUniverse, load_protocol_universe
+from services.scoring.distill import ProtocolUniverse
 from services.scoring.fold import compute_protocol_score
 from services.scoring.persist import persist_score_document
 from services.scoring.schema import ScoreDocument
 from utils.logging import log_timed_phase
-from utils.scoring_status import SCORE_TRIGGER_DIRTY_LOOP, SCORE_TRIGGER_STALENESS_SWEEP
+from utils.scoring_status import MODEL_VERSION, SCORE_TRIGGER_DIRTY_LOOP, SCORE_TRIGGER_STALENESS_SWEEP
 
 logger = logging.getLogger(__name__)
 
@@ -185,7 +185,9 @@ def select_due_protocols(
             # NULLS FIRST as an ordering is not enough on its own: a protocol
             # that has never been scored must also PASS the age filter, and
             # ``computed_at < cutoff`` is false for NULL.
-            (ProtocolScoreLatest.computed_at.is_(None)) | (ProtocolScoreLatest.computed_at < cutoff)
+            (ProtocolScoreLatest.computed_at.is_(None))
+            | (ProtocolScoreLatest.computed_at < cutoff)
+            | (ProtocolScoreLatest.model_version != MODEL_VERSION)
         )
         .where(or_(ProtocolScoreQueue.protocol_id.is_(None), retry_ready))
         .order_by(ProtocolScoreLatest.computed_at.asc().nullsfirst(), Protocol.id.asc())
@@ -430,17 +432,7 @@ def score_protocol(session: Session, due: DueProtocol) -> Any:
     """
     computed_at = session.execute(select(func.clock_timestamp())).scalar_one()
     durations: dict[str, int] = {}
-    # Assembled before the fold because it reads object storage and the fold's
-    # planes may not. ``None`` is the fail-closed answer to an unreadable source
-    # artifact and disposes nothing.
-    with log_timed_phase(logger, "universe_load", durations_ms=durations, protocol_id=due.protocol_id) as phase:
-        universe = load_protocol_universe(session, due.protocol_id)
-        phase["universe_addresses"] = len(universe.addresses) if universe is not None else None
-    if universe is None:
-        logger.warning(
-            "protocol score universe is not_determined: every disposition refuses",
-            extra={"protocol_id": due.protocol_id, "trigger": due.trigger},
-        )
+    universe = None  # Delivery classification no longer participates in scoring.
     with log_timed_phase(logger, "fold", durations_ms=durations, protocol_id=due.protocol_id):
         document = compute_protocol_score(
             session,

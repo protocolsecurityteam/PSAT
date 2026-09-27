@@ -559,98 +559,17 @@ describe("derive — confidence", () => {
   });
 });
 
-describe("derive — sheet disposition (1.4.0 airdrop_determined)", () => {
-  const disposedFinding = (over = {}) => ({
-    ...F[0],
-    reach_sheet_ceiling_magnitudes: [
-      {
-        entity: "ethereum::0x1b7a4c37c5b2b0b3b0d0f0a0b0c0d0e0f0a0b0c0",
-        published_usd: 0,
-        sheet_usd: 0,
-        sheet_state: "airdrop_determined",
-        ceiling_reason: "airdrop_determined",
-        bound_direction: "ceiling",
-      },
-    ],
-    ...over,
-  });
-
-  it("labels the new sheet state and ceiling reason rather than dropping them", () => {
-    // The label tables are NOT allow-lists: a token the page cannot name is
-    // still a token the document published, so the fall-through is the raw
-    // token and never a blank.
-    expect(sheetStateLabel("airdrop_determined")).toBe("airdrop-delivered");
-    expect(ceilingReasonLabel("airdrop_determined")).toBe("airdrop-delivered");
+describe("derive — retired delivery classification", () => {
+  it("labels legacy states as unpriced, never as a zero witness", () => {
+    expect(sheetStateLabel("airdrop_determined")).toBe("unpriced (legacy classification)");
+    expect(ceilingReasonLabel("airdrop_determined")).toBe("unpriced (legacy classification)");
     expect(sheetStateLabel("some_future_state")).toBe("some_future_state");
-    expect(ceilingReasonLabel("some_future_reason")).toBe("some_future_reason");
-    expect(sheetStateLabel(null)).toBeNull();
   });
-
-  it("carries the disposed figure WITH its reason, so $0 is never bare", () => {
-    const d = sheetDisposition(disposedFinding());
-    expect(d.count).toBe(1);
-    expect(d.usd).toBe(0);
-    expect(d.usdText).toBe("$0");
-    expect(d.label).toBe("airdrop-delivered");
-    // The SUBSTANCE of the sentence, not just that it mentions a distribution.
-    // The superseded note said these holdings are "not presented as positions
-    // this protocol holds", which describes what the page does and lets a
-    // reader assume the $0 covers them. It does not, and the two clauses that
-    // say so are the ones worth pinning: the holdings are still held, and this
-    // document does not value them.
-    expect(d.reason).toMatch(/STILL HELD/);
-    expect(d.reason).toMatch(/not_determined/);
-    expect(d.reason).toMatch(/PRICES/);
-    expect(d.reason).toMatch(/mass distribution/i);
-    // And it must NOT revert to describing the page's own behaviour.
-    expect(d.reason).not.toMatch(/not presented as positions/i);
-    // A DELIVERY claim. Real tokens arrive this way, so none of these words may
-    // appear beside the figure.
-    for (const word of [/spam/i, /scam/i, /junk/i, /worthless/i]) {
-      expect(d.reason).not.toMatch(word);
-    }
-  });
-
-  it("publishes no number rather than another zero when the document withheld one", () => {
-    const d = sheetDisposition(
-      disposedFinding({
-        reach_sheet_ceiling_magnitudes: [
-          { entity: "ethereum::0xabc", published_usd: null, sheet_state: "airdrop_determined" },
-        ],
-      }),
-    );
-    expect(d.usd).toBeNull();
-    expect(d.usdText).toBeNull();
-  });
-
-  it("reads the shipped document's own disposed rows and no others", () => {
-    // The golden's corpus no longer determines ANY sheet by delivery shape —
-    // provenance.value.sheet_states counts airdrop_determined at 0, and so does
-    // the ceiling-reason census — so the count re-pins from 1 to 0. That is the
-    // document's own witnessed zero, not an unasked question, and it makes this
-    // a pure negative control again: no row may grow a disposition the document
-    // does not name.
-    expect(ETHERFI.provenance.value.sheet_states.airdrop_determined).toBe(0);
-    const disposed = F.filter((finding) => sheetDisposition(finding) !== null);
-    expect(disposed.length).toBe(0);
-  });
-
-  it("reaches the deduction row so the cell can render it", () => {
-    const doc = { findings: F.map((f, i) => (i === 0 ? disposedFinding() : f)) };
-    const rows = deductionRows(doc, buildContractIndex([]));
-    const row = rows.find((r) => r.index === 0);
-    expect(row.sheetDisposition.usdText).toBe("$0");
-    // The constructed row and nothing else: the golden itself carries no
-    // disposed sheet, so the only cell that may render one is the row the
-    // substitution above put it on.
-    expect(rows.filter((r) => r.sheetDisposition).length).toBe(1);
-  });
-
-  it("leaves BOUND_DIRECTIONS alone — the disposition is not a direction", () => {
-    // The bound direction of a disposed sheet ceiling is still `ceiling`; the
-    // new token belongs to the state/reason vocabularies and must not be smuggled
-    // into the direction allow-list, where it would render as a bound nobody proved.
-    expect(BOUND_DIRECTIONS).toEqual(["floor", "ceiling", "not_determined"]);
-    expect(valueCell({ value_band: "<$100k", value_at_stake_bound_direction: "airdrop_determined" }).direction).toBeNull();
+  it("cannot publish an airdrop-derived zero even from legacy materialized data", () => {
+    const finding = {...F[0], reach_sheet_ceiling_magnitudes: [{published_usd: 0,
+      sheet_state: "airdrop_determined", ceiling_reason: "airdrop_determined"}]};
+    expect(sheetDisposition(finding)).toBeNull();
+    const rows = deductionRows({findings: [finding]}, buildContractIndex([]));
+    expect(rows[0].sheetDisposition).toBeNull();
   });
 });

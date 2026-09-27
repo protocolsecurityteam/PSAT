@@ -61,12 +61,7 @@ _CREDIT_PATH_CLAUSES = {
         "which carries an act-as witness — the same kind of answer reached through one more "
         "join, itemised per row under reach_composed_magnitudes"
     ),
-    CREDIT_PATH_SHEET_CEILING: (
-        "the controlled node's own priced SHEET, which bounds the move from ABOVE and never "
-        "measures it: replacing that node's code leaves none of that node's code between the "
-        "principal and what it holds, so at-most-what-is-there is proven without a call being "
-        "witnessed at all, itemised per row under reach_sheet_ceiling_magnitudes"
-    ),
+    CREDIT_PATH_SHEET_CEILING: "retired sheet-only attribution (no confidence credit)",
 }
 
 
@@ -80,7 +75,7 @@ def _credit_path_reading(counts: dict[str, int]) -> str:
     """
     parts = [f"{counts.get(path, 0)} from {clause}" for path, clause in _CREDIT_PATH_CLAUSES.items()]
     return (
-        "an answer counts here from any of THREE witnesses, and the population splits "
+        "call and composed witnesses supply answers; retired sheet-only attribution receives no credit: "
         + "; ".join(parts)
         + ". They are not equally strong and are counted apart so a consumer can subtract "
         "whichever of them it does not want to credit"
@@ -304,7 +299,7 @@ def _confidence(
             own = _gate(signal, "reach_magnitude_usd").is_determined
             identity = _signal_identity(signal)
             by_composition = not own and identity in (composed_signals or set())
-            by_ceiling = not own and not by_composition and identity in (ceiling_signals or set())
+            by_ceiling = False  # Present holdings do not bound generic capability scope.
             magnitude[key][1] += 1
             magnitude_census[signal.claim_id][1] += 1
             if own or by_composition or by_ceiling:

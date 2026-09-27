@@ -651,9 +651,9 @@ def test_value_out_reach_measures_downstream_holder_loss():
     # Reach is STATE-plane (holder addresses + this protocol's USD), so it rides
     # ``concrete`` — ``details`` is what the cross-deployment behavioral cache
     # stores and re-publishes to every twin of this bytecode.
-    assert eff.concrete["observed_reach_value_usd"] == 221_000_000.0 + 55_200_000.0
+    assert eff.concrete["reach_observed_holdings_usd"] == 221_000_000.0 + 55_200_000.0
     assert eff.concrete["observed_reach_holders"] == sorted([CONTRACT.lower(), lp.lower()])
-    assert eff.concrete["reach_determined"] is True
+    assert eff.concrete["reach_determined"] is False
     assert "reach_indeterminate" not in eff.concrete
     assert "observed_reach_floor_usd" not in eff.concrete
     assert not any(k.startswith(("observed_reach", "reach_")) for k in eff.details)
@@ -683,7 +683,7 @@ def test_value_out_reach_floors_and_flags_when_no_holder_moved():
     # ``observed_reach_value_usd`` is what let a zero-balance router read "$0 reach".
     assert eff.concrete["reach_determined"] is False
     assert eff.concrete["reach_indeterminate"] is True
-    assert eff.concrete["observed_reach_floor_usd"] == 221_000_000.0
+    assert "observed_reach_floor_usd" not in eff.concrete
     assert "observed_reach_value_usd" not in eff.concrete
     assert "observed_reach_holders" not in eff.concrete
     assert not any(k.startswith(("observed_reach", "reach_")) for k in eff.details)

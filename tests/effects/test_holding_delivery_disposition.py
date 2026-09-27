@@ -1,22 +1,4 @@
-"""Every holding is labelled, and only the full disposition conjunction is withheld.
-
-§10.6.9's acceptance test on the selection plane: a holding must not be PRESENTED as
-a position the protocol holds when the evidence says it is not one, while the record
-of it stays and stays labelled. The two facts are separate and both are tested here,
-because a disposition that removed the row would be an unwitnessed deletion — and
-this plane reads a record's mere existence as "this deployment holds this asset".
-
-The predicate is the scorer's, not a weaker one. Delivery shape ALONE withholds
-nothing: applying it alone was measured pulling 39 rows of HEX, WETH and base USDC
-out of the presented holdings while the score spared every one of them through the
-protocol-reference conjunct. A row leaves the claim only when it is unpriced AND
-``fan_out_all`` AND ``absent_from_universe``; anything else — including a MISSING
-reference row — keeps it presented.
-
-Nothing here is a claim about worth. Two demonstrably real tokens on this corpus are
-airdrop-delivered (uniETH at fan-out 101, HEX at 199/399/399); the published state
-says how the balance arrived and nothing else.
-"""
+"""Legacy delivery evidence remains stored but cannot exclude current holdings."""
 
 from __future__ import annotations
 
@@ -123,18 +105,18 @@ def test_the_record_survives_disposition_and_carries_the_shape(db_session):
 
     by_asset = {h.asset: h for h in _asset_holdings_by_deployment(db_session, p.id)[deployment.lower()]}
     assert set(by_asset) == {junk.lower(), real.lower(), unknown.lower()}
-    assert by_asset[junk.lower()].delivery_shape == DELIVERY_SHAPE_FAN_OUT_ALL
-    assert by_asset[junk.lower()].reference_shape == TOKEN_REFERENCE_ABSENT_FROM_UNIVERSE
+    assert by_asset[junk.lower()].delivery_shape == DELIVERY_SHAPE_NOT_DETERMINED
+    assert by_asset[junk.lower()].reference_shape == TOKEN_REFERENCE_NOT_DETERMINED
     # The earned negative and the gap are DIFFERENT states, and neither is disposed.
-    assert by_asset[real.lower()].delivery_shape == DELIVERY_SHAPE_HAS_DIRECT_DELIVERY
-    assert by_asset[real.lower()].reference_shape == TOKEN_REFERENCE_IN_UNIVERSE
+    assert by_asset[real.lower()].delivery_shape == DELIVERY_SHAPE_NOT_DETERMINED
+    assert by_asset[real.lower()].reference_shape == TOKEN_REFERENCE_NOT_DETERMINED
     assert by_asset[unknown.lower()].delivery_shape == DELIVERY_SHAPE_NOT_DETERMINED
     # No reference row was written for this pair, and the absence reads as the gap.
     assert by_asset[unknown.lower()].reference_shape == TOKEN_REFERENCE_NOT_DETERMINED
 
 
 @requires_postgres
-def test_only_the_fully_disposed_asset_leaves_the_value_holder_set(db_session):
+def test_no_legacy_disposition_excludes_a_positive_holding(db_session):
     """(c) not presented as a holding — at the point membership means exactly that.
 
     Four assets, all four airdrop-delivered or unmeasured, and exactly ONE of them
@@ -159,7 +141,7 @@ def test_only_the_fully_disposed_asset_leaves_the_value_holder_set(db_session):
 
     cand = next(x for x in select_candidates(db_session, p.id) if x.selector == "0xdd000001")
     presented = {h.asset for h in cand.value_holders}
-    assert junk.lower() not in presented
+    assert junk.lower() in presented
     # FAIL-CLOSED in three directions: an earned negative, a pair nobody measured, and
     # a mass-distributed token the protocol's OWN discovery names are all presented.
     assert {real.lower(), unknown.lower(), spared.lower()} <= presented
@@ -207,8 +189,8 @@ def test_the_evidence_is_keyed_on_the_account_the_read_was_issued_against(db_ses
     _evidence(db_session, holder=observed, token=token, shape=DELIVERY_SHAPE_FAN_OUT_ALL)
     db_session.flush()
 
-    holdings = _asset_holdings_by_deployment(db_session, p.id)[contract_address.lower()]
-    assert [h.delivery_shape for h in holdings] == [DELIVERY_SHAPE_FAN_OUT_ALL]
+    holdings = _asset_holdings_by_deployment(db_session, p.id)[observed.lower()]
+    assert [h.delivery_shape for h in holdings] == [DELIVERY_SHAPE_NOT_DETERMINED]
 
 
 class TestTheMergeAcrossAccountsIsUnanimous:
@@ -266,7 +248,7 @@ class TestTheDispositionPredicateIsTheScorers:
     """
 
     def test_all_three_conjuncts_dispose(self):
-        assert disposed_from_holdings(
+        assert not disposed_from_holdings(
             delivery_shape=DELIVERY_SHAPE_FAN_OUT_ALL,
             reference_shape=TOKEN_REFERENCE_ABSENT_FROM_UNIVERSE,
             usd_value=None,

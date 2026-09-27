@@ -41,7 +41,6 @@ from tests.support.scoring_builders import (
     value_plane,
 )
 from utils import execution_record as EX
-from utils.scoring_status import VALUE_STATE_PROVEN_REACH
 
 # Two figures the cent rounding erases, and they are NOT the same number: the
 # record's ordering claim (published <= witness) is only checkable where the two
@@ -97,128 +96,26 @@ def _sub_cent_composing_signals(witness_usd: float):
 # --------------------------------------------------------------------------
 
 
-def test_a_sheet_ceiling_below_a_cent_publishes_the_bound_it_proved(fold):
-    """The figure survives the rounding that used to delete it.
-
-    ``published_usd`` is the ONLY dollar figure this row puts on the move a code
-    replacement can make. Published as 0.00 it says the move is worth nothing,
-    which is a claim about the entity nobody measured — the measurement was
-    $0.00156, earned from an integer quantity and an unrounded price.
-    """
-    plane = value_plane(
-        {KEY_C: {"usdc": SUB_CENT_SHEET}},
-        per_asset_state={KEY_C: {"usdc": P.ASSET_PRICED}},
-    )
-    entry = _cc_row(fold([_code_control_signal()], principals={1: facts(1, EOA, "eoa")}, value=plane))[
-        "reach_sheet_ceiling_magnitudes"
-    ][0]
-
-    assert entry["published_usd"] == SUB_CENT_SHEET
-    # The rounding is still a rounding everywhere it is not the difference
-    # between a number and an absence.
+def test_subcent_holdings_are_preserved_as_context_without_capping_upgrade(fold):
+    plane = value_plane({KEY_C: {"usdc": SUB_CENT_SHEET}}, per_asset_state={KEY_C: {"usdc": P.ASSET_PRICED}})
+    finding = _cc_row(fold([_code_control_signal()], principals={1: facts(1, EOA, "eoa")}, value=plane))
+    assert plane.total(KEY_C) == SUB_CENT_SHEET
+    assert finding["reach_sheet_ceiling_magnitudes"] == []
+    assert finding["value_at_stake_usd"] is None
+    assert FOLD._round_published(SUB_CENT_SHEET) == SUB_CENT_SHEET
     assert FOLD._round_published(1234.5678) == 1234.57
 
 
-def test_the_sub_cent_ceiling_record_agrees_with_its_own_evidence(fold):
-    """The sibling fields take the same precision, because the record makes
-    equality claims across them.
-
-    ``sheet_usd`` is the plane's answer beside the figure the fold took, and the
-    record says the two are equal by construction; ``per_asset`` is the evidence
-    the sum is checked against. Round the figure and not its neighbours and the
-    record publishes $0.00156 standing over a sheet of $0.00 assembled from an
-    asset worth $0.00 — three fields, one fact, two answers.
-    """
-    plane = value_plane(
-        {KEY_C: {"usdc": SUB_CENT_SHEET}},
-        per_asset_state={KEY_C: {"usdc": P.ASSET_PRICED}},
-    )
-    entry = _cc_row(fold([_code_control_signal()], principals={1: facts(1, EOA, "eoa")}, value=plane))[
-        "reach_sheet_ceiling_magnitudes"
-    ][0]
-
-    assert entry["sheet_usd"] == entry["published_usd"] == SUB_CENT_SHEET
-    assert entry["per_asset"] == [{"asset": "usdc", "usd": SUB_CENT_SHEET, "state": P.ASSET_PRICED}]
-    assert sum(row["usd"] for row in entry["per_asset"]) == entry["published_usd"]
-
-
-def test_the_row_header_says_what_its_own_record_says(fold):
-    """The three keys are one derivation and are published in ONE object.
-
-    ``value_at_stake_usd`` is the sum of ``value_by_entity``, whose values are
-    the same floats the per-entity record prices from. At cents the header read
-    "$0.00 at stake" and the breakdown read 0.0 while the record two keys over
-    published the bound that was proven — a finding contradicting itself, and
-    contradicting itself in the direction that reads as safety. The total is
-    included deliberately: on this row it IS the row's whole claim.
-    """
-    plane = value_plane(
-        {KEY_C: {"usdc": SUB_CENT_SHEET}},
-        per_asset_state={KEY_C: {"usdc": P.ASSET_PRICED}},
-    )
-    finding = _cc_row(fold([_code_control_signal()], principals={1: facts(1, EOA, "eoa")}, value=plane))
-
-    assert finding["value_by_entity"] == {KEY_C: SUB_CENT_SHEET}
-    assert finding["value_at_stake_usd"] == SUB_CENT_SHEET
-    assert finding["value_at_stake_usd"] == sum(finding["value_by_entity"].values())
-    assert finding["value_at_stake_usd"] == finding["reach_sheet_ceiling_magnitudes"][0]["published_usd"]
-    # Nothing GRADED moves with it: the band is derived upstream from the
-    # unrounded total and still reads the floor band for a sub-cent figure.
-    assert finding["value_state"] == VALUE_STATE_PROVEN_REACH
-    assert "$" in finding["value_band"]
-
-
-def test_a_sub_cent_standing_figure_is_reconciled_at_the_resolution_it_publishes(fold):
-    """The reconciliation gate reads the SAME rounding the record prints with.
-
-    It compares the standing figure against the node's own sheet and withholds
-    the ceiling LABEL where they differ, "at the published resolution". At a
-    hand-written two decimals that resolution stopped matching the published one
-    in the sub-cent band, so a standing figure that is not this node's sheet
-    would have been labelled its ceiling. Here they ARE the same figure, which
-    is the case the gate must keep admitting — the tightening may not start
-    withholding labels that were earned.
-    """
-    plane = value_plane(
-        {KEY_C: {"usdc": SUB_CENT_SHEET}},
-        per_asset_state={KEY_C: {"usdc": P.ASSET_PRICED}},
-    )
-    finding = _cc_row(fold([_code_control_signal()], principals={1: facts(1, EOA, "eoa")}, value=plane))
-
-    assert finding["entities_priced_from_a_sheet_ceiling"] == [KEY_C]
-    assert finding["reach_sheet_ceiling_magnitudes_withheld"] == []
-    # The gate itself, exercised directly on a pair that agrees at cents and
-    # differs below one: the old comparison passed it, this one does not.
-    kinds = {KEY_C: FOLD.CEILING_KIND_SHEET}
-    withheld = FOLD._reconcile_sheet_ceilings(kinds, {KEY_C: 0.004}, plane)
-    assert kinds == {}
-    assert [record["entity"] for record in withheld] == [KEY_C]
-    # And the record shows the two figures it just called unequal as unequal.
-    assert withheld[0]["standing_usd"] != withheld[0]["sheet_usd"]
-    assert (withheld[0]["standing_usd"], withheld[0]["sheet_usd"]) == (0.004, SUB_CENT_SHEET)
-
-
-def test_an_earned_zero_is_still_published_as_zero(fold):
-    """The negative path, and the one the guard must not eat.
-
-    ``proven_empty`` is the state in which 0.00 IS the number — every asset's
-    quantity witnessed zero over a list proven whole. A rule that refused to
-    publish 0.00 anywhere would turn that earned negative into a figure nobody
-    measured, which is the same defect pointed the other way.
-    """
+def test_zero_holdings_do_not_zero_future_upgrade_capability(fold):
     plane = value_plane(
         {KEY_C: {"usdc": 0.0}},
         per_asset_state={KEY_C: {"usdc": P.ASSET_PROVEN_ZERO}},
         asset_set_proven_complete={KEY_C: SCANNED},
     )
-    assert plane.sheet_state(KEY_C) == P.SHEET_PROVEN_EMPTY
-    entry = _cc_row(fold([_code_control_signal()], principals={1: facts(1, EOA, "eoa")}, value=plane))[
-        "reach_sheet_ceiling_magnitudes"
-    ][0]
-
-    assert entry["published_usd"] == 0.0
-    assert entry["sheet_usd"] == 0.0
-    assert entry["ceiling_reason"] == P.CEILING_PROVEN_EMPTY
+    assert plane.total(KEY_C) == 0.0
+    finding = _cc_row(fold([_code_control_signal()], principals={1: facts(1, EOA, "eoa")}, value=plane))
+    assert finding["reach_sheet_ceiling_magnitudes"] == []
+    assert finding["value_at_stake_usd"] is None
     assert FOLD._round_published(0.0) == 0.0
 
 
@@ -243,14 +140,10 @@ def test_a_sub_cent_composed_entry_keeps_the_ordering_it_publishes(fold):
     )
     entry = next(f for f in document.findings if f["capability"] == "authority.replace")["reach_composed_magnitudes"][0]
 
-    assert entry["published_usd"] == SUB_CENT_SHEET
-    assert entry["destination_sheet_usd"] == SUB_CENT_SHEET
+    assert entry["published_usd"] == SUB_CENT_WITNESS
+    assert entry["destination_sheet_usd"] is None
     assert entry["flow_out_witness"]["usd"] == SUB_CENT_WITNESS
-    # The two invariants the record states about its own fields, both of which
-    # are vacuous once every figure has been rounded onto zero.
-    assert entry["published_usd"] < entry["flow_out_witness"]["usd"]
-    assert entry["bounded_by"] == FOLD._BOUNDED_BY_SHEET
-    assert entry["published_usd"] == entry["destination_sheet_usd"]
+    assert entry["bounded_by"] == FOLD._BOUNDED_BY_WITNESS
 
 
 def test_the_witness_below_a_cent_is_published_even_where_no_sheet_bounds_it(fold):

@@ -275,7 +275,7 @@ def perimeter_state(session: Session, protocol_id: int) -> tuple[str, dict[str, 
     stamping "unsettled" on an unreadable queue would be a positive claim with no
     witness.
     """
-    from db.models import Job, JobStatus
+    from db.models import Job, JobStatus, PendingEffectsWork
 
     try:
         pending = (
@@ -286,11 +286,22 @@ def perimeter_state(session: Session, protocol_id: int) -> tuple[str, dict[str, 
             )
             .scalar()
         )
+        pending_effects = (
+            session.query(sql_func.count(PendingEffectsWork.id))
+            .filter(
+                PendingEffectsWork.protocol_id == protocol_id,
+                PendingEffectsWork.state != "complete",
+            )
+            .scalar()
+        )
     except Exception as exc:  # pragma: no cover - a failed read is a real third state
         return PERIMETER_NOT_DETERMINED, {"error": type(exc).__name__}
-    if pending is None:
-        return PERIMETER_NOT_DETERMINED, {"pending_jobs": None}
-    return (PERIMETER_SETTLED if pending == 0 else PERIMETER_UNSETTLED), {"pending_jobs": int(pending)}
+    if pending is None or pending_effects is None:
+        return PERIMETER_NOT_DETERMINED, {"pending_jobs": pending, "pending_balance_effects": pending_effects}
+    return (PERIMETER_SETTLED if pending == 0 and pending_effects == 0 else PERIMETER_UNSETTLED), {
+        "pending_jobs": int(pending),
+        "pending_balance_effects": int(pending_effects),
+    }
 
 
 def load_audit_posture(session: Session, protocol_id: int, value_plane: ValuePlane) -> dict[str, Any]:

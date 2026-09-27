@@ -253,8 +253,8 @@ export function DetailEmptyState({
   }
 
   const tvl = companyData.tvl || null;
-  const tvlUsd = tvl ? (tvl.total_usd ?? tvl.defillama_tvl ?? null) : null;
-  const tvlSource = tvl && tvl.total_usd == null && tvl.defillama_tvl != null ? "DefiLlama" : "tracked";
+  const tvlUsd = tvl?.total_usd ?? null;
+  const externalTvl = tvl?.defillama_tvl ?? null;
   const reports = projection?.posture?.reportsOnFile ?? null;
 
   return (
@@ -270,6 +270,15 @@ export function DetailEmptyState({
             .join(" · ")}
         </span>
       </div>
+
+      {companyData.analysis_pending_balance_effects?.incomplete > 0 && (
+        <div className="ps-glance-card" role="status">
+          {companyData.analysis_pending_balance_effects.incomplete} balance-dependent analysis checks incomplete
+          {companyData.analysis_pending_balance_effects.degraded > 0
+            ? ` · ${companyData.analysis_pending_balance_effects.degraded} await recovery after retries`
+            : " · awaiting required observations"}
+        </div>
+      )}
 
       <GlanceScoreCard
         companyName={companyName}
@@ -336,15 +345,26 @@ export function DetailEmptyState({
         </div>
       </div>
 
-      {(tvlUsd != null || tops.length > 0) && (
+      {(tvlUsd != null || externalTvl != null || tops.length > 0) && (
         <div className="ps-glance-card">
           {tvlUsd != null && (
             <div className="ps-glance-vhead">
-              <span className="ps-glance-tvl">{formatUsd(tvlUsd)}</span>
+              <span className="ps-glance-tvl">{formatUsd(tvlUsd) || "$0.00"}</span>
               <span className="ps-glance-vsrc">
-                {["TVL", tvlSource, tvl?.timestamp ? shortDate(tvl.timestamp) : null]
+                {["Gross tracked holdings", tvl?.holdings_partial !== false ? "coverage partial/unknown" : null, tvl?.valuation_partial !== false ? "valuation partial/unknown" : null, tvl?.holdings_observed_at ? shortDate(tvl.holdings_observed_at) : "observation time unknown"]
                   .filter(Boolean)
                   .join(" · ")}
+              </span>
+            </div>
+          )}
+          {externalTvl != null && (
+            <div className="ps-glance-vhead">
+              <span className="ps-glance-tvl">{formatUsd(externalTvl) || "$0.00"}</span>
+              <span className="ps-glance-vsrc">
+                {["External TVL · DefiLlama", tvl?.external_slug || "series unknown",
+                  tvl?.external_observed_at ? shortDate(tvl.external_observed_at) : "upstream time unknown",
+                  tvl?.external_retrieved_at ? `retrieved ${shortDate(tvl.external_retrieved_at)}` : null]
+                  .filter(Boolean).join(" · ")}
               </span>
             </div>
           )}

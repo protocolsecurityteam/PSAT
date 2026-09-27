@@ -18,9 +18,9 @@ So there is one policy here and it is structural rather than remembered:
 gets there — it hands back the contract row that owns that address, and the read
 is filed against it. A caller cannot express the divergent shape any more.
 
-The escalation ladder (Etherscan first, chain sweep second) and the single write
-point both live here for the same reason: an escalation added on one producer
-and not the other is the same class of bug as a divergent address policy.
+Current publication is independent of historical discovery. Legacy sweep helpers
+remain for explicit historical tooling and evidence readers; normal resolution
+and TVL collection never invoke them.
 """
 
 from __future__ import annotations
@@ -28,6 +28,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -40,7 +41,6 @@ from services.clients.etherscan import TokenBalancePage
 # matter which producer imported this module's helpers.
 from services.monitoring import asset_sweep, warn_degraded_once
 from services.monitoring.asset_sweep import (
-    SWEEP_COMPLETED,
     CarriedTypedReceipt,
     SweepCost,
     SweepOutcome,
@@ -52,7 +52,6 @@ from utils.balance_status import (
     ASSET_SET_SOURCE_ETHERSCAN_PAGES,
     ASSET_SET_STATUS_AT_PAGE_CAP,
     ASSET_SET_STATUS_FETCH_FAILED,
-    ASSET_SET_STATUS_RETURNED_ASSETS,
     ASSET_SET_STATUS_RETURNED_EMPTY,
     BALANCE_SOURCE_PINNED_NATIVE_READ,
     BALANCE_SOURCE_UNPINNED_NATIVE_READ,
@@ -162,6 +161,9 @@ class NativeReading:
     price_usd: float | None
     symbol: str
     name: str
+    attempted: bool = True
+    observed_at: datetime | None = None
+    price_observed_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -259,7 +261,11 @@ def fetch_asset_page(address: str, *, chain_id: int) -> TokenBalancePage:
     try:
         return get_token_balances_page(address, chain_id=chain_id)
     except Exception as exc:
-        logger.warning("token balance fetch raised for %s on chain %s: %s", address, chain_id, exc)
+        from services.clients.request_budget import RequestBudgetExceeded
+
+        if isinstance(exc, RequestBudgetExceeded):
+            raise
+        logger.warning("token balance fetch raised for %s on chain %s: %s", address, chain_id, type(exc).__name__)
         return TokenBalancePage(
             rows=[],
             page_length=None,
@@ -637,225 +643,55 @@ def record_observation(
     native: NativeReading,
     page: TokenBalancePage,
     writer: str,
-    sweep: SweepOutcome | None = None,
-    escalation: str | None = None,
-    cost_note: str | None = None,
+    observed_at: datetime | None = None,
 ) -> RecordedObservation:
-    """THE write point for both producers: one fetch row plus its row set.
+    """Publish one current-state result. Caller commits; no provider work here.
 
-    The invariant every reader depends on is preserved here rather than at two
-    call sites: a non-failed class status is a promise that that class's row set
-    was written — possibly empty, when empty is what was observed, never merely
-    skipped.
+    Unattempted classes do not replace observations. Partial token prefixes are
+    retained independently by the shared projection policy, never merged into an
+    invented complete portfolio. Historical discovery is not a prerequisite.
     """
-    observed_address = subject.address
-    native_status = native_status_for(wei=native.wei, pinned=native.block_number is not None, failed=native.failed)
+    from utils.balance_status import STATUS_UNATTEMPTED
 
-    assets: dict[str, dict] = {}
-    for row in page.rows:
-        token = (row.get("token_address") or "").lower()
-        if not token:
-            continue
-        assets[token] = {
-            "token_address": token,
-            "token_name": row.get("token_name"),
-            "token_symbol": row.get("token_symbol"),
-            "decimals": row.get("decimals", 18),
-            "raw_balance": row["balance"],
-            "price_usd": row.get("price_usd"),
-            "usd_value": row.get("usd_value"),
-            "source": ASSET_SET_SOURCE_ETHERSCAN_PAGES,
-        }
-
-    # Two different things, deliberately not one flag. The SCAN either ran to a
-    # named block or it did not; the COMPLETENESS of the asset set is a further
-    # claim the scan only sometimes supports. A typed (ERC-721/1155) receipt whose
-    # current holding could not be read separates them: 1155 has no
-    # ``balanceOf(address)`` at all, so the answer is a revert rather than a zero,
-    # and the set cannot be shown to be everything — but the scan itself is a
-    # fact, and its rows and its cursor are both worth keeping.
-    scan_completed = sweep is not None and sweep.status == SWEEP_COMPLETED
-    typed_unreadable = [t for t in (sweep.typed_assets if sweep else ()) if t.raw_balance is None]
-    swept_ok = scan_completed and not typed_unreadable
-
-    if scan_completed:
-        assert sweep is not None
-        for asset in sweep.assets:
-            # A scan-discovered asset the holder no longer holds writes no row,
-            # and the completeness witness is why it does not need to. What
-            # ``proven_empty`` turns on is the SET — the fetch record carries
-            # ``chain_log_sweep`` + ``swept_through_block``, and the plane reads
-            # "this list is everything that ever arrived" off that — so a
-            # zero-quantity row would add no evidence while making row existence
-            # mean "holds this asset" again, which is the reading
-            # ``balance_reads.positive_raw_balance`` exists to stop. It would also
-            # flip the recorded asset-set status from ``returned_empty`` to
-            # ``returned_assets`` for a holder that holds nothing.
-            if asset.raw_balance is None or asset.raw_balance <= 0:
-                continue
-            existing = assets.get(asset.token_address)
-            if existing is not None:
-                # The page already carries this asset WITH a price; the sweep adds
-                # no money information, only completeness.
-                continue
-            assets[asset.token_address] = {
-                "token_address": asset.token_address,
-                "token_name": None,
-                "token_symbol": None,
-                "decimals": 18 if asset.decimals is None else asset.decimals,
-                "raw_balance": asset.raw_balance,
-                # No price source reaches a log-derived asset, so the quantity is
-                # published unpriced. NOT zero — an unpriced holding is not a
-                # holding worth nothing.
-                "price_usd": None,
-                "usd_value": None,
-                "source": ASSET_SET_SOURCE_CHAIN_LOG_SWEEP,
-            }
-        for asset in sweep.typed_assets:
-            if asset.raw_balance is None or asset.raw_balance <= 0:
-                continue
-            if asset.token_address in assets:
-                continue
-            assets[asset.token_address] = {
-                "token_address": asset.token_address,
-                "token_name": None,
-                # The quantity is a COUNT of items, not a scaled amount of
-                # anything, so ``decimals`` is 0 — never the conventional 18,
-                # which would present a count as a fungible quantity — and there
-                # is no USD column to fill. It must never be summed into a sheet
-                # total.
-                "token_symbol": None,
-                "decimals": 0,
-                "raw_balance": asset.raw_balance,
-                "price_usd": None,
-                "usd_value": None,
-                "source": ASSET_SET_SOURCE_CHAIN_LOG_SWEEP,
-            }
-
-    # The typed receipts, recorded on the fetch whether or not they are holdings
-    # today: they are the evidence for the completeness this scan does or does
-    # not claim, and an incremental window will never name them again.
-    typed_evidence: list[dict] | None = None
-    if scan_completed:
-        assert sweep is not None
-        # The id inventory is stored beside the quantity, not instead of it. It is
-        # what makes the ERC-1155 read a one-off: the ids exist only in the logs
-        # that delivered them, nothing else in the pipeline keeps a log, and a
-        # record without them sends the next cycle back through the whole
-        # full-history scan to learn what it already knew.
-        typed_evidence = [
-            {
-                "address": asset.token_address,
-                "kind": asset.kind,
-                "standard": asset.standard,
-                "quantity_readable": asset.raw_balance is not None,
-                "quantity": None if asset.raw_balance is None else str(asset.raw_balance),
-                "quantity_basis": asset.quantity_basis,
-                "ids_complete": asset.ids_complete,
-                "ids": [
-                    {"id": item.token_id, "quantity": None if item.quantity is None else str(item.quantity)}
-                    for item in asset.items
-                ],
-            }
-            for asset in sweep.typed_assets
-        ]
-
-    sweep_status: str | None
-    if swept_ok:
-        assert sweep is not None
-        asset_set_status = ASSET_SET_STATUS_RETURNED_ASSETS if assets else ASSET_SET_STATUS_RETURNED_EMPTY
-        asset_set_source = ASSET_SET_SOURCE_CHAIN_LOG_SWEEP
-        sweep_status = SWEEP_STATUS_COMPLETED
-        swept_through_block = sweep.swept_through_block
-        swept_from_block: int | None = sweep.swept_from_block
-        basis = f"{sweep.basis}; escalated because {escalation}; {SWEEP_POPULATION_NOTE}"
-        if page.status != ASSET_SET_STATUS_FETCH_FAILED and page.rows:
-            basis = f"{basis}; priced entries carried from {page.basis}"
-    elif scan_completed:
-        assert sweep is not None
-        # The scan ran and its rows are kept — discarding a holding the chain
-        # showed us would be its own fail-open. What is withheld is the
-        # COMPLETENESS: the source stays the third-party index's, so no consumer
-        # can read this set as chain-proven, and an empty one is Etherscan's
-        # empty rather than an earned negative. The cursor still advances,
-        # because the blocks WERE read and re-reading them every cycle would buy
-        # nothing.
-        asset_set_status = ASSET_SET_STATUS_RETURNED_ASSETS if assets else page.status
-        asset_set_source = ASSET_SET_SOURCE_ETHERSCAN_PAGES
-        sweep_status = SWEEP_STATUS_COMPLETED
-        swept_through_block = sweep.swept_through_block
-        swept_from_block = sweep.swept_from_block
-        basis = (
-            f"{page.basis}; chain scan of blocks {sweep.swept_from_block}-{sweep.swept_through_block} ran but "
-            f"its asset set is NOT claimed complete: {len(typed_unreadable)} ERC-721/1155 receipt(s) whose "
-            f"current holding neither balanceOf(address) nor a per-token-id read could determine "
-            f"({', '.join(f'{t.token_address} [{t.standard}, {len(t.items)} id(s)]' for t in typed_unreadable[:8])}); "
-            f"{SWEEP_POPULATION_NOTE}"
-        )
-    else:
-        asset_set_status = page.status
-        asset_set_source = ASSET_SET_SOURCE_ETHERSCAN_PAGES
-        sweep_status = SWEEP_STATUS_FAILED if sweep is not None else None
-        swept_through_block = None
-        swept_from_block = None
-        basis = page.basis
-        if sweep is not None:
-            basis = (
-                f"{basis}; chain sweep ABORTED, asset set NOT proven complete: "
-                f"{sweep.failure_reason or 'no reason recorded'}"
-            )
-            if _has_scan_record(session, subject=subject):
-                # A scan already established this contract's asset set, and this
-                # cycle's scan aborted. The Etherscan page is not a replacement
-                # for it: it is the answer whose incompleteness triggered the
-                # escalation in the first place. Recorded as a FAILED asset class
-                # so the earlier, better-evidenced fetch keeps winning the view —
-                # otherwise this row becomes current and takes the whole record
-                # with it: the sweep-discovered holdings withdraw (a fetch's rows
-                # are its set, wholesale), the typed evidence behind a withheld
-                # completeness disappears, and the cursor is inherited by a fetch
-                # that scanned nothing.
-                asset_set_status = ASSET_SET_STATUS_FETCH_FAILED
-                basis = (
-                    f"{basis}; the asset class is recorded as FAILED because a previous scan "
-                    f"had established this set and this cycle could not"
-                )
-
-    if cost_note and sweep is not None:
-        basis = f"{basis}; {cost_note}"
-
+    when = observed_at or datetime.now(timezone.utc)
+    native_status = (
+        native_status_for(wei=native.wei, pinned=native.block_number is not None, failed=native.failed)
+        if native.attempted
+        else STATUS_UNATTEMPTED
+    )
     fetch = ContractBalanceFetch(
         **subject.columns(),
         chain_id=chain_id,
-        observed_address=observed_address,
+        observed_address=subject.address,
         block_number=native.block_number,
         native_status=native_status,
-        asset_set_status=asset_set_status,
+        asset_set_status=page.status,
         asset_page_length=page.page_length,
-        asset_set_source=asset_set_source,
-        asset_set_basis=basis or None,
-        sweep_status=sweep_status,
-        swept_through_block=swept_through_block,
-        swept_from_block=swept_from_block,
-        typed_assets=typed_evidence,
+        asset_set_source=ASSET_SET_SOURCE_ETHERSCAN_PAGES,
+        asset_set_basis=page.basis,
         writer=writer,
+        observed_at=when,
+        fetched_at=when,
     )
     session.add(fetch)
     session.flush()
+    # NUMERIC(38,18) cannot represent arbitrary uint256 quantities in dollars.
+    # Keep the raw quantity even when a value is outside the monetary column.
+    import math
 
+    native_usd = None
+    if native.wei == 0 and native_status == NATIVE_STATUS_PROVEN_ZERO:
+        native_usd = 0
+    elif native.wei is not None and native.price_usd is not None:
+        value = (native.wei / 1e18) * native.price_usd
+        native_usd = value if math.isfinite(value) and 0 <= value < 1e20 else None
     written: list[ContractBalance] = []
-    # No DELETE anywhere in here. The writers are insert-only and
-    # ``contract_balances_latest`` decides what is current, per row class.
-    #
-    # A PROVEN zero is persisted as a row of its own. A quantity witnessed zero
-    # at a named height is an observation — the earned negative the sheet plane
-    # reads as ``proven_empty`` — and dropping it left the plane with an absence
-    # where a measurement had been made. The pinned-ness is what admits it and is
-    # not assumed: ``native_status_for`` stamps ``proven_zero`` only for a zero
-    # read AT a block, and an unpinned zero stays ``not_determined`` and writes
-    # nothing, because a zero at an unrecorded moment proves zero at no height.
-    if native.wei is not None and (native.wei > 0 or native_status == NATIVE_STATUS_PROVEN_ZERO):
-        native_usd = (native.wei / 1e18) * native.price_usd if native.price_usd is not None else None
+    if (
+        native.attempted
+        and not native.failed
+        and native.wei is not None
+        and (native.wei > 0 or native_status == NATIVE_STATUS_PROVEN_ZERO)
+    ):
         written.append(
             ContractBalance(
                 **subject.columns(),
@@ -863,14 +699,15 @@ def record_observation(
                 token_name=native.name,
                 token_symbol=native.symbol,
                 decimals=18,
+                decimals_known=True,
                 raw_balance=str(native.wei),
                 price_usd=native.price_usd,
-                # Written at the precision it was computed at, like the token
-                # leg beside it: a quantity times a price is the whole fact, and
-                # rounding it here would republish a sub-cent holding as nothing.
                 usd_value=native_usd,
-                observed_address=observed_address,
+                observed_address=subject.address,
                 block_number=native.block_number,
+                observed_at=native.observed_at or when,
+                fetched_at=when,
+                price_observed_at=native.price_observed_at if native.price_usd is not None else None,
                 fetch_id=fetch.id,
                 source=(
                     BALANCE_SOURCE_PINNED_NATIVE_READ
@@ -879,38 +716,37 @@ def record_observation(
                 ),
             )
         )
-
-    for token in sorted(assets):
-        row = assets[token]
-        written.append(
-            ContractBalance(
-                **subject.columns(),
-                token_address=row["token_address"],
-                token_name=row["token_name"],
-                token_symbol=row["token_symbol"],
-                decimals=row["decimals"],
-                raw_balance=str(row["raw_balance"]),
-                price_usd=row["price_usd"],
-                usd_value=row["usd_value"],
-                observed_address=observed_address,
-                # ERC-20 quantities from the page are unpinned ``tag=latest``
-                # answers and the schema refuses a height on them, so sweep-read
-                # quantities — which DO have one — record it in the fetch's
-                # ``swept_through_block`` rather than on the row.
-                block_number=None,
-                fetch_id=fetch.id,
-                source=row["source"],
+    if page.status not in (ASSET_SET_STATUS_FETCH_FAILED, STATUS_UNATTEMPTED):
+        for row in page.rows:
+            if int(row["balance"]) <= 0:
+                continue
+            known = row.get("decimals_reported") is True
+            written.append(
+                ContractBalance(
+                    **subject.columns(),
+                    token_address=row["token_address"].lower(),
+                    token_name=row.get("token_name"),
+                    token_symbol=row.get("token_symbol"),
+                    decimals=row.get("decimals", 18),
+                    decimals_known=known,
+                    raw_balance=str(row["balance"]),
+                    price_usd=row.get("price_usd") if known else None,
+                    usd_value=row.get("usd_value") if known else None,
+                    observed_address=subject.address,
+                    fetch_id=fetch.id,
+                    source=ASSET_SET_SOURCE_ETHERSCAN_PAGES,
+                    observed_at=when,
+                    fetched_at=when,
+                    price_observed_at=when if known and row.get("price_usd") is not None else None,
+                )
             )
-        )
-
-    for row_obj in written:
-        session.add(row_obj)
-
-    prune_balance_fetches(session, subject, observed_address)
+    session.add_all(written)
+    session.flush()
+    prune_balance_fetches(session, subject, subject.address)
     return RecordedObservation(
         fetch=fetch,
-        asset_set_status=asset_set_status,
-        asset_set_source=asset_set_source,
+        asset_set_status=page.status,
+        asset_set_source=ASSET_SET_SOURCE_ETHERSCAN_PAGES,
         native_status=native_status,
         rows=tuple(written),
     )

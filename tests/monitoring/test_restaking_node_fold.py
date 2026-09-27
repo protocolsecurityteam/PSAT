@@ -296,7 +296,10 @@ def test_no_module_outside_the_plane_imports_the_position_model():
         # Exclude on REPO-RELATIVE parts: a worktree checkout lives under
         # .claude/worktrees/, so matching absolute parts would skip every file
         # and pass this guard vacuously there.
-        if any(part in {".venv", "node_modules", "alembic", ".claude"} for part in path.relative_to(root).parts):
+        if any(
+            part in {".venv", "node_modules", "alembic", ".claude", ".local-compute", "analysis"}
+            for part in path.relative_to(root).parts
+        ):
             continue
         if path in allowed:
             continue

@@ -412,6 +412,7 @@ def company_score(company_name: str) -> CompanyScoreResponse:
     """
     from db.models import ProtocolScoreLatest
     from services.scoring.persist import ScoreDocumentUnavailable, load_score_document
+    from utils.scoring_status import MODEL_VERSION
 
     started = time.monotonic()
     with deps.SessionLocal() as session:
@@ -426,6 +427,9 @@ def company_score(company_name: str) -> CompanyScoreResponse:
         if row is None:
             _log_endpoint("/api/company/{name}/score", company=company_name, started=started, outcome="no_score")
             raise HTTPException(status_code=404, detail="No score has been computed for this protocol yet")
+
+        if row.model_version != MODEL_VERSION:
+            raise HTTPException(status_code=503, detail="Score is awaiting recomputation for current balance semantics")
 
         try:
             document = load_score_document(row)

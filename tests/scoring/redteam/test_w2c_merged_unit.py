@@ -401,8 +401,8 @@ def test_r9_a_capped_magnitude_does_not_move_per_member_reach(fold):
     assert finding["weakness_by_entity"] == {
         KEY_C: WEAKNESS_SAFE_MINORITY,
         KEY_PROXY: WEAKNESS_SAFE_MAJORITY,
-        KEY_V: WEAKNESS_SAFE_MAJORITY,
     }
+    assert KEY_V in {row["entity"] for row in finding["undetermined_instances"]}
     assert finding["weakness"] == WEAKNESS_SAFE_MAJORITY
 
 

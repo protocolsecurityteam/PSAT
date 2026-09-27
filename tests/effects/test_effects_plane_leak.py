@@ -387,16 +387,21 @@ def test_reach_never_reaches_the_code_plane_cache(clean_effects, monkeypatch):
     residue = dict(row.observed_residue or {})
     execution = residue.pop(PROVING_EXECUTION_KEY)
     assert residue == {
-        "observed_reach_value_usd": REACH_USD,
+        "reach_observed_holdings_usd": REACH_USD,
+        "reach_observed_holdings_pairs": [{"holder": HOLDER.lower(), "asset": TOKEN.lower()}],
+        "observed_reach_priced_holders": [HOLDER.lower()],
         "observed_reach_holders": [HOLDER.lower()],
         # The reach-determined discriminator and the asset list ride the STATE plane with the figures
         # they qualify: both are answers about this deployment's observation, not
         # about the code.
-        "reach_determined": True,
+        "reach_determined": False,
+        "reach_magnitude_state": "not_determined",
+        "reach_value_scope": "recorded_holdings_of_assets_observed_moving",
+        "reach_is_upper_bound": False,
         "observed_reach_assets": [TOKEN.lower()],
         # The TVL ceiling's outcome travels with the figure it qualifies; this stub
         # protocol has no snapshot, so the honest answer is "not checked".
-        "reach_tvl_check": "skipped_no_tvl",
+        "reach_tvl_check": "external_reference_only",
     }
     # The figure and the call that proved it are on the same row, which is the
     # whole point: a magnitude reaching a consumer without its execution is a
@@ -430,7 +435,7 @@ def test_cache_hit_never_inherits_another_deployments_reach(clean_effects, monke
     assert str(REACH_USD) not in str(b.witness)
     residue: dict[str, Any] = b.observed_residue or {}
     assert "observed_reach_holders" not in residue
-    assert "observed_reach_value_usd" not in residue
+    assert "reach_observed_holdings_usd" not in residue
     # A keeps its own.
     assert rows[CONTRACT_A.lower()].observed_residue["observed_reach_holders"] == [HOLDER.lower()]
 
@@ -451,10 +456,10 @@ def test_minted_claim_surfaces_reach_only_for_the_observing_deployment(clean_eff
     claim_b = claims_bridge.verdict_to_claim(rows[CONTRACT_B.lower()])
     assert claim_a is not None and claim_b is not None
     assert claim_a["witness"]["observed"]["observed_reach_holders"] == [HOLDER.lower()]
-    assert claim_a["witness"]["observed"]["observed_reach_value_usd"] == REACH_USD
+    assert claim_a["witness"]["observed"]["reach_observed_holdings_usd"] == REACH_USD
     observed_b = claim_b["witness"].get("observed", {})
     assert "observed_reach_holders" not in observed_b
-    assert "observed_reach_value_usd" not in observed_b
+    assert "reach_observed_holdings_usd" not in observed_b
 
 
 @requires_postgres
@@ -473,4 +478,4 @@ def test_reach_survives_a_later_observation_less_rewrite(clean_effects, monkeypa
 
     row = session.query(EffectVerdict).one()
     assert row.observed_residue["observed_reach_holders"] == [HOLDER.lower()]
-    assert row.observed_residue["observed_reach_value_usd"] == REACH_USD
+    assert row.observed_residue["reach_observed_holdings_usd"] == REACH_USD

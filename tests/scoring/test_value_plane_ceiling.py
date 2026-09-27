@@ -52,6 +52,7 @@ def _plane(
     plane.unpriced_positions = unpriced_positions or {}
     plane.asset_disposition = asset_disposition or {}
     plane.contract_entities = set(plane.per_asset) | set(plane.per_asset_state)
+    plane.fresh_entities = set(plane.contract_entities)
     return plane
 
 
@@ -59,6 +60,7 @@ def _priced() -> P.ValuePlane:
     return _plane(
         per_asset={KEY: {"weth": 3_000_000.0, "usdc": 1.5}},
         per_asset_state={KEY: {"weth": P.ASSET_PRICED, "usdc": P.ASSET_PRICED}},
+        asset_set_proven_complete={KEY: SCANNED},
     )
 
 
@@ -156,7 +158,7 @@ def _airdrop_determined() -> P.ValuePlane:
 ALL_SHAPES = {
     "priced": (_priced, 3_000_001.5, P.CEILING_ADMITTED),
     "proven_empty": (_proven_empty, 0.0, P.CEILING_PROVEN_EMPTY),
-    "airdrop_determined": (_airdrop_determined, 0.0, P.CEILING_AIRDROP_DETERMINED),
+    "legacy_airdrop": (_airdrop_determined, None, P.CEILING_UNPRICED),
     "below_resolution": (_below_resolution, None, P.CEILING_BELOW_RESOLUTION),
     "unpriced": (_unpriced, None, P.CEILING_UNPRICED),
     "asset_list_truncated": (_truncated, None, P.CEILING_ASSET_LIST_TRUNCATED),
@@ -172,9 +174,12 @@ def test_every_sheet_shape_answers_under_its_own_reason(shape: str):
     assert (usd, reason) == (expected_usd, expected_reason)
 
 
-def test_the_eight_shapes_cover_the_whole_vocabulary():
+def test_the_shapes_cover_the_whole_vocabulary():
     """No reason may ship without a case: an unexercised token is a claim."""
-    assert {reason for _, _, reason in ALL_SHAPES.values()} == set(P.CEILING_REASONS)
+    assert {reason for _, _, reason in ALL_SHAPES.values()} == set(P.CEILING_REASONS) - {
+        "asset_set_not_proven_complete",
+        "observation_not_fresh",
+    }
 
 
 @pytest.mark.parametrize("shape", sorted(ALL_SHAPES))
@@ -239,6 +244,7 @@ def test_the_ceiling_is_read_at_the_canonical_key():
         per_asset={OTHER: {"weth": 12.0}},
         per_asset_state={OTHER: {"weth": P.ASSET_PRICED}},
         alias={KEY: OTHER},
+        asset_set_proven_complete={OTHER: SCANNED},
     )
     assert P.ceiling_for(plane, KEY) == (12.0, P.CEILING_ADMITTED)
     assert P.ceiling_for(plane, OTHER) == (12.0, P.CEILING_ADMITTED)
@@ -287,6 +293,7 @@ def test_truncation_is_read_at_the_canonical_key_in_both_directions():
         per_asset={OTHER: {"weth": 12.0}},
         per_asset_state={OTHER: {"weth": P.ASSET_PRICED}},
         alias={KEY: OTHER},
+        asset_set_proven_complete={OTHER: SCANNED},
         asset_set_truncated={OTHER},
     )
     assert plane.asset_set_is_truncated(KEY) and plane.asset_set_is_truncated(OTHER)
@@ -305,7 +312,8 @@ def test_an_untruncated_sheet_is_not_thereby_claimed_complete():
     plane = _priced()
     assert plane.asset_set_truncated == set()
     assert plane.asset_set_is_truncated(KEY) is False
-    assert P.ceiling_for(plane, KEY) == (3_000_001.5, P.CEILING_ADMITTED)
+    plane.asset_set_proven_complete = {}
+    assert P.ceiling_for(plane, KEY) == (None, "asset_set_not_proven_complete")
 
 
 def test_an_unregistered_sheet_state_raises_instead_of_refusing_under_a_borrowed_reason(

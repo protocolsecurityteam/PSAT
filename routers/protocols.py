@@ -239,24 +239,15 @@ def protocol_tvl(protocol_id: int, days: int = 30) -> ProtocolTvlResponse:
         snapshots = session.execute(stmt).scalars().all()
 
         latest = snapshots[0] if snapshots else None
+        from services.aggregations.tvl import snapshot_payload
+
         return {
             "protocol_id": protocol_id,
             "protocol_name": protocol.name,
             "current": {
-                "total_usd": float(latest.total_usd) if latest and latest.total_usd else None,
-                "defillama_tvl": float(latest.defillama_tvl) if latest and latest.defillama_tvl else None,
-                "source": latest.source if latest else None,
-                "timestamp": latest.timestamp.isoformat() if latest else None,
+                **snapshot_payload(latest),
                 "contract_breakdown": latest.contract_breakdown if latest else None,
                 "chain_breakdown": latest.chain_breakdown if latest else None,
             },
-            "history": [
-                {
-                    "timestamp": s.timestamp.isoformat(),
-                    "total_usd": float(s.total_usd) if s.total_usd else None,
-                    "defillama_tvl": float(s.defillama_tvl) if s.defillama_tvl else None,
-                    "source": s.source,
-                }
-                for s in snapshots
-            ],
+            "history": [snapshot_payload(snapshot) for snapshot in snapshots],
         }

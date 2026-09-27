@@ -100,7 +100,7 @@ function formatUsdUpperBound(value) {
   else if (abs >= 1e6) text = `$${(value / 1e6).toFixed(1)}M`;
   else if (abs >= 1e3) text = `$${(value / 1e3).toFixed(1)}K`;
   else text = `$${Math.round(value)}`;
-  return `up to ~${text}`;
+  return `~${text}`;
 }
 
 // How the unvalued half of a partial reach floor is counted. A current payload
@@ -251,6 +251,13 @@ export function claimWitnessFacts(fn) {
     }
     const observed = w.observed;
     if (observed) {
+      if (observed.reach_value_scope === "recorded_holdings_of_assets_observed_moving") {
+        facts.push({ label: "Observed transfers", value: "holder outflow witnessed; dollar magnitude not determined" });
+        if (typeof observed.reach_observed_holdings_usd === "number") {
+          facts.push({ label: "Recorded holdings context", value: `${formatUsdUpperBound(observed.reach_observed_holdings_usd) || "$0"} — not a bound on this call` });
+        }
+      }
+
       if (typeof observed.observed_reach_value_usd === "number")
         reachValue = observed.observed_reach_value_usd;
       // The measured-reach discriminator, read HERE and not only in the branches
@@ -315,70 +322,10 @@ export function claimWitnessFacts(fn) {
   // an unseeded row is pushed byte-identical to before.
   const reachSeedClause = seedClauseForClaims(claims, isOutflowClaim);
   let reachFact = null;
-  if (reachRejected) {
-    // The corroborating ceiling refused this row's USD. When the row is ALSO the
-    // partial-floor shape (assets moved whose value is unknown), that is an
-    // independent fact and the refusal must not swallow it — one early-returning
-    // sentence hiding a second disclosure is the same defect the balance table
-    // had. Compose both.
-    reachFact = {
-      label: "Reach",
-      value:
-        reachUnvalued > 0
-          ? `not determined — ${unvaluedText(reachUnvalued, reachUnvaluedKeyed)}, and the priced floor exceeded protocol TVL and was refused`
-          : "not determined (measured figure exceeded protocol TVL and was refused)",
-    };
-  } else if (reachUnvalued > 0) {
-    // Witnessed, not valued. Naming the count keeps this apart from both the
-    // measured row (a number) and the not-witnessed row (a floor on own balance).
-    // The priced part is only ever shown WITH its subjects: it is a sum over the
-    // (holder, asset) pairs that were priced, and the pairs that were not are the
-    // clause beside it — the two must not read as statements about the same thing.
-    const priced = formatUsdUpperBound(reachPriced);
-    const unvalued = unvaluedText(reachUnvalued, reachUnvaluedKeyed);
-    let pricedClause = "";
-    if (priced && reachUnvaluedKeyed)
-      pricedClause = reachPricedHolders
-        ? `, priced part ${priced} across ${reachPricedHolders} holder(s)`
-        : `, priced part ${priced}`;
-    // Pre-fix payload: the unvalued set is asset-keyed and nothing records which
-    // holder the figure came from, so the figure is shown as unattributed rather
-    // than as the priced part of the assets just named.
-    else if (priced) pricedClause = `, priced part ${priced} (holder attribution not recorded)`;
-    reachFact = {
-      label: "Reach",
-      value: `value not determined — ${unvalued}${pricedClause}`,
-    };
-  } else if (reachIndeterminate) {
-    // NOT measured. Name the floor for what it is and never as the reach: the
-    // acting contract's own balance is a lower bound on what an exercise of this
-    // function can touch, and a zero floor says nothing about the money it moves.
-    const floor = formatUsdUpperBound(reachFloor);
-    reachFact = {
-      label: "Reach",
-      value: floor
-        ? `not determined (own balance floor ${floor})`
-        : "not determined (no downstream holder observed)",
-    };
-  } else if (reachDetermined === true) {
-    // MEASURED. A zero here is a measurement — every asset that moved had a priced
-    // holding and the total came out at nothing — and it used to render as silence,
-    // which is what "nothing was attempted" renders as. The backend payload
-    // is already pinned correct by
-    // `test_zero_reach_without_the_flag_is_a_measured_zero_not_a_floor`; only this
-    // renderer was blind.
-    const reach = formatUsdUpperBound(reachValue);
-    reachFact = reach
-      ? { label: "Reach (upper bound)", value: reach }
-      : { label: "Reach", value: "$0 — measured, no priced value reachable" };
-  } else {
-    // `reach_determined` absent: an older payload, where a 0 may be the acting
-    // deployment's own (zero) balance published as the reach rather than a
-    // measurement. Left exactly as it was — asserting a measured zero here would
-    // re-mint the "$0 reach for a function that may move millions" sentence the
-    // floor key removed. A never-attempted reach stays silent, as before.
-    const reach = formatUsdUpperBound(reachValue);
-    if (reach) reachFact = { label: "Reach (upper bound)", value: reach };
+  if (reachUnvalued > 0) {
+    reachFact = { label: "Reach", value: `value not determined — ${unvaluedText(reachUnvalued, reachUnvaluedKeyed)}` };
+  } else if (reachRejected || reachIndeterminate || reachDetermined != null || reachValue != null || reachFloor != null || reachPriced != null) {
+    reachFact = { label: "Reach", value: "dollar magnitude not determined; recorded holdings do not bound this call" };
   }
   if (reachFact)
     facts.push({
@@ -443,7 +390,7 @@ export function claimWitnessFacts(fn) {
       facts.push({
         label: "Backing",
         value: withSeedNote(
-          "matching asset inflow observed (backed)",
+          "asset inflow observed; economic backing not determined",
           mintSeedClause,
         ),
       });
@@ -451,7 +398,7 @@ export function claimWitnessFacts(fn) {
       facts.push({
         label: "Backing",
         value: withSeedNote(
-          "no matching inflow — supply rose alone (dilution)",
+          "no asset inflow observed in this call; economic backing not determined",
           mintSeedClause,
         ),
       });

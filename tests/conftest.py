@@ -41,6 +41,7 @@ _STORAGE_ENV_KEYS = (
 
 from db.models import (  # noqa: E402
     AuditContractCoverage,
+    BalanceCollectionState,
     Contract,
     ContractBalance,
     ContractBalanceFetch,
@@ -55,6 +56,7 @@ from db.models import (  # noqa: E402
     MonitoredEvent,
     Protocol,
     ProtocolSubscription,
+    ProviderPermit,
     ProxySubscription,
     ProxyUpgradeEvent,
     RoleHolderPlane,
@@ -729,6 +731,8 @@ def db_session():
         # delete it before those get cascaded away via Protocol cleanup.
         for model in [
             AuditContractCoverage,
+            BalanceCollectionState,
+            ProviderPermit,
             MonitoredEvent,
             MonitoredContract,
             ProtocolSubscription,
