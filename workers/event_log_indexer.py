@@ -6,11 +6,12 @@ import inspect
 import logging
 import os
 import signal
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from threading import Event, Lock, Thread
-from typing import Any, Callable, Mapping, MutableMapping, Protocol, Sequence, TypeGuard, cast
+from typing import Any, Callable, Literal, Mapping, MutableMapping, Protocol, Sequence, TypeGuard, cast
 
 from eth_utils.crypto import keccak
 from sqlalchemy import delete, func, select
@@ -97,11 +98,8 @@ DEFAULT_TRACKED_TOPIC_ENROLL_LIMIT = int(os.getenv("PSAT_EVENT_INDEXER_TRACKED_T
 # memory/latency bound on the scan; it is NOT a work budget, and it must stay
 # comfortably above the fleet size or the tail becomes unreachable again.
 DEFAULT_TRACKED_TOPIC_SCAN_LIMIT = int(os.getenv("PSAT_EVENT_INDEXER_TRACKED_TOPIC_SCAN_LIMIT", "5000"))
-# When a pass stops on its window budget there's more backfill pending, so the
-# backfill loop re-runs after this short pause instead of the full poll interval
-# — a cold fleet drains at throughput rather than idling 60s between every
-# budget-sized pass. Floored (not 0) so a large warm fleet that legitimately
-# fills the budget with cheap catch-up windows can't busy-spin.
+# Only cold history uses this short pause. Warm groups run on the normal poll
+# interval even when the warm fleet exceeds the historical backfill pass cap.
 DEFAULT_BACKFILL_BUSY_INTERVAL_S = float(os.getenv("PSAT_EVENT_INDEXER_BACKFILL_BUSY_INTERVAL_S", "2"))
 
 # Solmate RolesAuthority canCall: the role events to index at the authority so
@@ -698,6 +696,7 @@ def scan_enrolled_events(
     max_windows_per_pass: int = DEFAULT_MAX_WINDOWS_PER_PASS,
     insert_batch_size: int = DEFAULT_INSERT_BATCH,
     stop_event: Event | None = None,
+    scan_mode: Literal["all", "warm", "cold"] = "all",
 ) -> ScanSummary:
     # Cursors group by (chain, address): every topic0 on one address rides the
     # same eth_getLogs (an OR list), so the upstream request budget pays once
@@ -713,16 +712,22 @@ def scan_enrolled_events(
             IndexedEventCursor.event_address,
             IndexedEventCursor.topic0,
             IndexedEventCursor.last_run_at,
+            IndexedEventCursor.last_indexed_block,
+            IndexedEventCursor.backfill_complete,
         )
     ).all()
     # Skip zero/invalid-address cursors that predate the enroll-time guard: 0x0 can
     # never emit logs, so scanning it just burns one RPC round-trip every pass.
     rows = [row for row in all_rows if _is_enrollable_event_address(row[1])]
     groups: dict[tuple[int, str], dict[str, Any]] = {}
-    for chain_id, event_address, topic0, last_run_at in rows:
-        entry = groups.setdefault((chain_id, event_address.lower()), {"topics": set(), "runs": []})
+    for chain_id, event_address, topic0, last_run_at, last_block, complete in rows:
+        entry = groups.setdefault(
+            (chain_id, event_address.lower()), {"topics": set(), "runs": [], "last_blocks": [], "complete": True}
+        )
         entry["topics"].add(topic0.lower())
         entry["runs"].append(last_run_at)
+        entry["last_blocks"].append(int(last_block or 0))
+        entry["complete"] &= bool(complete)
 
     _epoch = datetime.min.replace(tzinfo=timezone.utc)
 
@@ -743,6 +748,44 @@ def scan_enrolled_events(
     # reaching the same target stamps the same block), so neither belongs in
     # the per-window hot path.
     targets: dict[int, int] = {}
+    head_failed_chains: set[int] = set()
+    if scan_mode != "all":
+        # Classify an already-backfilled group as cold if it needs more than
+        # one normal window after an outage. The target is fixed for this pass.
+        for chain_id, _address in groups:
+            if chain_id in targets or chain_id in head_failed_chains or chain_id not in head_fetchers:
+                continue
+            try:
+                depth = chain_by_id(chain_id).confirmation_depth
+            except UnknownChainError:
+                depth = confirmation_depth
+            try:
+                targets[chain_id] = max(0, head_fetchers[chain_id].head_block() - depth)
+            except Exception as exc:
+                head_failed_chains.add(chain_id)
+                logger.warning(
+                    "event indexer head read failed; chain skipped this pass",
+                    extra={
+                        "chain_id": chain_id,
+                        "exc_type": type(exc).__name__,
+                        "exc_msg": sanitize_string(str(exc))[:200],
+                    },
+                )
+        failed_groups += sum(chain_id in head_failed_chains for chain_id, _address in groups)
+        groups = {
+            key: entry
+            for key, entry in groups.items()
+            if key[0] in targets
+            and (
+                (not entry["complete"] or min(entry["last_blocks"]) + max_block_span < targets[key[0]])
+                == (scan_mode == "cold")
+            )
+        }
+        if scan_mode == "warm":
+            # One window per warm address, even when the fleet exceeds the cold
+            # backfill budget. Every warm group receives the same target sweep.
+            pass_budget = max(1, len(groups))
+            max_windows_per_cursor = 1
     block_hash_memo: dict[tuple[int, int], bytes | None] = {}
     # Chains whose cursors were skipped this pass for lack of a fetcher — logged
     # once each (inv. 4/10). The indexer is deliberately disabled for a chain with
@@ -840,23 +883,26 @@ def scan_enrolled_events(
     pending_at_budget = False
     if windows_scanned >= pass_budget:
         for chain_id, target in targets.items():
-            if (
-                session.execute(
-                    select(IndexedEventCursor.event_address)
-                    .where(
-                        IndexedEventCursor.chain_id == chain_id,
-                        IndexedEventCursor.event_address != _ZERO_ADDRESS,
-                        IndexedEventCursor.last_indexed_block < target,
-                    )
-                    .limit(1)
-                ).first()
-                is not None
-            ):
+            addresses = [address for (cid, address) in groups if cid == chain_id]
+            query = (
+                select(IndexedEventCursor.event_address)
+                .where(
+                    IndexedEventCursor.chain_id == chain_id,
+                    IndexedEventCursor.event_address != _ZERO_ADDRESS,
+                    IndexedEventCursor.last_indexed_block < target,
+                )
+                .limit(1)
+            )
+            if scan_mode != "all":
+                if not addresses:
+                    continue
+                query = query.where(func.lower(IndexedEventCursor.event_address).in_(addresses))
+            if session.execute(query).first() is not None:
                 pending_at_budget = True
                 break
         # A chain not visited because the budget ran out may have work. At most
         # one extra short pass discovers that it is already warm.
-        pending_at_budget |= any(
+        pending_at_budget |= scan_mode == "all" and any(
             chain not in targets and chain in fetchers and chain in head_fetchers and chain in block_hash_fetchers
             for chain, _address in groups
         )
@@ -1420,6 +1466,8 @@ def run_event_log_indexer_loop(
             # Own bind: ``threading.Thread`` does not inherit the parent's
             # context, so without this every backfill line loses ``worker_id``.
             with bind_trace_context(worker_id=WORKER_ID):
+                next_warm_at = 0.0
+                cold_pending = True
                 while not stop_event.is_set():
                     enrolled = 0
                     summary = ScanSummary()
@@ -1434,12 +1482,36 @@ def run_event_log_indexer_loop(
                                 )
                                 ph["enrolled"] = enrolled
                             with log_timed_phase(logger, "indexer_scan", record_metric=False) as ph:
-                                summary = scan_enrolled_events(
-                                    session,
-                                    fetchers=fetchers,
-                                    head_fetchers=head_fetchers,
-                                    block_hash_fetchers=block_hash_fetchers,
-                                    stop_event=stop_event,
+                                warm_due = time.monotonic() >= next_warm_at
+                                warm_summary = ScanSummary()
+                                if warm_due:
+                                    warm_summary = scan_enrolled_events(
+                                        session,
+                                        fetchers=fetchers,
+                                        head_fetchers=head_fetchers,
+                                        block_hash_fetchers=block_hash_fetchers,
+                                        stop_event=stop_event,
+                                        scan_mode="warm",
+                                    )
+                                    next_warm_at = time.monotonic() + interval
+                                cold_summary = ScanSummary()
+                                if cold_pending or warm_due or enrolled:
+                                    cold_summary = scan_enrolled_events(
+                                        session,
+                                        fetchers=fetchers,
+                                        head_fetchers=head_fetchers,
+                                        block_hash_fetchers=block_hash_fetchers,
+                                        stop_event=stop_event,
+                                        scan_mode="cold",
+                                    )
+                                    cold_pending = cold_summary.budget_exhausted
+                                summary = ScanSummary(
+                                    inserted=warm_summary.inserted + cold_summary.inserted,
+                                    windows_scanned=warm_summary.windows_scanned + cold_summary.windows_scanned,
+                                    caught_up_cursors=warm_summary.caught_up_cursors + cold_summary.caught_up_cursors,
+                                    total_cursors=max(warm_summary.total_cursors, cold_summary.total_cursors),
+                                    budget_exhausted=cold_pending,
+                                    failed_groups=warm_summary.failed_groups + cold_summary.failed_groups,
                                 )
                                 ph["windows_scanned"] = summary.windows_scanned
                                 ph["inserted"] = summary.inserted
@@ -1470,12 +1542,13 @@ def run_event_log_indexer_loop(
                         published["summary"] = summary
                         published["enrolled"] = enrolled
                         published["status"] = status
-                    # A budget-capped pass that hit its ceiling has more backfill pending:
-                    # re-run after a short pause instead of the full interval so a cold
-                    # fleet drains at throughput. min() so a sub-interval test cadence
-                    # isn't slowed; the floor keeps a warm fleet from busy-spinning.
+                    # Only unfinished history can use the short catch-up pause.
+                    # Warm heads are sampled on the normal interval even when
+                    # their fleet exceeds the old 100-window backfill cap.
                     backfill_wait = (
-                        min(interval, DEFAULT_BACKFILL_BUSY_INTERVAL_S) if summary.budget_exhausted else interval
+                        min(DEFAULT_BACKFILL_BUSY_INTERVAL_S, max(0.0, next_warm_at - time.monotonic()))
+                        if cold_pending
+                        else max(0.0, next_warm_at - time.monotonic())
                     )
                     stop_event.wait(backfill_wait)
 

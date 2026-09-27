@@ -41,8 +41,16 @@ PROCESS_META: dict[str, dict[str, Any]] = {
     HEARTBEAT_AUDIT_SCOPE: {"kind": "drainer", "interval_s": 30, "label": "Audit scope extraction"},
     HEARTBEAT_EVENT_INDEXER: {"kind": "indexer", "interval_s": 90, "label": "Event-log indexer"},
     HEARTBEAT_ENROLLMENT_RECONCILER: {"kind": "daemon", "interval_s": 660, "label": "Enrollment reconciler"},
-    HEARTBEAT_PROTOCOL_SCANNER: {"kind": "watcher", "interval_s": 600, "label": "Protocol event scanner"},
-    HEARTBEAT_PROTOCOL_POLLER: {"kind": "watcher", "interval_s": 600, "label": "Protocol state poller"},
+    HEARTBEAT_PROTOCOL_SCANNER: {
+        "kind": "watcher",
+        "interval_s": int(os.getenv("PROTOCOL_SCAN_INTERVAL", "600")),
+        "label": "Protocol event scanner",
+    },
+    HEARTBEAT_PROTOCOL_POLLER: {
+        "kind": "watcher",
+        "interval_s": int(os.getenv("PROTOCOL_POLL_INTERVAL", "600")),
+        "label": "Protocol state poller",
+    },
     HEARTBEAT_PROTOCOL_TVL: {"kind": "watcher", "interval_s": 3600, "label": "Protocol TVL refresh"},
     HEARTBEAT_PROTOCOL_RESTAKING: {"kind": "watcher", "interval_s": 3600, "label": "Restaking position refresh"},
     HEARTBEAT_ROLE_HOLDER_PLANE: {"kind": "watcher", "interval_s": 3600, "label": "Role-holder plane refresh"},

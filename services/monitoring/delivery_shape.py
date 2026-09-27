@@ -61,7 +61,7 @@ import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
-from typing import Any
+from typing import Any, TypedDict
 
 from sqlalchemy import func as _sql_func
 from sqlalchemy import or_, text
@@ -113,6 +113,10 @@ logger = logging.getLogger(__name__)
 # sharing the other's ceiling would let a wide disposition run starve the sweep
 # of the requests its own negative depends on.
 DISPOSITION_REQUEST_BUDGET = int(os.getenv("PSAT_DISPOSITION_REQUEST_BUDGET", "5000"))
+# An hourly producer must publish proven prefixes before an idle database
+# transaction outlives its connection. This bounds one scan's wall time while
+# retaining the existing partial-extent publication path on budget exhaustion.
+DISPOSITION_SCAN_WALL_SECONDS = float(os.getenv("PSAT_DISPOSITION_SCAN_WALL_SECONDS", "180"))
 
 # Tokens per ``eth_getLogs`` address filter, and holders per recipient-topic
 # OR-set. Both are OR-sets inside ONE request, so a batch costs the windows of a
@@ -188,12 +192,12 @@ DISPOSITION_MAX_DELIVERIES_PER_PAIR = 8
 # Optimism's upstream hard-caps the range: ``eth_getLogs`` there answers
 # ``-32012 request exceeded max allowed range: ... up to a 10,000 block range``,
 # so 10,000 is not a tuning choice, it is the largest window that gets served.
-# Everywhere else the window is sized so a creation-block-to-head range is ONE
-# request — measured on ethereum and base, where a single window returned the
-# whole history of a 40-token batch. Paging those chains into smaller windows
-# would multiply the request count by ~26 (ethereum) and ~50 (base) for
-# identical data.
-_DEFAULT_SCAN_WINDOW = (1_000_000_000, 10_000)
+# Ethereum and Base use the proxy's one-million-block forwarding threshold.
+# The old billion-block request was rejected at eRPC's two-million-block network
+# ceiling before reaching any provider, then repeatedly bisected by the client.
+# A 1,000-block floor still rejects any page that reaches the 40,000-log cap;
+# it only allows a dense valid range to be split further than the old 10,000.
+_DEFAULT_SCAN_WINDOW = (1_000_000, 1_000)
 _CHAIN_SCAN_WINDOW: dict[int, tuple[int, int]] = {
     # optimism: upstream range cap, with one level of bisect headroom below it
     # so a dense window can still be narrowed rather than abandoned outright.
@@ -232,6 +236,7 @@ class DispositionCost:
     # (``warn_degraded_once``) for the failures that repeat per holder.
     degraded: dict[str, int] = field(default_factory=dict)
     reserved: int = 0
+    scan_deadline_at: float | None = None
 
     @property
     def spent(self) -> int:
@@ -244,6 +249,11 @@ class DispositionCost:
 
     def count(self, key: str, n: int = 1) -> None:
         self.counts[key] = self.counts.get(key, 0) + n
+
+    def check_scan_deadline(self) -> None:
+        if self.scan_deadline_at is not None and time.monotonic() >= self.scan_deadline_at:
+            self.count("scan_time_budget_stopped")
+            raise DispositionTimeBudgetExceeded("disposition scan wall-time budget exhausted")
 
 
 @dataclass(frozen=True)
@@ -283,6 +293,10 @@ class DispositionBudgetExceeded(RpcScanCancelled):
     """The cycle's request ceiling was reached; bisection cannot restore budget."""
 
 
+class DispositionTimeBudgetExceeded(DispositionBudgetExceeded):
+    """The scan must publish its proven prefix before its DB transaction ages out."""
+
+
 class DispositionHistoryChanged(RuntimeError):
     """No evidence from this snapshot may be published."""
 
@@ -306,6 +320,8 @@ class _ChainSnapshot:
             return self.hashes[number]
         if self.cost.spent >= DISPOSITION_REQUEST_BUDGET:
             raise DispositionBudgetExceeded("disposition block checkpoint budget exhausted")
+        if not refresh:
+            self.cost.check_scan_deadline()
         self.cost.head_reads += 1
         raw = rpc_request(
             self.rpc_url,
@@ -371,6 +387,21 @@ class _Measured:
     measured_through_hash: str | None = None
 
 
+class _EvidenceWrite(TypedDict):
+    chain_id: int
+    holder_address: str
+    token_address: str
+    scanned_from_block: int
+    measured_through_block: int
+    deliveries: list[dict[str, Any]]
+    unmetered_elided: int
+    scan_basis: str
+    observed_balance_raw: str | None
+    caught_up: bool | None
+    counts: dict[str, int]
+    measured_through_hash: str | None
+
+
 class _DispositionFetcher(RpcEventLogFetcher):
     """This phase's OWN fetcher: explicit cap, own timeout, counted and budgeted.
 
@@ -402,6 +433,7 @@ class _DispositionFetcher(RpcEventLogFetcher):
         self._budget = budget
 
     def _count_get_logs(self) -> None:
+        self._cost.check_scan_deadline()
         if self._cost.spent >= self._budget:
             raise DispositionBudgetExceeded(f"disposition request budget of {self._budget} reached")
         self._cost.get_logs += 1
@@ -431,6 +463,7 @@ def creation_block(holder_address: str, *, chain_id: int, cost: DispositionCost)
             return 0 if cached is None else cached
     from services.clients.etherscan import get_contract_creation_block
 
+    cost.check_scan_deadline()
     cost.creation_lookups += 1
     try:
         block = get_contract_creation_block(holder_address, chain_id=chain_id)
@@ -808,7 +841,20 @@ def scan_delivery_shape(
     if not by_chain:
         return cost
 
-    for chain_id in sorted(by_chain):
+    if cost.scan_deadline_at is None and DISPOSITION_SCAN_WALL_SECONDS > 0:
+        cost.scan_deadline_at = time.monotonic() + DISPOSITION_SCAN_WALL_SECONDS
+    overall_deadline_at = cost.scan_deadline_at
+
+    chain_ids = sorted(by_chain)
+    for chain_index, chain_id in enumerate(chain_ids):
+        if overall_deadline_at is not None:
+            remaining = overall_deadline_at - time.monotonic()
+            if remaining <= 0:
+                cost.count("scan_time_budget_stopped")
+                break
+            # An active Ethereum repair must not consume Base's entire cycle.
+            # Unused time from an earlier chain remains available to later ones.
+            cost.scan_deadline_at = time.monotonic() + remaining / (len(chain_ids) - chain_index)
         chain_requests = by_chain[chain_id]
         # Monitor and resolution workers can ask about the same account. Hold
         # ownership through the producer's commit, including absent rows and
@@ -835,6 +881,12 @@ def scan_delivery_shape(
             cost.count("chains_unscanned")
             continue
         if cost.spent >= DISPOSITION_REQUEST_BUDGET:
+            break
+        try:
+            cost.check_scan_deadline()
+        except DispositionTimeBudgetExceeded:
+            if overall_deadline_at is not None and time.monotonic() < overall_deadline_at:
+                continue
             break
         cost.head_reads += 1
         try:
@@ -884,7 +936,7 @@ def scan_delivery_shape(
         except DispositionBudgetExceeded as exc:
             _invalidate_history(session, snapshot.invalidated)
             logger.warning(
-                "disposition: request budget exhausted on chain %s (%s) — remaining holders were NOT scanned and "
+                "disposition: scan budget exhausted on chain %s (%s) — remaining holders were NOT scanned and "
                 "wrote NO evidence; cost so far %d getLogs + %d receipts + %d head + %d creation",
                 chain_id,
                 exc,
@@ -893,6 +945,8 @@ def scan_delivery_shape(
                 cost.head_reads,
                 cost.creation_lookups,
             )
+            if cost.scan_deadline_at is not None and time.monotonic() >= cost.scan_deadline_at:
+                continue
             break
         except DispositionHistoryChanged as exc:
             # A rolled-back snapshot must not leave an old positive visible
@@ -920,6 +974,159 @@ def _invalidate_history(session: Session, keys: set[tuple[int, str, str]]) -> No
             {"measured_through_hash": None, "delivery_shape": DELIVERY_SHAPE_NOT_DETERMINED, "caught_up": False},
             synchronize_session="fetch",
         )
+
+
+def _claim_disposition_snapshot(
+    session: Session,
+    *,
+    chain_id: int,
+    holders: Sequence[str],
+    stored: Mapping[tuple[int, str, str], Any],
+) -> bool:
+    """Lock the holders and reject a scan whose input changed during RPC."""
+    for holder in holders:
+        if not session.execute(
+            text("SELECT pg_try_advisory_xact_lock(hashtext('delivery_shape'), hashtext(:key))"),
+            {"key": f"{chain_id}:{holder}"},
+        ).scalar():
+            return False
+    return load_delivery_evidence(session, [(chain_id, holder) for holder in holders]) == stored
+
+
+def scan_delivery_shape_detached(
+    session: Session,
+    requests: Sequence[DispositionRequest],
+    *,
+    rpc_url_for: Callable[[int], str | None],
+    cost: DispositionCost | None = None,
+    protocol_id: int | None = None,
+) -> DispositionCost:
+    """TVL scan with no checked-out DB connection during historical RPC work.
+
+    Observe immutable evidence in a short transaction, then compare it again
+    under holder advisory locks before publishing. A concurrent writer causes
+    this observation to be discarded; the next cycle reads its newer cursor.
+    """
+    from db.models import TokenDeliveryEvidence
+
+    cost = cost or DispositionCost()
+    by_chain: dict[int, list[DispositionRequest]] = {}
+    for request in requests:
+        if request.holder_address and request.tokens:
+            by_chain.setdefault(int(request.chain_id), []).append(request)
+    if not by_chain:
+        return cost
+    if cost.scan_deadline_at is None and DISPOSITION_SCAN_WALL_SECONDS > 0:
+        cost.scan_deadline_at = time.monotonic() + DISPOSITION_SCAN_WALL_SECONDS
+    overall_deadline = cost.scan_deadline_at
+    chains = sorted(by_chain)
+
+    for chain_index, chain_id in enumerate(chains):
+        if overall_deadline is not None:
+            remaining = overall_deadline - time.monotonic()
+            if remaining <= 0:
+                cost.count("scan_time_budget_stopped")
+                break
+            cost.scan_deadline_at = time.monotonic() + remaining / (len(chains) - chain_index)
+        chain_requests = by_chain[chain_id]
+        holders = sorted({r.holder_address for r in chain_requests})
+        rpc_url = rpc_url_for(chain_id)
+        if not rpc_url:
+            cost.count("chains_unscanned")
+            continue
+
+        # These are DeliveryFact values, not live ORM rows. commit() returns
+        # the checked-out connection before the first historical RPC request.
+        stored = load_delivery_evidence(session, [(chain_id, holder) for holder in holders])
+        priority = _token_priority(session, chain_id=chain_id, requests=chain_requests, protocol_id=protocol_id)
+        session.commit()
+        snapshot: _ChainSnapshot | None = None
+        staged: list[_EvidenceWrite] = []
+        budget_error: DispositionBudgetExceeded | None = None
+        try:
+            cost.check_scan_deadline()
+            cost.head_reads += 1
+            raw_head = rpc_request(rpc_url, "eth_blockNumber", [], chain_id=chain_id, retries=0)
+            head = max(0, int(raw_head, 16) - asset_sweep.SWEEP_FINALITY_MARGIN)
+            snapshot = _ChainSnapshot(rpc_url, chain_id, head, cost)
+            cost.reserved += 1
+            snapshot.block_hash(head)
+            checked, eligible = _check_history(None, chain_requests, stored, snapshot, priority)
+            try:
+                _scan_chain(
+                    None,
+                    chain_id=chain_id,
+                    rpc_url=rpc_url,
+                    head=head,
+                    requests=eligible,
+                    stored=checked,
+                    cost=cost,
+                    priority=priority,
+                    snapshot=snapshot,
+                    staged=staged,
+                )
+            except DispositionBudgetExceeded as exc:
+                budget_error = exc
+            cost.reserved = 0
+            snapshot.verify()
+        except DispositionHistoryChanged:
+            # A reorg can invalidate an old positive even though this pass may
+            # publish none of its replacement. Withdraw it in a short txn.
+            if _claim_disposition_snapshot(session, chain_id=chain_id, holders=holders, stored=stored):
+                _invalidate_history(
+                    session, {(r.chain_id, r.holder_address, t.lower()) for r in chain_requests for t in r.tokens}
+                )
+                session.commit()
+            else:
+                cost.count("publication_conflicts")
+                session.rollback()
+            cost.count("snapshots_rejected")
+            continue
+        except (DispositionBudgetExceeded, RuntimeError, TypeError, ValueError) as exc:
+            session.rollback()
+            if snapshot is not None and snapshot.invalidated:
+                if _claim_disposition_snapshot(session, chain_id=chain_id, holders=holders, stored=stored):
+                    _invalidate_history(session, snapshot.invalidated)
+                    session.commit()
+                else:
+                    cost.count("publication_conflicts")
+                    session.rollback()
+            logger.warning("disposition: snapshot not accepted", extra={"chain_id": chain_id, "error": str(exc)})
+            cost.count("snapshots_rejected")
+            continue
+        finally:
+            cost.reserved = 0
+
+        assert snapshot is not None
+        try:
+            # Lock only the publication transaction. The evidence comparison
+            # is a CAS: even a new row for an initially absent pair invalidates
+            # this observation before any of its writes are applied.
+            if not _claim_disposition_snapshot(session, chain_id=chain_id, holders=holders, stored=stored):
+                cost.count("publication_conflicts")
+                session.rollback()
+                continue
+            for key in snapshot.invalidated:
+                session.query(TokenDeliveryEvidence).filter_by(
+                    chain_id=key[0], holder_address=key[1], token_address=key[2]
+                ).delete(synchronize_session="fetch")
+            for evidence in staged:
+                shape = record_delivery_evidence(session, **evidence)
+                cost.count("pairs_recorded")
+                cost.count(f"verdict_{shape}")
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        if budget_error is not None:
+            logger.warning(
+                "disposition: scan budget exhausted on chain %s (%s); published proven prefix",
+                chain_id,
+                budget_error,
+            )
+            if cost.scan_deadline_at is None or time.monotonic() < cost.scan_deadline_at:
+                break
+    return cost
 
 
 def _check_history(session, requests, stored, snapshot: _ChainSnapshot, priority):
@@ -968,11 +1175,12 @@ def _check_history(session, requests, stored, snapshot: _ChainSnapshot, priority
         if checkpoint is not None and snapshot.block_hash(fact.measured_through_block) == checkpoint:
             continue
         snapshot.invalidated.add(key)
-        session.query(TokenDeliveryEvidence).filter(
-            TokenDeliveryEvidence.chain_id == key[0],
-            TokenDeliveryEvidence.holder_address == key[1],
-            TokenDeliveryEvidence.token_address == key[2],
-        ).delete(synchronize_session="fetch")
+        if session is not None:
+            session.query(TokenDeliveryEvidence).filter(
+                TokenDeliveryEvidence.chain_id == key[0],
+                TokenDeliveryEvidence.holder_address == key[1],
+                TokenDeliveryEvidence.token_address == key[2],
+            ).delete(synchronize_session="fetch")
         checked.pop(key)
         snapshot.cost.count("pairs_history_reset")
     snapshot.cost.count("pairs_checkpoint_deferred", len(keys - eligible))
@@ -1301,6 +1509,7 @@ def run_disposition(
     *,
     rpc_url_for: Callable[[int], str | None],
     protocol_id: int | None = None,
+    detached_scan: bool = False,
 ) -> DispositionCost:
     """The phase as a PRODUCER calls it: it can never fail the cycle.
 
@@ -1326,6 +1535,8 @@ def run_disposition(
             try:
                 written = record_protocol_reference(session, protocol_id=protocol_id, requests=requests)
             except Exception as exc:
+                if detached_scan:
+                    session.rollback()
                 logger.warning(
                     "disposition: protocol reference pass failed; every token stays not_determined",
                     extra={"protocol_id": protocol_id, "exc_type": type(exc).__name__, "error": str(exc)},
@@ -1334,8 +1545,18 @@ def run_disposition(
             else:
                 cost.count("reference_tokens_recorded", written)
         try:
-            scan_delivery_shape(session, requests, rpc_url_for=rpc_url_for, cost=cost, protocol_id=protocol_id)
+            if detached_scan:
+                # Commit the reference pass before the historical RPC scan.
+                # The detached path manages its own short read/write transactions.
+                session.commit()
+                scan_delivery_shape_detached(
+                    session, requests, rpc_url_for=rpc_url_for, cost=cost, protocol_id=protocol_id
+                )
+            else:
+                scan_delivery_shape(session, requests, rpc_url_for=rpc_url_for, cost=cost, protocol_id=protocol_id)
         except Exception as exc:
+            if detached_scan:
+                session.rollback()
             logger.warning(
                 "disposition scan failed; balances are unaffected and the pairs stay not_determined",
                 extra={
@@ -1370,7 +1591,7 @@ def disposition_cost_note(cost: DispositionCost) -> str:
 
 
 def _scan_chain(
-    session: Session,
+    session: Session | None,
     *,
     chain_id: int,
     rpc_url: str,
@@ -1380,6 +1601,7 @@ def _scan_chain(
     cost: DispositionCost,
     priority: Mapping[str, int],
     snapshot: _ChainSnapshot,
+    staged: list[_EvidenceWrite] | None = None,
 ) -> None:
     """Decide what this cycle scans, scan a bounded slice of it, and record.
 
@@ -1545,8 +1767,11 @@ def _scan_chain(
         max_block_range=max_block_range,
         cost=cost,
         priority=priority,
+        staged=staged,
     )
     if starved:
+        if cost.scan_deadline_at is not None and time.monotonic() >= cost.scan_deadline_at:
+            raise DispositionTimeBudgetExceeded("disposition scan wall-time budget exhausted")
         raise DispositionBudgetExceeded(f"disposition request budget of {DISPOSITION_REQUEST_BUDGET} reached")
 
 
@@ -1786,7 +2011,7 @@ def _ordered(tokens: Sequence[str], priority: Mapping[str, int]) -> list[str]:
 
 
 def _resolve_fan_out(
-    session: Session,
+    session: Session | None,
     *,
     chain_id: int,
     rpc_url: str,
@@ -1794,6 +2019,7 @@ def _resolve_fan_out(
     max_block_range: int,
     cost: DispositionCost,
     priority: Mapping[str, int],
+    staged: list[_EvidenceWrite] | None = None,
 ) -> None:
     """Meter each delivery, then record the pairs that were measured END TO END.
 
@@ -1870,6 +2096,11 @@ def _resolve_fan_out(
                 continue
             tx = record["tx"]
             if tx not in receipts:
+                try:
+                    cost.check_scan_deadline()
+                except DispositionTimeBudgetExceeded:
+                    exhausted = True
+                    break
                 if cost.spent >= DISPOSITION_REQUEST_BUDGET:
                     exhausted = True
                     break
@@ -1893,8 +2124,7 @@ def _resolve_fan_out(
             )
         if exhausted:
             break
-        shape = record_delivery_evidence(
-            session,
+        evidence = _EvidenceWrite(
             chain_id=chain_id,
             holder_address=holder,
             token_address=token,
@@ -1908,8 +2138,13 @@ def _resolve_fan_out(
             counts=cost.counts,
             measured_through_hash=entry.measured_through_hash,
         )
-        cost.count("pairs_recorded")
-        cost.count(f"verdict_{shape}")
+        if staged is not None:
+            staged.append(evidence)
+        else:
+            assert session is not None
+            shape = record_delivery_evidence(session, **evidence)
+            cost.count("pairs_recorded")
+            cost.count(f"verdict_{shape}")
     if exhausted:
         raise DispositionBudgetExceeded(f"disposition request budget of {DISPOSITION_REQUEST_BUDGET} reached")
 
@@ -2004,4 +2239,5 @@ __all__ = [
     "record_protocol_reference",
     "run_disposition",
     "scan_delivery_shape",
+    "scan_delivery_shape_detached",
 ]

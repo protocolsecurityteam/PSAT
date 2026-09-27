@@ -1,11 +1,19 @@
 import { describe, it, expect } from "vitest";
 import { eventKind, eventKindLabel, eventSalience, eventSeverity, salienceAllows } from "./eventClass.js";
-import { decodeEvent, targetText } from "./format.js";
+import { decodeEvent, scannerHealth, targetText } from "./format.js";
 import { shortenAddress } from "../../../shared/format.js";
 
 const ADDR_A = "0x1111111111111111111111111111111111111111";
 const ADDR_B = "0x2222222222222222222222222222222222222222";
 const ZERO = "0x0000000000000000000000000000000000000000";
+
+it("keeps an hourly scanner healthy between normal passes", () => {
+  const now = Date.parse("2026-09-26T12:00:00Z");
+  const contracts = [{ updated_at: new Date(now - 55 * 60 * 1000).toISOString() }];
+  expect(scannerHealth(contracts, now).tone).toBe("ok");
+  contracts[0].updated_at = new Date(now - 121 * 60 * 1000).toISOString();
+  expect(scannerHealth(contracts, now).tone).toBe("warn");
+});
 
 function evt(event_type, data) {
   return { event_type, data };
