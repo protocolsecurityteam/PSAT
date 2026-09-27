@@ -17,7 +17,6 @@ from db.models import (
 )
 from services.aggregations.company_overview import _entity_key
 from services.monitoring import tvl as tvl_module
-from services.monitoring.asset_sweep import SweepCost
 from services.monitoring.tvl import (
     DEFAULT_ENTITY_BALANCE_INTERVAL,
     _get_protocol_addresses,
@@ -81,7 +80,7 @@ def _no_pinned_native(monkeypatch):
 def _no_escalation(monkeypatch):
     """Normal collection must never invoke historical token scanning."""
     history = MagicMock(side_effect=AssertionError("routine history forbidden"))
-    monkeypatch.setattr("services.monitoring.balance_observation.run_sweeps", history)
+    monkeypatch.setattr("services.clients.rpc.rpc_request", history)
     yield
     history.assert_not_called()
 
@@ -535,7 +534,7 @@ class TestRefreshAllProtocols:
         monkeypatch.setattr("services.clients.etherscan.get_eth_price", lambda chain_id=1: 2000.0)
         monkeypatch.setattr("services.clients.etherscan.get_token_balances_page", lambda address, chain_id=1: page([]))
         history = MagicMock(side_effect=AssertionError("routine history forbidden"))
-        monkeypatch.setattr("services.monitoring.balance_observation.run_sweeps", history)
+        monkeypatch.setattr("services.clients.rpc.rpc_request", history)
         assert refresh_all_protocols(db_session) == 1
         history.assert_not_called()
         assert db_session.query(ContractBalanceFetch).filter_by(asset_set_status="returned_empty").count() == 1
@@ -1279,9 +1278,6 @@ class TestProvenCodelessHolderPopulation:
         # The escalation fires (an empty page is a trigger, never a proof) and
         # the scan is what would answer it; this test pins the RECORD, so the
         # scan is stubbed to no outcome and the sheet stays honestly unproven.
-        monkeypatch.setattr(
-            "services.monitoring.balance_observation.run_sweeps", lambda requests, **kw: ({}, SweepCost())
-        )
 
         report = refresh_entity_balances(db_session, proto.id)
         assert [h.entity_key for h in report.holders] == [f"ethereum::{eoa}"]
@@ -1400,9 +1396,6 @@ class TestEntityCohortInTheCycle:
             return real_contract_refresh(session, protocol_id, **kwargs)
 
         monkeypatch.setattr("services.monitoring.tvl.refresh_contract_balances", _counting_contract_refresh)
-        monkeypatch.setattr(
-            "services.monitoring.balance_observation.run_sweeps", lambda requests, **kw: ({}, SweepCost())
-        )
 
         refresh_all_protocols(db_session)
         assert self._readings(db_session, eoa) == 1
@@ -1429,9 +1422,6 @@ class TestEntityCohortInTheCycle:
         """
 
         proto, _host, eoa = self._fixture(db_session, monkeypatch, "b")
-        monkeypatch.setattr(
-            "services.monitoring.balance_observation.run_sweeps", lambda requests, **kw: ({}, SweepCost())
-        )
 
         first = refresh_entity_balances_if_due(db_session, proto.id)
         assert first is not None and [h.entity_key for h in first.holders] == [f"ethereum::{eoa}"]
@@ -1465,9 +1455,6 @@ class TestEntityCohortInTheCycle:
         db_session.add(host_a)
         db_session.flush()
         self._eoa_node(db_session, host_a, shared)
-        monkeypatch.setattr(
-            "services.monitoring.balance_observation.run_sweeps", lambda requests, **kw: ({}, SweepCost())
-        )
 
         assert refresh_entity_balances_if_due(db_session, proto_b.id) is not None
         assert (self._readings(db_session, exclusive), self._readings(db_session, shared)) == (1, 1)
@@ -1490,9 +1477,6 @@ class TestEntityCohortInTheCycle:
         the pass the cohort's own age opens — and then it is read.
         """
         proto, host, first_eoa = self._fixture(db_session, monkeypatch, "e")
-        monkeypatch.setattr(
-            "services.monitoring.balance_observation.run_sweeps", lambda requests, **kw: ({}, SweepCost())
-        )
         assert refresh_entity_balances_if_due(db_session, proto.id) is not None
 
         newcomer = self._addr("e9")
@@ -1510,7 +1494,7 @@ class TestEntityCohortInTheCycle:
     def test_neither_contract_nor_entity_collection_invokes_history(self, db_session, monkeypatch, _cleanup):
         _proto, _host, eoa = self._fixture(db_session, monkeypatch, "c")
         history = MagicMock(side_effect=AssertionError("routine history forbidden"))
-        monkeypatch.setattr("services.monitoring.balance_observation.run_sweeps", history)
+        monkeypatch.setattr("services.clients.rpc.rpc_request", history)
         refresh_all_protocols(db_session)
         history.assert_not_called()
         assert self._readings(db_session, eoa) == 1  # helper counts the independent token unit

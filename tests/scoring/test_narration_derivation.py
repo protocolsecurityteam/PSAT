@@ -432,17 +432,17 @@ def test_the_two_ceiling_kinds_are_counted_apart_and_neither_borrows_the_others_
 
     # Counted apart, and neither count is the row's total of five.
     assert "2 priced from a composed extraction CEILING" in both
-    assert "3 priced from a SHEET CEILING" in both
+    assert "3 valued from the controlled node's observed own holdings" in both
     assert "5 of 5 entity(ies)" in both
     # The composed clause counts composed entries only; the sheet clause counts
     # sheet entries only. A shared denominator would be the frozen-pair defect
     # one axis over.
     assert "travel with 2 of those 2 figure(s)" in both
-    assert "each of the 3 sheet figure(s)" in both
+    assert "the 3 holdings figure(s) value observed assets at controlled nodes" in both
     assert "travel with 2 of those 5 figure(s)" not in both
 
     # A single-kind row is untouched by the existence of the other.
-    assert "SHEET CEILING" not in _basis(composed, ceiling)
+    assert "observed own holdings" not in _basis(composed, ceiling)
     assert "composed extraction CEILING" not in _basis({}, frozenset(), sheet)
 
 
@@ -857,4 +857,4 @@ def test_the_rollup_counts_one_sheet_once_and_names_a_disagreement_rather_than_a
 
 
 def test_retired_airdrop_admissions_have_no_published_narration():
-    assert all(reason != P.CEILING_AIRDROP_DETERMINED for reason, _ in FOLD._CEILING_SOURCE_READINGS)
+    assert all(reason != "airdrop_determined" for reason, _ in FOLD._CEILING_SOURCE_READINGS)

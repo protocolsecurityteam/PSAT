@@ -24,7 +24,6 @@ because it only moves a candidate earlier in the queue, never out of it.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -50,19 +49,12 @@ from db.models import (
     Job,
     JobStage,
     JobStatus,
-    TokenProtocolReference,
     TvlSnapshot,
 )
 from services.effects.config import EFFECT_CLASS_SUPPLY, EFFECT_CLASS_VALUE_OUT, NATIVE_ASSET_LOG_EMITTER
 from services.monitoring.balance_reads import positive_raw_balance
 from utils.balance_status import (
     ASSET_SET_STATUS_AT_PAGE_CAP,
-    DELIVERY_SHAPE_FAN_OUT_ALL,
-    DELIVERY_SHAPE_HAS_DIRECT_DELIVERY,
-    DELIVERY_SHAPE_NOT_DETERMINED,
-    TOKEN_REFERENCE_ABSENT_FROM_UNIVERSE,
-    TOKEN_REFERENCE_IN_UNIVERSE,
-    TOKEN_REFERENCE_NOT_DETERMINED,
     USD_CRUMB_THRESHOLD,
 )
 from utils.chains import UnknownChainError, canonical_chain, chain_by_id, chain_by_name
@@ -409,76 +401,6 @@ class AssetHolding(NamedTuple):
     # Uniform across every holding of one holder; carried per row so the reach probe
     # needs no second input to thread.
     completeness: str = HOLDINGS_COMPLETENESS_NOT_DETERMINED
-    # How every recorded delivery of this asset into this holder ARRIVED, as one of
-    # :data:`~utils.balance_status.DELIVERY_SHAPES`. A DELIVERY claim and never a worth
-    # claim: two demonstrably real tokens on this corpus are airdrop-delivered (uniETH
-    # at fan-out 101, HEX at 199/399/399), so ``fan_out_all`` states how the balance
-    # got here and states nothing about what it is worth.
-    #
-    # The record is KEPT under every shape — a vanished row is an unwitnessed deletion,
-    # and this record's EXISTENCE is what downstream reads as "this deployment holds
-    # this asset". Delivery shape alone withholds nothing; a row leaves the holdings
-    # claim only under the full conjunction in :func:`disposed_from_holdings`, and it
-    # is excluded at the consumption points rather than dropped here, so the exclusion
-    # is visible in a labelled record rather than silent in a missing one.
-    delivery_shape: str = DELIVERY_SHAPE_NOT_DETERMINED
-    # Whether this asset's address was found in the protocol's own discovered
-    # universe, as one of :data:`~utils.balance_status.TOKEN_REFERENCE_SHAPES`, read off the
-    # last ``token_protocol_reference`` row the producer measured. The second required
-    # conjunct — see :func:`disposed_from_holdings` for why this plane reads a stored
-    # verdict rather than assembling the universe itself, and what that costs.
-    reference_shape: str = TOKEN_REFERENCE_NOT_DETERMINED
-
-
-def disposed_from_holdings(*, delivery_shape: str, reference_shape: str, usd_value: float | None) -> bool:
-    """Historical delivery classifications never exclude a holdings witness."""
-    return False
-
-
-def load_protocol_reference_shapes(session: Session, protocol_ids: Iterable[int]) -> dict[tuple[int, int, str], str]:
-    """``(protocol id, chain id, token address) -> reference shape``, as stored.
-
-    One batched read of the producer's own verdicts. The protocol stays IN the key
-    rather than being merged out: "is this address in the universe" is a question
-    about one protocol's discovery, and two protocols on one page answer it
-    independently.
-
-    Every key absent from the result is ``not_determined`` at the call sites, never
-    ``absent_from_universe``: this table says what the producer MEASURED, and a pair
-    it never measured is a pair nobody answered for.
-    """
-    ids = sorted({int(pid) for pid in protocol_ids if pid is not None})
-    if not ids:
-        return {}
-    rows = session.execute(
-        select(
-            TokenProtocolReference.protocol_id,
-            TokenProtocolReference.chain_id,
-            TokenProtocolReference.token_address,
-            TokenProtocolReference.reference_shape,
-        ).where(TokenProtocolReference.protocol_id.in_(ids))
-    ).all()
-    return {
-        (int(protocol_id), int(chain_id), str(token or "").lower()): str(shape)
-        for protocol_id, chain_id, token, shape in rows
-    }
-
-
-def _merged_reference_shape(shapes: Iterable[str]) -> str:
-    """One reference shape for a (holder, asset) several accounts' rows contributed to.
-
-    Mirrors :func:`_merged_delivery_shape` and fails closed the same way. Any account
-    whose chain's reference row says ``in_universe`` SPARES the holding outright —
-    the scorer tests universe membership chain-blind, and an address discovered on
-    one chain is an address the protocol references. ``absent_from_universe`` needs
-    unanimity, and an empty contribution set is never vacuously unanimous.
-    """
-    seen = list(shapes)
-    if any(shape == TOKEN_REFERENCE_IN_UNIVERSE for shape in seen):
-        return TOKEN_REFERENCE_IN_UNIVERSE
-    if seen and all(shape == TOKEN_REFERENCE_ABSENT_FROM_UNIVERSE for shape in seen):
-        return TOKEN_REFERENCE_ABSENT_FROM_UNIVERSE
-    return TOKEN_REFERENCE_NOT_DETERMINED
 
 
 def _asset_holdings_by_deployment(
@@ -497,17 +419,11 @@ def _asset_holdings_by_deployment(
     rows = session.execute(
         select(
             Contract.id,
-            Contract.chain,
             ContractBalanceLatest.token_address,
             ContractBalanceLatest.usd_value,
             ContractBalanceLatest.raw_balance,
-            # The account the read was ISSUED against, which is the key delivery
-            # evidence is stored under. It differs from ``contracts.address`` on 162
-            # of this protocol's token rows (18 distinct ethereum accounts), so keying
-            # the lookup on the contract address would answer ``not_determined`` for
-            # every one of them.
+            # Preserve the actual holder when balances were read against a proxy.
             ContractBalanceLatest.observed_address,
-            ContractBalanceFetch.chain_id,
             ContractBalanceFetch.asset_set_status,
         )
         .join(ContractBalanceLatest, ContractBalanceLatest.contract_id == Contract.id)
@@ -523,42 +439,24 @@ def _asset_holdings_by_deployment(
             select(Contract.id, Contract.address).where(Contract.protocol_id == protocol_id)
         ).all()
     }
-    kept: list[tuple[str, str, float | None, tuple[int, str, str] | None, str | None]] = []
-    accounts: set[tuple[int, str]] = set()
+    kept: list[tuple[str, str, float | None, str | None]] = []
     for (
         contract_id,
-        chain,
         token_address,
         usd,
         raw_balance,
         observed_address,
-        fetch_chain_id,
         asset_set_status,
     ) in rows:
         holder = _addr(observed_address) or holders.get(contract_id) or _addr(addresses.get(contract_id))
         if holder is None:
             continue
-        # A row is a holdings witness only if a strictly positive quantity was
-        # witnessed. Row EXISTENCE alone must never mean "holds this asset":
-        # that reading is what makes this function the delivery trap for the
-        # balance three-state, and it is only accidentally sound today (measured:
-        # 0 of 1617 stored rows are non-positive). Unparseable is EXCLUDED, never
-        # admitted, and never raised.
+        # Only a strictly positive quantity proves that this holder owns the asset.
         if not positive_raw_balance(raw_balance):
             continue
         asset = _addr(token_address) or NATIVE_ASSET_LOG_EMITTER
         value = None if usd is None else float(_usd(usd))
-        account = _delivery_account(fetch_chain_id, chain, observed_address)
-        evidence_key = None if account is None or token_address is None else (*account, _addr(token_address) or "")
-        if account is not None:
-            accounts.add(account)
-        kept.append((holder, asset, value, evidence_key, asset_set_status))
-    # ONE batched read for the whole protocol's accounts, keyed by the account the
-    # balance was read against rather than by any folded entity: two accounts of one
-    # deployment are two holders here, and merging them would let one account's
-    # evidence answer for the other's holding.
-    facts = {}  # delivery classifications are retired
-    references = {}  # protocol-universe membership is not verified token relevance
+        kept.append((holder, asset, value, asset_set_status))
     # (holder, asset) -> usd. ``None`` (unpriced) NEVER overwrites a priced value and
     # is never treated as 0 in the max: a copy of the same holding that happened to be
     # priced is strictly more informative.
@@ -568,13 +466,7 @@ def _asset_holdings_by_deployment(
     # missing entries, whatever the other siblings said. Taking the last-seen or
     # the strongest value would let a complete-looking fetch mask a capped one.
     holder_capped: dict[str, bool] = {}
-    # (holder, asset) -> the shapes every contributing account's evidence answered.
-    shapes: dict[tuple[str, str], list[str]] = {}
-    # (holder, asset) -> the reference verdict stored for every contributing account's
-    # CHAIN. Collected per row rather than per asset because one holding can be read on
-    # two chains, and the producer measures the universe question per chain.
-    reference_shapes: dict[tuple[str, str], list[str]] = {}
-    for holder, asset, value, evidence_key, asset_set_status in kept:
+    for holder, asset, value, asset_set_status in kept:
         key = (holder, asset)
         if key not in best:
             best[key] = value
@@ -584,13 +476,6 @@ def _asset_holdings_by_deployment(
                 best[key] = value
             elif value is not None:
                 best[key] = max(current, value)
-        fact = None if evidence_key is None else facts.get(evidence_key)
-        shapes.setdefault(key, []).append(fact.shape if fact is not None else DELIVERY_SHAPE_NOT_DETERMINED)
-        reference_shapes.setdefault(key, []).append(
-            TOKEN_REFERENCE_NOT_DETERMINED
-            if evidence_key is None
-            else references.get((protocol_id, evidence_key[0], evidence_key[2]), TOKEN_REFERENCE_NOT_DETERMINED)
-        )
         if _completeness_from_fetch(asset_set_status) == HOLDINGS_COMPLETENESS_AT_PAGE_CAP:
             holder_capped[holder] = True
     out: dict[str, list[AssetHolding]] = {}
@@ -604,54 +489,9 @@ def _asset_holdings_by_deployment(
                 asset=asset,
                 usd_value=usd_value,
                 completeness=completeness,
-                delivery_shape=_merged_delivery_shape(shapes.get((holder, asset), ())),
-                reference_shape=_merged_reference_shape(reference_shapes.get((holder, asset), ())),
             )
         )
     return {holder: tuple(items) for holder, items in out.items()}
-
-
-def _delivery_account(
-    fetch_chain_id: int | None, chain_name: str | None, observed_address: str | None
-) -> tuple[int, str] | None:
-    """The ``(chain_id, account)`` delivery evidence for one balance row is keyed by.
-
-    ``None`` where either half is missing, which is the state that admits no lookup
-    and therefore leaves the row ``not_determined`` — the shape that keeps the row
-    presented. The fetch's own ``chain_id`` is preferred over the contract's chain
-    NAME because it is the value the producer measured against; the name is the
-    fallback that still covers a legacy row with no fetch.
-    """
-    if not observed_address:
-        return None
-    chain_id = fetch_chain_id
-    if chain_id is None and chain_name:
-        try:
-            chain_id = chain_by_name(chain_name).chain_id
-        except UnknownChainError:
-            return None
-    if chain_id is None:
-        return None
-    return int(chain_id), str(observed_address).lower()
-
-
-def _merged_delivery_shape(shapes: Iterable[str]) -> str:
-    """One delivery shape for a (holder, asset) several accounts' rows contributed to.
-
-    ``fan_out_all`` only under UNANIMITY, because it is the shape that stops a row
-    being presented as a holding and the all-quantifier it comes from is per account:
-    one contributing account that saw a direct delivery, or that nobody measured, is
-    enough that "every delivery on record was a mass distribution" is not proven for
-    this holding. ``has_direct_delivery`` outranks ``not_determined`` — an earned
-    negative is not weakened by a sibling gap — and an empty contribution set is
-    ``not_determined`` rather than vacuously unanimous.
-    """
-    seen = list(shapes)
-    if seen and all(shape == DELIVERY_SHAPE_FAN_OUT_ALL for shape in seen):
-        return DELIVERY_SHAPE_FAN_OUT_ALL
-    if any(shape == DELIVERY_SHAPE_HAS_DIRECT_DELIVERY for shape in seen):
-        return DELIVERY_SHAPE_HAS_DIRECT_DELIVERY
-    return DELIVERY_SHAPE_NOT_DETERMINED
 
 
 def _completeness_from_fetch(asset_set_status: str | None) -> str:

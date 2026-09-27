@@ -38,7 +38,6 @@ def _plane(
     asset_set_accounts_unscanned: dict[str, list[str]] | None = None,
     typed_receipts_unresolved: dict[str, list[dict]] | None = None,
     unpriced_positions: dict[str, list[dict]] | None = None,
-    asset_disposition: dict[str, dict[str, dict]] | None = None,
 ) -> P.ValuePlane:
     plane = P.ValuePlane()
     plane.per_asset = per_asset or {}
@@ -50,7 +49,6 @@ def _plane(
     plane.asset_set_accounts_unscanned = asset_set_accounts_unscanned or {}
     plane.typed_receipts_unresolved = typed_receipts_unresolved or {}
     plane.unpriced_positions = unpriced_positions or {}
-    plane.asset_disposition = asset_disposition or {}
     plane.contract_entities = set(plane.per_asset) | set(plane.per_asset_state)
     plane.fresh_entities = set(plane.contract_entities)
     return plane
@@ -131,27 +129,12 @@ def _truncated() -> P.ValuePlane:
 
 # The carrier record a disposed reading is published from — the delivery
 # evidence's own stored fields, not a sentence written here.
-DELIVERED = {
-    "shape": "fan_out_all",
-    "fan_out_threshold_k": 25,
-    "min_fan_out": 199,
-    "delivery_count": 1,
-    "scanned_from_block": 0,
-    "measured_through_block": 21_000_000,
-    "accounts": ["0x" + "a" * 40],
-    "basis": ["delivery receipts read over blocks 0-21000000; every delivery fanned out to >= 25 recipients"],
-}
 
 
 def _airdrop_determined() -> P.ValuePlane:
-    """A sheet whose only reading arrived as a mass distribution.
-
-    The claim is DELIVERY SHAPE: this says how the holding arrived and never
-    that it is worth nothing — real tokens have been measured arriving this way.
-    """
+    """A retired classification must decode as unknown value, never as zero."""
     return _plane(
         per_asset_state={KEY: {"junk": P.ASSET_AIRDROP_DELIVERED}},
-        asset_disposition={KEY: {"junk": DELIVERED}},
     )
 
 

@@ -59,11 +59,8 @@ MIN_SNAPSHOT_INTERVAL = int(os.getenv("PROTOCOL_TVL_MIN_INTERVAL", "300"))
 # Protocols refreshed per tick, oldest-snapshot-first — bounds the per-tick
 # Etherscan/DefiLlama fan-out (design §2.7).
 DEFAULT_TVL_PROTOCOLS_PER_PASS = 10
-# How stale the entity cohort's reading may get before the cycle re-reads it.
-# Deliberately a day rather than the TVL tick: these holders are the protocol's
-# signers and capability principals, not its deployments, and their scan is
-# batched — N holders sharing a cursor cost the same windows as one — so the
-# cadence, not the population, is what the spend is bought with.
+# The protocol's signers and capability principals use a daily balance cadence.
+# The shared collector still deduplicates physical reads across protocols.
 DEFAULT_ENTITY_BALANCE_INTERVAL = int(os.getenv("PSAT_ENTITY_BALANCE_INTERVAL", "86400"))
 DEFILLAMA_PROTOCOL_URL = "https://api.llama.fi/protocol"
 
@@ -144,28 +141,12 @@ def fetch_defillama_tvl(protocol_name: str) -> dict | None:
 
 
 def _get_protocol_addresses(session: Session, protocol_id: int) -> list[Contract]:
-    """Return contracts to fetch balances for, excluding implementation-behind-proxy.
+    """Select current balance subjects, normally excluding proxy implementations.
 
-    With TWO exceptions, and both are correctness exceptions rather than
-    conveniences. The value plane folds an implementation's rows onto its
-    proxy's key, so the two addresses are ONE sheet — and every claim that sheet
-    makes about its asset list is a claim about both addresses, which nothing
-    could earn while nothing was ever allowed to read the implementation.
-
-    1. **Stuck at the page cap.** An excluded implementation row whose CURRENT
-       asset fetch says ``at_page_cap`` is a permanently stuck truncation: that
-       stale prefix keeps the proxy's sheet marked incomplete, and refuses it a
-       ceiling, no matter how many times the proxy itself is re-observed.
-    2. **Folded into a sheet that is proving itself whole.** Where the entity an
-       implementation folds onto carries a completed chain-log scan, that sheet
-       is trying to publish an asset list as COMPLETE — and it may only do so
-       where every account it sums was scanned at its own address. Without this,
-       the implementation's address is never read, the sheet can never be shown
-       whole, and the honest outcome is a permanent not_determined on entities
-       whose proxies swept clean. Re-observed every cycle rather than once: the
-       scan is incremental behind ``swept_through_block`` (about one request),
-       and a cursor that stops advancing is what makes a completeness claim go
-       stale without saying so.
+    Include implementations with a truncated stored page or whose proxy still
+    carries a legacy scan observation. Refreshing these accounts avoids leaving
+    old evidence permanently attached to the folded entity. These exceptions
+    schedule current balance reads only; historical scans are never resumed.
     """
     from services.aggregations.company_overview.entity_keys import _entity_key
     from services.monitoring.balance_reads import winning_asset_fetches
@@ -176,7 +157,7 @@ def _get_protocol_addresses(session: Session, protocol_id: int) -> list[Contract
         contract_id for contract_id, fetch in winning.items() if fetch.asset_set_status == ASSET_SET_STATUS_AT_PAGE_CAP
     }
     by_id = {c.id: c for c in contracts}
-    scanning_entities = {
+    legacy_scanned_entities = {
         _entity_key(by_id[contract_id].chain, by_id[contract_id].address)
         for contract_id, fetch in winning.items()
         if contract_id in by_id
@@ -184,15 +165,15 @@ def _get_protocol_addresses(session: Session, protocol_id: int) -> list[Contract
         and fetch.sweep_status == SWEEP_STATUS_COMPLETED
         and fetch.swept_through_block is not None
     }
-    folded_into_a_scanning_sheet = {
+    folded_into_a_legacy_scanned_sheet = {
         c.id
         for c in contracts
-        if c.is_proxy and c.implementation and _entity_key(c.chain, c.address) in scanning_entities
+        if c.is_proxy and c.implementation and _entity_key(c.chain, c.address) in legacy_scanned_entities
     }
     # The IMPLEMENTATION rows of those proxies, matched the same chain-scoped way
     # the exclusion below is built.
-    scanning_impl_tokens = {
-        _entity_key(by_id[cid].chain, by_id[cid].implementation) for cid in folded_into_a_scanning_sheet
+    legacy_scanned_impl_tokens = {
+        _entity_key(by_id[cid].chain, by_id[cid].implementation) for cid in folded_into_a_legacy_scanned_sheet
     }
 
     # Impl-behind-proxy tokens, keyed by the composite "<chain>::<address>": an
@@ -213,7 +194,7 @@ def _get_protocol_addresses(session: Session, protocol_id: int) -> list[Contract
         and (
             _entity_key(c.chain, c.address) not in impl_tokens
             or c.id in stuck_at_cap
-            or _entity_key(c.chain, c.address) in scanning_impl_tokens
+            or _entity_key(c.chain, c.address) in legacy_scanned_impl_tokens
         )
     ]
 

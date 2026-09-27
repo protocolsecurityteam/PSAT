@@ -1,4 +1,4 @@
-"""Sheet ceilings: asset coverage, bound direction, disposition, unresolved stake, and ceiling narration."""
+"""Sheet ceilings: asset coverage, bound direction, unresolved stake, and ceiling narration."""
 
 from __future__ import annotations
 
@@ -150,7 +150,6 @@ def _asset_coverage(value_plane: P.ValuePlane, canonical: str) -> dict[str, Any]
     not_priced = sorted(
         name for name in names if states.get(name) in (*_UNPRICED_ASSET_STATES, P.ASSET_AIRDROP_DELIVERED)
     )
-    disposed: list[str] = []  # Retired category; legacy readings are unpriced.
     list_is_whole = not value_plane.asset_set_is_truncated(canonical) and value_plane.asset_set_is_proven_complete(
         canonical
     )
@@ -168,15 +167,9 @@ def _asset_coverage(value_plane: P.ValuePlane, canonical: str) -> dict[str, Any]
             for name in names
         ],
         "assets_observed": len(names),
-        # Assets carrying a determined DOLLAR reading — a price, or a quantity
-        # witnessed zero. The three populations partition ``assets_observed``:
-        # a disposed asset carries no dollar figure at all (its ``usd`` is null
-        # in ``per_asset``), so it is counted under ``assets_disposed`` and
-        # under neither of the other two. Folding it in here published a sheet
-        # whose every asset arrived by mass distribution as fully priced.
-        "assets_priced": len(names) - len(not_priced) - len(disposed),
+        # A determined dollar value requires either a quote or a proven zero quantity.
+        "assets_priced": len(names) - len(not_priced),
         "assets_not_priced": not_priced,
-        "assets_disposed": disposed,
         # The LIST conjunct of ``complete``, published rather than left inside
         # it: a reader who sees the direction refused with both asset lists
         # empty has no other field to read the cause off, and an unpublished
@@ -187,7 +180,6 @@ def _asset_coverage(value_plane: P.ValuePlane, canonical: str) -> dict[str, Any]
         "observation_fresh": canonical in value_plane.fresh_entities,
         "complete": bool(names)
         and not not_priced
-        and not disposed
         and not positions
         and not value_plane.unresolved_typed_receipts(canonical)
         and list_is_whole
@@ -636,12 +628,6 @@ def _sheet_ceiling_records(
                 # — which is every ADMITTED entry on this corpus and is why they
                 # bound the priced portion and not the move.
                 "asset_set_completeness": _asset_set_completeness(value_plane, entity),
-                # The delivery evidence a disposed reading stands on, carried
-                # from the plane's own records rather than restated: the
-                # sentence below quotes these fields, so a reader checks the
-                # claim against the evidence and not against the prose.
-                # ``null`` where no reading here is disposed.
-                "asset_disposition": None,
                 **coverage,
                 PROVING_EXECUTION_KEY: EX.not_determined(EX.REASON_NOT_PROVEN_BY_A_CALL).as_json(),
                 "reading": (

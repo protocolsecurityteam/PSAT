@@ -182,25 +182,12 @@ def _round_published(value: float) -> float:
     return rounded if rounded != 0.0 or value == 0.0 else value
 
 
-# The token a figure carries where a sheet EXISTS, is determined, and still may
-# not bound a witness. One token, used at both trim sites and published on both
-# surfaces, so the two cannot drift into describing the same fact differently.
-SHEET_BOUND_REFUSED_BY_DISPOSITION = "sheet_determined_by_disposition_does_not_bound"
+# An observed dollar total does not establish the scope needed to cap a call.
+SHEET_BOUND_REFUSED_BY_SCOPE = "observed_holdings_do_not_bound_capability"
 
-
-# And what that token means, in the one sentence both surfaces publish. It says
-# what the sheet DOES determine as well as what it does not, because the
-# alternative reading — "the sheet is not determined" — is false here and is the
-# word a reader would otherwise act on.
-_DISPOSED_SHEET_DOES_NOT_BOUND = (
-    "a witnessed magnitude charged against an entity whose sheet IS determined, at $0, by "
-    "delivery-shape disposition: every reading on it arrived only in transactions carrying at "
-    "least the published fan-out threshold of same-token transfer LOGS. That determination is "
-    "over the "
-    "readings observed, on an asset list that is NOT proven whole, and it is a claim about how "
-    "the holdings arrived and never about what they are worth — two of the tokens measured into "
-    "that state on this corpus are real ones. So the $0 bounds what the entity HOLDS and not "
-    "what is there to MOVE, the sheet does not trim this figure, and the witness stands alone"
+_OBSERVED_SHEET_DOES_NOT_BOUND = (
+    "the observed holdings do not establish an upper bound on this capability; "
+    "the witnessed magnitude stands without being capped by the balance snapshot"
 )
 
 

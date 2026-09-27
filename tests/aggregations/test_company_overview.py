@@ -30,8 +30,6 @@ from db.models import (
     FunctionPrincipal,
     JobStatus,
     PrincipalLabel,
-    TokenDeliveryEvidence,
-    TokenProtocolReference,
     UpgradeEvent,
 )
 from services.aggregations.company_overview import (
@@ -53,10 +51,6 @@ from utils.balance_status import (
     ASSET_SET_STATUS_AT_PAGE_CAP,
     ASSET_SET_STATUS_RETURNED_ASSETS,
     BALANCE_WRITER_TVL,
-    DELIVERY_SHAPE_FAN_OUT_ALL,
-    DELIVERY_SHAPE_HAS_DIRECT_DELIVERY,
-    TOKEN_REFERENCE_ABSENT_FROM_UNIVERSE,
-    TOKEN_REFERENCE_IN_UNIVERSE,
 )
 
 pytestmark = requires_postgres
@@ -2507,15 +2501,8 @@ def test_a_long_list_the_fetch_paged_to_exhaustion_is_not_read_as_truncated(db_s
     assert entry["holdings_coverage"]["state"] == "not_determined"
 
 
-def test_an_airdrop_delivered_row_is_published_labelled_and_not_presented_as_a_holding(db_session):
-    """§10.6.9. The row stays, carries both shapes, and the disposition is counted.
-
-    Four rows on one account: one that meets every disposition conjunct, one with a
-    direct delivery on record, one nobody measured, and one that is airdrop-delivered
-    but named by the protocol's OWN discovery — the HEX / WETH / base USDC shape.
-    Only the first is disposed, and it is disposed by LABEL — never by removal, and
-    never by a claim about what it is worth.
-    """
+def test_priced_and_unpriced_holdings_remain_visible_without_classification(db_session):
+    """Unpriced positions remain visible and only known dollar values enter the total."""
     p = _add_protocol(db_session, f"e2e-airdrop-{uuid.uuid4().hex[:8]}")
     addr = _addr("air1")
     job = _add_job(db_session, address=addr, protocol_id=p.id, name="Holder")
@@ -2552,68 +2539,6 @@ def test_an_airdrop_delivered_row_is_published_labelled_and_not_presented_as_a_h
             )
         ]
     )
-    db_session.add_all(
-        [
-            TokenDeliveryEvidence(
-                chain_id=1,
-                holder_address=addr.lower(),
-                token_address=junk.lower(),
-                scanned_from_block=0,
-                measured_through_block=100,
-                deliveries=[{"tx": "0x01", "log_index": 1, "fan_out": 400, "fan_out_basis": "receipt"}],
-                delivery_count=1,
-                unreadable_deliveries=0,
-                min_fan_out=400,
-                fan_out_threshold_k=25,
-                delivery_shape=DELIVERY_SHAPE_FAN_OUT_ALL,
-                basis="scan 0..100",
-            ),
-            TokenDeliveryEvidence(
-                chain_id=1,
-                holder_address=addr.lower(),
-                token_address=real.lower(),
-                scanned_from_block=0,
-                measured_through_block=100,
-                deliveries=[{"tx": "0x02", "log_index": 1, "fan_out": 1, "fan_out_basis": "receipt"}],
-                delivery_count=1,
-                unreadable_deliveries=0,
-                min_fan_out=1,
-                fan_out_threshold_k=25,
-                delivery_shape=DELIVERY_SHAPE_HAS_DIRECT_DELIVERY,
-                basis="scan 0..100",
-            ),
-            TokenDeliveryEvidence(
-                chain_id=1,
-                holder_address=addr.lower(),
-                token_address=spared.lower(),
-                scanned_from_block=0,
-                measured_through_block=100,
-                deliveries=[{"tx": "0x04", "log_index": 1, "fan_out": 399, "fan_out_basis": "receipt"}],
-                delivery_count=1,
-                unreadable_deliveries=0,
-                min_fan_out=399,
-                fan_out_threshold_k=25,
-                delivery_shape=DELIVERY_SHAPE_FAN_OUT_ALL,
-                basis="scan 0..100",
-            ),
-        ]
-    )
-    db_session.add_all(
-        [
-            TokenProtocolReference(
-                protocol_id=p.id,
-                chain_id=1,
-                token_address=token.lower(),
-                reference_shape=shape,
-                universe_addresses=4,
-                basis="universe of 4 addresses, chain-blind",
-            )
-            for token, shape in (
-                (junk, TOKEN_REFERENCE_ABSENT_FROM_UNIVERSE),
-                (spared, TOKEN_REFERENCE_IN_UNIVERSE),
-            )
-        ]
-    )
     db_session.commit()
 
     payload = build_company_overview(db_session, p.name)
@@ -2622,24 +2547,15 @@ def test_an_airdrop_delivered_row_is_published_labelled_and_not_presented_as_a_h
 
     # (a) STILL RETURNED. A suppressed row would be an unwitnessed deletion.
     assert set(by_symbol) == {"JUNK", "REAL", "UNK", "SPARED"}
-    # Historical delivery evidence is not consumed by current presentation.
+    # Delivery history is not part of the holdings presentation.
     assert all("disposition_state" not in row and "delivery_shape" not in row for row in by_symbol.values())
     assert by_symbol["JUNK"]["usd_value"] is None
     assert "disposed_rows" not in entry["holdings_coverage"]
     assert entry["total_usd"] == 700.0
 
 
-def test_a_priced_airdrop_delivered_row_is_presented_and_counts_toward_the_total(db_session):
-    """A priced holding is a real dollar figure whatever the shape of its arrival.
-
-    Both other conjuncts hold here — mass-distributed AND absent from the protocol's
-    universe — and the price alone keeps the row a presented holding, because a
-    number was determined for it and delivery evidence cannot unmake that number.
-
-    The census's ``fan_out_all`` readings are all unpriced today, so this shape does
-    not occur on the corpus — which is exactly why it is pinned here rather than left
-    to the coincidence.
-    """
+def test_priced_holding_counts_toward_total_without_classification(db_session):
+    """Pricing a positive holding requires no delivery-history classification."""
     p = _add_protocol(db_session, f"e2e-airdrop-priced-{uuid.uuid4().hex[:8]}")
     addr = _addr("airp1")
     job = _add_job(db_session, address=addr, protocol_id=p.id, name="PricedHolder")
@@ -2666,32 +2582,6 @@ def test_a_priced_airdrop_delivered_row_is_presented_and_counts_toward_the_total
             usd_value=1234,
             price_usd=1234,
             observed_address=addr,
-        )
-    )
-    db_session.add(
-        TokenDeliveryEvidence(
-            chain_id=1,
-            holder_address=addr.lower(),
-            token_address=token.lower(),
-            scanned_from_block=0,
-            measured_through_block=100,
-            deliveries=[{"tx": "0x03", "log_index": 1, "fan_out": 900, "fan_out_basis": "receipt"}],
-            delivery_count=1,
-            unreadable_deliveries=0,
-            min_fan_out=900,
-            fan_out_threshold_k=25,
-            delivery_shape=DELIVERY_SHAPE_FAN_OUT_ALL,
-            basis="scan 0..100",
-        )
-    )
-    db_session.add(
-        TokenProtocolReference(
-            protocol_id=p.id,
-            chain_id=1,
-            token_address=token.lower(),
-            reference_shape=TOKEN_REFERENCE_ABSENT_FROM_UNIVERSE,
-            universe_addresses=4,
-            basis="universe of 4 addresses, chain-blind",
         )
     )
     db_session.commit()

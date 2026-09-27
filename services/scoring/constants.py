@@ -237,7 +237,7 @@ UNCALIBRATED_ARMS: tuple[str, ...] = (
     "route_comparison_verdict:route_match",
     "retired:destination_callee_is_restricted_by_the_intermediate",
     "code_control_ceiling_refused:alias_ambiguous",
-    "sheet_bound_refused:sheet_determined_by_disposition_does_not_bound",
+    "sheet_bound_refused:observed_holdings_do_not_bound_capability",
     "fork:simulation+destination_param",
     "constrained:token_owner+restricted_caller",
     "msg_value_return_refused:amount_fold_disagreed",

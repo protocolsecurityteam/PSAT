@@ -1,32 +1,12 @@
-"""The ONE ERC-20 observation path, shared by both balance producers.
+"""Publish current balance observations at each subject's own address.
 
-``services.monitoring.tvl`` and ``workers.resolution_worker`` used to each call
-``get_token_balances_page`` directly and write their own rows, under DIFFERENT
-``observed_address`` policies — the TVL loop read ``contracts.address``, the
-resolution worker read ``request['proxy_address'] or address`` and filed the
-answer against the JOB's contract row. That divergence is not cosmetic: it
-attributed a proxy's 19.06 ETH to the implementation's row, where a later TVL
-fetch at the implementation's own address won the native class wholesale and
-evicted it, leaving the plane publishing a proven zero for an account that was
-never the one holding the ETH.
-
-So there is one policy here and it is structural rather than remembered:
-
-    A FETCH ROW'S ``observed_address`` IS ITS OWN CONTRACT'S ``contracts.address``.
-
-:func:`observation_contract` is how a caller that wants some OTHER address read
-gets there — it hands back the contract row that owns that address, and the read
-is filed against it. A caller cannot express the divergent shape any more.
-
-Current publication is independent of historical discovery. Legacy sweep helpers
-remain for explicit historical tooling and evidence readers; normal resolution
-and TVL collection never invoke them.
+Shared by resolution and TVL collection. Historical scan provenance remains on
+old observations, but this module performs no historical discovery.
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -35,125 +15,21 @@ from sqlalchemy.orm import Session
 
 from db.models import Contract, ContractBalance, ContractBalanceFetch
 from services.clients.etherscan import TokenBalancePage
-
-# The two wire-reaching functions are called through the MODULE, not bound here:
-# one indirection point means a stub (the offline suite's, or a test's) holds no
-# matter which producer imported this module's helpers.
-from services.monitoring import asset_sweep, warn_degraded_once
-from services.monitoring.asset_sweep import (
-    CarriedTypedReceipt,
-    SweepCost,
-    SweepOutcome,
-    carried_typed_receipt,
-)
 from services.monitoring.balance_reads import ObservationSubject, native_status_for, prune_balance_fetches
 from utils.balance_status import (
-    ASSET_SET_SOURCE_CHAIN_LOG_SWEEP,
     ASSET_SET_SOURCE_ETHERSCAN_PAGES,
-    ASSET_SET_STATUS_AT_PAGE_CAP,
     ASSET_SET_STATUS_FETCH_FAILED,
-    ASSET_SET_STATUS_RETURNED_EMPTY,
     BALANCE_SOURCE_PINNED_NATIVE_READ,
     BALANCE_SOURCE_UNPINNED_NATIVE_READ,
     NATIVE_STATUS_PROVEN_ZERO,
-    SWEEP_STATUS_COMPLETED,
-    SWEEP_STATUS_FAILED,
 )
 
 logger = logging.getLogger(__name__)
 
-# Consecutive failed asset fetches before Etherscan counts as "persistently
-# unobtainable" and the chain is asked instead. One failure is a transport
-# hiccup and sweeping on it would spend a full-history scan on noise; a run of
-# them is a contract this index will not answer for.
-PERSISTENT_FAILURE_RUN = 3
-
-# Consecutive failed scans after which a contract stops being re-escalated. Same
-# shape as the trigger above and for the same reason, on the other side: an
-# escalation that has failed this many times in a row is not going to be answered
-# by asking again next hour, and asking is what costs the budget.
-SWEEP_FAILURE_RUN = 3
-
-# Consecutive full-history re-scans that still could not settle a typed receipt's
-# id inventory before the cursor stops being refused for it.
-#
-# The re-scan exists to recover token ids from the logs that delivered them, and
-# a log this decoder cannot read an id out of will not become readable by
-# scanning it again. Without a bound that is a permanent full-history scan every
-# cycle: ``sweep_keeps_failing`` cannot catch it, because the scan SUCCEEDS —
-# what fails is the decode. So the same shape as the failure run above, and the
-# same division: what is bounded is the COST of asking, never the answer. A
-# bounded-out record still carries an unsettled inventory, so its receipts stay
-# unresolved and its sheet stays refused — fail-closed, just no longer at the
-# price of a genesis-to-head scan per hour.
-ID_RESCAN_RUN = 3
-
-ESCALATE_RETURNED_EMPTY = "etherscan returned an empty list"
-ESCALATE_PERSISTENT_FAILURE = "etherscan persistently unobtainable"
-ESCALATE_NO_FETCH_RECORD = "no prior fetch record for this contract"
-
-# A list that came back AT THE CAP is deliberately NOT an escalation trigger.
-# Its completeness mechanism is paging the endpoint past entry 100
-# (``get_token_balances_page``), which costs one request per additional hundred
-# assets and is exactly the asset-list completeness a truncated sheet lacks. The
-# chain sweep is the wrong tool for it: a holder rich enough to overflow the page
-# is a holder whose incoming-transfer history bisects the scan windows toward the
-# floor — measured at up to ~2,350 requests for ONE such address
-# (SPAM_CLASSIFIER_FEASIBILITY.md) against ~1 request per 1M-block window for a
-# quiet one. A list that is still a prefix after the page budget therefore stays
-# ``at_page_cap``, and the plane refuses it a ceiling — the fail-closed answer,
-# reached without spending a four-figure request budget to buy it.
-AT_CAP_COMPLETENESS_MECHANISM = "etherscan pagination past the first page (not a chain sweep)"
-
-# The swept population's own scope sentence, carried onto every basis string.
-# Proven-codeless EOA principals used to be excluded from it — they have no
-# ``contracts`` row and nothing could read them — and the exclusion was recorded
-# here rather than left silent. They are now read at their own (chain, address)
-# identity, so the sentence states what the population IS.
-SWEEP_POPULATION_NOTE = (
-    "swept population: the protocol's contracts plus its proven-codeless EOA principals, each read at its own address"
-)
-
-# Subjects already announced as bounded out, so the WARNING marks the CROSSING
-# and not every cycle after it. The bounded-out state is self-sustaining by
-# construction — a subject that stops being escalated writes no new sweep rows,
-# so the run these predicates read never changes again — which is exactly why a
-# per-cycle log of it would be a permanent storm rather than a signal. Process-
-# local: a restart re-announces once, which is the cheap direction, and nothing
-# published depends on it.
-_GIVE_UP_ANNOUNCED: set[tuple[str, ObservationSubject]] = set()
-_GIVE_UP_ANNOUNCED_MAX = 4096
-
-
-def _announce_give_up(kind: str, subject: ObservationSubject, message: str, **fields: object) -> None:
-    key = (kind, subject)
-    if key in _GIVE_UP_ANNOUNCED:
-        return
-    if len(_GIVE_UP_ANNOUNCED) >= _GIVE_UP_ANNOUNCED_MAX:
-        # Bounded rather than grown: the set is a de-dupe cursor, not a record,
-        # so the worst a reset costs is one repeated announcement.
-        _GIVE_UP_ANNOUNCED.clear()
-    _GIVE_UP_ANNOUNCED.add(key)
-    logger.warning(
-        message,
-        extra={
-            "address": subject.address,
-            "chain": subject.chain,
-            "contract_id": subject.contract_id,
-            "give_up": kind,
-            **fields,
-        },
-    )
-
 
 @dataclass(frozen=True)
 class NativeReading:
-    """The native leg, as the calling producer obtained it.
-
-    It stays with the producers because they obtain it differently — the TVL loop
-    pins one Multicall3 read per chain ahead of its contract loop, the resolution
-    worker fans out per job — and because unifying it was not what diverged.
-    """
+    """Native quantity and price observations supplied by the shared collector."""
 
     wei: int | None
     block_number: int | None
@@ -171,8 +47,7 @@ class RecordedObservation:
     """What :func:`record_observation` persisted, for a caller that must report it.
 
     The caller reads its own cycle summary off these rows rather than off the
-    inputs: what was WRITTEN is the observation, and after an escalation the two
-    are not the same list.
+    inputs: what was written is the observation.
     """
 
     fetch: ContractBalanceFetch
@@ -180,30 +55,6 @@ class RecordedObservation:
     asset_set_source: str
     native_status: str
     rows: tuple[ContractBalance, ...]
-
-
-@dataclass(frozen=True)
-class SweepRequest:
-    """One holder queued for the chain-derived escalation."""
-
-    subject: ObservationSubject
-    address: str
-    chain_id: int
-    from_block: int
-    reason: str
-    # What a previous sweep already found for this holder. An incremental window
-    # names only what arrived inside it, so without this the next cycle's row set
-    # would omit every earlier asset — and the balance view takes a fetch's rows
-    # wholesale, so the omission would read as a sale.
-    known_assets: tuple[str, ...] = ()
-    # The typed receipts already on record. Carried for the refusal they carry,
-    # not for their quantity — and with the token ids a previous scan decoded,
-    # which is the only way an incremental window can read an ERC-1155 holding at
-    # all: the ids exist only in the delivering logs, long past the cursor.
-    known_typed: tuple[CarriedTypedReceipt, ...] = ()
-    # First block of the union of the scans behind the current set; None when
-    # nothing has been scanned yet.
-    union_from_block: int | None = None
 
 
 def observation_contract(
@@ -273,366 +124,6 @@ def fetch_asset_page(address: str, *, chain_id: int) -> TokenBalancePage:
             pages_read=0,
             basis=f"etherscan addresstokenbalance raised: {type(exc).__name__}",
         )
-
-
-def escalation_reason(session: Session, *, subject: ObservationSubject, page: TokenBalancePage) -> str | None:
-    """Why this contract's asset set must be asked of the chain, or ``None``.
-
-    Uniform: the trigger is the shape of the answer, never what a claim wants to
-    be true of the contract.
-    """
-    if sweep_keeps_failing(session, subject=subject):
-        return None
-    if page.status == ASSET_SET_STATUS_RETURNED_EMPTY:
-        return ESCALATE_RETURNED_EMPTY
-    if page.status == ASSET_SET_STATUS_AT_PAGE_CAP:
-        # See AT_CAP_COMPLETENESS_MECHANISM: paging is this state's mechanism and
-        # it has already run. Sweeping here would buy the same completeness at a
-        # bisection-dominated cost.
-        return None
-    recent = (
-        session.execute(
-            select(ContractBalanceFetch.asset_set_status)
-            .where(*subject.filters(ContractBalanceFetch))
-            .order_by(ContractBalanceFetch.fetched_at.desc(), ContractBalanceFetch.id.desc())
-            .limit(PERSISTENT_FAILURE_RUN)
-        )
-        .scalars()
-        .all()
-    )
-    if not recent:
-        return ESCALATE_NO_FETCH_RECORD
-    if page.status == ASSET_SET_STATUS_FETCH_FAILED and len(recent) >= PERSISTENT_FAILURE_RUN:
-        if all(status == ASSET_SET_STATUS_FETCH_FAILED for status in recent):
-            return ESCALATE_PERSISTENT_FAILURE
-    return None
-
-
-def sweep_from_block(session: Session, *, subject: ObservationSubject) -> int:
-    """Where this contract's next scan starts.
-
-    The stored cursor plus one, or 0 for a contract never swept. Without it the
-    hourly loop would re-run a full-history scan every cycle — the cursor is what
-    makes the one-shot a one-shot.
-
-    THE CURSOR AND THE EVIDENCE COME FROM THE SAME ROW, by construction rather
-    than by agreement. A cursor's promise is "those blocks were read and what
-    they held is on record", so it may only be taken from a fetch that is also
-    the one carrying the record — the current asset fetch. Reading the cursor
-    from anywhere wider (a ``max()`` over history, say) lets a row that scanned
-    nothing hand back a height a different row earned, and the evidence readers,
-    which key on the current fetch, then answer for a scan the cursor did not
-    come from. That divergence had three doors: a fetch with a cursor but no
-    typed record, an abort that became current, and a plain non-escalating
-    ``returned_assets`` cycle. One row closes all three.
-
-    The cost is accepted and stated: a cycle that does not escalate makes the
-    next escalation a full re-scan. It converges on that scan, and a re-scan is
-    the cheap side of the trade against inheriting a conclusion.
-
-    THE SAME RULE COVERS THE TYPED ID INVENTORY. A cursor promises the blocks
-    were read AND what they held is on record; for an ERC-1155 receipt "what it
-    held" is a set of token ids, because no address-level call answers for one.
-    A record that names typed receipts but no ids is a scan whose evidence cannot
-    answer the question the sheet asks, so its cursor is refused and the scan is
-    redone — once. After that the ids are stored and the cursor holds forever,
-    and where the ids are undecodable the re-scan is bounded rather than endless
-    (:data:`ID_RESCAN_RUN`).
-    """
-    current = _current_asset_fetch(session, subject=subject)
-    if not _cursor_is_inheritable(session, current, subject=subject):
-        return 0
-    assert current is not None and current.swept_through_block is not None
-    return int(current.swept_through_block) + 1
-
-
-def _cursor_is_inheritable(
-    session: Session, fetch: ContractBalanceFetch | None, *, subject: ObservationSubject
-) -> bool:
-    """The single condition behind both the cursor and the scan extent.
-
-    One predicate rather than two copies: a union extent inherited past a refused
-    cursor would name blocks the re-scan is about to read again as if they were
-    already behind the set, and the only way that cannot drift is for the two
-    readers to ask the same function.
-    """
-    if fetch is None or fetch.swept_through_block is None or not _typed_record_is_readable(fetch):
-        return False
-    if _typed_record_is_id_complete(fetch):
-        return True
-    return id_rescan_keeps_failing(session, subject=subject)
-
-
-def id_rescan_keeps_failing(session: Session, *, subject: ObservationSubject) -> bool:
-    """Whether this contract's last few full-history scans all failed to settle ids.
-
-    Looks only at scans that ran from the union's first block — the re-scan the
-    refused cursor buys — so a run of them that still produced no settled
-    inventory is evidence about the LOGS, not about one unlucky cycle. The state
-    is self-sustaining by construction: once bounded out the incremental cycles
-    inherit the same unsettled record, which is what keeps it from oscillating
-    between a cheap cycle and a genesis scan.
-    """
-    recent = (
-        session.execute(
-            select(ContractBalanceFetch.typed_assets)
-            .where(
-                *subject.filters(ContractBalanceFetch),
-                ContractBalanceFetch.sweep_status == SWEEP_STATUS_COMPLETED,
-                ContractBalanceFetch.swept_from_block == 0,
-            )
-            .order_by(ContractBalanceFetch.fetched_at.desc(), ContractBalanceFetch.id.desc())
-            .limit(ID_RESCAN_RUN)
-        )
-        .scalars()
-        .all()
-    )
-    bounded = len(recent) >= ID_RESCAN_RUN and not any(_entries_are_id_complete(entries) for entries in recent)
-    if bounded:
-        _announce_give_up(
-            "id_rescan",
-            subject,
-            "asset sweep: full-history re-scans stopped for this holder; its typed id inventory stays unsettled",
-            rescans=ID_RESCAN_RUN,
-        )
-    return bounded
-
-
-def known_swept_assets(session: Session, *, subject: ObservationSubject) -> tuple[str, ...]:
-    """The assets a previous scan already attributed to this contract.
-
-    Read off the rows of the fetch whose ERC-20 set is CURRENT — the same fetch
-    ``contract_balances_latest`` publishes — so the list carried into the next
-    incremental window is exactly the one a consumer is reading today.
-    """
-    fetch = _current_asset_fetch(session, subject=subject)
-    if fetch is None:
-        return ()
-    winner = fetch.id
-    rows = (
-        session.execute(
-            select(ContractBalance.token_address).where(
-                ContractBalance.fetch_id == winner,
-                ContractBalance.token_address.is_not(None),
-                ContractBalance.source == ASSET_SET_SOURCE_CHAIN_LOG_SWEEP,
-            )
-        )
-        .scalars()
-        .all()
-    )
-    return tuple(sorted({str(a).lower() for a in rows if a}))
-
-
-def known_typed_assets(session: Session, *, subject: ObservationSubject) -> tuple[CarriedTypedReceipt, ...]:
-    """The ERC-721/1155 receipts the current fetch record already knows about.
-
-    This is the durable half of the completeness refusal. A typed receipt whose
-    holding has no readable answer is why a swept set may not be published as
-    complete, and an incremental window will not name it again — so it is read
-    back from the fetch record and re-carried every cycle. Without it the refusal
-    lasted exactly one cycle and the next one published the empty sheet.
-
-    Each receipt carries its standard and its stored token ids, so the next cycle
-    can read an ERC-1155 holding without re-scanning the history that named them.
-    """
-    fetch = _current_asset_fetch(session, subject=subject)
-    if fetch is None or not _typed_record_is_readable(fetch):
-        return ()
-    receipts = {}
-    for entry in fetch.typed_assets or []:
-        receipt = carried_typed_receipt(entry)
-        if receipt.address:
-            receipts[receipt.address] = receipt
-    return tuple(receipts[address] for address in sorted(receipts))
-
-
-def _typed_record_is_readable(fetch: ContractBalanceFetch) -> bool:
-    """Whether this fetch's typed-receipt record can be read as one.
-
-    A missing record and an unreadable one are the same thing to every caller
-    here: no statement about typed receipts survives from that scan, so the scan
-    is redone rather than its conclusions inherited. Silently degrading a
-    malformed blob to "no typed receipts" would resurrect exactly the bug this
-    column closes — a completeness claim published because the evidence against
-    it could not be read.
-    """
-    entries = fetch.typed_assets
-    if entries is None or not isinstance(entries, list):
-        return False
-    return all(isinstance(entry, dict) and entry.get("address") and _typed_ids_are_readable(entry) for entry in entries)
-
-
-def _typed_ids_are_readable(entry: dict) -> bool:
-    """Whether one entry's id inventory can be read as one.
-
-    An entry from before ids were kept carries neither key, and that absence is a
-    fact this reader can act on: it is distinguished from a blob that claims an
-    inventory and cannot produce one. The malformed case is distrusted rather
-    than degraded to "no ids", for the same reason the record above is: a receipt
-    whose ids are unreadable is a receipt whose per-id holding can never be read,
-    and reading the blob as absent would let the next cycle inherit a cursor over
-    blocks whose evidence is gone.
-    """
-    if "ids" not in entry and "ids_complete" not in entry:
-        return True
-    if not isinstance(entry.get("ids_complete"), bool) or not isinstance(entry.get("ids"), list):
-        return False
-    return all(
-        isinstance(item, dict) and isinstance(item.get("id"), str) and str(item["id"]).isdigit()
-        for item in entry["ids"]
-    )
-
-
-def _typed_record_is_id_complete(fetch: ContractBalanceFetch) -> bool:
-    """Whether every typed receipt on this fetch carries a settled id inventory.
-
-    Settled includes empty — a full-history scan that saw no id for a token has
-    established that it has none. What this refuses is the record that never
-    asked, which is every record written before the ids were decoded.
-    """
-    return _entries_are_id_complete(fetch.typed_assets)
-
-
-def _entries_are_id_complete(entries: object) -> bool:
-    if entries is None or not isinstance(entries, list):
-        return False
-    return all(isinstance(entry, dict) and entry.get("ids_complete") is True for entry in entries)
-
-
-def scanned_from_block(session: Session, *, subject: ObservationSubject) -> int | None:
-    """The first block of the union of the scans behind the current asset set."""
-    fetch = _current_asset_fetch(session, subject=subject)
-    # Same row and same predicate as :func:`sweep_from_block`: an extent is only
-    # readable off the fetch that carries the scan it describes, and a scan being
-    # redone has no extent yet.
-    if not _cursor_is_inheritable(session, fetch, subject=subject):
-        return None
-    assert fetch is not None
-    return int(fetch.swept_from_block) if fetch.swept_from_block is not None else 0
-
-
-def _current_asset_fetch(session: Session, *, subject: ObservationSubject) -> ContractBalanceFetch | None:
-    """The fetch whose ERC-20 row set ``contract_balances_latest`` publishes."""
-    return (
-        session.execute(
-            select(ContractBalanceFetch)
-            .where(
-                *subject.filters(ContractBalanceFetch),
-                ContractBalanceFetch.asset_set_status != ASSET_SET_STATUS_FETCH_FAILED,
-            )
-            .order_by(ContractBalanceFetch.fetched_at.desc(), ContractBalanceFetch.id.desc())
-            .limit(1)
-        )
-        .scalars()
-        .first()
-    )
-
-
-def _has_scan_record(session: Session, *, subject: ObservationSubject) -> bool:
-    """Whether any fetch for this contract carries a completed scan."""
-    return (
-        session.execute(
-            select(ContractBalanceFetch.id)
-            .where(
-                *subject.filters(ContractBalanceFetch),
-                ContractBalanceFetch.swept_through_block.is_not(None),
-            )
-            .limit(1)
-        )
-        .scalars()
-        .first()
-        is not None
-    )
-
-
-def sweep_keeps_failing(session: Session, *, subject: ObservationSubject) -> bool:
-    """Whether this contract's last few scans all failed.
-
-    A scan that cannot be proven whole is usually a holder whose transfer history
-    bisects the windows toward the floor, and retrying it every cycle spends a
-    four-figure request budget to fail the same way. After a run of failures the
-    escalation stops asking: the sheet keeps whatever Etherscan says, publishes no
-    completeness, and an operator can see the failures in the fetch records.
-    """
-    recent = (
-        session.execute(
-            select(ContractBalanceFetch.sweep_status)
-            .where(
-                *subject.filters(ContractBalanceFetch),
-                ContractBalanceFetch.sweep_status.is_not(None),
-            )
-            .order_by(ContractBalanceFetch.fetched_at.desc(), ContractBalanceFetch.id.desc())
-            .limit(SWEEP_FAILURE_RUN)
-        )
-        .scalars()
-        .all()
-    )
-    bounded = len(recent) >= SWEEP_FAILURE_RUN and all(status == SWEEP_STATUS_FAILED for status in recent)
-    if bounded:
-        _announce_give_up(
-            "sweep",
-            subject,
-            "asset sweep: escalation stopped for this holder; its sheet publishes no completeness from now on",
-            failures=SWEEP_FAILURE_RUN,
-        )
-    return bounded
-
-
-def run_sweeps(
-    requests: list[SweepRequest],
-    *,
-    rpc_url_for: Callable[[int], str | None],
-    cost: SweepCost | None = None,
-) -> tuple[dict[ObservationSubject, SweepOutcome], SweepCost]:
-    """Run the escalation for a whole cycle's candidates, batched per chain.
-
-    Batching is not an optimisation here: the recipient filter is an OR-set in
-    one topic position, so N holders sharing a cursor cost the same windows as
-    one. Per-contract scans would multiply the cycle's request count by N.
-    """
-    cost = cost if cost is not None else SweepCost()
-    outcomes: dict[ObservationSubject, SweepOutcome] = {}
-    by_chain: dict[int, list[SweepRequest]] = {}
-    for request in requests:
-        by_chain.setdefault(request.chain_id, []).append(request)
-    for chain_id, cohort in sorted(by_chain.items()):
-        rpc_url = rpc_url_for(chain_id)
-        if not rpc_url:
-            # The one arm that produces NO outcome at all, so it is invisible in
-            # a completed-vs-failed count: an unrouted chain's holders are not
-            # failed sweeps, they are unattempted ones. Counted under its own
-            # kind so the caller can flip the cycle partial on it.
-            warn_degraded_once(
-                logger,
-                cost.degraded,
-                "chain_unrouted",
-                "asset sweep: no RPC URL for chain; its holders are not swept and record nothing",
-                scope=chain_id,
-                chain_id=chain_id,
-                holders=len(cohort),
-            )
-            continue
-        head = asset_sweep.sweep_head_block(rpc_url, chain_id=chain_id, cost=cost)
-        by_address = {r.address.lower(): r for r in cohort}
-        results, cost = asset_sweep.sweep_holders(
-            list(by_address),
-            rpc_url=rpc_url,
-            chain_id=chain_id,
-            from_block_by_address={a: r.from_block for a, r in by_address.items()},
-            known_assets_by_address={a: r.known_assets for a, r in by_address.items()},
-            known_typed_by_address={a: r.known_typed for a, r in by_address.items()},
-            union_from_by_address={
-                a: (r.union_from_block if r.union_from_block is not None else r.from_block)
-                for a, r in by_address.items()
-            },
-            cost=cost,
-            head_block=head,
-        )
-        for address, outcome in results.items():
-            request = by_address.get(address)
-            if request is not None:
-                outcomes[request.subject] = outcome
-    return outcomes, cost
 
 
 def record_observation(
@@ -750,29 +241,3 @@ def record_observation(
         native_status=native_status,
         rows=tuple(written),
     )
-
-
-__all__ = [
-    "AT_CAP_COMPLETENESS_MECHANISM",
-    "ESCALATE_NO_FETCH_RECORD",
-    "ESCALATE_PERSISTENT_FAILURE",
-    "ESCALATE_RETURNED_EMPTY",
-    "ID_RESCAN_RUN",
-    "PERSISTENT_FAILURE_RUN",
-    "SWEEP_POPULATION_NOTE",
-    "NativeReading",
-    "ObservationSubject",
-    "RecordedObservation",
-    "SweepRequest",
-    "escalation_reason",
-    "fetch_asset_page",
-    "id_rescan_keeps_failing",
-    "known_swept_assets",
-    "known_typed_assets",
-    "scanned_from_block",
-    "observation_contract",
-    "record_observation",
-    "run_sweeps",
-    "sweep_from_block",
-    "sweep_keeps_failing",
-]

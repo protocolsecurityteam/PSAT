@@ -22,7 +22,6 @@ from __future__ import annotations
 import pytest
 
 import services.resolution.repos.event_logs_rpc as event_logs_rpc
-from services.monitoring.asset_sweep import TRANSFER_TOPIC0
 from services.monitoring.event_topics import (
     OWNERSHIP_TRANSFERRED_TOPIC0,
     parse_any_log,
@@ -31,6 +30,8 @@ from services.resolution.repos.event_logs_rpc import (
     RpcEventLogFetcher,
     normalize_topic_filter,
 )
+
+TRANSFER_TOPIC0 = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 
 _ADDR_A = "0x" + "1a" * 20
 _ADDR_B = "0x" + "2b" * 20

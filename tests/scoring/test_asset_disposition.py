@@ -12,7 +12,6 @@ TOKEN = "0x" + "1" * 40
 def test_legacy_disposition_is_an_unpriced_observation():
     plane = P.ValuePlane(
         per_asset_state={KEY: {TOKEN: P.ASSET_AIRDROP_DELIVERED}},
-        asset_disposition={KEY: {TOKEN: {"shape": "fan_out_all"}}},
     )
     assert plane.sheet_state(KEY) == P.SHEET_UNPRICED
     assert plane.total(KEY) is None

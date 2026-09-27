@@ -10,10 +10,10 @@ from services.scoring.fold.ceilings import _PUBLISHED_CENT
 from services.scoring.fold.composition import _ComposedMagnitude
 from services.scoring.fold.gates import _is_number
 from services.scoring.fold.readings import (
-    _DISPOSED_SHEET_DOES_NOT_BOUND,
+    _OBSERVED_SHEET_DOES_NOT_BOUND,
     CEILING_KIND_COMPOSED,
     CEILING_KIND_SHEET,
-    SHEET_BOUND_REFUSED_BY_DISPOSITION,
+    SHEET_BOUND_REFUSED_BY_SCOPE,
     SHEET_CEILING_REFUSED_PREFIX,
 )
 from services.scoring.fold.types import _Instance
@@ -321,19 +321,12 @@ def _entity_contribution(
             return None, "native_only_flow+absent_native_row(not_determined)", None, False, None
         # Proven, and proven zero carries 0.0 — the pairing is enforced by Tri.
         held: float | None = float(native.value if native.value is not None else 0.0)
-        # A native-only flow is valued against the native holding, which no
-        # delivery-shape disposition touches — native ETH emits no Transfer log
-        # and has no delivery shape to read — so the trimming figure IS the held
-        # one on this arm.
+        # Native-only valuation uses the independently observed native balance.
         trim: float | None = held
         basis = "native_only_flow x native_balance"
     else:
-        # TWO figures, and they answer two questions. ``held`` is what the sheet
-        # DETERMINES the entity holds and is what the fallthrough below reports
-        # on; ``trim`` is what the sheet may BOUND A WITNESS with, which a
-        # disposed sheet's determined $0 may not do (``ValuePlane.trimming_total``
-        # states why). Reading one off the other would either trim a witnessed
-        # magnitude to a false zero or publish a determined sheet as unknown.
+        # The observed total and a proven upper bound answer different questions.
+        # A generic capability may affect assets beyond the current snapshot.
         held = value_plane.total(key)
         trim = value_plane.trimming_total(key)
         basis = "entity_holdings"
@@ -343,17 +336,10 @@ def _entity_contribution(
         state = instance.magnitude.state
         if state == MAGNITUDE_STATE_PROVEN_EXACT:
             if trim is None and held is not None:
-                # SYMMETRY WITH THE FLOOR BRANCH BELOW, and for the same reason:
-                # the sheet IS determined, at $0, by delivery-shape disposition,
-                # and may not trim. What differs is only the disclosure this
-                # state OWES — an exact witness publishes the dollars the call
-                # moves, not a figure the sheet failed to bound — so the refusal
-                # is named in the basis and carried as a reading, while the
-                # unbounded-figure keys stay off it. Without this the basis said
-                # "x entity_holdings" over a sheet that bounded nothing.
+                # The snapshot does not cap this exact call witness.
                 return (
                     magnitude,
-                    f"witnessed_reach(exact)+{SHEET_BOUND_REFUSED_BY_DISPOSITION}",
+                    f"witnessed_reach(exact)+{SHEET_BOUND_REFUSED_BY_SCOPE}",
                     {
                         "function": instance.signal.function_name,
                         "capability": instance.signal.claim_id,
@@ -363,7 +349,7 @@ def _entity_contribution(
                         # lands under the key that claims neither — the same
                         # registry the siblings read, never a hand-written key.
                         **_unbounded_figure(state, magnitude),
-                        "reading": _DISPOSED_SHEET_DOES_NOT_BOUND,
+                        "reading": _OBSERVED_SHEET_DOES_NOT_BOUND,
                     },
                     False,
                     state,
@@ -381,24 +367,17 @@ def _entity_contribution(
         if trim is not None:
             return min(trim, magnitude), f"witnessed_reach({_state_word(state)}) x {basis}", None, False, state
         if held is not None:
-            # The sheet IS determined and still may not trim. Its own state says
-            # why: every reading on it arrived as a mass distribution, over an
-            # asset list that is not proven whole, so the $0 bounds what the
-            # entity HOLDS as a determined figure and says nothing about what is
-            # there to MOVE — the disposed assets are still held, and delivery
-            # shape is not a claim about worth. Published under its own token
-            # rather than the not_determined one below, because "the sheet is
-            # not determined" is FALSE here and a reader acts on that word.
+            # Preserve the witnessed magnitude when the sheet cannot cap its scope.
             return (
                 magnitude,
-                f"witnessed_reach({_state_word(state)})+{SHEET_BOUND_REFUSED_BY_DISPOSITION}",
+                f"witnessed_reach({_state_word(state)})+{SHEET_BOUND_REFUSED_BY_SCOPE}",
                 {
                     "function": instance.signal.function_name,
                     "capability": instance.signal.claim_id,
                     "entity": key,
                     "witness_state": state,
                     **_unbounded_figure(state, magnitude),
-                    "reading": _DISPOSED_SHEET_DOES_NOT_BOUND,
+                    "reading": _OBSERVED_SHEET_DOES_NOT_BOUND,
                 },
                 False,
                 state,

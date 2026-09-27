@@ -439,9 +439,6 @@ from services.scoring.planes.value import (
     CEILING_ADMITTING_REASONS as CEILING_ADMITTING_REASONS,
 )
 from services.scoring.planes.value import (
-    CEILING_AIRDROP_DETERMINED as CEILING_AIRDROP_DETERMINED,
-)
-from services.scoring.planes.value import (
     CEILING_ALIAS_AMBIGUOUS as CEILING_ALIAS_AMBIGUOUS,
 )
 from services.scoring.planes.value import (
@@ -476,9 +473,6 @@ from services.scoring.planes.value import (
 )
 from services.scoring.planes.value import (
     EMPTY_REFUSED_UNSCANNED_ACCOUNT as EMPTY_REFUSED_UNSCANNED_ACCOUNT,
-)
-from services.scoring.planes.value import (
-    SHEET_AIRDROP_DETERMINED as SHEET_AIRDROP_DETERMINED,
 )
 from services.scoring.planes.value import (
     SHEET_BELOW_RESOLUTION as SHEET_BELOW_RESOLUTION,
@@ -550,7 +544,6 @@ __all__ = [
     "ASSET_UNPRICED",
     "CEILING_ADMITTED",
     "CEILING_ADMITTING_REASONS",
-    "CEILING_AIRDROP_DETERMINED",
     "CEILING_ALIAS_AMBIGUOUS",
     "CEILING_ASSET_LIST_TRUNCATED",
     "CEILING_BELOW_RESOLUTION",
@@ -608,7 +601,6 @@ __all__ = [
     "SCOPE_NOT_DETERMINED",
     "SCOPE_ROLES",
     "SCOPE_STATE_VAR",
-    "SHEET_AIRDROP_DETERMINED",
     "SHEET_BELOW_RESOLUTION",
     "SHEET_NOT_DETERMINED",
     "SHEET_NO_ROWS",

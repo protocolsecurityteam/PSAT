@@ -10,7 +10,7 @@ from services.effects.balance_dependencies import (
     with_relevant_tokens,
 )
 from services.effects.recipes import _reach_tvl_state
-from services.effects.selection import Candidate, disposed_from_holdings
+from services.effects.selection import Candidate
 from services.effects.simulate import SimCallResult, SimResult
 
 HOLDER = "0x" + "11" * 20
@@ -62,10 +62,7 @@ def test_missing_snapshot_is_not_complete_and_price_is_not_an_identity():
     assert token_fingerprint([TOKEN]) != token_fingerprint([OTHER])
 
 
-def test_delivery_never_disposes_and_external_tvl_never_rejects_reach():
-    assert not disposed_from_holdings(
-        delivery_shape="fan_out_all", reference_shape="absent_from_universe", usd_value=None
-    )
+def test_external_tvl_never_rejects_reach():
     assert _reach_tvl_state(1000, 1) == ("external_reference_only", None)
 
 

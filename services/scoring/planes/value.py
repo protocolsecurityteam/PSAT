@@ -52,8 +52,6 @@ SHEET_BELOW_RESOLUTION = "priced_below_resolution"
 SHEET_UNPRICED = "unpriced"
 SHEET_PROVEN_EMPTY = "proven_empty"
 SHEET_NO_ROWS = "no_rows"
-# Retired output token, retained for import compatibility only.
-SHEET_AIRDROP_DETERMINED = "airdrop_determined"
 
 # The states in which a sheet total is NOT a number. Kept apart from each other
 # all the way to the consumer: "every price lookup answered below the column's
@@ -143,8 +141,6 @@ class ValuePlane:
     # named here and aliased nowhere.
     alias_ambiguous: set[str] = field(default_factory=set)
     unpriced_positions: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
-    # Legacy in-memory compatibility only; delivery evidence is never loaded.
-    asset_disposition: dict[str, dict[str, dict[str, Any]]] = field(default_factory=dict)
     annotations: list[dict[str, Any]] = field(default_factory=list)
     provenance: dict[str, Any] = field(default_factory=dict)
 
@@ -283,8 +279,6 @@ class ValuePlane:
 # Value-side ceiling outcomes; callers also need a compatible capability scope.
 CEILING_ADMITTED = "admitted"
 CEILING_PROVEN_EMPTY = "proven_empty"
-# Retired output token.
-CEILING_AIRDROP_DETERMINED = "airdrop_determined"
 CEILING_NO_ROWS = "no_rows"
 CEILING_BELOW_RESOLUTION = "below_resolution"
 CEILING_UNPRICED = "unpriced"
@@ -720,11 +714,6 @@ def load_value_plane(session: Session, protocol_id: int, *, universe: ProtocolUn
     # are the SAME on-chain account read twice at two heights by two writers —
     # not two holdings — so the account is what a reading has to be reduced over.
     observations: dict[tuple[str, str], dict[str, list[Any]]] = defaultdict(lambda: defaultdict(list))
-    # The same buckets, carrying the (chain, ACCOUNT) identities the readings
-    # were issued against. The delivery-evidence table is keyed on that account —
-    # never on a folded entity key — so the disposition's all-quantifier is
-    # evaluated over exactly the addresses that contributed to the bucket.
-    accounts_by_bucket: dict[tuple[str, str], set[tuple[str, str]]] = defaultdict(set)
     for row in rows:
         account = _balance_account(row)
         key = plane.canonical(entity_key(chain_of.get(account), address_of.get(account)))
@@ -736,7 +725,6 @@ def load_value_plane(session: Session, protocol_id: int, *, universe: ProtocolUn
         if row.fetched_at is not None:
             fetched.append(row.fetched_at)
         observations[(key, asset)][_lower(row.observed_address)].append(row)
-        accounts_by_bucket[(key, asset)].add((chain_of.get(account) or "", _lower(row.observed_address)))
 
     freshness: dict[str, list[bool]] = defaultdict(list)
     for (key, _asset), accounts in observations.items():

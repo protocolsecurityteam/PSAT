@@ -148,3 +148,31 @@ def test_persisted_legacy_signal_magnitude_is_withheld_before_reconciliation():
     assert current.gate_inputs["reach_magnitude_usd"]["state"] == "not_determined"
     assert current.value_state == "proven_reach"
     assert "legacy_holdings_magnitude_withheld" in current.witness_notes
+
+
+@pytest.mark.parametrize("state", ["proven_exact", "proven_floor"])
+def test_witnessed_magnitude_refusal_explains_snapshot_scope_without_delivery_classification(state):
+    from services.scoring.fold.contributions import _entity_contribution
+    from services.scoring.fold.types import _Instance
+    from services.scoring.schema import Tri
+    from tests.support.scoring_builders import sig
+
+    instance = _Instance(
+        signal=sig(claim_id="flow.out"),
+        severity=1.0,
+        severity_basis=(),
+        entity_keys=(KEY,),
+        magnitude=Tri.proven(state, 500.0),
+        value_bound="floor",
+        pricing_blocked=None,
+        native_only=False,
+        asset_identity_undecidable=False,
+    )
+    usd, basis, disclosure, _, actual_state = _entity_contribution(instance, KEY, plane(), transitive=False)
+    assert usd == 500.0  # The $100 observed snapshot must not cap a witnessed $500 call.
+    assert actual_state == state
+    assert "observed_holdings_do_not_bound_capability" in basis
+    assert disclosure is not None
+    assert "upper bound on this capability" in disclosure["reading"]
+    assert "delivery" not in disclosure["reading"]
+    assert "$0" not in disclosure["reading"]
