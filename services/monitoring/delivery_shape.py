@@ -61,7 +61,7 @@ import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
-from typing import Any
+from typing import Any, TypedDict
 
 from sqlalchemy import func as _sql_func
 from sqlalchemy import or_, text
@@ -385,6 +385,21 @@ class _Measured:
     deliveries: list[dict[str, Any]] = field(default_factory=list)
     aborted: bool = False
     measured_through_hash: str | None = None
+
+
+class _EvidenceWrite(TypedDict):
+    chain_id: int
+    holder_address: str
+    token_address: str
+    scanned_from_block: int
+    measured_through_block: int
+    deliveries: list[dict[str, Any]]
+    unmetered_elided: int
+    scan_basis: str
+    observed_balance_raw: str | None
+    caught_up: bool | None
+    counts: dict[str, int]
+    measured_through_hash: str | None
 
 
 class _DispositionFetcher(RpcEventLogFetcher):
@@ -930,7 +945,7 @@ def scan_delivery_shape(
                 cost.head_reads,
                 cost.creation_lookups,
             )
-            if overall_deadline_at is not None and time.monotonic() >= cost.scan_deadline_at:
+            if cost.scan_deadline_at is not None and time.monotonic() >= cost.scan_deadline_at:
                 continue
             break
         except DispositionHistoryChanged as exc:
@@ -1026,7 +1041,7 @@ def scan_delivery_shape_detached(
         priority = _token_priority(session, chain_id=chain_id, requests=chain_requests, protocol_id=protocol_id)
         session.commit()
         snapshot: _ChainSnapshot | None = None
-        staged: list[dict[str, Any]] = []
+        staged: list[_EvidenceWrite] = []
         budget_error: DispositionBudgetExceeded | None = None
         try:
             cost.check_scan_deadline()
@@ -1109,7 +1124,7 @@ def scan_delivery_shape_detached(
                 chain_id,
                 budget_error,
             )
-            if overall_deadline is None or time.monotonic() < cost.scan_deadline_at:
+            if cost.scan_deadline_at is None or time.monotonic() < cost.scan_deadline_at:
                 break
     return cost
 
@@ -1586,7 +1601,7 @@ def _scan_chain(
     cost: DispositionCost,
     priority: Mapping[str, int],
     snapshot: _ChainSnapshot,
-    staged: list[dict[str, Any]] | None = None,
+    staged: list[_EvidenceWrite] | None = None,
 ) -> None:
     """Decide what this cycle scans, scan a bounded slice of it, and record.
 
@@ -2004,7 +2019,7 @@ def _resolve_fan_out(
     max_block_range: int,
     cost: DispositionCost,
     priority: Mapping[str, int],
-    staged: list[dict[str, Any]] | None = None,
+    staged: list[_EvidenceWrite] | None = None,
 ) -> None:
     """Meter each delivery, then record the pairs that were measured END TO END.
 
@@ -2109,7 +2124,7 @@ def _resolve_fan_out(
             )
         if exhausted:
             break
-        evidence = dict(
+        evidence = _EvidenceWrite(
             chain_id=chain_id,
             holder_address=holder,
             token_address=token,
