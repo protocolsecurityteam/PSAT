@@ -47,12 +47,3 @@ def test_unconditionally_emitted_artifacts(analyzed_weth, live_client: LiveClien
     art = live_client.artifact(analyzed_weth["job_id"], artifact_name)
     assert art is not None, f"{artifact_name} artifact was not emitted"
     assert isinstance(art, (dict, list)), f"{artifact_name} should be structured JSON"
-
-
-def test_resolved_control_graph_when_non_empty(analyzed_weth, live_client: LiveClient):
-    # resolution_worker.py:142 only stores this when the graph has nodes; WETH has none.
-    art = live_client.artifact(analyzed_weth["job_id"], "resolved_control_graph")
-    if art is None:
-        pytest.skip("resolved_control_graph not emitted (expected for controls-free contracts)")
-    assert isinstance(art, dict)
-    assert "nodes" in art or "edges" in art
