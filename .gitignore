@@ -37,6 +37,8 @@ old_tood
 phase-b-results.md
 
 # coverage / diff-cover artifacts
+ci-results/
+coverage-data/
 coverage.xml
 diff-cover.html
 diff-cover.md
