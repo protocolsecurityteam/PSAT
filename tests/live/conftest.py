@@ -151,10 +151,10 @@ class LiveClient:
     def children_of(self, parent_job_id: str) -> list[dict[str, Any]]:
         return [j for j in self.jobs() if (j.get("request") or {}).get("parent_job_id") == parent_job_id]
 
-    def artifact(self, run_name: str, artifact_name: str) -> dict | str | None:
-        """Fetch an artifact. Returns dict for JSON, None on 404."""
+    def artifact(self, job_id: str, artifact_name: str) -> dict | str | None:
+        """Fetch this fixture job's artifact, independent of newer same-name runs."""
         r = self._session.get(
-            self._url(f"/api/analyses/{run_name}/artifact/{artifact_name}.json"),
+            self._url(f"/api/analyses/{job_id}/artifact/{artifact_name}.json"),
             timeout=15,
         )
         if r.status_code == 404:

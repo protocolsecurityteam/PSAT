@@ -11,7 +11,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from threading import Event, Lock, Thread
-from typing import Any, Callable, Literal, Mapping, MutableMapping, Protocol, Sequence, TypeGuard, cast
+from typing import Any, Callable, Iterator, Literal, Mapping, MutableMapping, Protocol, Sequence, TypeGuard, cast
 
 from eth_utils.crypto import keccak
 from sqlalchemy import delete, func, select
@@ -88,6 +88,10 @@ DEFAULT_MAX_BLOCK_SPAN = int(os.getenv("PSAT_EVENT_INDEXER_MAX_BLOCK_SPAN", "500
 DEFAULT_MAX_WINDOWS_PER_CURSOR = int(os.getenv("PSAT_EVENT_INDEXER_MAX_WINDOWS_PER_CURSOR", "50"))
 DEFAULT_MAX_WINDOWS_PER_PASS = int(os.getenv("PSAT_EVENT_INDEXER_MAX_WINDOWS_PER_PASS", "100"))
 DEFAULT_INSERT_BATCH = int(os.getenv("PSAT_EVENT_INDEXER_INSERT_BATCH", "1000"))
+# SQL batches alone do not release the reconciliation row dirtied by the INSERT
+# trigger. Bound commits independently of RPC windows, preserving whole blocks.
+DEFAULT_WRITE_MAX_ROWS = 5_000
+DEFAULT_WRITE_MAX_BYTES = 4 * 1024 * 1024
 # Monitored contracts that still NEED a cursor, worked per pass when enrolling
 # from tracking plans. Every cursor it mints is a cold backfill from the
 # emitter's deploy block, so the work is spread across passes. Addresses already
@@ -508,7 +512,7 @@ def _fetch_window(
     return fetcher.fetch_logs(event_address=event_address, topics=topics, from_block=from_block, to_block=to_block)
 
 
-def index_event_group_step(
+def index_event_group_steps(
     session: Session,
     *,
     chain_id: int,
@@ -521,8 +525,15 @@ def index_event_group_step(
     confirmation_depth: int = DEFAULT_CONFIRMATION_DEPTH,
     max_block_span: int = DEFAULT_MAX_BLOCK_SPAN,
     insert_batch_size: int = DEFAULT_INSERT_BATCH,
-) -> GroupStepResult:
-    """Advance every cursor of one (chain, address) group by one shared window.
+    write_max_rows: int = DEFAULT_WRITE_MAX_ROWS,
+    write_max_bytes: int = DEFAULT_WRITE_MAX_BYTES,
+) -> Iterator[GroupStepResult]:
+    """Yield atomic write prefixes of one fetched (chain, address) window.
+
+    The caller MUST commit each yielded prefix before requesting the next.
+    Logs, cursor progress, and trigger invalidation share that transaction.
+    After each commit, re-lock and validate cursors before using retained logs;
+    a concurrent advance/rewind discards the remainder for a fresh scan.
 
     One ``eth_getLogs`` covers all the group's topic0s (an OR list); results
     demux back to per-topic cursors. Members advance in lockstep from the group
@@ -536,21 +547,21 @@ def index_event_group_step(
     """
     memo: MutableMapping[tuple[int, int], bytes | None] = block_hash_memo if block_hash_memo is not None else {}
     topic_list = sorted({str(t).lower() for t in topics})
-    cursors = (
-        session.execute(
-            select(IndexedEventCursor)
-            .where(IndexedEventCursor.chain_id == chain_id)
-            .where(func.lower(IndexedEventCursor.event_address) == event_address.lower())
-            .where(func.lower(IndexedEventCursor.topic0).in_(topic_list))
-            .with_for_update()
-        )
-        .scalars()
-        .all()
+    cursor_query = (
+        select(IndexedEventCursor)
+        .where(IndexedEventCursor.chain_id == chain_id)
+        .where(func.lower(IndexedEventCursor.event_address) == event_address.lower())
+        .where(func.lower(IndexedEventCursor.topic0).in_(topic_list))
+        .order_by(IndexedEventCursor.topic0)
+        .with_for_update()
+        .execution_options(populate_existing=True)
     )
+    cursors = session.execute(cursor_query).scalars().all()
     if not cursors:
-        return GroupStepResult(
+        yield GroupStepResult(
             scanned_from=0, scanned_to=0, inserted=0, members_at_target=0, group_complete=True, fetched=False
         )
+        return
 
     def _hash_at(block: int) -> bytes | None:
         key = (chain_id, block)
@@ -562,6 +573,7 @@ def index_event_group_step(
     # the confirmed target (mid-backfill windows are final and never stamp), so
     # this runs once per warm cursor as it re-enters a scan — not per window —
     # and the memo collapses same-block lookups across the whole pass.
+    rewind_to: int | None = None
     for cursor in cursors:
         last = int(cursor.last_indexed_block or 0)
         if last <= 0 or cursor.last_indexed_block_hash is None or last >= target:
@@ -585,16 +597,13 @@ def index_event_group_step(
             # The delete is address-wide (all topics), so every sibling cursor
             # above the rewind point must come back with it — otherwise its
             # already-indexed range would be silently emptied.
-            session.execute(
-                delete(IndexedEventLog)
-                .where(IndexedEventLog.chain_id == chain_id)
-                .where(func.lower(IndexedEventLog.event_address) == event_address.lower())
-                .where(IndexedEventLog.block_number > rewind_to)
-            )
+            # Defer the DELETE until all external reads finish: its trigger also
+            # locks the chain reconciliation row.
+            rewind_hash = _hash_at(rewind_to) if rewind_to else None
             for member in cursors:
                 if int(member.last_indexed_block or 0) > rewind_to:
                     member.last_indexed_block = rewind_to
-                    member.last_indexed_block_hash = _hash_at(rewind_to) if rewind_to else None
+                    member.last_indexed_block_hash = rewind_hash
                     member.backfill_complete = False
             break
 
@@ -608,7 +617,7 @@ def index_event_group_step(
         for cursor in cursors:
             cursor.backfill_complete = True
             cursor.last_run_at = func.now()
-        return GroupStepResult(
+        yield GroupStepResult(
             scanned_from=target + 1,
             scanned_to=target,
             inserted=0,
@@ -616,6 +625,7 @@ def index_event_group_step(
             group_complete=True,
             fetched=False,
         )
+        return
 
     start = min(int(c.last_indexed_block or 0) for c in active) + 1
     window_end = min(target, start - 1 + max(1, max_block_span))
@@ -632,56 +642,107 @@ def index_event_group_step(
         to_block=window_end,
         window_stats=window_stats,
     )
-    logs_by_topic: dict[str, list[FetchedEventLog]] = {}
-    for log in logs:
-        if log.topics:
-            logs_by_topic.setdefault(log.topics[0].lower(), []).append(log)
-
-    inserted = 0
-    members_at_target = 0
+    # Plan before the first write/trigger lock. Fetch all required stamps here,
+    # too, so neither a final hash read nor a rewind RPC holds that shared lock.
     for cursor in cursors:
-        last = int(cursor.last_indexed_block or 0)
-        if last < target:
-            member_logs = [log for log in logs_by_topic.get(cursor.topic0.lower(), []) if log.block_number > last]
-            inserted += _bulk_insert_logs(
-                session,
-                chain_id,
-                event_address.lower(),
-                cursor.topic0.lower(),
-                member_logs,
-                batch_size=insert_batch_size,
-            )
-            if window_end > last:
-                cursor.last_indexed_block = window_end
-                # The stamp is position-bound; clear it on a mid-backfill
-                # advance so a later reorg pre-check can't compare the hash of
-                # one block against the position of another.
+        final_block = max(int(cursor.last_indexed_block or 0), window_end)
+        if final_block >= target and (
+            cursor.last_indexed_block_hash is None or window_end > int(cursor.last_indexed_block or 0)
+        ):
+            _hash_at(final_block)
+    logs.sort(key=lambda log: log.block_number)
+    prefixes = _write_prefixes(logs, window_end, max_rows=write_max_rows, max_bytes=write_max_bytes)
+    if rewind_to is not None:
+        session.execute(
+            delete(IndexedEventLog)
+            .where(IndexedEventLog.chain_id == chain_id)
+            .where(func.lower(IndexedEventLog.event_address) == event_address.lower())
+            .where(IndexedEventLog.block_number > rewind_to)
+        )
+
+    expected = None
+    prefix_start = start
+    for offset, end_offset, prefix_end in prefixes:
+        if expected is not None:
+            cursors = session.execute(cursor_query).scalars().all()
+            if _cursor_positions(cursors) != expected:
+                raise RuntimeError("event cursors changed between write prefixes; refetch required")
+        logs_by_topic: dict[str, list[FetchedEventLog]] = {}
+        for log in logs[offset:end_offset]:
+            if log.topics:
+                logs_by_topic.setdefault(log.topics[0].lower(), []).append(log)
+        inserted = 0
+        members_at_target = 0
+        for cursor in cursors:
+            last = int(cursor.last_indexed_block or 0)
+            if prefix_end > last:
+                member_logs = [log for log in logs_by_topic.get(cursor.topic0.lower(), []) if log.block_number > last]
+                inserted += _bulk_insert_logs(
+                    session,
+                    chain_id,
+                    event_address.lower(),
+                    cursor.topic0.lower(),
+                    member_logs,
+                    batch_size=insert_batch_size,
+                )
+                cursor.last_indexed_block = prefix_end
                 cursor.last_indexed_block_hash = None
-                # Only cursors that actually moved through this window record it.
-                # A group scans from its MIN member, so a cursor already above
-                # ``window_end`` gained no coverage here and must not inherit a
-                # page count from blocks it had already passed.
+                # Keep the original RPC page's count/cap, even when only a
+                # prefix was committed. A small write is not a small RPC page.
                 _fold_window_stats(cursor, window_stats)
-        if int(cursor.last_indexed_block or 0) >= target:
-            members_at_target += 1
-            cursor.backfill_complete = True
-            if cursor.last_indexed_block_hash is None:
-                # The only hash stamp: at the confirmed fringe, where a reorg
-                # could still rewrite the block — keyed on the missing stamp
-                # (an advance clears it), NOT on the completeness transition,
-                # which never re-fires when a warm cursor catches up again.
-                # Finalized mid-backfill windows never stamp, keeping
-                # per-window eth_getBlockByNumber traffic out of the hot loop.
-                cursor.last_indexed_block_hash = _hash_at(int(cursor.last_indexed_block))
-        cursor.last_run_at = func.now()
-    return GroupStepResult(
-        scanned_from=start,
-        scanned_to=window_end,
-        inserted=inserted,
-        members_at_target=members_at_target,
-        group_complete=members_at_target == len(cursors),
-        fetched=True,
-    )
+            cursor.backfill_complete = int(cursor.last_indexed_block or 0) >= target
+            if cursor.backfill_complete:
+                members_at_target += 1
+                if cursor.last_indexed_block_hash is None:
+                    cursor.last_indexed_block_hash = memo[(chain_id, int(cursor.last_indexed_block))]
+            cursor.last_run_at = func.now()
+        expected = _cursor_positions(cursors)
+        yield GroupStepResult(
+            scanned_from=prefix_start,
+            scanned_to=prefix_end,
+            inserted=inserted,
+            members_at_target=members_at_target,
+            group_complete=members_at_target == len(cursors),
+            fetched=prefix_start == start,
+        )
+        prefix_start = prefix_end + 1
+
+
+def _cursor_positions(cursors: Sequence[IndexedEventCursor]) -> list[tuple[str, int, bytes | None]]:
+    return [(c.topic0, int(c.last_indexed_block or 0), c.last_indexed_block_hash) for c in cursors]
+
+
+def _write_prefixes(
+    logs: list[FetchedEventLog], window_end: int, *, max_rows: int, max_bytes: int
+) -> list[tuple[int, int, int]]:
+    """Offsets and inclusive frontiers; never split a block across commits.
+
+    A single oversized block is committed whole, alone, rather than losing
+    events or stalling permanently. These are soft budgets, not a time limit.
+    Bytes conservatively estimate serialized payload, not Python heap size.
+    """
+    prefixes: list[tuple[int, int, int]] = []
+    offset = 0
+    payload_bytes = 0
+    block_start = 0
+    while block_start < len(logs):
+        block_end = block_start
+        block_bytes = 0
+        block = logs[block_start].block_number
+        while block_end < len(logs) and logs[block_end].block_number == block:
+            log = logs[block_end]
+            block_bytes += 256 + sum(len(word) + 4 for word in (*log.topics, *log.data_words))
+            block_end += 1
+        if block_start > offset and (
+            block_end - offset > max(1, max_rows) or payload_bytes + block_bytes > max(1, max_bytes)
+        ):
+            prefixes.append((offset, block_start, block - 1))
+            offset = block_start
+            payload_bytes = 0
+        payload_bytes += block_bytes
+        block_start = block_end
+    prefixes.append((offset, len(logs), window_end))
+    return prefixes
 
 
 def scan_enrolled_events(
@@ -695,6 +756,8 @@ def scan_enrolled_events(
     max_windows_per_cursor: int = DEFAULT_MAX_WINDOWS_PER_CURSOR,
     max_windows_per_pass: int = DEFAULT_MAX_WINDOWS_PER_PASS,
     insert_batch_size: int = DEFAULT_INSERT_BATCH,
+    write_max_rows: int = DEFAULT_WRITE_MAX_ROWS,
+    write_max_bytes: int = DEFAULT_WRITE_MAX_BYTES,
     stop_event: Event | None = None,
     scan_mode: Literal["all", "warm", "cold"] = "all",
 ) -> ScanSummary:
@@ -827,9 +890,9 @@ def scan_enrolled_events(
             chain_confirmation_depth = confirmation_depth
         # Walk several windows per group, but cap it (per-group) so one
         # high-volume address can't consume the whole pass budget, and stop at
-        # the global budget mid-group. Commit per window: each transaction (and
-        # INSERT) stays small, progress is durable, and a mid-backfill failure on
-        # one group doesn't roll back the windows it already landed.
+        # the global budget mid-group. Commit complete block prefixes within
+        # each fetched window, releasing trigger locks and keeping partial
+        # progress durable if a later prefix fails.
         group_members_at_target = 0
         try:
             if chain_id not in targets:
@@ -839,7 +902,8 @@ def scan_enrolled_events(
                     break
                 if windows_scanned >= pass_budget:
                     break
-                result = index_event_group_step(
+                group_complete = False
+                for result in index_event_group_steps(
                     session,
                     chain_id=chain_id,
                     event_address=event_address,
@@ -851,12 +915,17 @@ def scan_enrolled_events(
                     confirmation_depth=chain_confirmation_depth,
                     max_block_span=max_block_span,
                     insert_batch_size=insert_batch_size,
-                )
-                session.commit()
-                inserted += result.inserted
-                windows_scanned += int(result.fetched)
-                group_members_at_target = result.members_at_target
-                if result.group_complete:
+                    write_max_rows=write_max_rows,
+                    write_max_bytes=write_max_bytes,
+                ):
+                    session.commit()
+                    inserted += result.inserted
+                    windows_scanned += int(result.fetched)
+                    group_members_at_target = result.members_at_target
+                    group_complete = result.group_complete
+                    if stop_event is not None and stop_event.is_set():
+                        break
+                if group_complete:
                     break
         except Exception as exc:
             session.rollback()

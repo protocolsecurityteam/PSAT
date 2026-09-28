@@ -157,7 +157,7 @@ def test_reextract_scope_unknown_audit_404(live_client: LiveClient):
 
 def test_contract_audit_timeline_on_weth(analyzed_weth, live_client: LiveClient):
     # WETH has no audits — verifies the "never_audited" path doesn't error on empty joins.
-    detail = live_client.analysis_detail(analyzed_weth["name"])
+    detail = live_client.analysis_detail(analyzed_weth["job_id"])
     contract_id = detail.get("contract_id")
     assert isinstance(contract_id, int), "need contract_id from analysis_detail to exercise timeline"
 
