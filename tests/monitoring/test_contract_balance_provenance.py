@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import select, text, update
+from sqlalchemy import select, text, true, update
 
 from db.models import (
     BalanceCollectionState,
@@ -132,7 +132,7 @@ def _fetches(session, contract_id: int, read_class: str | None = None) -> list[C
                 if read_class == "native"
                 else ContractBalanceFetch.asset_set_status != "unattempted"
                 if read_class == "tokens"
-                else True
+                else true()
             )
             .order_by(ContractBalanceFetch.id)
         ).scalars()

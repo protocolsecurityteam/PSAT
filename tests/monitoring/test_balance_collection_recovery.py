@@ -79,6 +79,7 @@ def test_partial_does_not_replace_snapshot_or_prune_tail(db_session):
     )
     assert {r.token_address for r in current} == {TOKEN_A, TOKEN_B}
     assert {r.fetch_id for r in current} == {full_id}
+    assert target.subject.contract_id is not None
     prefix = partial_asset_rows(db_session, protocol.id)[target.subject.contract_id]
     assert len(prefix) == 1 and prefix[0].raw_balance == "15"
     assert db_session.get(ContractBalanceFetch, full_id) is not None

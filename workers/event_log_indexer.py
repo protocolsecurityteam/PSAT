@@ -1028,6 +1028,7 @@ def enroll_from_completed_jobs(
     query = (
         select(Job)
         .where(Job.status == JobStatus.completed)
+        .where(Job.request["effects_resume_work_id"].astext.is_(None))
         .where(Job.address.isnot(None))
         .order_by(Job.updated_at.desc())
         .limit(limit)

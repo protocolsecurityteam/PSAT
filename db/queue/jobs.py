@@ -387,6 +387,8 @@ def reconcile_impl_job_for_proxy(
     proxy_lc = proxy_addr.lower()
 
     def _scoped(stmt):
+        # An effects-only retry cannot serve as the implementation analysis.
+        stmt = stmt.where(Job.request["effects_resume_work_id"].astext.is_(None))
         # Chain is filtered in BOTH branches. Previously the chain predicate was
         # nested under ``root_job_id is not None``, so when root_job_id was None a
         # same-address impl job on a *different* chain could masquerade as a

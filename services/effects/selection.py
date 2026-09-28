@@ -492,7 +492,13 @@ def _asset_holdings_by_deployment(session: Session, protocol_id: int) -> dict[st
     # WEAKEST WINS: one capped sibling means this holder's asset list may be
     # missing entries, whatever the other siblings said. Taking the last-seen or
     # the strongest value would let a complete-looking fetch mask a capped one.
+    from services.monitoring.balance_reads import latest_partial_asset_fetches
+
     holder_capped: dict[str, bool] = {}
+    for contract_id in latest_partial_asset_fetches(session, protocol_id):
+        holder = holders.get(contract_id) or _addr(addresses.get(contract_id))
+        if holder is not None:
+            holder_capped[holder] = True
     for holder, asset, value, asset_set_status in kept:
         key = (holder, asset)
         if key not in best:
@@ -579,6 +585,8 @@ def _token_holdings_by_contract(session: Session, protocol_id: int, limit: int) 
         select(
             Contract.id,
             ContractBalanceLatest.token_address,
+            ContractBalanceLatest.usd_value,
+            ContractBalanceLatest.id,
         )
         .join(ContractBalanceLatest, ContractBalanceLatest.contract_id == Contract.id)
         .where(
@@ -606,7 +614,7 @@ def _token_holdings_by_contract(session: Session, protocol_id: int, limit: int) 
     # the accepted snapshot's dollar total.
     from services.monitoring.balance_reads import partial_asset_rows
 
-    candidate_rows = [(cid, token) for cid, token in rows]
+    candidate_rows = list(rows)
     for contract_id, partials in partial_asset_rows(session, protocol_id).items():
         for row in partials:
             if (
@@ -615,9 +623,11 @@ def _token_holdings_by_contract(session: Session, protocol_id: int, limit: int) 
                 and row.usd_value is not None
                 and row.usd_value >= USD_CRUMB_THRESHOLD
             ):
-                candidate_rows.append((contract_id, row.token_address))
+                candidate_rows.append((contract_id, row.token_address, row.usd_value, row.id))
     out: dict[int, list[str]] = {}
-    for contract_id, token in candidate_rows:
+    # Apply the existing richest-first order to both identity sources before
+    # deduplication and the original token cap. Values here only rank inputs.
+    for contract_id, token, _usd_value, _row_id in sorted(candidate_rows, key=lambda row: (-row[2], row[1], row[3])):
         addr = _addr(token)
         if addr is None:
             continue
@@ -708,6 +718,8 @@ def _job_owns_contract_address(protocol_id: int, scope: JobScope):
     """
     return and_(
         Job.protocol_id == protocol_id,
+        # Recovery owns a selected function/family, never the whole contract.
+        Job.request["effects_resume_work_id"].astext.is_(None),
         Job.chain_id == scope.chain_id,
         Job.address.is_not(None),
         func.lower(Job.address) == func.lower(Contract.address),

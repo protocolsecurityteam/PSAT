@@ -263,6 +263,7 @@ def _address_has_active_job(session: Session, address: str | None, *, chain_id: 
         .where(func.lower(Job.address) == address.lower())
         .where(Job.chain_id == chain_id)
         .where(Job.id != exclude_job_id)
+        .where(Job.request["effects_resume_work_id"].astext.is_(None))
         .where(Job.status.in_((JobStatus.queued, JobStatus.processing)))
         .limit(1)
     ).first()

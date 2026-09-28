@@ -810,6 +810,8 @@ def load_value_plane(session: Session, protocol_id: int, *, universe: ProtocolUn
     from db.models import Contract, ContractBalanceFetch, ContractBalanceLatest, RestakingPositionLatest
     from services.monitoring.balance_reads import (
         ObservationSubject,
+        latest_partial_asset_fetches,
+        latest_partial_entity_asset_fetches,
         native_balance_fact,
         winning_asset_fetches,
         winning_entity_asset_fetches,
@@ -931,7 +933,17 @@ def load_value_plane(session: Session, protocol_id: int, *, universe: ProtocolUn
     # be a later failure that would withdraw the truncation while the truncated
     # prefix rows are still what the sheet sums.
     winning_asset_fetch: dict[Any, Any] = dict(winning_asset_fetches(session, protocol_id))
-    for subject, fetch in winning_entity_asset_fetches(session, entity_subjects).items():
+    entity_winners = winning_entity_asset_fetches(session, entity_subjects)
+    partial_accounts: set[Any] = set(latest_partial_asset_fetches(session, protocol_id, winners=winning_asset_fetch))
+    partial_accounts.update(
+        (subject.chain, subject.address)
+        for subject in latest_partial_entity_asset_fetches(session, entity_subjects, winners=entity_winners)
+    )
+    # Keep accepted amounts, but a newer capped observation still invalidates
+    # completeness and empty-sheet claims under the existing scoring rules.
+    for account in partial_accounts:
+        plane.asset_set_truncated.add(plane.canonical(entity_key(chain_of.get(account), address_of.get(account))))
+    for subject, fetch in entity_winners.items():
         winning_asset_fetch[(subject.chain, subject.address)] = fetch
     # EVERY account that folds onto a key, with no exemption. The sheet is the
     # sum over its accounts, so its asset list is whole only where every one of

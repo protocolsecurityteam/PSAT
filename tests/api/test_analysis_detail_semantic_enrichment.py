@@ -282,6 +282,7 @@ def test_address_lookup_keeps_full_analysis_after_effects_recovery(api_client, d
     original = _seed_completed_job(db_session, address=address)
     store_artifact(db_session, original.id, "predicate_trees", data=_semantic_artifact())
     retry = _seed_completed_job(db_session, address=address)
+    assert retry.request is not None
     retry.request = dict(retry.request, effects_resume_work_id=42)
     retry.updated_at = original.updated_at + timedelta(minutes=1)
     db_session.commit()

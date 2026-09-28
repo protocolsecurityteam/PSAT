@@ -1427,10 +1427,12 @@ class TestEntityCohortInTheCycle:
         assert first is not None and [h.entity_key for h in first.holders] == [f"ethereum::{eoa}"]
 
         reused = refresh_entity_balances_if_due(db_session, proto.id)
+        assert reused is not None and reused.collection is not None
         assert reused.collection.attempted == 0
         assert reused.collection.reused == 2
         self._age(db_session, eoa, seconds=DEFAULT_ENTITY_BALANCE_INTERVAL + 60)
         due = refresh_entity_balances_if_due(db_session, proto.id)
+        assert due is not None and due.collection is not None
         assert due.collection.attempted == 2
         assert self._readings(db_session, eoa) == 2
 
@@ -1483,6 +1485,7 @@ class TestEntityCohortInTheCycle:
         self._eoa_node(db_session, host, newcomer)
 
         newcomer_pass = refresh_entity_balances_if_due(db_session, proto.id)
+        assert newcomer_pass is not None and newcomer_pass.collection is not None
         assert newcomer_pass.collection.attempted == 2
         assert newcomer_pass.collection.reused == 2
         assert self._readings(db_session, newcomer) == 1

@@ -279,6 +279,7 @@ def test_regular_collection_dependencies_preserve_audited_cache_hits(clean_effec
         _, metrics = _run(worker, session, job)
         session.commit()
     assert prober.runs == [ids[CONTRACT_A], ids[CONTRACT_B]]  # miss, audit, trusted hit
+    assert metrics is not None
     assert metrics["cache_hits_kernel"] == 1
     assert session.query(EffectBehaviorCache).one().audit_status == "passed"
     assert session.query(PendingEffectsWork).filter_by(protocol_id=pid, state="complete").count() == 3

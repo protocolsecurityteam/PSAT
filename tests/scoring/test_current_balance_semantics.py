@@ -4,9 +4,11 @@ from types import SimpleNamespace
 
 from services.aggregations.tvl import snapshot_payload
 from services.scoring import planes as P
+from services.scoring.distill.facts import _ContractFacts
 from services.scoring.distill.flow_reach import _flow_reach
 from services.scoring.fold.contributions import _sheet_ceiling
-from services.scoring.schema import signal_from_row, signal_to_row_kwargs
+from services.scoring.fold.types import _Instance
+from services.scoring.schema import Tri, signal_from_row, signal_to_row_kwargs
 from tests.support.scoring_builders import magnitude, proven, reaches, sig
 
 KEY = "ethereum::0x" + "1" * 40
@@ -20,16 +22,20 @@ def test_current_holdings_keep_existing_code_control_and_trimming_rules():
     # Collection provenance must not introduce a new freshness/completeness gate.
     assert P.ceiling_for(value, KEY) == (2_000_000, P.CEILING_ADMITTED)
     assert value.trimming_total(KEY) == 2_000_000
-    instance = SimpleNamespace(
-        signal=SimpleNamespace(
-            claim_id="upgrade.implementation",
-            chain="ethereum",
-            deployment_address=KEY.split("::")[1],
-        )
+    instance = _Instance(
+        signal=sig(deployment_address=KEY.split("::")[1]),
+        severity=1,
+        severity_basis=(),
+        entity_keys=(KEY,),
+        magnitude=Tri.not_determined(),
+        value_bound="not_determined",
+        pricing_blocked=None,
+        native_only=False,
+        asset_identity_undecidable=False,
     )
     usd, reason = _sheet_ceiling(instance, KEY, value)
     assert usd == 2_000_000
-    assert "code_control_sheet_ceiling" in reason
+    assert reason is not None and "code_control_sheet_ceiling" in reason
 
 
 def test_stored_transfer_valuation_survives_redistillation_and_row_loading():
@@ -39,7 +45,7 @@ def test_stored_transfer_valuation_survives_redistillation_and_row_loading():
             "reach_determined": True,
             "observed_reach_holders": [KEY.split("::")[1]],
         },
-        SimpleNamespace(chain="ethereum"),
+        _ContractFacts(contract_id=1, protocol_id=1, chain="ethereum", address=KEY.split("::")[1], functions=[]),
         KEY,
     )
     assert reach.state == "proven_reach"

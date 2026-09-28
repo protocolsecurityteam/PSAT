@@ -347,7 +347,8 @@ def winning_asset_fetches(session: Session, protocol_id: int) -> dict[int, Contr
     a ``fetch_failed`` (or a shorter page) arriving after an ``at_page_cap`` read
     would withdraw the truncation while the truncated-prefix rows are still what
     the view returns and still what a sheet sums. Same rule as the view's ERC-20
-    arm — latest non-failed wins — so the two cannot disagree.
+    arm — prefer accepted snapshots, then the latest partial — so the two agree.
+    Newer partial coverage is read separately by ``latest_partial_asset_fetches``.
 
     A contract whose asset class has NO non-failed fetch is absent from the
     mapping: nothing current is known about its list, which is a third state and
@@ -387,7 +388,7 @@ def winning_entity_asset_fetches(
 ) -> dict[ObservationSubject, ContractBalanceFetch]:
     """The same question as :func:`winning_asset_fetches`, for entity subjects.
 
-    Same rule — latest non-failed fetch per subject wins the ERC-20 class — asked
+    Same accepted-first rule for the ERC-20 class, asked
     over the OTHER identity arm. It is a separate function rather than a widened
     one because the two are scoped differently and neither scope can stand in for
     the other: a contract's fetches are scoped by ``contracts.protocol_id``, and
@@ -547,7 +548,9 @@ __all__ = [
 ]
 
 
-def latest_partial_asset_fetches(session: Session, protocol_id: int) -> dict[int, ContractBalanceFetch]:
+def latest_partial_asset_fetches(
+    session: Session, protocol_id: int, *, winners: dict[int, ContractBalanceFetch] | None = None
+) -> dict[int, ContractBalanceFetch]:
     """Newest partial prefix, separately from the accepted monetary snapshot."""
     rows = session.scalars(
         select(ContractBalanceFetch)
@@ -562,13 +565,52 @@ def latest_partial_asset_fetches(session: Session, protocol_id: int) -> dict[int
         .distinct(ContractBalanceFetch.contract_id)
     ).all()
     out: dict[int, ContractBalanceFetch] = {}
-    winners = winning_asset_fetches(session, protocol_id)
+    if winners is None:
+        winners = winning_asset_fetches(session, protocol_id)
     for row in rows:
         if row.contract_id is None:
             continue
         winner = winners.get(row.contract_id)
-        if row.contract_id is not None and (winner is None or row.fetched_at >= winner.fetched_at):
+        if winner is None or (row.fetched_at, row.id) >= (winner.fetched_at, winner.id):
             out.setdefault(row.contract_id, row)
+    return out
+
+
+def latest_partial_entity_asset_fetches(
+    session: Session,
+    subjects: list[ObservationSubject],
+    *,
+    winners: dict[ObservationSubject, ContractBalanceFetch] | None = None,
+) -> dict[ObservationSubject, ContractBalanceFetch]:
+    """Newer partial coverage for the caller's entity perimeter."""
+    by_identity = {(s.chain, s.address): s for s in subjects if s.is_entity}
+    if not by_identity:
+        return {}
+    rows = session.scalars(
+        select(ContractBalanceFetch)
+        .where(
+            ContractBalanceFetch.contract_id.is_(None),
+            tuple_(ContractBalanceFetch.entity_chain, ContractBalanceFetch.entity_address).in_(list(by_identity)),
+            ContractBalanceFetch.asset_set_status == ASSET_SET_STATUS_AT_PAGE_CAP,
+        )
+        .order_by(
+            ContractBalanceFetch.entity_chain,
+            ContractBalanceFetch.entity_address,
+            ContractBalanceFetch.fetched_at.desc(),
+            ContractBalanceFetch.id.desc(),
+        )
+        .distinct(ContractBalanceFetch.entity_chain, ContractBalanceFetch.entity_address)
+    ).all()
+    if winners is None:
+        winners = winning_entity_asset_fetches(session, subjects)
+    out: dict[ObservationSubject, ContractBalanceFetch] = {}
+    for row in rows:
+        if row.entity_address is None:
+            continue
+        subject = by_identity[(row.entity_chain, row.entity_address)]
+        winner = winners.get(subject)
+        if winner is None or (row.fetched_at, row.id) >= (winner.fetched_at, winner.id):
+            out.setdefault(subject, row)
     return out
 
 

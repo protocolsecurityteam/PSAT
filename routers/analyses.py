@@ -123,7 +123,11 @@ def analyses(response: Response) -> list[AnalysisListEntry]:
     # rapid re-renders avoid a network round-trip for the multi-MB payload.
     response.headers["Cache-Control"] = "private, max-age=15, stale-while-revalidate=60"
     with deps.SessionLocal() as session:
-        stmt = select(Job).where(Job.status == JobStatus.completed).order_by(Job.updated_at.desc())
+        stmt = (
+            select(Job)
+            .where(Job.status == JobStatus.completed, Job.request["effects_resume_work_id"].astext.is_(None))
+            .order_by(Job.updated_at.desc())
+        )
         jobs = session.execute(stmt).scalars().all()
 
         jobs_by_id = {str(job.id): job for job in jobs}
@@ -295,7 +299,11 @@ def analysis_artifact(
             # (every prod row is chain 1 today, so output is unchanged).
             stmt = (
                 select(Job)
-                .where(Job.address == run_name, Job.status == JobStatus.completed)
+                .where(
+                    Job.address == run_name,
+                    Job.status == JobStatus.completed,
+                    Job.request["effects_resume_work_id"].astext.is_(None),
+                )
                 .order_by(Job.updated_at.desc())
                 .limit(1)
             )
