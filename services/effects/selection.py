@@ -614,7 +614,9 @@ def _token_holdings_by_contract(session: Session, protocol_id: int, limit: int) 
     # the accepted snapshot's dollar total.
     from services.monitoring.balance_reads import partial_asset_rows
 
-    candidate_rows = list(rows)
+    candidate_rows = [
+        (cid, token, usd, row_id) for cid, token, usd, row_id in rows if token is not None and usd is not None
+    ]
     for contract_id, partials in partial_asset_rows(session, protocol_id).items():
         for row in partials:
             if (
