@@ -17,7 +17,7 @@ def test_first_run_completes(analyzed_weth):
 
 
 def test_first_run_has_artifacts(analyzed_weth, live_client: LiveClient):
-    analysis = live_client.artifact(analyzed_weth["name"], "contract_analysis")
+    analysis = live_client.artifact(analyzed_weth["job_id"], "contract_analysis")
     assert isinstance(analysis, dict)
     assert "subject" in analysis or "summary" in analysis
 
@@ -37,8 +37,8 @@ def test_second_run_uses_cache(analyzed_weth, cached_weth, live_client: LiveClie
         f"than the second run ({analyzed_weth.get('address')})"
     )
 
-    a1 = live_client.artifact(analyzed_weth["name"], "contract_analysis")
-    a2 = live_client.artifact(cached_weth["name"], "contract_analysis")
+    a1 = live_client.artifact(analyzed_weth["job_id"], "contract_analysis")
+    a2 = live_client.artifact(cached_weth["job_id"], "contract_analysis")
     assert isinstance(a1, dict) and isinstance(a2, dict)
     assert a1.get("subject", {}).get("name") == a2.get("subject", {}).get("name")
 
@@ -69,7 +69,7 @@ def company_first_children(company_first_run, live_client: LiveClient) -> list[d
 
 @pytest.fixture(scope="module")
 def company_first_inventory(company_first_run, live_client: LiveClient) -> dict[str, Any] | None:
-    art = live_client.artifact(company_first_run["name"], "contract_inventory")
+    art = live_client.artifact(company_first_run["job_id"], "contract_inventory")
     return art if isinstance(art, dict) else None
 
 
@@ -135,7 +135,7 @@ def test_second_company_run_inventory_merged(
     company_second_run,
     live_client: LiveClient,
 ):
-    inventory2 = live_client.artifact(company_second_run["name"], "contract_inventory")
+    inventory2 = live_client.artifact(company_second_run["job_id"], "contract_inventory")
     if not isinstance(inventory2, dict):
         pytest.skip("Could not fetch inventory for run 2")
     contracts2 = inventory2.get("contracts", []) or []

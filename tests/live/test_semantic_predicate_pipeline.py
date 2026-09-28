@@ -103,7 +103,7 @@ def guarded_company_child(analyzed_company, live_client: LiveClient) -> dict[str
     diagnostics: list[str] = []
 
     for job in completed:
-        artifact = live_client.artifact(job["name"], "predicate_trees")
+        artifact = live_client.artifact(job["job_id"], "predicate_trees")
         if not isinstance(artifact, dict):
             diagnostics.append(f"{job.get('name')} {job.get('address')}: missing predicate_trees")
             continue
@@ -182,7 +182,7 @@ def test_capability_resolution_returns_non_empty(guarded_company_child, live_cli
 
 def test_effective_function_has_capability_expr(guarded_company_child, live_client: LiveClient):
     job = guarded_company_child["job"]
-    detail = live_client.analysis_detail(job["name"])
+    detail = live_client.analysis_detail(job["job_id"])
     functions = (detail.get("effective_permissions") or {}).get("functions") or []
 
     assert functions, "guarded child must produce effective_permissions.functions rows"
@@ -196,7 +196,7 @@ def test_effective_function_principal_consistent_with_capability_expr(
     live_client: LiveClient,
 ):
     job = guarded_company_child["job"]
-    detail = live_client.analysis_detail(job["name"])
+    detail = live_client.analysis_detail(job["job_id"])
     functions = (detail.get("effective_permissions") or {}).get("functions") or []
 
     checked_any = False
@@ -242,7 +242,7 @@ def test_effective_function_principal_consistent_with_capability_expr(
 def test_no_retired_artifacts_present(guarded_company_child, live_client: LiveClient):
     job = guarded_company_child["job"]
     for retired_name in ("permission_graph", "semantic_guards"):
-        artifact = live_client.artifact(job["name"], retired_name)
+        artifact = live_client.artifact(job["job_id"], retired_name)
         if artifact is None:
             continue
         assert isinstance(artifact, dict), f"{retired_name} still emits but is not a dict"

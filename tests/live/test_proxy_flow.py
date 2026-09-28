@@ -20,13 +20,13 @@ def usdc_job(live_client: LiveClient) -> dict:
 
 
 def test_contract_flags_marks_proxy(usdc_job, live_client: LiveClient):
-    flags = live_client.artifact(usdc_job["name"], "contract_flags")
+    flags = live_client.artifact(usdc_job["job_id"], "contract_flags")
     assert isinstance(flags, dict)
     assert flags.get("is_proxy") is True, f"USDC should be detected as a proxy, got flags={flags}"
 
 
 def test_implementation_is_resolved(usdc_job, live_client: LiveClient):
-    flags = live_client.artifact(usdc_job["name"], "contract_flags")
+    flags = live_client.artifact(usdc_job["job_id"], "contract_flags")
     assert isinstance(flags, dict)
     impl = flags.get("implementation")
     assert isinstance(impl, str) and impl.startswith("0x") and len(impl) == 42, (
@@ -36,14 +36,14 @@ def test_implementation_is_resolved(usdc_job, live_client: LiveClient):
 
 
 def test_classifications_artifact_non_empty(usdc_job, live_client: LiveClient):
-    cls = live_client.artifact(usdc_job["name"], "classifications")
+    cls = live_client.artifact(usdc_job["job_id"], "classifications")
     assert isinstance(cls, dict), "classifications artifact should exist and be JSON"
     entries = cls.get("classifications") or {}
     assert entries, "classifications map should not be empty for a proxy"
 
 
 def test_implementation_job_completed(usdc_job, live_client: LiveClient):
-    flags = live_client.artifact(usdc_job["name"], "contract_flags")
+    flags = live_client.artifact(usdc_job["job_id"], "contract_flags")
     assert isinstance(flags, dict)
     impl = (flags.get("implementation") or "").lower()
     assert impl
