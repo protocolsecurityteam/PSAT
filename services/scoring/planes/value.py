@@ -23,6 +23,7 @@ from services.scoring.schema import coalesce_chain, entity_key
 from utils.balance_status import (
     ASSET_SET_SOURCE_CHAIN_LOG_SWEEP,
     ASSET_SET_STATUS_AT_PAGE_CAP,
+    STATUS_UNATTEMPTED,
     SWEEP_STATUS_COMPLETED,
 )
 
@@ -730,124 +731,6 @@ def _alias_fixed_point(alias: dict[str, str]) -> dict[str, str]:
     return out
 
 
-# The states a reading may be disposed OUT OF. Pricing-agnostic per the ruling —
-# delivery shape is a pricing-independent fact and dust airdrops land in
-# ``priced_below_resolution`` — but a PRICED reading is never disposed: a number
-# was determined for it, and disposing it would delete a measured dollar from
-# the document on evidence about how the token arrived.
-_DISPOSABLE_ASSET_STATES = (ASSET_UNPRICED, ASSET_BELOW_RESOLUTION)
-
-
-def _resolve_asset_disposition(
-    session: Session,
-    plane: ValuePlane,
-    accounts_by_bucket: dict[tuple[str, str], set[tuple[str, str]]],
-    universe: ProtocolUniverse | None,
-) -> tuple[dict[str, dict[str, dict[str, Any]]], dict[str, int]]:
-    """Which (entity, asset) readings arrived only as mass distributions.
-
-    Five conjuncts, every one of them fail-closed:
-
-    1. A UNIVERSE was supplied. No universe, no condemnation — an unset argument
-       means the caller could not build the protocol's address set (object
-       storage refused, or the fold was handed a plane by hand), and a predicate
-       that condemns everything absent from an empty set condemns everything.
-    2. The asset is not the native coin. Native ETH has no ``Transfer`` log to
-       have a delivery shape, so there is no evidence to read.
-    3. The reading's reduced state is unpriced or below-resolution. A PRICED
-       reading is never disposed.
-    4. P4 — the token address is absent from the protocol's discovered universe,
-       tested CHAIN-BLIND. Chain scoping is banned here and the ban is measured,
-       not stylistic: on this corpus a chain-scoped P4 falsely condemns
-       $3,272,829.37 of real holdings ($2,203,581.37 on optimism, whose contracts
-       carry no dependency, control-graph or signal rows at all, and $1,069,248.00
-       on base) and buys nothing on base's unpriced population. Absence of chain
-       attribution is not proof of absence from a chain — 5.28% of the universe
-       has no chain column at all — so an address discovered anywhere admits
-       everywhere, and chain-blind is the superset that reading requires.
-    5. P2 — EVERY observed account that contributed a reading to this bucket
-       holds a delivery fact whose all-quantifier passed. A missing fact for any
-       one contributing account refuses the whole bucket: the entity's holding is
-       the sum over its accounts, so evidence at one account answers nothing
-       about another's.
-
-    Returns the carrier records and a census. Both are published; the census
-    names its zeros so a conjunct that never fired is visible.
-    """
-    from services.monitoring.delivery_evidence import load_delivery_evidence
-
-    census: dict[str, int] = dict.fromkeys(DISPOSITION_REFUSALS, 0)
-    if universe is None:
-        return {}, census
-
-    from utils.chains import UnknownChainError, chain_by_name
-
-    chain_ids: dict[str, int] = {}
-    for chain_name, _ in {account for accounts in accounts_by_bucket.values() for account in accounts}:
-        if chain_name in chain_ids:
-            continue
-        try:
-            chain_ids[chain_name] = int(chain_by_name(chain_name).chain_id)
-        except (UnknownChainError, ValueError, TypeError):
-            # A chain name nothing maps to an id. The evidence table is keyed by
-            # id, so there is no row to ask for — and guessing one would ask the
-            # wrong chain's question. Refused by omission below.
-            continue
-
-    holders = {
-        (chain_ids[chain_name], address)
-        for accounts in accounts_by_bucket.values()
-        for chain_name, address in accounts
-        if chain_name in chain_ids and address
-    }
-    evidence = load_delivery_evidence(session, holders)
-
-    disposition: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
-    for (key, asset), accounts in sorted(accounts_by_bucket.items()):
-        if asset == NATIVE_ASSET:
-            continue
-        if (plane.per_asset_state.get(key) or {}).get(asset) not in _DISPOSABLE_ASSET_STATES:
-            continue
-        if asset in universe.addresses:
-            continue
-        facts = []
-        for chain_name, address in sorted(accounts):
-            chain_id = chain_ids.get(chain_name)
-            if chain_id is None or not address:
-                facts = []
-                break
-            fact = evidence.get((chain_id, address, asset))
-            if fact is None or not fact.is_airdrop_only:
-                facts = []
-                break
-            facts.append(fact)
-        if not facts:
-            continue
-        disposition[key][asset] = {
-            "shape": facts[0].shape,
-            "fan_out_threshold_k": max(fact.fan_out_threshold_k for fact in facts),
-            # The WEAKEST end of the accounts' evidence, because the claim only
-            # holds where all of them do: the smallest fan-out any account
-            # measured, the latest block any scan started at, the earliest block
-            # any of them ran through.
-            "min_fan_out": min((fact.min_fan_out for fact in facts if fact.min_fan_out is not None), default=None),
-            "delivery_count": sum(fact.delivery_count for fact in facts),
-            "scanned_from_block": max(fact.scanned_from_block for fact in facts),
-            "measured_through_block": min(fact.measured_through_block for fact in facts),
-            "accounts": [fact.holder_address for fact in facts],
-            # The carriers' own basis strings, verbatim, so a published claim
-            # quotes stored evidence rather than a sentence re-authored here.
-            "basis": [fact.basis for fact in facts if fact.basis],
-        }
-
-    out = {key: dict(sorted(assets.items())) for key, assets in sorted(disposition.items())}
-    for key in sorted(out):
-        refusal = plane.disposition_refusal(key)
-        if refusal is not None:
-            census[refusal] += len(out[key])
-    return out, census
-
-
 def _balance_account(row: Any) -> Any:
     """The ACCOUNT identity a balance/fetch row is keyed on.
 
@@ -923,14 +806,16 @@ def load_entity_alias(session: Session, protocol_id: int) -> tuple[dict[str, str
 
 
 def load_value_plane(session: Session, protocol_id: int, *, universe: ProtocolUniverse | None = None) -> ValuePlane:
+    """Load current balances under existing valuation rules; universe is a legacy argument."""
     from db.models import Contract, ContractBalanceFetch, ContractBalanceLatest, RestakingPositionLatest
     from services.monitoring.balance_reads import (
         ObservationSubject,
+        latest_partial_asset_fetches,
+        latest_partial_entity_asset_fetches,
         native_balance_fact,
         winning_asset_fetches,
         winning_entity_asset_fetches,
     )
-    from services.monitoring.delivery_evidence import FAN_OUT_CALIBRATION_CORPUS, FAN_OUT_THRESHOLD_K
 
     plane = ValuePlane()
     contracts = session.query(Contract).filter(Contract.protocol_id == protocol_id).order_by(Contract.id).all()
@@ -999,11 +884,6 @@ def load_value_plane(session: Session, protocol_id: int, *, universe: ProtocolUn
     # are the SAME on-chain account read twice at two heights by two writers —
     # not two holdings — so the account is what a reading has to be reduced over.
     observations: dict[tuple[str, str], dict[str, list[Any]]] = defaultdict(lambda: defaultdict(list))
-    # The same buckets, carrying the (chain, ACCOUNT) identities the readings
-    # were issued against. The delivery-evidence table is keyed on that account —
-    # never on a folded entity key — so the disposition's all-quantifier is
-    # evaluated over exactly the addresses that contributed to the bucket.
-    accounts_by_bucket: dict[tuple[str, str], set[tuple[str, str]]] = defaultdict(set)
     for row in rows:
         account = _balance_account(row)
         key = plane.canonical(entity_key(chain_of.get(account), address_of.get(account)))
@@ -1015,7 +895,6 @@ def load_value_plane(session: Session, protocol_id: int, *, universe: ProtocolUn
         if row.fetched_at is not None:
             fetched.append(row.fetched_at)
         observations[(key, asset)][_lower(row.observed_address)].append(row)
-        accounts_by_bucket[(key, asset)].add((chain_of.get(account) or "", _lower(row.observed_address)))
 
     per_asset, per_asset_state, reduction = _reduce_observations(observations)
     plane.per_asset = per_asset
@@ -1046,13 +925,25 @@ def load_value_plane(session: Session, protocol_id: int, *, universe: ProtocolUn
             .all()
         )
     for fetch in fetch_rows:
-        latest_fetch[_balance_account(fetch)] = fetch
+        # A token-only pass makes no new statement about the native balance.
+        if fetch.native_status != STATUS_UNATTEMPTED:
+            latest_fetch[_balance_account(fetch)] = fetch
     # Completeness is a property of THE ROW SET, so it is read from the fetch
     # whose rows this plane just loaded — never from the latest fetch, which may
     # be a later failure that would withdraw the truncation while the truncated
     # prefix rows are still what the sheet sums.
     winning_asset_fetch: dict[Any, Any] = dict(winning_asset_fetches(session, protocol_id))
-    for subject, fetch in winning_entity_asset_fetches(session, entity_subjects).items():
+    entity_winners = winning_entity_asset_fetches(session, entity_subjects)
+    partial_accounts: set[Any] = set(latest_partial_asset_fetches(session, protocol_id, winners=winning_asset_fetch))
+    partial_accounts.update(
+        (subject.chain, subject.address)
+        for subject in latest_partial_entity_asset_fetches(session, entity_subjects, winners=entity_winners)
+    )
+    # Keep accepted amounts, but a newer capped observation still invalidates
+    # completeness and empty-sheet claims under the existing scoring rules.
+    for account in partial_accounts:
+        plane.asset_set_truncated.add(plane.canonical(entity_key(chain_of.get(account), address_of.get(account))))
+    for subject, fetch in entity_winners.items():
         winning_asset_fetch[(subject.chain, subject.address)] = fetch
     # EVERY account that folds onto a key, with no exemption. The sheet is the
     # sum over its accounts, so its asset list is whole only where every one of
@@ -1249,22 +1140,7 @@ def load_value_plane(session: Session, protocol_id: int, *, universe: ProtocolUn
             }
         )
 
-    # The disposition pass, run HERE and not beside the reduction: its refusal
-    # conjuncts read the typed receipts, the truncation flag, the unscanned
-    # accounts and the restaking positions, all of which are resolved above.
-    plane.asset_disposition, disposition_refused = _resolve_asset_disposition(
-        session, plane, accounts_by_bucket, universe
-    )
-    # The reading's state is rewritten in place, so every consumer of
-    # ``per_asset_state`` — the sheet state, the coverage census, the fold's
-    # per-asset publication — sees the determination rather than an unpriced
-    # reading with a note attached somewhere else. The row itself is never
-    # dropped: a disposed asset stays visible and stays labelled.
-    disposed_readings = 0
-    for key, assets in sorted(plane.asset_disposition.items()):
-        for asset in sorted(assets):
-            plane.per_asset_state.setdefault(key, {})[asset] = ASSET_AIRDROP_DELIVERED
-            disposed_readings += 1
+    # Delivery classification is retired: retain the original quantity/price reading.
 
     # ``native_status = proven_zero`` becomes a real ASSET reading, on the sheets
     # whose asset list a chain scan proved whole. The pair is what carries the
@@ -1413,53 +1289,13 @@ def load_value_plane(session: Session, protocol_id: int, *, universe: ProtocolUn
             "priced_below_resolution = every price that answered landed on the storage column's "
             "resolution floor and the total is NOT a number; unpriced = no price answered; proven_empty = "
             "every quantity proven zero, the only state in which 0.00 is a number; "
-            "airdrop_determined = every reading left on the sheet arrived only in mass "
-            "distributions or is a witnessed zero, which is a DIFFERENT witness from proven_empty "
-            "and never the same one: proven_empty says nothing ever arrived, airdrop_determined "
-            "says what arrived arrived as a mass distribution; no_rows = nothing observed. "
+            "no_rows = nothing observed. "
             "The census is taken over this plane's BASE POPULATION (contract_entities, folded "
             "onto canonical keys) unioned with every entity the observation maps carry, so "
             "no_rows counts the entities the protocol names and nobody has read — a count "
             "taken over the observations alone could only ever report 0 there, which is not "
             "the same fact"
         ),
-        "asset_disposition": {
-            "entities_determined": sheet_states[SHEET_AIRDROP_DETERMINED],
-            "readings_disposed": disposed_readings,
-            "tokens_disposed": len({asset for assets in plane.asset_disposition.values() for asset in assets}),
-            "readings_refused_by_reason": dict(sorted(disposition_refused.items())),
-            "fan_out_threshold_k": FAN_OUT_THRESHOLD_K,
-            "fan_out_calibration_corpus": FAN_OUT_CALIBRATION_CORPUS,
-            "protocol_universe": (
-                None
-                if universe is None
-                else {
-                    "addresses": len(universe.addresses),
-                    "sources": dict(sorted(universe.sources.items())),
-                    "chain_scope": "chain_blind",
-                    "basis": universe.basis,
-                }
-            ),
-            "reading": (
-                "what is published here is DELIVERY SHAPE and never worth. A disposed reading "
-                "says every incoming delivery of that token to that account arrived in a "
-                "transaction carrying at least fan_out_threshold_k same-token transfer LOGS — the "
-                "meter the threshold is calibrated in, and an upper bound on that transaction's "
-                "distinct recipients rather than a count of them. It does not say the token is "
-                "worthless: the reference corpus carries a class of FIVE demonstrably real tokens "
-                "with this delivery shape (HEX, WETH and base USDC, which the protocol-reference "
-                "conjunct spares, plus uniETH at fan-out 101 and USDtb at 175, which are in this "
-                "state). The two conjuncts do NOT carry equal weight on every "
-                "chain: the protocol-reference conjunct is near-vacuous on base, where it "
-                "condemns 1,175 of 1,175 unpriced tokens and so partitions nothing, which means "
-                "delivery shape CARRIES THE CLAIM ALONE on base over 1,745 readings. The asset "
-                "list a disposition covers is the Etherscan-page-derived one and is NOT proven "
-                "whole — the gate here refuses only a list read AT the page cap — so the "
-                "determination is over the readings observed and never over the holdings. "
-                "protocol_universe is null where no universe was supplied, and no reading is "
-                "disposed there: no universe, no condemnation"
-            ),
-        },
         "asset_set_completeness": {
             "entities_proven_complete": len(plane.asset_set_proven_complete),
             "entities_proven_truncated": len(plane.asset_set_truncated),

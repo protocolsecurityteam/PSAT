@@ -18,6 +18,7 @@ from db.models import (
     ContractProbeAttempt,
     Job,
     JobStatus,
+    PendingEffectsWork,
     Protocol,
     TvlSnapshot,
 )
@@ -256,12 +257,9 @@ def _latest_tvl(session: Session, protocol_row: Protocol | None) -> TvlSummary |
     ).scalar_one_or_none()
     if latest_tvl is None:
         return None
-    return {
-        "total_usd": float(latest_tvl.total_usd) if latest_tvl.total_usd else None,
-        "defillama_tvl": float(latest_tvl.defillama_tvl) if latest_tvl.defillama_tvl else None,
-        "source": latest_tvl.source,
-        "timestamp": latest_tvl.timestamp.isoformat(),
-    }
+    from services.aggregations.tvl import snapshot_payload
+
+    return snapshot_payload(latest_tvl)
 
 
 def _company_reach(session: Session, contracts_by_job_id: dict[Any, Contract]) -> ReachBlock:
@@ -280,6 +278,20 @@ def _company_reach(session: Session, contracts_by_job_id: dict[Any, Contract]) -
     }
 
 
+def _balance_effects_coverage(session: Session, protocol: Protocol | None) -> dict[str, int]:
+    if protocol is None:
+        return {"incomplete": 0, "degraded": 0}
+    states: dict[str, int] = {
+        state: count
+        for state, count in session.execute(
+            select(PendingEffectsWork.state, func.count())
+            .where(PendingEffectsWork.protocol_id == protocol.id, PendingEffectsWork.state != "complete")
+            .group_by(PendingEffectsWork.state)
+        ).all()
+    }
+    return {"incomplete": sum(states.values()), "degraded": states.get("degraded", 0)}
+
+
 def assemble_company_payload(
     session: Session,
     name: str,
@@ -293,6 +305,7 @@ def assemble_company_payload(
         "protocol_id": protocol_row.id if protocol_row else None,
         "contract_count": len(governance.contracts),
         "tvl": _latest_tvl(session, protocol_row),
+        "analysis_pending_balance_effects": _balance_effects_coverage(session, protocol_row),
         "contracts": governance.contracts,
         "principals": governance.principals,
         "ownership_hierarchy": governance.hierarchy,

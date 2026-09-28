@@ -492,9 +492,12 @@ def _prefetch_child_tables(
             ContractBalanceLatest.fetch_id.is_not(None),
         )
         for f in s.execute(
-            select(ContractBalanceFetch.id, ContractBalanceFetch.chain_id, ContractBalanceFetch.asset_set_status).where(
-                ContractBalanceFetch.contract_id.in_(id_list), ContractBalanceFetch.id.in_(referenced)
-            )
+            select(
+                ContractBalanceFetch.id,
+                ContractBalanceFetch.chain_id,
+                ContractBalanceFetch.asset_set_status,
+                ContractBalanceFetch.asset_set_source,
+            ).where(ContractBalanceFetch.contract_id.in_(id_list), ContractBalanceFetch.id.in_(referenced))
         ):
             local[f.id] = f
             rows += 1

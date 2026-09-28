@@ -530,8 +530,11 @@ def rpc_request(
     session = _get_session()
     effective_timeout = JSON_RPC_TIMEOUT_SECONDS if timeout is None else timeout
     for attempt in range(retries + 1):
+        from services.clients.request_budget import charge_attempt
+
         if attempt and before_retry is not None:
             before_retry()
+        charge_attempt("rpc")
         try:
             response = session.post(
                 rpc_url,

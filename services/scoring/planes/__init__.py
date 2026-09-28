@@ -526,9 +526,6 @@ from services.scoring.planes.value import (
     _reduce_observations as _reduce_observations,
 )
 from services.scoring.planes.value import (
-    _resolve_asset_disposition as _resolve_asset_disposition,
-)
-from services.scoring.planes.value import (
     ceiling_for as ceiling_for,
 )
 from services.scoring.planes.value import (

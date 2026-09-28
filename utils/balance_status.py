@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+STATUS_UNATTEMPTED = "unattempted"
+
 # --- native coin -----------------------------------------------------------
 # ``proven_zero`` is reachable ONLY from a pinned read, and the schema enforces
 # it (``ck_cbf_proven_zero_requires_block``): a zero from an unpinned
@@ -26,6 +28,7 @@ NATIVE_STATUS_PROVEN_NONZERO = "proven_nonzero"
 NATIVE_STATUS_FETCH_FAILED = "fetch_failed"
 NATIVE_STATUS_NOT_DETERMINED = "not_determined"
 NATIVE_STATUSES = (
+    STATUS_UNATTEMPTED,
     NATIVE_STATUS_PROVEN_ZERO,
     NATIVE_STATUS_PROVEN_NONZERO,
     NATIVE_STATUS_FETCH_FAILED,
@@ -42,6 +45,7 @@ ASSET_SET_STATUS_RETURNED_EMPTY = "returned_empty"
 ASSET_SET_STATUS_AT_PAGE_CAP = "at_page_cap"
 ASSET_SET_STATUS_FETCH_FAILED = "fetch_failed"
 ASSET_SET_STATUSES = (
+    STATUS_UNATTEMPTED,
     ASSET_SET_STATUS_RETURNED_ASSETS,
     ASSET_SET_STATUS_RETURNED_EMPTY,
     ASSET_SET_STATUS_AT_PAGE_CAP,
@@ -250,3 +254,13 @@ TOKEN_REFERENCE_SHAPES = (
 # It is NOT a claim about worth: nothing here says a crumb is worthless, spam or
 # fake. It says the figure is below the resolution these two consumers act on.
 USD_CRUMB_THRESHOLD = Decimal("0.01")
+
+# Shared publication policy. A partial prefix is a fallback only when no accepted
+# provider rowset exists. SQL projection and retention use these same statuses.
+NATIVE_ACCEPTED_STATUSES = (NATIVE_STATUS_PROVEN_ZERO, NATIVE_STATUS_PROVEN_NONZERO, NATIVE_STATUS_NOT_DETERMINED)
+ASSET_ACCEPTED_STATUSES = (ASSET_SET_STATUS_RETURNED_ASSETS, ASSET_SET_STATUS_RETURNED_EMPTY)
+ASSET_OBSERVED_STATUSES = (*ASSET_ACCEPTED_STATUSES, ASSET_SET_STATUS_AT_PAGE_CAP)
+
+
+def asset_snapshot_priority(status: str) -> int:
+    return 2 if status in ASSET_ACCEPTED_STATUSES else (1 if status == ASSET_SET_STATUS_AT_PAGE_CAP else 0)

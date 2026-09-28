@@ -128,6 +128,8 @@ def resolve_company_jobs(session: Session, name: str) -> tuple[Protocol | None, 
             .where(
                 Contract.protocol_id == protocol_row.id,
                 Job.status == JobStatus.completed,
+                # A collection retry has no full-analysis artifacts of its own.
+                Job.request["effects_resume_work_id"].astext.is_(None),
                 Job.address.isnot(None),
             )
         ).all()
@@ -152,7 +154,13 @@ def resolve_company_jobs(session: Session, name: str) -> tuple[Protocol | None, 
         return None, []
 
     company_job_id = str(company_job.id)
-    all_completed = session.execute(select(Job).where(Job.status == JobStatus.completed)).scalars().all()
+    all_completed = (
+        session.execute(
+            select(Job).where(Job.status == JobStatus.completed, Job.request["effects_resume_work_id"].astext.is_(None))
+        )
+        .scalars()
+        .all()
+    )
     jobs_by_id = {str(j.id): j for j in all_completed}
     jobs_by_id[company_job_id] = company_job
 
@@ -272,7 +280,11 @@ def resolve_implementation_contracts(
         candidates: dict[str, list[Job]] = {}
         for ij in session.execute(
             select(Job)
-            .where(Job.address.in_(list(impl_addrs_needed)), Job.status == JobStatus.completed)
+            .where(
+                Job.address.in_(list(impl_addrs_needed)),
+                Job.status == JobStatus.completed,
+                Job.request["effects_resume_work_id"].astext.is_(None),
+            )
             .order_by(Job.updated_at.desc(), Job.created_at.desc(), Job.id.desc())
         ).scalars():
             if not ij.address:

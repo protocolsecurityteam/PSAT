@@ -30,8 +30,6 @@ from db.models import (
     FunctionPrincipal,
     JobStatus,
     PrincipalLabel,
-    TokenDeliveryEvidence,
-    TokenProtocolReference,
     UpgradeEvent,
 )
 from services.aggregations.company_overview import (
@@ -53,12 +51,6 @@ from utils.balance_status import (
     ASSET_SET_STATUS_AT_PAGE_CAP,
     ASSET_SET_STATUS_RETURNED_ASSETS,
     BALANCE_WRITER_TVL,
-    DELIVERY_SHAPE_FAN_OUT_ALL,
-    DELIVERY_SHAPE_HAS_DIRECT_DELIVERY,
-    DELIVERY_SHAPE_NOT_DETERMINED,
-    TOKEN_REFERENCE_ABSENT_FROM_UNIVERSE,
-    TOKEN_REFERENCE_IN_UNIVERSE,
-    TOKEN_REFERENCE_NOT_DETERMINED,
 )
 
 pytestmark = requires_postgres
@@ -100,7 +92,13 @@ def test_prefetch_balance_provenance_is_narrow_and_keeps_both_current_fetches(db
                 contract_id=contract.id, fetch_id=historical.id, token_address=_addr("old"), raw_balance="1"
             ),
             ContractBalance(contract_id=contract.id, fetch_id=tokens.id, token_address=_addr("token"), raw_balance="2"),
-            ContractBalance(contract_id=contract.id, fetch_id=native.id, token_address=None, raw_balance="3"),
+            ContractBalance(
+                contract_id=contract.id,
+                fetch_id=native.id,
+                token_address=None,
+                raw_balance="3",
+                source="pinned_native_read",
+            ),
         ]
     )
     db_session.commit()
@@ -116,12 +114,17 @@ def test_prefetch_balance_provenance_is_narrow_and_keeps_both_current_fetches(db
     finally:
         event.remove(engine, "before_cursor_execute", capture)
     provenance = children["balance_fetches"]
-    assert set(provenance) == {tokens.id, native.id}
-    assert historical.id not in provenance and failed.id not in provenance
-    assert provenance[tokens.id].asset_set_status == "at_page_cap"
+    assert set(provenance) == {historical.id, native.id}
+    assert tokens.id not in provenance and failed.id not in provenance
+    assert provenance[historical.id].asset_set_status == "returned_assets"
     assert provenance[native.id].chain_id == 8453
     assert not any("typed_assets" in sql or "asset_set_basis" in sql for sql in statements)
-    assert {b.fetch_id for b in children["balances"][contract.id]} == {tokens.id, native.id}
+    payload = build_company_overview(db_session, p.name)
+    entry = next(e for e in payload["contracts"] if e["address"] == addr)
+    native_row = next(b for b in entry["balances"] if b["token_address"] is None)
+    assert native_row["source"] == "pinned_native_read"
+
+    assert {b.fetch_id for b in children["balances"][contract.id]} == {historical.id, native.id}
 
 
 def test_resolve_company_jobs_protocol_path(db_session):
@@ -2498,15 +2501,8 @@ def test_a_long_list_the_fetch_paged_to_exhaustion_is_not_read_as_truncated(db_s
     assert entry["holdings_coverage"]["state"] == "not_determined"
 
 
-def test_an_airdrop_delivered_row_is_published_labelled_and_not_presented_as_a_holding(db_session):
-    """§10.6.9. The row stays, carries both shapes, and the disposition is counted.
-
-    Four rows on one account: one that meets every disposition conjunct, one with a
-    direct delivery on record, one nobody measured, and one that is airdrop-delivered
-    but named by the protocol's OWN discovery — the HEX / WETH / base USDC shape.
-    Only the first is disposed, and it is disposed by LABEL — never by removal, and
-    never by a claim about what it is worth.
-    """
+def test_priced_and_unpriced_holdings_remain_visible_without_classification(db_session):
+    """Unpriced positions remain visible and only known dollar values enter the total."""
     p = _add_protocol(db_session, f"e2e-airdrop-{uuid.uuid4().hex[:8]}")
     addr = _addr("air1")
     job = _add_job(db_session, address=addr, protocol_id=p.id, name="Holder")
@@ -2543,68 +2539,6 @@ def test_an_airdrop_delivered_row_is_published_labelled_and_not_presented_as_a_h
             )
         ]
     )
-    db_session.add_all(
-        [
-            TokenDeliveryEvidence(
-                chain_id=1,
-                holder_address=addr.lower(),
-                token_address=junk.lower(),
-                scanned_from_block=0,
-                measured_through_block=100,
-                deliveries=[{"tx": "0x01", "log_index": 1, "fan_out": 400, "fan_out_basis": "receipt"}],
-                delivery_count=1,
-                unreadable_deliveries=0,
-                min_fan_out=400,
-                fan_out_threshold_k=25,
-                delivery_shape=DELIVERY_SHAPE_FAN_OUT_ALL,
-                basis="scan 0..100",
-            ),
-            TokenDeliveryEvidence(
-                chain_id=1,
-                holder_address=addr.lower(),
-                token_address=real.lower(),
-                scanned_from_block=0,
-                measured_through_block=100,
-                deliveries=[{"tx": "0x02", "log_index": 1, "fan_out": 1, "fan_out_basis": "receipt"}],
-                delivery_count=1,
-                unreadable_deliveries=0,
-                min_fan_out=1,
-                fan_out_threshold_k=25,
-                delivery_shape=DELIVERY_SHAPE_HAS_DIRECT_DELIVERY,
-                basis="scan 0..100",
-            ),
-            TokenDeliveryEvidence(
-                chain_id=1,
-                holder_address=addr.lower(),
-                token_address=spared.lower(),
-                scanned_from_block=0,
-                measured_through_block=100,
-                deliveries=[{"tx": "0x04", "log_index": 1, "fan_out": 399, "fan_out_basis": "receipt"}],
-                delivery_count=1,
-                unreadable_deliveries=0,
-                min_fan_out=399,
-                fan_out_threshold_k=25,
-                delivery_shape=DELIVERY_SHAPE_FAN_OUT_ALL,
-                basis="scan 0..100",
-            ),
-        ]
-    )
-    db_session.add_all(
-        [
-            TokenProtocolReference(
-                protocol_id=p.id,
-                chain_id=1,
-                token_address=token.lower(),
-                reference_shape=shape,
-                universe_addresses=4,
-                basis="universe of 4 addresses, chain-blind",
-            )
-            for token, shape in (
-                (junk, TOKEN_REFERENCE_ABSENT_FROM_UNIVERSE),
-                (spared, TOKEN_REFERENCE_IN_UNIVERSE),
-            )
-        ]
-    )
     db_session.commit()
 
     payload = build_company_overview(db_session, p.name)
@@ -2613,42 +2547,15 @@ def test_an_airdrop_delivered_row_is_published_labelled_and_not_presented_as_a_h
 
     # (a) STILL RETURNED. A suppressed row would be an unwitnessed deletion.
     assert set(by_symbol) == {"JUNK", "REAL", "UNK", "SPARED"}
-    # (b) LABELLED on both planes — with the evidence row's own basis.
-    assert by_symbol["JUNK"]["delivery_shape"] == DELIVERY_SHAPE_FAN_OUT_ALL
-    assert by_symbol["JUNK"]["delivery_shape_basis"] == "scan 0..100"
-    assert by_symbol["JUNK"]["reference_shape"] == TOKEN_REFERENCE_ABSENT_FROM_UNIVERSE
-    assert by_symbol["JUNK"]["disposition_state"] == "disposed"
-    # The three fail-closed directions: an earned negative, an unmeasured pair, and a
-    # mass-distributed token the protocol's own discovery names. NONE is disposed.
-    assert by_symbol["REAL"]["delivery_shape"] == DELIVERY_SHAPE_HAS_DIRECT_DELIVERY
-    assert by_symbol["UNK"]["delivery_shape"] == DELIVERY_SHAPE_NOT_DETERMINED
-    assert by_symbol["UNK"]["delivery_shape_basis"] is None
-    assert by_symbol["UNK"]["reference_shape"] == TOKEN_REFERENCE_NOT_DETERMINED
-    assert by_symbol["SPARED"]["delivery_shape"] == DELIVERY_SHAPE_FAN_OUT_ALL
-    assert by_symbol["SPARED"]["reference_shape"] == TOKEN_REFERENCE_IN_UNIVERSE
-    assert [by_symbol[s]["disposition_state"] for s in ("REAL", "UNK", "SPARED")] == ["presented"] * 3
-    # (c) COUNTED, as named numbers rather than an inference from the rows — and the
-    # two counts are DIFFERENT, which is the whole point: two rows arrived as mass
-    # distributions and only one of them is withheld.
-    cov = entry["holdings_coverage"]
-    assert cov["airdrop_delivered_rows"] == 2
-    assert cov["disposed_rows"] == 1
-    assert "worth" in cov["delivery_shape_reading"]
-    # The priced row's dollars are untouched: delivery shape is not a price.
+    # Delivery history is not part of the holdings presentation.
+    assert all("disposition_state" not in row and "delivery_shape" not in row for row in by_symbol.values())
+    assert by_symbol["JUNK"]["usd_value"] is None
+    assert "disposed_rows" not in entry["holdings_coverage"]
     assert entry["total_usd"] == 700.0
 
 
-def test_a_priced_airdrop_delivered_row_is_presented_and_counts_toward_the_total(db_session):
-    """A priced holding is a real dollar figure whatever the shape of its arrival.
-
-    Both other conjuncts hold here — mass-distributed AND absent from the protocol's
-    universe — and the price alone keeps the row a presented holding, because a
-    number was determined for it and delivery evidence cannot unmake that number.
-
-    The census's ``fan_out_all`` readings are all unpriced today, so this shape does
-    not occur on the corpus — which is exactly why it is pinned here rather than left
-    to the coincidence.
-    """
+def test_priced_holding_counts_toward_total_without_classification(db_session):
+    """Pricing a positive holding requires no delivery-history classification."""
     p = _add_protocol(db_session, f"e2e-airdrop-priced-{uuid.uuid4().hex[:8]}")
     addr = _addr("airp1")
     job = _add_job(db_session, address=addr, protocol_id=p.id, name="PricedHolder")
@@ -2677,41 +2584,13 @@ def test_a_priced_airdrop_delivered_row_is_presented_and_counts_toward_the_total
             observed_address=addr,
         )
     )
-    db_session.add(
-        TokenDeliveryEvidence(
-            chain_id=1,
-            holder_address=addr.lower(),
-            token_address=token.lower(),
-            scanned_from_block=0,
-            measured_through_block=100,
-            deliveries=[{"tx": "0x03", "log_index": 1, "fan_out": 900, "fan_out_basis": "receipt"}],
-            delivery_count=1,
-            unreadable_deliveries=0,
-            min_fan_out=900,
-            fan_out_threshold_k=25,
-            delivery_shape=DELIVERY_SHAPE_FAN_OUT_ALL,
-            basis="scan 0..100",
-        )
-    )
-    db_session.add(
-        TokenProtocolReference(
-            protocol_id=p.id,
-            chain_id=1,
-            token_address=token.lower(),
-            reference_shape=TOKEN_REFERENCE_ABSENT_FROM_UNIVERSE,
-            universe_addresses=4,
-            basis="universe of 4 addresses, chain-blind",
-        )
-    )
     db_session.commit()
 
     payload = build_company_overview(db_session, p.name)
     entry = next(e for e in payload["contracts"] if e["address"] == addr)
-    assert entry["balances"][0]["delivery_shape"] == DELIVERY_SHAPE_FAN_OUT_ALL
-    assert entry["balances"][0]["reference_shape"] == TOKEN_REFERENCE_ABSENT_FROM_UNIVERSE
-    assert entry["balances"][0]["disposition_state"] == "presented"
-    assert entry["holdings_coverage"]["airdrop_delivered_rows"] == 1
-    assert entry["holdings_coverage"]["disposed_rows"] == 0
+    assert "disposition_state" not in entry["balances"][0]
+    assert "delivery_shape" not in entry["balances"][0]
+    assert "disposed_rows" not in entry["holdings_coverage"]
     assert entry["total_usd"] == 1234.0
 
 
@@ -3124,3 +3003,75 @@ def test_fund_flow_capabilities_agree_with_controls_detail(db_session):
     target_entry = next(c for c in payload["contracts"] if c["address"] == t_addr)
     assert "upgradeable" in target_entry["capabilities"]
     assert "upgradeable" not in flow["capabilities"]
+
+
+def test_pending_balance_effects_are_visible_and_prevent_settled_score(db_session):
+    from db.models import PendingEffectsWork
+    from services.aggregations.company_overview.payload import _balance_effects_coverage
+    from services.scoring.planes.provenance import perimeter_state
+
+    protocol = _add_protocol(db_session, f"pending-balances-{uuid.uuid4().hex[:8]}")
+    address = _addr("pending-balances")
+    job = _add_job(db_session, address=address, protocol_id=protocol.id, status=JobStatus.completed)
+    contract = _add_contract(db_session, address=address, job=job, protocol_id=protocol.id)
+    function = EffectiveFunction(
+        contract_id=contract.id,
+        deployment_address=address,
+        selector="0x12345678",
+        function_name="withdraw",
+        abi_signature="withdraw()",
+    )
+    db_session.add(function)
+    db_session.flush()
+    pending = PendingEffectsWork(
+        protocol_id=protocol.id,
+        contract_id=contract.id,
+        function_id=function.id,
+        chain_id=8453,
+        deployment_address=address,
+        effect_family="value_out",
+        state="degraded",
+    )
+    db_session.add(pending)
+    db_session.flush()
+    assert _balance_effects_coverage(db_session, protocol) == {"incomplete": 1, "degraded": 1}
+    state, evidence = perimeter_state(db_session, protocol.id)
+    assert state == "unsettled"
+    assert evidence["pending_balance_effects"] == 1
+    pending.state = "complete"
+    db_session.flush()
+    assert _balance_effects_coverage(db_session, protocol) == {"incomplete": 0, "degraded": 0}
+    assert perimeter_state(db_session, protocol.id)[0] == "settled"
+
+
+def test_effects_recovery_keeps_original_analysis_and_alias_metadata(db_session):
+    p = _add_protocol(db_session, f"recovery-surface-{uuid.uuid4().hex[:8]}")
+    address = _addr("recovery-alias")
+    original = _add_job(db_session, address=address, protocol_id=p.id, request={"chain": "mainnet"})
+    contract = _add_contract(db_session, address=address, job=original, protocol_id=p.id, chain="mainnet")
+    recovery = _add_job(db_session, address=address, protocol_id=p.id, request={"chain": "ethereum"})
+    assert recovery.request is not None
+    recovery.request = dict(recovery.request, effects_resume_work_id=42, effects_function_ids=[1])
+    recovery.updated_at = original.updated_at + timedelta(minutes=1)
+    db_session.flush()
+    _, jobs = resolve_company_jobs(db_session, p.name)
+    assert [j.id for j in jobs] == [original.id]
+    assert prefetch_contracts(db_session, jobs)[original.id].id == contract.id
+
+
+def test_implementation_lookup_does_not_choose_effects_only_recovery(db_session):
+    p = _add_protocol(db_session, f"recovery-impl-{uuid.uuid4().hex[:8]}")
+    proxy_address, impl_address = _addr("recovery-proxy"), _addr("recovery-impl")
+    proxy = _add_job(db_session, address=proxy_address, protocol_id=p.id)
+    original = _add_job(db_session, address=impl_address, protocol_id=p.id)
+    _add_contract(
+        db_session, address=proxy_address, job=proxy, protocol_id=p.id, is_proxy=True, implementation=impl_address
+    )
+    _add_contract(db_session, address=impl_address, job=original, protocol_id=p.id)
+    retry = _add_job(db_session, address=impl_address, protocol_id=p.id)
+    assert retry.request is not None
+    retry.request = dict(retry.request, effects_resume_work_id=42)
+    retry.updated_at = original.updated_at + timedelta(minutes=1)
+    db_session.flush()
+    implementations, _ = resolve_implementation_contracts(db_session, [proxy], prefetch_contracts(db_session, [proxy]))
+    assert {j.id for j in implementations.values()} == {original.id}

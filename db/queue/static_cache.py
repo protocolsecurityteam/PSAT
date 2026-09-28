@@ -376,6 +376,7 @@ def find_existing_job_for_address(session: Session, address: str, chain: str | N
     stmt = select(Job).where(
         func.lower(Job.address) == address.lower(),
         Job.status != JobStatus.failed,
+        Job.request["effects_resume_work_id"].astext.is_(None),
     )
     # SQL-side chain filtering on ``jobs.chain_id`` (invariant 1). The M0.2
     # backfill populated every address-scoped row, so this is total;

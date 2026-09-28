@@ -172,7 +172,8 @@ def test_static_worker_parent_chain_name_never_none():
     assert _parent_chain_name(_row(request={}, address="0x1")) == "ethereum"
 
 
-def test_fetch_balances_passes_chain_id_to_etherscan(monkeypatch):
+@requires_postgres
+def test_fetch_balances_passes_chain_id_to_etherscan(monkeypatch, db_session):
     from workers.resolution_worker import ResolutionWorker
 
     captured: dict[str, object] = {}
@@ -199,15 +200,20 @@ def test_fetch_balances_passes_chain_id_to_etherscan(monkeypatch):
     pinned_native_unavailable(monkeypatch)
 
     worker = ResolutionWorker()
-    session = MagicMock()
-    job = _row(id="job-1", address="0x" + "11" * 20, request={"chain": "base"})
-    contract_row = _row(id=7, address=job.address, protocol_id=None)
+    from db.models import Contract
+
+    session = db_session
+    job = _row(id=uuid.uuid4(), address="0x" + "11" * 20, request={"chain": "base"})
+    contract_row = Contract(address=job.address, chain="base")
+    session.add(contract_row)
+    session.commit()
 
     worker._fetch_balances(session, job, contract_row, chain_id=_BASE_ID)
 
     assert captured["balance_chain"] == _BASE_ID
     assert captured["token_chain"] == _BASE_ID
-    assert captured["price_chain"] == _BASE_ID
+    # Base uses ETH: the collector intentionally shares its mainnet ETH quote.
+    assert captured["price_chain"] == 1
 
 
 # ---------------------------------------------------------------------------

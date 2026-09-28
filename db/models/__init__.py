@@ -7,6 +7,8 @@ re-exports the full former ``db.models`` module surface.
 
 from __future__ import annotations
 
+from .balance_collection import BalanceCollectionState
+from .balance_work import PendingEffectsWork
 from .balances import (
     CURSOR_BASIS_NOT_DETERMINED,
     DISAGREEMENTS_WITHHELD_SQL,
@@ -153,6 +155,8 @@ from .tokens import (
 )
 
 __all__ = [
+    "BalanceCollectionState",
+    "PendingEffectsWork",
     "ADMITTING_WITNESS_RULES",
     "AddressLabel",
     "Artifact",

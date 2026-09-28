@@ -241,6 +241,7 @@ def probe_contract_membership(
             select(Job)
             .where(func.lower(Job.address) == addr)
             .where(Job.status == JobStatus.completed)
+            .where(Job.request["effects_resume_work_id"].astext.is_(None))
             .order_by(Job.updated_at.desc(), Job.created_at.desc())
             .limit(1)
         )
@@ -331,6 +332,7 @@ def probe_contract_signature(
             select(Job)
             .where(func.lower(Job.address) == addr)
             .where(Job.status == JobStatus.completed)
+            .where(Job.request["effects_resume_work_id"].astext.is_(None))
             .order_by(Job.updated_at.desc(), Job.created_at.desc())
             .limit(1)
         )
@@ -442,6 +444,7 @@ def get_contract_capabilities(
             select(Job)
             .where(func.lower(Job.address) == addr)
             .where(Job.status == JobStatus.completed)
+            .where(Job.request["effects_resume_work_id"].astext.is_(None))
             .where(Job.chain_id == chain_id)
             .order_by(
                 Job.updated_at.desc(),
@@ -543,6 +546,7 @@ def company_semantic_capabilities(request: Request, company_name: str) -> dict[s
             select(Job).where(
                 Job.protocol_id == protocol_row.id,
                 Job.status == JobStatus.completed,
+                Job.request["effects_resume_work_id"].astext.is_(None),
                 Job.address.isnot(None),
             )
         ).scalars():

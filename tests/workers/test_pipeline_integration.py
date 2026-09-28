@@ -696,6 +696,8 @@ def test_resolution_worker_rewrites_address_for_impl_jobs(monkeypatch):
     from workers.resolution_worker import ResolutionWorker
 
     worker = ResolutionWorker()
+    # This test exercises proxy graph/state routing; collection has real-DB tests.
+    monkeypatch.setattr(worker, "_fetch_balances", lambda *args, **kwargs: None)
     session = MagicMock()
 
     job = _job(

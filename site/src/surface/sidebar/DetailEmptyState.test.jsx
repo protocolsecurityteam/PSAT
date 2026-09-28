@@ -182,3 +182,24 @@ describe("DetailEmptyState — freshness and value", () => {
     expect(screen.getByText("$3.2B")).toBeInTheDocument();
   });
 });
+
+
+describe("balance evidence coverage", () => {
+  it("shows incomplete dependent analysis even if jobs have completed", () => {
+    renderPanel({companyData: companyData({analysis_pending_balance_effects: {incomplete: 3, degraded: 1}})});
+    expect(screen.getByRole("status")).toHaveTextContent("3 balance-dependent analysis checks incomplete");
+    expect(screen.getByRole("status")).toHaveTextContent("1 await recovery after retries");
+  });
+  it("preserves the single tracked TVL value, measured zero, and partial metadata", () => {
+    renderPanel({companyData: companyData({tvl: {total_usd: 0, defillama_tvl: 1000000,
+      holdings_partial: true, valuation_partial: true}})});
+    expect(screen.getByText("$0.00")).toBeInTheDocument();
+    expect(screen.getByText(/TVL · tracked · coverage partial\/unknown/)).toBeInTheDocument();
+    expect(screen.queryByText("$1.0M")).not.toBeInTheDocument();
+  });
+  it("keeps the existing DefiLlama fallback when tracked TVL is unavailable", () => {
+    renderPanel({companyData: companyData({tvl: {total_usd: null, defillama_tvl: 1000000}})});
+    expect(screen.getByText(/TVL · DefiLlama/)).toBeInTheDocument();
+    expect(screen.queryByText(/coverage partial/)).not.toBeInTheDocument();
+  });
+});

@@ -8,8 +8,9 @@ from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
+from sqlalchemy import select
 
-from db.models import ContractBalance, ContractBalanceFetch
+from db.models import Contract, ContractBalance, ContractBalanceFetch
 from tests.conftest import DATABASE_URL as _DB_URL
 from tests.conftest import _can_connect, requires_postgres
 from tests.support.balance_stubs import page, pinned_native_unavailable
@@ -122,8 +123,8 @@ class TestProxyAddressOverride:
 
 
 def _added(session) -> list:
-    """Every object handed to ``session.add`` on a MagicMock session."""
-    return [c.args[0] for c in session.add.call_args_list if c.args]
+    """Durably published quantity and read-class observation rows."""
+    return list(session.scalars(select(ContractBalance))) + list(session.scalars(select(ContractBalanceFetch)))
 
 
 def _balance_rows(session) -> int:
@@ -145,13 +146,16 @@ def _fetch_rows(session) -> int:
 # ---------------------------------------------------------------------------
 
 
+@requires_postgres
 class TestFetchBalancesHappyPath:
     """ETH + token balances stored, price fetch failure handled gracefully."""
 
-    def test_stores_eth_and_tokens(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_stores_eth_and_tokens(self, monkeypatch: pytest.MonkeyPatch, db_session) -> None:
         worker = ResolutionWorker()
-        session = MagicMock()
-        fake_contract = SimpleNamespace(id=42, address=TARGET_ADDRESS, protocol_id=None)
+        session = db_session
+        fake_contract = Contract(address=TARGET_ADDRESS, chain="ethereum")
+        session.add(fake_contract)
+        session.commit()
         job = _job()
 
         monkeypatch.setattr(
@@ -163,7 +167,7 @@ class TestFetchBalancesHappyPath:
             lambda addr, *a, **k: page(
                 [
                     {
-                        "token_address": "0xtoken1",
+                        "token_address": "0x" + "a" * 40,
                         "token_name": "USDC",
                         "token_symbol": "USDC",
                         "decimals": 6,
@@ -178,17 +182,16 @@ class TestFetchBalancesHappyPath:
 
         cast(Any, worker)._fetch_balances(session, job, fake_contract, chain_id=1)
 
-        # 2 holdings rows: 1 ETH + 1 token. The third ``add`` is the
-        # ``ContractBalanceFetch`` provenance row, which is NOT a holding and is
-        # counted separately for exactly that reason.
+        # Native and token units commit independently, each with its own fetch.
         assert _balance_rows(session) == 2
-        assert _fetch_rows(session) == 1
-        session.commit.assert_called()
+        assert _fetch_rows(session) == 2
 
-    def test_price_failure_still_stores_eth(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_price_failure_still_stores_eth(self, monkeypatch: pytest.MonkeyPatch, db_session) -> None:
         worker = ResolutionWorker()
-        session = MagicMock()
-        fake_contract = SimpleNamespace(id=42, address=TARGET_ADDRESS, protocol_id=None)
+        session = db_session
+        fake_contract = Contract(address=TARGET_ADDRESS, chain="ethereum")
+        session.add(fake_contract)
+        session.commit()
         job = _job()
 
         monkeypatch.setattr(
@@ -202,15 +205,16 @@ class TestFetchBalancesHappyPath:
 
         # Should still add ETH balance even if price failed
         assert _balance_rows(session) == 1
-        assert _fetch_rows(session) == 1
-        session.commit.assert_called()
+        assert _fetch_rows(session) == 2
 
     def test_balance_fetch_exception_writes_no_holding_but_leaves_a_trace(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, db_session
     ) -> None:
         worker = ResolutionWorker()
-        session = MagicMock()
-        fake_contract = SimpleNamespace(id=42, address=TARGET_ADDRESS, protocol_id=None)
+        session = db_session
+        fake_contract = Contract(address=TARGET_ADDRESS, chain="ethereum")
+        session.add(fake_contract)
+        session.commit()
         job = _job()
 
         monkeypatch.setattr(
@@ -226,16 +230,20 @@ class TestFetchBalancesHappyPath:
         # the balance plane showing a plain absence. A provenance row now says
         # the read was attempted and failed.
         assert _balance_rows(session) == 0
-        fetches = _fetch_objects(session)
-        assert len(fetches) == 1
+        fetches = sorted(_fetch_objects(session), key=lambda f: f.native_status == "unattempted")
+        assert len(fetches) == 2
         assert fetches[0].native_status == NATIVE_STATUS_FETCH_FAILED
 
-    def test_non_eth_native_chain_stores_native_symbol(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_non_eth_native_chain_stores_native_symbol(self, monkeypatch: pytest.MonkeyPatch, db_session) -> None:
         """A BSC job records its native gas balance under BNB at the BNB quote,
         never an ETH label — the native asset comes from the chain registry."""
         worker = ResolutionWorker()
-        session = MagicMock()
-        fake_contract = SimpleNamespace(id=42, address=TARGET_ADDRESS, protocol_id=None)
+        session = db_session
+        fake_contract = Contract(address=TARGET_ADDRESS, chain="ethereum")
+        session.add(fake_contract)
+        session.commit()
+        fake_contract.chain = "bsc"
+        session.commit()
         job = _job(request={"chain": "bsc", "chain_id": 56})
 
         monkeypatch.setattr(
@@ -484,13 +492,16 @@ class TestMissingArtifactsRaise:
 # ---------------------------------------------------------------------------
 
 
+@requires_postgres
 class TestFetchBalancesZeroEth:
     """Zero ETH balance does not add an ETH row."""
 
-    def test_zero_eth_no_row(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_zero_eth_no_row(self, monkeypatch: pytest.MonkeyPatch, db_session) -> None:
         worker = ResolutionWorker()
-        session = MagicMock()
-        fake_contract = SimpleNamespace(id=42, address=TARGET_ADDRESS, protocol_id=None)
+        session = db_session
+        fake_contract = Contract(address=TARGET_ADDRESS, chain="ethereum")
+        session.add(fake_contract)
+        session.commit()
         job = _job()
 
         monkeypatch.setattr("services.clients.etherscan.get_eth_balance", lambda addr, *a, **k: 0)
@@ -505,11 +516,10 @@ class TestFetchBalancesZeroEth:
         # Etherscan path it is ``not_determined``, never ``proven_zero``: the
         # answer carries no height, so it proves zero at no height.
         assert _balance_rows(session) == 0
-        fetches = _fetch_objects(session)
-        assert len(fetches) == 1
+        fetches = sorted(_fetch_objects(session), key=lambda f: f.native_status == "unattempted")
+        assert len(fetches) == 2
         assert fetches[0].native_status == NATIVE_STATUS_NOT_DETERMINED
         assert fetches[0].block_number is None
-        session.commit.assert_called()
 
 
 # ---------------------------------------------------------------------------
@@ -517,6 +527,7 @@ class TestFetchBalancesZeroEth:
 # ---------------------------------------------------------------------------
 
 
+@requires_postgres
 class TestFetchBalancesProxyAddress:
     """Which address is read, and which row the answer is filed against.
 
@@ -530,10 +541,14 @@ class TestFetchBalancesProxyAddress:
     have a row.
     """
 
-    def test_an_unowned_proxy_address_is_not_read_against_a_foreign_row(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_an_unowned_proxy_address_is_not_read_against_a_foreign_row(
+        self, monkeypatch: pytest.MonkeyPatch, db_session
+    ) -> None:
         worker = ResolutionWorker()
-        session = MagicMock()
-        fake_contract = SimpleNamespace(id=42, address=TARGET_ADDRESS, protocol_id=None)
+        session = db_session
+        fake_contract = Contract(address=TARGET_ADDRESS, chain="ethereum")
+        session.add(fake_contract)
+        session.commit()
 
         captured_addrs: list[str] = []
 

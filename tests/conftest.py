@@ -41,6 +41,7 @@ _STORAGE_ENV_KEYS = (
 
 from db.models import (  # noqa: E402
     AuditContractCoverage,
+    BalanceCollectionState,
     Contract,
     ContractBalance,
     ContractBalanceFetch,
@@ -59,7 +60,6 @@ from db.models import (  # noqa: E402
     ProxyUpgradeEvent,
     RoleHolderPlane,
     RoleHolderPlaneRefresh,
-    TokenDeliveryEvidence,
     TvlSnapshot,
     UpgradeTransaction,
     WatchedProxy,
@@ -437,61 +437,6 @@ def _force_resolution_multicall_off(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _stub_balance_asset_sweep(monkeypatch):
-    """Keep the offline suite hermetic against the balance producers' escalation.
-
-    Both producers now escalate to a chain log sweep whenever Etherscan's asset
-    list comes back empty, at its page cap, or persistently unobtainable — and an
-    empty page is exactly what the stubbed wire returns in most balance tests, so
-    without this every one of them would issue real ``eth_getLogs`` traffic. The
-    stub returns "no contract was swept", which is the state those tests already
-    asserted against. The sweep's own arms (``test_asset_sweep.py``) call
-    ``sweep_holders`` / ``record_observation`` directly with a stubbed fetcher, so
-    they still exercise it."""
-    monkeypatch.setattr(
-        "services.monitoring.asset_sweep.sweep_head_block",
-        lambda *a, **kw: None,
-    )
-    monkeypatch.setattr(
-        "services.monitoring.asset_sweep.sweep_holders",
-        lambda addresses, **kwargs: ({}, kwargs.get("cost")),
-    )
-
-
-@pytest.fixture(autouse=True)
-def _stub_delivery_shape_rpc(monkeypatch):
-    """Balance tests must not read disposition heads/checkpoints from the wire.
-
-    Disposition owns its budgeted RPC reads independently of the asset sweep.
-    Model an unavailable head unless a test supplies its own wire; the dedicated
-    disposition fixtures override this stub and exercise the real scanner.
-    """
-
-    def _unavailable(*args, **kwargs):
-        raise RuntimeError("offline: disposition RPC unavailable")
-
-    monkeypatch.setattr("services.monitoring.delivery_shape.rpc_request", _unavailable)
-
-
-@pytest.fixture(autouse=True)
-def _clear_protocol_universe_memo():
-    """Start and end every test with no memoized protocol universe.
-
-    ``services.monitoring.delivery_shape`` memoizes the 26.5-second universe
-    assembly per PROCESS, keyed on the protocol and the discovery extent it was
-    built over. A pytest process is one process across every test in it, so a
-    universe a test built could otherwise be served to a later test that rebuilt
-    the same extent — the memo working exactly as designed, on a database whose
-    rows were rolled back underneath it. Cleared on both sides so neither the
-    arrival nor the departure of a test can carry one."""
-    from services.monitoring.delivery_shape import clear_protocol_universe_memo
-
-    clear_protocol_universe_memo()
-    yield
-    clear_protocol_universe_memo()
-
-
-@pytest.fixture(autouse=True)
 def _force_differential_probe_off(monkeypatch):
     """Keep the offline suite hermetic against the differential probe (default ON in
     code, so real runs need no env). With the flag on, in-process resolution tests
@@ -729,6 +674,7 @@ def db_session():
         # delete it before those get cascaded away via Protocol cleanup.
         for model in [
             AuditContractCoverage,
+            BalanceCollectionState,
             MonitoredEvent,
             MonitoredContract,
             ProtocolSubscription,
@@ -758,13 +704,6 @@ def db_session():
             # reruns don't couple lease state across unrelated passes.
             DaemonLease,
             IndexerWork,
-            # Delivery evidence is a fact about two ADDRESSES, so it carries no
-            # protocol FK and nothing above cascades it. That is right for
-            # production — the row outlives every fetch and every protocol that
-            # observed it — and it means this teardown is the only thing that
-            # can clear it between tests. Without this line one test's
-            # constructed fan-out becomes the next test's stored verdict.
-            TokenDeliveryEvidence,
             # Balance readings have TWO identity arms, and only one of them is
             # a ``contracts`` FK. An ENTITY-keyed row — a discovery-only
             # principal, ``contract_id`` NULL, named by ``(entity_chain,
@@ -780,7 +719,7 @@ def db_session():
             ContractBalance,
             ContractBalanceFetch,
             # Role planes are keyed by (chain, registry, role) and hold no FK
-            # anything above cascades — same shape as TokenDeliveryEvidence.
+            # anything above cascades.
             # A committed plane row left behind is the next test's stored
             # floor, and the refresh watermark would mark its registry
             # not-due, so both arms are swept together.

@@ -5,7 +5,7 @@ import { formatDelay, formatUsd, principalLabel, shortAddr } from "../format.js"
 import { machineFunctions, tabForLane } from "../lane.js";
 import { LANE_META, MACHINE_TABS, ROLE_META, TYPE_META } from "../meta.js";
 import { dedupeAndTagRows } from "../layout/governancePath.js";
-import { BalanceTable, isAirdropDelivered } from "./BalanceTable.jsx";
+import { BalanceTable } from "./BalanceTable.jsx";
 import { DependsOnTab } from "./DependsOnTab.jsx";
 import { GovernsTab } from "./GovernsTab.jsx";
 import { LaneColumn } from "./LaneColumn.jsx";
@@ -117,7 +117,7 @@ export function EntityCard({
         // present it as a position this contract took. The predicate is the
         // backend's own `disposition_state` — see BalanceTable: the withholding
         // rule is a conjunction and a consumer that re-derives it carries half.
-        balances: (machine.balances || []).filter((b) => !isAirdropDelivered(b)).length,
+        balances: (machine.balances || []).length,
         governs: canCallRows.length,
       }
     : { governs: canCallRows.length };

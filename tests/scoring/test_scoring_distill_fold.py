@@ -2218,3 +2218,55 @@ def test_role_holder_floors_are_scoped_to_the_protocol_being_scored(corpus, db_s
             RoleHolderPlane.registry_address.in_([registry, foreign_registry])
         ).delete(synchronize_session=False)
         db_session.commit()
+
+
+def test_targeted_recovery_keeps_original_asset_facts_and_sibling_signals(corpus):
+    from dataclasses import replace
+
+    from db.queue import store_artifact
+
+    contract = corpus.contract("0x" + "ad" * 20)
+    claim = _flow_out(None, None, "idiom_structural")
+    claim["witness"]["sink_receivers"] = {
+        "transfer": {"receiver_provenance": "contract_state_unresolved", "auto_getter_selector": "0x38d52e0f"}
+    }
+    flow = corpus.function(
+        contract,
+        name="withdraw",
+        selector="0x12345678",
+        claims=[claim],
+    )
+    corpus.function(
+        contract,
+        name="upgradeTo",
+        selector="0x87654321",
+        claims=[{"claim_id": "upgrade.implementation", "tier": "standard_exact", "witness": {}}],
+    )
+    store_artifact(
+        corpus.session,
+        corpus.job.id,
+        "flow_asset_addresses",
+        data={
+            "receivers": [
+                {
+                    "asset_getter_selector": "0x38d52e0f",
+                    "asset_address": VAULT,
+                    "asset_address_status": "resolved",
+                    "asset_identity_invariant": "immutable",
+                }
+            ]
+        },
+    )
+    expected = distill_job_signals(corpus.session, corpus.job)[contract.id]
+    retry = Job(
+        id=uuid.uuid4(),
+        protocol_id=corpus.protocol.id,
+        request={"effects_resume_work_id": 1, "effects_function_ids": [flow.id]},
+    )
+    corpus.session.add(retry)
+    corpus.session.flush()
+    resumed = distill_job_signals(corpus.session, retry, contract_ids=[contract.id])
+    assert set(resumed) == {contract.id}
+    assert {s.claim_id for s in resumed[contract.id]} == {"flow.out", "upgrade.implementation"}
+    assert [replace(s, job_id=corpus.job.id) for s in resumed[contract.id]] == expected
+    assert next(s for s in resumed[contract.id] if s.claim_id == "flow.out").gate_input("asset_identity").is_determined
