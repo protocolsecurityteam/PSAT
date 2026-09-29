@@ -1,3 +1,4 @@
+import { companyApi } from "../api/client.js";
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { ReactFlowProvider } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
@@ -154,6 +155,7 @@ function ProtocolSurface({
     if (!companyName) return undefined;
     setError(null);
     let cancelled = false;
+    const controller = new AbortController();
 
     const haveCompanyData = Boolean(initialData);
     // Fixtures (vitest, e2e) still embed functions on each contract,
@@ -171,11 +173,10 @@ function ProtocolSurface({
     // of payload inside the main endpoint); doing it alongside keeps the
     // canvas TTI down without waiting on the function inspector data.
     if (!haveCompanyData) {
-      fetch(`/api/company/${encodeURIComponent(companyName)}`)
-        .then((r) => {
-          if (!r.ok) throw new Error("Failed to load company overview");
-          return r.json();
-        })
+      Promise.all([
+        companyApi(`/api/company/${encodeURIComponent(companyName)}`, { signal: controller.signal }),
+        companyApi(`/api/company/${encodeURIComponent(companyName)}/summary`, { signal: controller.signal }),
+      ]).then(([overview, summary]) => ({ ...overview, ...summary }))
         .then((d) => {
           if (cancelled) return;
           setCompanyData(d);
@@ -200,8 +201,7 @@ function ProtocolSurface({
       setFunctionsLoading(true);
     } else {
       setFunctionsLoading(true);
-      fetch(`/api/company/${encodeURIComponent(companyName)}/functions`)
-        .then((r) => (r.ok ? r.json() : null))
+      companyApi(`/api/company/${encodeURIComponent(companyName)}/functions`, { signal: controller.signal })
         .then((d) => {
           if (cancelled) return;
           const incoming = d && typeof d === "object" && d.functions;
@@ -215,6 +215,7 @@ function ProtocolSurface({
 
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [companyName, initialData, initialFunctions]);
 

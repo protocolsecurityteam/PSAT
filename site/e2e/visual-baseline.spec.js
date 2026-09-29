@@ -105,6 +105,9 @@ async function setupPage(page) {
   }
 
   // Catch-all first so specific routes registered later take precedence.
+  await page.route(/\/api\/company\/[^/]+\/summary$/, (route) =>
+    route.fulfill({ contentType: "application/json", body: "{}" })
+  );
   await page.route(
     (url) => url.pathname.startsWith("/api/"),
     (route) => route.fulfill({ status: 200, contentType: "application/json", body: "{}" }),

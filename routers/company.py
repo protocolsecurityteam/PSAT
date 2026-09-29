@@ -7,8 +7,8 @@ import time
 from collections.abc import Iterable
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request, Response
-from sqlalchemy import func, or_, select
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.orm import aliased
 
 from db.models import AuditContractCoverage, AuditReport, Contract, Protocol
@@ -28,8 +28,9 @@ from services.aggregations.company_overview import (
     build_functions_for_protocol,
     resolve_company_jobs,
 )
+from services.aggregations.company_overview.jobs import eligible_company_names
 from services.audits.serializers import _audit_brief, _audit_report_to_dict
-from services.company_pages import cache_tag, read_response
+from services.company_pages import cache_tag, enabled, prepared_or_pending
 
 from . import deps
 
@@ -102,8 +103,8 @@ def company_overview(company_name: str, response: Response, request: Request) ->
     response.headers["X-PSAT-Fresh-Until"] = str(time.time() + 60)
     response.headers["Cache-Tag"] = cache_tag(company_name)
     with deps.SessionLocal() as session:
-        if prepared := read_response(session, request, company_name):
-            return prepared
+        if enabled():
+            return prepared_or_pending(session, request, company_name)
         response.headers["X-PSAT-Response-Source"] = "live"
         try:
             # cast: assemble_company_payload provably builds exactly this
@@ -166,8 +167,8 @@ def company_functions(company_name: str, response: Response, request: Request) -
     """
     started = time.monotonic()
     with deps.SessionLocal() as session:
-        if prepared := read_response(session, request, company_name, functions=True):
-            return prepared
+        if enabled():
+            return prepared_or_pending(session, request, company_name, section="functions")
         response.headers["X-PSAT-Response-Source"] = "live"
         response.headers["X-PSAT-Fresh-Until"] = str(time.time() + 60)
         response.headers["Cache-Tag"] = cache_tag(company_name)
@@ -484,3 +485,36 @@ def company_score(company_name: str) -> CompanyScoreResponse:
         finding_count=len(payload["findings"] or []),
     )
     return payload
+
+
+@router.get("/api/company/{company_name}/summary", response_model=None)
+def company_summary(company_name: str, request: Request) -> Response | dict:
+    from services.aggregations.company_overview.payload import build_company_summary
+
+    with deps.SessionLocal() as session:
+        if enabled():
+            return prepared_or_pending(session, request, company_name, section="summary")
+        try:
+            return build_company_summary(session, company_name)
+        except CompanyNotFound:
+            raise HTTPException(404, "Company not found") from None
+
+
+@router.post("/api/company/{company_name}/refresh", dependencies=[Depends(deps.require_admin_key)], status_code=202)
+def refresh_company(company_name: str) -> dict:
+    with deps.SessionLocal() as session:
+        identities = eligible_company_names(session)
+        if company_name not in identities:
+            raise HTTPException(404, "Company not found")
+        protocol_id = identities[company_name]
+        if not enabled():
+            raise HTTPException(409, "Prepared company responses are disabled")
+        # Touch revisions, never lock the result row held by a running builder.
+        keys = (
+            [f"protocol:{protocol_id}:manual", f"summary:protocol:{protocol_id}:manual"]
+            if protocol_id is not None
+            else ["legacy:job:manual"]
+        )
+        session.execute(text("SELECT psat_page_touch(:keys)"), {"keys": keys})
+        session.commit()
+    return {"status": "preparing"}

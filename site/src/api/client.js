@@ -59,9 +59,11 @@ export async function api(path, options = {}) {
     let message = response.status >= 500
       ? "The server is temporarily unavailable. Please try again."
       : `Request failed (${response.status}). Please try again.`;
+    let code;
     if (type.includes("application/json")) {
       try {
         const body = await response.json();
+        code = body.code;
         if (typeof body.detail === "string" && body.detail.length <= 300 && !/<[^>]+>/.test(body.detail)) {
           message = body.detail;
         }
@@ -72,6 +74,7 @@ export async function api(path, options = {}) {
     }
     const err = new Error(message);
     err.status = response.status;
+    err.code = code;
     throw err;
   }
   const type = response.headers.get("content-type") || "";
@@ -79,4 +82,31 @@ export async function api(path, options = {}) {
     return response.json();
   }
   return response.text();
+}
+
+
+// Preparation is shared by all readers. Retry only the server's explicit
+// preparing state, with a bounded wait and navigation cancellation.
+export async function companyApi(path, options = {}) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await api(path, options);
+    } catch (err) {
+      if (err.status !== 503 || err.code !== "company_preparing" || attempt >= 15) throw err;
+      await new Promise((resolve, reject) => {
+        const signal = options.signal;
+        const abort = () => {
+          clearTimeout(timer);
+          signal?.removeEventListener("abort", abort);
+          reject(new DOMException("Request aborted", "AbortError"));
+        };
+        const timer = setTimeout(() => {
+          signal?.removeEventListener("abort", abort);
+          resolve();
+        }, 2000);
+        if (signal?.aborted) abort();
+        else signal?.addEventListener("abort", abort, { once: true });
+      });
+    }
+  }
 }

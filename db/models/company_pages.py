@@ -13,14 +13,23 @@ from .base import Base
 class CompanyPageSnapshot(Base):
     __tablename__ = "company_page_snapshots"
 
-    protocol_id: Mapped[int] = mapped_column(Integer, ForeignKey("protocols.id", ondelete="CASCADE"), primary_key=True)
-    company_name: Mapped[str | None] = mapped_column(String(255))
+    cache_key: Mapped[str] = mapped_column(String(300), primary_key=True)
+    protocol_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("protocols.id", ondelete="CASCADE"), unique=True
+    )
+    company_name: Mapped[str] = mapped_column(String(255), index=True)
     version: Mapped[str | None] = mapped_column(String(100))
     source_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     overview_gzip: Mapped[bytes | None] = mapped_column(LargeBinary)
     functions_gzip: Mapped[bytes | None] = mapped_column(LargeBinary)
     source_revisions: Mapped[dict[str, str | None] | None] = mapped_column(JSONB)
+    functions_source_revisions: Mapped[dict[str, str | None] | None] = mapped_column(JSONB)
+    functions_source_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    summary_gzip: Mapped[bytes | None] = mapped_column(LargeBinary)
+    summary_source_revisions: Mapped[dict[str, str | None] | None] = mapped_column(JSONB)
+    summary_source_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
     next_attempt_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

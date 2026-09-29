@@ -44,6 +44,7 @@ from db.models import (  # noqa: E402
     BalanceCollectionState,
     CompanyPagePurge,
     CompanyPageRevision,
+    CompanyPageSnapshot,
     Contract,
     ContractBalance,
     ContractBalanceFetch,
@@ -705,7 +706,6 @@ def db_session():
             # live 120s TTL under a per-process holder). Clear them so warm-DB
             # reruns don't couple lease state across unrelated passes.
             DaemonLease,
-            IndexerWork,
             # Balance readings have TWO identity arms, and only one of them is
             # a ``contracts`` FK. An ENTITY-keyed row — a discovery-only
             # principal, ``contract_id`` NULL, named by ``(entity_chain,
@@ -729,6 +729,8 @@ def db_session():
             RoleHolderPlaneRefresh,
             # Revision/outbox records intentionally survive source deletion.
             # Clear after every source-table teardown trigger has fired.
+            IndexerWork,
+            CompanyPageSnapshot,
             CompanyPagePurge,
             CompanyPageRevision,
         ]:

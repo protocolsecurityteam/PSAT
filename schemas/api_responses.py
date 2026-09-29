@@ -103,8 +103,8 @@ class CompanyOverviewResponse(TypedDict):
     company: str
     protocol_id: int | None
     contract_count: int
-    tvl: TvlSummary | None
-    analysis_pending_balance_effects: dict[str, int]
+    tvl: NotRequired[TvlSummary | None]
+    analysis_pending_balance_effects: NotRequired[dict[str, int]]
     contracts: list[dict[str, Any]]
     principals: list[dict[str, Any]]
     ownership_hierarchy: list[dict[str, Any]]

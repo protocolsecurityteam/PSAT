@@ -299,13 +299,13 @@ def assemble_company_payload(
     jobs: list[Job],
     governance: GovernanceView,
     reach: ReachBlock,
+    *,
+    include_summary: bool = True,
 ) -> CompanyOverviewResponse:
-    return {
+    payload: CompanyOverviewResponse = {
         "company": name,
         "protocol_id": protocol_row.id if protocol_row else None,
         "contract_count": len(governance.contracts),
-        "tvl": _latest_tvl(session, protocol_row),
-        "analysis_pending_balance_effects": _balance_effects_coverage(session, protocol_row),
         "contracts": governance.contracts,
         "principals": governance.principals,
         "ownership_hierarchy": governance.hierarchy,
@@ -317,8 +317,23 @@ def assemble_company_payload(
         "all_addresses_count": _all_addresses_count(session, protocol_row, jobs),
     }
 
+    if include_summary:
+        payload["tvl"] = _latest_tvl(session, protocol_row)
+        payload["analysis_pending_balance_effects"] = _balance_effects_coverage(session, protocol_row)
+    return payload
 
-def build_company_overview(session: Session, name: str) -> CompanyOverviewResponse:
+
+def build_company_summary(session: Session, name: str) -> dict[str, Any]:
+    protocol = session.execute(select(Protocol).where(Protocol.name == name)).scalar_one_or_none()
+    if protocol is None and not session.scalar(select(Job.id).where(Job.company == name).limit(1)):
+        raise CompanyNotFound(name)
+    return {
+        "tvl": _latest_tvl(session, protocol),
+        "analysis_pending_balance_effects": _balance_effects_coverage(session, protocol),
+    }
+
+
+def build_company_overview(session: Session, name: str, *, include_summary: bool = True) -> CompanyOverviewResponse:
     timings_ms: dict[str, int] = {}
     start = time.monotonic()
 
@@ -335,7 +350,9 @@ def build_company_overview(session: Session, name: str) -> CompanyOverviewRespon
     with _time_phase(timings_ms, "compute_reach"):
         reach = _company_reach(session, contracts_by_job_id)
     with _time_phase(timings_ms, "assemble_payload"):
-        payload = assemble_company_payload(session, name, protocol_row, jobs, governance, reach)
+        payload = assemble_company_payload(
+            session, name, protocol_row, jobs, governance, reach, include_summary=include_summary
+        )
 
     total_ms = int((time.monotonic() - start) * 1000)
     logger.info(

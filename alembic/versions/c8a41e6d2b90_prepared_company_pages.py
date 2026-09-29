@@ -1,7 +1,7 @@
 """Add replace-in-place prepared company responses.
 
 Revision ID: c8a41e6d2b90
-Revises: b3d7e1f05a92
+Revises: d8e51f0a2b64
 """
 
 import sqlalchemy as sa
@@ -10,7 +10,7 @@ from sqlalchemy.dialects import postgresql
 from alembic import op
 
 revision = "c8a41e6d2b90"
-down_revision = "b3d7e1f05a92"
+down_revision = "d8e51f0a2b64"
 branch_labels = None
 depends_on = None
 

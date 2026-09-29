@@ -98,11 +98,11 @@ def test_prepared_get_reads_one_blob_and_never_writes(prepared, functions, encod
         ({}, b"fresh=1", False),
     ],
 )
-def test_explicit_fresh_reads_bypass_without_db_access(headers, query, operator, monkeypatch):
-    monkeypatch.setenv("PSAT_PREPARED_COMPANY_PAGES", "1")
-    session = MagicMock()
-    assert pages.read_response(session, request(headers, query, operator), "example") is None
-    session.execute.assert_not_called()
+def test_explicit_fresh_reads_validate_and_reuse(prepared, headers, query, operator):
+    session, protocol, factory = prepared
+    assert worker.refresh_one(factory) == "prepared"
+    assert pages.read_response(session, request(headers, query, operator), protocol.name) is not None
+    assert worker.refresh_one(factory) == "idle"
 
 
 @pytest.mark.parametrize("change", ["untracked", "future", "version", "rename", "missing", "disabled"])
@@ -168,9 +168,11 @@ def test_mark_during_build_survives_atomic_publication(prepared, monkeypatch):
 
 def test_worker_is_single_flight_and_never_rebuilds_unchanged_data(prepared, monkeypatch):
     session, protocol, factory = prepared
+    session.add(Page(cache_key=f"protocol:{protocol.id}", protocol_id=protocol.id, company_name=protocol.name))
+    session.commit()
     with factory() as lease:
-        lease.execute(text("SELECT pg_advisory_xact_lock(210031, 0)"))
-        assert worker.refresh_one(factory) == "leased"
+        lease.execute(select(Page.protocol_id).with_for_update())
+        assert worker.refresh_one(factory) == "idle"
     assert worker.refresh_one(factory) == "prepared"
     session.execute(
         update(Page).values(
@@ -264,7 +266,7 @@ def test_dirty_revision_rolls_back_with_producer(prepared):
 
 
 @pytest.mark.parametrize("encoding", ["gzip", "identity", "gzip;q=0", "*;q=1"])
-def test_full_api_serves_prepared_bytes_without_building_and_falls_back(prepared, monkeypatch, encoding):
+def test_full_api_serves_prepared_bytes_and_dirty_requests_never_build(prepared, monkeypatch, encoding):
     from fastapi.testclient import TestClient
 
     import api
@@ -294,9 +296,11 @@ def test_full_api_serves_prepared_bytes_without_building_and_falls_back(prepared
     session.execute(update(Contract).where(Contract.protocol_id == protocol.id).values(contract_name="Dirty"))
     session.commit()
     response = client.get(f"/api/company/{protocol.name}")
-    assert response.status_code == 200
-    assert response.headers["x-psat-response-source"] == "live"
-    overview.assert_called_once()
+    assert response.status_code == 503
+    assert response.json()["code"] == "company_preparing"
+    assert response.headers["retry-after"] == "2"
+    assert response.headers["cache-control"] == "private, no-store"
+    overview.assert_not_called()
 
 
 def test_overview_and_functions_share_repeatable_read_snapshot(prepared, monkeypatch):
@@ -329,7 +333,7 @@ def test_schema_version_and_name_change_rebuild(prepared, monkeypatch):
     session.execute(update(Page).values(next_attempt_at=datetime.now(timezone.utc) - timedelta(seconds=1)))
     session.execute(update(Protocol).where(Protocol.id == protocol.id).values(name="renamed"))
     session.commit()
-    monkeypatch.setenv("GIT_SHA", "new-version")
+    monkeypatch.setenv("PSAT_COMPANY_BUILD_REVISION", "new-version")
     assert worker.refresh_one(factory) == "prepared"
     assert pages.read_response(session, request(), "renamed") is not None
     assert pages.read_response(session, request(), "prepared-example") is None

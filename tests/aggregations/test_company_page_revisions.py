@@ -20,7 +20,6 @@ from db.models import (
     FunctionPrincipal,
     Job,
     JobStatus,
-    TokenDeliveryEvidence,
     TvlSnapshot,
 )
 from services import company_pages as pages
@@ -57,7 +56,21 @@ def test_reconciler_bookkeeping_never_rebuilds_or_enqueues_a_purge(prepared, mon
     builder = MagicMock(side_effect=AssertionError("Bookkeeping must not rebuild"))
     monkeypatch.setattr(worker, "build_company_overview", builder)
     for _ in range(3):
-        _finish_success(session, EnrollmentClaim(protocol.id, datetime.now(timezone.utc), 0, uuid4()))
+        from db.models import MonitoringEnrollmentQueue
+
+        dirty = datetime.now(timezone.utc)
+        lease = uuid4()
+        session.add(
+            MonitoringEnrollmentQueue(
+                protocol_id=protocol.id,
+                dirty_at=dirty,
+                lease_id=lease,
+                lease_expires_at=dirty + timedelta(minutes=5),
+                reason="test",
+            )
+        )
+        session.commit()
+        _finish_success(session, EnrollmentClaim(protocol.id, dirty, 0, lease))
         assert worker.refresh_one(factory) == "idle"
         response = pages.read_response(session, request(), protocol.name)
         assert response is not None and response.body == original
@@ -316,7 +329,8 @@ def test_tvl_and_pending_member_inventory_changes_invalidate(prepared):
     assert worker.refresh_one(factory) == "prepared"
     session.add(TvlSnapshot(protocol_id=protocol.id, total_usd=123))
     session.commit()
-    assert pages.read_response(session, request(), protocol.name) is None
+    assert pages.read_response(session, request(), protocol.name) is not None
+    assert pages.read_response(session, request(), protocol.name, section="summary") is None
     ready(session)
     assert worker.refresh_one(factory) == "prepared"
     session.add(Contract(address=_addr("candidate"), nominated_protocol_id=protocol.id))
@@ -324,40 +338,21 @@ def test_tvl_and_pending_member_inventory_changes_invalidate(prepared):
     assert pages.read_response(session, request(), protocol.name) is None
 
 
-def test_balance_and_missing_delivery_evidence_track_the_observed_holder(prepared):
+def test_balance_changes_only_dirty_overview(prepared):
     session, protocol, factory = prepared
     contract = root_contract(session, protocol)
-    holder = _addr("different-observed-holder")
-    token = _addr("token")
     assert worker.refresh_one(factory) == "prepared"
-    balance = ContractBalance(contract_id=contract.id, token_address=token, raw_balance="100", observed_address=holder)
+    balance = ContractBalance(contract_id=contract.id, token_address=_addr("token"), raw_balance="100")
     session.add(balance)
     session.commit()
     assert pages.read_response(session, request(), protocol.name) is None
-    ready(session)
-    assert worker.refresh_one(factory) == "prepared"
-    dependencies = session.execute(select(Page.source_revisions)).scalar_one()
-    assert dependencies[f"holder:{holder}"] is None
-    session.add(
-        TokenDeliveryEvidence(
-            chain_id=1,
-            holder_address=holder,
-            token_address=token,
-            scanned_from_block=0,
-            measured_through_block=1,
-            deliveries=[],
-            delivery_count=0,
-            fan_out_threshold_k=25,
-            basis="test",
-        )
-    )
-    session.commit()
-    assert pages.read_response(session, request(), protocol.name) is None
+    assert pages.read_response(session, request(), protocol.name, functions=True) is not None
     ready(session)
     assert worker.refresh_one(factory) == "prepared"
     session.execute(delete(ContractBalance).where(ContractBalance.id == balance.id))
     session.commit()
     assert pages.read_response(session, request(), protocol.name) is None
+    assert pages.read_response(session, request(), protocol.name, functions=True) is not None
 
 
 def test_moving_a_member_invalidates_both_protocols(prepared):
@@ -402,9 +397,12 @@ def test_input_read_tables_have_transactional_triggers(prepared):
         "function_principals",
         "principal_labels",
         "upgrade_events",
+        "upgrade_transactions",
+        "contract_creation_witnesses",
         "contract_balances",
         "contract_balance_fetches",
         "tvl_snapshots",
+        "pending_effects_work",
         "function_score_signals",
         "token_protocol_reference",
         "token_delivery_evidence",

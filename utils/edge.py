@@ -29,6 +29,7 @@ CACHE_PATHS = (
     "/api/company/{company_name}",
     "/api/company/{company_name}/addresses",
     "/api/company/{company_name}/functions",
+    "/api/company/{company_name}/summary",
 )
 # Everything else under /api (including new routes) is operator-only by default.
 PUBLIC_READS = (

@@ -1,6 +1,6 @@
-import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { api } from "../api/client.js";
+import { api, companyApi } from "../api/client.js";
 import { useIsAdmin } from "../api/useIsAdmin.js";
 import { chainLabel } from "../surface/chainMeta.js";
 import { entityKey } from "../surface/entityKey.js";
@@ -32,7 +32,10 @@ function selectMissNotice(result, label) {
 
 export default function CompanyOverview({ companyName, onNavigateToSurface }) {
   const isAdmin = useIsAdmin();
-  const [data, setData] = useState(null);
+  const [structure, setData] = useState(null);
+  const [summary, setSummary] = useState(null);
+  const [summaryError, setSummaryError] = useState(null);
+  const data = useMemo(() => structure ? { ...structure, ...summary } : null, [structure, summary]);
   const [error, setError] = useState(null);
   const [requestAttempt, setRequestAttempt] = useState(0);
   const [auditCoverage, setAuditCoverage] = useState(null);
@@ -118,6 +121,8 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
     const controller = new AbortController();
     const options = { signal: controller.signal };
     setData(null);
+    setSummary(null);
+    setSummaryError(null);
     setError(null);
     setAuditCoverage(null);
     setFunctionData(null);
@@ -127,9 +132,12 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
     setSelectMiss(null);
     setAddressesModalOpen(false);
     setAuditsAdminOpen(false);
-    api(`/api/company/${encodeURIComponent(companyName)}`, options)
+    companyApi(`/api/company/${encodeURIComponent(companyName)}`, options)
       .then((d) => { if (!cancelled) setData(d); })
       .catch((e) => { if (!cancelled) setError(e.message); });
+    companyApi(`/api/company/${encodeURIComponent(companyName)}/summary`, options)
+      .then((s) => { if (!cancelled) setSummary(s); })
+      .catch((e) => { if (!cancelled) setSummaryError(e.message); });
     // Audit coverage is a separate concern — fetching it in parallel means
     // the overview still renders even if the audits pipeline hasn't been
     // wired up yet for this protocol. 404 / 500 / network errors are
@@ -141,7 +149,7 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
     // drop from ~3.3 MB to ~1.2 MB. Fetched in parallel and threaded
     // through to ProtocolSurface as initialFunctions so the embedded
     // surface doesn't have to re-fetch.
-    api(`/api/company/${encodeURIComponent(companyName)}/functions`, options)
+    companyApi(`/api/company/${encodeURIComponent(companyName)}/functions`, options)
       .then((d) => { if (!cancelled) setFunctionData(d?.functions || {}); })
       .catch((e) => { if (!cancelled) setFunctionError(e.message); });
     // Fetched here rather than inside ScoreBand so it travels in parallel with
@@ -247,6 +255,7 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
         </div>
       </section>
 
+      {summaryError && <p role="alert">Company summary unavailable: {summaryError}</p>}
       <ScoreBand
         companyName={companyName}
         contracts={contracts}

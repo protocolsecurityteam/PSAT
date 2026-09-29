@@ -79,15 +79,42 @@ def eligible_company_protocol_ids(session: Session) -> list[int]:
     completed jobs by address and chain instead. Address-bearing jobs have a
     non-null chain_id enforced by ck_jobs_chain_id_required_for_address.
     Project distinct scalar chain pairs, never job requests or ORM graphs.
-    Legacy company-only pages without a Protocol row continue to use live reads.
+    Legacy company-only identities are discovered separately for preparation.
     """
     rows = session.execute(
         select(Contract.protocol_id, Contract.chain, Job.chain_id)
         .join(Job, Contract.address == func.lower(Job.address))
-        .where(Contract.protocol_id.is_not(None), Job.status == JobStatus.completed, Job.address.is_not(None))
+        .where(
+            Contract.protocol_id.is_not(None),
+            Job.status == JobStatus.completed,
+            Job.address.is_not(None),
+            Job.request["effects_resume_work_id"].astext.is_(None),
+        )
         .distinct()
     )
     return sorted({pid for pid, chain, job_chain_id in rows if job_chain_id == _contract_chain_id(chain)})
+
+
+def eligible_company_names(session: Session) -> dict[str, int | None]:
+    """Small identity projection; legacy graphs are resolved only by the builder."""
+    companies: dict[str, int | None] = {
+        name: pid
+        for name, pid in session.execute(
+            select(Protocol.name, Protocol.id).where(Protocol.id.in_(eligible_company_protocol_ids(session)))
+        )
+    }
+    for name in session.scalars(
+        select(Job.company)
+        .where(
+            Job.company.is_not(None),
+            Job.company != "",
+            ~select(Protocol.id).where(Protocol.name == Job.company).exists(),
+        )
+        .distinct()
+    ):
+        if name is not None:
+            companies[name] = None
+    return companies
 
 
 def _job_chain_name(job: Job) -> str:
@@ -220,6 +247,7 @@ def prefetch_contracts(session: Session, jobs: list[Job]) -> dict[Any, Contract]
     Jobs whose Contract row was reassigned to a newer job by
     ``copy_static_cache`` are matched by ``(address, chain)``.
     """
+    track(session, "address", (job.address for job in jobs))
     company_job_ids = [j.id for j in jobs]
     contracts_by_job_id: dict[Any, Contract] = {}
     if company_job_ids:
