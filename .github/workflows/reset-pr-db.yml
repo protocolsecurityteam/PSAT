@@ -123,6 +123,14 @@ jobs:
           export DATABASE_URL
           uv run --no-sync alembic upgrade head
 
+      - name: Activate worker lifecycle
+        env:
+          PGPASSWORD: ${{ secrets.NEON_STAGING_PASSWORD }}
+          PREVIEW_DATABASE: ${{ steps.plan.outputs.database }}
+        run: |
+          psql "sslmode=require host=$NEON_STAGING_ADMIN_HOST user=$NEON_STAGING_ADMIN_USER dbname=$PREVIEW_DATABASE" \
+            -v ON_ERROR_STOP=1 -c "UPDATE worker_lifecycle SET paused = false WHERE id = 1;"
+
       - name: Start preview machines
         run: |
           mapfile -t machines < <(flyctl machines list -a "${{ steps.plan.outputs.app }}" --json \
