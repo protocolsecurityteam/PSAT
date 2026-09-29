@@ -22,6 +22,7 @@ import { useChainScope } from "./hooks/useChainScope.js";
 import { useAuditCoverage } from "./hooks/useAuditCoverage.js";
 import { useSurfaceModel } from "./hooks/useSurfaceModel.js";
 import { useReachOverlay } from "./hooks/useReachOverlay.js";
+import StaleBanner from "../shared/StaleBanner.jsx";
 
 // Audit-coverage highlight set — lives with the coverage hook; re-exported
 // here for existing importers (tests target this module's public surface).
@@ -46,6 +47,8 @@ function ProtocolSurface({
   // (vitest, e2e) still embed functions on each contract entry, so
   // fall back to those when neither prop is provided.
   const [companyData, setCompanyData] = useState(initialData);
+  // Only sections this surface fetched itself; a parent labels what it hands in.
+  const [sectionMetas, setSectionMetas] = useState([]);
   const { availableChains, activeChain, isMultichain, rescopeChain } = useChainScope({
     companyData,
     embedded,
@@ -154,6 +157,7 @@ function ProtocolSurface({
   useEffect(() => {
     if (!companyName) return undefined;
     setError(null);
+    setSectionMetas([]);
     let cancelled = false;
     const controller = new AbortController();
 
@@ -176,7 +180,10 @@ function ProtocolSurface({
       Promise.all([
         companyApi(`/api/company/${encodeURIComponent(companyName)}`, { signal: controller.signal }),
         companyApi(`/api/company/${encodeURIComponent(companyName)}/summary`, { signal: controller.signal }),
-      ]).then(([overview, summary]) => ({ ...overview, ...summary }))
+      ]).then(([overview, summary]) => {
+        if (!cancelled) setSectionMetas((current) => [...current, overview.meta, summary.meta]);
+        return { ...overview.data, ...summary.data };
+      })
         .then((d) => {
           if (cancelled) return;
           setCompanyData(d);
@@ -202,8 +209,9 @@ function ProtocolSurface({
     } else {
       setFunctionsLoading(true);
       companyApi(`/api/company/${encodeURIComponent(companyName)}/functions`, { signal: controller.signal })
-        .then((d) => {
+        .then(({ data: d, meta }) => {
           if (cancelled) return;
+          setSectionMetas((current) => [...current, meta]);
           const incoming = d && typeof d === "object" && d.functions;
           if (incoming && Object.keys(incoming).length > 0) {
             setLocallyFetched(incoming);
@@ -587,6 +595,7 @@ function ProtocolSurface({
 
   return (
     <div className="ps-surface ps-surface-fullscreen">
+      <StaleBanner metas={sectionMetas} />
       <SurfaceFilterPanel
         machines={allMachines}
         principals={visiblePrincipals}

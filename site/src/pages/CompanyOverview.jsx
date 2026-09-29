@@ -8,6 +8,7 @@ import { bytecodeVerifiedAudits } from "../audits/auditCoverage.js";
 import LoadingFallback from "../LoadingFallback.jsx";
 import ProtocolLogo from "../ProtocolLogo.jsx";
 import ScoreBand from "../score/ScoreBand.jsx";
+import StaleBanner from "../shared/StaleBanner.jsx";
 
 const ProtocolSurface = lazy(() => import("../surface/ProtocolSurface.jsx"));
 const AddressesModal = lazy(() => import("../addresses/AddressesModal.jsx"));
@@ -41,6 +42,7 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
   const [auditCoverage, setAuditCoverage] = useState(null);
   const [functionData, setFunctionData] = useState(null);
   const [functionError, setFunctionError] = useState(null);
+  const [sectionMeta, setSectionMeta] = useState({});
   const [addressesModalOpen, setAddressesModalOpen] = useState(false);
   const [auditsAdminOpen, setAuditsAdminOpen] = useState(false);
   const [score, setScore] = useState(null);
@@ -129,14 +131,16 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
     setFunctionError(null);
     setScore(null);
     setScoreError(null);
+    setSectionMeta({});
     setSelectMiss(null);
     setAddressesModalOpen(false);
     setAuditsAdminOpen(false);
+    const keepMeta = (section, meta) => setSectionMeta((current) => ({ ...current, [section]: meta }));
     companyApi(`/api/company/${encodeURIComponent(companyName)}`, options)
-      .then((d) => { if (!cancelled) setData(d); })
+      .then(({ data: d, meta }) => { if (!cancelled) { setData(d); keepMeta("overview", meta); } })
       .catch((e) => { if (!cancelled) setError(e.message); });
     companyApi(`/api/company/${encodeURIComponent(companyName)}/summary`, options)
-      .then((s) => { if (!cancelled) setSummary(s); })
+      .then(({ data: s, meta }) => { if (!cancelled) { setSummary(s); keepMeta("summary", meta); } })
       .catch((e) => { if (!cancelled) setSummaryError(e.message); });
     // Audit coverage is a separate concern — fetching it in parallel means
     // the overview still renders even if the audits pipeline hasn't been
@@ -150,7 +154,9 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
     // through to ProtocolSurface as initialFunctions so the embedded
     // surface doesn't have to re-fetch.
     companyApi(`/api/company/${encodeURIComponent(companyName)}/functions`, options)
-      .then((d) => { if (!cancelled) setFunctionData(d?.functions || {}); })
+      .then(({ data: d, meta }) => {
+        if (!cancelled) { setFunctionData(d?.functions || {}); keepMeta("functions", meta); }
+      })
       .catch((e) => { if (!cancelled) setFunctionError(e.message); });
     // Fetched here rather than inside ScoreBand so it travels in parallel with
     // the company payload: mounting the band only after /api/company answered
@@ -255,6 +261,7 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
         </div>
       </section>
 
+      <StaleBanner metas={Object.values(sectionMeta)} />
       {summaryError && <p role="alert">Company summary unavailable: {summaryError}</p>}
       <ScoreBand
         companyName={companyName}

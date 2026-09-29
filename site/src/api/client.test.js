@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { api, companyApi } from "./client.js";
+import { api, companyApi, SUPPORTED_PAYLOAD_SCHEMA } from "./client.js";
 import { setFetchHandler } from "../test/fetchMock.js";
 
 describe("API error messages", () => {
@@ -44,7 +44,7 @@ describe("company preparation", () => {
     try {
       const pending = companyApi("/api/company/example");
       await vi.advanceTimersByTimeAsync(2000);
-      await expect(pending).resolves.toEqual({ company: "example" });
+      await expect(pending).resolves.toMatchObject({ data: { company: "example" } });
       expect(calls).toBe(2);
     } finally { vi.useRealTimers(); }
   });
@@ -93,4 +93,50 @@ describe("company preparation", () => {
       expect(calls).toBe(1);
     } finally { vi.useRealTimers(); }
   });
+});
+
+function prepared(body, headers) {
+  return new Response(JSON.stringify(body), { headers: { "Content-Type": "application/json", ...headers } });
+}
+
+describe("company provenance", () => {
+  it("returns the body with its provenance headers", async () => {
+    setFetchHandler("/api/company/example/summary", () => prepared({ tvl: null }, {
+      "X-PSAT-Response-Source": "prepared-stale",
+      "X-PSAT-Prepared-At": "2026-09-29T10:00:00+00:00",
+      "X-PSAT-Stale-Reason": "data",
+      "X-PSAT-Payload-Schema": String(SUPPORTED_PAYLOAD_SCHEMA.summary),
+    }));
+    await expect(companyApi("/api/company/example/summary")).resolves.toEqual({
+      data: { tvl: null },
+      meta: {
+        source: "prepared-stale",
+        preparedAt: "2026-09-29T10:00:00+00:00",
+        staleReason: "data",
+        schema: SUPPORTED_PAYLOAD_SCHEMA.summary,
+      },
+    });
+  });
+
+  it.each([String(SUPPORTED_PAYLOAD_SCHEMA.functions + 1), null])(
+    "treats a prepared payload in schema %s as still preparing",
+    async (schema) => {
+      vi.useFakeTimers();
+      let calls = 0;
+      setFetchHandler("/api/company/example/functions", () => {
+        calls += 1;
+        const current = String(SUPPORTED_PAYLOAD_SCHEMA.functions);
+        return prepared({ functions: { calls } }, {
+          "X-PSAT-Response-Source": "prepared",
+          ...(calls === 1 ? (schema === null ? {} : { "X-PSAT-Payload-Schema": schema }) : { "X-PSAT-Payload-Schema": current }),
+        });
+      });
+      try {
+        const pending = companyApi("/api/company/example/functions");
+        await vi.advanceTimersByTimeAsync(2000);
+        await expect(pending).resolves.toMatchObject({ data: { functions: { calls: 2 } } });
+        expect(calls).toBe(2);
+      } finally { vi.useRealTimers(); }
+    },
+  );
 });
