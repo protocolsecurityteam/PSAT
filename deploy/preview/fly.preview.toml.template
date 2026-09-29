@@ -18,6 +18,11 @@ kill_timeout = 30
   PSAT_RESOLUTION_WORKERS = "2"
   PSAT_POLICY_WORKERS = "3"
   PSAT_POLICY_JOB_CONCURRENCY = "2"
+  # Live tests read the chain as of these finalized heights so eRPC's
+  # forever-cache replays repeat runs instead of billing Alchemy. The pipeline
+  # still analyzes everything; only its chain inputs are fixed. Roll forward
+  # by editing these (the first run at a new pin pays once to warm the cache).
+  PSAT_PIN_BLOCKS = "1:26079000,8453:51927000,10:157522000"
 
 [deploy]
   release_command = "uv run --no-sync alembic upgrade head"
