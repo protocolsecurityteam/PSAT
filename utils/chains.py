@@ -129,7 +129,7 @@ class ChainInfo:
     # proven Envio coverage and serves two roles:
     #   * it is the "event indexer enabled for this chain" signal (inv. 10); and
     #   * it is the NATIVE HyperSync query endpoint (``<chain>.hypersync.xyz``) that
-    #     the inline resolution repos (``event_logs_hypersync.py``,
+    #     the inline resolution scans (``predicate_evaluator/membership.py``,
     #     ``mapping_enumerator.py``) POST to directly with an ENVIO_API_TOKEN bearer.
     # The durable event indexer does NOT read this URL: it goes through the chain's
     # eRPC route, which fronts a HyperRPC (JSON-RPC) upstream carrying the Envio

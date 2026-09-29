@@ -496,64 +496,6 @@ def requeue_job(
     session.commit()
 
 
-def release_job_lease(
-    session: Session,
-    job_id: Any,
-    *,
-    lease_id: uuid.UUID,
-    reason: str = "graceful shutdown",
-) -> bool:
-    """Release the lease on a ``processing`` job so a sibling worker can
-    claim it immediately, without bumping ``retry_count`` or marking the
-    row as failed.
-
-    Use case: a worker receives SIGTERM mid-job (Fly machine drain,
-    auto-stop, OOM) and exits before the in-flight stage can complete.
-    The work didn't fail — the worker just had to stop. Without this
-    helper the row sits in ``processing`` until ``lease_expires_at``
-    fires (default 15min via ``DEFAULT_JOB_LEASE_TTL_S``), wedging any
-    downstream pipeline waiting on its output. Calling this on shutdown
-    collapses that 15min wait to ~0.
-
-    Race-safe: the SQL filter on ``lease_id`` makes the UPDATE a no-op
-    if the row is no longer leased to this caller. Two relevant races:
-      1. The main thread completed the job between SIGTERM landing and
-         the daemon-thread release: ``complete_job`` already cleared
-         ``lease_id``, so this UPDATE matches 0 rows and we report
-         "already handled" rather than overwriting completed status.
-      2. ``reclaim_stuck_jobs`` swept the row first: same outcome.
-
-    The conditional UPDATE replaces the in-memory ``_check_lease_or_raise``
-    pattern used elsewhere because we explicitly want a no-throw,
-    "best-effort idempotent release" semantic, not a raise-on-mismatch.
-
-    Returns ``True`` if this call performed the release, ``False`` if
-    the row was already released or no longer matched our lease.
-    """
-    result = session.execute(
-        text(
-            """
-            UPDATE jobs
-            SET status = 'queued',
-                worker_id = NULL,
-                lease_id = NULL,
-                lease_expires_at = NULL,
-                detail = :detail
-            WHERE id = :job_id
-              AND status = 'processing'
-              AND lease_id = :lease_id
-            """
-        ),
-        {"job_id": job_id, "lease_id": lease_id, "detail": f"Released lease: {reason}"},
-    )
-    session.commit()
-    # ``CursorResult.rowcount`` is the standard accessor for affected-row
-    # count; the typeshed stubs route through generic ``Result[Any]`` so
-    # pyright doesn't see the attribute. Guard with ``getattr`` to keep
-    # the strict-typecheck CI green without a noqa.
-    return int(getattr(result, "rowcount", 0)) > 0
-
-
 def fail_job_terminal(
     session: Session,
     job_id: Any,

@@ -561,18 +561,6 @@ def _pause_plan(ctx: ProbeContext, spec: calldata_synth.PausePlanInputs) -> Prob
 # ---------------------------------------------------------------------------
 
 
-def static_plan(effect: ObservedEffect, *, gate_ref: str = "", behavior_hash: str | None = None) -> ProbePlan:
-    """Wrap an already-computed :class:`ObservedEffect` as a ProbePlan whose
-    ``run`` just returns it. Convenience for stub probers."""
-    return ProbePlan(
-        effect_class=effect.effect_class,
-        scope=effect.scope,
-        run=lambda: effect,
-        gate_ref=gate_ref or effect.gate_ref,
-        behavior_hash=behavior_hash,
-    )
-
-
 __all__ = [
     "ProbeContext",
     "ProbePlan",
@@ -580,5 +568,4 @@ __all__ = [
     "HashResolver",
     "make_bytecode_hash_resolver",
     "default_prober",
-    "static_plan",
 ]

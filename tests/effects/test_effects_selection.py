@@ -2034,7 +2034,7 @@ def test_shape4_failed_contract_is_covered_by_its_own_job_too(db_session):
 def test_the_page_cap_signal_is_read_off_the_response_not_the_filtered_rows(monkeypatch):
     """The truncation discriminator's INPUT must not be a list a filter already thinned.
 
-    ``get_token_balances`` keeps an entry only when ``raw_balance > 0``, and the page-cap
+    ``get_token_balances_page`` keeps an entry only when ``raw_balance > 0``, and the page-cap
     check used to be evaluated on that filtered list — so a FULL page containing any
     zero-balance entry read as "not truncated", one line below the filter that destroyed
     the signal. The check now asks how many entries the ENDPOINT returned.
@@ -2059,7 +2059,7 @@ def test_the_page_cap_signal_is_read_off_the_response_not_the_filtered_rows(monk
     warnings: list[str] = []
     monkeypatch.setattr(etherscan.logger, "warning", lambda msg, *a: warnings.append(msg % a))
 
-    rows = etherscan.get_token_balances("0x" + "ab" * 20, 1)
+    rows = etherscan.get_token_balances_page("0x" + "ab" * 20, chain_id=1).rows
 
     assert len(rows) == cap - 1, "the zero-balance entry is still filtered out of the stored rows"
     # The stub re-serves page 1 for every request, so paging cannot reach a short
@@ -2070,5 +2070,5 @@ def test_the_page_cap_signal_is_read_off_the_response_not_the_filtered_rows(monk
     # NEGATIVE CONTROL: a genuinely short page reports nothing.
     monkeypatch.setattr(etherscan, "get", lambda *a, **k: {"result": page[:3]})
     warnings.clear()
-    etherscan.get_token_balances("0x" + "ac" * 20, 1)
+    etherscan.get_token_balances_page("0x" + "ac" * 20, chain_id=1)
     assert not [w for w in warnings if "FULL page" in w]
