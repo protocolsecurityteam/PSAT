@@ -198,8 +198,13 @@ def resolve_company_jobs(session: Session, name: str) -> tuple[Protocol | None, 
                 best_by_entity[key] = job
         return protocol_row, list(best_by_entity.values())
 
+    # Only completed rows have a response-relevant updated_at; heartbeats on
+    # in-progress jobs must not reorder legacy membership.
     company_job = session.execute(
-        select(Job).where(Job.company == name).order_by(Job.updated_at.desc()).limit(1)
+        select(Job)
+        .where(Job.company == name, Job.status == JobStatus.completed)
+        .order_by(Job.updated_at.desc())
+        .limit(1)
     ).scalar_one_or_none()
     if company_job is None:
         return None, []

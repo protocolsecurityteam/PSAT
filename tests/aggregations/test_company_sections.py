@@ -205,6 +205,27 @@ def test_legacy_company_is_prepared_and_new_descendants_invalidate(prepared):
     assert json.loads(bytes(response.body))["protocol_id"] == adopted.id
 
 
+def test_heartbeat_on_in_progress_company_job_does_not_change_legacy_membership(prepared):
+    from uuid import uuid4
+
+    from db.models import Job, JobStatus
+    from db.queue.jobs import heartbeat_job
+    from services.aggregations.company_overview import resolve_company_jobs
+
+    session, _, _ = prepared
+    name = "legacy-heartbeat"
+    lease = uuid4()
+    proxy = _add_job(session, address=_addr("legacy-proxy"), company=name, status=JobStatus.processing)
+    session.execute(update(Job).where(Job.id == proxy.id).values(lease_id=lease))
+    _add_job(session, address=_addr("legacy-root"), company=name)
+    # Implementation children carry no company; only the parent walk links them.
+    _add_job(session, address=_addr("legacy-impl"), request={"parent_job_id": str(proxy.id)})
+    before = {job.id for job in resolve_company_jobs(session, name)[1]}
+    heartbeat_job(session, proxy.id, lease_id=lease)
+    session.expire_all()
+    assert {job.id for job in resolve_company_jobs(session, name)[1]} == before
+
+
 def test_protocol_without_completed_members_does_not_wait_forever(prepared):
     from fastapi import HTTPException
 
