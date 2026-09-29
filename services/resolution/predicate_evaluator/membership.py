@@ -169,11 +169,7 @@ def _observed_event_key_words_from_hypersync(
     import time
 
     from services.resolution.adapters.event_indexed import _resolve_event_address
-    from services.resolution.repos.event_logs_hypersync import (
-        _data_words_from_log,
-        _logs_from_response,
-        _topics_from_log,
-    )
+    from services.resolution.hypersync_bound import data_words_from_log, logs_from_response, topics_from_log
     from services.resolution.repos.event_logs_pg import _event_keys, _normalize_word
 
     token = os.getenv("ENVIO_API_TOKEN") or getattr(outer_ctx, "meta", {}).get("hypersync_token")
@@ -199,7 +195,7 @@ def _observed_event_key_words_from_hypersync(
             import hypersync
         except Exception:
             return []
-        from services.resolution.repos.event_logs_hypersync import _hypersync_url_for_chain
+        from services.resolution.hypersync_bound import hypersync_url_for_chain
 
         scan_chain_id = getattr(outer_ctx, "chain_id", None)
         if not isinstance(scan_chain_id, int):
@@ -214,7 +210,7 @@ def _observed_event_key_words_from_hypersync(
         # set it in a multichain deployment or every chain's scan is pinned to one
         # endpoint; multichain routing must come from the registry (or per-eval
         # meta.hypersync_url), not this env var.
-        registry_url = _hypersync_url_for_chain(scan_chain_id)
+        registry_url = hypersync_url_for_chain(scan_chain_id)
         url = getattr(outer_ctx, "meta", {}).get("hypersync_url") or os.getenv("PSAT_HYPERSYNC_URL") or registry_url
         if not url:
             return []
@@ -260,15 +256,15 @@ def _observed_event_key_words_from_hypersync(
                 except Exception:
                     break
                 page_count += 1
-                for log in _logs_from_response(response):
-                    topics = _topics_from_log(log)
+                for log in logs_from_response(response):
+                    topics = topics_from_log(log)
                     if not topics:
                         continue
                     topic0 = topics[0].lower()
                     for hint in hints_by_address_topic.get((event_address, topic0), []):
                         keys = _event_keys(
                             topics,
-                            _data_words_from_log(log),
+                            data_words_from_log(log),
                             hint.get("topics_to_keys") or {},
                             hint.get("data_to_keys") or {},
                         )

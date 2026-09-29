@@ -13,8 +13,7 @@ height) and pin the complete fix:
     keeping-up cursor exact and demotes a stalled one;
   * the head pin can NOT strip an already-indexed denylist member: an address
     blocked in ``(pin, cursor]`` stays in the negated cofinite blacklist (gated),
-    never reading PUBLIC (the round-2 fail-open the reviewer reproduced);
-  * the HyperSync sibling demotes an unpinned ``to_block``.
+    never reading PUBLIC (the round-2 fail-open the reviewer reproduced).
 
 Real ``psat_test`` Postgres + the production ``PostgresEventLogRepo`` /
 ``EventIndexedAdapter`` (no monkeypatched fold); only rows are seeded.
@@ -22,7 +21,6 @@ Real ``psat_test`` Postgres + the production ``PostgresEventLogRepo`` /
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
 import pytest
@@ -36,7 +34,6 @@ from services.resolution.capability_resolver import (
     RESOLVER_FINALITY_MARGIN,
     _resolve_resolution_block,
 )
-from services.resolution.repos.event_logs_hypersync import HyperSyncEventLogRepo
 from services.resolution.repos.event_logs_pg import (
     PostgresEventLogRepo,
     _cursor_covers_block,
@@ -336,81 +333,3 @@ def test_pin_keeps_keeping_up_cursor_exact_and_demotes_stalled(db_session, monke
     else:
         assert result.confidence == "partial"
         assert result.partial_reason == "cursor_behind_block"
-
-
-# --------------------------------------------------------------------------- #
-# 5. HyperSync sibling: unpinned to_block demotes (defense-in-depth)          #
-# --------------------------------------------------------------------------- #
-
-
-class _FakeResponse:
-    next_block = None
-    data = None
-    logs: list[Any] = []
-
-
-class _FakeClient:
-    async def get(self, _query):
-        return _FakeResponse()
-
-
-@pytest.fixture
-def _stub_hypersync(monkeypatch):
-    monkeypatch.setattr(
-        "services.resolution.hypersync_bound.build_hypersync_client",
-        lambda *a, **k: _FakeClient(),
-    )
-
-
-def _hypersync_repo() -> HyperSyncEventLogRepo:
-    return HyperSyncEventLogRepo(from_block=0, bearer_token="test-token")
-
-
-def test_hypersync_fold_writes_unpinned_to_block_demotes(_stub_hypersync):
-    repo = _hypersync_repo()
-    result = asyncio.run(
-        repo._fold_event_writes_async(
-            event_address=EVENT_ADDRESS,
-            topic0=TOPIC_ADD,
-            topics_to_keys=_TOPICS_TO_KEYS,
-            data_to_keys={},
-            key_sources=_KEY_SOURCES,
-            direction="add",
-            to_block=None,
-        )
-    )
-    assert result.confidence == "partial"
-    assert result.partial_reason == "cursor_behind_block"
-
-
-def test_hypersync_fold_history_unpinned_to_block_demotes(_stub_hypersync):
-    repo = _hypersync_repo()
-    result = asyncio.run(
-        repo._fold_event_history_async(
-            event_address=EVENT_ADDRESS,
-            event_hints=[
-                {"topic0": TOPIC_ADD, "direction": "add", "topics_to_keys": _TOPICS_TO_KEYS, "data_to_keys": {}}
-            ],
-            key_sources=_KEY_SOURCES,
-            to_block=None,
-        )
-    )
-    assert result.confidence == "partial"
-    assert result.partial_reason == "cursor_behind_block"
-
-
-def test_hypersync_fold_writes_pinned_to_block_stays_exact(_stub_hypersync):
-    repo = _hypersync_repo()
-    result = asyncio.run(
-        repo._fold_event_writes_async(
-            event_address=EVENT_ADDRESS,
-            topic0=TOPIC_ADD,
-            topics_to_keys=_TOPICS_TO_KEYS,
-            data_to_keys={},
-            key_sources=_KEY_SOURCES,
-            direction="add",
-            to_block=5_000_000,
-        )
-    )
-    assert result.confidence == "enumerable"
-    assert result.partial_reason is None
