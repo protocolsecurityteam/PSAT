@@ -7,15 +7,10 @@ resolution) actually exercise the SQLAlchemy queries.
 
 from __future__ import annotations
 
-import sys
 import uuid
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-
 from sqlalchemy import event, select
 
 from db.models import (

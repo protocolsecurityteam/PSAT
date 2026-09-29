@@ -35,7 +35,6 @@ from tests.live.conftest import LiveClient
 # TellerWithMultiAssetSupport — Solmate ``Auth``; ``canCall`` delegates to
 # RolesAuthority 0x3994741a…; governing 4/6 Safe (ground-truthed on-chain).
 VEDA_TELLER = "0xe2acf9f80a2756e51d1e53f9f41583c84279fb1f"
-GOVERNING_SAFE = "0xcea8039076e35a825854c5c2f85659430b06ec96"
 _CANCALL_SELECTOR = "0xb7009613"  # keccak("canCall(address,address,bytes4)")[:4]
 
 # A Solmate ``requiresAuth`` guard survives into ``capability_expr`` differently
@@ -85,16 +84,6 @@ def _cancall_functions(ep: dict) -> list[dict]:
     ]
 
 
-def _finite_set_members(node: object, out: set[str]) -> None:
-    """Collect every ``finite_set`` member address anywhere in a capability tree."""
-    if isinstance(node, dict):
-        out.update(str(m).lower() for m in (node.get("members") or []))
-        for child in node.get("children") or []:
-            _finite_set_members(child, out)
-        if isinstance(node.get("signer"), dict):
-            _finite_set_members(node["signer"], out)
-
-
 def test_veda_teller_cancall_resolves_without_preempt(analyzed_veda_teller, live_client: LiveClient):
     """canCall is detected, dispatched, and resolved — never the pre-#104
     ``delegated_check_not_materialized`` inline-preempt dead-end."""
@@ -113,26 +102,4 @@ def test_veda_teller_cancall_resolves_without_preempt(analyzed_veda_teller, live
     resolved = [f for f in cancall if (f.get("capability_expr") or {}).get("kind") != "unsupported"]
     assert resolved, "every canCall-guarded function is unsupported — canCall resolution is not working"
 
-
-def test_veda_teller_cancall_recovers_governing_safe(analyzed_veda_teller, live_client: LiveClient):
-    """End-to-end recovery: canCall resolves to the real 4/6 governance Safe.
-
-    SKIPs when the Safe isn't among the resolved callers — that means the
-    RolesAuthority wasn't analyzed alongside (or its index is cold), so canCall
-    deferred to a probe. That's fail-safe, not a regression; the recovery path is
-    pinned deterministically offline.
-    """
-    ep = live_client.artifact(analyzed_veda_teller["job_id"], "effective_permissions")
-    if not isinstance(ep, dict):
-        pytest.skip("effective_permissions artifact not available")
-
-    members: set[str] = set()
-    for fn in ep.get("functions") or []:
-        _finite_set_members(fn.get("capability_expr") or {}, members)
-
-    if GOVERNING_SAFE not in members:
-        pytest.skip(
-            "governing Safe not in resolved callers — RolesAuthority not analyzed alongside / cold index, "
-            "so canCall deferred (fail-safe). Recovery pinned offline."
-        )
     # Reaching here means canCall recovered the real governance Safe end-to-end live.

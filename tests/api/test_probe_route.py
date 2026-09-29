@@ -839,7 +839,8 @@ def test_probe_membership_picks_most_recent_completed_job(api_client, db_session
             },
         }
 
-    store_artifact(db_session, older.id, "predicate_trees", data=_tree("OLD"))
+    # The older tree omits f(), so picking it would answer function_unguarded.
+    store_artifact(db_session, older.id, "predicate_trees", data={"schema_version": "semantic", "trees": {}})
     store_artifact(db_session, newer.id, "predicate_trees", data=_tree("NEW"))
     db_session.commit()
 
@@ -851,12 +852,6 @@ def test_probe_membership_picks_most_recent_completed_job(api_client, db_session
             "member": "0x" + "11" * 20,
         },
     )
-    # Equality leaf -> non_membership_leaf; that's expected. The
-    # point: the route picked the NEWER tree, so the leaf walks
-    # without finding membership data. We don't assert text equality
-    # on `expression` here because the field isn't surfaced in the
-    # response — the implicit pin is "no 500 / no stale-tree
-    # error", just the standard non-membership-leaf signal.
     assert resp.status_code == 200
     body = resp.json()
     assert body["leaf_kind"] == "equality"
