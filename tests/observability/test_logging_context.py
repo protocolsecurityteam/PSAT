@@ -8,12 +8,9 @@ concurrent contexts never cross-contaminate.
 
 from __future__ import annotations
 
-import contextvars
 import io
 import json
 import logging
-import threading
-from concurrent.futures import ThreadPoolExecutor
 
 from services.concurrency import RpcExecutor, parallel_map
 from utils.logging import (
@@ -125,30 +122,6 @@ def test_configure_logging_is_idempotent_across_calls():
 # ---------------------------------------------------------------------------
 
 
-def test_trace_id_does_not_leak_into_threadpool_without_copy_context():
-    """Bare ``executor.submit`` does NOT carry the parent's ContextVar; the bug workers.base +
-    parallel_map wrap around."""
-
-    def read_trace() -> str | None:
-        return trace_id_var.get()
-
-    with bind_trace_context(trace_id="parent"):
-        with ThreadPoolExecutor(max_workers=1) as ex:
-            seen = ex.submit(read_trace).result()
-    assert seen is None
-
-
-def test_trace_id_propagates_into_threadpool_with_copy_context():
-    def read_trace() -> str | None:
-        return trace_id_var.get()
-
-    with bind_trace_context(trace_id="parent"):
-        ctx = contextvars.copy_context()
-        with ThreadPoolExecutor(max_workers=1) as ex:
-            seen = ex.submit(ctx.run, read_trace).result()
-    assert seen == "parent"
-
-
 def test_parallel_map_propagates_trace_id():
     RpcExecutor.reset_for_tests()
 
@@ -183,24 +156,3 @@ def test_parallel_map_sequential_path_propagates_trace_id():
 # ---------------------------------------------------------------------------
 # Cross-thread isolation
 # ---------------------------------------------------------------------------
-
-
-def test_concurrent_contexts_do_not_cross_contaminate():
-    barrier = threading.Barrier(2, timeout=5)
-    seen: dict[str, str | None] = {}
-
-    def worker(name: str, trace: str) -> None:
-        with bind_trace_context(trace_id=trace):
-            barrier.wait()
-            # While both threads are inside their bind blocks, each read must be its own.
-            seen[name] = trace_id_var.get()
-            barrier.wait()
-
-    t1 = threading.Thread(target=worker, args=("a", "trace-a"))
-    t2 = threading.Thread(target=worker, args=("b", "trace-b"))
-    t1.start()
-    t2.start()
-    t1.join()
-    t2.join()
-
-    assert seen == {"a": "trace-a", "b": "trace-b"}

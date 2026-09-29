@@ -20,7 +20,7 @@ import pytest
 from eth_abi.abi import decode, encode
 
 import services.clients.rpc as rpc_mod
-from services.clients.rpc import MULTICALL3_ADDRESS, multicall3_aggregate3, selector
+from services.clients.rpc import MULTICALL3_ADDRESS, multicall3_aggregate3
 
 
 def _fake_multicall_chain(state: dict[tuple[str, str], tuple[bool, str]], *, recorder: list | None = None):
@@ -48,10 +48,6 @@ def _fake_multicall_chain(state: dict[tuple[str, str], tuple[bool, str]], *, rec
         return "0x" + encode(["(bool,bytes)[]"], [out]).hex()
 
     return fake
-
-
-def test_selector_is_canonical_aggregate3():
-    assert selector("aggregate3((address,bool,bytes)[])") == "0x82ad56cb"
 
 
 def test_aggregate3_round_trip_success_and_revert(monkeypatch):

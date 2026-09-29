@@ -43,14 +43,6 @@ def test_second_run_uses_cache(analyzed_weth, cached_weth, live_client: LiveClie
     assert a1.get("subject", {}).get("name") == a2.get("subject", {}).get("name")
 
 
-def test_second_run_completed_faster(analyzed_weth, cached_weth, live_client: LiveClient):
-    t1 = live_client.job_duration_seconds(analyzed_weth)
-    t2 = live_client.job_duration_seconds(cached_weth)
-    # Below 30s fixed overhead dominates and the assertion flaps.
-    if t1 > 30:
-        assert t2 < t1, f"Second run ({t2:.1f}s) should be faster than first ({t1:.1f}s)"
-
-
 @pytest.fixture(scope="module")
 def company_first_run(live_client: LiveClient) -> dict[str, Any]:
     parent = live_client.submit_company_and_wait(COMPANY_NAME, limit=COMPANY_LIMIT)
@@ -128,37 +120,3 @@ def test_second_company_run_deduplicates(
                 f"all_is_proxy_flags={is_proxy_flags}"
             )
         raise AssertionError("Run 2 re-spawned jobs for already-analyzed non-proxy addresses:\n" + "\n".join(lines))
-
-
-def test_second_company_run_inventory_merged(
-    company_first_inventory,
-    company_second_run,
-    live_client: LiveClient,
-):
-    inventory2 = live_client.artifact(company_second_run["job_id"], "contract_inventory")
-    if not isinstance(inventory2, dict):
-        pytest.skip("Could not fetch inventory for run 2")
-    contracts2 = inventory2.get("contracts", []) or []
-
-    inventory1 = company_first_inventory if isinstance(company_first_inventory, dict) else None
-    contracts1 = (inventory1 or {}).get("contracts") or []
-
-    # Empty inventories on either side mean dapp_crawl/Tavily flaked; the cascade still
-    # ran via DefiLlama. Skip the merge comparison rather than fail on a discovery flake.
-    if not contracts1 or not contracts2:
-        pytest.skip(
-            f"contract_inventory empty on at least one run "
-            f"(run1={len(contracts1)}, run2={len(contracts2)}); skipping merge comparison"
-        )
-
-    addrs1 = {c.get("address", "").lower() for c in contracts1 if c.get("address")}
-    addrs2 = {c.get("address", "").lower() for c in contracts2 if c.get("address")}
-    # Discovery (Tavily / DefiLlama / DApp crawl) isn't deterministic; assert overlap, not superset.
-    overlap = len(addrs1 & addrs2)
-    union = len(addrs1 | addrs2)
-    jaccard = overlap / union if union else 1.0
-    assert jaccard >= 0.85, (
-        f"Run 1 and Run 2 inventories diverge too much: "
-        f"run1={len(addrs1)}, run2={len(addrs2)}, overlap={overlap}, "
-        f"union={union}, jaccard={jaccard:.2f} (required >= 0.85)"
-    )

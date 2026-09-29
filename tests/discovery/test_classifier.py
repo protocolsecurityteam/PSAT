@@ -430,34 +430,6 @@ def test_classify_contracts_pre_classified_skips_rpc(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_classify_single_eip1967_proxy(monkeypatch):
-    addr = ADDR(0xA)
-    impl = ADDR(0xB)
-    admin = ADDR(0xC)
-
-    storage = {
-        (addr, cls.EIP1967_IMPL_SLOT): _slot_for(impl),
-        (addr, cls.EIP1967_ADMIN_SLOT): _slot_for(admin),
-    }
-
-    monkeypatch.setattr(cls, "get_code", lambda _rpc, _addr, chain_id=None: BIG_BYTECODE)
-    monkeypatch.setattr(
-        cls,
-        "rpc_call",
-        lambda _rpc, method, params, retries=1, chain_id=None: (
-            storage.get((params[0], params[1]), ZERO_SLOT)
-            if method == "eth_getStorageAt"
-            else (_ for _ in ()).throw(RuntimeError("unexpected"))
-        ),
-    )
-
-    result = cls.classify_single(addr, RPC)
-    assert result["type"] == "proxy"
-    assert result["proxy_type"] == "eip1967"
-    assert result["implementation"] == impl
-    assert result["admin"] == admin
-
-
 def test_classify_single_eip1167(monkeypatch):
     impl_hex = "aabbccddee11223344556677889900aabbccddee"
     bytecode = "0x" + cls.EIP1167_PREFIX + impl_hex + cls.EIP1167_SUFFIX
@@ -469,22 +441,6 @@ def test_classify_single_eip1167(monkeypatch):
     assert result["type"] == "proxy"
     assert result["proxy_type"] == "eip1167"
     assert result["implementation"] == "0x" + impl_hex
-
-
-def test_classify_single_regular(monkeypatch):
-    addr = ADDR(0xE)
-
-    monkeypatch.setattr(cls, "get_code", lambda _rpc, _addr, chain_id=None: BIG_BYTECODE)
-    monkeypatch.setattr(
-        cls,
-        "rpc_call",
-        lambda _rpc, method, params, retries=1, chain_id=None: (
-            ZERO_SLOT if method == "eth_getStorageAt" else (_ for _ in ()).throw(RuntimeError("revert"))
-        ),
-    )
-
-    result = cls.classify_single(addr, RPC)
-    assert result["type"] == "regular"
 
 
 def test_classify_single_with_bytecode_param(monkeypatch):

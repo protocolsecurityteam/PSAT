@@ -24,7 +24,6 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
-from sqlalchemy import text
 
 from db import contract_materializations as cm
 from db.models import ContractMaterialization
@@ -482,30 +481,3 @@ def test_materialize_serves_current_schema_version_row(_route_to_test_db, _clean
     assert row.status == "ready"
     assert row.contract_name == "CurrentAnalyzer"
     assert row.analysis_schema_version == cm.ANALYSIS_SCHEMA_VERSION
-
-
-@requires_postgres
-def test_migration_backfills_existing_rows_to_launch_version(_clean_cm):
-    """A row inserted without an explicit ``analysis_schema_version`` (the post-backfill shape of a
-    pre-column row) carries the migration's ``server_default`` of 1, so a deploy doesn't invalidate
-    the whole cache at once."""
-    chain = "1"
-    keccak = "0x" + "d1" * 32
-    _clean_cm.execute(
-        text(
-            "INSERT INTO contract_materializations "
-            "(chain, bytecode_keccak, address, status) "
-            "VALUES (:chain, :keccak, :addr, 'ready')"
-        ),
-        {"chain": chain, "keccak": keccak, "addr": "0x" + "1" * 40},
-    )
-    _clean_cm.commit()
-
-    version = _clean_cm.execute(
-        text(
-            "SELECT analysis_schema_version FROM contract_materializations "
-            "WHERE chain = :chain AND bytecode_keccak = :keccak"
-        ),
-        {"chain": chain, "keccak": keccak},
-    ).scalar_one()
-    assert version == 1

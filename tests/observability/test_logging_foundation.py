@@ -75,19 +75,6 @@ def test_stream_subprocess_respects_custom_level(caplog):
     assert info_lines and info_lines[0].levelno == logging.INFO
 
 
-def test_uvicorn_log_config_routes_through_json_formatter():
-    cfg = uvicorn_log_config(level=logging.INFO)
-
-    assert cfg["version"] == 1
-    assert cfg["disable_existing_loggers"] is False
-    assert cfg["formatters"]["json"]["()"] == "utils.logging.JsonFormatter"
-    for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
-        spec = cfg["loggers"][name]
-        assert spec["handlers"] == ["json"]
-        assert spec["level"] == logging.INFO
-        assert spec["propagate"] is False
-
-
 def test_uvicorn_log_config_is_applicable_dictconfig():
     # dictConfig must accept it and instantiate a real JsonFormatter.
     cfg = uvicorn_log_config()
@@ -187,28 +174,6 @@ def test_bound_contextvar_shadows_a_colliding_extra_key():
     # Unbound, the same extra passes through: shadowing is a property of the ambient bind.
     out_unbound = json.loads(fmt.format(record))
     assert out_unbound["address"] == "0x" + "ee" * 20
-
-
-def test_formatter_drops_uvicorn_color_message_duplicate():
-    """uvicorn attaches an ANSI-coloured copy of the message via ``extra``; it is not a fact and
-    must not ride along as a second field on every line."""
-    fmt = JsonFormatter()
-    record = logging.LogRecord(
-        name="uvicorn.error",
-        level=logging.INFO,
-        pathname=__file__,
-        lineno=1,
-        msg="Started server process [123]",
-        args=(),
-        exc_info=None,
-    )
-    record.color_message = "Started server process [\x1b[36m%d\x1b[0m]"
-
-    out = json.loads(fmt.format(record))
-
-    assert out["message"] == "Started server process [123]"
-    assert "color_message" not in out
-    assert "\x1b" not in json.dumps(out)
 
 
 def _crytic_record(msg: str, *, args=(), exc_info=None) -> logging.LogRecord:

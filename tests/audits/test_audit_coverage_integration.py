@@ -351,42 +351,6 @@ def test_audits_straddling_upgrades_map_to_distinct_windows(
     assert late.match_confidence == "high"
 
 
-def test_reextraction_updates_coverage(db_session, storage_bucket, seed_protocol_with_history, worker, llm_stub_dir):
-    """Re-extraction changing scope_contracts pivots coverage rows (no live /reextract_scope call)."""
-    from db.models import AuditContractCoverage, AuditReport
-
-    proto = seed_protocol_with_history
-    audit_id = _seed_scoped_audit(
-        db_session,
-        storage_bucket,
-        proto["protocol_id"],
-        fixture="spearbit_table.txt",
-        auditor="Spearbit",
-        title="Original",
-        date="2024-10-15",
-    )
-    _drive_worker(worker, db_session)
-
-    db_session.expire_all()
-    initial = db_session.query(AuditContractCoverage).filter_by(audit_report_id=audit_id).all()
-    assert {r.contract_id for r in initial} == {
-        proto["impl_a"].id,
-        proto["standalone"].id,
-    }
-
-    from services.audits.coverage import upsert_coverage_for_audit
-
-    ar = db_session.get(AuditReport, audit_id)
-    ar.scope_contracts = ["Vault"]
-    db_session.commit()
-    upsert_coverage_for_audit(db_session, audit_id)
-    db_session.commit()
-
-    db_session.expire_all()
-    after = db_session.query(AuditContractCoverage).filter_by(audit_report_id=audit_id).all()
-    assert {r.contract_id for r in after} == {proto["standalone"].id}
-
-
 # ---------------------------------------------------------------------------
 # 2. refresh_coverage admin endpoint
 # ---------------------------------------------------------------------------

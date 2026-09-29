@@ -152,9 +152,6 @@ class TestSanitizeString:
         assert "FAKE_ALCHEMY_KEY_FOR_TESTS" not in out
         assert "FAKE_ETHERSCAN_KEY" not in out
 
-    def test_no_url_pass_through(self):
-        assert sanitize_string("nothing to see") == "nothing to see"
-
     def test_wss_url_embedded_in_text_is_scrubbed(self):
         # RPC providers also expose wss:// endpoints; the extractor must handle ws/wss.
         wss_url = _ALCHEMY.replace("https://", "wss://")

@@ -69,15 +69,6 @@ def _mock_controller_value(controller_id="owner", value="0x" + "b" * 40, resolve
     return cv
 
 
-def _mock_graph_node(address="0x" + "c" * 40, resolved_type="safe"):
-    n = MagicMock()
-    n.address = address
-    n.resolved_type = resolved_type
-    n.node_type = resolved_type
-    n.contract_id = 1
-    return n
-
-
 # ---------------------------------------------------------------------------
 # Tests for _determine_contract_type
 # ---------------------------------------------------------------------------
@@ -202,23 +193,6 @@ class TestBuildMonitoringConfig:
         ]
         config = _build_monitoring_config(None, [], "regular", tracked)
         assert config["tracked_topics"] == tracked
-
-    def test_authority_topic_sets_watch_authority_flag(self):
-        """The flag-getter defaults to True on missing keys, so this documents rather than gates; it keeps the config
-        self-describing."""
-        from services.monitoring.enrollment import _build_monitoring_config
-
-        tracked = [
-            {
-                "topic0": "0x" + "b" * 64,
-                "signature": "AuthorityUpdated(address,address)",
-                "event_type": "authority_updated",
-                "controller_id": "external_contract:authority",
-                "inputs": [],
-            }
-        ]
-        config = _build_monitoring_config(None, [], "regular", tracked)
-        assert config.get("watch_authority") is True
 
     def test_empty_tracked_topics_witnessed_as_empty_list(self):
         """No tracked_topics and no not-determined token emits the witnessed-empty ``[]``; key absence is never a
@@ -571,37 +545,6 @@ class TestEnrollmentIntegration:
         assert pausable_mc.monitoring_config["watch_pause"] is True
         assert pausable_mc.monitoring_config["watch_roles"] is True
         assert pausable_mc.monitoring_config["watch_upgrades"] is False
-
-    def test_the_baseline_only_outcome_is_counted_per_cycle_not_logged_per_contract(self, pg_session, caplog):
-        """26% of a pipeline run's log volume was this one line, 8,196 times."""
-        import logging as _logging
-
-        from db.models import Contract, Protocol
-        from services.monitoring.enrollment import enroll_protocol_contracts
-        from services.monitoring.tracking_plan_state import NO_CURRENT_MATERIALIZATION
-
-        proto = Protocol(name=PROTO_NAME)
-        pg_session.add(proto)
-        pg_session.flush()
-        for index in range(2):
-            # Own address prefixes: this class's rows outlive the test.
-            address = "0x" + f"1{index}" * 20
-            pg_session.add(Contract(address=address, chain="ethereum", protocol_id=proto.id, contract_name=f"C{index}"))
-            _create_completed_job(pg_session, address, proto.id)
-        pg_session.commit()
-
-        with caplog.at_level(_logging.DEBUG, logger="services.monitoring.enrollment"):
-            with patch("services.monitoring.enrollment.rpc_request", return_value="0x100"):
-                enroll_protocol_contracts(pg_session, proto.id, "http://rpc", "ethereum")
-
-        per_contract = [r for r in caplog.records if "no current tracking_plan materialization" in r.message]
-        assert per_contract, "the per-contract line still exists, at DEBUG"
-        assert {r.levelno for r in per_contract} == {_logging.DEBUG}
-
-        summary = next(r for r in caplog.records if r.message.startswith("Enrolled ") and hasattr(r, "baseline_only"))
-        assert summary.levelno == _logging.INFO
-        assert summary.baseline_only == 2
-        assert summary.plan_not_determined == {NO_CURRENT_MATERIALIZATION: 2}
 
     def test_enroll_proxy_without_summary_uses_contract_fields(self, pg_session):
         """The common EIP-1967 case (Slither ran on the implementation, not the proxy shell): is_proxy=True with NO

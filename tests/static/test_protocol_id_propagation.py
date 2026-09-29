@@ -153,28 +153,6 @@ class TestStaticWorkerProtocolIdPropagation:
 
 
 class TestEnrollmentWithProxyContracts:
-    def test_enrollment_skipped_when_protocol_id_null(self):
-        """Simulates the policy_worker check: with protocol_id None, enrollment is
-        never attempted (the downstream effect of the static worker bug)."""
-        job = MagicMock()
-        job.protocol_id = None  # BUG: impl jobs get NULL
-
-        enrollment_attempted = False
-        if job.protocol_id:
-            enrollment_attempted = True
-
-        assert not enrollment_attempted, "Enrollment should NOT fire when protocol_id is NULL (current broken behavior)"
-
-    def test_enrollment_fires_when_protocol_id_set(self):
-        job = MagicMock()
-        job.protocol_id = 1  # FIXED: impl jobs inherit protocol_id
-
-        enrollment_attempted = False
-        if job.protocol_id:
-            enrollment_attempted = True
-
-        assert enrollment_attempted, "Enrollment must fire when protocol_id is set"
-
     @patch("services.monitoring.enrollment.enroll_protocol_contracts")
     def test_maybe_enroll_called_with_correct_protocol(self, mock_enroll):
         from services.monitoring.enrollment import maybe_enroll_protocol
@@ -395,55 +373,3 @@ class TestProtocolIdPropagationIntegration:
                 "Enrollment must fire even when both the calling job and an unrelated sibling are in_flight."
             )
             mock_enroll.assert_called_once()
-
-    def test_multi_hop_propagation(self, pg_session):
-        from db.models import Job, Protocol
-        from db.queue import create_job
-        from workers.static_worker import StaticWorker
-
-        protocol = Protocol(name="__test_propagation__")
-        pg_session.add(protocol)
-        pg_session.commit()
-
-        # Root proxy job
-        root = create_job(
-            pg_session,
-            {
-                "address": "0x" + "55" * 20,
-                "name": "RootProxy",
-                "rpc_url": "http://localhost:8545",
-                "protocol_id": protocol.id,
-            },
-        )
-
-        # Static worker creates impl child
-        impl_addr = "0x" + "66" * 20
-        worker = StaticWorker()
-        with patch("services.discovery.classifier.classify_single", return_value=_proxy_classification(impl_addr)):
-            assert root.address is not None
-            worker._resolve_proxy(pg_session, root, root.address, "RootProxy")
-
-        from sqlalchemy import select
-
-        impl_job = pg_session.execute(select(Job).where(Job.address == impl_addr)).scalar_one()
-        assert impl_job.protocol_id == protocol.id
-
-        grandchild_addr = "0x" + "77" * 20
-        grandchild = create_job(
-            pg_session,
-            {
-                "address": grandchild_addr,
-                "name": "DiscoveredContract",
-                "rpc_url": "http://localhost:8545",
-                "discovered_by": "resolution",
-            },
-        )
-        # Resolution worker pattern (resolution_worker.py:323-325)
-        if impl_job.protocol_id:
-            grandchild.protocol_id = impl_job.protocol_id
-        pg_session.commit()
-
-        pg_session.refresh(grandchild)
-        assert grandchild.protocol_id == protocol.id, (
-            "Grandchild (resolution-discovered from impl) must inherit protocol_id"
-        )

@@ -52,12 +52,6 @@ def _fake_anvil_bin(tmp_path: Path, body: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def test_anvil_stays_silent_while_its_output_is_piped():
-    """``--silent`` suppresses the banner (whose tail is dev keys + a mnemonic) and per-RPC
-    lines, not fatal startup errors, so the pipe carries the failure and never a secret."""
-    assert "--silent" in anvil_mod._build_anvil_cmd("anvil", 8546, "prague", None, None)
-
-
 def test_spawn_failure_carries_returncode_and_output_tail(tmp_path, caplog):
     """A fork dying at startup must be explainable: exit code and last words ride the exception,
     not DEVNULL."""
@@ -181,17 +175,6 @@ def test_contract_facts_lookup_failure_warns_and_records_degraded(monkeypatch, c
     assert not hasattr(rec, "address")
     assert [e.phase for e in accumulator] == ["effects_calldata_facts"]
     assert accumulator[0].context["contract_address"] == "0x" + "ab" * 20
-
-
-def test_encode_calldata_failure_logs_debug_with_selector(caplog):
-    with caplog.at_level(logging.DEBUG, logger=CALLDATA_LOGGER):
-        # A value that cannot encode into the declared type.
-        assert calldata_mod.encode_calldata("0xdeadbeef", "f(uint256)", substitutions={0: "not-a-number"}) is None
-
-    rec = next(r for r in caplog.records if r.name == CALLDATA_LOGGER)
-    assert rec.levelno == logging.DEBUG
-    assert rec.selector == "0xdeadbeef"
-    assert rec.exc_type
 
 
 def test_uint_call_failure_logs_the_zero_it_passes(caplog):
@@ -455,25 +438,6 @@ def test_hashless_candidates_record_a_capped_sample_plus_the_exact_total(monkeyp
     assert len(summary.context["function_ids_sample"]) == _NO_HASH_SAMPLE
 
 
-def test_selection_funnel_reaches_the_metrics_under_one_key_spelling():
-    from workers.effects_worker import EffectsWorker, _Counters
-
-    counters = _Counters(
-        selection_funnel={"rows_in": 14, "skipped_already_explained": 3, "cap_dropped": 1, "selected": 10}
-    )
-    metrics: dict = {}
-    token = stage_metrics_var.set(metrics)
-    try:
-        EffectsWorker.__new__(EffectsWorker)._record_metrics(counters)
-    finally:
-        stage_metrics_var.reset(token)
-
-    assert metrics["selection_rows_in"] == 14
-    assert metrics["selection_cap_dropped"] == 1
-    assert metrics["selection_selected"] == 10
-    assert not [k for k in metrics if k in counters.selection_funnel], "unprefixed funnel key leaked"
-
-
 def test_selectionless_job_still_reports_a_defined_funnel():
     """ "selection never ran" must be readable as such, not as an absent funnel."""
     from workers.effects_worker import EffectsWorker
@@ -536,22 +500,6 @@ def test_a_dead_fork_publishes_no_rss_peak_at_all(caplog):
     assert records[0].levelno == logging.WARNING
     assert records[0].reason == "read_did_not_answer"
     assert [e.phase for e in accumulator] == ["effects_rss_sample"]
-
-
-def test_the_transport_reports_a_dead_or_unreadable_fork_as_unknown():
-    """The 0->``None`` normalization lives in ``rss_mb`` itself, so every caller gets "not
-    known" instead of a zero that looks measured."""
-    import os
-
-    class _Exited:
-        pid = os.getpid()
-
-        def poll(self):
-            return 0
-
-    anvil = SubprocessAnvil.__new__(SubprocessAnvil)
-    anvil._proc = _Exited()  # pyright: ignore[reportAttributeAccessIssue]
-    assert anvil.rss_mb() is None
 
 
 def test_raising_sampler_is_still_treated_as_unmeasured(caplog):

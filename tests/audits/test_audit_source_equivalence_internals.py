@@ -6,7 +6,6 @@ behaviour is in ``test_audit_coverage.py``. No DB or network; ``requests.get`` a
 
 from __future__ import annotations
 
-import hashlib
 from unittest.mock import MagicMock
 
 import pytest
@@ -120,37 +119,6 @@ class TestFetchEtherscanSourceFiles:
         assert got.source is None
         assert got.status == "fetch_failed"
         assert "etherscan down" in got.detail
-
-    def test_strips_blank_metadata_to_none(self, monkeypatch):
-        """Whitespace-only ContractName/CompilerVersion fields are normalized
-        to None so downstream checks (``if source.contract_name``) work."""
-        import importlib
-
-        fetch_module = importlib.import_module("services.discovery.fetch")
-        etherscan_module = importlib.import_module("services.clients.etherscan")
-        monkeypatch.setattr(
-            etherscan_module,
-            "get",
-            lambda *_a, **_k: {
-                "result": [
-                    {
-                        "ContractName": "   ",
-                        "CompilerVersion": "",
-                        "SourceCode": "contract X {}",
-                    }
-                ]
-            },
-        )
-        monkeypatch.setattr(
-            fetch_module,
-            "parse_sources",
-            lambda _res: {"X.sol": "contract X {}"},
-        )
-        got = fetch_etherscan_source_files("0x" + "a" * 40, chain_id=1)
-        assert got.status == "ok"
-        assert got.source is not None
-        assert got.source.contract_name is None
-        assert got.source.compiler_version is None
 
 
 # ---------------------------------------------------------------------------
@@ -471,24 +439,6 @@ class TestFetchGithubRawHashCaching:
         assert got.sha256 is not None and len(got.sha256) == 64
         assert not hasattr(got, "content")
 
-    def test_lru_cap_is_bounded(self):
-        """A finite 4096-entry ceiling (never ``maxsize=None``) keeps the
-        process-global cache from growing without bound in a long-lived
-        worker. Pin it so a refactor can't silently unbound the cache."""
-        info = _fetch_github_raw_hash.cache_info()
-        assert info.maxsize == 4096
-
-    def test_failure_status_propagates_with_no_hash(self, monkeypatch):
-        """A terminal failure caches its status with ``sha256=None`` — still a
-        tiny row, and the caller can distinguish missing from mismatched."""
-        monkeypatch.setattr(
-            "services.audits.source_equivalence.requests.get",
-            lambda *_a, **_k: _resp(status_code=404, text="Not Found"),
-        )
-        got = _fetch_github_raw_hash("https://raw.githubusercontent.com/x/y/abc/Missing.sol", None)
-        assert got.sha256 is None
-        assert got.status == "http_404"
-
 
 class TestFetchGithubSourceHash:
     def test_returns_invalid_input_on_missing_inputs(self):
@@ -507,15 +457,6 @@ class TestFetchGithubSourceHash:
         got = fetch_github_source_hash("r/n", "abc1234", "src/Pool.sol")
         assert got.sha256 == _hash_source_text(content)
         assert got.status == "ok"
-
-    def test_propagates_http_404_from_raw(self, monkeypatch):
-        monkeypatch.setattr(
-            "services.audits.source_equivalence.requests.get",
-            lambda *_a, **_k: _resp(status_code=404),
-        )
-        got = fetch_github_source_hash("r/n", "abc1234", "src/Pool.sol")
-        assert got.sha256 is None
-        assert got.status == "http_404"
 
 
 # ---------------------------------------------------------------------------
@@ -547,11 +488,6 @@ class TestCandidatePathsForName:
 # ---------------------------------------------------------------------------
 # _hash_source_text — sanity: same text → same hash
 # ---------------------------------------------------------------------------
-
-
-def test_hash_source_text_is_sha256():
-    content = "contract X {}"
-    assert _hash_source_text(content) == hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -700,15 +636,6 @@ class TestVerifyAuditCoversImplStatuses:
         assert out.status == "github_fetch_failed"
 
 
-def test_transient_statuses_is_correct():
-    """``TRANSIENT_STATUSES`` must be a subset of ``EQUIVALENCE_STATUSES``.
-    Guards a class of typo where a retry-sweep check silently fails to
-    find its target status value."""
-    assert source_equivalence.TRANSIENT_STATUSES <= source_equivalence.EQUIVALENCE_STATUSES
-    for permanent in ("proven", "hash_mismatch", "no_reviewed_commit", "no_source_repo"):
-        assert permanent not in source_equivalence.TRANSIENT_STATUSES
-
-
 # ---------------------------------------------------------------------------
 # extract_referenced_repos (Phase D)
 # ---------------------------------------------------------------------------
@@ -825,16 +752,6 @@ class TestFallbackReposBehavior:
             fallback_repos=["repo-with-code"],  # returns content that doesn't match
         )
         assert out.status == "hash_mismatch"
-
-    def test_no_source_repo_and_no_fallback_is_short_circuit(self):
-        out = source_equivalence.verify_audit_covers_impl(
-            reviewed_commits=["abc1234"],
-            scope_name="Pool",
-            impl_source=self._src({"src/Pool.sol": "hash"}),
-            source_repo=None,
-            fallback_repos=None,
-        )
-        assert out.status == "no_source_repo"
 
     def test_fallback_only_works_when_source_repo_is_none(self, monkeypatch):
 

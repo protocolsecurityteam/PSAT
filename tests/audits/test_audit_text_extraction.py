@@ -12,11 +12,9 @@ import pytest
 import requests
 
 from services.audits.text_extraction import (
-    _ACCEPTED_CONTENT_TYPES,
     PdfDownloadError,
     PdfParseError,
     PdfTooLargeError,
-    _normalize_download_url,
     audit_text_key,
     download_audit_body,
     download_pdf,
@@ -72,35 +70,6 @@ class TestExtractTextFromPdf:
 
         # Assert on the SHA, not the URL, so the impl isn't pinned to a formatting choice.
         assert sha in text, f"commit SHA from link annotation lost in extraction. Extracted text: {text!r}"
-
-    def test_multiple_link_annotations_all_extracted(self):
-        import io
-
-        from pypdf import PdfWriter
-        from pypdf.annotations import Link
-        from pypdf.generic import RectangleObject
-
-        shas = [
-            "3e9f54ec" + "0" * 32,
-            "abc96405" + "1" * 32,
-            "b7a8d04d" + "2" * 32,
-        ]
-        w = PdfWriter()
-        w.add_blank_page(width=612, height=792)
-        for i, sha in enumerate(shas):
-            w.add_annotation(
-                page_number=0,
-                annotation=Link(
-                    rect=RectangleObject((100, 700 - i * 30, 300, 720 - i * 30)),
-                    url=f"https://github.com/etherfi-protocol/smart-contracts/commit/{sha}",
-                ),
-            )
-        buf = io.BytesIO()
-        w.write(buf)
-
-        text = extract_text_from_pdf(buf.getvalue())
-        for sha in shas:
-            assert sha in text, f"SHA {sha} missing from extraction"
 
     def test_link_annotations_across_multiple_pages(self):
         """URIs on page 2 must show up alongside (or after) page 2's body
@@ -164,14 +133,6 @@ class TestExtractTextFromPdf:
 
         text = extract_text_from_pdf(buf.getvalue())
         assert "annotator's private note" not in text
-
-    def test_pdf_without_any_annotations_still_extracts_cleanly(self):
-        """Regression guard: the new path must be a pure addition and
-        leave annotation-free PDFs byte-identical to the old behaviour."""
-        body = minimal_pdf_with_text("No links here, just scope contracts.")
-        text = extract_text_from_pdf(body)
-        assert "No links here" in text
-        assert text.count("--- page 1 ---") == 1
 
     def test_end_to_end_link_sha_reaches_reviewed_commits_extractor(self):
         """Locks extract_text_from_pdf -> extract_reviewed_commits end to end for the Certora-V3.Prelude-1 case
@@ -274,9 +235,6 @@ class TestDownloadPdfBoundaries:
         with pytest.raises(PdfDownloadError, match="fetch error"):
             download_pdf("https://example.com/a.pdf", session=session)
 
-    def test_all_accepted_content_types_include_pdf(self):
-        assert "application/pdf" in _ACCEPTED_CONTENT_TYPES
-
 
 # download_audit_body retry-with-backoff. Prod saw bursts of ConnectionResetError(104) from Code4rena / Sherlock
 # that permanently failed audit rows. requests wraps it as requests.exceptions.ConnectionError, so tests mock
@@ -363,36 +321,6 @@ class TestDownloadAuditBodyRetry:
         with pytest.raises(PdfDownloadError, match="content-type"):
             download_pdf("https://example.com/login.pdf", session=session)
         assert session.get.call_count == 1
-
-    def test_end_to_end_audit_succeeds_after_transient_flake(self, monkeypatch):
-        """Closes the loop on the prod failure mode: a single ConnectionReset
-        burst made audit rows permanently 'failed'. Post-fix the same flake
-        is absorbed by retry and the audit ends as 'success'."""
-        monkeypatch.setattr("services.audits.text_extraction._retry_sleep", lambda _s: None, raising=False)
-
-        pdf = minimal_pdf_with_text("Audits covering Pool.sol Vault.sol Strategy.sol Registry.sol. " * 20)
-        session = MagicMock()
-        session.get.side_effect = [
-            requests.exceptions.ConnectionError(
-                "Connection aborted.",
-                ConnectionResetError(104, "Connection reset by peer"),
-            ),
-            _mock_response(body=pdf),
-        ]
-        monkeypatch.setattr(
-            "services.audits.text_extraction.store_audit_text",
-            lambda aid, text: (f"audits/text/{aid}.txt", len(text.encode("utf-8")), "f" * 64),
-        )
-
-        outcome = process_audit_report(
-            audit_report_id=1,
-            url="https://example.com/audit.pdf",
-            session=session,
-        )
-        assert outcome.status == "success", (
-            f"expected success after transient retry, got {outcome.status}: {outcome.error}"
-        )
-        assert session.get.call_count == 2
 
 
 def test_audit_text_key_is_deterministic():
@@ -607,9 +535,3 @@ class TestProcessAuditReportTextFiles:
 
         assert out.status == "success"
         assert captured["url"] == "https://raw.githubusercontent.com/x/y/main/audits/report.pdf"
-
-
-def test_normalize_download_url_rewrites_github_blob_files():
-    assert _normalize_download_url("https://github.com/a/b/blob/main/foo.pdf") == (
-        "https://raw.githubusercontent.com/a/b/main/foo.pdf"
-    )

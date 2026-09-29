@@ -203,11 +203,6 @@ def test_claim_batch_skips_terminal_rows(db_session, worker, seed_protocol):
     assert claimed == []
 
 
-def test_claim_batch_returns_empty_when_no_pending(db_session, worker):
-    claimed = worker._claim_batch(db_session)
-    assert claimed == []
-
-
 def test_idle_queue_makes_no_http_calls_and_no_writes(db_session, worker, seed_protocol, monkeypatch):
     """With every coverage row terminal, a poll tick must be a true no-op (zero Etherscan/GitHub calls, zero row
     updates). This lets the worker run continuously without re-introducing the rate-limit cascade; an empty

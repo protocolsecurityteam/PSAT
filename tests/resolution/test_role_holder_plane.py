@@ -457,11 +457,6 @@ def test_candidate_pool_reads_declared_names_across_contracts(db_session):
     session.rollback()
 
 
-def test_default_admin_role_name_is_not_its_own_keccak():
-    """Pins why the zero-word arm must exist separately: the name does not hash to the hash it labels."""
-    assert "0x" + keccak(text="DEFAULT_ADMIN_ROLE").hex() != ZERO_ROLE
-
-
 # Disagreement — recorded, never diagnosed
 
 

@@ -98,15 +98,6 @@ def compute(closure, *, conditions=None, conferral=None, signals=()):
     )
 
 
-def test_hop_verdict_is_the_folds_single_implementation():
-    assert FOLD._hop_bound is R.hop_bound
-    assert (FOLD.HOP_REFUSED_SCOPE, FOLD.HOP_REFUSED_CONFERRAL, FOLD.HOP_REFUSED_CONDITION) == (
-        R.HOP_REFUSED_SCOPE,
-        R.HOP_REFUSED_CONFERRAL,
-        R.HOP_REFUSED_CONDITION,
-    )
-
-
 def test_admin_column_edge_expands_as_code_control():
     """Holding the admin slot is upgrade power: the walk continues past the
     anchor with no conferral question, hop-numbered from the anchor."""

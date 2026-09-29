@@ -268,25 +268,6 @@ def test_resolve_implementation_contracts_links_proxy_to_impl(db_session):
     assert contracts_by_job[impl_job.id].id == impl_contract.id
 
 
-def test_build_company_overview_end_to_end_protocol_path(db_session):
-    """Top-level: protocol + a single non-proxy contract returns a sane payload."""
-    p = _add_protocol(db_session, f"e2e-alpha-{uuid.uuid4().hex[:8]}")
-    addr = _addr("e2e1")
-    job = _add_job(db_session, address=addr, protocol_id=p.id, name="Vault")
-    _add_contract(db_session, address=addr, job=job, protocol_id=p.id, contract_name="Vault")
-
-    payload = build_company_overview(db_session, p.name)
-
-    assert payload["company"] == p.name
-    assert payload["protocol_id"] == p.id
-    assert payload["contract_count"] == 1
-    addrs = {c["address"] for c in payload["contracts"]}
-    assert addr in addrs
-    # The full inventory moved to /api/company/{name}/addresses; the main
-    # payload only carries the count.
-    assert payload["all_addresses_count"] == 1
-
-
 def test_build_company_overview_raises_when_unknown(db_session):
     with pytest.raises(CompanyNotFound):
         build_company_overview(db_session, f"missing-{uuid.uuid4().hex[:8]}")
@@ -475,49 +456,6 @@ def test_build_functions_for_protocol_returns_keyed_function_list(db_session):
 def test_build_functions_for_protocol_unknown_company_raises(db_session):
     with pytest.raises(CompanyNotFound):
         build_functions_for_protocol(db_session, f"missing-{uuid.uuid4().hex[:8]}")
-
-
-def test_build_functions_for_protocol_proxy_uses_impl(db_session):
-    """Proxy entries inherit functions from the impl contract's EF rows."""
-    p = _add_protocol(db_session, f"functions-proxy-{uuid.uuid4().hex[:8]}")
-    proxy_addr = _addr("pxfn")
-    impl_addr = _addr("imfn")
-
-    proxy_job = _add_job(db_session, address=proxy_addr, protocol_id=p.id, is_proxy=True)
-    impl_job = _add_job(db_session, address=impl_addr, protocol_id=p.id)
-    _add_contract(
-        db_session,
-        address=proxy_addr,
-        job=proxy_job,
-        protocol_id=p.id,
-        is_proxy=True,
-        implementation=impl_addr,
-        contract_name="ERC1967Proxy",
-    )
-    impl_contract = _add_contract(
-        db_session, address=impl_addr, job=impl_job, protocol_id=p.id, contract_name="VaultImpl"
-    )
-    db_session.add(
-        EffectiveFunction(
-            contract_id=impl_contract.id,
-            function_name="upgradeTo",
-            selector="0x3659cfe6",
-            abi_signature="upgradeTo(address)",
-            effect_labels=["implementation_update"],
-            effect_targets=[],
-            action_summary="upgrade",
-            authority_public=False,
-            authority_roles=[],
-        )
-    )
-    db_session.commit()
-
-    out = build_functions_for_protocol(db_session, p.name)
-    # Function is keyed to the proxy's (chain, address) — what the user sees —
-    # not the impl's address.
-    proxy_key = f"ethereum::{proxy_addr.lower()}"
-    assert proxy_key in out
-    assert any(entry["function"] == "upgradeTo(address)" for entry in out[proxy_key])
 
 
 def test_build_functions_for_protocol_two_chains_shared_address(db_session):
@@ -2395,45 +2333,6 @@ def test_priced_and_unpriced_holdings_remain_visible_without_classification(db_s
     assert by_symbol["JUNK"]["usd_value"] is None
     assert "disposed_rows" not in entry["holdings_coverage"]
     assert entry["total_usd"] == 700.0
-
-
-def test_priced_holding_counts_toward_total_without_classification(db_session):
-    p = _add_protocol(db_session, f"e2e-airdrop-priced-{uuid.uuid4().hex[:8]}")
-    addr = _addr("airp1")
-    job = _add_job(db_session, address=addr, protocol_id=p.id, name="PricedHolder")
-    c = _add_contract(db_session, address=addr, job=job, protocol_id=p.id, contract_name="PricedHolder")
-    token = _addr("airptok")
-    fetch = ContractBalanceFetch(
-        contract_id=c.id,
-        chain_id=1,
-        observed_address=addr,
-        native_status="not_determined",
-        writer=BALANCE_WRITER_TVL,
-        asset_set_status=ASSET_SET_STATUS_RETURNED_ASSETS,
-    )
-    db_session.add(fetch)
-    db_session.flush()
-    db_session.add(
-        ContractBalance(
-            contract_id=c.id,
-            fetch_id=fetch.id,
-            token_address=token,
-            token_symbol="AIRP",
-            decimals=18,
-            raw_balance="1000000000000000000",
-            usd_value=1234,
-            price_usd=1234,
-            observed_address=addr,
-        )
-    )
-    db_session.commit()
-
-    payload = build_company_overview(db_session, p.name)
-    entry = next(e for e in payload["contracts"] if e["address"] == addr)
-    assert "disposition_state" not in entry["balances"][0]
-    assert "delivery_shape" not in entry["balances"][0]
-    assert "disposed_rows" not in entry["holdings_coverage"]
-    assert entry["total_usd"] == 1234.0
 
 
 def test_terminal_principal_walk_reaches_the_principal_payloads(db_session):

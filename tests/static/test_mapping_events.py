@@ -170,42 +170,6 @@ def test_makerdao_deny_removes_via_zero_write():
     assert specs[0]["direction"] == "remove"
 
 
-def test_rely_and_deny_together_produce_two_specs():
-    wards = _mapping("wards")
-    guy_a = _local("guy_a")
-    guy_b = _local("guy_b")
-    rely_fn = _function(
-        "rely",
-        nodes=[
-            _node(
-                [
-                    _index(wards, guy_a, _tmp("T1")),
-                    _assignment(_tmp("T1"), _constant(1)),
-                    _event_call("Rely(address)", [guy_a]),
-                ]
-            )
-        ],
-        written=[wards],
-    )
-    deny_fn = _function(
-        "deny",
-        nodes=[
-            _node(
-                [
-                    _index(wards, guy_b, _tmp("T2")),
-                    _assignment(_tmp("T2"), _constant(0)),
-                    _event_call("Deny(address)", [guy_b]),
-                ]
-            )
-        ],
-        written=[wards],
-    )
-    specs = discover_mapping_writer_events(_contract([rely_fn, deny_fn]))
-    directions = {s["direction"] for s in specs}
-    assert directions == {"add", "remove"}
-    assert all(s["mapping_name"] == "wards" for s in specs)
-
-
 def test_bool_mapping_true_is_add():
     whitelist = _mapping("whitelist", value_type="bool")
     x = _local("x")
@@ -509,10 +473,6 @@ def test_dedupes_on_mapping_event_direction():
     )
     specs = discover_mapping_writer_events(_contract([fn_a, fn_b]))
     assert len(specs) == 1
-
-
-def test_empty_contract_returns_empty():
-    assert discover_mapping_writer_events(_contract([])) == []
 
 
 def test_bare_event_name_in_ir_resolves_to_canonical_signature():

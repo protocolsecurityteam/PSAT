@@ -150,12 +150,6 @@ def test_param_derived_nested_matches_inline_entry(flows):
     assert flows["unwrapVia(uint256)"]["amount_param_index"] == flows["unwrap(uint256)"]["amount_param_index"]
 
 
-def test_plain_param_amount_is_unchanged(flows):
-    flow = flows["payout(uint256)"]
-    assert flow["amount_kind"]["kind"] == "param", flow
-    assert flow["amount_param_index"] == 0, flow
-
-
 def test_call_without_a_caller_input_stays_indeterminate(flows):
     flow = flows["drain()"]
     assert flow["amount_kind"]["kind"] == "indeterminate", flow

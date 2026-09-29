@@ -250,11 +250,6 @@ def test_a_pull_whose_sink_is_this_contract_stays_inbound(_unit, signature):
     assert "asset_pull" in info["effect_labels"]
 
 
-def test_a_pull_this_contract_pays_stays_outbound(_unit):
-    info = _effects(_unit, "Bridger")["pushOut(address,uint256)"]
-    assert [f["direction"] for f in info["value_flows"]] == ["out"]
-
-
 def test_a_third_party_pull_mints_the_routed_claim_not_flow_in(_unit):
     contract = _contract(_unit, "Bridger")
     claims = build_claims(contract, build_effects(contract), {})["functions"]

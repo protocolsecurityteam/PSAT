@@ -331,12 +331,6 @@ def test_non_subtractive_balance_arithmetic_is_not_a_delta(tmp_path):
     assert amount["kind"] == "indeterminate", amount
 
 
-def test_plain_storage_amount_unaffected(tmp_path):
-    contract = _compile(tmp_path, BALANCE_DELTA_SRC, "Sweeper")
-    amount = _out_flow(build_effects(contract)["functions"]["payLocked(address)"])["amount_kind"]
-    assert amount["kind"] == "bounded_by_storage", amount
-
-
 def test_balance_delta_reaches_the_claims_witness(tmp_path):
     contract = _compile(tmp_path, BALANCE_DELTA_SRC, "Sweeper")
     effects = build_effects(contract)

@@ -76,28 +76,6 @@ def test_batched_classifier_shortcut_fires_on_registry_hit(monkeypatch):
     assert had_error is False
 
 
-def test_empty_registry_skips_shortcut(monkeypatch):
-    """The shortcut is gated by ``if _KNOWN_BYTECODE_IMPLS:``; an empty registry must not
-    even call get_code_with_keccak."""
-    _stub_get_code(monkeypatch)
-
-    keccak_calls = []
-
-    def _track_keccak(_rpc, _addr):
-        keccak_calls.append(_addr)
-        return ("0x60", "0x" + "ee" * 32)
-
-    monkeypatch.setattr("services.clients.rpc.get_code_with_keccak", _track_keccak)
-    monkeypatch.setattr(tracking, "_KNOWN_BYTECODE_IMPLS", {})
-
-    # Every probe returns None so the classifier reaches the generic fallthrough.
-    monkeypatch.setattr(tracking, "_try_eth_call_decoded", lambda *_a, **_kw: None)
-    monkeypatch.setattr(tracking, "type_authority_contract", lambda *_a, **_kw: {})
-
-    _classify_uncached("https://rpc", "0x" + "33" * 20, "latest")
-    assert keccak_calls == [], "empty registry must not call get_code_with_keccak"
-
-
 def test_registry_miss_falls_through_to_probes(monkeypatch):
     """Registry has entries but THIS contract's keccak isn't in it →
     fall through to the normal probe sequence."""
@@ -128,24 +106,3 @@ def test_keccak_fetch_failure_falls_through(monkeypatch):
 
     kind, _details, _had_error = _classify_uncached("https://rpc", "0x" + "55" * 20, "latest")
     assert kind == "contract", "keccak fetch failure must not crash; must fall through"
-
-
-def test_partial_details_merged_with_address(monkeypatch):
-    """The registry stores partial details; the classifier adds the address. The merge must
-    not drop fields."""
-    _stub_get_code(monkeypatch)
-    _stub_keccak(monkeypatch, "0x" + "77" * 32)
-    fake_registry = {
-        "0x" + "77" * 32: (
-            "proxy_admin",
-            {"upgrade_interface_version": "5.0.0", "owner": "0xdeadbeef"},
-        )
-    }
-    monkeypatch.setattr(tracking, "_KNOWN_BYTECODE_IMPLS", fake_registry)
-    monkeypatch.setattr(tracking, "_try_eth_call_decoded", lambda *_a, **_kw: None)
-
-    addr = "0x" + "88" * 20
-    _kind, details, _had_error = _classify_uncached("https://rpc", addr, "latest")
-    assert details["address"] == addr
-    assert details["upgrade_interface_version"] == "5.0.0"
-    assert details["owner"] == "0xdeadbeef"

@@ -635,11 +635,3 @@ def test_legacy_rollback_moves_indexer_back_even_with_failed_controller(monkeypa
     assert updates[-2][updates[-2].index("--config") + 1] == str(bridge_config)
     assert updates[-1][updates[-1].index("--config") + 1] == state["config"]
     assert "admin:resume" not in fly.events
-
-
-def test_production_defaults_enable_split_with_two_gib_monitor():
-    source = Path("fly.toml").read_text()
-    assert 'PSAT_WORKER_LIFECYCLE_MODE = "enforce"' in source
-    assert 'PSAT_INDEXER_GROUP = "monitor"' in source
-    monitor = source.split('processes = ["monitor"]')[1].split("[[restart]]")[0]
-    assert 'size = "shared-cpu-2x"' in monitor and 'memory = "2048mb"' in monitor

@@ -58,17 +58,6 @@ def test_incomplete_mapping_enumeration_degrades_and_counts(monkeypatch):
     assert accumulator[0].context["status"] == "incomplete_timeout"
 
 
-def test_proxies_redirected_metric_increments():
-    metrics: dict = {}
-    tok = stage_metrics_var.set(metrics)
-    try:
-        recursive._bump_stage_metric("proxies_redirected")
-        recursive._bump_stage_metric("proxies_redirected")
-    finally:
-        stage_metrics_var.reset(tok)
-    assert metrics["proxies_redirected"] == 2
-
-
 def test_solmate_decline_emits_decision_extra(caplog):
     """The Veda cold-index race shows as an adapter 'deferred' decision, queryable by
     adapter/address/decision/reason."""

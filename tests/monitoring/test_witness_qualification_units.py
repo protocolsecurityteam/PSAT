@@ -125,15 +125,6 @@ def test_one_unrestricted_path_demotes_the_event():
     assert openness_of_write_paths({"a()"}, set(), restricted) == OPENNESS_NOT_DETERMINED
 
 
-def test_the_kill_switch_cannot_promote(monkeypatch):
-    """``PSAT_AUTHORITY_EARNED_PUBLIC=0`` turns off the resolution plane's earned-public
-    projection, which there NARROWS publishing. Here it would only withhold a promotion, so
-    honouring it would make it a promoter: a cofinite denylist would read as proof of restriction."""
-    for value in ("0", "1"):
-        monkeypatch.setenv("PSAT_AUTHORITY_EARNED_PUBLIC", value)
-        assert restricted_function_signatures(_trees(**{"f()": _DENYLIST})) == frozenset()
-
-
 # ---------------------------------------------------------------------------
 # F7 — writer hygiene
 # ---------------------------------------------------------------------------

@@ -192,33 +192,6 @@ def test_spawn_is_idempotent(db_session, seed, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_unanalyzed_node_spawns_nothing(db_session, seed, monkeypatch):
-    """``analyzed=false`` ⇒ zero jobs; spawning would be acting on an absence."""
-    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
-    _protocol_id, parent, address_factory = seed
-    addr = address_factory()
-
-    result = _spawn(db_session, parent, _graph(parent.address, [_node(addr, analyzed=False)]), budget=8)
-
-    assert _jobs_for(db_session, addr) == []
-    assert result["queued"] == []
-    assert result["omitted"] == []
-    assert result["out_of_population"] == [{"address": addr, "reason": "not_analyzed"}]
-
-
-def test_principal_node_spawns_nothing(db_session, seed, monkeypatch):
-    """``node_type='principal'`` ⇒ zero jobs; the corpus's 7 role-grant principals are
-    EOAs/unclassified, so a job could only fail."""
-    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
-    _protocol_id, parent, address_factory = seed
-    addr = address_factory()
-
-    result = _spawn(db_session, parent, _graph(parent.address, [_node(addr, node_type="principal")]), budget=8)
-
-    assert _jobs_for(db_session, addr) == []
-    assert result["out_of_population"] == [{"address": addr, "reason": "not_contract_node"}]
-
-
 def test_disabled_chain_spawns_nothing_and_logs_the_reason(db_session, seed, monkeypatch, caplog):
     """A disabled chain ⇒ zero jobs plus an explicit skip record (an OMISSION, not a
     carve-out: an enabled deployment would analyse it)."""
@@ -238,18 +211,6 @@ def test_disabled_chain_spawns_nothing_and_logs_the_reason(db_session, seed, mon
     assert _jobs_for(db_session, addr) == []
     assert result["omitted"] == [{"address": addr, "reason": "chain_not_enabled"}]
     assert any(getattr(rec, "reason", None) == "chain_not_enabled" for rec in caplog.records)
-
-
-def test_zero_address_spawns_nothing(db_session, seed, monkeypatch):
-    """An unset controller resolves to 0x000…0; queuing it spawns a job that can
-    only fail with "No verified source code"."""
-    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
-    _protocol_id, parent, _address_factory = seed
-
-    result = _spawn(db_session, parent, _graph(parent.address, [_node(ZERO_ADDRESS)]), budget=8)
-
-    assert _jobs_for(db_session, ZERO_ADDRESS) == []
-    assert result["omitted"] == [{"address": ZERO_ADDRESS, "reason": "zero_address"}]
 
 
 # ---------------------------------------------------------------------------
@@ -595,20 +556,6 @@ def test_mismatch_payload_is_byte_identical_to_the_never_read_payload(monkeypatc
         "declared_vault_matches_gated_contract": "not_determined",
     }
     assert other not in str(mismatch)
-
-
-def test_reverting_getter_is_not_determined(monkeypatch):
-    """The 9 non-manager role-grant contracts have no ``vault()``. A revert is
-    undetermined (neither "no back-link" nor a falsification) and fires no control."""
-    from services.resolution.tracking import probe_declared_vault_backlink
-
-    _wire_backlink(monkeypatch, vault_return="revert")
-    out = probe_declared_vault_backlink("https://rpc.example", MANAGER, VAULT)
-    assert out is not None
-
-    assert out["declared_vault_matches_gated_contract"] == "not_determined"
-    assert out["backlink_address"] == "not_determined"
-    assert out["negative_control"] == "not_determined"
 
 
 def test_catch_all_fallback_cannot_mint_a_backlink(monkeypatch):

@@ -125,10 +125,6 @@ class TestMakeResult:
             "all_names": ["Aave V3", "Aave V2"],
         }
 
-    def test_single_protocol_no_siblings(self):
-        result = _make_result(LIDO, [LIDO])
-        assert result["all_slugs"] == ["lido"]
-
     def test_missing_fields_default_to_none(self):
         bare = {"tvl": 1}
         result = _make_result(bare, [bare])
@@ -337,22 +333,6 @@ class TestFetchProtocols:
 
         result = _fetch_protocols()
         assert [p["slug"] for p in result] == ["high", "mid", "low"]
-
-    def test_raises_on_http_error(self, monkeypatch):
-        def _mock_get(*a, **kw):
-            resp = type(
-                "Resp",
-                (),
-                {
-                    "raise_for_status": lambda self: (_ for _ in ()).throw(requests.HTTPError("500")),
-                },
-            )()
-            return resp
-
-        monkeypatch.setattr(requests, "get", _mock_get)
-
-        with pytest.raises(requests.HTTPError):
-            _fetch_protocols()
 
 
 # ---------------------------------------------------------------------------

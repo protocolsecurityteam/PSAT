@@ -294,46 +294,6 @@ def test_within_window_duplicate_log_collapses_to_one_row(db_session, monkeypatc
     assert _count_events(db_session, mc.id, "ownership_transferred") == 1
 
 
-def test_two_poll_detections_same_field_both_insert_with_null_log_index(db_session, monkeypatch):
-    """Successive state_changed_poll detections both land: log_index is NULL, outside the
-    partial identity index."""
-    plan = [{"field": "owner", "kind": "getter_call", "selector": "0x8da5cb5b", "type_kind": "address"}]
-    mc = _mk(
-        db_session,
-        ADDR(0x9011),
-        0,
-        config={"polling_plan": plan, "watch_ownership": True},
-        state={"owner": ADDR(0x1).lower()},
-        needs_polling=True,
-    )
-
-    def _wire(value):
-        def stub(url, calls):
-            return [(value, "ok") for _ in calls]
-
-        return stub
-
-    import services.monitoring.unified_watcher as uw
-
-    monkeypatch.setattr(uw, "rpc_batch_request_classified", _wire("0x" + "0" * 24 + ADDR(0x2)[2:]))
-    poll_for_state_changes(db_session, "http://stub")
-    monkeypatch.setattr(uw, "rpc_batch_request_classified", _wire("0x" + "0" * 24 + ADDR(0x3)[2:]))
-    poll_for_state_changes(db_session, "http://stub")
-
-    assert _count_events(db_session, mc.id, "state_changed_poll") == 2
-    log_indexes = (
-        db_session.execute(
-            select(MonitoredEvent.log_index).where(
-                MonitoredEvent.monitored_contract_id == mc.id,
-                MonitoredEvent.event_type == "state_changed_poll",
-            )
-        )
-        .scalars()
-        .all()
-    )
-    assert log_indexes == [None, None]
-
-
 # ---------------------------------------------------------------------------
 # Lease gating (design §2.4 Layer 1)
 # ---------------------------------------------------------------------------

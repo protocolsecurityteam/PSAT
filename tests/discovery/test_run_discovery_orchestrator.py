@@ -115,19 +115,6 @@ def test_search_fn_records_errors_on_exa_exception(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_patch_and_restore_search():
-    sentinel = lambda *a, **kw: "patched"  # noqa: E731
-    original = rd.audit_reports_mod._tavily_search
-    try:
-        rd._patch_search(sentinel)
-        assert rd.audit_reports_mod._tavily_search is sentinel
-        assert rd.inventory_mod._tavily_search is sentinel
-        assert rd.inventory_domain_mod._tavily_search is sentinel
-    finally:
-        rd._restore_search(original)
-    assert rd.audit_reports_mod._tavily_search is original
-
-
 def test_patch_classify_with_seeds_appends_unseen_urls():
     original = rd.audit_reports_mod.classify_search_results
     seeds = [

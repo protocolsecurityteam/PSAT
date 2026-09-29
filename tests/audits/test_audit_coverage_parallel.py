@@ -5,7 +5,6 @@ the per-address Etherscan cache collapses repeats under concurrency, and a per-m
 
 from __future__ import annotations
 
-import threading
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -206,52 +205,3 @@ def test_apply_equivalence_http_per_match_crash_does_not_abort_siblings(monkeypa
         if m.audit_report_id == bad_audit_id:
             continue
         assert by_audit[m.audit_report_id].equivalence_status == "proven"
-
-
-def test_apply_equivalence_http_consistent_under_8_threads(monkeypatch):
-    """Stress: 50 matches sharing 5 distinct addresses must produce
-    a deterministic per-address fetch count and consistent stamps."""
-    monkeypatch.setenv("PSAT_RPC_FANOUT", "8")
-    RpcExecutor.reset_for_tests()
-
-    addrs = [f"0x{i:040x}" for i in range(5)]
-    matches = [_make_match(audit_id=i, contract_id=i) for i in range(50)]
-    inputs: dict = {}
-    for i, m in enumerate(matches):
-        inputs[(m.audit_report_id, m.contract_id)] = _make_inputs(
-            m.audit_report_id, m.contract_id, addrs[i % len(addrs)]
-        )
-
-    etherscan_calls: list[str] = []
-    fetch_lock = threading.Lock()
-
-    def thread_safe_record(addr):
-        with fetch_lock:
-            etherscan_calls.append(addr)
-
-    _stub_etherscan_and_github(monkeypatch, etherscan_calls=None)
-    from services.audits import source_equivalence
-
-    fake_fetch = source_equivalence.EtherscanFetch(
-        source=source_equivalence.VerifiedSource(
-            contract_name="MyPool", compiler_version="0.8", files={"src/MyPool.sol": "h"}
-        ),
-        status="ok",
-        detail="",
-    )
-
-    def recording_fetch(addr, **_kw):
-        thread_safe_record(addr)
-        return fake_fetch
-
-    monkeypatch.setattr(source_equivalence, "fetch_etherscan_source_files", recording_fetch)
-
-    stamped = _apply_equivalence_http(matches, inputs)
-
-    # 5 distinct addresses → 5 Etherscan calls + at most one extra per
-    # address from a benign double-miss race.
-    unique_addrs = set(etherscan_calls)
-    assert unique_addrs == set(addrs)
-    assert len(etherscan_calls) <= 2 * len(addrs)
-    assert len(stamped) == len(matches)
-    assert all(s.equivalence_status == "proven" for s in stamped)

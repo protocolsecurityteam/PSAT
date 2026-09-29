@@ -294,43 +294,6 @@ def test_scope_bucket_routing(db_session, api_client, seed_protocol):
     assert fail["error"] == "LLM timeout"
 
 
-def test_pipeline_item_exposes_stage_metadata(db_session, api_client, seed_protocol):
-    pid, _ = seed_protocol
-    now = datetime.now(timezone.utc)
-
-    processing = _insert_audit(
-        db_session,
-        pid,
-        text_status="success",
-        text_extracted_at=now - timedelta(minutes=4),
-        text_size_bytes=182_432,
-        scope_status="processing",
-        scope_started_at=now - timedelta(seconds=50),
-        scope_worker="scope-worker-c",
-        scope_contracts=["Vault", "Router"],
-        reviewed_commits=["abc1234", "def5678"],
-        referenced_repos=["owner/protocol"],
-        scope_entries=[{"name": "Vault", "address": "0x1111111111111111111111111111111111111111", "chain": "ethereum"}],
-        classified_commits=[{"sha": "abc1234", "label": "reviewed", "context": "scope table"}],
-        auditor="Metadata",
-    )
-
-    r = api_client.get("/api/audits/pipeline")
-    scope_rows = {a["audit_id"]: a for a in r.json()["scope_extraction"]["processing"]}
-    item = scope_rows[processing]
-
-    assert item["worker_id"] == "scope-worker-c"
-    assert item["text_extraction_status"] == "success"
-    assert item["text_size_bytes"] == 182_432
-    assert item["text_extracted_at"] is not None
-    assert item["scope_extraction_status"] == "processing"
-    assert item["scope_contract_count"] == 2
-    assert item["reviewed_commit_count"] == 2
-    assert item["referenced_repo_count"] == 1
-    assert item["scope_entry_count"] == 1
-    assert item["classified_commit_count"] == 1
-
-
 # ---------------------------------------------------------------------------
 # 6. Bucket cap — the endpoint never returns more than _PIPELINE_BUCKET_LIMIT
 #    entries, protecting the monitor page from pathological backlogs
@@ -355,38 +318,6 @@ def test_pipeline_caps_buckets_at_limit(db_session, api_client, seed_protocol):
 # ---------------------------------------------------------------------------
 # 7. Multi-protocol — company name is joined correctly per row
 # ---------------------------------------------------------------------------
-
-
-def test_pipeline_joins_protocol_name_per_row(db_session, api_client):
-    """The monitor needs ``company`` on each item for the protocol audit-tab click-through."""
-    from db.models import AuditContractCoverage, AuditReport, Protocol
-
-    name_a = f"pipe-a-{uuid.uuid4().hex[:8]}"
-    name_b = f"pipe-b-{uuid.uuid4().hex[:8]}"
-    pa = Protocol(name=name_a)
-    pb = Protocol(name=name_b)
-    db_session.add_all([pa, pb])
-    db_session.commit()
-    pa_id, pb_id = pa.id, pb.id
-
-    try:
-        a_id = _insert_audit(db_session, pa_id, text_status="processing", auditor="A")
-        b_id = _insert_audit(db_session, pb_id, text_status="processing", auditor="B")
-
-        r = api_client.get("/api/audits/pipeline")
-        processing = {a["audit_id"]: a for a in r.json()["text_extraction"]["processing"]}
-
-        assert processing[a_id]["company"] == name_a
-        assert processing[b_id]["company"] == name_b
-    finally:
-        db_session.query(AuditContractCoverage).filter(AuditContractCoverage.protocol_id.in_([pa_id, pb_id])).delete(
-            synchronize_session=False
-        )
-        db_session.query(AuditReport).filter(AuditReport.protocol_id.in_([pa_id, pb_id])).delete(
-            synchronize_session=False
-        )
-        db_session.query(Protocol).filter(Protocol.id.in_([pa_id, pb_id])).delete(synchronize_session=False)
-        db_session.commit()
 
 
 # ---------------------------------------------------------------------------

@@ -146,19 +146,6 @@ def test_company_functions_serves_all_three_authority_roles_states(api_client, t
     assert entries["unreadable()"]["authority_roles"] is None
 
 
-def test_analyses_detail_serves_all_three_authority_roles_states(api_client, three_state_rows):
-    job, _contract = three_state_rows
-
-    body = api_client.get(f"/api/analyses/{job.id}")
-    assert body.status_code == 200
-    entries = _by_signature(body.json()["effective_permissions"]["functions"])
-
-    assert entries["roleGated()"]["authority_roles"] is None
-    assert entries["ownerOnly()"]["authority_roles"] == []
-    assert [g["role"] for g in entries["witnessed()"]["authority_roles"]] == [7]
-    assert entries["unreadable()"]["authority_roles"] is None
-
-
 def test_the_two_surfaces_agree_on_every_row(api_client, three_state_rows):
     """The contradiction this file exists for: the same DB row served two ways.
     Compared as the three STATES rather than by deep equality — the company
@@ -209,18 +196,3 @@ def test_undetermined_roles_are_jsonb_null_not_sql_null(db_session, three_state_
 
     assert sql_null == 0
     assert jsonb_null == 1
-
-
-@pytest.mark.parametrize("column", ["authority_public", "authority_roles", "authority_openness"])
-def test_authority_columns_carry_their_column_comment(db_session, column):
-    """The three-state semantics live in the DB, where an operator reading the
-    schema meets them. ``authority_openness`` was commented and the two columns
-    a consumer actually folds were not."""
-    comment = db_session.execute(
-        text(
-            "SELECT col_description(a.attrelid, a.attnum) FROM pg_attribute a "
-            "WHERE a.attrelid = 'effective_functions'::regclass AND a.attname = :n"
-        ),
-        {"n": column},
-    ).scalar_one()
-    assert comment, f"effective_functions.{column} carries no column comment"

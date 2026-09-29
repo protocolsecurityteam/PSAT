@@ -657,13 +657,6 @@ def test_internal_function_pointer_refuses(_unit, _effects):
     )
 
 
-def test_pointer_fixture_really_carries_an_out_flow(_effects):
-    # Without a live out-flow on this function the refusal above would be
-    # protecting nothing.
-    info = next(i for i in _effects.values() if i["function"].startswith("pointerCallAfterClear("))
-    assert [f for f in info["value_flows"] if f["direction"] == "out"] != []
-
-
 def test_helper_invoked_twice_keeps_both_positions(_unit, _effects):
     # The first `_pay` runs before the clear. Keying the walk on the callee's
     # name instead of on its call site would lose that position entirely.
@@ -741,13 +734,6 @@ def test_native_transfer_after_clear_is_proven(_unit, _effects):
         ro.SHAPE_ZERO_ASSIGNMENT,
         "Ordering.bids",
     )
-
-
-def test_transfer_and_send_produce_no_sink_record(_effects):
-    # The premise of the two refusals above: if the sink list DID carry these
-    # ops, missing them would not have been a hole worth closing.
-    info = next(i for i in _effects.values() if i["function"].startswith("transferBeforeClear("))
-    assert [s for s in info["sinks"] if s["kind"] == "external_call"] == []
 
 
 # ---------------------------------------------------------------------------

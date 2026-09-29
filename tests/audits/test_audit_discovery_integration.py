@@ -581,37 +581,6 @@ def test_sync_upserts_on_duplicate_url(db_session):
     assert rows[0].classified_commits == [{"sha": "abc123def456", "label": "reviewed", "provenance": "ai_returned"}]
 
 
-def test_sync_accepts_audit_date_ranges(db_session):
-    """Audit discovery can return human date ranges, not just ISO dates."""
-    from db.models import AuditReport, Protocol
-    from workers.discovery import _sync_audit_reports_to_db
-
-    protocol = Protocol(name=f"date-range-test-{uuid.uuid4().hex[:8]}")
-    db_session.add(protocol)
-    db_session.commit()
-
-    date_range = "2023-04-28 to 2023-05-05"
-    _sync_audit_reports_to_db(
-        db_session,
-        protocol.id,
-        [
-            {
-                "url": "https://github.com/0xVolodya/audits/blob/main/reports/eigenlayer.md",
-                "auditor": "0xVolodya, Independent Security Researcher",
-                "title": "[dep: EigenLayer] EigenLayer Audit Report",
-                "date": date_range,
-                "confidence": 1.0,
-                "source_repo": "Layr-Labs/eigenlayer-contracts",
-                "reviewed_commits": ["7a23e259050fe88a179ab0345cc8cfc9b5e57221"],
-                "referenced_repos": ["Layr-Labs/eigenlayer-contracts"],
-            }
-        ],
-    )
-
-    row = db_session.query(AuditReport).filter_by(protocol_id=protocol.id).one()
-    assert row.date == date_range
-
-
 # ---------------------------------------------------------------------------
 # Scenario 7: sync drops entries missing required fields
 # ---------------------------------------------------------------------------

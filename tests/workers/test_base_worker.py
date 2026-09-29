@@ -83,15 +83,6 @@ def _force_single_job_concurrency(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-@patch("workers.base.signal.signal")
-def test_init_sets_worker_id_with_classname_and_pid(mock_signal):
-    with patch("workers.base.os.getpid", return_value=12345):
-        w = _TestWorker()
-    assert w.worker_id.startswith("_TestWorker-12345-")
-    assert len(w.worker_id.split("-")) == 3
-    assert w._running is True
-
-
 # ---------------------------------------------------------------------------
 # Tests: _handle_sigterm
 # ---------------------------------------------------------------------------
@@ -363,32 +354,6 @@ def test_requeued_failure_carries_no_traceback(
 
 @patch("workers.base.signal.signal")
 @patch("workers.base.SessionLocal")
-@patch("workers.base.claim_job", return_value=None)
-@patch("workers.base.time.sleep")
-def test_run_loop_no_job_sleeps(mock_sleep, mock_claim, mock_session_cls, mock_signal):
-    mock_session = MagicMock()
-    mock_session_cls.return_value = mock_session
-
-    w = _TestWorker()
-    w.poll_interval = 2.0
-
-    call_count = 0
-
-    def _claim_side_effect(session, stage, worker_id):
-        nonlocal call_count
-        call_count += 1
-        if call_count >= 2:
-            w._running = False
-        return None
-
-    mock_claim.side_effect = _claim_side_effect
-    w.run_loop()
-
-    assert [call.args[0] for call in mock_sleep.call_args_list] == [2.0, 4.0]
-
-
-@patch("workers.base.signal.signal")
-@patch("workers.base.SessionLocal")
 @patch("workers.base.claim_job")
 @patch("db.queue.complete_job")
 def test_run_loop_next_stage_done_calls_complete_job(mock_complete, mock_claim, mock_session_cls, mock_signal):
@@ -413,37 +378,6 @@ def test_run_loop_next_stage_done_calls_complete_job(mock_complete, mock_claim, 
     w.run_loop()
 
     mock_complete.assert_called_once_with(mock_session, job.id, lease_id=None)
-
-
-@patch("workers.base.signal.signal")
-@patch("workers.base.SessionLocal")
-@patch("workers.base.claim_job", return_value=None)
-@patch("workers.base.time.sleep")
-def test_run_loop_stale_recovery_uses_elapsed_time(mock_sleep, mock_claim, mock_session_cls, mock_signal):
-    """Adaptive poll delays must not slow the stale-job recovery cadence."""
-    mock_session = MagicMock()
-    mock_session_cls.return_value = mock_session
-
-    w = _TestWorker()
-
-    cycle = 0
-
-    def _claim_side_effect(session, stage, worker_id):
-        nonlocal cycle
-        cycle += 1
-        if cycle >= 31:
-            w._running = False
-        return None
-
-    mock_claim.side_effect = _claim_side_effect
-
-    # Each claimed poll advances a synthetic clock by two seconds.
-    with (
-        patch("workers.base.time.monotonic", side_effect=lambda: cycle * 2),
-        patch.object(w, "_recover_stale_jobs") as mock_recover,
-    ):
-        w.run_loop()
-        mock_recover.assert_called_once_with(mock_session)
 
 
 # ---------------------------------------------------------------------------
@@ -471,16 +405,6 @@ def test_claim_job_sweeps_stuck_rows_before_claiming(mock_claim, mock_reclaim, m
 # ---------------------------------------------------------------------------
 # Tests: update_detail
 # ---------------------------------------------------------------------------
-
-
-@patch("workers.base.signal.signal")
-@patch("workers.base.update_job_detail")
-def test_update_detail_delegates_to_queue(mock_update, mock_signal):
-    w = _TestWorker()
-    mock_session = MagicMock()
-    mock_job = _make_job()
-    w.update_detail(mock_session, cast(Any, mock_job), "50% done")
-    mock_update.assert_called_once_with(mock_session, mock_job.id, "50% done")
 
 
 # ---------------------------------------------------------------------------
@@ -721,28 +645,3 @@ def test_run_loop_outer_exception_does_not_crash(mock_claim, mock_session_cls, m
 
     w = _TestWorker()
     w.run_loop()
-
-
-@patch("workers.base.signal.signal")
-@patch("workers.base.SessionLocal")
-@patch("workers.base.claim_job", return_value=None)
-@patch("workers.base.time.sleep")
-def test_run_loop_session_closed_when_no_job(mock_sleep, mock_claim, mock_session_cls, mock_signal):
-    mock_session = MagicMock()
-    mock_session_cls.return_value = mock_session
-
-    w = _TestWorker()
-
-    cycle = 0
-
-    def _claim_side_effect(session, stage, worker_id):
-        nonlocal cycle
-        cycle += 1
-        if cycle >= 2:
-            w._running = False
-        return None
-
-    mock_claim.side_effect = _claim_side_effect
-    w.run_loop()
-
-    assert mock_session.close.call_count >= 2

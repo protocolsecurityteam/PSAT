@@ -5,7 +5,6 @@ and LLM call are stubbed; no MinIO or OpenRouter.
 
 from __future__ import annotations
 
-import json
 from typing import Any, cast
 from unittest.mock import MagicMock
 
@@ -14,7 +13,6 @@ import pytest
 from db.storage import StorageUnavailable
 from services.audits import scope_extraction as scope_pkg
 from services.audits.scope_extraction import (
-    ScopeExtractionOutcome,
     process_audit_scope,
 )
 from services.audits.scope_extraction._errors import LLMUnavailableError
@@ -249,41 +247,7 @@ class TestClassifiedCommitFiltering:
         ]
 
 
-class TestOutcomeDefaults:
-    def test_scope_extraction_outcome_defaults_preserve_none(self):
-        """Constructing ``ScopeExtractionOutcome(status=...)`` alone keeps
-        every optional field None — the worker relies on "unset" being
-        distinguishable from "set to empty"."""
-        oc = ScopeExtractionOutcome(status="failed", error="x")
-        assert oc.contracts == ()
-        assert oc.storage_key is None
-        assert oc.extracted_date is None
-        assert oc.reviewed_commits == ()
-        assert oc.method == "llm"
-        assert oc.raw_response is None
-        assert oc.model is None
-
-
 class TestArtifactPayloadShape:
-    def test_build_artifact_payload_carries_required_fields(self):
-        """The artifact JSON is the debugging source of truth for an audit
-        row — every downstream viewer reads these keys."""
-        from services.audits.scope_extraction._artifact import build_artifact_payload
-
-        payload = build_artifact_payload(
-            ["Pool", "Vault"],
-            method="llm",
-            model="google/gemini-2.0-flash-001",
-            extracted_date="2024-06-01",
-            raw_response='["Pool","Vault"]',
-            scope_section_text="<scope>",
-        )
-        assert payload["contracts"] == ["Pool", "Vault"]
-        assert payload["method"] == "llm"
-        assert payload["model"] == "google/gemini-2.0-flash-001"
-        assert payload["extracted_date"] == "2024-06-01"
-        json.dumps(payload)
-
     def test_build_artifact_payload_caps_scope_section_text(self):
         """Pathological PDFs can have 100k+ chars of scope prose. The 20k
         cap keeps the artifact readable in a debugger."""

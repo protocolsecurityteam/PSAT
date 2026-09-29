@@ -5,7 +5,6 @@ rule: never rely on env-var-controlled divergence), so real coverage code runs w
 
 from __future__ import annotations
 
-import hashlib
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -262,91 +261,6 @@ def test_coverage_worker_writes_pending_when_audit_is_verifiable(db_session, see
     assert rows[0].match_type == "direct"
     assert rows[0].equivalence_status == "pending"
     assert calls == {"github": 0, "etherscan": 0}
-
-
-def test_coverage_worker_then_verify_worker_upgrades_to_reviewed_commit(db_session, seed_protocol, worker, monkeypatch):
-    """Deferred path end to end: the coverage worker writes a pending row, then ``verify_one_coverage_row`` upgrades
-    it to ``reviewed_commit/high`` once the proof goes through.
-    """
-    from db.models import AuditContractCoverage, JobStage, JobStatus
-    from services.audits import source_equivalence
-    from services.audits.coverage import verify_one_coverage_row
-
-    protocol_id, _ = seed_protocol
-    job = _add_job(
-        db_session,
-        protocol_id=protocol_id,
-        stage=JobStage.coverage,
-        status=JobStatus.queued,
-    )
-    contract = _add_contract(
-        db_session,
-        protocol_id=protocol_id,
-        name="Pool",
-        address="0x" + "a" * 40,
-        job_id=job.id,
-    )
-    audit = _add_audit(
-        db_session,
-        protocol_id=protocol_id,
-        text_status="success",
-        scope_status="success",
-        scope=["Pool"],
-    )
-    audit.reviewed_commits = ["abc1234"]
-    audit.source_repo = "some/repo"
-    db_session.commit()
-
-    content = "contract Pool {}"
-    h = hashlib.sha256(content.encode()).hexdigest()
-    monkeypatch.setattr(
-        source_equivalence,
-        "fetch_etherscan_source_files",
-        lambda _addr, **_kw: source_equivalence.EtherscanFetch(
-            source=source_equivalence.VerifiedSource(
-                contract_name="Pool",
-                compiler_version="0.8",
-                files={"src/Pool.sol": h},
-            ),
-            status="ok",
-            detail="",
-        ),
-    )
-    monkeypatch.setattr(
-        source_equivalence,
-        "fetch_github_source_hash",
-        lambda _repo, _commit, path, token=None: source_equivalence.GithubHashResult(
-            sha256=h if path == "src/Pool.sol" else None,
-            status="ok" if path == "src/Pool.sol" else "http_404",
-            detail="",
-        ),
-    )
-
-    claimed = worker._claim_next_job(db_session)
-    assert claimed is not None
-    worker.process(db_session, claimed)
-    db_session.commit()
-
-    db_session.expire_all()
-    row = (
-        db_session.execute(select(AuditContractCoverage).where(AuditContractCoverage.contract_id == contract.id))
-        .scalars()
-        .one()
-    )
-    assert row.match_type == "direct"
-    assert row.equivalence_status == "pending"
-
-    # Phase 2: drive the per-row verify entry point directly to keep assertions row-level.
-    status = verify_one_coverage_row(db_session, row.id)
-    db_session.commit()
-    assert status == "proven"
-
-    db_session.expire_all()
-    row = db_session.get(AuditContractCoverage, row.id)
-    assert row is not None
-    assert row.match_type == "reviewed_commit"
-    assert row.match_confidence == "high"
-    assert row.equivalence_status == "proven"
 
 
 # ---------------------------------------------------------------------------

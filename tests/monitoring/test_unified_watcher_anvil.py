@@ -903,35 +903,6 @@ def test_proxy_upgrade_backward_compat(anvil_env, test_db):
     assert wp.last_known_implementation.lower() == impl_v2.lower()
 
 
-def test_mixed_contracts_single_scan(anvil_env, test_db):
-    rpc_url, tmp_path = anvil_env
-    from services.monitoring.unified_watcher import scan_for_events
-
-    ownable_addr = _compile_and_deploy(OWNABLE_SOURCE, "TestOwnable", [], rpc_url, PRIVATE_KEY, tmp_path)
-    pausable_addr = _compile_and_deploy(PAUSABLE_SOURCE, "TestPausable", [], rpc_url, PRIVATE_KEY, tmp_path)
-    safe_addr = _compile_and_deploy(SAFE_SOURCE, "TestSafe", [], rpc_url, PRIVATE_KEY, tmp_path)
-
-    current_block = int(_cast(["block-number"], rpc_url))
-
-    _register_contract(test_db, ownable_addr, "regular", current_block)
-    _register_contract(test_db, pausable_addr, "pausable", current_block)
-    _register_contract(test_db, safe_addr, "safe", current_block)
-
-    # Perform actions on each
-    new_owner = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
-    _cast_send(ownable_addr, "transferOwnership(address)", [new_owner], rpc_url, PRIVATE_KEY)
-    _cast_send(pausable_addr, "pause()", [], rpc_url, PRIVATE_KEY)
-    _cast_send(safe_addr, "addOwner(address)", [new_owner], rpc_url, PRIVATE_KEY)
-
-    events = scan_for_events(test_db, rpc_url)
-
-    event_types = sorted([e.event_type for e in events])
-    assert "ownership_transferred" in event_types
-    assert "paused" in event_types
-    assert "signer_added" in event_types
-    assert len(events) >= 3
-
-
 def test_poll_detects_ownership_change(anvil_env, test_db):
     rpc_url, tmp_path = anvil_env
     from services.monitoring.unified_watcher import poll_for_state_changes

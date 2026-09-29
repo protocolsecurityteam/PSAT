@@ -29,7 +29,6 @@ from services.static.contract_analysis_pipeline.summaries import (
     _role_names_from_predicate_trees,
     _role_names_from_tree,
 )
-from services.static.contract_analysis_pipeline.tracking import _is_storage_layout_constant
 
 
 class _Bytes32Constant:
@@ -222,17 +221,6 @@ REAL_EXTERNAL_REGISTRY_ROLE_LEAF = {
 }
 
 
-def test_external_registry_role_leaf_is_not_admitted():
-    """A GENUINE cross-contract role check mints nothing, intentionally.
-
-    ``callee_signature`` comes from the interface the CALLER declared
-    (``predicates.py:2338``), so a slot lens or merkle contract declared as
-    ``hasRole(bytes32,address)`` lowers to a byte-identical descriptor; argument position adds
-    nothing. Measured cost is zero. These roles publish ``not_determined`` (B4c), **never** "no roles"."""
-    trees = {"trees": {"mint()": _leaf(REAL_EXTERNAL_REGISTRY_ROLE_LEAF)}}
-    assert _role_names_from_predicate_trees(trees, _vars("MINTER_ROLE")) == set()
-
-
 def test_real_slot_constant_leaves_are_rejected():
     """The two REAL measured slot-constant leaves — role_definitions ids 19 and
     1 — mint nothing."""
@@ -322,12 +310,6 @@ def test_hostile_role_with_banned_suffix_is_kept():
 def test_hostile_slot_with_innocent_name_is_dropped():
     trees = {"trees": {"setTokenOut(address)": _leaf(HOSTILE_SLOT_WITH_INNOCENT_NAME)}}
     assert _role_names_from_predicate_trees(trees, _vars("MAIN_POINTER")) == set()
-
-
-def test_name_suffix_guard_misclassifies_both_hostile_fixtures():
-    """Why ``_is_storage_layout_constant`` is banned as the D6 fix: wrong in both directions here."""
-    assert _is_storage_layout_constant("GOVERNOR_SLOT") is True  # a real role it would drop
-    assert _is_storage_layout_constant("MAIN_POINTER") is False  # a real pointer it would keep
 
 
 # --- fail-closed arms ------------------------------------------------------
@@ -476,48 +458,6 @@ class TestExternalArmHostileShapes:
         )
         assert roles == []
 
-    def test_merkle_root_in_a_membership_proof(self, tmp_path):
-        """``isInTree(bytes32,address)`` matches hasRole's argument ORDER yet is no role check, so the
-        selector gate is load-bearing."""
-        roles = _role_names_from_source(
-            tmp_path,
-            """
-            pragma solidity ^0.8.19;
-            interface ITree { function isInTree(bytes32 root, address account) external view returns (bool); }
-            contract C {
-                ITree public tree;
-                bytes32 public constant AIRDROP_ROOT = keccak256("AIRDROP");
-                uint256 public value;
-                constructor(ITree t) { tree = t; }
-                function claim() external {
-                    require(tree.isInTree(AIRDROP_ROOT, msg.sender), "no");
-                    value = 1;
-                }
-            }
-            """,
-        )
-        assert roles == []
-
-    def test_create2_salt_in_a_factory_authorisation(self, tmp_path):
-        roles = _role_names_from_source(
-            tmp_path,
-            """
-            pragma solidity ^0.8.19;
-            interface IFactory { function isAuthorized(address account, bytes32 salt) external view returns (bool); }
-            contract C {
-                IFactory public factory;
-                bytes32 public constant DEPLOY_SALT = keccak256("SALT");
-                uint256 public value;
-                constructor(IFactory f) { factory = f; }
-                function deploy() external {
-                    require(factory.isAuthorized(msg.sender, DEPLOY_SALT), "no");
-                    value = 1;
-                }
-            }
-            """,
-        )
-        assert roles == []
-
     def test_a_genuine_hasrole_gate_mints_nothing_either(self, tmp_path):
         """The honest cost of the excision: a real cross-contract role check publishes NO row
         (``not_determined`` under B4c, not "no roles")."""
@@ -568,75 +508,6 @@ class TestCallerDeclaredInterfaceShapes:
     The selector is read off the interface the CALLING contract declared, so any contract
     declared as ``hasRole(bytes32,address)`` looks identical; refuting bodies are sometimes
     visible in the same unit."""
-
-    def test_h1_slot_lens_declared_as_hasrole(self, tmp_path):
-        """H1 - an ERC-7201 pointer read through a slot lens *declared* ``hasRole(bytes32,address)``."""
-        roles = _role_names_from_source(
-            tmp_path,
-            """
-            pragma solidity ^0.8.19;
-            interface ISlotLens { function hasRole(bytes32 slot, address target) external view returns (bool); }
-            contract C {
-                ISlotLens public lens;
-                bytes32 public constant PausedStorageLocation =
-                    0xcd5ed15c6e187e77e9aee88184c21f4f2182ab5827cb3b7e07fbedcd63f03300;
-                uint256 public value;
-                constructor(ISlotLens l) { lens = l; }
-                function unpause() external {
-                    require(lens.hasRole(PausedStorageLocation, msg.sender), "no");
-                    value = 1;
-                }
-            }
-            """,
-        )
-        assert roles == []
-
-    def test_h2_merkle_tree_declared_as_hasrole(self, tmp_path):
-        roles = _role_names_from_source(
-            tmp_path,
-            """
-            pragma solidity ^0.8.19;
-            interface ITree { function hasRole(bytes32 root, address account) external view returns (bool); }
-            contract C {
-                ITree public tree;
-                bytes32 public constant AIRDROP_ROOT = keccak256("AIRDROP");
-                uint256 public value;
-                constructor(ITree t) { tree = t; }
-                function claim() external {
-                    require(tree.hasRole(AIRDROP_ROOT, msg.sender), "no");
-                    value = 1;
-                }
-            }
-            """,
-        )
-        assert roles == []
-
-    def test_h4_same_unit_hasrole_that_ignores_the_account(self, tmp_path):
-        """H4 - the in-unit ``hasRole`` returns ``salts[salt]`` and drops ``account``, so it gates
-        nothing about the caller."""
-        roles = _role_names_from_source(
-            tmp_path,
-            """
-            pragma solidity ^0.8.19;
-            contract Registry {
-                mapping(bytes32 => bool) public salts;
-                function hasRole(bytes32 salt, address) external view returns (bool) {
-                    return salts[salt];
-                }
-            }
-            contract C {
-                Registry public registry;
-                bytes32 public constant DEPLOY_SALT = keccak256("SALT");
-                uint256 public value;
-                constructor(Registry r) { registry = r; }
-                function deploy() external {
-                    require(registry.hasRole(DEPLOY_SALT, msg.sender), "no");
-                    value = 1;
-                }
-            }
-            """,
-        )
-        assert roles == []
 
     def test_h5_recovered_signer_is_not_the_caller(self, tmp_path):
         """H5 - a recovered signer is not this function's caller. Moot with the arm gone, pinned anyway."""

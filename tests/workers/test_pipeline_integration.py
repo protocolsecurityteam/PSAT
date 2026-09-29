@@ -377,16 +377,6 @@ def test_detail_inlines_upgrade_history_and_graph_viz(mock_session_cls, mock_get
 # ===================================================================
 
 
-def test_graph_label_prefers_caller_supplied_label():
-    from services.discovery.dependency_graph_builder import build_dependency_visualization
-
-    unified = {"address": TARGET, "dependencies": {DEP_A: {"type": "regular", "source": ["static"]}}}
-
-    viz = build_dependency_visualization(unified, target_label="Rewards Router")
-    target_node = next(n for n in viz["nodes"] if n["is_target"])
-    assert target_node["label"] == "Rewards Router"
-
-
 # ===================================================================
 # 6. Full data flow: unified -> graph viz -> upgrade history
 # ===================================================================

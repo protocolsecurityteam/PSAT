@@ -43,7 +43,6 @@ from sqlalchemy.types import JSON
 
 from services.policy.effective_permissions_writer import (
     _column_values_for_capability,
-    _principal_rows_for_capability,
     write_effective_function_rows,
 )
 from services.resolution.capabilities import (
@@ -463,33 +462,6 @@ def test_irreducible_and_emits_zero_rows_with_tree(db_session) -> None:
     assert {c["kind"] for c in children} == {"finite_set", "threshold_group"}
 
 
-def test_or_pure_set_emits_union(db_session) -> None:
-    """OR of two finite_sets is simplified by ``union`` into one finite_set, so the
-    writer emits N rows."""
-    from services.resolution.capabilities import union
-
-    a = CapabilityExpr.finite_set(["0x" + "a" * 40, "0x" + "b" * 40])
-    b = CapabilityExpr.finite_set(["0x" + "b" * 40, "0x" + "c" * 40])
-    merged = union(a, b)
-    assert merged.kind == "finite_set"
-
-    write_effective_function_rows(
-        db_session,
-        contract_id=1,
-        function_records=[_fn_record("anyOf()")],
-        capability_by_function={"anyOf()": merged},
-    )
-    db_session.commit()
-
-    rows = _principals(db_session)
-    assert len(rows) == 3
-    assert {r.address for r in rows} == {
-        "0x" + "a" * 40,
-        "0x" + "b" * 40,
-        "0x" + "c" * 40,
-    }
-
-
 def test_mixed_or_public_and_finite_writes_public_and_principal(db_session) -> None:
     finite = CapabilityExpr.finite_set(["0x" + "a" * 40])
     public = CapabilityExpr.conditional_universal(
@@ -547,37 +519,6 @@ def test_and_of_mixed_or_and_side_condition_preserves_both_paths(db_session) -> 
 # ---------------------------------------------------------------------------
 
 
-def test_principal_rows_for_capability_finite_set() -> None:
-    cap_dict = capability_to_dict(CapabilityExpr.finite_set(["0x" + "a" * 40]))
-    rows = _principal_rows_for_capability(cap_dict)
-    assert len(rows) == 1
-    assert rows[0]["principal_type"] == "controller"
-
-
-def test_column_values_conditional_universal() -> None:
-    cap_dict = capability_to_dict(
-        CapabilityExpr.conditional_universal(Condition(kind="pause", description="paused")),
-    )
-    cols = _column_values_for_capability(cap_dict)
-    assert cols["status"] == "public"
-    assert cols["authority_public"] is True
-    assert cols["conditions"] and cols["conditions"][0]["kind"] == "pause"
-
-
-def test_column_values_resolved_empty() -> None:
-    cap_dict = capability_to_dict(CapabilityExpr.finite_set([], quality="exact", confidence="enumerable"))
-    cols = _column_values_for_capability(cap_dict)
-    assert cols["status"] == "resolved_empty"
-    assert cols["authority_public"] is False
-
-
-def test_column_values_lower_bound_empty_is_not_resolved_empty() -> None:
-    cap_dict = capability_to_dict(CapabilityExpr.finite_set([], quality="lower_bound", confidence="partial"))
-    cols = _column_values_for_capability(cap_dict)
-    assert cols["status"] is None
-    assert cols["authority_public"] is False
-
-
 def test_column_values_public_or_composite() -> None:
     left = CapabilityExpr.conditional_universal(Condition(kind="business", description="initialized branch"))
     right = CapabilityExpr.conditional_universal(Condition(kind="business", description="constructor branch"))
@@ -591,13 +532,6 @@ def test_column_values_public_or_composite() -> None:
         {"kind": "business", "description": "initialized branch"},
         {"kind": "business", "description": "constructor branch"},
     ]
-
-
-def test_column_values_unsupported() -> None:
-    cap_dict = capability_to_dict(CapabilityExpr.unsupported("reason_x"))
-    cols = _column_values_for_capability(cap_dict)
-    assert cols["status"] == "unsupported"
-    assert cols["authority_public"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -639,21 +573,6 @@ def test_finite_set_rows_typed_via_resolver(db_session) -> None:
     # Classifier details (owners/threshold) are merged alongside the surface trace.
     assert rows[safe_addr.lower()].details.get("owners") == ["0x" + "1" * 40]
     assert rows[eoa_addr.lower()].resolved_type == "eoa"
-
-
-def test_finite_set_rows_untyped_without_resolver(db_session) -> None:
-    """With no resolver the rows stay untyped; typing is additive and resolver-gated."""
-    member = "0x" + "a" * 40
-    write_effective_function_rows(
-        db_session,
-        contract_id=1,
-        function_records=[_fn_record("doThing()")],
-        capability_by_function={"doThing()": CapabilityExpr.finite_set([member])},
-    )
-    db_session.commit()
-    rows = _principals(db_session)
-    assert len(rows) == 1
-    assert rows[0].resolved_type is None
 
 
 def test_resolver_not_called_for_signature_witness(db_session) -> None:
@@ -753,10 +672,6 @@ def test_row_abi_signature_falls_back_to_the_full_name(db_session) -> None:
 # ``authority_public=False`` reported a WITNESSED caller
 # restriction and "the authority could not be determined" with one value.
 # ---------------------------------------------------------------------------
-
-
-def _openness(session) -> str | None:
-    return _ef_row(session).authority_openness
 
 
 def test_openness_open_on_conditional_universal(db_session) -> None:

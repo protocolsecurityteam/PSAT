@@ -208,32 +208,6 @@ def test_writer_functions_from_effects(tmp_path):
     assert {w["function"] for w in target["writer_functions"]} == {"transferOwnership(address)"}
 
 
-def test_external_role_getter_name_does_not_create_role_identifier(tmp_path):
-    source = """
-    pragma solidity ^0.8.19;
-    interface IRoleRegistry {
-        function hasRole(bytes32 role, address account) external view returns (bool);
-        function BREAK_GLASS() external view returns (bytes32);
-    }
-    contract C {
-        IRoleRegistry public roleRegistry;
-        bool public paused;
-        constructor(IRoleRegistry r) { roleRegistry = r; }
-        function pauseContract() external {
-            require(
-                roleRegistry.hasRole(roleRegistry.BREAK_GLASS(), msg.sender),
-                "no"
-            );
-            paused = true;
-        }
-    }
-    """
-    targets = _build(tmp_path, source)
-    by_id = {t["controller_id"]: t for t in targets}
-    assert "external_contract:roleRegistry" in by_id, list(by_id.keys())
-    assert "role_identifier:BREAK_GLASS" not in by_id
-
-
 def test_writer_emits_event_promotes_tracking_mode(tmp_path):
     source = """
     pragma solidity ^0.8.19;

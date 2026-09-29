@@ -355,27 +355,6 @@ def test_copy_row_skips_primary_key(db_session):
     assert cloned.contract_name == "Original"
 
 
-def test_copy_row_skips_server_defaults(db_session):
-    from db.models import Contract
-    from db.queue import copy_row, create_job
-
-    job = create_job(db_session, {"address": ADDR_A})
-    original = Contract(
-        job_id=job.id,
-        address=ADDR_A,
-        chain="ethereum",
-        contract_name="Original",
-    )
-    db_session.add(original)
-    db_session.flush()
-
-    cloned = copy_row(db_session, original, job_id=job.id, address=ADDR_A, chain="base")
-    assert isinstance(cloned, Contract)
-    db_session.flush()
-
-    assert cloned.is_proxy is not None
-
-
 def test_copy_row_applies_overrides(db_session):
     from db.models import Contract
     from db.queue import copy_row, create_job

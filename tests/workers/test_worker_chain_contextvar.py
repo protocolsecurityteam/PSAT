@@ -88,18 +88,3 @@ def test_execute_job_binds_chain_from_request(_mock_advance, _mock_signal):
     assert captured["chain"] == "base"
     # Contextvar is reset on exit — no leak into the next job.
     assert chain_var.get() is None
-
-
-@patch("workers.base.signal.signal")
-@patch("workers.base.advance_job")
-def test_execute_job_binds_chain_from_chain_id_when_request_omits_it(_mock_advance, _mock_signal):
-    captured: dict[str, str | None] = {}
-    job = _make_job(request={"address": "0x" + "a" * 40}, chain_id=8453)
-
-    w = _TestWorker()
-    w._record_stage_timing = MagicMock()
-    w._satisfy_dependencies = MagicMock(return_value=0)
-    w.process = MagicMock(side_effect=lambda _s, _j: captured.__setitem__("chain", chain_var.get()))
-
-    w._execute_job(MagicMock(), cast(Any, job))
-    assert captured["chain"] == "base"

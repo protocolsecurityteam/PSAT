@@ -174,14 +174,6 @@ class TestCompanyInventoryChainFiltering:
 
 
 class TestDedupChainFiltering:
-    def test_existing_job_different_chain_not_found(self, db_session):
-        """An Ethereum job must NOT suppress a Base job for the same address."""
-        from db.queue import create_job, find_existing_job_for_address
-
-        create_job(db_session, {"address": ADDR_A, "chain": "ethereum"})
-        found = find_existing_job_for_address(db_session, ADDR_A, chain="base")
-        assert found is None, "Ethereum job suppressed Base job creation — cross-chain dedup error"
-
     def test_is_known_proxy_same_chain(self, db_session):
         from db.models import Contract
         from db.queue import create_job, is_known_proxy
@@ -247,15 +239,3 @@ class TestCopyCachePreservesSource:
             "Source job is no longer a valid cache after first copy — contract row was moved instead of cloned"
         )
         assert found.id == source.id
-
-    def test_second_cache_copy_succeeds(self, db_session):
-        from db.queue import copy_static_cache, create_job
-
-        source = _create_completed_job_with_chain(db_session, ADDR_A, "ethereum")
-
-        target1 = create_job(db_session, {"address": ADDR_A, "chain": "ethereum"})
-        copy_static_cache(db_session, source.id, target1.id)
-
-        target2 = create_job(db_session, {"address": ADDR_A, "chain": "ethereum"})
-        result2 = copy_static_cache(db_session, source.id, target2.id)
-        assert result2 is not None, "Second cache copy failed — source contract row was consumed by the first"

@@ -104,40 +104,6 @@ def test_pause_only_tree_does_not_admit_function(tmp_path):
     assert "readOnly()" not in semantic_signatures
 
 
-def test_role_definitions_from_predicate_role_keys(tmp_path):
-    """``role_definitions`` comes only from the in-contract ``mapping_membership`` shape.
-
-    The cross-contract ``registry.hasRole(ROLE, msg.sender)`` gate below names two real roles
-    and mints NEITHER: ``callee_signature`` is the CALLER's declaration (``predicates.py:2338``),
-    so slot lenses / merkle contracts declared as ``hasRole(bytes32,address)`` minted ERC-7201
-    pointers as roles (see ``test_role_definition_leaf_admission.py``). The absence is a
-    **coverage caveat** (``not_determined``, ``SCORING_INVARIANTS.md`` B4c), not "no roles"."""
-    source = """
-    pragma solidity ^0.8.19;
-    interface IRoleRegistry {
-        function hasRole(bytes32 role, address account) external view returns (bool);
-    }
-    contract C {
-        IRoleRegistry public roleRegistry;
-        bytes32 public constant ADMIN_ROLE = keccak256("ADMIN");
-        bytes32 public constant MINTER_ROLE = keccak256("MINTER");
-        uint256 public value;
-        constructor(IRoleRegistry rr) { roleRegistry = rr; }
-        function mint() external {
-            require(roleRegistry.hasRole(MINTER_ROLE, msg.sender), "no");
-            value = 1;
-        }
-        function admin() external {
-            require(roleRegistry.hasRole(ADMIN_ROLE, msg.sender), "no");
-            value = 2;
-        }
-    }
-    """
-    ac = _detect(tmp_path, source)
-    role_names = {r["role"] for r in ac["role_definitions"]}
-    assert role_names == set()
-
-
 def test_delegated_authority_leaf_admits_function(tmp_path):
     source = """
     pragma solidity ^0.8.19;

@@ -112,18 +112,6 @@ def test_external_check_unavailable_chain_skips_scan(monkeypatch, _capture_build
     assert "url" not in _capture_build_url  # no coverage → client never built
 
 
-def test_external_check_threads_per_chain_url(monkeypatch, _capture_build_url):
-    import services.resolution.external_check_materializer as mod
-
-    monkeypatch.delenv("PSAT_HYPERSYNC_URL", raising=False)
-    monkeypatch.setenv("ENVIO_API_TOKEN", "tok")
-    monkeypatch.setattr(hb, "hypersync_url_for_chain", lambda cid: BASE_URL if cid == 8453 else None)
-    _stub_floor_defer(monkeypatch)
-
-    asyncio.run(mod._candidate_addresses_from_hypersync_async(checker_address="0x" + "11" * 20, limit=8, chain_id=8453))
-    assert _capture_build_url["url"] == BASE_URL
-
-
 # --------------------------------------------------------------------------- #
 # predicate_evaluator view-key membership scan                                #
 # --------------------------------------------------------------------------- #
@@ -178,9 +166,3 @@ def test_observed_keys_meta_url_overrides_registry(monkeypatch, _capture_build_u
 # --------------------------------------------------------------------------- #
 # mapping_enumerator default                                                   #
 # --------------------------------------------------------------------------- #
-
-
-def test_mapping_enumerator_default_url_is_registry_mainnet():
-    from services.resolution.mapping_enumerator import DEFAULT_HYPERSYNC_URL
-
-    assert DEFAULT_HYPERSYNC_URL == MAINNET_URL

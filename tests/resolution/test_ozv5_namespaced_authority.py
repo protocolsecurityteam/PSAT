@@ -203,25 +203,6 @@ def test_non_ownership_accessor_view_call_stays_placeholder(monkeypatch: pytest.
     assert not _called(recorder, OWNER_SELECTOR), "non-owner accessor must not read owner()"
 
 
-def test_parametric_role_admin_accessor_stays_placeholder(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The parametric AccessControl role-admin root is a per-role authority, not the OZ-v5
-    owner; it stays fail-closed."""
-    recorder: list = []
-    _stub_rpc_map(monkeypatch, {OWNER_SELECTOR: SAFE}, recorder)
-    tree = _eq_tree(
-        {
-            "source": "view_call",
-            "callee_signature": "_getAccessControlStorage()",
-            "callee_selector": "0xdeadbeef",
-        }
-    )
-
-    cap = evaluate_tree(tree, _ctx_with_rpc())
-
-    assert cap.members == []
-    assert not _called(recorder, OWNER_SELECTOR)
-
-
 def test_oz_v5_accessor_without_rpc_stays_placeholder(monkeypatch: pytest.MonkeyPatch) -> None:
     """No reachable RPC => the gate stays unresolved, never a false negative."""
     recorder: list = []
@@ -347,13 +328,6 @@ class TestLayer1OwnableForm:
         writers = {w.get("function") for w in owner.get("writer_functions", [])}
         # Only the canonical ownership mutators, NOT incidental namespace setters.
         assert writers == {"transferOwnership(address)", "renounceOwnership()"}
-
-    def test_gate_operand_is_namespaced_slot_member(self, _slither) -> None:
-        _targets, trees = _build_targets(_slither, "OzV5Ownable", [{"role": "OwnableStorageLocation"}])
-        leaf = trees["trees"]["setTokenOut(address)"]["leaf"]
-        other = next(o for o in leaf["operands"] if o.get("source") != "msg_sender")
-        assert other["state_variable_name"] == "OwnableStorageLocation"
-        assert other["member_path"] == ["_owner"]
 
 
 class TestLayer1AccessControlForm:

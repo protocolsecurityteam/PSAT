@@ -501,27 +501,6 @@ class TestSearchCacheBehavior:
 
 
 class TestDeepResearchCacheBehavior:
-    def test_disabled_skips_storage(self, monkeypatch):
-        import time as _time
-
-        monkeypatch.setattr(_time, "sleep", lambda _s: None)
-        monkeypatch.setattr(exa, "_get_api_key", lambda: "k")
-        monkeypatch.delenv("PSAT_EXA_CACHE", raising=False)
-
-        storage_client = MagicMock()
-        post_mock = MagicMock(return_value=_FakeResp(payload={"id": "t1"}))
-        get_mock = MagicMock(return_value=_FakeResp(payload={"status": "completed", "data": {"x": 1}}))
-
-        with patch("db.storage.get_storage_client", return_value=storage_client):
-            monkeypatch.setattr(exa.requests, "post", post_mock)
-            monkeypatch.setattr(exa.requests, "get", get_mock)
-            out = exa.deep_research("inst", timeout_seconds=60)
-
-        assert out["data"] == {"x": 1}
-        post_mock.assert_called_once()  # task created
-        storage_client.get.assert_not_called()
-        storage_client.put.assert_not_called()
-
     def test_hit_skips_task_creation(self, monkeypatch):
         monkeypatch.setattr(exa, "_get_api_key", lambda: "k")
         monkeypatch.setenv("PSAT_EXA_CACHE", "1")

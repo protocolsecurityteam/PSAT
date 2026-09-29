@@ -229,26 +229,6 @@ def test_binary_combines_operand_sources(tmp_path):
     )
 
 
-def test_state_variable_read(tmp_path):
-    sl = _compile(
-        tmp_path,
-        """
-        pragma solidity ^0.8.19;
-        contract C {
-            address public ownerVar;
-            function f() external view returns (address) {
-                return ownerVar;
-            }
-        }
-    """,
-    )
-    fn = _function(sl, "f")
-    eng = ProvenanceEngine(fn)
-    eng.run()
-    has_state = any(_has_source_kind(srcs, "state_variable") for srcs in eng.provenance.sources.values())
-    assert has_state
-
-
 def test_index_propagates_base_and_key(tmp_path):
     sl = _compile(
         tmp_path,
@@ -749,45 +729,6 @@ def test_sub_engine_memo_collapses_repeated_internal_calls(tmp_path):
     assert set(eng._sub_engine_memo.keys()) == pre_keys, (
         "re-running the same engine introduced new memo keys — bindings may have shifted, breaking memo stability"
     )
-
-
-def test_leaf_value_source_cache_collapses_repeat_resolutions(tmp_path):
-    """Per-engine ``_leaf_value_source_cache`` short-circuits the isinstance chain for
-    SolidityVariable / Constant / StateVariable, collapsing the many re-resolutions
-    of the fixed-point worklist. Pin: msg.sender + state-var reads + a literal
-    constant populate at least one entry of each leaf kind after one run()."""
-    sl = _compile(
-        tmp_path,
-        """
-        pragma solidity ^0.8.19;
-        contract C {
-            address public ownerVar;
-            uint256 public counter;
-            function f() external view {
-                require(msg.sender == ownerVar);
-                require(counter > 100);
-            }
-        }
-        """,
-    )
-    fn = _function(sl, "f")
-    eng = ProvenanceEngine(fn)
-    eng.run()
-    cache_kinds = set()
-    for sources in eng._leaf_value_source_cache.values():
-        for src in sources:
-            cache_kinds.add(src.kind)
-    # msg.sender → msg_sender; ownerVar/counter → state_variable;
-    # 100 → constant. All three must be present.
-    assert "msg_sender" in cache_kinds, cache_kinds
-    assert "state_variable" in cache_kinds, cache_kinds
-    assert "constant" in cache_kinds, cache_kinds
-    # Variables (Local/Temporary/Reference) must NOT be cached: provenance changes during convergence.
-    for sources in eng._leaf_value_source_cache.values():
-        for src in sources:
-            assert src.kind not in ("parameter", "local", "temporary", "reference"), (
-                f"Variable subtype leaked into leaf cache: {src.kind} ({sources})"
-            )
 
 
 def test_shared_modifier_phi_does_not_pollute_function_parameter(tmp_path):

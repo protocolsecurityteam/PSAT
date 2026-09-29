@@ -612,35 +612,6 @@ def test_late_inheritance_refused_off_a_stale_h_row(db_session):
     assert _rules(db_session, impl) == set()
 
 
-def test_heuristic_member_without_pointer_seeds_no_late_inheritance(db_session):
-    """No-op guarantees: a heuristic member with no implementation pointer
-    seeds nothing, an unrelated late candidate stays pending, and a second
-    evaluate over unchanged facts mints and revokes nothing."""
-    protocol = _protocol(db_session)
-    deployer = _addr(0xD25)
-    _anchor(db_session, protocol, _addr(0x2600), deployer=deployer)
-    _anchor(db_session, protocol, _addr(0x2601), deployer=deployer)
-    member = _candidate(db_session, protocol, _addr(0x2602), deployer=deployer)
-    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(member.id,)))
-    db_session.commit()
-    assert member.protocol_id == protocol.id
-    assert gate.member_for_evidence(db_session, contract_id=member.id, protocol_id=protocol.id) is False
-
-    late = _candidate(db_session, protocol, _addr(0x2603), deployer=_addr(0xBEE5))
-    assert gate._w4h_late_inheritance_seed(db_session, {late.id}) == set()
-
-    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(late.id,)))
-    db_session.commit()
-    assert late.protocol_id is None
-    assert _rules(db_session, late) == set()
-
-    before = {(row.id, row.revoked_at) for row in db_session.execute(select(ContractMembershipWitness)).scalars()}
-    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(late.id,)))
-    db_session.commit()
-    after = {(row.id, row.revoked_at) for row in db_session.execute(select(ContractMembershipWitness)).scalars()}
-    assert after == before
-
-
 def test_exclusivity_requires_a_proven_member(db_session):
     """§9 invariant 3 on the shared-operator kill: a heuristic-only member is
     not_determined there — it neither supplies the mandatory proven member nor

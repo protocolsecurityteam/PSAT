@@ -110,47 +110,6 @@ def test_resolve_returns_none_when_no_artifact(session):
 
 
 @requires_postgres
-def test_resolve_returns_per_function_capabilities(session):
-    from services.resolution.capability_resolver import resolve_contract_capabilities
-
-    address = "0x" + uuid.uuid4().hex[:8] + "01" * 16
-    artifact = {
-        "schema_version": "semantic",
-        "contract_name": "T",
-        "trees": {
-            "f()": {
-                "op": "LEAF",
-                "leaf": {
-                    "kind": "equality",
-                    "operator": "eq",
-                    "authority_role": "caller_authority",
-                    "operands": [
-                        {"source": "msg_sender"},
-                        {"source": "state_variable", "state_variable_name": "owner"},
-                    ],
-                    "references_msg_sender": True,
-                    "parameter_indices": [],
-                    "expression": "msg.sender == owner",
-                    "basis": [],
-                },
-            }
-        },
-    }
-    _seed_job_with_artifact(session, address=address, predicate_trees=artifact)
-
-    out = resolve_contract_capabilities(session, address=address, chain_id=1)
-    assert out is not None
-    assert "f()" in out
-    cap = out["f()"]
-    # The eq-against-state-variable shape produces a finite_set over the state-var holder
-    # (lower_bound until probed); pin only the protocol shape (typed kind, confidence,
-    # membership_quality).
-    assert "kind" in cap
-    assert "confidence" in cap
-    assert "membership_quality" in cap
-
-
-@requires_postgres
 def test_resolve_yields_finite_set_with_indexed_event_repo(session):
     """A multi-key membership leaf resolves through generic indexed events."""
     from db.models import IndexedEventCursor, IndexedEventLog

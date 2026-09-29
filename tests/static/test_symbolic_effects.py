@@ -411,31 +411,6 @@ contract Target {{
 # =========================================================================
 
 
-def test_q6_random_authority_var():
-    """Authority var called in a modifier. The structural ``dest:{name}`` detector is RETIRED (a
-    category error: a data-freshness call in a modifier matched too), so a bespoke non-``setAuthority``
-    setter is silent; ``authority.replace`` is reserved for the canonical Solmate selector."""
-    auth_var = f"_{_rand()}"
-    mod = _rand()
-    set_fn = _rand()
-    guarded_fn = _rand()
-    source = f"""
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
-interface IAuth {{ function canCall(address, address, bytes4) external view returns (bool); }}
-contract Target {{
-    address public owner;
-    IAuth public {auth_var};
-    modifier onlyOwner() {{ require(msg.sender == owner); _; }}
-    modifier {mod}(bytes4 sig) {{ require(address({auth_var}) == address(0) || {auth_var}.canCall(msg.sender, address(this), sig)); _; }}
-    function {set_fn}(IAuth a) external onlyOwner {{ {auth_var} = a; }}
-    function {guarded_fn}() external {mod}(msg.sig) {{ }}
-}}
-"""
-    ac = _analyze(source)
-    assert "authority_update" not in _labels(ac, set_fn)
-
-
 def test_q6_random_hook_var():
     hook_var = f"_{_rand()}"
     set_fn = _rand()

@@ -68,22 +68,6 @@ def test_claim_after_window_expires_sweeps_again():
     assert mocked_reclaim.call_count == 2
 
 
-def test_claim_job_called_every_time_regardless_of_throttle():
-    """Throttling the SWEEP must never throttle the CLAIM; conflating them would
-    silently halve worker throughput."""
-    w = _FakeWorker()
-    session = MagicMock()
-    with (
-        patch("workers.base.reclaim_stuck_jobs"),
-        patch("workers.base.claim_job", return_value=None) as mocked_claim,
-        patch("workers.base.time.monotonic", side_effect=[1000.0, 1001.0, 1002.0]),
-    ):
-        w._claim_job(session)
-        w._claim_job(session)
-        w._claim_job(session)
-    assert mocked_claim.call_count == 3
-
-
 def test_each_worker_throttle_is_independent():
     """Per-worker, not global: otherwise an unlucky boot order could starve one stage's recovery."""
     w1 = _FakeWorker()

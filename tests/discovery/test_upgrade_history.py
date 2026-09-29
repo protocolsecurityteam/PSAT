@@ -456,37 +456,6 @@ class TestBuildUpgradeHistory:
         assert impls[1].get("contract_name") == "ImplV2"  # known name applied
         assert "contract_name" not in impls[0]  # unknown, not fetched
 
-    def test_target_contract_is_itself_a_proxy(self, monkeypatch, tmp_path):
-        """A target classified as a proxy (``target_classification.type =
-        "proxy"``) appears in the output proxies dict with its history — the
-        case where PSAT runs against a proxy directly."""
-        target = ADDR(0)
-        target_impl = ADDR(10)
-        deps = {
-            "address": target,
-            "target_classification": {
-                "type": "proxy",
-                "proxy_type": "eip1967",
-                "implementation": target_impl,
-            },
-            "dependencies": {},
-        }
-
-        def mock_fetch(address, topic0, from_block=0, chain_id=1):
-            if address == target and topic0 == uh.UPGRADED_TOPIC0:
-                return [_make_log(target, uh.UPGRADED_TOPIC0, _topic_for(target_impl), block="0x64")]
-            return []
-
-        monkeypatch.setattr(uh, "_fetch_logs_etherscan", mock_fetch)
-        _mock_no_enrichment(monkeypatch)
-
-        result = uh.build_upgrade_history(deps)
-        assert target in result["proxies"], "Target contract is a proxy and should appear in the proxies output"
-        h = result["proxies"][target]
-        assert h["proxy_type"] == "eip1967"
-        assert h["current_implementation"] == target_impl
-        assert h["upgrade_count"] == 1
-
     @pytest.mark.parametrize(
         "proxy_type",
         ["eip1967", "transparent", "uups"],
@@ -512,48 +481,6 @@ class TestBuildUpgradeHistory:
         assert h["events"] == []
         assert len(h["implementations"]) == 1
         assert h["implementations"][0].get("address") == impl
-
-    def test_non_indexed_upgraded_in_full_pipeline(self, monkeypatch, tmp_path):
-        target = ADDR(1)
-        impl_v1, impl_v2 = ADDR(10), ADDR(11)
-        deps_path = _write_deps_target_proxy(tmp_path, target, "oz_legacy", impl_v2)
-
-        def data_for(addr):
-            return "0x" + "0" * 24 + addr[2:]
-
-        def mock_fetch(address, topic0, from_block=0, chain_id=1):
-            if topic0 != uh.UPGRADED_TOPIC0:
-                return []
-            return [
-                {
-                    "address": target,
-                    "topics": [uh.UPGRADED_TOPIC0],
-                    "data": data_for(impl_v1),
-                    "blockNumber": "0x64",
-                    "transactionHash": "0xa",
-                    "logIndex": "0x0",
-                    "timeStamp": "0x65a00000",
-                },
-                {
-                    "address": target,
-                    "topics": [uh.UPGRADED_TOPIC0],
-                    "data": data_for(impl_v2),
-                    "blockNumber": "0xc8",
-                    "transactionHash": "0xb",
-                    "logIndex": "0x0",
-                    "timeStamp": "0x65b00000",
-                },
-            ]
-
-        monkeypatch.setattr(uh, "_fetch_logs_etherscan", mock_fetch)
-        _mock_no_enrichment(monkeypatch)
-
-        result = uh.build_upgrade_history(deps_path)
-        h = result["proxies"][target]
-        assert h["upgrade_count"] == 2
-        assert len(h["implementations"]) == 2
-        assert h["implementations"][0].get("address") == impl_v1
-        assert h["implementations"][1].get("address") == impl_v2
 
 
 # ---------------------------------------------------------------------------

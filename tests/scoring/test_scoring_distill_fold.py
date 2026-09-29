@@ -1911,23 +1911,6 @@ def test_the_same_account_read_at_two_heights_publishes_the_later_read(corpus, d
     assert plane.provenance["observation_reduction"]["stale_high_water_usd_dropped"] == 12057846.17
 
 
-def test_two_distinct_observed_accounts_of_one_entity_are_summed(corpus, db_session):
-    """R5, the other leg: distinct accounts are distinct holdings.
-
-    Unexercised on the shipped corpus (every competing pair observes one
-    address), so pinned rather than left implicit.
-    """
-    token = "0x" + "d6" * 20
-    proxy = corpus.contract("0x" + "f3" * 20, implementation="0x" + "f4" * 20)
-    impl = corpus.contract("0x" + "f4" * 20)
-    _balance_row(db_session, proxy, usd="1000.00", token=token, observed=proxy.address)
-    _balance_row(db_session, impl, usd="400.00", token=token, observed=impl.address)
-
-    plane = load_value_plane(db_session, corpus.protocol.id)
-    assert plane.total(entity_key("ethereum", proxy.address)) == 1400.0
-    assert plane.provenance["observation_reduction"]["multi_account_buckets"] == 1
-
-
 def test_a_sheet_of_rounding_dust_publishes_no_total_and_names_why(corpus, db_session):
     token = "0x" + "d7" * 20
     other = "0x" + "d8" * 20

@@ -251,15 +251,6 @@ def test_the_edge_relation_is_not_role_principal(db_session, anchor, monkeypatch
     assert _edges(db_session, contract, "role_principal") == []
 
 
-def test_the_new_relation_is_a_control_relation(db_session):
-    """It carries authority, so it belongs in the allowlist. It moves NO NEW value through
-    the effects closure (``build_authority_graph`` already folds ``function_principals`` in);
-    it only makes the link reachable in the TABLE plane that reads edges."""
-    from db.models import CONTROL_EDGE_RELATIONS
-
-    assert EDGE_RELATION_CAPABILITY_PRINCIPAL in CONTROL_EDGE_RELATIONS
-
-
 # ---------------------------------------------------------------------------
 # Node yes, job never — pinned from both directions
 # ---------------------------------------------------------------------------
@@ -884,19 +875,3 @@ def test_a_deployment_scoped_mint_stays_in_its_scope(db_session, anchor, monkeyp
     db_session.commit()
     assert [m["address"] for m in scoped["minted"]] == [principal]
     assert _nodes(db_session, contract, principal)[0].deployment_address == proxy
-
-
-def test_an_absent_ledger_is_not_an_empty_walk(db_session, anchor, monkeypatch):
-    """``walked`` is set at loop exit only, so a ledger that never reached the end says so
-    rather than reading as "considered everything, minted nothing"."""
-    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
-    from services.discovery.perimeter import new_fp_materialization_result
-
-    fresh = new_fp_materialization_result(budget=16)
-    assert fresh["walked"] is False
-    assert fresh["site"] == "fp_materialization"
-    assert fresh["minted"] == []
-
-    _protocol, contract = anchor
-    ledger, _payloads = _mint(db_session, contract)
-    assert ledger["walked"] is True

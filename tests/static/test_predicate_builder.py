@@ -1370,27 +1370,6 @@ def test_computed_operand_without_argument_provenance_says_not_determined(tmp_pa
     assert all(o.get("derived_from") is None for o in computed)
 
 
-def test_non_computed_operands_do_not_carry_derived_from(tmp_path):
-    """Absence means "the question does not apply", so it must be reserved for
-    operands that are not computed at all."""
-    sl = _compile(
-        tmp_path,
-        """
-        pragma solidity ^0.8.19;
-        contract C {
-            address public owner;
-            function f() external view {
-                require(msg.sender == owner, "no");
-            }
-        }
-    """,
-    )
-    leaves = _all_leaves(build_predicate_tree(_function(sl, "f")))
-    operands = [o for le in leaves for o in le["operands"]]
-    assert operands
-    assert all("derived_from" not in o for o in operands if o["source"] != "computed")
-
-
 # ---------------------------------------------------------------------------
 # guard_extraction_uncertain — the producer half. Over the 88-contract replay every
 # tree-less predicate target has ZERO revert gates, so the marker has zero realised

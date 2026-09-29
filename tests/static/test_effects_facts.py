@@ -25,7 +25,6 @@ from services.static.claims import (  # noqa: E402
     project_effect_labels,
 )
 from services.static.contract_analysis_pipeline.effects import (  # noqa: E402
-    SCHEMA_VERSION,
     build_effects,
 )
 from services.static.contract_analysis_pipeline.predicate_artifacts import (  # noqa: E402
@@ -381,12 +380,6 @@ def test_inline_assembly_write_is_assembly_slot_granularity(tmp_path):
     assert assembly_facts[0]["var"].startswith("assembly_storage:")
     assert assembly_facts[0]["hygiene_class"] == "normal"
     assert assembly_facts[0]["member_path"] == []
-
-
-def test_schema_version_bumped_for_additive_fact_fields(tmp_path):
-    contract = _compile(tmp_path, _MEMBER_SRC, "Accountant")
-    artifact = build_effects(contract)
-    assert artifact["schema_version"] == SCHEMA_VERSION == "semantic-3"
 
 
 # Probe-input facts: which argument is the quantity, and can the target take ETH

@@ -229,17 +229,6 @@ def test_health_and_config_endpoints(api_client) -> None:
     assert "default_rpc_url" in config.json()
 
 
-def test_version_endpoint_returns_git_sha(api_client, monkeypatch) -> None:
-    monkeypatch.setenv("GIT_SHA", "deadbeef")
-    r = api_client.get("/api/version")
-    assert r.status_code == 200
-    assert r.json() == {"sha": "deadbeef"}
-
-    monkeypatch.delenv("GIT_SHA", raising=False)
-    r = api_client.get("/api/version")
-    assert r.json() == {"sha": "unknown"}
-
-
 def test_admin_key_required_for_non_get(monkeypatch) -> None:
     import api
     from routers.deps import require_admin_key

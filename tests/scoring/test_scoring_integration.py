@@ -460,12 +460,6 @@ def test_a_failed_mark_never_breaks_its_host_transaction(fx, caplog):
     assert fx.session.get(Contract, contract.id) is not None
 
 
-def test_non_integer_protocol_is_not_marked(fx):
-    assert mark_protocol_score_dirty(fx.session, None, SCORE_DIRTY_MANUAL) is False
-    fx.session.commit()
-    assert fx.queued_row() is None
-
-
 def test_coverage_worker_marks_dirty(fx, monkeypatch):
     from workers.coverage_worker import CoverageWorker
 

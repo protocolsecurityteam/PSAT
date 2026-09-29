@@ -153,32 +153,6 @@ def test_multi_address_bisect_floor_re_raises(monkeypatch):
     assert calls == [20_000, 10_000]
 
 
-def test_single_address_request_shape_unchanged(monkeypatch):
-    """Per-cursor callers pass a single string: the wire ``address`` stays a bare string, not a one-element list."""
-    calls: list[dict] = []
-
-    def fake_rpc(url, method, params, *, chain_id=None):
-        calls.append(params[0])
-        return [_raw_log(address=_ADDR_A, topic0=_TOPIC_A, block=42)]
-
-    monkeypatch.setattr(event_logs_rpc, "rpc_request", fake_rpc)
-    fetcher = RpcEventLogFetcher("http://unit.test")
-    logs = fetcher.fetch_logs(
-        event_address=_ADDR_A,
-        topics=[_TOPIC_A, _TOPIC_B],
-        from_block=100,
-        to_block=100 + 499_999,
-    )
-
-    assert len(calls) == 1
-    assert calls[0]["address"] == _ADDR_A
-    assert isinstance(calls[0]["address"], str)
-    assert calls[0]["topics"] == [[_TOPIC_A, _TOPIC_B]]
-    assert calls[0]["fromBlock"] == hex(100)
-    assert calls[0]["toBlock"] == hex(100 + 499_999)
-    assert [log.block_number for log in logs] == [42]
-
-
 def test_raw_dict_decodes_through_governance_parser(monkeypatch):
     """A realistic OwnershipTransferred log round-trips through the production ``parse_any_log`` to the
     decoded owner rotation, keyed to the emitter the fetcher attributed it to."""
@@ -267,14 +241,6 @@ class TestFetchLogsShapes:
         )
         assert "address" not in rpc.calls[0]
         assert rpc.calls[0]["topics"] == [[TRANSFER_TOPIC0], None, [_pad(HOLDER)]]
-
-    def test_the_historical_call_shape_sends_the_historical_payload(self, monkeypatch):
-        rpc = _StubRpc([[]])
-        monkeypatch.setattr("services.resolution.repos.event_logs_rpc.rpc_request", rpc)
-        fetcher = RpcEventLogFetcher("http://rpc.invalid", chain_id=1)
-        fetcher.fetch_logs(event_address=[TOKEN], topics=[TRANSFER_TOPIC0], from_block=0, to_block=9)
-        assert rpc.calls[0]["address"] == [TOKEN]
-        assert rpc.calls[0]["topics"] == [[TRANSFER_TOPIC0]]
 
     def test_a_filter_that_constrains_nothing_is_refused(self, monkeypatch):
         rpc = _StubRpc([[]])

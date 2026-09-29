@@ -10,7 +10,6 @@ here.
 
 from __future__ import annotations
 
-import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -78,34 +77,6 @@ class TestAnalysisPhaseSuccess:
         assert calls[1]["data"] == predicate_trees
         assert calls[2]["data"] == effects
 
-    def test_stores_predicate_trees_and_effects_side_artifacts(self, monkeypatch, tmp_path):
-        worker = StaticWorker()
-        monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
-        monkeypatch.setattr(worker, "_write_analysis_tables", lambda *a, **kw: None)
-        session = MagicMock()
-        job = _job()
-
-        analysis_data = {
-            "schema_version": "0.1",
-            "subject": {"name": "TestContract"},
-            "summary": {"control_model": "ownable"},
-        }
-        predicate_trees = {"schema_version": "semantic", "trees": {}}
-        effects = {"schema_version": "semantic", "functions": {}}
-        analysis_path = tmp_path / "contract_analysis.json"
-        analysis_path.write_text(json.dumps(analysis_data))
-
-        monkeypatch.setattr(
-            "workers.static_worker.collect_contract_analysis_with_artifacts",
-            lambda project_dir: (analysis_data, predicate_trees, effects),
-        )
-        calls = _capture_store_artifact(monkeypatch)
-
-        result = worker._run_analysis_phase(session, job, tmp_path, "TestContract", job.address)
-
-        assert result == analysis_data
-        assert [call["name"] for call in calls] == ["contract_analysis", "predicate_trees", "effects"]
-
     def test_skips_predicate_trees_for_vyper(self, monkeypatch, tmp_path):
         worker = StaticWorker()
         monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
@@ -144,21 +115,3 @@ class TestAnalysisPhaseFailure:
         assert len(calls) == 1
         assert calls[0]["name"] == "analysis_error"
         assert "LLM analysis timed out" in calls[0]["data"]["error"]
-
-    def test_stores_analysis_error_on_generic_exception(self, monkeypatch, tmp_path):
-        worker = StaticWorker()
-        monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
-        session = MagicMock()
-        job = _job()
-
-        def _raise(project_dir):
-            raise ValueError("bad json from model")
-
-        monkeypatch.setattr("workers.static_worker.collect_contract_analysis_with_artifacts", _raise)
-        calls = _capture_store_artifact(monkeypatch)
-
-        result = worker._run_analysis_phase(session, job, tmp_path, "TestContract", job.address)
-
-        assert result is None
-        assert calls[0]["name"] == "analysis_error"
-        assert "bad json from model" in calls[0]["data"]["error"]

@@ -570,21 +570,6 @@ def test_supply_burn_emits_no_backing():
     assert "backing" not in eff.details
 
 
-def test_supply_unsupported_downgrades_no_backing():
-    # Backing fallback: simulate_unsupported → Tier-2 downgrade unknown, never backed.
-    eff = recipes.supply(
-        simulate=ScriptedSimulate(SimResult(calls=(ok(),))),
-        store=RecordingStore(),
-        ctx=CTX,
-        token_address=TOKEN,
-        principal=PRINCIPAL,
-        mint_calldata="0x40c10f19" + "00" * 64,
-        simulate_supported=False,
-    )
-    assert eff.verdict == VERDICT_UNKNOWN
-    assert "backing" not in eff.details
-
-
 # ---------------------------------------------------------------------------
 # Downstream value-reach — fork-observed, over the value_out recipe
 # ---------------------------------------------------------------------------

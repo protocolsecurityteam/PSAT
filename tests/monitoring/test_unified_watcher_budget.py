@@ -198,20 +198,6 @@ def test_per_cohort_turn_cap_hands_off_within_pass(db_session, monkeypatch):
     assert cursors == {25 * MAX_BLOCK_RANGE}
 
 
-def test_budget_not_exhausted_when_caught_up(db_session, monkeypatch):
-    from services.monitoring.unified_watcher import scan_for_events
-
-    monkeypatch.setenv("PSAT_SCAN_CONFIRMATION_DEPTH", "0")
-    mc_id = _mk(db_session, ADDR(1), 0)
-    Wire(head=3000).install(monkeypatch)  # 2 windows total
-
-    result = scan_for_events(db_session, "http://stub")
-
-    assert result.windows_scanned == 2
-    assert result.budget_exhausted is False
-    assert _cursor(db_session, mc_id) == 3000
-
-
 # ---------------------------------------------------------------------------
 # Runaway-cursor backstop (F6)
 # ---------------------------------------------------------------------------

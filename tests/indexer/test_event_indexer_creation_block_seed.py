@@ -162,27 +162,6 @@ def test_backfill_starts_at_seed_and_never_scans_pre_deploy(session):
 
 
 @requires_postgres
-def test_block0_seed_scans_pre_deploy_range(session):
-    # The bug, pinned: a cursor seeded at 0 fetches from block 1 — the empty
-    # pre-deployment scan the creation-block seed eliminates.
-    enroll_event_cursor(session, chain_id=1, event_address=_AUTHORITY, topic0=_TOPIC, start_block=0)
-    session.commit()
-
-    fetcher = _RecordingFetcher()
-    fetchers, heads, hashes = _maps(fetcher)
-    scan_enrolled_events(
-        session,
-        fetchers=fetchers,
-        head_fetchers=heads,
-        block_hash_fetchers=hashes,
-        confirmation_depth=_CONFIRMATIONS,
-        max_block_span=_MAX_SPAN,
-        max_windows_per_cursor=5,
-    )
-    assert fetcher.from_blocks and min(fetcher.from_blocks) == 1
-
-
-@requires_postgres
 def test_enroll_from_completed_jobs_seeds_solmate_cursor_at_creation_block(session, monkeypatch):
     import workers.event_log_indexer as eli
     from db.models import Contract, ControllerValue, Job, JobStage, JobStatus, Protocol

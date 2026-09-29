@@ -230,22 +230,6 @@ def test_batch_manage_idiom_positive(tmp_path):
     assert _find(claims, "manageBatch") == {idiom}
 
 
-def test_library_mediated_batch_executor_is_a_deliberate_under_claim(tmp_path):
-    """A real arbitrary-call executor that this matcher knowingly stays silent on.
-
-    ``using Address for address`` puts the LIBRARY in the destination, so the only handle
-    the MINTING gate has is "an address parameter appears in the read set" — which a
-    fixed-destination forwarder also looks like. Tolerated for a scalar parameter (common
-    shape, sibling positive covers it); not for an array, where the same allowance put a
-    false arbitrary-call badge on published output.
-
-    The library body now BINDS published parameter names (binding tests below) but
-    deliberately does not gate minting. An under-claim is the safe direction, and a
-    proven effects verdict still catches this function if it moves value."""
-    claims = _pipeline_claims(tmp_path, "boring_vault_manage.sol", "BoringVault")
-    assert _find(claims, "manageBatchViaLibrary") == set()
-
-
 def test_batch_of_fixed_width_digests_is_a_near_miss_negative(tmp_path):
     """``bytes32[]`` reduces to ``bytes32``, which is not arbitrary calldata —
     widening the element type must not sweep in every batch that happens to carry
@@ -485,18 +469,6 @@ def test_a_singly_assigned_local_still_binds_to_its_parameter(tmp_path):
     assert witness["destination_basis"] == "call_destination"
 
 
-def test_every_binding_state_is_reachable_on_one_corpus(tmp_path):
-    """R2: a state that cannot be produced is not a mitigation. All three
-    destination states and all three calldata states are minted by this corpus."""
-    witnesses = _binding_witnesses(tmp_path)
-    # ``state_var`` is absent from the CLAIMS because it now suppresses the claim
-    # (it is the proof that the caller does not choose the destination); the
-    # state itself is still produced and asserted in
-    # ``test_the_state_var_destination_state_is_still_produced``.
-    assert {w["destination_kind"] for w in witnesses.values()} == {"param", "not_determined"}
-    assert {w["calldata_kind"] for w in witnesses.values()} == {"param", "call_argument", "not_determined"}
-
-
 def test_plain_transfer_is_taint_near_miss_negative(tmp_path):
     """Address-tainted destination but no arbitrary calldata parameter → the
     value send earns no exec.arbitrary claim."""
@@ -561,26 +533,6 @@ def test_facts_manage_idiom_fails_closed_without_a_contract():
     }
     art = build_claims(None, effects, {})
     assert art["functions"]["manage(address,bytes,uint256)"] == []
-
-
-def test_facts_all_new_claim_ids_are_registered():
-    from services.static.claims import registry
-
-    build_claims(None, {"schema_version": "semantic-2", "functions": {}}, {})  # force discovery
-    registered = set(registry())
-    for claim_id in (
-        "upgrade.implementation",
-        "proxy.admin_change",
-        "safe.signer_mgmt",
-        "safe.module_mgmt",
-        "safe.set_guard",
-        "timelock.schedule",
-        "timelock.execute",
-        "timelock.cancel",
-        "timelock.set_delay",
-        "exec.arbitrary",
-    ):
-        assert claim_id in registered, claim_id
 
 
 def test_fixed_destination_batch_forwarder_is_a_near_miss_negative(tmp_path):

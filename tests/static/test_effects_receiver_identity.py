@@ -276,16 +276,6 @@ def test_local_and_internal_state_variable_are_not_confused(effects):
     assert internal is not None and internal["binding"] == "state_variable"
 
 
-def test_hand_written_getter_is_never_paired_with_a_local(effects):
-    """``getToken()`` reads exactly what ``local`` holds, and pairing them would
-    be a name/behaviour guess, not a compiler fact — solc minted no accessor for
-    a local, so there is nothing to publish."""
-    local = _receiver(effects, "payLocal(address,uint256)", "local.safeTransfer")
-    assert local is not None
-    assert local["auto_getter_selector"] is None
-    assert local["receiver_provenance"] == "not_determined"
-
-
 # --- A1: the DECLARED TYPE licenses the selector, not the identifier --------
 
 

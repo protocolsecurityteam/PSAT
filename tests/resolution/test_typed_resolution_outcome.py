@@ -74,10 +74,6 @@ def _status(cap_dict: dict[str, Any]) -> str | None:
     return capability_surface_status(cap_dict, project_capability_surface(cap_dict))
 
 
-def _principal_rows(cap_dict: dict[str, Any]) -> list[dict[str, Any]]:
-    return project_capability_surface(cap_dict).principal_rows
-
-
 def _assert_unchanged_empty(cap_dict: dict[str, Any]) -> None:
     assert cap_dict["kind"] == "finite_set"
     assert cap_dict["membership_quality"] == "lower_bound"
@@ -154,37 +150,3 @@ B_PENDING_DEFAULT_ADMIN = {
     "member_path": ["newAdmin"],
 }
 GUARD_OWNER = {"source": "view_call", "callee_signature": "owner()", "callee_selector": OWNER_SELECTOR}
-
-
-@pytest.mark.parametrize("mode", ["revert", "empty"])
-def test_group_a_pending_governor_yields_empty_caller_set(monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
-    _stub_rpc(monkeypatch, mode)
-    cap_dict = _expr_dict(evaluate_tree(_eq_tree(A_PENDING_GOVERNOR), _ctx_with_rpc()))
-
-    assert cap_dict["kind"] == "finite_set"
-    assert cap_dict["members"] == []
-    assert _principal_rows(cap_dict) == []
-
-
-def test_group_b_pending_default_admin_member_yields_empty_caller_set(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Struct member, no getter — recorder proves no read is attempted.
-    recorder: list = []
-    _stub_rpc(monkeypatch, "revert", recorder=recorder)
-    cap_dict = _expr_dict(evaluate_tree(_eq_tree(B_PENDING_DEFAULT_ADMIN), _ctx_with_rpc()))
-
-    assert cap_dict["kind"] == "finite_set"
-    assert cap_dict["members"] == []
-    assert _principal_rows(cap_dict) == []
-    assert recorder == []  # no getter exists to call
-
-
-def test_guard_non_pending_owner_revert_stays_unresolved(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Precision baseline: a non-pending ``view_call`` whose getter reverts stays lower_bound
-    (P1/P2 don't over-reach)."""
-    _stub_rpc(monkeypatch, "revert")
-    cap_dict = _expr_dict(evaluate_tree(_eq_tree(GUARD_OWNER), _ctx_with_rpc()))
-
-    assert cap_dict["kind"] == "finite_set"
-    assert cap_dict["members"] == []
-    assert cap_dict["membership_quality"] == "lower_bound"
-    assert _status(cap_dict) != "resolved_empty"

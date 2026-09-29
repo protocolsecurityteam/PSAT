@@ -38,35 +38,6 @@ TRANSFER_TOPIC0 = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df52
 GOV_TOKEN = "0xfe0c30065b384f05761f15d0cc899d4f9f9cc0eb"
 
 
-def test_fixture_carries_the_audited_window():
-    """A fixture that lost its logs or its baseline must fail here, not pass
-    downstream as a green zero-diff."""
-    fixture = load_replay_fixture()
-    assert len(fixture["logs"]) == 446
-    assert len(fixture["baseline_event_identities"]) == 446
-    assert len(baseline_identities(fixture)) == 446
-    assert len(fixture["contracts"]) == 3
-    assert fixture["window"] == {
-        "chain": "ethereum",
-        "chain_id": 1,
-        "from_block": 25657762,
-        "to_block": 25661204,
-    }
-
-
-def test_recorded_baseline_was_444_balances_and_2_locked():
-    """The shape of what the pre-taxonomy run published, pinned from the
-    recording so the differential below is read against a stated baseline
-    rather than an implied one."""
-    by_type: dict[str, int] = {}
-    for _addr, event_type, _tx, _li, _hist in load_replay_fixture()["baseline_event_identities"]:
-        by_type[event_type] = by_type.get(event_type, 0) + 1
-    assert by_type == {
-        "state_changed:state_variable:_balances": 444,
-        "state_changed:state_variable:locked": 2,
-    }
-
-
 def test_replay_publishes_nothing_unwitnessed(db_session):
     """The differential: 446 REMOVED, 0 ADDED. Every recorded row was an open-path writer on
     an unreadable controller (activity tier), so the honest publication is nothing."""

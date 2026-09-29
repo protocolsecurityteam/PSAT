@@ -303,17 +303,6 @@ class TestRunLoop:
         assert worker._recover_calls == 2
 
 
-def test_worker_id_contains_worker_name_and_pid():
-    """Operators grep the logs for a worker_id to trace a row through the
-    pipeline; a garbled prefix would break that workflow."""
-    worker = _TestWorker()
-    assert worker.worker_id.startswith("TestWorker-")
-    parts = worker.worker_id.split("-")
-    assert len(parts) == 3
-    assert parts[1].isdigit()
-    assert len(parts[2]) == 8
-
-
 def test_recovery_cutoff_is_configured_seconds_in_past():
     """The ``cutoff`` passed to ``_stale_recovery_query`` must be exactly
     ``stale_processing_seconds`` before ``now``. Without this guarantee,

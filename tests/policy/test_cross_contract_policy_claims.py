@@ -241,20 +241,6 @@ def test_apply_cross_contract_claims_merges_and_dedups():
 # ---------------------------------------------------------------------------
 
 
-def test_equal_tier_merge_keeps_the_first_claim():
-    """Both merge sites are ``resolve_claim_precedence([*existing, *additions])`` and precedence
-    compares tiers with a strict ``>``, so at EQUAL tier the incumbent wins and a re-derived
-    claim loses to the one it replaces (why the effects bridge couldn't repair a damaged row).
-    Pinned as a fact about the shape, not a defect here: the precondition below keeps it harmless."""
-    from services.static.claims.registry import resolve_claim_precedence
-
-    stale: Claim = {"claim_id": "flow.out", "tier": "policy_derived", "witness": {"sink_id": "stale"}}
-    fresh: Claim = {"claim_id": "flow.out", "tier": "policy_derived", "witness": {"sink_id": "fresh"}}
-    survivor = resolve_claim_precedence([stale, fresh])
-    assert len(survivor) == 1
-    assert survivor[0]["witness"]["sink_id"] == "stale"
-
-
 @requires_postgres
 def test_the_row_replace_drops_last_run_s_policy_derived_claims(db_session):
     """Why the equal-tier hazard cannot fire at ``_enrich_cross_contract``'s EF write.

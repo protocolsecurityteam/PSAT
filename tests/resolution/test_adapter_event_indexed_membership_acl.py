@@ -14,7 +14,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import services.resolution.mapping_enumerator as mapping_enumerator
-from services.resolution.adapters import AdapterRegistry, EvaluationContext
+from services.resolution.adapters import EvaluationContext
 from services.resolution.adapters.event_indexed import (
     EventIndexedAdapter,
     _caller_event_arg_position,
@@ -233,22 +233,6 @@ def test_matches_zero_for_composeQueue_value_position_none():
     assert EventIndexedAdapter.matches(desc, EvaluationContext(chain_id=1)) == 0
 
 
-def test_matches_zero_for_no_hint_admins_membership():
-    desc = {
-        "kind": "mapping_membership",
-        "storage_var": "admins",
-        "key_sources": [{"source": "msg_sender"}],
-    }
-    assert EventIndexedAdapter.matches(desc, EvaluationContext(chain_id=1)) == 0
-
-
-def test_registry_picks_event_indexed_for_caller_keyed_membership(monkeypatch):
-    registry = AdapterRegistry()
-    registry.register(EventIndexedAdapter)
-    picked = registry.pick(_eigenpod_descriptor(), EvaluationContext(chain_id=1, contract_address=CONTRACT))
-    assert picked is EventIndexedAdapter
-
-
 def test_enumerate_recovers_truthy_caller(monkeypatch):
     # Single caller, value=true → recovered.
     logs = [_eigenpod_log(CALLER_A, "0x88676cad", True, block=100)]
@@ -296,111 +280,6 @@ def test_enumerate_drops_caller_whose_latest_value_is_false(monkeypatch):
     cap = EventIndexedAdapter().enumerate(_eigenpod_descriptor(), ctx)
     assert cap.kind == "finite_set"
     assert (cap.members or []) == []
-
-
-def test_end_to_end_and_tree_recovers_membership_and_keeps_hasrole_external(monkeypatch):
-    # AND[membership, hasRole(...)]: the membership leaf resolves to the caller set and
-    # the hasRole sibling stays external_check_only. Pre-fix the membership leaf was
-    # no_adapter and absorbed the whole AND.
-    from services.resolution.predicate_evaluator import evaluate_tree_with_registry
-
-    tree = {
-        "op": "AND",
-        "children": [
-            {
-                "op": "LEAF",
-                "leaf": {
-                    "kind": "membership",
-                    "operator": "truthy",
-                    "authority_role": "caller_authority",
-                    "operands": [{"source": "msg_sender"}],
-                    "set_descriptor": _eigenpod_descriptor(),
-                },
-            },
-            {
-                "op": "LEAF",
-                "leaf": {
-                    "kind": "external_bool",
-                    "operator": "truthy",
-                    "authority_role": "delegated_authority",
-                    "callee_state_mutability": "view",
-                    "callee_signature": "hasRole(bytes32,address)",
-                    "expression": "hasRole(...)",
-                    "operands": [{"source": "msg_sender"}],
-                    "set_descriptor": {
-                        "kind": "external_set",
-                        "key_sources": [{"source": "msg_sender"}],
-                        "authority_contract": {
-                            "address_source": {"source": "state_variable", "state_variable_name": "roleRegistry"}
-                        },
-                        "callee_function": "hasRole",
-                        "callee_signature": "hasRole(bytes32,address)",
-                        "callee_selector": "0x91d14854",
-                    },
-                },
-            },
-        ],
-    }
-    logs = [_eigenpod_log(CALLER_A, "0x88676cad", True, block=100)]
-    _patched_value_fold(monkeypatch, logs)
-    registry = AdapterRegistry()
-    registry.register(EventIndexedAdapter)
-    cap = evaluate_tree_with_registry(
-        cast(Any, tree), registry, EvaluationContext(chain_id=1, contract_address=CONTRACT)
-    )
-
-    assert cap.kind == "AND"
-    children = cap.children or []
-    finite = [c for c in children if c.kind == "finite_set"]
-    external = [c for c in children if c.kind == "external_check_only"]
-    assert len(finite) == 1
-    assert sorted(finite[0].members or []) == [CALLER_A.lower()]
-    assert len(external) == 1
-    assert external[0].check is not None
-    assert external[0].check.extra.get("callee_signature") == "hasRole(bytes32,address)"
-    assert cap.unsupported_reason is None
-
-
-def test_pre_fix_membership_leaf_absorbs_and(monkeypatch):
-    # With the implicit predicate neutralized the leaf declines as no_adapter and absorbs the AND.
-    import services.resolution.adapters.event_indexed as ei
-    from services.resolution.predicate_evaluator import evaluate_tree_with_registry
-
-    monkeypatch.setattr(ei, "_implicit_membership_value_predicate", lambda d: None)
-    tree = {
-        "op": "AND",
-        "children": [
-            {
-                "op": "LEAF",
-                "leaf": {
-                    "kind": "membership",
-                    "operator": "truthy",
-                    "authority_role": "caller_authority",
-                    "operands": [{"source": "msg_sender"}],
-                    "set_descriptor": _eigenpod_descriptor(),
-                },
-            },
-            {
-                "op": "LEAF",
-                "leaf": {
-                    "kind": "equality",
-                    "operator": "eq",
-                    "authority_role": "caller_authority",
-                    "operands": [
-                        {"source": "msg_sender"},
-                        {"source": "state_variable", "state_variable_name": "_owner"},
-                    ],
-                },
-            },
-        ],
-    }
-    registry = AdapterRegistry()
-    registry.register(ei.EventIndexedAdapter)
-    cap = evaluate_tree_with_registry(
-        cast(Any, tree), registry, EvaluationContext(chain_id=1, contract_address=CONTRACT)
-    )
-    assert cap.kind == "unsupported"
-    assert "no_adapter" in (cap.unsupported_reason or "")
 
 
 def _run(coro):

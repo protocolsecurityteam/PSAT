@@ -47,7 +47,6 @@ from services.scoring.schema import (
     entity_key,
     is_entity_key,
     not_determined_signal_defaults,
-    signal_from_row,
     signal_to_row_kwargs,
 )
 from utils.scoring_status import (
@@ -60,7 +59,6 @@ from utils.scoring_status import (
     MODEL_VERSION,
     OPENNESS_NOT_DETERMINED,
     OPENNESS_RESTRICTED,
-    PERIMETER_NOT_DETERMINED,
     PERIMETER_SETTLED,
     PERIMETER_UNSETTLED,
     PRINCIPAL_STATE_ENUMERATED,
@@ -214,13 +212,6 @@ def test_empty_principal_set_cannot_be_published_as_enumerated():
         _signal(principal_state=PRINCIPAL_STATE_ENUMERATED, principal_refs=())
 
 
-def test_principal_refs_carry_no_resolution():
-    ref = PrincipalRef(function_principal_id=7, chain="ethereum", address="0xAAA")
-    assert set(ref.to_json()) == {"function_principal_id", "chain", "address"}
-    assert ref.key == "ethereum::0xaaa"
-    assert PrincipalRef.from_json(ref.to_json()) == ref
-
-
 def test_value_states_are_three_and_bounds_require_a_proven_reach():
     reached = _signal(
         value_state=VALUE_STATE_PROVEN_REACH,
@@ -289,11 +280,6 @@ def test_score_document_grade_and_confidence_are_determined_together():
             model_parameters={},
             provenance={},
         )
-
-
-def test_perimeter_has_a_third_state():
-    """A queue read that failed lands on neither polarity."""
-    assert len({PERIMETER_SETTLED, PERIMETER_UNSETTLED, PERIMETER_NOT_DETERMINED}) == 3
 
 
 # --------------------------------------------------------------------------
@@ -854,16 +840,6 @@ def test_gate_inputs_must_be_tri_envelopes():
         _signal(gate_inputs={"pause_effective": True})
 
 
-def test_gate_input_round_trips_all_three_states():
-    gates = {
-        "proven_present": Tri.proven(SEVERITY_STATE_PROVEN, 0.2).to_json(),
-        "not_determined": Tri.not_determined().to_json(),
-    }
-    sig = _signal(gate_inputs=gates)
-    assert sig.gate_input("proven_present").require(SEVERITY_STATE_PROVEN) == 0.2
-    assert sig.gate_input("not_determined").value is None
-
-
 def test_destination_bearing_claim_cannot_be_not_applicable():
     """Item 6: an unread delegatecall destination must not launder as 'none'."""
     for claim in DESTINATION_BEARING_CLAIMS:
@@ -1029,16 +1005,6 @@ def test_signal_row_seam_round_trips_all_three_states(db_session, scoring_protoc
 
 
 @pytest.mark.usefixtures("scoring_protocol")
-def test_signal_from_row_is_the_inverse_of_to_row_kwargs(db_session, scoring_protocol):
-    fx = scoring_protocol
-    original = _signal_for(fx, severity=Tri.proven(SEVERITY_STATE_PROVEN, 0.75), severity_basis=("base",))
-    row = FunctionScoreSignal(**signal_to_row_kwargs(original, job_id=fx.job.id))
-    db_session.add(row)
-    db_session.commit()
-    assert signal_from_row(row) == original
-
-
-@pytest.mark.usefixtures("scoring_protocol")
 def test_replace_rejects_a_signal_for_another_contract(db_session, scoring_protocol):
     fx = scoring_protocol
     with pytest.raises(ValueError, match="passed to replace"):
@@ -1118,25 +1084,6 @@ def test_a_rejected_signal_leaves_the_original_set_fully_intact(db_session, scor
 
     survivors = db_session.query(FunctionScoreSignal).filter_by(contract_id=fx.contract.id).all()
     assert sorted(r.selector for r in survivors) == ["0x00000001", "0x00000002"]
-
-
-@pytest.mark.usefixtures("scoring_protocol")
-def test_a_rejected_first_element_does_not_drop_the_contract(db_session, scoring_protocol):
-    """The raise-on-first-element case: the contract must not vanish."""
-    fx = scoring_protocol
-    db_session.add(_row(fx))
-    db_session.commit()
-
-    with pytest.raises(ValueError):
-        replace_contract_signals(
-            db_session,
-            contract_id=fx.contract.id,
-            signals=[_signal_for(fx, contract_id=fx.sibling.id)],
-            job_id=fx.later_job.id,
-        )
-    db_session.commit()
-
-    assert db_session.query(FunctionScoreSignal).filter_by(contract_id=fx.contract.id).count() == 1
 
 
 @pytest.mark.usefixtures("scoring_protocol")

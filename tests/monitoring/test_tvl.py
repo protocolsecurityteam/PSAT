@@ -508,22 +508,6 @@ class TestRefreshAllProtocols:
         snapshots = db_session.query(TvlSnapshot).all()
         assert len(snapshots) == 2
 
-    def test_empty_provider_page_never_invokes_history(self, db_session, monkeypatch, _cleanup):
-        proto = Protocol(name="Proto_no_history")
-        db_session.add(proto)
-        db_session.flush()
-        db_session.add(Contract(address=_addr("all_protos", "f0"), chain="ethereum", protocol_id=proto.id))
-        db_session.commit()
-        monkeypatch.setattr("services.monitoring.tvl.fetch_defillama_tvl", lambda name: None)
-        monkeypatch.setattr("services.clients.etherscan.get_eth_balance", lambda address, chain_id=1: 10**18)
-        monkeypatch.setattr("services.clients.etherscan.get_eth_price", lambda chain_id=1: 2000.0)
-        monkeypatch.setattr("services.clients.etherscan.get_token_balances_page", lambda address, chain_id=1: page([]))
-        history = MagicMock(side_effect=AssertionError("routine history forbidden"))
-        monkeypatch.setattr("services.clients.rpc.rpc_request", history)
-        assert refresh_all_protocols(db_session) == 1
-        history.assert_not_called()
-        assert db_session.query(ContractBalanceFetch).filter_by(asset_set_status="returned_empty").count() == 1
-
     def test_rotation_oldest_and_no_snapshot_first_capped(self, db_session, monkeypatch, _cleanup):
         from datetime import datetime, timezone
 

@@ -67,24 +67,6 @@ def test_orphan_duplicates_merge_via_aliases(db_session):
     assert orphan_audit.protocol_id == adopted.id
 
 
-def test_no_aliases_keeps_legacy_single_row_adoption(db_session):
-    """Without ``aliases`` the function still adopts the one exact-name match."""
-    row = Protocol(name="solo-protocol", canonical_slug=None)
-    db_session.add(row)
-    db_session.commit()
-
-    adopted = get_or_create_protocol(
-        db_session,
-        "solo-protocol",
-        canonical_slug="solo-slug",
-    )
-    db_session.commit()
-
-    assert adopted.id == row.id
-    assert adopted.canonical_slug == "solo-slug"
-    assert len(db_session.execute(select(Protocol)).scalars().all()) == 1
-
-
 # ---------------------------------------------------------------------------
 # (2) Concurrent slug-keyed inserts serialize cleanly via savepoint retry.
 # ---------------------------------------------------------------------------

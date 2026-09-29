@@ -63,23 +63,6 @@ def clean_jobs(db_session):
 # ---------------------------------------------------------------------------
 
 
-def test_effects_stage_between_policy_and_coverage():
-    order = [s.value for s in JobStage]
-    assert order.index("policy") < order.index("effects") < order.index("coverage")
-    assert order == [
-        "discovery",
-        "dapp_crawl",
-        "defillama_scan",
-        "selection",
-        "static",
-        "resolution",
-        "policy",
-        "effects",
-        "coverage",
-        "done",
-    ]
-
-
 # ---------------------------------------------------------------------------
 # Flag-dynamic transition (§3a.4 / inv. 15).
 # ---------------------------------------------------------------------------

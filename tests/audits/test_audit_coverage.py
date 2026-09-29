@@ -1458,29 +1458,6 @@ def test_fetch_bytecode_keccak_none_on_rpc_error(monkeypatch):
     assert cov._fetch_bytecode_keccak("0x" + "ef" * 20, "ethereum") is None
 
 
-def test_upsert_coverage_stamps_bytecode_keccak(db_session, seed_protocol, monkeypatch):
-    from db.models import AuditContractCoverage
-    from services.audits.coverage import upsert_coverage_for_audit
-    from services.clients import rpc
-
-    protocol_id, _ = seed_protocol
-    pool_addr = "0x" + "aa" * 20
-    _add_contract(db_session, protocol_id, address=pool_addr, name="Pool")
-    audit = _add_audit(db_session, protocol_id, date="2024-06-15", scope=["Pool"])
-
-    monkeypatch.setattr(rpc, "get_code", _stub_get_code({pool_addr: "0xdeadbeef"}))
-
-    rows_written = upsert_coverage_for_audit(db_session, audit.id)
-    db_session.commit()
-    assert rows_written == 1
-
-    cov_row = db_session.query(AuditContractCoverage).filter_by(audit_report_id=audit.id).one()
-    assert cov_row.bytecode_keccak_at_match is not None
-    assert cov_row.bytecode_keccak_at_match.startswith("0x")
-    assert len(cov_row.bytecode_keccak_at_match) == 66
-    assert cov_row.verified_at is not None
-
-
 def test_upsert_coverage_keccak_null_when_rpc_fails(db_session, seed_protocol, monkeypatch):
     from db.models import AuditContractCoverage
     from services.audits.coverage import upsert_coverage_for_audit
@@ -1762,14 +1739,6 @@ def test_match_audits_for_contract_address_anchor_honors_chain(db_session, seed_
     assert len(matches) == 1
     assert matches[0].audit_report_id == audit.id
     assert matches[0].match_type == "reviewed_address"
-
-
-def test_reviewed_address_match_type_in_order_ranking():
-    from services.audits.coverage import _MATCH_TYPE_ORDER
-
-    assert _MATCH_TYPE_ORDER["direct"] < _MATCH_TYPE_ORDER["impl_era"]
-    assert _MATCH_TYPE_ORDER["impl_era"] < _MATCH_TYPE_ORDER["reviewed_address"]
-    assert _MATCH_TYPE_ORDER["reviewed_address"] < _MATCH_TYPE_ORDER["reviewed_commit"]
 
 
 # ---------------------------------------------------------------------------

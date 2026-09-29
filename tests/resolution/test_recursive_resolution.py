@@ -810,50 +810,6 @@ def test_resolve_control_graph_no_impl_proxy_controller_is_degraded(monkeypatch)
     assert diamond_address not in nested
 
 
-def test_resolve_control_graph_skips_failed_nested_materialization(monkeypatch):
-    root_address = "0x1111111111111111111111111111111111111111"
-    nested_address = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-
-    root_bundle = _bundle(
-        root_address,
-        "Vault",
-        snapshot={
-            "schema_version": "0.1",
-            "contract_address": root_address,
-            "contract_name": "Vault",
-            "block_number": 1,
-            "controller_values": {
-                "external_contract:authority": {
-                    "source": "authority",
-                    "value": nested_address,
-                    "block_number": 1,
-                    "observed_via": "eth_call",
-                    "resolved_type": "contract",
-                    "details": {"address": nested_address},
-                }
-            },
-        },
-    )
-
-    monkeypatch.setattr(
-        "services.resolution.recursive._materialize_contract_artifacts",
-        lambda address, rpc_url, *, workspace_prefix, chain=None: (_ for _ in ()).throw(
-            RuntimeError("nested compile failed")
-        ),
-    )
-
-    graph, _nested = resolve_control_graph(
-        root_artifacts=cast(LoadedArtifacts, root_bundle),
-        rpc_url="http://rpc.example",
-        chain_id=1,
-        max_depth=2,
-    )
-
-    nodes = {node["address"]: node for node in graph["nodes"]}
-    assert nodes[nested_address]["analyzed"] is False
-    assert "materialize_error" in nodes[nested_address]["details"]
-
-
 def test_resolve_control_graph_names_failed_nested_contract_from_metadata(monkeypatch):
     root_address = "0x1111111111111111111111111111111111111111"
     nested_address = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"

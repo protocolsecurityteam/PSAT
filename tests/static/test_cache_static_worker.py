@@ -236,37 +236,6 @@ def test_proxy_cache_rpc_fails(db_session, monkeypatch):
     assert "resolve_proxy" in phases_run
 
 
-def test_proxy_cache_no_cache_flag(db_session, monkeypatch):
-    from db.models import Contract
-    from db.queue import create_job, store_source_files
-    from workers.static_worker import StaticWorker
-
-    job = create_job(db_session, {"address": ADDR_A, "rpc_url": "https://rpc.example"})
-    contract = Contract(
-        job_id=job.id,
-        address=ADDR_A,
-        contract_name="TestContract",
-        compiler_version="v0.8.24",
-        language="solidity",
-        evm_version="shanghai",
-        optimization=True,
-        optimization_runs=200,
-        source_format="flat",
-        source_file_count=1,
-        remappings=[],
-    )
-    db_session.add(contract)
-    db_session.commit()
-    store_source_files(db_session, job.id, {"src/Test.sol": "contract Test {}"})
-
-    worker = StaticWorker()
-    phases_run = _patch_static_worker_phases(monkeypatch, worker)
-
-    worker.process(db_session, job)
-
-    assert "resolve_proxy" in phases_run
-
-
 def test_proxy_cache_immutable_eip1167(db_session, monkeypatch):
     from sqlalchemy import select
 

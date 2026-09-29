@@ -192,23 +192,6 @@ def test_probe_rpc_failure_is_an_attempt_not_a_verdict(db_session, monkeypatch, 
     assert gate.resolve_membership_state(db_session, row) == "candidate"
 
 
-def test_probe_reads_resolving_nowhere_keep_parked_explainable(db_session, monkeypatch, erpc_env):
-    protocol = _protocol(db_session)
-    row = _contract(db_session, ADDR(0x104), nominated=protocol.id)
-    _stub_wire(monkeypatch)  # owner/authority revert, slots zero, no creation answer
-
-    result = gate.probe(db_session, row)
-
-    assert result.code_present is True
-    assert result.resolved_addresses == ()
-    attempt = db_session.get(ContractProbeAttempt, (row.id, 1))
-    assert attempt is not None
-    reads = attempt.results["reads"]
-    assert reads["owner"]["ok"] is False and reads["owner"]["value"] is None
-    assert reads["implementation"]["ok"] is True and reads["implementation"]["value"] is None
-    assert attempt.results["resolved_addresses"] == []
-
-
 @pytest.mark.parametrize("bad_code", [None, 42, "not-hex", "0xzz", "0x123"])
 def test_probe_malformed_getcode_never_mints_a_verdict(db_session, monkeypatch, erpc_env, bad_code):
     # Only a well-formed hex string is a code verdict; None / missing /

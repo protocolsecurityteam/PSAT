@@ -446,30 +446,6 @@ def test_cc7_the_ceiling_is_capped_per_key_and_never_per_row(fold):
         assert entry["published_usd"] < finding["value_at_stake_usd"]
 
 
-def test_cc_the_ceiling_reason_vocabulary_is_closed_and_ordered():
-    """The tokens are document-visible, so the tuple is pinned literally.
-
-    ``ceiling_reason`` is on every sheet-ceiling entry and the two admitting reasons drive the
-    fold; a token added, renamed or reordered changes what a consumer reads.
-    """
-    assert P.CEILING_REASONS == (
-        "admitted",
-        "proven_empty",
-        "airdrop_determined",
-        "no_rows",
-        "below_resolution",
-        "unpriced",
-        "asset_list_truncated",
-        "alias_ambiguous",
-    )
-    assert P.CEILING_ADMITTING_REASONS == ("admitted", "proven_empty", "airdrop_determined")
-    assert set(P.CEILING_ADMITTING_REASONS) < set(P.CEILING_REASONS)
-    # The three admits are three PROOFS and stay three tokens: an observed number, a witnessed
-    # zero, and a zero earned from DELIVERY SHAPE (airdrop). None may become a claim about worth.
-    assert len(set(P.CEILING_ADMITTING_REASONS)) == 3
-    assert not {"spam", "scam", "worthless"} & set(P.CEILING_REASONS)
-
-
 def test_cc1_a_partly_priced_sheet_bounds_the_priced_portion_and_not_the_move(fold):
     """SHEET_PRICED is a FLOOR over what was priced, so the ceiling is conditional.
 

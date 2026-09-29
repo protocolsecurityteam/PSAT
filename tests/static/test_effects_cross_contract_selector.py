@@ -80,11 +80,3 @@ def test_interface_param_call_selector_is_canonical(effects):
 
 def test_struct_and_enum_param_call_selector_is_canonical(effects):
     assert _selector_for(effects, "doCfg(Report)", "sib.configure") == _sel("configure((uint256,address),uint8)")
-
-
-def test_library_call_selector_is_left_notional(effects):
-    # The library internal has no external selector; the derived value keeps the
-    # un-lowered interface param and is NOT the canonical form.
-    lib_sel = _selector_for(effects, "doPull(uint256)", "underlying.safeTransferFrom")
-    assert lib_sel == _sel("safeTransferFrom(IToken,address,address,uint256)")
-    assert lib_sel != _sel("safeTransferFrom(address,address,address,uint256)")

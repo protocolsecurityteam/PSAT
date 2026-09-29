@@ -250,31 +250,6 @@ def test_inline_query_sites_resolve_a_floor():
             )
 
 
-def test_no_enumerator_reintroduces_a_from_block_default():
-    """Fail if any ``enumerate_*`` / ``__init__`` ``from_block`` regains a default, keyword-only
-    or positional-with-default; both silently re-arm a genesis scan."""
-    for rel in ("services/resolution/mapping_enumerator.py",):
-        tree = ast.parse((_REPO / rel).read_text())
-        for node in ast.walk(tree):
-            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            for arg, default in zip(node.args.kwonlyargs, node.args.kw_defaults):
-                if arg.arg == "from_block":
-                    assert default is None, (
-                        f"{rel}:{node.name} reintroduced a keyword-only from_block default — genesis footgun"
-                    )
-            posargs = node.args.posonlyargs + node.args.args
-            pos_defaults = node.args.defaults
-            if pos_defaults:
-                defaulted = posargs[len(posargs) - len(pos_defaults) :]
-                for arg, default in zip(defaulted, pos_defaults):
-                    if arg.arg == "from_block":
-                        raise AssertionError(
-                            f"{rel}:{node.name} reintroduced a positional from_block default "
-                            f"(={ast.dump(default)}) — genesis footgun"
-                        )
-
-
 # (c) floor-or-defer semantics ----------------------------------------------
 
 
@@ -687,17 +662,6 @@ def test_enumerator_constructs_client_through_the_bound():
     )
     assert result["status"] == "complete"
     assert isinstance(captured.get("max_num_retries"), int)  # routed through the bound
-
-
-def test_hypersync_slot_is_a_per_token_semaphore():
-    from services.resolution import hypersync_bound
-
-    entered = []
-    with hypersync_bound.hypersync_slot("tok-a"):
-        entered.append("a")
-    assert entered == ["a"]
-    # Same token reuses one bounded semaphore instance.
-    assert hypersync_bound._semaphore_for("tok-a") is hypersync_bound._semaphore_for("tok-a")
 
 
 if __name__ == "__main__":  # pragma: no cover

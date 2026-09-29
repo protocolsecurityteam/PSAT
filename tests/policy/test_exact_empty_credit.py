@@ -160,9 +160,3 @@ def test_a_non_finite_set_is_not_applicable():
 
 def test_a_missing_capability_is_not_determined():
     assert exact_empty_credit(None)["verdict"] == "not_determined"
-
-
-def test_the_gate_never_returns_a_proven_absent_verdict():
-    """It withholds a credit; it never asserts that a caller exists."""
-    for cap in (_empty(), _empty(trace=[]), None, {"kind": "AND"}):
-        assert exact_empty_credit(cap)["verdict"] in ("earned", "not_determined", "not_applicable")

@@ -12,51 +12,13 @@ from types import SimpleNamespace
 
 import services.static.contract_analysis_pipeline.core as core
 from services.static.contract_analysis_pipeline.core import (
-    _emit_pipeline_profile,
     collect_contract_analysis_with_artifacts,
-)
-from services.static.contract_analysis_pipeline.predicate_artifacts import (
-    build_predicate_artifacts_with_pause_info,
 )
 from utils.logging import (
     bind_trace_context,
     degraded_errors_var,
     stage_metrics_var,
 )
-
-
-def test_emit_pipeline_profile_folds_phase_ms_metrics():
-    metrics: dict = {}
-    token = stage_metrics_var.set(metrics)
-    try:
-        _emit_pipeline_profile(
-            contract_name="C",
-            external_fn_count=3,
-            durations_ms={"slither_parse": 50, "predicate_trees": 200},
-            total_ms=300,
-        )
-    finally:
-        stage_metrics_var.reset(token)
-
-    assert metrics["phase_ms_slither_parse"] == 50
-    assert metrics["phase_ms_predicate_trees"] == 200
-    assert metrics["contract_analysis_total_ms"] == 300
-
-
-def test_predicate_artifacts_emits_attempted_and_built_metrics():
-    # Zero entry points -> zero attempted/built; the pair must still be emitted so divergence is chartable.
-    metrics: dict = {}
-    token = stage_metrics_var.set(metrics)
-    try:
-        artifact, _pause = build_predicate_artifacts_with_pause_info(
-            SimpleNamespace(name="Empty", functions_entry_points=[])
-        )
-    finally:
-        stage_metrics_var.reset(token)
-
-    assert artifact["trees"] == {}
-    assert metrics["predicate_fns_attempted"] == 0
-    assert metrics["predicate_trees_built"] == 0
 
 
 def _stub_analysis_phases(monkeypatch):

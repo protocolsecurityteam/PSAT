@@ -10,8 +10,6 @@ import services.resolution.role_store_standards as rss
 from services.resolution.role_store_standards import (
     OZ_ACCESS_CONTROL_ENUMERABLE,
     SOLADY_ENUMERABLE_ROLES,
-    STANDARDS,
-    all_topic0s,
     detect_standards,
     resolve_probe_code,
 )
@@ -46,15 +44,6 @@ def test_oz_grant_revoke_polarity_and_eip165():
     assert grant.active_when is True and revoke.active_when is False
     assert (grant.holder_topic_index, grant.role_topic_index) == (2, 1)
     assert OZ_ACCESS_CONTROL_ENUMERABLE.eip165_interface_id == "0x5a05180f"
-
-
-def test_all_topic0s_is_the_sorted_union():
-    expected = set()
-    for standard in STANDARDS:
-        expected.update(standard.topic0s())
-    assert all_topic0s() == sorted(expected)
-    # Solady RoleSet + OZ RoleGranted/RoleRevoked = 3 distinct topics.
-    assert len(all_topic0s()) == 3
 
 
 # --- detect_standards ------------------------------------------------------

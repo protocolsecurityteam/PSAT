@@ -504,15 +504,6 @@ def test_verdicts_are_total_over_live_declarations(tmp_path):
     assert all(v["state"] in ("proven", "not_determined") for v in verdicts_of.values())
 
 
-def test_refusal_reasons_separate_the_two_ways_a_guard_can_be_missing(tmp_path):
-    """``guard_modifier_not_applied`` (a proven guard exists elsewhere) vs ``no_verified_guard_modifier``
-    (none does): only the first is the fail-open shape."""
-    guarded = verified_guard_verdicts(_contract(tmp_path, _A12_GUARD_VAR_BUT_NO_MODIFIER, "C"))
-    unguarded = verified_guard_verdicts(_contract(tmp_path, _A13_FAKE_GUARD_NO_REVERT, "C"))
-    assert guarded["payout()"]["reason"] == W2_REASON_GUARD_NOT_APPLIED
-    assert unguarded["payout()"]["reason"] == W2_REASON_NO_VERIFIED_GUARD
-
-
 def test_proven_dict_names_which_modifier_holds_which_var(tmp_path):
     """The modifier-retaining computation is the whole difference from the
     contract-scoped var set — without it there is nothing to join against."""

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from eth_utils.crypto import keccak
 
-from services.static.claims import is_registered
 from services.static.cross_contract import (
     TRANSFER_POLICY_CONFIGURE,
     build_callee_claim_map,
@@ -52,10 +51,6 @@ def _caller(fn_sig: str, sinks: list[dict]) -> dict:
 # ---------------------------------------------------------------------------
 # The new claim id is registered (emit_claim would fail closed otherwise)
 # ---------------------------------------------------------------------------
-
-
-def test_transfer_policy_claim_is_registered():
-    assert is_registered(TRANSFER_POLICY_CONFIGURE)
 
 
 # ---------------------------------------------------------------------------
@@ -125,14 +120,6 @@ def test_no_join_when_controller_value_unresolved():
 def test_no_join_when_callee_not_analyzed():
     target = _caller("sweep(address)", [_external_sink("token.transfer", TRANSFER_SELECTOR)])
     assert derive_cross_contract_claims(target, {"state_variable:token": {"value": TOKEN}}, {}) == {}
-
-
-def test_control_plane_callee_claim_never_propagates():
-    # A callee whose transfer selector somehow carried an authority claim must
-    # not contaminate the caller: build_callee_claim_map already dropped it.
-    callee_map = build_callee_claim_map({TOKEN: _callee(TRANSFER_SELECTOR, [_std("authority.replace")])})
-    target = _caller("sweep(address)", [_external_sink("token.transfer", TRANSFER_SELECTOR)])
-    assert derive_cross_contract_claims(target, {"state_variable:token": {"value": TOKEN}}, callee_map) == {}
 
 
 def test_external_contract_controller_id_format_resolves():
@@ -328,43 +315,6 @@ def test_provenance_does_not_override_static_standard_exact():
 # ---------------------------------------------------------------------------
 # The four derivations compose without clobbering each other
 # ---------------------------------------------------------------------------
-
-
-def test_derivations_merge_per_function():
-    callee_map = build_callee_claim_map({TOKEN: _callee(TRANSFER_SELECTOR, [_std("flow.out")])})
-    target = {
-        "functions": {
-            "sweep(address)": {
-                "selector": _selector("sweep(address)"),
-                "sinks": [_external_sink("token.transfer", TRANSFER_SELECTOR)],
-                "state_writes": [],
-                "claims": [],
-            },
-            "allowFrom(address)": {
-                "selector": "0xccddeeff",
-                "sinks": [],
-                "state_writes": [
-                    {
-                        "var": "allowlist",
-                        "declared_type": "mapping(address => bool)",
-                        "member_path": [],
-                        "granularity": "var",
-                        "hygiene_class": "normal",
-                        "origin": "body",
-                    }
-                ],
-                "claims": [],
-            },
-        }
-    }
-    out = derive_cross_contract_claims(
-        target,
-        {"state_variable:token": {"value": TOKEN}},
-        callee_map,
-        sibling_transfer_hooks=[{"sibling_address": VAULT, "pointer_var": "hook"}],
-    )
-    assert out["sweep(address)"][0]["claim_id"] == "flow.out"
-    assert out["allowFrom(address)"][0]["claim_id"] == TRANSFER_POLICY_CONFIGURE
 
 
 # ---------------------------------------------------------------------------

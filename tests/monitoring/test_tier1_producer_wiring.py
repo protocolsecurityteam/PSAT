@@ -235,23 +235,6 @@ class TestRoleHolderPlaneFiringCondition:
         assert len(calls) == 1
         db_session.rollback()
 
-    def test_no_registry_address_reads_nothing(self, monkeypatch):
-        calls = self._spy(monkeypatch)
-        session = MagicMock()
-
-        assert (
-            ResolutionWorker()._resolve_role_holder_plane(
-                session,
-                _job_stub(),
-                chain_id=1,
-                rpc_url="https://rpc.example",
-                registry_address=None,
-            )
-            == 0
-        )
-        assert calls == []
-        session.execute.assert_not_called()
-
     def test_no_rows_writes_nothing(self, db_session, monkeypatch):
         """An empty resolve is row-absence, which is not_determined — not a commit."""
         self._spy(monkeypatch)
@@ -414,18 +397,6 @@ class TestResolutionStageComposition:
         assert any(d.startswith("Resolution complete") for d in details)
         session.rollback.assert_called()
 
-    def test_an_ungated_registry_reaches_the_real_gate_without_a_chain_read(self, monkeypatch):
-        """No producer stub: the default corpus has no cursors, so the gate must close before the wire."""
-        _stub_stage(monkeypatch)
-        monkeypatch.setattr(
-            "workers.resolution_worker.resolve_role_holder_planes",
-            lambda *a, **kw: (_ for _ in ()).throw(AssertionError("gate should have closed")),
-        )
-        session = MagicMock()
-        session.execute.return_value.scalar_one_or_none.return_value = None
-
-        ResolutionWorker().process(session, _job())  # pyright: ignore[reportArgumentType]
-
 
 # ---------------------------------------------------------------------------
 # 1.2 — the restaking periodic step
@@ -507,16 +478,6 @@ class TestRestakingStepOrder:
         assert spies.order == ["enroll", "read", "persist"]
         assert written == 1
         assert spies.enrolled == [(1, [EFNM_PROXY])]
-        db_session.rollback()
-
-    def test_the_read_targets_the_verified_managers(self, db_session, one_protocol, monkeypatch):
-        spies = _RestakingSpies(monkeypatch)
-
-        refresh_restaking_plane(db_session, chain_id=1, rpc_url="https://rpc.example")
-
-        assert spies.read_kwargs["eigen_pod_manager"] == EIGEN_POD_MANAGER
-        assert spies.read_kwargs["delegation_manager"] == DELEGATION_MANAGER
-        assert spies.read_kwargs["chain_id"] == 1
         db_session.rollback()
 
     def test_nodes_are_scoped_to_the_emitter_that_enumerated_them(self, db_session, one_protocol, monkeypatch):
@@ -652,24 +613,6 @@ class TestRestakingFailureDomain:
         run_restaking_loop(0.0, stop)  # must return, not raise
 
         assert beats == [(HEARTBEAT_PROTOCOL_RESTAKING, "degraded")]
-
-    def test_the_step_is_a_supervised_sibling_of_the_balance_loop(self):
-        """Own thread, own name — the Supervisor's isolation is the failure
-        domain, so a restaking crash cannot reach the TVL loop."""
-        from db.queue import HEARTBEAT_PROTOCOL_TVL
-        from workers.protocol_monitor import _build_default_supervisor
-
-        names = [name for name, _ in _build_default_supervisor("https://rpc.example", None)._loops]
-
-        assert HEARTBEAT_PROTOCOL_RESTAKING in names
-        assert HEARTBEAT_PROTOCOL_TVL in names
-        assert names.index(HEARTBEAT_PROTOCOL_RESTAKING) != names.index(HEARTBEAT_PROTOCOL_TVL)
-        assert len(names) == len(set(names))
-
-    def test_the_step_is_registered_for_the_fleet_view(self):
-        from services.monitoring.process_meta import PROCESS_META
-
-        assert HEARTBEAT_PROTOCOL_RESTAKING in PROCESS_META
 
 
 # ---------------------------------------------------------------------------

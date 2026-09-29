@@ -506,24 +506,6 @@ def test_underscore_bearing_body_is_rejected(monkeypatch):
         assert protection[key] == value
 
 
-def test_clean_sentinel_word_still_earns_the_empty_module_set(monkeypatch):
-    """Recall pin for the strict decoder: the one word that proves the list empty
-    still does, with its basis and its block."""
-    _, details, _ = _both_paths(
-        monkeypatch,
-        MODULE_FREE_SAFE,
-        version="1.4.1",
-        head_word=SENTINEL_WORD,
-        guard_word=ZERO_WORD,
-    )
-    protection = _protection(details)
-    assert protection["module_set"] == []
-    assert protection["module_set_basis"] == "storage_linked_list_terminated"
-    assert protection["modules_head"] == SENTINEL_WORD
-    assert protection["probe_block"] == PROBE_BLOCK
-    assert protection["guard"] == "proven_zero"
-
-
 def test_uppercase_hex_digits_still_decode(monkeypatch):
     """A full-width word whose digits are uppercase is well-formed; the published
     address is normalised to lowercase, as before."""

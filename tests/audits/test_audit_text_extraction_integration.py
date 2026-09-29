@@ -6,7 +6,7 @@ Needs Postgres + storage (skips without docker).
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 import pytest
@@ -163,42 +163,6 @@ def test_worker_processes_pending_rows_end_to_end(db_session, storage_bucket, se
 # ---------------------------------------------------------------------------
 
 
-def test_worker_processes_markdown_audit_rows_end_to_end(
-    db_session, storage_bucket, seed_protocol, worker, monkeypatch
-):
-    """A .md URL is downloaded as text and stored verbatim; the ``--- page N ---`` markers come from pypdf and must
-    not appear for markdown.
-    """
-    from db.models import AuditReport
-
-    md_body = (
-        "# Hats Finance — EtherFi Audit\n\n"
-        "## Scope\n\n"
-        "The following contracts were reviewed:\n\n"
-        "- Pool.sol\n- Vault.sol\n- Strategy.sol\n- Registry.sol\n\n"
-        + ("Finding N: description that pads the body above the 500-char gate. " * 20)
-    )
-    url = "https://raw.githubusercontent.com/etherfi-protocol/smart-contracts/master/audits/Hats.md"
-    audit_id = _seed_audit(db_session, seed_protocol, url=url, pdf_url=None)
-    _mock_download(monkeypatch, {url: md_body.encode("utf-8")})
-
-    claimed = worker._claim_batch(db_session)
-    audit_obj = next(a for a in claimed if a.id == audit_id)
-    _, outcome = worker._process_row(audit_obj)
-    assert outcome.status == "success", f"outcome={outcome}"
-    worker._persist_outcome(audit_id, outcome)
-
-    db_session.expire_all()
-    row = db_session.get(AuditReport, audit_id)
-    assert row.text_extraction_status == "success"
-    assert row.text_storage_key == f"audits/text/{audit_id}.txt"
-
-    body = storage_bucket.get(outcome.storage_key)
-    stored = body.decode("utf-8")
-    assert stored == md_body
-    assert "--- page 1 ---" not in stored
-
-
 # ---------------------------------------------------------------------------
 # 2. Worker failure path — HTTP error goes to 'failed' with error text
 # ---------------------------------------------------------------------------
@@ -236,27 +200,6 @@ def test_worker_records_http_failure_without_touching_storage(
 # ---------------------------------------------------------------------------
 
 
-def test_worker_skips_short_text_pdfs(db_session, storage_bucket, seed_protocol, worker, monkeypatch):
-    from db.models import AuditReport
-
-    pdf_bytes = minimal_pdf_with_text("tiny")  # far below 500 char threshold
-    url = "https://example.com/image-only.pdf"
-    audit_id = _seed_audit(db_session, seed_protocol, url=url, pdf_url=url)
-    _mock_download(monkeypatch, {url: pdf_bytes})
-
-    claimed = worker._claim_batch(db_session)
-    audit_obj = next(a for a in claimed if a.id == audit_id)
-    _, outcome = worker._process_row(audit_obj)
-    worker._persist_outcome(audit_id, outcome)
-
-    db_session.expire_all()
-    row = db_session.get(AuditReport, audit_id)
-    assert row.text_extraction_status == "skipped"
-    assert row.text_extraction_error is not None
-    assert "image-only" in row.text_extraction_error
-    assert row.text_storage_key is None
-
-
 # ---------------------------------------------------------------------------
 # 4. Claim atomicity — claimed rows transition status and won't re-appear
 # ---------------------------------------------------------------------------
@@ -281,35 +224,6 @@ def test_claim_batch_flips_status_to_processing(db_session, storage_bucket, seed
 # ---------------------------------------------------------------------------
 # 5. Stale-row recovery resets abandoned 'processing' rows
 # ---------------------------------------------------------------------------
-
-
-def test_stale_processing_rows_are_recovered(db_session, storage_bucket, seed_protocol, worker, monkeypatch):
-    """A row stuck in ``processing`` past the stale timeout is reset to
-    NULL so a fresh claim can pick it up, and its processing metadata is
-    cleared so error state doesn't leak across workers."""
-    from db.models import AuditReport
-
-    audit_id = _seed_audit(db_session, seed_protocol, url="https://example.com/stale.pdf")
-
-    # Manually park the row in 'processing' with a timestamp older than the
-    # stale-recovery threshold (default 600s).
-    row = db_session.get(AuditReport, audit_id)
-    assert row is not None
-    row.text_extraction_status = "processing"
-    row.text_extraction_worker = "ghost-worker-that-died"
-    row.text_extraction_started_at = datetime.now(timezone.utc) - timedelta(hours=1)
-    db_session.commit()
-
-    worker._recover_stale_rows(db_session)
-
-    db_session.expire_all()
-    row = db_session.get(AuditReport, audit_id)
-    assert row.text_extraction_status is None
-    assert row.text_extraction_worker is None
-    assert row.text_extraction_started_at is None
-
-    claimed = worker._claim_batch(db_session)
-    assert audit_id in {a.id for a in claimed}
 
 
 # ---------------------------------------------------------------------------

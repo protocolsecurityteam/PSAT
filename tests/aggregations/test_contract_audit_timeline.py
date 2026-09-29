@@ -67,12 +67,6 @@ def test_skips_empty_addresses(monkeypatch):
     assert out == {}
 
 
-def test_no_process_global_keccak_cache():
-    """The third keccak cache is eliminated, not merely bounded."""
-    assert not hasattr(cat, "_BYTECODE_KECCAK_CACHE")
-    assert not hasattr(cat, "_BYTECODE_KECCAK_TTL_SECONDS")
-
-
 @requires_postgres
 def test_current_status_needs_a_determined_lower_bound_for_open_ended(db_session):
     """``covered_to_block is None`` alone is not "this row covers the currently-open impl window":

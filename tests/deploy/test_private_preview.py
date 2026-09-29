@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import socket
 import subprocess
@@ -313,25 +312,3 @@ def test_comment_commands_are_exact_and_revalidate_pr() -> None:
     assert "pr.head.repo?.full_name" in commands
     assert "--ref main" in commands
     assert 'head_sha="$HEAD_SHA"' in commands
-
-
-def test_plan_cli_never_performs_remote_operations(tmp_path: Path) -> None:
-    result = subprocess.run(
-        [
-            "python",
-            "-m",
-            "deploy.preview.control",
-            "plan",
-            "--pr-number",
-            "42",
-            "--organization",
-            "psat-staging",
-            "--app-prefix",
-            "psat-stage-pr",
-        ],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    assert json.loads(result.stdout)["mode"] == "plan-only; no remote operations implemented"

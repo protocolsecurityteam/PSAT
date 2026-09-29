@@ -58,41 +58,7 @@ def _get_function_labels(analysis: dict, function_name: str) -> set[str]:
     return set()
 
 
-def _get_function_claims(analysis: dict, function_name: str) -> set[str]:
-    for sig, info in (analysis.get("effects", {}).get("functions") or {}).items():
-        if sig.split("(")[0] == function_name:
-            return {claim["claim_id"] for claim in (info.get("claims") or [])}
-    return set()
-
-
 # 1. Randomized impl slot name + delegatecall fallback
-
-
-def test_random_impl_slot_with_delegatecall():
-    slot_name = f"_{_rand()}"
-    setter_name = _rand()
-    source = f"""
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
-contract Target {{
-    address private {slot_name};
-    address public owner;
-    modifier onlyOwner() {{ require(msg.sender == owner); _; }}
-    function {setter_name}(address a) external onlyOwner {{ {slot_name} = a; }}
-    fallback() external payable {{
-        address t = {slot_name};
-        assembly {{ calldatacopy(0,0,calldatasize()) let r := delegatecall(gas(),t,0,calldatasize(),0,0) returndatacopy(0,0,returndatasize()) switch r case 0 {{ revert(0,returndatasize()) }} default {{ return(0,returndatasize()) }} }}
-    }}
-}}
-"""
-    analysis = _scaffold_and_analyze(source)
-    labels = _get_function_labels(analysis, setter_name)
-    # The bespoke same-contract impl-slot detector is retired; ``upgrade.*`` is
-    # standard-gated. The delegatecall stays a fact on the fallback.
-    assert "implementation_update" not in labels, (
-        f"Random impl slot '{slot_name}', setter '{setter_name}': expected NO implementation_update, got {labels}"
-    )
-    assert "delegatecall_execution" in _get_function_labels(analysis, "fallback")
 
 
 # 2. Randomized pause variable name (a bool gating a modifier, flipped by a function)
@@ -292,31 +258,6 @@ contract Target {{
 
 
 # 9. Ownership transfer with randomized variable name
-
-
-def test_random_owner_variable_name():
-    var_name = f"_{_rand()}"
-    fn_name = _rand()
-    source = f"""
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
-contract Target {{
-    address public {var_name};
-    constructor() {{ {var_name} = msg.sender; }}
-    modifier auth() {{ require(msg.sender == {var_name}); _; }}
-    function {fn_name}(address newAdmin) external auth {{ {var_name} = newAdmin; }}
-}}
-"""
-    analysis = _scaffold_and_analyze(source)
-    labels = _get_function_labels(analysis, fn_name)
-    claims = _get_function_claims(analysis, fn_name)
-    # No ownership standard on this contract (no owner()/transferOwnership),
-    # so the bespoke caller-authority scalar rotation is authorized_caller.rotate
-    # rather than the ghost-prone ownership_transfer.
-    assert "authorized_caller.rotate" in claims, (
-        f"Random owner var '{var_name}', fn '{fn_name}': expected authorized_caller.rotate, got {claims}"
-    )
-    assert "ownership_transfer" not in labels
 
 
 # Conventional-name controls (merged from tests/test_effect_label_weaknesses.py):

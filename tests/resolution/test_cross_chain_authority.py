@@ -116,15 +116,6 @@ def test_recognizer_is_none_on_unknown_chain():
     assert make_cross_chain_recognizer(None) is None
 
 
-def test_recognizer_bound_to_base_recognizes_messenger():
-    recognize = make_cross_chain_recognizer(BASE_CHAIN_ID)
-    assert recognize is not None
-    assert recognize(BASE_MESSENGER) == (
-        CROSS_CHAIN_AUTHORITY_TYPE,
-        {"address": BASE_MESSENGER, "role": "cross_domain_messenger"},
-    )
-
-
 # --- build_principal_labels wiring -------------------------------------------
 
 

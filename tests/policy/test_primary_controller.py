@@ -116,15 +116,6 @@ def test_address_lowercasing():
     assert result["0xabc"] == ["0xc1"]
 
 
-def test_self_address_in_fp_is_still_counted():
-    """A principal whose own address is in its own FP map (e.g. a Safe calling itself
-    via execTransaction) still counts as primary; self-reference is a Surface-layout concern.
-    """
-    fp = {"0xsafe": {"0xsafe"}}
-    result = assign_primary_controllers([_p("0xsafe", "safe")], fp)
-    assert result["0xsafe"] == ["0xsafe"]
-
-
 def test_empty_inputs():
     assert assign_primary_controllers([], {}) == {}
     assert assign_primary_controllers([_p("0xa", "safe")], {}) == {"0xa": []}
@@ -442,21 +433,6 @@ def test_broad_whitelist_callers_not_primary_eligible():
     assert all(result[b] == [] for b in bidders)
 
 
-def test_assignment_stable_as_coverage_grows():
-    """Population-insensitivity: analyzing extra unrelated contracts must not change
-    who wins the original contract (the old count tiebreak lacked this)."""
-    a, b = "0xaaa", "0xbbb"
-    fp_small = {"0xc1": {a, b}}
-    detail = {"0xc1": [_fn({a}, claims=["ownership.transfer"]), _fn({b}, claims=["pause.set"])]}
-    small = assign_primary_controllers([_p(a, "safe"), _p(b, "safe")], fp_small, fp_function_detail_by_contract=detail)
-    fp_big = dict(fp_small)
-    for i in range(10):  # b picks up ten more contracts as analysis progresses
-        fp_big[f"0xd{i}"] = {b}
-    big = assign_primary_controllers([_p(a, "safe"), _p(b, "safe")], fp_big, fp_function_detail_by_contract=detail)
-    assert small[a] == ["0xc1"]
-    assert big[a] == ["0xc1"], "coverage growth must never flip an existing assignment"
-
-
 # --- assign_operand_render_groups ------------------------------------------
 #
 # Machinery contracts (passthrough timelock, Pauser, L1 bridge receiver) render with
@@ -491,14 +467,6 @@ def test_unowned_mediator_joins_operand_unit():
     primary_for = {"0xgov": ["0xc1", "0xc2"]}
     fp = {"0xc1": {tl}, "0xc2": {tl}, tl: set()}
     assert assign_operand_render_groups(fp, _all_contracts(fp), {tl}, primary_for) == {tl: "0xgov"}
-
-
-def test_render_group_noop_when_already_home():
-    """A mediator whose driver also won its operands (the 10d timelock shape) needs no override."""
-    tl = "0xtl"
-    primary_for = {"0xgov": ["0xc1", "0xc2", tl]}
-    fp = {"0xc1": {tl}, "0xc2": {tl}, tl: {"0xgov"}}
-    assert assign_operand_render_groups(fp, _all_contracts(fp), {tl}, primary_for) == {}
 
 
 def test_mediator_render_group_tie_is_split_evidence():

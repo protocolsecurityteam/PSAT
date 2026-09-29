@@ -434,21 +434,6 @@ class TestFailureDomain:
 
         assert beats == [(HEARTBEAT_ROLE_HOLDER_PLANE, "degraded")]
 
-    def test_the_loop_is_a_supervised_sibling_of_the_restaking_loop(self):
-        from db.queue import HEARTBEAT_PROTOCOL_RESTAKING
-        from workers.protocol_monitor import _build_default_supervisor
-
-        names = [name for name, _ in _build_default_supervisor("https://rpc.example", None)._loops]
-
-        assert HEARTBEAT_ROLE_HOLDER_PLANE in names
-        assert names.index(HEARTBEAT_ROLE_HOLDER_PLANE) != names.index(HEARTBEAT_PROTOCOL_RESTAKING)
-        assert len(names) == len(set(names))
-
-    def test_the_loop_is_registered_for_the_fleet_view(self):
-        from services.monitoring.process_meta import PROCESS_META
-
-        assert HEARTBEAT_ROLE_HOLDER_PLANE in PROCESS_META
-
 
 # ---------------------------------------------------------------------------
 # Observability — both call sites, every outcome

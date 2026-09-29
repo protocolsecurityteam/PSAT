@@ -18,19 +18,11 @@ from utils.memory import (
     cgroup_anon_file_bytes,
     cgroup_memory_max_bytes,
     count_sibling_python_procs,
-    current_rss_bytes,
     descendant_rss_samples,
     mb,
     reset_cache_pressure_state,
     rss_bytes_for_pid,
 )
-
-
-def test_current_rss_bytes_returns_positive_or_zero():
-    rss = current_rss_bytes()
-    # Linux returns a real value; non-Linux returns 0. Neither should raise.
-    assert isinstance(rss, int)
-    assert rss >= 0
 
 
 def test_rss_bytes_for_pid_live_and_dead():

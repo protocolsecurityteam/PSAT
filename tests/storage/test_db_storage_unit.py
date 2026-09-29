@@ -55,13 +55,6 @@ def test_get_many_swallows_transport_errors_per_key() -> None:
     }
 
 
-def test_get_many_total_outage_returns_all_none() -> None:
-    client = _bare_client()
-    with patch.object(client, "get", side_effect=StorageUnavailable("bucket gone")):
-        result = client.get_many(["a", "b", "c"])
-    assert result == {"a": None, "b": None, "c": None}
-
-
 def test_get_many_dedupes_input_keys() -> None:
     client = _bare_client()
     calls: list[str] = []

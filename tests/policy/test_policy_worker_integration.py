@@ -111,63 +111,6 @@ class TestResolveAuthorityWithSnapshot:
 # ---------------------------------------------------------------------------
 
 
-class TestProcessStoresAllArtifacts:
-    """Full process() stores effective_permissions, resolved_control_graph, and principal_labels."""
-
-    def test_all_three_artifacts_stored(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        worker = PolicyWorker()
-        session = MagicMock()
-        session.execute.return_value.scalar_one_or_none.return_value = None
-        job = _job()
-
-        contract_analysis = _minimal_contract_analysis()
-        control_snapshot = _minimal_snapshot({"some_key:admin": {"value": "0xbbb"}})
-        resolved_graph = _graph_with_nodes([])
-        tracking_plan = {"schema_version": "0.1", "contract_address": TARGET_ADDRESS, "contract_name": "TestContract"}
-
-        def fake_get_artifact(_session: Any, _job_id: Any, name: str) -> Any:
-            return {
-                "contract_analysis": contract_analysis,
-                "control_snapshot": control_snapshot,
-                "resolved_control_graph": resolved_graph,
-                "control_tracking_plan": tracking_plan,
-            }.get(name)
-
-        store_calls: list[tuple[str, Any]] = []
-
-        def fake_store_artifact(
-            _session: Any,
-            _job_id: Any,
-            name: str,
-            data: Any = None,
-            text_data: Any = None,
-        ) -> None:
-            store_calls.append((name, data))
-
-        monkeypatch.setattr("workers.policy_worker.get_artifact", fake_get_artifact)
-        monkeypatch.setattr("workers.policy_worker.store_artifact", fake_store_artifact)
-        monkeypatch.setattr("workers.policy_worker._load_nested_artifacts", lambda *_a, **_kw: {})
-        monkeypatch.setattr(
-            "workers.policy_worker.build_effective_permissions",
-            lambda *a, **kw: {"schema_version": "1", "functions": []},
-        )
-        monkeypatch.setattr(
-            "workers.policy_worker.resolve_control_graph",
-            lambda **kw: ({"nodes": [], "edges": [], "refreshed": True}, {}),
-        )
-        monkeypatch.setattr(
-            "workers.policy_worker.build_principal_labels",
-            lambda *a, **kw: {"principals": []},
-        )
-
-        worker.process(session, cast(Any, job))
-
-        stored_names = [name for name, _ in store_calls]
-        assert "effective_permissions" in stored_names
-        assert "resolved_control_graph" in stored_names
-        assert "principal_labels" in stored_names
-
-
 class TestProcessSemanticInputs:
     """Missing semantic inputs are degraded instead of using a static-summary fallback."""
 

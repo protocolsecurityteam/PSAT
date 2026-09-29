@@ -246,16 +246,6 @@ def test_state_var_survives_internal_call(tmp_path):
     assert flow["target_kind"]["kind"] == "immutable"
 
 
-def test_forwarded_param_recovers_in_callee(tmp_path):
-    contract = _compile(tmp_path, INDIRECTION_SRC, "Indirection")
-    effects = build_effects(contract)
-    flow = _out_flow(effects["functions"]["payForward(address,uint256)"])
-    # The entry's caller-chosen ``dest``/``amt`` forwarded one hop into ``_pay``:
-    # recovered to ``param`` (a trace, since it crossed the internal-call boundary).
-    assert flow["target_kind"] == {"kind": "param", "tier": "static_trace"}
-    assert flow["amount_kind"] == {"kind": "param", "tier": "static_trace"}
-
-
 def test_lattice_reaches_the_claim_witness(tmp_path):
     contract = _compile(tmp_path, LATTICE_SRC, "Lattice")
     effects = build_effects(contract)

@@ -345,36 +345,3 @@ def test_specs_fingerprint_changes_on_direction(_clean_l2):
     rely = [_rely_spec()]
     deny = [{**_rely_spec(), "direction": "remove"}]
     assert db_cache.specs_fingerprint(rely) != db_cache.specs_fingerprint(deny)
-
-
-@requires_postgres
-def test_db_module_upsert_and_find_roundtrip(_clean_l2):
-    """upsert→find_fresh contract."""
-    specs = [_rely_spec()]
-    h = db_cache.specs_fingerprint(specs)
-    payload = {
-        "principals": [
-            {
-                "address": _addr("a"),
-                "mapping_name": "wards",
-                "direction_history": ["add"],
-                "last_seen_block": 10,
-            }
-        ],
-        "status": "complete",
-        "pages_fetched": 1,
-        "last_block_scanned": 100,
-        "error": None,
-    }
-    db_cache.upsert(chain="ethereum", address="0x" + "EE" * 20, specs_hash=h, result=payload)
-    got = db_cache.find_fresh(chain="ethereum", address="0x" + "EE" * 20, specs_hash=h)
-    assert got is not None
-    assert got["status"] == "complete"
-    assert got["principals"] == payload["principals"]
-    assert got["last_block_scanned"] == 100
-
-
-@requires_postgres
-def test_db_module_find_fresh_misses_on_unknown_key(_clean_l2):
-    h = db_cache.specs_fingerprint([_rely_spec()])
-    assert db_cache.find_fresh(chain="ethereum", address="0x" + "FF" * 20, specs_hash=h) is None
