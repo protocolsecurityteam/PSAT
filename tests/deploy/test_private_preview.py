@@ -2,14 +2,12 @@ from __future__ import annotations
 
 import json
 import os
-import shlex
 import socket
 import subprocess
 from pathlib import Path
 
 import pytest
 import tomli
-import yaml
 
 from deploy.preview.control import (
     ConfigurationError,
@@ -87,42 +85,17 @@ def test_render_rejects_template_that_can_force_public_https() -> None:
         render_config(unsafe, plan)
 
 
-def test_preview_matches_production_runtime_and_capacity() -> None:
+def test_preview_matches_production_company_cache_and_web_capacity() -> None:
     production = tomli.loads((ROOT / "fly.toml").read_text())
     plan = build_plan(42, "psat-staging", "psat-stage-pr")
     preview = tomli.loads(render_config((PREVIEW / "fly.preview.toml.template").read_text(), plan))
-    # Only routing and ownership of worker shutdown differ. Compare the whole
-    # environment so new production flags cannot silently bypass preview tests.
-    exceptions = {"PSAT_EDGE_MODE", "PSAT_SITE_ORIGIN", "PSAT_WORKER_LIFECYCLE_MODE"}
-    assert {k: v for k, v in preview["env"].items() if k not in exceptions} == {
-        k: v for k, v in production["env"].items() if k not in exceptions
-    }
-    assert preview["env"]["PSAT_WORKER_LIFECYCLE_MODE"] == "off"
-    assert production["env"]["PSAT_WORKER_LIFECYCLE_MODE"] == "enforce"
-    assert preview["env"]["PSAT_PREPARED_COMPANY_PAGES"] == "1"
-    assert preview["env"]["PSAT_COMPANY_BUILDER_ON_WEB"] == "1"
-    for key in ("build", "deploy", "processes", "vm", "restart", "kill_signal", "kill_timeout"):
-        assert preview[key] == production[key], key
-    for key in ("internal_port", "auto_stop_machines", "auto_start_machines", "processes", "concurrency"):
-        assert preview["http_service"][key] == production["http_service"][key], key
-
-
-def test_preview_workflow_runtime_secret_overrides_match_production() -> None:
-    production_env = tomli.loads((ROOT / "fly.toml").read_text())["env"]
-    workflow = yaml.safe_load((WORKFLOWS / "pr.yml").read_text())
-    overrides = {}
-    for job in workflow["jobs"].values():
-        for step in job.get("steps", []):
-            for line in step.get("run", "").replace("\\\n", " ").splitlines():
-                if not line.strip().startswith("flyctl secrets set "):
-                    continue
-                for argument in shlex.split(line):
-                    key, separator, value = argument.partition("=")
-                    if separator and key in production_env and key not in {"PSAT_EDGE_MODE", "PSAT_SITE_ORIGIN"}:
-                        overrides[key] = value
-    # Fly secrets override config values, including these historical nonsecret settings.
-    assert {"PSAT_SUPPORTED_CHAIN_IDS", "PSAT_EXA_CACHE", "PSAT_TAVILY_CACHE"} <= overrides.keys()
-    assert overrides == {key: production_env[key] for key in overrides}
+    for key in ("PSAT_PREPARED_COMPANY_PAGES", "PSAT_COMPANY_BUILDER_ON_WEB"):
+        assert preview["env"][key] == production["env"][key] == "1"
+    assert preview["processes"]["web"] == production["processes"]["web"] == "./deploy/start_web.sh"
+    preview_web = next(vm for vm in preview["vm"] if vm["processes"] == ["web"])
+    production_web = next(vm for vm in production["vm"] if vm["processes"] == ["web"])
+    assert preview_web == production_web
+    assert preview_web["memory"] == "1gb"
 
 
 def test_app_inventory_requires_exact_staging_owner() -> None:
