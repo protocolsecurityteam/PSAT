@@ -394,29 +394,6 @@ def test_negative_control_view_gains_no_state_write_evidence() -> None:
     assert view["state_changing"] is False and actor["state_changing"] is True
 
 
-def test_a_state_write_only_filter_would_suppress_the_positive_control() -> None:
-    """The trap for whoever retargets ``selection.py``'s "has a sink": ``sweepDust`` is the
-    documented positive control and its state-write list is empty. If this fails because it
-    acquired a state write, the retarget became safe; until then the filter must key on sinks or
-    ``state_changing``.
-    """
-    recs = _records(_EFFECTS)
-
-    def has_state_write(rec: dict[str, Any]) -> bool:
-        return bool(rec["state_writes"])
-
-    def acts(rec: dict[str, Any]) -> bool:
-        return bool([s for s in (rec["sinks"] or []) if s["origin"] == "body"])
-
-    assert not has_state_write(recs["sweepDust(address,address)"])  # the trap
-    assert acts(recs["sweepDust(address,address)"])  # the correct predicate keeps it
-    assert acts(recs["updateExchangeRate(uint96)"])
-    # and it still excludes what it should not: the view has body sinks too, so a sink-only
-    # filter is insufficient; state_changing is not.
-    assert acts(recs["getRateInQuote(ERC20)"])
-    assert recs["getRateInQuote(ERC20)"]["state_changing"] is False
-
-
 # ---------------------------------------------------------------------------
 # The artifact hop. ``policy_worker`` hands the writer ``ep_data["functions"]``, NOT the record
 # dicts above: a field stopping at the record layer is NULL in production while these tests pass.

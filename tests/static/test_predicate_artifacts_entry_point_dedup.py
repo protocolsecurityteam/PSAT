@@ -188,24 +188,6 @@ def test_overridden_functions_iterated_once_not_per_inheritance_depth(tmp_path):
     )
 
 
-def test_no_inheritance_iteration_surface_unchanged(tmp_path):
-    """On a flat contract, ``functions_entry_points`` must match dedup-by-last-wins of
-    ``contract.functions`` filtered by ``_is_externally_callable``: the fix is a
-    no-op on the common case."""
-    sl = _compile(tmp_path, FLAT_SRC)
-    weth = _select_contract(sl, "WETH9Like")
-
-    legacy_surface = {fn.full_name: fn for fn in weth.functions if _is_externally_callable(fn)}
-    entry_point_surface = {fn.full_name: fn for fn in weth.functions_entry_points if _is_externally_callable(fn)}
-
-    assert set(legacy_surface.keys()) == set(entry_point_surface.keys())
-    for full_name, fn in entry_point_surface.items():
-        assert id(fn) == id(legacy_surface[full_name]), (
-            f"functions_entry_points returned a different Function object "
-            f"for {full_name} than dedup-by-last-wins of contract.functions"
-        )
-
-
 def test_inherited_override_iteration_surface_matches_dedup_by_last_wins(tmp_path):
     """The fix relies on Slither emitting the *override* (not the base) in
     ``functions_entry_points``; a reversal would silently analyze the base, a

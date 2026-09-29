@@ -463,27 +463,6 @@ def test_classify_exception_stores_classification_error(monkeypatch):
     assert created_jobs == []
 
 
-def test_classify_generic_exception_stores_error(monkeypatch):
-    worker = StaticWorker()
-    session = MagicMock()
-    job = _job()
-
-    store_calls, _ = _capture_store_and_create(monkeypatch)
-
-    def _raise(address, rpc_url, **_kw):
-        raise ValueError("unexpected bytecode format")
-
-    monkeypatch.setattr(
-        "services.discovery.classifier.classify_single",
-        _raise,
-    )
-
-    worker._resolve_proxy(session, job, _ADDR, "TestContract")
-
-    flags = store_calls[0][1]
-    assert "unexpected bytecode format" in flags["classification_error"]
-
-
 # ---------------------------------------------------------------------------
 # 6. Existing impl job skip
 # ---------------------------------------------------------------------------

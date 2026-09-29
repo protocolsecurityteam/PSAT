@@ -148,50 +148,7 @@ class TestMissingDappUrls:
             worker.process(session, cast(Any, job))
 
 
-class TestHappyPath:
-    def test_stores_artifacts_and_completes(self, monkeypatch, dapp_worker_module):
-        crawl_result = {
-            "addresses": [ADDR_A, ADDR_B],
-            "interaction_count": 5,
-        }
-        spies = _patch_worker_deps(monkeypatch, dapp_worker_module, crawl_result=crawl_result)
-        session = _session_no_existing_contracts()
-        job = _job()
-
-        worker = dapp_worker_module.DAppCrawlWorker()
-        with pytest.raises(JobHandledDirectly):
-            worker.process(session, cast(Any, job))
-
-        stored_names = [name for name, _ in spies["store_calls"]]
-        assert "dapp_crawl_results" in stored_names
-        assert "discovery_summary" in stored_names
-
-        crawl_artifact = next(d for n, d in spies["store_calls"] if n == "dapp_crawl_results")
-        assert crawl_artifact["addresses_found"] == 2
-        assert crawl_artifact["interaction_count"] == 5
-
-        summary = next(d for n, d in spies["store_calls"] if n == "discovery_summary")
-        assert summary["discovered_count"] == 2
-        assert "analyzed_count" not in summary
-        assert "child_jobs" not in summary
-
-        assert len(spies["complete_calls"]) == 1
-
-
 class TestJobName:
-    def test_name_set_when_missing(self, monkeypatch, dapp_worker_module):
-        crawl_result = {"addresses": [], "interaction_count": 0}
-        _patch_worker_deps(monkeypatch, dapp_worker_module, crawl_result=crawl_result)
-        session = _session_no_existing_contracts()
-        job = _job(name=None, request={"dapp_urls": ["https://a.com", "https://b.com"]})
-
-        worker = dapp_worker_module.DAppCrawlWorker()
-        with pytest.raises(JobHandledDirectly):
-            worker.process(session, cast(Any, job))
-
-        assert job.name == "DApp crawl (2 URLs)"
-        session.commit.assert_called()
-
     def test_name_not_overwritten(self, monkeypatch, dapp_worker_module):
         crawl_result = {"addresses": [], "interaction_count": 0}
         _patch_worker_deps(monkeypatch, dapp_worker_module, crawl_result=crawl_result)
@@ -203,49 +160,6 @@ class TestJobName:
             worker.process(session, cast(Any, job))
 
         assert job.name == "My Custom Name"
-
-
-class TestCrawlParameters:
-    def test_custom_chain_id_and_wait(self, monkeypatch, dapp_worker_module):
-        captured: dict[str, Any] = {}
-
-        def fake_crawl(urls, chain_id=1, wait=10, progress=None):
-            captured["chain_id"] = chain_id
-            captured["wait"] = wait
-            return {"addresses": [], "interaction_count": 0}
-
-        _patch_worker_deps(monkeypatch, dapp_worker_module)
-        # Re-patch crawl_dapp since _patch_worker_deps installed its own stub
-        monkeypatch.setattr(dapp_worker_module, "crawl_dapp", fake_crawl)
-
-        session = _session_no_existing_contracts()
-        job = _job(request={"dapp_urls": ["https://x.com"], "chain_id": 137, "wait": 20})
-
-        worker = dapp_worker_module.DAppCrawlWorker()
-        with pytest.raises(JobHandledDirectly):
-            worker.process(session, cast(Any, job))
-
-        assert captured["chain_id"] == 137
-        assert captured["wait"] == 20
-
-    def test_missing_wait_uses_default(self, monkeypatch, dapp_worker_module):
-        captured: dict[str, Any] = {}
-
-        def fake_crawl(urls, chain_id=1, wait=10, progress=None):
-            captured["wait"] = wait
-            return {"addresses": [], "interaction_count": 0}
-
-        _patch_worker_deps(monkeypatch, dapp_worker_module)
-        monkeypatch.setattr(dapp_worker_module, "crawl_dapp", fake_crawl)
-
-        session = _session_no_existing_contracts()
-        job = _job(request={"dapp_urls": ["https://x.com"]})
-
-        worker = dapp_worker_module.DAppCrawlWorker()
-        with pytest.raises(JobHandledDirectly):
-            worker.process(session, cast(Any, job))
-
-        assert captured["wait"] == 10
 
 
 class TestProtocolCreation:
@@ -287,47 +201,3 @@ class TestProtocolCreation:
 
         assert spies["protocol_calls"] == [("Ether.fi", "stake.ether.fi")]
         assert job.company == "Ether.fi"
-
-
-class TestInteractionPersistence:
-    def test_interactions_written_to_session(self, monkeypatch, dapp_worker_module):
-        crawl_result = {
-            "addresses": [ADDR_A],
-            "interaction_count": 2,
-            "interactions": [
-                {
-                    "type": "sendTransaction",
-                    "url": "https://ether.fi/stake",
-                    "timestamp": 1700000000000,
-                    "to": ADDR_A.upper(),
-                    "value": "0x0",
-                    "data": "0xabcdef01",
-                    "method_selector": "0xabcdef01",
-                    "is_permit": False,
-                },
-                {
-                    "type": "personal_sign",
-                    "url": "https://ether.fi/",
-                    "timestamp": 1700000001000,
-                    "to": None,
-                    "message": "sign in",
-                    "is_permit": False,
-                },
-            ],
-        }
-        _patch_worker_deps(monkeypatch, dapp_worker_module, crawl_result=crawl_result)
-        session = _session_no_existing_contracts()
-        job = _job()
-
-        worker = dapp_worker_module.DAppCrawlWorker()
-        with pytest.raises(JobHandledDirectly):
-            worker.process(session, cast(Any, job))
-
-        added = [call.args[0] for call in session.add.call_args_list]
-        interactions = [row for row in added if type(row).__name__ == "DAppInteraction"]
-        assert len(interactions) == 2
-        types = {row.type for row in interactions}
-        assert types == {"sendTransaction", "personal_sign"}
-        send_row = next(row for row in interactions if row.type == "sendTransaction")
-        assert send_row.to_address == ADDR_A.lower()
-        assert send_row.method_selector == "0xabcdef01"

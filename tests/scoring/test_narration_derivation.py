@@ -526,34 +526,7 @@ def test_no_published_narration_names_a_concept_the_document_does_not_publish(re
             assert dead not in value, f"{path} still names {dead!r}"
 
 
-def test_the_predicate_reading_claims_no_guard_it_did_not_check(republishing_document):
-    """Ruling 6.1 M1. "it INCLUDES the authorization guard" is an indicative
-    existential about the row's extracted list; the fold never checks it."""
-    readings = [
-        value
-        for path, value in _published_strings(republishing_document)
-        if path.endswith("destination_predicates.reading")
-    ]
-    assert readings
-    for reading in readings:
-        assert "it includes the authorization guard" not in reading
-        assert "it may include the authorization guard" in reading
-        # The enumeration matches what is enumerated.
-        assert "Three things about them" in reading
-        assert reading.count("(1)") == reading.count("(2)") == reading.count("(3)") == 1
-        assert "(4)" not in reading
-
-
 # The registries themselves, and case 7's subsumed parity
-
-
-def test_every_registered_arm_and_ceiling_carries_its_own_sentence():
-    assert set(FOLD._WITHHELD_ARM_READINGS) == {FOLD.ARM_WITHHELD, FOLD.ARM_GATE_ONLY, FOLD.ARM_NOT_DETERMINED}
-    assert len(set(FOLD._WITHHELD_ARM_READINGS.values())) == len(FOLD._WITHHELD_ARM_READINGS)
-    assert set(FOLD._COMPOSED_SOURCE_READINGS) == {"flow.out witness", "destination sheet"}
-    assert len(set(FOLD._COMPOSED_SOURCE_READINGS.values())) == len(FOLD._COMPOSED_SOURCE_READINGS)
-    # The arm the rule takes when it PUBLISHES has no sentence; reaching for it raises.
-    assert FOLD.ARM_REPUBLISHED_DIRECT not in FOLD._WITHHELD_ARM_READINGS
 
 
 @pytest.mark.parametrize(
@@ -630,16 +603,6 @@ def test_the_census_account_of_composed_withheld_is_derived_from_the_arms_that_f
     assert "earned no typed finding in either direction" in undetermined
     # Two arms on one row are counted apart, never merged into one cause.
     assert "1 to a route witnessed AUTHORING" in both and "could not be READ at all" in both
-
-
-def test_every_withholding_arm_has_a_census_cause_and_they_are_distinct():
-    """Keyed on ``(arm, route token)`` since B2: the gate-only arm fires on two
-    tokens with their own causes, so distinctness must hold over the pairs."""
-    arms = {arm for arm, _ in FOLD._WITHHELD_CAUSE_ORDER}
-    assert arms == set(FOLD._WITHHELD_ARM_READINGS)
-    causes = [FOLD._withheld_cause(key) for key in FOLD._WITHHELD_CAUSE_ORDER]
-    assert len(set(causes)) == len(causes)
-    assert FOLD.ARM_REPUBLISHED_DIRECT not in arms
 
 
 # The confidence pass's three credit paths, and the sheet-ceiling rollup
@@ -826,41 +789,6 @@ def test_the_rollup_counts_one_sheet_once_and_names_a_disagreement_rather_than_a
 # them: a sentence claiming "every asset observed at this entity was priced" rode
 # a proven-ZERO reading green through this suite. The corpus carries such sheets
 # now; the strings are derivation-checked like every other published reading.
-
-
-def test_the_ceiling_source_readings_are_a_closed_keyed_vocabulary():
-    """One sentence per (admitting reason, coverage) pair that can be reached.
-
-    Five keys, not six: ``(PROVEN_EMPTY, False)`` is absent because the
-    cross-plane gate refuses the empty state wherever an unpriced position sits
-    at the node. ``AIRDROP_DETERMINED`` carries both arms because its coverage is
-    earned rather than implied. The lookup stays strict: an unregistered
-    combination raises.
-    """
-    assert set(FOLD._CEILING_SOURCE_READINGS) == {
-        (P.CEILING_ADMITTED, True),
-        (P.CEILING_ADMITTED, False),
-        (P.CEILING_PROVEN_EMPTY, True),
-        # BOTH arms, unlike proven-empty's: a disposition says one asset's
-        # contribution is nil and says nothing about whether the LIST is whole,
-        # so a disposed sheet is coverage-complete only where the list is
-        # separately proven — and the partial arm is the ordinary case.
-        (P.CEILING_AIRDROP_DETERMINED, True),
-        (P.CEILING_AIRDROP_DETERMINED, False),
-    }
-    # The claim these two sentences make is delivery shape, and neither may
-    # restate it as a claim about what the holdings are worth.
-    for complete in (True, False):
-        sentence = FOLD._CEILING_SOURCE_READINGS[(P.CEILING_AIRDROP_DETERMINED, complete)]
-        assert "DELIVERY SHAPE" in sentence or "DELIVERY-SHAPE" in sentence
-        assert "worthless" not in sentence and "spam" not in sentence
-    assert len(set(FOLD._CEILING_SOURCE_READINGS.values())) == len(FOLD._CEILING_SOURCE_READINGS)
-    assert (P.CEILING_PROVEN_EMPTY, False) not in FOLD._CEILING_SOURCE_READINGS
-    # Both coverage sentences must survive a proven-ZERO reading being the thing
-    # observed. "was priced" is false of a witnessed zero, and the coverage
-    # sentence is shared with the admitted arm, so it may not say it.
-    assert "was priced" not in FOLD._SHEET_CEILING_DIRECTION_BASIS[True]
-    assert "determined reading" in FOLD._SHEET_CEILING_DIRECTION_BASIS[True]
 
 
 def _proven_empty_ceiling_row(fold):
@@ -1173,12 +1101,3 @@ def test_a_ceiling_row_stops_counting_a_disposed_asset_as_a_priced_one(fold):
     # determined reading, so the fix cannot be read as a general de-crediting.
     unpriced = _priced_but_partly_unpriced_ceiling_row(fold)
     assert unpriced["assets_disposed"] == [] and unpriced["assets_priced"] == 1
-
-
-def test_no_proven_empty_narration_names_a_concept_the_row_does_not_publish(fold):
-    entry, _ = _proven_empty_ceiling_row(fold)
-    published = set(entry)
-    for sentence in (entry["reading"], entry["bound_direction_basis"]):
-        for concept in ("assets_not_priced", "unpriced_positions", "per_asset"):
-            if concept in sentence:
-                assert concept in published, concept

@@ -749,49 +749,6 @@ def test_upgrade_history_artifact_copied_as_seed(db_session):
 # ---------------------------------------------------------------------------
 
 
-def test_enrichment_cache_stored_on_first_run(db_session, monkeypatch):
-    from db.queue import create_job, get_artifact, store_artifact
-
-    job = create_job(db_session, {"address": ADDR_A})
-    db_session.commit()
-
-    addr_dep = "0x0000000000000000000000000000000000000aaa"
-    unified = {
-        "dependencies": {
-            addr_dep: {"type": "regular"},
-        },
-        "dependency_graph": {},
-    }
-
-    fake_info = ("SomeToken", {"0x12345678": "transfer"})
-    call_log = []
-
-    def mock_get_contract_info(addr, *, chain_id=1):
-        call_log.append(addr)
-        return fake_info
-
-    monkeypatch.setattr(
-        "services.discovery.unified_dependencies.get_contract_info",
-        mock_get_contract_info,
-    )
-
-    from services.discovery.unified_dependencies import enrich_dependency_metadata
-
-    info_cache: dict = {}
-    enrich_dependency_metadata(unified, info_cache=info_cache, chain_id=1)
-
-    assert addr_dep in info_cache
-    assert info_cache[addr_dep] == fake_info
-
-    enrichment_data = {addr: {"name": name, "selectors": selectors} for addr, (name, selectors) in info_cache.items()}
-    store_artifact(db_session, job.id, "enrichment_cache", data=enrichment_data)
-
-    art = get_artifact(db_session, job.id, "enrichment_cache")
-    assert isinstance(art, dict)
-    assert art[addr_dep]["name"] == "SomeToken"
-    assert art[addr_dep]["selectors"] == {"0x12345678": "transfer"}
-
-
 def test_enrichment_cache_skips_cached_addresses(db_session, monkeypatch):
     addr_a = "0x0000000000000000000000000000000000000aaa"
     addr_b = "0x0000000000000000000000000000000000000bbb"

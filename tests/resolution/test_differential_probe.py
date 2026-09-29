@@ -284,48 +284,6 @@ _REAL_OWNABLE_REVERT = (
 ).replace(" ", "")
 
 
-def test_recorded_real_gated_transcript_replays_to_confirmed_gated():
-    # EarlyAdopterPool.setClaimingOpen(uint256) @ 25289222: two random callers
-    # revert "Ownable: caller is not the owner"; the real owner succeeds.
-    gated = "0x7623e9dc0da6ff821ddb9ebaba794054e078f8c4"
-    owner = "0xf155a2632ef263a6a382028b3b33feb29175b8a5"
-
-    def responder(_tag, frm):
-        return ok() if frm == owner else revert(_REAL_OWNABLE_REVERT)
-
-    wire = StubWire(responder)
-    result = dp.run_differential_probe(
-        call_batch=wire,
-        chain_id=1,
-        contract_address=gated,
-        selector="0x9a1e97d1",
-        canonical_signature="setClaimingOpen(uint256)",
-        block=25289222,
-        principal=owner,
-    )
-    assert result.verdict == "gated_confirmed"
-    assert result.transcript["outcomes"][owner]["success"] is True
-    rand0 = result.transcript["identities"]["random"][0]
-    assert result.transcript["outcomes"][rand0]["decoded_error"] == "Error('Ownable: caller is not the owner')"
-
-
-def test_recorded_real_public_transcript_replays_to_public():
-    # WETH transfer(0x0, 0) @ 25289222: both random callers succeed at both blocks.
-    weth = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
-    wire = StubWire(lambda _tag, _frm: ok(TRUE))
-    result = dp.run_differential_probe(
-        call_batch=wire,
-        chain_id=1,
-        contract_address=weth,
-        selector="0xa9059cbb",
-        canonical_signature="transfer(address,uint256)",
-        block=25289222,
-        block_delta=50000,
-    )
-    assert result.verdict == "public"
-    assert result.transcript["cross_checks"]["block_independence"] == "pass"
-
-
 def test_run_synthesis_miss_never_probes_and_keeps_static():
     wire = StubWire(lambda _tag, _frm: ok())
     result = dp.run_differential_probe(

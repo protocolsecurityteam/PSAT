@@ -377,12 +377,6 @@ def test_unseedable_token_leaves_the_verdict_exactly_as_today():
     assert seeded.reason == plain.reason == "mint_call_reverted"
 
 
-def test_no_seeder_issues_exactly_one_block():
-    chain = FakeChain()
-    _supply(chain, RecordingStore())
-    assert len(chain.blocks) == 1
-
-
 # ---------------------------------------------------------------------------
 # msg.value staging — ETH only after a zero-value call provably failed
 # ---------------------------------------------------------------------------

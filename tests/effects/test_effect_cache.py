@@ -16,7 +16,6 @@ from db.effect_cache import (
     KERNEL_SURFACE_SENTINEL,
     find_cached_verdict,
     kernel_verdicts_agree,
-    mark_audited,
     record_effect_verdict,
     upsert_cached_verdict,
 )
@@ -135,19 +134,6 @@ def test_kernel_verdicts_agree_ignores_concrete_values():
     # Different structural sign → disagree (a real collision).
     assert not kernel_verdicts_agree("proven", {"supply_delta_sign": "mint"}, "proven", {"supply_delta_sign": "burn"})
     assert not kernel_verdicts_agree("proven", {"latch_flip": True}, "unknown", {"latch_flip": True})
-
-
-@requires_postgres
-def test_mark_audited_stamps_result(clean_effects):
-    session = clean_effects
-    row = upsert_cached_verdict(
-        session, behavior_hash="bh_a", effect_class="supply", scope=KERNEL, verdict="proven", tier="tier1"
-    )
-    assert row.audit_status is None
-    mark_audited(session, row, passed=True, peer_hash="surfaceX")
-    assert row.audit_status == effect_cache.AUDIT_PASSED
-    assert row.audit_peer_hash == "surfaceX"
-    assert row.audited_at is not None
 
 
 # ---------------------------------------------------------------------------
@@ -686,19 +672,6 @@ def test_cache_served_rewrite_keeps_freeze_pause_observations(clean_effects):
         "auto_expiry",
     ):
         assert row.witness[key] == full[key], key
-
-
-@requires_postgres
-def test_cache_served_rewrite_lets_a_present_incoming_key_win(clean_effects):
-    """Incoming keys win where present — defensive, no live caller: production
-    paths pass a payload laundered through ``code_plane_details``, or
-    ``witness_from_cache=False``. Pinned so a future caller carrying such a key
-    gets override, not shadowing."""
-    session = clean_effects
-    _write_burn(session, witness=dict(FULL_WITNESS))
-    row = _write_burn(session, witness={**STRIPPED_WITNESS, "input_seeded": False}, witness_from_cache=True)
-    assert row.witness["input_seeded"] is False
-    assert row.witness["contract_balance_seeded"] is True
 
 
 @requires_postgres

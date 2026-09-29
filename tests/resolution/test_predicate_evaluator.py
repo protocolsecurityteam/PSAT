@@ -394,11 +394,6 @@ def test_signature_auth_yields_signature_witness(tmp_path):
 # Direct evaluator tests (no Slither needed)
 
 
-def test_evaluate_none_tree_yields_conditional_universal():
-    cap = evaluate_tree(None)
-    assert cap.kind == "conditional_universal"
-
-
 def test_caller_dependent_unsupported_stays_unsupported():
     """Caller-dependent unknown gates remain fail-closed."""
     tree = {

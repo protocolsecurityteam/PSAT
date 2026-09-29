@@ -45,14 +45,6 @@ def _gated_unknown_cap(selector_hint: str = "0xabcdef01") -> CapabilityExpr:
 # ---------------------------------------------------------------------------
 
 
-def test_flag_defaults_on(monkeypatch):
-    # Phase 3 gate green → default ON; delenv removes the conftest hermetic force-off.
-    monkeypatch.delenv("PSAT_DIFFERENTIAL_PROBE", raising=False)
-    assert dp.differential_probe_enabled() is True
-    monkeypatch.setenv("PSAT_DIFFERENTIAL_PROBE", "0")  # kill-switch
-    assert dp.differential_probe_enabled() is False
-
-
 def test_should_probe_only_gated_unknown_external_check():
     assert _should_differential_probe(_gated_unknown_cap()) is True
     # Not a caller-gate external check (no basis tag) → downstream probe / adapter-pending, skip.

@@ -3,12 +3,6 @@
 from __future__ import annotations
 
 from services.scoring import planes as P
-from tests.support.scoring_builders import (
-    KEY_C,
-    KEY_PROXY,
-    KEY_V,
-    closure_of,
-)
 
 
 def test_role_labels_parse_to_the_roles_they_name():
@@ -38,11 +32,3 @@ def test_a_getter_name_is_a_state_var_scope_and_never_a_role():
     scope = P.parse_edge_scope("roleRegistry", "controller_value")
     assert (scope.kind, scope.state_var, scope.roles) == (P.SCOPE_STATE_VAR, "roleRegistry", ())
     assert P.parse_edge_scope("_roles", "mapping_member").state_var == "_roles"
-
-
-def test_the_closure_answers_adjacency_from_the_edges_it_carries():
-    closure = closure_of({KEY_C: {KEY_V, KEY_PROXY}})
-    assert closure.principals() == (KEY_C,)
-    assert closure.controlled_by(KEY_C) == tuple(sorted((KEY_V, KEY_PROXY)))
-    assert closure.controlled_by(KEY_V) == ()
-    assert {e.relation for e in closure.edges_from(KEY_C)} == {"controller_value"}

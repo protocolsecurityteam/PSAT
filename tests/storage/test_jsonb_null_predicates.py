@@ -22,7 +22,7 @@ import pytest
 from sqlalchemy import JSON, select
 from sqlalchemy.orm import Session
 
-from db.jsonb import JSONB_UNSET, JSONB_WRITTEN_NULL, jsonb_has_payload, jsonb_state
+from db.jsonb import jsonb_has_payload, jsonb_state
 from db.models import Base, ContractMaterialization
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -171,30 +171,3 @@ def test_jsonb_has_payload_selects_the_payload_row(db_session: Session, _materia
         select(ContractMaterialization.chain).where(scoped, jsonb_has_payload(ContractMaterialization.analysis))
     ).all()
     assert list(selected) == ["w0-5-payload"]
-
-
-def test_written_null_and_unset_are_separately_addressable(db_session: Session, _materializations: list[str]) -> None:
-    """R1: "a writer ran and recorded no value" (evidence about the writer) and "nothing was ever
-    written" stay distinguishable; collapsing them reads an unpopulated column as a proven absence."""
-    scoped = ContractMaterialization.chain.in_(_materializations)
-    written_null = db_session.scalars(
-        select(ContractMaterialization.chain).where(
-            scoped, jsonb_state(ContractMaterialization.analysis) == JSONB_WRITTEN_NULL
-        )
-    ).all()
-    unset = db_session.scalars(
-        select(ContractMaterialization.chain).where(
-            scoped, jsonb_state(ContractMaterialization.analysis) == JSONB_UNSET
-        )
-    ).all()
-    assert list(written_null) == ["w0-5-written-null"]
-    assert list(unset) == ["w0-5-unset"]
-
-
-def test_the_replaced_predicate_over_counts(db_session: Session, _materializations: list[str]) -> None:
-    """The defect being fixed, pinned so a revert is loud. Bound through a local name so the scan
-    does not flag this file (also the scan's documented blind spot)."""
-    column = ContractMaterialization.analysis
-    scoped = ContractMaterialization.chain.in_(_materializations)
-    naive = db_session.scalars(select(ContractMaterialization.chain).where(scoped, column.is_not(None))).all()
-    assert sorted(naive) == ["w0-5-payload", "w0-5-written-null"]

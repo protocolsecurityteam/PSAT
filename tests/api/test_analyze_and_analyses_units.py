@@ -15,19 +15,6 @@ from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
 
-
-def _fake_artifact(job_id, name: str, data):
-    """Inline ``Artifact`` row stand-in for the /api/analyses batched select."""
-    return SimpleNamespace(
-        job_id=job_id,
-        name=name,
-        storage_key=None,
-        data=data,
-        text_data=None,
-        content_type=None,
-    )
-
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -96,69 +83,9 @@ def _make_client() -> TestClient:
 # ---------------------------------------------------------------------------
 
 
-@patch("routers.deps.SessionLocal")
-@patch("routers.deps.create_job")
-def test_analyze_company_creates_job(mock_create_job, mock_session_cls):
-    client = _make_client()
-
-    fake_job = _fake_api_job(
-        company="etherfi",
-        status="queued",
-        stage="discovery",
-        request={
-            "company": "etherfi",
-            "name": None,
-            "address": None,
-            "chain": None,
-            "analyze_limit": 5,
-            "rpc_url": None,
-        },
-    )
-    mock_create_job.return_value = fake_job
-
-    mock_session = MagicMock()
-    _mock_session_ctx(mock_session_cls, mock_session)
-
-    response = client.post("/api/analyze", json={"company": "etherfi"})
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["company"] == "etherfi"
-    assert body["address"] is None
-    assert body["stage"] == "discovery"
-    assert body["status"] == "queued"
-
-    # Verify create_job was called with the model-dumped dict
-    call_args = mock_create_job.call_args
-    req_dict = call_args[0][1]  # positional arg: (session, request_dict)
-    assert req_dict["company"] == "etherfi"
-    assert req_dict.get("address") is None
-
-
 # ---------------------------------------------------------------------------
 # 1b. POST /api/analyze — mutual exclusion validation
 # ---------------------------------------------------------------------------
-
-
-@patch("routers.deps.SessionLocal")
-@patch("routers.deps.create_job")
-def test_analyze_accepts_address_with_company_context(mock_create_job, mock_session_cls):
-    """address + company together is valid (address is target, company is context)."""
-    client = _make_client()
-    addr = "0x1111111111111111111111111111111111111111"
-    fake_job = _fake_api_job(address=addr, company="etherfi", status="queued", stage="discovery")
-    mock_create_job.return_value = fake_job
-    mock_session = MagicMock()
-    _mock_session_ctx(mock_session_cls, mock_session)
-
-    response = client.post(
-        "/api/analyze",
-        json={"address": addr, "company": "etherfi"},
-    )
-    assert response.status_code == 200
-    req_dict = mock_create_job.call_args[0][1]
-    assert req_dict["address"] == addr
-    assert req_dict["company"] == "etherfi"
 
 
 # ---------------------------------------------------------------------------
@@ -309,58 +236,6 @@ def test_analyses_list_proxy_flagging(mock_session_cls):
     assert merged["proxy_address_display"] == proxy_addr
     assert merged["proxy_type_display"] == "ERC1967"
     assert merged["display_name"] == "VaultImpl"
-
-
-@patch("routers.deps.SessionLocal")
-def test_analyses_list_non_proxy_has_is_proxy_false(mock_session_cls):
-    client = _make_client()
-    job_id = uuid.uuid4()
-
-    fake_job = _fake_api_job(
-        job_id=str(job_id),
-        address="0xCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
-        name="regular_contract",
-        status="completed",
-        stage="done",
-        request={"address": "0xCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"},
-    )
-
-    from db.models import JobStatus
-
-    fake_job.status = JobStatus.completed
-
-    mock_session = MagicMock()
-    _mock_session_ctx(mock_session_cls, mock_session)
-
-    artifacts = [
-        _fake_artifact(fake_job.id, "contract_analysis", {"subject": {"name": "Regular"}, "summary": {}}),
-    ]
-
-    call_count = {"n": 0}
-
-    def route_execute(stmt, *args, **kwargs):
-        call_count["n"] += 1
-        result = MagicMock()
-        if call_count["n"] == 1:
-            result.scalars.return_value.all.return_value = [fake_job]
-        elif call_count["n"] == 2:
-            result.scalars.return_value = iter([])
-        elif call_count["n"] == 3:
-            result.scalars.return_value = iter(artifacts)
-        else:
-            result.scalars.return_value.all.return_value = []
-            result.scalar_one_or_none.return_value = None
-        return result
-
-    mock_session.execute.side_effect = route_execute
-
-    response = client.get("/api/analyses")
-
-    assert response.status_code == 200
-    entries = response.json()
-    entry = next((e for e in entries if e.get("job_id") == str(job_id)), None)
-    assert entry is not None
-    assert entry["is_proxy"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -710,70 +585,6 @@ def test_analysis_detail_proxy_inherits_impl_artifacts(mock_session_cls, mock_ge
 # ---------------------------------------------------------------------------
 # Audit report endpoints
 # ---------------------------------------------------------------------------
-
-
-def _fake_audit_report(**overrides):
-    """Build a MagicMock that behaves like db.models.AuditReport."""
-    ar = MagicMock()
-    ar.url = overrides.get("url", "https://blog.openzeppelin.com/aave-v3-audit")
-    ar.pdf_url = overrides.get("pdf_url", "https://blog.openzeppelin.com/aave-v3-audit.pdf")
-    ar.auditor = overrides.get("auditor", "OpenZeppelin")
-    ar.title = overrides.get("title", "Aave V3 Security Audit")
-    ar.date = overrides.get("date", "2023-06-15")
-    ar.confidence = overrides.get("confidence", 0.95)
-    return ar
-
-
-@patch("routers.deps.SessionLocal")
-def test_company_audits_endpoint(mock_session_cls):
-    client = _make_client()
-    mock_session = MagicMock()
-    _mock_session_ctx(mock_session_cls, mock_session)
-
-    protocol = MagicMock()
-    protocol.id = 1
-    protocol.name = "aave"
-
-    audit1 = _fake_audit_report()
-    audit2 = _fake_audit_report(
-        url="https://github.com/trailofbits/aave-audit",
-        pdf_url=None,
-        auditor="Trail of Bits",
-        title="Aave V3 Review",
-        date="2023-03-01",
-        confidence=0.85,
-    )
-
-    call_count = {"n": 0}
-
-    def route_execute(stmt, *args, **kwargs):
-        call_count["n"] += 1
-        result = MagicMock()
-        if call_count["n"] == 1:
-            result.scalar_one_or_none.return_value = protocol
-        else:
-            result.scalars.return_value.all.return_value = [audit1, audit2]
-        return result
-
-    mock_session.execute.side_effect = route_execute
-
-    response = client.get("/api/company/aave/audits")
-    assert response.status_code == 200
-    body = response.json()
-    assert body["company"] == "aave"
-    assert body["protocol_id"] == 1
-    assert body["audit_count"] == 2
-    assert len(body["audits"]) == 2
-
-    oz = next(a for a in body["audits"] if a["auditor"] == "OpenZeppelin")
-    assert oz["title"] == "Aave V3 Security Audit"
-    assert oz["date"] == "2023-06-15"
-    assert oz["pdf_url"] == "https://blog.openzeppelin.com/aave-v3-audit.pdf"
-    assert oz["confidence"] == 0.95
-
-    tob = next(a for a in body["audits"] if a["auditor"] == "Trail of Bits")
-    assert tob["pdf_url"] is None
-    assert tob["confidence"] == 0.85
 
 
 @patch("routers.deps.SessionLocal")

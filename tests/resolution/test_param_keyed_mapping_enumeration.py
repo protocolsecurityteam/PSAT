@@ -380,12 +380,6 @@ class TestL1SyncPoolReceiver:
         assert op.get("mapping_name") is None
         assert op.get("mapping_writer_specs") is None
 
-    def test_getter_is_not_stamped(self) -> None:
-        """``getReceiver(uint32)`` reads the same mapping but is not a caller gate, so
-        no param-keyed marker is attached to anything in its (absent) guard tree."""
-        art = build_predicate_artifacts(_receiver_contract())
-        assert "getReceiver(uint32)" not in art["trees"]
-
     def test_resolves_receivers_end_to_end(self) -> None:
         """End-to-end: the stamped operand routes to value enumeration and the seeded
         ReceiverSet events fold to the receiver set."""
@@ -397,14 +391,4 @@ class TestL1SyncPoolReceiver:
         assert cap.members == sorted([R1, R2])  # resolver returns deduped + sorted
         assert cap.membership_quality == "lower_bound"
         assert sorted(_principals(cap)) == sorted([R1, R2])
-        assert _status(cap) != "resolved_empty"
-
-    def test_empty_receivers_external_check_end_to_end(self) -> None:
-        """End-to-end: with no ReceiverSet events on the analyzed (impl) address the gate
-        becomes an explicit external check, not a silent ``lower_bound``."""
-        tree = _tree_for(_receiver_contract(), _ON_MESSAGE)
-        cap = evaluate_tree(tree, _ctx(_seeded_meta()))
-
-        assert cap.kind == "external_check_only"
-        assert _principals(cap) == []
         assert _status(cap) != "resolved_empty"

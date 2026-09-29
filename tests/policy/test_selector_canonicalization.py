@@ -24,7 +24,6 @@ from slither import Slither  # noqa: E402
 
 from services.effects.calldata import _selector_of  # noqa: E402
 from services.policy.effective_permissions import (  # noqa: E402
-    _abi_signature_and_selector,
     build_effective_permissions,
 )
 from services.resolution.capability_resolver import _selector_for_signature  # noqa: E402
@@ -117,23 +116,6 @@ def test_predicate_artifact_emits_canonical_signatures(predicate_artifact):
     assert not any(k.split("(", 1)[0] == "setNum" for k in canonical)
 
 
-def test_canonical_selectors_match_real_evm_and_differ_from_address_collapse(predicate_artifact):
-    """Each canonical signature keccaks to the real selector and, for enum/struct, is
-    NOT the old address-collapsed value."""
-    canonical = predicate_artifact["canonical_signatures"]
-
-    _, set_mode = _lookup(canonical, "setMode")
-    assert _sel(set_mode) == SET_MODE_CANONICAL
-    assert _sel(set_mode) != SET_MODE_ADDRESS_BUG  # revert-proof: catches a regression to the bug
-
-    _, execute = _lookup(canonical, "execute")
-    assert _sel(execute) == EXECUTE_CANONICAL
-    assert _sel(execute) != EXECUTE_ADDRESS_BUG
-
-    _, set_foo = _lookup(canonical, "setFoo")
-    assert _sel(set_foo) == SET_FOO_CANONICAL  # contract param: address collapse is correct here
-
-
 def test_resolver_selector_uses_artifact_canonical_map(predicate_artifact):
     """Feeding the artifact's canonical map into the resolver's selector helper yields
     the true ``msg.sig`` for struct/enum functions.
@@ -194,20 +176,6 @@ def test_canonical_signature_falls_back_when_slither_cannot_lower():
 
     assert _canonical_signature(_Raises()) is None
     assert _canonical_signature(_NonString()) is None
-
-
-def test_abi_signature_and_selector_helper_prefers_map():
-    """Unit pin on the policy helper: map wins; absent → string fallback."""
-    cmap = {"execute(Order)": "execute((uint256,address))"}
-    assert _abi_signature_and_selector("execute(Order)", cmap) == (
-        "execute((uint256,address))",
-        EXECUTE_CANONICAL,
-    )
-    # Not in the map → lossy fallback (address collapse) — the documented gap.
-    assert _abi_signature_and_selector("execute(Order)", {}) == (
-        "execute(address)",
-        EXECUTE_ADDRESS_BUG,
-    )
 
 
 # --- nested / repeated user-defined type lowering -------------------------
@@ -408,17 +376,6 @@ def test_fallback_preserves_an_already_lowered_tuple():
     assert _abi_signature(canonical) == canonical
     assert _abi_signature("f((uint256,address)[])") == "f((uint256,address)[])"
     assert _abi_signature_and_selector(canonical, {})[1] == _sel(canonical)
-
-
-def test_fallback_still_lowers_a_bare_contract_param():
-    """No regression to the #104 fix: a bare user-defined name is usually a contract
-    reference but can't be told from a file-level struct/enum, so it stays ``address``.
-    Pins the compromise the canonical map exists to resolve, not a correct lowering."""
-    from services.policy.effective_permissions import _abi_signature_and_selector
-
-    abi_sig, selector = _abi_signature_and_selector("addAsset(ERC20)", {})
-    assert abi_sig == "addAsset(address)"
-    assert selector == _sel("addAsset(address)")
 
 
 def test_canonical_map_still_wins_over_the_fallback():

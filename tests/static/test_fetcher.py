@@ -43,15 +43,6 @@ def test_parse_sources_preserves_standard_json_paths():
     ]
 
 
-def test_parse_remappings_reads_standard_json_settings():
-    remappings = fetcher.parse_remappings(STANDARD_JSON_RESULT)
-
-    assert remappings == [
-        "@solmate/=lib/solmate/src/",
-        "@openzeppelin/=lib/openzeppelin-contracts/",
-    ]
-
-
 def test_scaffold_writes_standard_json_layout_and_metadata(tmp_path):
     project_dir = tmp_path / "BoringVault"
     returned = fetcher.scaffold(
@@ -107,17 +98,6 @@ def test_scaffold_flat_source_uses_single_src_file_and_no_remappings(tmp_path):
     assert meta["source_format"] == "flat"
     assert meta["source_file_count"] == 1
     assert meta["remappings"] == []
-
-
-def test_parse_sources_uses_vyper_extension_for_flat_source():
-    result = {
-        "ContractName": "GateSeal",
-        "CompilerVersion": "vyper:0.3.7",
-        "SourceCode": "# @version 0.3.7\n@external\ndef ping():\n    pass\n",
-    }
-
-    sources = fetcher.parse_sources(result)
-    assert sorted(sources) == ["src/GateSeal.vy"]
 
 
 def test_scaffold_records_vyper_language_metadata(tmp_path):

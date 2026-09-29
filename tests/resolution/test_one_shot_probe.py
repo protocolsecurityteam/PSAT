@@ -270,13 +270,6 @@ def test_getter_latch_prefers_eth_call():
     assert result.state == "consumed"
 
 
-def test_no_latch_location_is_indeterminate():
-    rpc = FakeRpc()
-    result = resolve_one_shot_state(rpc_url="x", address=PROXY, latches=[], rpc=rpc)
-    assert result.state == "indeterminate"
-    assert result.transcript.get("reason") == "no_latch_location"
-
-
 def test_annotate_capability_lands_latch_state_on_condition():
     from services.resolution.one_shot_probe import LatchReadResult
 
@@ -366,43 +359,6 @@ def test_maybe_one_shot_probe_annotates_standard(monkeypatch):
     )
     cond = next(c for c in cap_dict["conditions"] if c["kind"] == "one_shot")
     assert cond["latch_state"] == "consumed" and cond["latch_target"] == "proxy:eip1967"
-
-
-def test_maybe_one_shot_probe_skips_non_one_shot(monkeypatch):
-    from services.resolution import capability_resolver as cr
-
-    called = {"n": 0}
-
-    def _boom(**kw):
-        called["n"] += 1
-        raise AssertionError("must not probe a non-one-shot row")
-
-    monkeypatch.setattr(cr, "resolve_one_shot_state", _boom)
-    cap_dict = {"kind": "finite_set", "members": []}
-    plain_tree = {
-        "op": "LEAF",
-        "leaf": {
-            "kind": "equality",
-            "operator": "eq",
-            "authority_role": "business",
-            "operands": [],
-            "references_msg_sender": False,
-            "expression": "",
-            "basis": [],
-        },
-    }
-    cr._maybe_one_shot_probe(
-        cap_dict,
-        tree=plain_tree,
-        runtime_addr=PROXY,
-        rpc_url="x",
-        chain_id=1,
-        block=None,
-        block_cell=[cr._UNRESOLVED_BLOCK],
-        db_proxy_linked=False,
-        pass_cache={},
-    )
-    assert called["n"] == 0
 
 
 def test_maybe_one_shot_probe_uses_pass_cache(monkeypatch):

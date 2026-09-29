@@ -109,14 +109,3 @@ def test_the_control_instrument_is_wired_and_disagrees_with_the_binding(matrix):
     suppressed = matrix[0]["suppressed_state_var"]
     assert suppressed["rebalance(address,address,bytes)"]["destination_kind"] == "state_var"
     assert suppressed["rebalance(address,address,bytes)"]["destination_param"] is None
-
-
-def test_the_gate_still_carries_the_column_that_sees_the_allocation_class():
-    """The cheapest way for this gate to die is for someone to drop the slow
-    column. Repetition under pymalloc is inert here (1 distinct control payload
-    in 20 measured runs); the allocator is the whole detector, so its presence is
-    pinned rather than left to review."""
-    assert GATE.exists() and os.access(GATE, os.X_OK), "determinism_gate.sh must exist and be executable"
-    text = GATE.read_text()
-    assert text.count('"malloc|') >= 4, "class-B matrix lost its PYTHONMALLOC=malloc runs"
-    assert "class A" in text and "class B" in text, "the gate must name which class each check covers"

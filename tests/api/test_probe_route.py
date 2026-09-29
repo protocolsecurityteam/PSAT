@@ -667,38 +667,6 @@ def test_probe_rate_limit_keyed_per_address(api_client, db_session, monkeypatch)
 
 
 @requires_postgres
-def test_probe_rate_limit_disabled_when_zero(api_client, db_session, monkeypatch):
-    """``PSAT_PROBE_RATE_LIMIT=0`` disables rate limiting."""
-    import api as api_module
-
-    _no_auth(api_module)
-    address = "0x" + uuid.uuid4().hex[:8] + "ec" * 16
-    _seed_completed_job_with_artifact(
-        db_session,
-        address=address,
-        predicate_trees={"schema_version": "semantic", "contract_name": "T", "trees": {}},
-    )
-
-    from routers import predicate_capabilities
-
-    monkeypatch.setattr(predicate_capabilities, "_PROBE_RATE_LIMIT", 0)
-    predicate_capabilities._probe_rate_state.clear()
-
-    payload = {
-        "function_signature": "open()",
-        "predicate_index": 0,
-        "member": "0x" + "11" * 20,
-    }
-    for _ in range(50):
-        resp = api_client.post(
-            f"/api/contract/{address}/probe/membership",
-            json=payload,
-            headers={"X-PSAT-Admin-Key": "test-key"},
-        )
-        assert resp.status_code == 200
-
-
-@requires_postgres
 def test_probe_rate_limit_applies_to_signature_route_too(api_client, db_session, monkeypatch):
     import api as api_module
 

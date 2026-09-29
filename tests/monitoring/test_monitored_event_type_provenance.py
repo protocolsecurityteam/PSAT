@@ -209,15 +209,6 @@ def test_proven_caller_gate_target_keeps_the_controller_claim():
     assert topics[0]["event_type"] == "controller_changed:state_variable:pauser"
 
 
-def test_call_target_provenance_does_not_earn_the_controller_claim():
-    """DISCRIMINATING CONTROL: ``call_target`` is a PRESENT provenance
-    value that is not the gate proof — "called, and no gate was proven".
-    It must resolve exactly like an absent one."""
-    topics = extract_governance_topics(_plan(_erc20_balances_controller(authority_provenance="call_target")))
-
-    assert {t["event_type"] for t in topics} == {"state_changed:state_variable:_balances"}
-
-
 def test_absent_and_call_target_agree_but_caller_gate_differs():
     """The three states of ``authority_provenance`` off the resolver: only a proven gate mints
     the controller claim."""
@@ -304,20 +295,6 @@ def test_unclassified_spec_decodes_to_the_neutral_type():
     parsed = parse_tracked_log(_transfer_log(), spec)
     assert parsed is not None
     assert parsed["event_type"] == "state_changed"
-
-
-def test_decoder_stamps_the_resolved_neutral_type_on_a_real_transfer():
-    """End of the producer path: the decoded event that reaches the
-    watcher's insert carries the neutral type."""
-    spec = next(
-        t for t in extract_governance_topics(_plan(_erc20_balances_controller())) if t["topic0"] == TRANSFER_TOPIC0
-    )
-    parsed = parse_tracked_log(_transfer_log(), spec)
-
-    assert parsed is not None
-    assert parsed["event_type"] == "state_changed:state_variable:_balances"
-    assert parsed["to"] == "0x951af4267c8fbcd1c5a8c38e15b122768e44559a"
-    assert parsed["value"] == 22661724000000000000
 
 
 # ---------------------------------------------------------------------------

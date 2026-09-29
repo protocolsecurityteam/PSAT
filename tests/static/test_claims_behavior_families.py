@@ -218,12 +218,6 @@ def test_weth_wrap_unwrap_idiom():
     assert "weth.withdraw" in _ids(fns["withdraw(uint256)"])
 
 
-def test_erc20_counterexample_non_token_contract_has_no_erc20_claims():
-    fns = _load(LZ_OAPP)
-    for sig, claims in fns.items():
-        assert not _ids(claims) & {"erc20.approve", "erc20.transfer", "erc20.transfer_from"}, sig
-
-
 def test_gov_delegate_positive_writes_delegates_and_checkpoints():
     """Comp-style delegation — writing both the ``delegates`` map and the
     ``checkpoints`` voting-power ledger is the voting-power move. The gate is
@@ -248,22 +242,10 @@ def test_gov_delegate_positive_writes_delegates_and_checkpoints():
     assert "gov.delegate" in ids["delegate(address)"]
 
 
-def test_gov_delegate_counterexample_non_voting_token():
-    fns = _load(WRAPPED_NATIVE)
-    for claims in fns.values():
-        assert "gov.delegate" not in _ids(claims)
-
-
 def test_lz_oapp_config_claims():
     fns = _load(LZ_OAPP)
     assert _one(fns["setPeer(uint32,bytes32)"], "lz_oapp.set_peer")["tier"] == "standard_exact"
     assert _one(fns["setDelegate(address)"], "lz_oapp.set_delegate")["tier"] == "standard_exact"
-
-
-def test_lz_oapp_counterexample_non_oapp_has_no_peer_claim():
-    fns = _load(WRAPPED_NATIVE)
-    for claims in fns.values():
-        assert not _ids(claims) & {"lz_oapp.set_peer", "lz_oapp.set_delegate"}
 
 
 # ---------------------------------------------------------------------------

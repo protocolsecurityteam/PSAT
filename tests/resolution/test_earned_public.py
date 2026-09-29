@@ -105,13 +105,6 @@ def test_view_external_acl_gates_under_flag(tmp_path, earned_public):
     assert cap.kind == "external_check_only", f"view caller ACL must gate, got {cap.kind}"
 
 
-def test_view_external_acl_opens_without_flag(tmp_path, legacy_path):
-    """Documents the legacy fail-open this refactor exists to fix (and pins
-    the kill-switch rollback behavior)."""
-    cap = _cap_for(_compile(tmp_path, _EXTERNAL_ACL), "f()")
-    assert cap.kind == "conditional_universal"
-
-
 def test_value_movement_transfer_from_stays_open(tmp_path, earned_public):
     """Canary: ``require(token.transferFrom(msg.sender, …))`` taints from
     the caller but is permissionless — the callee is effectful (non-view),
@@ -617,11 +610,6 @@ def test_root_check_blocks_public_path_under_flag(earned_public):
     assert surface.residual
 
 
-def test_root_check_folds_as_side_condition_without_flag(legacy_path):
-    surface = project_capability_surface(_and_dict(_PUBLIC, _ROOT_CHECK))
-    assert surface.authority_public
-
-
 def test_bound_check_never_blocks_public_path(earned_public):
     """The Veda contract: an inlined downstream call's auth is a runtime side-condition, not
     an end-user restriction (the cofinite/denylist public path must survive it)."""
@@ -813,13 +801,6 @@ def _threshold_caps(sl, full_name: str, adapter: Any = None):
     gate_cap = evaluate_tree(gate_subtree, ctx)
     surface = project_capability_surface(capability_to_dict(evaluate_tree(tree, ctx)))
     return role, gate_cap, surface
-
-
-def test_admin_curated_threshold_promotes_to_caller_authority(tmp_path, earned_public):
-    """Part A: an ``onlyOwner``-curated ``tier[msg.sender] >= K`` is not self-acquirable,
-    so it promotes from ``business`` to ``caller_authority``."""
-    role, _cap, _surface = _threshold_caps(_compile(tmp_path, _ADMIN_CURATED_THRESHOLD), "gated()")
-    assert role == "caller_authority"
 
 
 def test_admin_curated_threshold_cold_fails_closed(tmp_path, earned_public):

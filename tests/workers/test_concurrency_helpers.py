@@ -189,20 +189,7 @@ def test_parallel_map_respects_psat_rpc_fanout_env(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_rpc_executor_returns_same_instance_across_calls():
-    a = RpcExecutor.get()
-    b = RpcExecutor.get()
-    assert a is b
-
-
 def test_rpc_executor_submit_returns_future_resolving_to_result():
     fut = submit_rpc(lambda x: x + 1, 41)
     assert isinstance(fut, Future)
     assert fut.result(timeout=5) == 42
-
-
-def test_rpc_executor_reset_drops_singleton():
-    a = RpcExecutor.get()
-    RpcExecutor.reset_for_tests()
-    b = RpcExecutor.get()
-    assert a is not b

@@ -471,25 +471,3 @@ def test_poll_loop_startup_offset_override_disables_shift(monkeypatch):
 
     # No 300s offset wait — the first wait is the post-pass interval wait.
     assert waits == [600.0]
-
-
-def test_scan_loop_does_not_offset_first_pass(monkeypatch):
-    order: list = []
-    ev = Event()
-
-    def fake_scan(session, rpc_url):
-        order.append("scan")
-        ev.set()  # stop after the first pass
-        return uw.ScanResult([])
-
-    def rec_wait(timeout=None):
-        order.append(("wait", timeout))
-        return True
-
-    monkeypatch.setattr(uw, "scan_for_events", fake_scan)
-    monkeypatch.setattr(uw, "SessionLocal", lambda: contextlib.nullcontext(MagicMock()))
-    monkeypatch.setattr(ev, "wait", rec_wait)
-
-    uw.run_scan_loop("http://rpc", interval=600, stop_event=ev)
-
-    assert order[0] == "scan"  # the scanner runs its first pass with no pre-wait

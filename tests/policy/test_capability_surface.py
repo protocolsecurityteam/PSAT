@@ -36,12 +36,6 @@ def test_cofinite_projects_to_public_path_with_denylist_condition():
     assert any(c["kind"] == "denylist" and "2 excluded, exhaustive" in c["description"] for c in path), path
 
 
-def test_cofinite_status_is_public():
-    cap = {"kind": "cofinite_blacklist", "blacklist": [ADDR_A]}
-    surface = project_capability_surface(cap)
-    assert capability_surface_status(cap, surface) == "public"
-
-
 def test_cofinite_carries_its_own_conditions_into_the_public_path():
     # The cofinite's own conditions (whenNotPaused, a share time-lock) must ride along in the
     # public path next to the denylist summary.

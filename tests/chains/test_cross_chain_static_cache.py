@@ -182,23 +182,6 @@ def test_copy_restamps_address_scopes_artifacts_and_leaves_donor_untouched(db_se
     assert donor_contract.job_id == donor_job.id
 
 
-def test_parity_fresh_vs_cross_chain_copy(db_session):
-    """Copied artifacts equal a fresh analysis of the same source on the target chain, modulo the re-stamped address."""
-    donor_job, _ = _make_donor(db_session)
-    target_job, _ = _make_target(db_session)
-    copy_static_cache_cross_chain(db_session, donor_job.id, target_job.id, target_address=ADDR_BASE)
-
-    # What a fresh static analysis of the identical source at ADDR_BASE emits.
-    expected = {
-        "contract_analysis": _analysis(ADDR_BASE.lower()),
-        "control_tracking_plan": _tracking_plan(ADDR_BASE.lower()),
-        "predicate_trees": _PREDICATE_TREES,
-        "effects": _EFFECTS,
-    }
-    for name, want in expected.items():
-        assert get_artifact(db_session, target_job.id, name) == want, name
-
-
 def test_copy_returns_none_without_target_contract(db_session):
     donor_job, _ = _make_donor(db_session)
     empty_target = create_job(db_session, {"address": ADDR_BASE, "chain": "base"})

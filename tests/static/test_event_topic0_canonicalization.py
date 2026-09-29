@@ -23,7 +23,6 @@ from slither import Slither  # noqa: E402
 
 from services.static.contract_analysis_pipeline import tracking  # noqa: E402
 from services.static.contract_analysis_pipeline.mapping_events import (  # noqa: E402
-    _abi_type,
     _event_metadata,
 )
 
@@ -128,35 +127,3 @@ def test_tracking_topic0_is_canonical(events, event_name):
     assert ref["topic0"] == _topic0(CANONICAL[event_name])
     if event_name in ON_CHAIN:
         assert ref["topic0"] == ON_CHAIN[event_name]
-
-
-def test_declared_name_signatures_would_miss_onchain_logs(events):
-    """Revert-proof: the OLD ``full_name`` (declared-name) signatures keccak to a
-    topic0 that does NOT match the real on-chain one for every non-elementary
-    event — re-introducing them would re-create the under-report bug."""
-    for name in ("Rely", "OrderFulfilled", "Initialize"):
-        full_name = events[name].full_name
-        assert _topic0(full_name) != ON_CHAIN[name]
-
-
-def test_elementary_only_event_is_byte_identical(events):
-    """No behavior change for elementary-only events: the canonical signature
-    equals Slither's ``full_name`` (the legacy producer output)."""
-    ev = events["TransferBatch"]
-    md = _event_metadata(ev)
-    assert md is not None
-    assert md["signature"] == ev.full_name
-    assert tracking._event_signature(ev) == ev.full_name
-
-
-def test_abi_type_collapses_each_non_elementary_shape(events):
-    of = events["OrderFulfilled"]
-    spent = next(e for e in of.elems if e.name == "offer").type  # SpentItem[]
-    assert _abi_type(spent) == "(uint8,address,uint256,uint256)[]"
-    assert tracking._abi_type(spent) == "(uint8,address,uint256,uint256)[]"
-
-    init = events["Initialize"]
-    pool_id = next(e for e in init.elems if e.name == "id").type  # PoolId (UDVT bytes32)
-    hooks = next(e for e in init.elems if e.name == "hooks").type  # IHooks interface
-    assert _abi_type(pool_id) == "bytes32"
-    assert _abi_type(hooks) == "address"

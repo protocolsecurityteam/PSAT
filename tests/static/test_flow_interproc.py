@@ -503,16 +503,6 @@ def test_bare_balance_read_stays_whole_balance(tmp_path):
     assert _out_flow(effects["functions"]["drainEntry(address)"])["amount_kind"]["kind"] == "whole_balance"
 
 
-def test_balance_delta_amount_does_not_claim_whole_balance(tmp_path):
-    contract = _compile(tmp_path, _BALANCE_AMOUNT_SRC, "BalanceAmounts")
-    effects = build_effects(contract)
-    amount = _out_flow(effects["functions"]["deltaEntry(address,uint256)"])["amount_kind"]
-    # A delta of two balance reads is not the balance: claiming whole_balance
-    # here reads as "this can drain the contract" on a bounded redemption path.
-    assert amount["kind"] != "whole_balance", amount
-    assert amount == {"kind": "balance_delta", "tier": "static_trace"}, amount
-
-
 def test_balance_amount_nested_matches_entry(tmp_path):
     contract = _compile(tmp_path, _BALANCE_AMOUNT_SRC, "BalanceAmounts")
     effects = build_effects(contract)

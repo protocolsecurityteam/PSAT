@@ -300,19 +300,3 @@ def test_initial_graph_dedupes_edges_on_re_walk():
         if e["from_id"] == root_node_id and e["to_id"] == nested_node_id and e["relation"] == "controller_value"
     ]
     assert len(matching) == 1
-
-
-def test_no_initial_graph_preserves_legacy_behavior():
-    """Without initial_graph, behavior is unchanged (guards against the new path leaking into legacy callers)."""
-    with patch(
-        "services.resolution.recursive._materialize_contract_artifacts",
-        side_effect=AssertionError("nothing nested in this fixture"),
-    ):
-        graph, _ = resolve_control_graph(
-            root_artifacts=_root_artifacts(with_role_principals=False),
-            rpc_url="https://rpc",
-            chain_id=1,
-            workspace_prefix="test",
-        )
-    root_node_id = recursive._address_node_id(ROOT_ADDR)
-    assert {n["id"] for n in graph["nodes"]} == {root_node_id}

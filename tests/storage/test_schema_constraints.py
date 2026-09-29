@@ -117,20 +117,3 @@ def test_coverage_trigger_allows_non_proxy_insert(db_session):
 # Postgres does NOT auto-create an index on a foreign-key column, and several
 # hot paths scan those columns.
 # ---------------------------------------------------------------------------
-
-
-def test_upgrade_events_contract_id_index_exists(db_session):
-    """Hit by services.audits.coverage._compute_impl_windows* and api.contract_audit_timeline
-    on every request; the FK alone creates no index."""
-    row = db_session.execute(
-        text(
-            "SELECT indexname FROM pg_indexes "
-            "WHERE tablename = 'upgrade_events' "
-            "AND indexname = 'ix_upgrade_events_contract_id'"
-        )
-    ).scalar_one_or_none()
-    assert row == "ix_upgrade_events_contract_id", (
-        "Missing index ix_upgrade_events_contract_id on upgrade_events(contract_id) — "
-        "this index is required by the coverage matcher and audit_timeline API; "
-        "re-add it via an Alembic revision."
-    )

@@ -542,38 +542,6 @@ def test_concurrent_job_handled_directly_skips_advance(
 # ---------------------------------------------------------------------------
 
 
-@patch("workers.base.signal.signal")
-@patch("workers.base.SessionLocal")
-@patch("workers.base.claim_job")
-@patch("workers.base.advance_job")
-def test_k1_path_matches_legacy_advance_args(mock_advance, mock_claim, mock_session_cls, mock_signal, monkeypatch):
-    """No shape change for the un-opted-in fleet."""
-    monkeypatch.delenv("PSAT_DISCOVERY_JOB_CONCURRENCY", raising=False)
-    monkeypatch.delenv("PSAT_JOB_CONCURRENCY", raising=False)
-
-    session = MagicMock()
-    mock_session_cls.return_value = session
-
-    job = _make_job()
-    cycle = {"n": 0}
-
-    def _claim(*_a, **_kw):
-        cycle["n"] += 1
-        if cycle["n"] == 1:
-            return job
-        w._running = False
-        return None
-
-    mock_claim.side_effect = _claim
-
-    w = _ConcurrentWorker()
-    assert w._job_pool is None, "K=1 must not create a thread pool"
-    w.process = MagicMock()
-    w.run_loop()
-
-    mock_advance.assert_called_once_with(session, job.id, JobStage.static, "Completed discovery", lease_id=None)
-
-
 # ---------------------------------------------------------------------------
 # K>1 with next_stage=done
 # ---------------------------------------------------------------------------

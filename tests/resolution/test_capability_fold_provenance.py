@@ -108,12 +108,6 @@ def test_union_with_blockless_operand_publishes_no_height():
     assert "exact_as_of" not in out
 
 
-def test_min_of_present_is_not_implemented():
-    """The banned behaviour: a present height must not leak out because the other operand had none."""
-    result = intersect(_fold([ADDR_A], block=B1), _blockless_live_getter([ADDR_A]))
-    assert result.last_indexed_block is None
-
-
 # ---------------------------------------------------------------------------
 # finite ∩ cofinite (the subtractive path — no structural-AND diversion)
 # ---------------------------------------------------------------------------

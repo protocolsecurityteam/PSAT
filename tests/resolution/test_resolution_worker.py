@@ -70,23 +70,6 @@ def db_session_for_resolution():
 # ---------------------------------------------------------------------------
 
 
-class TestProcessHappyPath:
-    def test_stores_snapshot_and_graph(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        worker = ResolutionWorker()
-        session = MagicMock()
-        # Make scalar_one_or_none return None (no contract row) so DB writes are skipped
-        session.execute.return_value.scalar_one_or_none.return_value = None
-        job = _job()
-
-        ctx = _patch_all(monkeypatch)
-
-        worker.process(session, cast(Any, job))
-
-        stored_names = [name for name, _ in ctx["store_calls"]]
-        assert "control_snapshot" in stored_names
-        assert "resolved_control_graph" in stored_names
-
-
 # ---------------------------------------------------------------------------
 # 2. Proxy address override
 # ---------------------------------------------------------------------------

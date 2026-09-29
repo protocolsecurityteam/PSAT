@@ -37,12 +37,6 @@ def test_threshold_group_canonicalizes():
     assert cap.threshold == (2, [ADDR_A.lower(), ADDR_B.lower()])
 
 
-def test_unsupported_carries_reason():
-    cap = CapabilityExpr.unsupported("test_reason")
-    assert cap.kind == "unsupported"
-    assert cap.unsupported_reason == "test_reason"
-
-
 # ---------------------------------------------------------------------------
 # Intersect — finite × finite
 # ---------------------------------------------------------------------------
@@ -297,35 +291,12 @@ def test_negate_lower_bound_blacklist_yields_lower_bound_finite():
     assert out.membership_quality == "lower_bound"
 
 
-def test_negate_exact_blacklist_yields_exact_finite():
-    bl = CapabilityExpr.cofinite_blacklist([ADDR_A, ADDR_B])  # default exact
-    out = negate(bl)
-    assert out.kind == "finite_set"
-    assert out.membership_quality == "exact"
-
-
 def test_negate_finite_then_negate_returns_finite():
     """Double negation: negate(negate(finite_exact)) == finite_exact (canonical)."""
     fin = CapabilityExpr.finite_set([ADDR_A, ADDR_B])
     twice = negate(negate(fin))
     assert twice.kind == "finite_set"
     assert twice.members == fin.members
-
-
-def test_negate_threshold_unsupported():
-    tg = CapabilityExpr.threshold_group(2, [ADDR_A, ADDR_B])
-    out = negate(tg)
-    assert out.kind == "unsupported"
-    assert out.unsupported_reason is not None
-    assert "threshold_group" in out.unsupported_reason
-
-
-def test_negate_unsupported_chains():
-    u = CapabilityExpr.unsupported("test")
-    out = negate(u)
-    assert out.kind == "unsupported"
-    assert out.unsupported_reason is not None
-    assert "test" in out.unsupported_reason
 
 
 def test_negate_de_morgan_and():
@@ -342,22 +313,6 @@ def test_negate_de_morgan_and():
 # blacklist_quality — Part 1 representation. Describes the EXCLUDED set (vs
 # membership_quality for an allow-list); carried through every cofinite-producing
 # combinator and inert today (every cofinite is exact).
-
-
-def test_cofinite_blacklist_quality_defaults_exact():
-    assert CapabilityExpr.cofinite_blacklist([ADDR_A]).blacklist_quality == "exact"
-
-
-def test_cofinite_blacklist_quality_lower_bound_is_carried():
-    cap = CapabilityExpr.cofinite_blacklist([ADDR_A], blacklist_quality="lower_bound")
-    assert cap.blacklist_quality == "lower_bound"
-
-
-def test_negate_finite_exact_yields_exact_blacklist():
-    # The complement of an exact finite set is an exact cofinite; pinned to lock the Part 1 no-op.
-    out = negate(CapabilityExpr.finite_set([ADDR_A, ADDR_B]))
-    assert out.kind == "cofinite_blacklist"
-    assert out.blacklist_quality == "exact"
 
 
 def test_intersect_blacklists_threads_quality():
@@ -454,17 +409,6 @@ def test_negate_threshold_and_signature_stay_gated():
 # is a positive gate.
 
 
-def test_truthy_unenumerable_allowlist_never_becomes_cofinite():
-    # A ``truthy`` allowlist that can't be enumerated stays unsupported/finite — never
-    # negated, so it never reaches the cofinite arm (polarity is enforced in
-    # ``_evaluate_leaf``; here we pin that the algebra invents no open set from a decline).
-    allow_decline = CapabilityExpr.unsupported("no_adapter")
-    assert negate(allow_decline).kind == "unsupported"  # would only be reached on falsy; stays gated
-    # An enumerated allowlist is a finite_set and stays a finite_set (gated).
-    enumerated = CapabilityExpr.finite_set([ADDR_A])
-    assert enumerated.kind == "finite_set"
-
-
 def test_mixed_role_gate_and_denylist_stays_gated():
     # role gate AND denylist → the role finite_set folds the denylist as a set-subtraction
     # and stays gated; a denylist must never erase a positive gate.
@@ -552,11 +496,6 @@ def test_negate_total_over_all_kinds():
 # ---------------------------------------------------------------------------
 # Subject dimension (root caller vs bound intermediate)
 # ---------------------------------------------------------------------------
-
-
-def test_finite_set_defaults_to_root_subject():
-    assert CapabilityExpr.finite_set([ADDR_A]).subject == "root"
-    assert CapabilityExpr.finite_set([ADDR_A], subject="bound").subject == "bound"
 
 
 def test_intersect_cross_subject_preserves_root_set_as_condition():

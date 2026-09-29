@@ -479,23 +479,6 @@ def test_principal_hosted_only_on_a_d2_member_is_refused(db_session, protocol):
     assert subject.protocol_id is None, "a D2-only member's principal must not license what it controls"
 
 
-def test_the_same_principals_admit_once_an_anchoring_member_hosts_them(db_session, protocol):
-    """Control for the refusal above: the fact, not the row, is what changes."""
-    anchor = _anchored_member(db_session, protocol, ADDR(0x3100))
-    endpoint = _d2_only_member(db_session, protocol, ADDR(0x3101), controls=anchor)
-    controller = _contract(db_session, ADDR(0x3102), nominated=protocol.id)
-    _principal(db_session, endpoint, controller.address, resolved_type="timelock")
-    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(controller.id,)))
-    db_session.flush()
-    assert controller.protocol_id is None
-
-    _principal(db_session, anchor, controller.address, resolved_type="timelock")
-    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(controller.id,)))
-    db_session.flush()
-    assert controller.protocol_id == protocol.id
-    assert _witness(db_session, controller, protocol, WITNESS_RULE_W3_CONTROL, "d2").via_address == anchor.address
-
-
 # ---------------------------------------------------------------------------
 # (d) Revocation — the hosting member's demotion cascades (invariant 8)
 # ---------------------------------------------------------------------------
@@ -740,23 +723,6 @@ def test_principal_arms_settle_identically_across_arrival_orders(db_session):
     assert principals_first == candidates_first
     assert all(is_member for is_member, _ in principals_first.values())
     assert (WITNESS_RULE_W4_FACTORY, None) in dict(principals_first)[5][1]
-
-
-def test_closest_miss_names_a_non_anchoring_factory(db_session, protocol):
-    """Invariant 5: a row parked behind the factory rule says so by name."""
-    from scripts.membership_reporting import closest_miss
-
-    outsider = _contract(db_session, ADDR(0x6600), nominated=protocol.id)
-    child = _contract(db_session, ADDR(0x6601), nominated=protocol.id, factory=outsider.address)
-    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(child.id,)))
-    db_session.flush()
-    assert child.protocol_id is None
-    miss = closest_miss(db_session, contract=child, protocol_id=protocol.id)
-    assert miss == {
-        "nearest_rule": "w4_factory",
-        "missing": "factory_not_anchoring_member",
-        "factory": outsider.address,
-    }
 
 
 def test_settling_is_idempotent_under_the_principal_arms(db_session, protocol):

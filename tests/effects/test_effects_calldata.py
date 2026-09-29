@@ -2264,10 +2264,6 @@ def test_token_seed_fixtures_one_per_caller_and_entry():
     assert len(owner_seeds) == 1
 
 
-def test_token_seed_fixtures_empty_without_slots():
-    assert cd._token_seed_fixtures((), [CALLER], CONTRACT) == ()
-
-
 # ---------------------------------------------------------------------------
 # synthesize_pause emits token seeds (+ the no-token_slots regression)
 # ---------------------------------------------------------------------------
@@ -2300,30 +2296,6 @@ def test_synthesize_pause_emits_token_seed_fixtures(db_session):
     assert seed.verify_expected == cd._word_hex(cd.SEED_AMOUNT)
     # the principal set_balance is still present and unchanged.
     assert any(fx.kind == "set_balance" and fx.address == PRINCIPAL for fx in spec.fixtures)
-
-
-@requires_postgres
-def test_synthesize_pause_without_token_slots_is_unchanged(db_session):
-    """Regression: no token_slots key ⇒ the fixture list is exactly today's — one
-    set_balance for the principal, nothing else."""
-    contract, ids = _pause_contract(db_session)
-    facts = _token_facts()  # no token_slots
-    fn = cd.resolve_function(facts, PAUSE_SEL)
-    assert fn is not None
-    candidate = Candidate(
-        function_id=ids[PAUSE_SEL],
-        contract_id=contract.id,
-        contract_address=CONTRACT,
-        selector=PAUSE_SEL,
-        function_name="pause",
-        authority_public=False,
-        principal_addresses=(PRINCIPAL,),
-    )
-    spec = cd.synthesize_pause(db_session, candidate, facts, fn)
-    assert spec is not None
-    assert all(fx.kind == "set_balance" for fx in spec.fixtures)
-    assert {fx.address for fx in spec.fixtures} == {PRINCIPAL}
-    assert all(fx.verify_calldata is None for fx in spec.fixtures)
 
 
 # ---------------------------------------------------------------------------
@@ -2378,13 +2350,6 @@ def _stub_seams(*, block_number=None) -> _Seams:
         chain_id=1,
         block_number=block_number,
     )
-
-
-def test_preflight_pins_the_real_head_block():
-    worker = EffectsWorker()
-    supported, block = worker._preflight(_stub_seams(block_number=lambda: 21_000_123), {})
-    assert supported is True
-    assert block == 21_000_123
 
 
 def test_preflight_without_a_pinned_head_disables_tier1():

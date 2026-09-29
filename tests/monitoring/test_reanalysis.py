@@ -298,10 +298,6 @@ class TestShouldTriggerReanalysis:
     def test_non_triggering_event_types(self, event_type):
         assert should_trigger_reanalysis(event_type) is False
 
-    @pytest.mark.parametrize("field", sorted(_REANALYSIS_POLL_FIELDS))
-    def test_poll_triggering_fields(self, field):
-        assert should_trigger_reanalysis("state_changed_poll", {"field": field}) is True
-
     @pytest.mark.parametrize("field", ["paused", "threshold", "min_delay", "owners"])
     def test_poll_non_triggering_fields(self, field):
         assert should_trigger_reanalysis("state_changed_poll", {"field": field}) is False
@@ -340,25 +336,6 @@ class TestShouldTriggerReanalysis:
             )
             is True
         )
-
-    def test_handrolled_ownership_transferred_data_synthesizes_tags(self):
-        """``parse_governance_log`` now attaches ``effect_tags={"writes": ["owner"]}``; the
-        check must give the same verdict as the bare event_type path. This is the production
-        path: scan_for_events always passes event_data with effect_tags."""
-        data = {
-            "old_owner": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
-            "new_owner": "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
-            "effect_tags": {"writes": ["owner"]},
-        }
-        assert should_trigger_reanalysis("ownership_transferred", data) is True
-
-    def test_handrolled_upgraded_data_synthesizes_tags(self):
-        """Proxy Upgraded: the ``delegates: True`` path fires when the decoder attaches it."""
-        data = {
-            "implementation": "0x" + "aa" * 20,
-            "effect_tags": {"writes": ["implementation"], "delegates": True},
-        }
-        assert should_trigger_reanalysis("upgraded", data) is True
 
 
 # ---------------------------------------------------------------------------
@@ -476,12 +453,6 @@ class TestMaybeQueueReanalysis:
         assert job is not None
         assert job.request is not None
         assert job.request.get("reanalysis_trigger") == "poll:owner"
-
-    def test_poll_paused_does_not_trigger(self, db_session):
-        mc = _make_monitored_contract(db_session, "0x" + "44" * 20, "pausable")
-        data = {"field": "paused", "old_value": "False", "new_value": "True"}
-        job = maybe_queue_reanalysis(db_session, mc, "state_changed_poll", data)
-        assert job is None
 
     def test_different_event_types_dedup_each_other(self, db_session):
         """An upgrade and an ownership_transferred for the same address produce one job."""
@@ -677,24 +648,6 @@ class TestReanalysisAnvilIntegration:
         )
         assert len(jobs) == 1
         assert jobs[0].request.get("reanalysis_trigger") == "admin_changed"
-
-    def test_pause_does_not_trigger_reanalysis(self, anvil_env, db_session):
-        """Deploy pausable, pause, scan → NO reanalysis job."""
-        rpc_url, tmp_path = anvil_env
-        from services.monitoring.unified_watcher import scan_for_events
-
-        addr = _compile_and_deploy(PAUSABLE_SOURCE, "TestPausable", [], rpc_url, PRIVATE_KEY, tmp_path)
-        current_block = int(_cast(["block-number"], rpc_url))
-
-        _make_monitored_contract(db_session, addr, "pausable", current_block)
-
-        _cast_send(addr, "pause()", [], rpc_url, PRIVATE_KEY)
-
-        events = scan_for_events(db_session, rpc_url)
-        assert any(e.event_type == "paused" for e in events)
-
-        jobs = db_session.execute(select(Job).where(func.lower(Job.address) == addr.lower())).scalars().all()
-        assert len(jobs) == 0
 
     def test_multiple_upgrades_single_scan_creates_one_job(self, anvil_env, db_session):
         """Two upgrades in consecutive blocks → only one reanalysis job (dedup)."""

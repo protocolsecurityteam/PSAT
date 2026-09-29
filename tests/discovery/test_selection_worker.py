@@ -355,28 +355,6 @@ def test_null_confidence_dapp_and_defillama_rows_participate(db_session, worker,
 # ---------------------------------------------------------------------------
 
 
-@requires_postgres
-def test_upgrade_history_rows_are_excluded(db_session, worker, seed_protocol):
-    from db.models import Job
-
-    protocol_id, company, addr = seed_protocol
-    _add_contract(
-        db_session,
-        protocol_id=protocol_id,
-        address=addr(),
-        discovery_sources="upgrade_history",
-        confidence=0.9,
-    )
-    job = _add_selection_job(db_session, protocol_id=protocol_id, company=company, analyze_limit=3)
-    with pytest.raises(JobHandledDirectly):
-        worker.process(db_session, job)
-
-    children = (
-        db_session.execute(select(Job).where(Job.request["parent_job_id"].as_string() == str(job.id))).scalars().all()
-    )
-    assert children == []
-
-
 # ---------------------------------------------------------------------------
 # 5. Dedup: address with an existing non-proxy job is skipped
 # ---------------------------------------------------------------------------

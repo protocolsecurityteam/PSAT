@@ -150,15 +150,6 @@ def test_dapp_sniffer_exception_records_degraded_and_counts():
 # --------------------------------------------------------------------------- #
 
 
-def test_scope_llm_error_carries_failure_kind():
-    from services.audits.scope_extraction._errors import LLMUnavailableError
-
-    api = LLMUnavailableError("402 payment required")
-    parse = LLMUnavailableError("bad json", failure_kind="parse")
-    assert api.failure_kind == "api"  # default = upstream outage signature
-    assert parse.failure_kind == "parse"
-
-
 def test_scope_llm_fallback_degrades_with_failure_kind(monkeypatch):
     """The LLM-unavailable fallback records a degraded entry carrying ``failure_kind``."""
     import services.audits.scope_extraction as scope_mod

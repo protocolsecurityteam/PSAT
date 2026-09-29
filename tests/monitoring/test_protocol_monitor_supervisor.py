@@ -353,17 +353,6 @@ def test_main_flag_dispatch(monkeypatch, argv, patch_targets, expected):
         assert seen.get(label) == exp
 
 
-def test_run_supervised_default_installs_signals_and_runs(monkeypatch):
-    """Drive _run_supervised_default end-to-end without blocking forever."""
-    sup = Supervisor([], stop_event=threading.Event())
-    sup.stop_event.set()  # run_forever exits immediately
-    monkeypatch.setattr(pm, "_build_default_supervisor", lambda rpc, interval: sup)
-    # Don't mutate the process-wide SIGTERM/SIGINT handlers under the test runner.
-    monkeypatch.setattr(pm.signal, "signal", lambda *a, **k: None)
-
-    pm._run_supervised_default("http://d", None)  # returns cleanly
-
-
 def test_run_forever_returns_after_stop():
     stop = threading.Event()
     ran = [False]

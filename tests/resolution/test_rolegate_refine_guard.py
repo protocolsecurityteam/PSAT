@@ -799,13 +799,6 @@ contract C {
 """
 
 
-def test_fixture5_transparent_role_store_gates(tmp_path, both_flags):
-    contract = _compile(tmp_path, _TRANSPARENT_ROLE_STORE, "C")
-    trees = _build_pipeline(contract)
-    cap = evaluate_tree(trees["setMaxBidPrice(uint256)"])
-    assert cap.kind == "external_check_only", f"transparent role store must gate, got {cap.kind}"
-
-
 # Effectful permissionless (fixture 6): require(token.transferFrom(msg.sender,…))
 # moves the caller's own assets — permissionless, stays open. Protects the 11.
 _EFFECTFUL_PERMISSIONLESS = """

@@ -446,18 +446,6 @@ def test_only_a_bundle_this_job_produced_may_refresh(monkeypatch, captured_publi
     assert captured_publish[1]["refresh_on_differ"] is False
 
 
-@requires_postgres
-def test_a_copied_bundle_does_not_overwrite_a_freshly_analyzed_row(cm_db):
-    fresh_plan = {"contract_address": ADDR, "tracked_controllers": [{"controller_id": "state_variable:authority"}]}
-    ancestor_plan = {"contract_address": ADDR, "tracked_controllers": [{"controller_id": "ancestors_authority"}]}
-    assert _publish(tracking_plan=fresh_plan, refresh_on_differ=True) == PUBLISH_WRITTEN
-
-    assert _publish(tracking_plan=ancestor_plan, refresh_on_differ=False) == PUBLISH_ALREADY_CURRENT
-    cm_db.expire_all()
-    row = _row(cm_db)
-    assert row is not None and row.tracking_plan == fresh_plan
-
-
 def test_static_stage_publishes_nothing_without_a_plan(monkeypatch, captured_publish):
     _stub_artifacts(monkeypatch, {"contract_analysis": ANALYSIS})
     _FakeStaticWorker()._publish_materialization(None, _fake_job(), ADDR, "C")

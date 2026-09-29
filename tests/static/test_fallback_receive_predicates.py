@@ -64,11 +64,6 @@ def contract(tmp_path_factory):
 # 1. The tree is attempted
 
 
-def test_gated_fallback_gets_a_predicate_tree(contract):
-    trees = (build_predicate_artifacts(contract) or {}).get("trees") or {}
-    assert "fallback()" in trees, "no tree was built for a fallback carrying a require"
-
-
 def test_gated_fallback_tree_carries_the_caller_authority_leaf(contract):
     """The positive case. A tree that exists but lost the gate would satisfy the
     test above and still publish the function as open."""

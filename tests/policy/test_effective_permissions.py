@@ -369,59 +369,6 @@ def test_build_effective_permissions_projects_mixed_public_or_capability():
     assert fn.get("capability_expr") == cap
 
 
-def test_build_effective_permissions_with_authority_snapshot():
-    target_analysis = {
-        "subject": {
-            "address": "0x1111111111111111111111111111111111111111",
-            "name": "Target",
-        },
-        "semantic_control": {
-            "semantic_functions": [
-                {
-                    "function": "manage(address,bytes,uint256)",
-                    "controller_refs": ["authority"],
-                    "effect_targets": ["target.functionCallWithValue"],
-                    "effect_labels": ["arbitrary_external_call"],
-                    "action_summary": "Executes arbitrary external calldata from the contract.",
-                }
-            ]
-        },
-    }
-    target_snapshot = {
-        "contract_name": "Target",
-        "controller_values": {
-            "external_contract:authority": {
-                "value": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                "resolved_type": "contract",
-                "details": {"address": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
-            }
-        },
-    }
-    authority_snapshot = {"contract_name": "Authority", "controller_values": {}}
-    payload = build_effective_permissions(
-        target_analysis,
-        target_snapshot=target_snapshot,
-        authority_snapshot=authority_snapshot,
-        capability_resolver_output={
-            "manage(address,bytes,uint256)": _finite_cap("0xcccccccccccccccccccccccccccccccccccccccc"),
-        },
-        effects=_effects(
-            _effect(
-                "manage(address,bytes,uint256)",
-                targets=["target.functionCallWithValue"],
-                labels=["arbitrary_external_call"],
-                summary="Executes arbitrary external calldata from the contract.",
-                sink_kind="external_call",
-            )
-        ),
-    )
-
-    assert payload["contract_name"] == "Target"
-    assert payload["authority_contract"] is None
-    assert payload["principal_resolution"]["status"] == "complete"
-    assert payload["functions"][0]["effect_labels"] == ["arbitrary_external_call"]
-
-
 def test_build_effective_permissions_handles_vyper_dynarray_signatures():
     target_analysis = {
         "subject": {

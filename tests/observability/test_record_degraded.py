@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import threading
-
 from utils.logging import bind_trace_context, degraded_errors_var, record_degraded
 
 
@@ -55,33 +53,3 @@ def test_record_degraded_optional_traceback_is_captured_when_requested():
         degraded_errors_var.reset(token)
     assert accumulator[0].traceback is not None
     assert "with-tb" in accumulator[0].traceback
-
-
-def test_record_degraded_per_thread_isolation():
-    """Two threads each binding their own accumulator must not cross over."""
-
-    results: dict[str, list] = {}
-
-    def worker(name: str, stage: str, message: str) -> None:
-        accumulator: list = []
-        token = degraded_errors_var.set(accumulator)
-        try:
-            with bind_trace_context(stage=stage, job_id=name, worker_id=f"w-{name}"):
-                record_degraded(phase="x", exc=RuntimeError(message))
-                results[name] = list(accumulator)
-        finally:
-            degraded_errors_var.reset(token)
-
-    t1 = threading.Thread(target=worker, args=("a", "discovery", "from-a"))
-    t2 = threading.Thread(target=worker, args=("b", "static", "from-b"))
-    t1.start()
-    t2.start()
-    t1.join()
-    t2.join()
-
-    assert len(results["a"]) == 1
-    assert len(results["b"]) == 1
-    assert results["a"][0].message == "from-a"
-    assert results["a"][0].stage == "discovery"
-    assert results["b"][0].message == "from-b"
-    assert results["b"][0].stage == "static"

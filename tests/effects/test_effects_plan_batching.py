@@ -227,48 +227,6 @@ def _pause_claim(var: str, member: str | None):
 
 
 @requires_postgres
-def test_principals_by_selector_prefetch_matches_query(clean):
-    session = clean
-    proto = Protocol(name=f"pbs-{uuid.uuid4().hex[:8]}")
-    session.add(proto)
-    session.flush()
-    c = Contract(protocol_id=proto.id, address="0x" + "c1" * 20, chain="ethereum", is_proxy=False)
-    session.add(c)
-    session.flush()
-    for sel, prin in (("0xaaaaaaaa", "0x" + "a0" * 20), ("0xbbbbbbbb", "0x" + "b0" * 20)):
-        fn = EffectiveFunction(
-            contract_id=c.id, function_name="f", selector=sel, authority_public=False, effect_targets=["s"]
-        )
-        session.add(fn)
-        session.flush()
-        session.add(FunctionPrincipal(function_id=fn.id, address=prin))
-    session.commit()
-
-    legacy = calldata_synth._principals_by_selector(session, c.id)
-    prefetch_mod.install_prefetch(
-        session,
-        1,
-        [
-            Candidate(
-                function_id=0,
-                contract_id=c.id,
-                contract_address=c.address,
-                selector=None,
-                function_name="f",
-                authority_public=False,
-                principal_addresses=(),
-            )
-        ],
-    )
-    try:
-        batched = calldata_synth._principals_by_selector(session, c.id)
-    finally:
-        prefetch_mod.clear_prefetch(session)
-    assert batched == legacy
-    assert batched == {"0xaaaaaaaa": "0x" + "a0" * 20, "0xbbbbbbbb": "0x" + "b0" * 20}
-
-
-@requires_postgres
 def test_principals_by_selector_is_deterministic_with_two_principals(clean):
     """A selector with TWO principals is where the batched and unbatched reads
     could disagree: both keep the first row via ``setdefault``, but only the

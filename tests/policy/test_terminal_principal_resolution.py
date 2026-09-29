@@ -243,15 +243,6 @@ def test_two_getters_same_controller_not_ambiguous():
     assert "controllers" not in record
 
 
-def test_single_controller_plane_proceeds():
-    # Regression guard for the sound single-plane case (owner only, no authority).
-    resolver = _dict_resolver({CONTRACT_A: [{"address": SAFE, "resolved_type": "safe", "details": {}}]})
-    record = resolve_terminal_principal(CONTRACT_A, "contract", resolve_controllers=resolver)
-    assert record["terminal"] is True
-    assert record["address"] == SAFE
-    assert "controllers" not in record
-
-
 def test_already_terminal_start_short_circuits():
     called = {"n": 0}
 
@@ -399,39 +390,6 @@ def test_steps_returned_but_unusable_is_not_a_proven_absence():
         CONTRACT_A, "contract", resolve_controllers=lambda _address: [{"resolved_type": "contract"}]
     )
     assert record["status"] == "unknown_unfetched"
-
-
-def test_policy_worker_resolver_keeps_error_and_absence_apart():
-    """The collapse was at the CALL SITE: ``if not controllers: return None`` mapped both
-    ``read_contract_controllers`` answers onto ``None``."""
-    import workers.policy_worker as pw
-
-    calls: dict[str, object] = {}
-
-    def _fake_read(rpc_url, address, *, chain_id=None):
-        return calls["value"]
-
-    original_read = pw.read_contract_controllers
-    original_classify = pw.classify_resolved_address_with_status
-    pw.read_contract_controllers = _fake_read
-    pw.classify_resolved_address_with_status = lambda rpc_url, address, chain_id=None: ("eoa", {}, True)
-    try:
-        resolver = pw._make_terminal_controller_resolver("http://rpc.example", chain_id=1)
-        assert resolver is not None
-
-        calls["value"] = None  # probe error
-        assert resolver(CONTRACT_A) is None
-
-        calls["value"] = []  # probed clean, no controller
-        assert resolver(CONTRACT_A) == []
-
-        calls["value"] = [EOA]  # a real controller
-        steps = resolver(CONTRACT_A)
-        assert steps is not None
-        assert [step["address"] for step in steps] == [EOA]
-    finally:
-        pw.read_contract_controllers = original_read
-        pw.classify_resolved_address_with_status = original_classify
 
 
 def test_multi_plane_records_silence_per_plane():

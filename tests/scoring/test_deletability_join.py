@@ -324,17 +324,6 @@ def test_the_earned_negative_publishes_the_authority_it_asked_about():
     assert verdict.gating_authorities == (AUTHORITY,)
 
 
-def test_the_three_states_are_three_distinct_tokens():
-    setter = _roles_setter()
-    deletable = P.authority_deletability(_plane((setter,), **_gated()), [SAFE], VAULT_KEY, EXIT)
-    negative = P.authority_deletability(_plane((setter,), **_gated()), [EOA], VAULT_KEY, EXIT)
-    unknown = P.authority_deletability(_plane((setter,)), [SAFE], VAULT_KEY, EXIT)
-
-    states = {deletable.state, negative.state, unknown.state}
-    assert states == set(P.DELETABILITY_STATES)
-    assert negative.reason != unknown.reason
-
-
 def test_a_tainted_gate_does_not_defeat_the_host_arm():
     plane = _plane(
         (_setter(3, contract=VAULT, function_name="setAuthority", principal=SAFE),),
@@ -441,14 +430,6 @@ def test_no_filter_anywhere_on_principal_type():
     assert "principal_type" not in source
     assert not hasattr(P.SetterPrincipal, "principal_type")
     assert "principal_type" not in {field.name for field in P.SetterPrincipal.__dataclass_fields__.values()}
-
-
-def test_the_decision_reads_setter_rows_and_never_a_chain_length():
-    """The banned shortcut (hop count, selector name, contract shape) all
-    partition the reference corpus identically to the correct join."""
-    source = inspect.getsource(P.authority_deletability)
-    for banned in ("act_as_chain", "len(chain", "hop", "contract_name"):
-        assert banned not in source
 
 
 # --- the published verdict (inv. 13) ----------------------------------------

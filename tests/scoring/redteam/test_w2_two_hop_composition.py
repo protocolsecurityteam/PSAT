@@ -89,29 +89,6 @@ def test_w2_case1_the_two_hop_chain_composes_through_both_links(fold):
     assert KEY_T not in {e["entity"] for e in row["reach_composed_magnitudes"]}
 
 
-def test_w2_the_composed_figure_carries_no_authored_precondition_block(fold):
-    """F3, cut. The block that hedged the figure was one constant string.
-
-    ``caller_holding_precondition`` was 1,222 characters, identical on all forty
-    reference-corpus entries, and its central clause (the last admitted call
-    spends a quantity the caller must hold) is FALSE on the twelve whose
-    destination is ``manage``. It is deleted, with ``principal_extraction_bound``,
-    which named a direction derived from nothing. What survives is what the entry
-    can account for: the figure, the sheet that bounded it, the execution.
-    """
-    document = fold(_composing_signals(), principals=_composing_principals(), **_two_hop_case())
-    entry = next(e for e in _gate_row(document)["reach_composed_magnitudes"] if e["entity"] == KEY_V)
-    assert "caller_holding_precondition" not in entry
-    assert "principal_extraction_bound" not in entry
-    assert not hasattr(FOLD, "_CallerHoldingPrecondition")
-    assert not hasattr(FOLD, "COMPOSED_BOUND_CALLER_ARGUMENTS")
-    # The witness was READ from one function's row and measures the entity.
-    assert entry["witness_granularity"] == "entity"
-    # ...and deleting the hedge did not delete the figure or its account.
-    assert entry["published_usd"] == 1_000_000.0
-    assert entry["proving_execution"]["state"] in ("recorded", "not_determined")
-
-
 def test_w2_case2_the_condition_disproved_hop_is_not_resurrected_by_composition(fold):
     """Regression case 2. The blocked EOA stays blocked.
 

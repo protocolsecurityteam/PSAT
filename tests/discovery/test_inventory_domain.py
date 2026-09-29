@@ -14,7 +14,6 @@ import pytest
 
 from services.discovery.inventory_domain import (
     ADDRESS_RE,
-    CHAIN_IDS,
     DOMAIN_RE,
     URL_RE,
     RateLimiter,
@@ -83,14 +82,6 @@ class TestDomainRE:
 # ---------------------------------------------------------------------------
 
 
-class TestConstants:
-    def test_chain_ids_ethereum_is_1(self):
-        # Cross-module agreement: the ``utils.chains`` registry and inventory's
-        # ``CHAIN_IDS`` must resolve the same id, which chain_resolver.py feeds to
-        # Etherscan v2 as the ``chainid`` query param.
-        assert CHAIN_IDS["ethereum"] == 1
-
-
 # ---------------------------------------------------------------------------
 # RateLimiter
 # ---------------------------------------------------------------------------
@@ -126,11 +117,6 @@ class TestDebugLog:
         captured = capsys.readouterr()
         assert "hello debug" in captured.err
         assert "[debug]" in captured.err
-
-    def test_disabled_prints_nothing(self, capsys):
-        _debug_log(False, "should not appear")
-        captured = capsys.readouterr()
-        assert captured.err == ""
 
 
 class TestGetDomain:
@@ -615,9 +601,6 @@ class TestDomainCandidatesFromResults:
         candidates = _domain_candidates_from_results(results)
         assert candidates[0] == "docs.aave.com"
 
-    def test_empty_results(self):
-        assert _domain_candidates_from_results([]) == []
-
     def test_skips_empty_urls(self):
         results = [{"url": "", "title": "No URL"}, {"url": "  ", "title": "Blank"}]
         assert _domain_candidates_from_results(results) == []
@@ -645,9 +628,6 @@ class TestCollectInDomainPages:
         ]
         pages = _collect_in_domain_pages(results, "a.com")
         assert len(pages) == 1
-
-    def test_empty_results(self):
-        assert _collect_in_domain_pages([], "example.com") == []
 
     def test_subdomain_match(self):
         results = [
@@ -772,9 +752,6 @@ class TestDedupeResultsByUrl:
         assert len(deduped) == 1
         assert deduped[0]["url"] == "https://a.com/page"
 
-    def test_empty_results(self):
-        assert _dedupe_results_by_url([]) == []
-
     def test_merged_result_preserves_extra_fields(self):
         results = [
             {"url": "https://a.com/page", "content": "short", "score": 0.5},
@@ -791,22 +768,6 @@ class TestDedupeResultsByUrl:
 
 
 class TestDiscoverContractInventoryPages:
-    def test_no_results_returns_empty(self, monkeypatch):
-        monkeypatch.setattr(
-            "services.discovery.inventory_domain._tavily_search",
-            lambda *a, **kw: [],
-        )
-        combined, recommended = _discover_contract_inventory_pages(
-            domain="example.com",
-            company="TestCo",
-            broad_results=[],
-            queries_used=[0],
-            max_queries=5,
-            errors=[],
-        )
-        assert combined == []
-        assert recommended == []
-
     def test_with_broad_and_site_results(self, monkeypatch):
         site_results = [
             {"url": "https://docs.example.com/contracts", "title": "Contracts", "content": "addresses"},

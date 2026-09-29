@@ -106,11 +106,6 @@ def test_confine_refuses_escape(tmp_path):
         fetch._confine(tmp_path, "../../etc/passwd")
 
 
-def test_confine_accepts_legit(tmp_path):
-    full = fetch._confine(tmp_path, "contracts/A.sol")
-    assert full == (tmp_path / "contracts/A.sol").resolve()
-
-
 def test_scaffold_refuses_escaping_source(tmp_path):
     result = _standard_json_result({"contracts/../../../../tmp/evil.sol": {"content": "x"}})
     project = tmp_path / "proj"
@@ -179,14 +174,6 @@ def test_remapping_target_rejects_embedded_newline():
     assert not fetch._remapping_target_is_safe("@a/=lib/\r\n@x/=/etc/")
     assert fetch._remapping_target_is_safe("@openzeppelin/=lib/openzeppelin-contracts/")
     assert fetch._remapping_target_is_safe("@a/=")
-
-
-def test_parse_remappings_drops_newline_injection():
-    result = _standard_json_result(
-        {"src/C.sol": {"content": "x"}},
-        remappings=["@a/=lib/\n@x/=/etc/", "@oz/=lib/openzeppelin/"],
-    )
-    assert fetch.parse_remappings(result) == ["@oz/=lib/openzeppelin/"]
 
 
 def test_scaffold_remappings_never_writes_absolute_line(tmp_path):

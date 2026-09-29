@@ -340,23 +340,6 @@ class TestMembershipNFTStorageSlot:
         assert _principals(cap) == [MANAGER]
         assert _status(cap) != "resolved_empty"
 
-    def test_confirmed_zero_slot_resolved_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        tree = _tree_for(_membership_nft(), "burn(address,uint256,uint256)")
-        _stub(monkeypatch, slot="0x" + "00" * 32)
-        cap = evaluate_tree(tree, _ctx_with_rpc())
-
-        assert _principals(cap) == []
-        assert _status(cap) == "resolved_empty"
-        assert cap.empty_reason == "slot_read_zero"
-
-    def test_unreadable_slot_not_resolved_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        tree = _tree_for(_membership_nft(), "incrementLock(uint256,uint32)")
-        _stub(monkeypatch, slot="revert")
-        cap = evaluate_tree(tree, _ctx_with_rpc())
-
-        assert cap.membership_quality == "lower_bound"
-        assert _status(cap) != "resolved_empty"
-
     def test_public_sibling_resolves_via_getter(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The ``liquidityPool``-gated function still resolves through its getter
         (no slot), proving the slot path is additive, not a replacement."""

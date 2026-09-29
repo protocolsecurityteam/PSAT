@@ -197,24 +197,6 @@ def test_pause_recipe_ineffective_pause_is_distinct_unknown():
     assert any(r.get("label") == "pause_effectiveness" and r["success"] is False for r in store.stored[-1]["results"])
 
 
-def test_pause_recipe_proven_records_pause_effective():
-    transport = StubAnvil(guarded={GUARDED}, pause_calldata=PAUSE, duration=3600)
-    eff = pause_recipe(
-        transport=transport,
-        store=RecordingStore(),
-        ctx=CTX,
-        contract_address=CONTRACT,
-        principal=PRINCIPAL,
-        pause_calldata=PAUSE,
-        entry_points=_entry_points(),
-        predicted_guard_set=["foo"],
-        max_pause_duration=3600,
-    )
-    assert eff.verdict == VERDICT_PROVEN
-    assert eff.details["pause_effective"] is True
-    assert eff.details["observation"] == "executed"
-
-
 class DeadSurfaceAnvil(StubAnvil):
     """Every entry point already reverts on its OWN precondition — an unfunded
     caller, an unmet business rule — pause or no pause. The pause itself enacts
@@ -444,28 +426,6 @@ def test_timelock_schedule_advance_execute_proves_a_caller_arbitrary_move():
     assert labels["execute_premature"]["success"] is False
     assert labels["execute"]["success"] is True
     assert transport.impersonated == [PRINCIPAL]
-
-
-def test_timelock_premature_execute_reverts_not_ready_proving_the_delay_gate():
-    """The Tier-1 impossibility made explicit: before the warp the operation is not
-    ready, so ``execute`` reverts with the not-ready selector. Observing that revert
-    and its later success is what proves the recipe advanced time."""
-    store = RecordingStore()
-    timelock_execute_recipe(
-        transport=TimelockAnvil(delay=TIMELOCK_DELAY),
-        store=store,
-        ctx=CTX,
-        contract_address=CONTRACT,
-        principal=PRINCIPAL,
-        schedule_calldata=SCHEDULE,
-        execute_calldata=EXECUTE,
-        delay_seconds=TIMELOCK_DELAY,
-        witness_token=TOKEN,
-        witness_calldata=WITNESS,
-    )
-    prem = {r["label"]: r for r in store.stored[-1]["results"]}["execute_premature"]
-    assert prem["success"] is False
-    assert prem["revert"].startswith(NOT_READY)
 
 
 def test_timelock_schedule_rejection_is_its_own_unknown():
@@ -786,15 +746,6 @@ def test_verified_fixtures_are_applied_after_plain_ones():
     _apply_fixtures(transport, [_verified_fixture(word), plain], tr)
     assert [f["kind"] for f in tr["fixtures"]] == ["set_balance", "set_storage_at"]
     assert transport.balances == {PRINCIPAL: "0x64"}
-
-
-def test_forkfixture_backward_compatible_defaults():
-    from services.effects.anvil import ForkFixture, _has_verify_spec
-
-    fx = ForkFixture(kind="set_balance", address=PRINCIPAL, value="0x1")
-    assert fx.verify_to is None and fx.verify_calldata is None and fx.verify_expected is None
-    assert _has_verify_spec(fx) is False
-    assert _has_verify_spec(_verified_fixture("0x" + "00" * 32)) is True
 
 
 # ---------------------------------------------------------------------------

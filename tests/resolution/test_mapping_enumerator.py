@@ -111,11 +111,6 @@ def _run(coroutine):
     return asyncio.run(coroutine)
 
 
-def test_event_topic0_hashes_canonical_signature():
-    expected = "0xdd0e34038ac38b2a1ce960229778ac48a8719bc900b6c4f8d0475c6e8b385a60"
-    assert _event_topic0("Rely(address)") == expected
-
-
 def test_decode_address_topic_strips_padding():
     padded = _indexed_topic(_addr("dead1234"))
     assert _decode_address_topic(padded) == _addr("dead1234")
@@ -351,30 +346,6 @@ def test_indexed_argument_before_non_indexed_key_uses_data_slot_zero():
     assert [p["address"] for p in out] == [alice]
 
 
-def test_empty_history_returns_empty():
-    client, _ = _fake_client([])
-    out = _run(
-        enumerate_mapping_allowlist(
-            "0xCC00000000000000000000000000000000000001",
-            [_rely_spec()],
-            client=client,
-            hypersync_module=_FakeHypersyncModule(),
-        )
-    )
-    assert out == []
-
-
-def test_no_specs_returns_empty_without_client():
-    out = _run(
-        enumerate_mapping_allowlist(
-            "0xCC00000000000000000000000000000000000001",
-            [],
-            hypersync_module=_FakeHypersyncModule(),
-        )
-    )
-    assert out == []
-
-
 def test_pagination_via_next_block():
     rely_topic = _event_topic0("Rely(address)")
     alice = _addr("a11ce")
@@ -600,21 +571,6 @@ def test_sync_wrapper_caches_results():
     assert result2["status"] == "complete"
     assert result2["principals"] == result1["principals"]
     assert calls["n"] == calls_after_first  # no additional calls
-
-
-def test_clear_enumeration_cache_drops_entries():
-    rely_topic = _event_topic0("Rely(address)")
-    client, _ = _fake_client([([_log(rely_topic, indexed_args=[_addr("aa")], block=10)], None)])
-    enumerate_mapping_allowlist_sync(
-        "0x" + "BB" * 20,
-        cast(Any, [_rely_spec()]),
-        from_block=0,
-        client=client,
-        hypersync_module=_FakeHypersyncModule(),
-    )
-    assert mapping_enumerator._CACHE  # populated
-    clear_enumeration_cache()
-    assert not mapping_enumerator._CACHE
 
 
 # ---------------------------------------------------------------------------

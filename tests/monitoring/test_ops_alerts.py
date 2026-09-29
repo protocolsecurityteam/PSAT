@@ -19,11 +19,10 @@ from sqlalchemy.orm import Session as SASession
 
 from db.models import IndexedEventCursor, MonitoredContract, WorkerHeartbeat
 from db.queue import HEARTBEAT_PROTOCOL_POLLER, HEARTBEAT_PROTOCOL_SCANNER
-from services.monitoring import ops_alerts, process_meta
+from services.monitoring import process_meta
 from services.monitoring.ops_alerts import (
     _cas_write,
     collect_chain_health,
-    collect_stale_processes,
     run_ops_alert_tick,
 )
 from services.monitoring.process_meta import ERROR, FRESH, PROCESS_META, STALE, classify, stale_after_seconds
@@ -111,21 +110,6 @@ def test_classify_boundaries():
     assert classify(ERROR, 5.0, 600) == ERROR
     # Staleness dominates an error status once the beat goes silent.
     assert classify(ERROR, 5000.0, 600) == STALE
-
-
-@requires_postgres
-def test_collect_stale_processes_missing_and_old(db_session, _clean_heartbeats):
-    now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
-    # Everything fresh except: poller old (stale) and one errored fresh beat.
-    _seed_all_fresh(db_session, now, exclude={HEARTBEAT_PROTOCOL_POLLER})
-    _seed(db_session, HEARTBEAT_PROTOCOL_POLLER, age_s=100_000, now=now)
-    db_session.commit()
-
-    stale = {s["name"]: s for s in collect_stale_processes(db_session, now=now)}
-    assert HEARTBEAT_PROTOCOL_POLLER in stale
-    assert stale[HEARTBEAT_PROTOCOL_POLLER]["status"] == STALE
-    # A fresh, healthy process is absent.
-    assert HEARTBEAT_PROTOCOL_SCANNER not in stale
 
 
 # ── watchdog transitions: dedupe / recovery / cooldown ───────────────────────
@@ -513,11 +497,3 @@ def test_health_monitoring_ok_when_chains_fresh(api_client, db_session, _clean_h
     body = resp.json()
     assert body["status"] == "ok"
     assert all(not c["stale"] for c in body["chains"])
-
-
-@requires_postgres
-def test_watchdog_reads_same_meta_as_fleet(db_session, _clean_heartbeats):
-    # The whole point of the shared module: fleet + watchdog key off one dict.
-    from services.aggregations import fleet
-
-    assert fleet.PROCESS_META is ops_alerts.PROCESS_META

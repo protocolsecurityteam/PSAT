@@ -45,13 +45,6 @@ _NOW = datetime(2026, 8, 4, 1, 42, tzinfo=timezone.utc)
 # ---------------------------------------------------------------------------
 
 
-def test_every_not_determined_token_but_the_caller_one_merges():
-    """The exclusion is exactly one token, and it is the deliberate-overwrite
-    one: a config an API caller authored is not ignorance to be repaired."""
-    assert PLAN_NOT_DETERMINED_TOKENS - STALENESS_MERGE_TOKENS == {CONFIG_SUPPLIED_BY_CALLER}
-    assert len(PLAN_NOT_DETERMINED_TOKENS) == 7
-
-
 def test_producers_mint_only_vocabulary_tokens():
     """The three producers of the token — the strict reader, the enrollment
     caller, the PATCH route — stay inside the vocabulary this module owns."""

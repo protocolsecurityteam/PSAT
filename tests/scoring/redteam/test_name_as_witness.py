@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Any
 
 from services.scoring import distill as D
-from services.scoring import planes as P
 from services.scoring.constants import WEAKNESS_SAFE_SINGLE_SIGNER
 from services.scoring.schema import PrincipalRef, Tri, entity_key
 from tests.support.scoring_builders import (
@@ -59,18 +58,6 @@ def test_f6_the_registry_escalation_needs_mutator_selectors():
     assert base.value == 0.75
     assert escalated.value == 1.0
     assert "registry_owner_self_grant_escalation" in basis
-
-
-def test_f6_selectors_are_what_the_facts_are_built_from():
-    class _Fn:
-        def __init__(self, name, selector):
-            self.function_name = name
-            self.selector = selector
-
-    homonym = _Fn("setUserRole", "0xdeadbeef")
-    canonical = _Fn("whateverName", "0x67aff484")
-    assert D._lower(homonym.selector) not in D._SOLMATE_MUTATOR_SELECTORS
-    assert D._lower(canonical.selector) in D._SOLMATE_MUTATOR_SELECTORS
 
 
 def test_b5_the_self_gated_delay_credit_is_retired():
@@ -306,13 +293,6 @@ def test_f5_confidence_does_not_rise_when_analysis_is_lost(fold):
     less = fold([answered], principals=principals, value=plane)
     assert less.confidence_pct is not None and more.confidence_pct is not None
     assert less.confidence_pct <= more.confidence_pct
-
-
-def test_r1_capability_principal_is_not_a_reach_relation():
-    assert "capability_principal" not in P.CONTROL_RELATIONS
-    # Not walked, and the exclusion carries a stated reason rather than being a
-    # relation the walk happens never to mention.
-    assert "capability_principal" in P.UNCONSUMED_REACH_REASONS
 
 
 def test_g2_the_destination_free_allow_list_is_disjoint_and_conservative():

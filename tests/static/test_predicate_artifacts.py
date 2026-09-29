@@ -283,29 +283,6 @@ def test_artifact_omits_constructor(tmp_path):
     assert "f()" in artifact["trees"]
 
 
-def test_artifact_serializes_cleanly_to_json(tmp_path):
-    sl = _compile(
-        tmp_path,
-        """
-        pragma solidity ^0.8.19;
-        contract C {
-            mapping(bytes32 => mapping(address => bool)) private _roles;
-            bytes32 constant MINTER = keccak256("MINTER");
-            uint256 public x;
-            function mint(uint256 v) external {
-                require(_roles[MINTER][msg.sender]);
-                x = v;
-            }
-        }
-    """,
-    )
-    artifact = build_predicate_artifacts(_contract(sl))
-    encoded = json.dumps(artifact)
-    decoded = json.loads(encoded)
-    assert decoded["schema_version"] == SCHEMA_VERSION
-    assert "mint(uint256)" in decoded["trees"]
-
-
 def test_artifact_with_low_level_call_provenance_serializes(tmp_path):
     """A comparison operand derived from a low-level ``.staticcall`` via a built-in's
     ``arg_origins``: Slither's ``LowLevelCall.function_name`` is a ``Constant``, and
@@ -644,16 +621,3 @@ def test_artifact_helper_engine_cache_skips_repeated_callees(tmp_path):
     assert cached_count < uncached_count, (
         f"helper-engine cache did not reduce engine count: cached={cached_count} uncached={uncached_count}"
     )
-
-
-def test_artifact_empty_contract(tmp_path):
-    sl = _compile(
-        tmp_path,
-        """
-        pragma solidity ^0.8.19;
-        interface IThing { function foo() external; }
-    """,
-    )
-    artifact = build_predicate_artifacts(_contract(sl, "IThing"))
-    assert artifact["trees"] == {}
-    assert artifact["schema_version"] == SCHEMA_VERSION

@@ -82,26 +82,6 @@ def test_proxy_delegates_to_edge():
     assert not any(e["op"] == "STATIC_REF" and e["to"] == f"addr:{IMPL}" for e in result["edges"])
 
 
-def test_classification_only_no_static_ref():
-    deps = {
-        DEP_A: {
-            "type": "proxy",
-            "source": ["dynamic"],
-            "implementation": {
-                "address": IMPL,
-                "type": "implementation",
-                "source": ["classification"],
-            },
-        },
-    }
-    graph = {f"{TARGET}|{DEP_A}": [{"op": "CALL", "provenance": []}]}
-    result = build_dependency_visualization(_unified(deps=deps, graph=graph))
-
-    impl_edges = [e for e in result["edges"] if e["to"] == f"addr:{IMPL}"]
-    assert len(impl_edges) == 1
-    assert impl_edges[0]["op"] == "DELEGATES_TO"
-
-
 def test_contract_name_used_as_label():
     deps = {DEP_A: {"type": "regular", "source": ["dynamic"], "contract_name": "WETH9"}}
     graph = {f"{TARGET}|{DEP_A}": [{"op": "CALL", "provenance": []}]}

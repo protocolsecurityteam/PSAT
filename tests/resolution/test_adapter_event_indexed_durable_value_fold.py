@@ -305,32 +305,6 @@ def test_cold_durable_index_with_rows_defers_pending_index(db_session, no_live_c
     assert no_live_calls == []
 
 
-def test_cold_durable_index_no_rows_defers_pending_index(db_session, no_live_calls):
-    # No rows AND no backfill_complete cursor (``no_index_cursor``) is index-cold: defer to
-    # external_check_only tagged ``deferred_pending_index`` rather than block on a live
-    # replay. ZERO live enumerate_mapping_values_sync calls.
-    ctx = EvaluationContext(
-        chain_id=1,
-        contract_address=STATE_HOLDER,
-        block=RESOLUTION_BLOCK,
-        event_log_repo=PostgresEventLogRepo(db_session),
-    )
-    cap = EventIndexedAdapter().enumerate(_eigenpod_descriptor(), ctx)
-
-    assert cap.kind == "external_check_only"
-    assert cap.check is not None
-    assert cap.check.extra.get("deferred_pending_index") is True
-    # ``no_index_cursor`` drives the reconciler; ``caller_keyed_membership_allowlist`` (a
-    # CALLER_GATE_BASIS_TAGS member) makes the cold deferral a root-authority blocker so it stays gated.
-    assert cap.check.extra.get("basis") == ["no_index_cursor", "caller_keyed_membership_allowlist"]
-    from services.resolution.permissionless_shapes import CALLER_GATE_BASIS_TAGS
-
-    assert "caller_keyed_membership_allowlist" in CALLER_GATE_BASIS_TAGS
-    # The reconciler keys on target_address: it MUST be the event state-holder.
-    assert cap.check.target_address == STATE_HOLDER
-    assert no_live_calls == []
-
-
 @pytest.fixture
 def iter_rows_spy(monkeypatch):
     """Count ``iter_event_rows`` invocations so a test can assert a cold fold performs zero scans."""

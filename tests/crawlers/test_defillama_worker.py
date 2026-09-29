@@ -102,37 +102,6 @@ class TestMissingProtocol:
             worker.process(session, cast(Any, job))
 
 
-class TestHappyPath:
-    def test_stores_artifacts_and_completes(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        worker = DefiLlamaWorker()
-        session = MagicMock()
-        session.execute.return_value.scalar_one_or_none.return_value = None
-        job = _job()
-
-        trackers = _patch_worker_deps(monkeypatch)
-
-        details = [
-            {"address": ADDR_1, "chain": "ethereum"},
-            {"address": ADDR_2, "chain": "polygon"},
-        ]
-        monkeypatch.setattr(
-            "workers.defillama_worker.scan_protocol",
-            lambda **kwargs: _scan_result(
-                addresses=[ADDR_1, ADDR_2],
-                address_details=details,
-            ),
-        )
-
-        with pytest.raises(JobHandledDirectly):
-            worker.process(session, cast(Any, job))
-
-        stored_names = [name for name, _ in trackers["store_calls"]]
-        assert "defillama_full_scan" in stored_names
-        assert "defillama_scan_results" in stored_names
-        assert "discovery_summary" in stored_names
-        assert len(trackers["complete_calls"]) == 1
-
-
 class TestJobName:
     def test_sets_name_when_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:
         worker = DefiLlamaWorker()

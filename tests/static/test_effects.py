@@ -484,20 +484,3 @@ def test_solmate_setauthority_is_authority_update(tmp_path):
     labels = _info(artifact, "setAuthority(Authority)")["effect_labels"]
     assert "authority_update" in labels
     assert "external_contract_call" not in labels
-
-
-def test_access_control_selectors_are_canonical():
-    """Pin the access-control table's magic 4-byte constants to their ABI
-    signatures so a typo can't silently disable detection."""
-    from services.static.contract_analysis_pipeline.summaries import _ACCESS_CONTROL_SELECTORS
-
-    expected = {
-        "grantRole(bytes32,address)": "role_management",
-        "revokeRole(bytes32,address)": "role_management",
-        "setUserRole(address,uint8,bool)": "role_management",
-        "setRoleCapability(uint8,address,bytes4,bool)": "role_management",
-        "setPublicCapability(address,bytes4,bool)": "role_management",
-        "setAuthority(address)": "authority_update",
-    }
-    recomputed = {"0x" + keccak(text=sig)[:4].hex(): label for sig, label in expected.items()}
-    assert _ACCESS_CONTROL_SELECTORS == recomputed

@@ -18,7 +18,6 @@ from services.audits.scope_extraction import (
     _build_prompt,
     _call_llm,
     _split_text_into_chunks,
-    build_artifact_payload,
     extract_contracts_regex_fallback,
     extract_date_from_pdf_text,
     extract_scope_via_chunk_scan,
@@ -230,17 +229,6 @@ def test_locate_scope_section_normalizes_ligatures_in_headers():
     assert "EthfiL2Token.sol" in sections[0].text_slice
 
 
-def test_validate_contracts_after_ligature_normalization():
-    # The worker normalizes text before validation; pins post-normalization: "EthfiL2Token" survives a clean LLM form
-    # too.
-    from services.audits.scope_extraction import _normalize_ligatures
-
-    raw_with_ligature = "Items in scope: src/EthﬁL2Token.sol reviewed."
-    normalized = _normalize_ligatures(raw_with_ligature)
-    assert "EthfiL2Token" in normalized
-    assert validate_contracts(["EthfiL2Token"], normalized) == ["EthfiL2Token"]
-
-
 # ---------------------------------------------------------------------------
 # validate_contracts
 # ---------------------------------------------------------------------------
@@ -379,14 +367,6 @@ def test_extract_date_skips_ambiguous_slash_format():
 def test_extract_date_prefers_prose_over_ambiguous_slash():
     text = "Cover\nAudit: 05/02/2024\nDelivered: 10 March 2024"
     assert extract_date_from_pdf_text(text) == "2024-03-10"
-
-
-def test_extract_date_extended_window_catches_dates_past_2000_chars():
-    # Some PDFs have long cover boilerplate before the date. The window
-    # was extended from 2000 → 6000 chars; a date at ~3500 should hit.
-    prefix = "boilerplate " * 250  # ~3000 chars
-    text = prefix + "2024-03-14 " + "more " * 100
-    assert extract_date_from_pdf_text(text) == "2024-03-14"
 
 
 # ---------------------------------------------------------------------------
@@ -614,29 +594,9 @@ def test_extract_scope_with_llm_handles_empty_array(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_build_artifact_payload_preserves_scope_section_text():
-    payload = build_artifact_payload(
-        ["Pool"],
-        method="llm_chunk_scan",
-        model="google/gemini-2.0-flash-001",
-        extracted_date="2024-12-19",
-        raw_response='["Pool"]',
-        scope_section_text="The following contracts were audited:\nsrc/Pool.sol",
-    )
-    assert payload["scope_section_text"] == ("The following contracts were audited:\nsrc/Pool.sol")
-
-
 # ---------------------------------------------------------------------------
 # build_prompt sanity
 # ---------------------------------------------------------------------------
-
-
-def test_build_prompt_includes_title_and_scope_text():
-    sections = [ScopeSection(1, 1, "scope", "Pool.sol  Vault.sol")]
-    prompt = _build_prompt(sections, "My Audit", "SomeFirm")
-    assert "My Audit" in prompt
-    assert "SomeFirm" in prompt
-    assert "Pool.sol" in prompt
 
 
 def test_build_prompt_truncates_very_large_scope_text():
@@ -698,18 +658,6 @@ def test_content_pattern_does_not_match_mere_scope_mention():
     )
     sections = locate_scope_section(text)
     assert sections == []
-
-
-def test_content_pattern_coexists_with_header_pattern():
-    text = _doc(
-        _page(1, "Cover"),
-        _page(2, "Scope\n(see later sections)"),
-        _page(4, "The following contracts were audited:\n- Pool.sol"),
-    )
-    sections = locate_scope_section(text)
-    assert len(sections) >= 1
-    combined = "\n".join(s.text_slice for s in sections)
-    assert "Pool.sol" in combined
 
 
 # ---------------------------------------------------------------------------

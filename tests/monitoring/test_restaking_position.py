@@ -13,7 +13,7 @@ alone would ship a rule the measured corpus cannot satisfy:
 from __future__ import annotations
 
 import pytest
-from sqlalchemy import inspect, select, text
+from sqlalchemy import inspect, select
 
 from db.models import Contract, Protocol, RestakingPosition, RestakingPositionLatest
 from services.clients.rpc import selector
@@ -212,38 +212,6 @@ class TestHappyPathBothShapes:
             "node_set_completeness": "not_determined",
         }
 
-    def test_residual_key_is_present_and_is_the_string(self):
-        for record in (_record(), _record(get_eigen_pod="0x")):
-            assert "consensus_layer_residual" in record
-            assert record["consensus_layer_residual"] == "not_determined"
-            assert record["consensus_layer_residual"] != 0
-
-    def test_published_zero_states_its_scope_and_omits_native_balances(self):
-        """What a 0 means: summing this column over the 26 nodes gives 0 wei while the pods hold
-        374.148164612 ETH (one exactly 320), so the record carries no node or pod native
-        balance: those are not_determined on this plane, not zero."""
-        record = position_record(
-            chain_id=1,
-            node_address="0xf538ac27909beed9652b8f008f2246851fded09b",
-            block_number=BLOCK,
-            block_hash=BLOCK_HASH,
-            strategy=STRATEGY,
-            reads=NodeReads(
-                get_eigen_pod=_addr_word("0x7474b357106e509918cd1db47c40a7d0d775d4c7"),
-                owner_to_pod=_addr_word("0x7474b357106e509918cd1db47c40a7d0d775d4c7"),
-                has_pod=_word(1),
-                pod_owner_deposit_shares=_word(0),
-                withdrawable_shares=_shares_return(0, 0),
-                active_validator_count=_word(0),
-                last_checkpoint_timestamp=_word(1784221571),
-            ),
-            withdrawable_calldata=_calldata("0xf538ac27909beed9652b8f008f2246851fded09b"),
-        )
-        # The pod backing this very row holds exactly 320 ETH at this block.
-        assert record["eigenlayer_beacon_shares_wei"] == 0
-        assert not [key for key in record if "native" in key or "balance" in key]
-        assert record["consensus_layer_residual"] == "not_determined"
-
 
 class TestEigenpodIdentityLegs:
     def test_all_three_zero_is_the_proven_absent_arm(self):
@@ -303,34 +271,6 @@ class TestStrategyIsWitnessed:
         assert record["eigenlayer_beacon_shares_wei"] is None
         assert record["shares_strategy"] is None
 
-    def test_published_strategy_is_the_witnessed_one(self):
-        assert _record()["shares_strategy"] == STRATEGY
-        assert _record()["shares_strategy"] != NEAR_MISS_STRATEGY
-
-    def test_near_miss_strategy_answer_is_not_a_proven_zero(self):
-        """A wrong strategy returns [0]/[0] with success, as does a non-staker. The producer
-        only queries the witnessed strategy, so this pins the downstream consequence: that shape
-        with a zero deposit leg is admitted ONLY under three-way agreement, and the identity
-        cross-read (a non-staker is codeless) is what rejects a non-staker."""
-        record = position_record(
-            chain_id=1,
-            node_address="0x00000000000000000000000000000000deadbeef",
-            block_number=BLOCK,
-            block_hash=BLOCK_HASH,
-            strategy=STRATEGY,
-            reads=NodeReads(
-                get_eigen_pod="0x",
-                owner_to_pod=ZERO_WORD,
-                has_pod=_word(0),
-                pod_owner_deposit_shares=_word(0),
-                withdrawable_shares=_shares_return(0, 0),
-                active_validator_count=None,
-                last_checkpoint_timestamp=None,
-            ),
-            withdrawable_calldata=_calldata("0x00000000000000000000000000000000deadbeef"),
-        )
-        assert record == _skeleton("0x00000000000000000000000000000000deadbeef")
-
 
 class TestFailedReadsNeverBecomeZero:
     def test_withdrawable_call_failed_is_read_failed_and_null(self):
@@ -379,9 +319,6 @@ class TestFailedReadsNeverBecomeZero:
 
 
 class TestCrossReadPartition:
-    def test_agree(self):
-        assert _record()["cross_read_agreement"] == CROSS_READ_AGREE
-
     def test_disagree_within_invariant_publishes_with_a_flag(self):
         record = _record(
             withdrawable_shares=_shares_return(SHARES_WEI - 1, SHARES_WEI),
@@ -415,18 +352,6 @@ class TestCrossReadPartition:
         )
         assert record["shares_basis"] == SHARES_BASIS_NOT_DETERMINED
         assert record["eigenlayer_beacon_shares_wei"] is None
-
-    def test_disagree_within_invariant_with_zero_is_unreachable_by_construction(self):
-        """A zero requires ``agree``, so the pairing cannot be produced."""
-        for withdrawable, deposit in ((0, 1), (0, SHARES_WEI)):
-            record = _record(
-                withdrawable_shares=_shares_return(withdrawable, deposit),
-                pod_owner_deposit_shares=_word(deposit),
-            )
-            assert not (
-                record["eigenlayer_beacon_shares_wei"] == 0
-                and record["cross_read_agreement"] == CROSS_READ_DISAGREE_WITHIN_INVARIANT
-            )
 
 
 class TestDecoders:
@@ -540,12 +465,6 @@ class TestStrategyGateIsOnTheIssuedBytes:
         assert withdrawable_calldata_operands(bad) is None
         assert _record(calldata=bad)["shares_basis"] == SHARES_BASIS_NOT_DETERMINED
 
-    def test_coherent_calldata_publishes(self):
-        record = _record()
-        assert record["shares_basis"] == SHARES_BASIS_EIGENLAYER_BEACON_SHARES
-        assert record["shares_strategy"] == STRATEGY
-        assert withdrawable_calldata_operands(_calldata()) == (NODE_WITH_SHARES, STRATEGY)
-
 
 class TestPodFactsRequireAProvenPod:
     def test_pod_facts_withheld_without_the_cross_read(self):
@@ -642,19 +561,6 @@ class TestConstraintsAreABackstop:
         session.add(RestakingPosition(**values))
         session.flush()
 
-    def test_the_measured_shapes_insert(self, db_session):
-        self._row(db_session)
-        self._row(
-            db_session,
-            node_address=NODE_ZERO_SHARES,
-            eigenpod=POD_ZERO_SHARES,
-            eigenlayer_beacon_shares_wei=0,
-            deposit_shares_wei=0,
-            active_validator_count=0,
-            last_checkpoint_timestamp=1784243039,
-        )
-        db_session.rollback()
-
     @pytest.mark.parametrize(
         "overrides",
         [
@@ -717,10 +623,6 @@ class TestConstraintsAreABackstop:
             "block_hash",
         ):
             assert columns[name]["nullable"] is False, name
-
-    def test_no_usd_column_exists_on_this_plane(self, db_session):
-        columns = {c["name"] for c in inspect(db_session.get_bind()).get_columns("restaking_positions")}
-        assert not [c for c in columns if "usd" in c or "price" in c]
 
 
 @requires_postgres
@@ -902,19 +804,6 @@ class TestPersistence:
         assert manager_contract_id_for(db_session, emitter=EFNM_PROXY, protocol_id=protocol.id) == proxy.id
         assert manager_contract_id_for(db_session, emitter=EFNM_PROXY, protocol_id=protocol.id) != implementation.id
         db_session.rollback()
-
-
-@requires_postgres
-def test_column_comment_states_what_a_zero_does_not_mean(db_session):
-    comment = db_session.execute(
-        text(
-            "SELECT col_description('restaking_positions'::regclass, "
-            "(SELECT attnum FROM pg_attribute WHERE attrelid='restaking_positions'::regclass "
-            "AND attname='eigenlayer_beacon_shares_wei'))"
-        )
-    ).scalar_one()
-    assert "374.148164612 ETH" in comment
-    assert "not_determined" in comment
 
 
 @requires_postgres

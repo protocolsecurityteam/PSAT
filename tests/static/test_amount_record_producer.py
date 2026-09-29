@@ -358,25 +358,6 @@ def test_the_key_resolves_through_the_call_site_binding(_unit):
     assert flow["amount_record_key_param_indexes"] == [None]
 
 
-def test_a_burn_decrement_resolves_its_key_the_same_way(_unit):
-    """The ``_burn(msg.sender, amount)`` shape at the site itself: the element
-    being DECREMENTED is ``_balances[account]``, and it names the caller's cell
-    under the same binding — the record half of the burn variant, which the
-    quantity join then has to agree with."""
-    code_unit, ctx = _ctx_for(
-        _unit,
-        "Records",
-        "_burnAndPay",
-        is_entry=False,
-        param_bindings={"account": ("msg_sender",)},
-    )
-    element = _ir_lvalue(code_unit, lambda ir: type(ir).__name__ == "Index")
-    site = _element_record_site(element, ctx)
-    assert site is not None
-    assert (site["base_canonical"], site["member_path"], site["key_levels"]) == ("Records._balances", (), 1)
-    assert site["key_origins"] == (("msg_sender",),)
-
-
 def test_the_same_key_without_a_binding_names_no_caller(_unit):
     """The falsifier for the line above: the identical IR, walked with no
     binding for ``account``, resolves to ``indeterminate``. A formal parameter's

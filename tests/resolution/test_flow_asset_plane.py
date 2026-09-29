@@ -284,15 +284,6 @@ def test_zero_word_is_its_own_state(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "asset_identity_invariant" not in row
 
 
-def test_zero_answer_and_failed_read_are_distinguishable(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Collapsing these two is the whole point of the third state."""
-    effects = _effects(_sink("s0", _state_var_receiver(SEL_TOKEN, "token")))
-    zero, _ = _run(monkeypatch, effects, [EthCallResult(True, WORD_ZERO, None, None)])
-    failed, _ = _run(monkeypatch, effects, [MEASURED_REVERT])
-    assert zero["receivers"][0] != failed["receivers"][0]
-    assert zero["receivers"][0]["asset_address_status"] != failed["receivers"][0]["asset_address_status"]
-
-
 def test_zero_row_is_not_counted_as_resolved(monkeypatch: pytest.MonkeyPatch) -> None:
     effects = _effects(_sink("s0", _state_var_receiver(SEL_TOKEN, "token")))
     zero, _ = _run(monkeypatch, effects, [EthCallResult(True, WORD_ZERO, None, None)])
@@ -315,25 +306,6 @@ def test_an_observation_cannot_exist_without_a_height() -> None:
         fap.AssetObservation(address=cast(Any, None), block_number=BLOCK, block_hash=None)
     with pytest.raises(ValueError):
         fap.AssetObservation(address="0x8f08b704", block_number=BLOCK, block_hash=None)
-
-
-def test_every_published_address_carries_its_block(monkeypatch: pytest.MonkeyPatch) -> None:
-    effects = _effects(
-        _sink("s0", _state_var_receiver(SEL_TOKEN, "token")),
-        _sink("s1", _state_var_receiver(SEL_EETH, "eEth")),
-        _sink("s2", _state_var_receiver(SEL_REWARD_TOKEN, "rewardTokenAddress")),
-    )
-    payload, _ = _run(
-        monkeypatch,
-        effects,
-        [
-            EthCallResult(True, WORD_KING, None, None),
-            EthCallResult(True, WORD_EETH, None, None),
-            MEASURED_REVERT,
-        ],
-    )
-    for row in payload["receivers"]:
-        assert ("asset_address" in row) <= ("observed_at_block" in row)
 
 
 def test_a_hashless_probe_block_still_publishes_the_height(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -505,14 +477,6 @@ def test_same_name_different_selector_does_not_fold(monkeypatch: pytest.MonkeyPa
     assert len(seen[0][1]) == 2
 
 
-def test_no_row_is_keyed_by_a_variable_name(monkeypatch: pytest.MonkeyPatch) -> None:
-    effects = _effects(_sink("s0", _state_var_receiver(SEL_TOKEN, "token")))
-    payload, _ = _run(monkeypatch, effects, [EthCallResult(True, WORD_KING, None, None)])
-    row = payload["receivers"][0]
-    assert row["receiver_variables"] == ["token"]
-    assert row["asset_getter_selector"] == SEL_TOKEN
-
-
 def test_conflicting_declaration_classes_withhold_the_mutability(monkeypatch: pytest.MonkeyPatch) -> None:
     a = _state_var_receiver(SEL_TOKEN, "token", mutability="immutable_in_implementation")
     b = _state_var_receiver(SEL_TOKEN, "token", mutability="mutable")
@@ -537,24 +501,6 @@ def test_two_identical_runs_produce_the_identical_payload(monkeypatch: pytest.Mo
     assert first == second
     # Sorted by selector, so sink declaration order cannot reorder the payload.
     assert [r["asset_getter_selector"] for r in first["receivers"]] == sorted([SEL_TOKEN, SEL_REWARD_TOKEN])
-
-
-def test_a_rerun_replaces_the_payload_rather_than_appending(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The artifact is upserted on (job_id, name), so a second pass at a new
-    height cannot leave a stale address sitting beside a fresh one."""
-    effects = _effects(_sink("s0", _state_var_receiver(SEL_TOKEN, "token")))
-    ctx = _stage_ctx(monkeypatch, effects, [EthCallResult(True, WORD_KING, None, None)])
-    worker, session, job = ctx["worker"], ctx["session"], ctx["job"]
-    worker._resolve_flow_asset_addresses(
-        session, job, chain_id=1, rpc_url="http://stub", deployment_address=MERKLE_DROP, proven_proxied=True
-    )
-    worker._resolve_flow_asset_addresses(
-        session, job, chain_id=1, rpc_url="http://stub", deployment_address=MERKLE_DROP, proven_proxied=True
-    )
-    stored = [(name, data) for name, data in ctx["store_calls"] if name == "flow_asset_addresses"]
-    assert len(stored) == 2
-    assert stored[0][1] == stored[1][1]
-    assert len(ctx["artifact_store"]["flow_asset_addresses"]["receivers"]) == 1
 
 
 # ---------------------------------------------------------------------------

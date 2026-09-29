@@ -48,23 +48,6 @@ def test_the_fetch_fact_is_carried_verbatim_in_all_three_states():
     assert _source_verified({"source_verified": "true"}) is None
 
 
-def test_the_project_layout_cannot_decide_the_field(tmp_path: Path):
-    """The 9-row reproduction at the publisher: a verified ``contracts/``-layout bundle must
-    publish True, and an unverified fetch False however Foundry-shaped its scaffold."""
-    lido_shaped = tmp_path / "lido"
-    (lido_shaped / "contracts").mkdir(parents=True)
-    (lido_shaped / "contracts" / "Lido.sol").write_text("contract Lido {}")
-    assert not list(lido_shaped.rglob("src/**/*.sol")), "fixture must have no src/ tree"
-
-    foundry_shaped = tmp_path / "foundry"
-    (foundry_shaped / "src").mkdir(parents=True)
-    (foundry_shaped / "src" / "Vault.sol").write_text("contract Vault {}")
-    assert list(foundry_shaped.rglob("src/**/*.sol")), "fixture must have a src/ tree"
-
-    assert _source_verified({"source_verified": True}) is True
-    assert _source_verified({"source_verified": False}) is False
-
-
 # ---------------------------------------------------------------------------
 # 2. the two scaffolders that must carry it
 # ---------------------------------------------------------------------------

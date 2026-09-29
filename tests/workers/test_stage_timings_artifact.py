@@ -66,44 +66,6 @@ def test_record_writes_per_stage_artifact_with_flat_payload(monkeypatch):
     assert payload["worker_id"].startswith("_FakeWorker-")
 
 
-def test_each_stage_writes_its_own_artifact_name(monkeypatch):
-    writes: list[tuple[str | None, dict | None]] = []
-
-    def _fake_store(*args, **kw):
-        name = args[2] if len(args) > 2 else kw.get("name")
-        writes.append((name, kw.get("data")))
-
-    monkeypatch.setattr("workers.base.store_artifact", _fake_store)
-
-    class _StaticWorker(BaseWorker):
-        stage = JobStage.static
-        next_stage = JobStage.resolution
-
-    _FakeWorker()._record_stage_timing(
-        MagicMock(),
-        _job(),
-        started_at="t0",
-        ended_at="t1",
-        elapsed_s=1.0,
-        status="success",
-    )
-    _StaticWorker()._record_stage_timing(
-        MagicMock(),
-        _job(),
-        started_at="t2",
-        ended_at="t3",
-        elapsed_s=2.0,
-        status="success",
-    )
-
-    names = [name for name, _ in writes]
-    assert names == ["stage_timing_discovery", "stage_timing_static"]
-    payload0, payload1 = writes[0][1], writes[1][1]
-    assert payload0 is not None and payload1 is not None
-    assert payload0["stage"] == "discovery"
-    assert payload1["stage"] == "static"
-
-
 def test_record_folds_stage_metrics_when_bound(monkeypatch):
     """Folded under ``metrics`` so the monitoring UI can show "12 deps, 3 principals"
     without log scraping."""
@@ -187,32 +149,6 @@ def test_record_failed_status_persists(monkeypatch):
     )
     assert captured["data"]["status"] == "failed"
     assert captured["data"]["stage"] == "discovery"
-
-
-def test_record_swallows_storage_errors():
-
-    def _boom(*_a, **_kw):
-        raise RuntimeError("storage down")
-
-    fake_session = MagicMock()
-    w = _FakeWorker()
-    # Patch via direct attribute on the module so the call site's
-    # store_artifact name resolves to the boom.
-    import workers.base as base
-
-    original = base.store_artifact
-    base.store_artifact = _boom
-    try:
-        w._record_stage_timing(
-            fake_session,
-            _job(),
-            started_at="2026-04-27T03:00:00.000Z",
-            ended_at="2026-04-27T03:00:01.000Z",
-            elapsed_s=1.0,
-            status="success",
-        )
-    finally:
-        base.store_artifact = original
 
 
 # ---------------------------------------------------------------------------

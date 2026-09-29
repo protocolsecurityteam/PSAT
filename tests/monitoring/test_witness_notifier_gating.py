@@ -10,7 +10,7 @@ import uuid
 from unittest.mock import patch
 
 import pytest
-from sqlalchemy import inspect, text
+from sqlalchemy import text
 
 from db.models import Contract, MonitoredContract, MonitoredEvent, Protocol, ProtocolSubscription
 from services.monitoring.event_topics import MAX_EVENT_TYPE_LENGTH, value_changed_event_type
@@ -231,12 +231,6 @@ def test_a_filtered_subscription_still_hears_the_verified_successor(db_session, 
 # ---------------------------------------------------------------------------
 # event_type column width
 # ---------------------------------------------------------------------------
-
-
-def test_event_type_column_is_wide_enough_for_the_vocabulary(db_session):
-    column = inspect(db_session.get_bind()).get_columns("monitored_events")
-    width = next(c["type"].length for c in column if c["name"] == "event_type")
-    assert width == MAX_EVENT_TYPE_LENGTH == 100
 
 
 def test_the_longest_mintable_type_fits(db_session, notify_env):

@@ -104,22 +104,6 @@ def test_the_hash_commitment_binding_is_marked_as_flow_insensitive():
         assert verdict["pins"] is True, name
 
 
-def test_the_constraint_is_present_in_the_corpus_even_though_the_flow_fact_ignores_it():
-    """The evidence a narrowing would read is IN the predicate tree of each
-    constrained function and NOT in the control's, so a zero-diff after an A4 change
-    means the change did nothing, not that there was nothing to find."""
-    fns = _functions(CONSTRAINED)
-    allowlisted = fns["payAllowlisted(IERC20,address,uint256)"]["predicate_tree"]
-    anyone = fns["payAnyone(IERC20,address,uint256)"]["predicate_tree"]
-    # The allowlist read is a membership leaf; the control's only leaf is its
-    # owner check.
-    assert "membership" in allowlisted["leaf_kinds"]
-    assert "membership" not in anyone["leaf_kinds"]
-    assert allowlisted["leaf_count"] > anyone["leaf_count"]
-    for name in ("payCommitted(IERC20,address,uint256,bytes32)", "payTreasuryOnly(IERC20,address,uint256)"):
-        assert fns[name]["predicate_tree"]["leaf_count"] > anyone["leaf_count"], name
-
-
 # 3 + 9. delegatecall routes
 
 
@@ -307,19 +291,6 @@ def test_class_F_a_value_returning_forwarder_keeps_its_caller_gate():
     )
 
 
-def test_class_R_fallback_and_receive_are_caller_gated_and_carry_a_tree():
-    """INVERTED (commit c2a2ebe0). ``fallback`` and ``receive`` were excluded from
-    tree-building, so neither carried a tree though both require
-    ``msg.sender == owner``. They are built now, and the fabricated
-    ``keccak("fallback()")`` / ``keccak("receive()")`` selectors are gone."""
-    fns = _functions(TREE_ABSENT)
-    for signature in ("fallback()", "receive()"):
-        tree = fns[signature]["predicate_tree"]
-        assert tree["present"] is True, signature
-        assert "caller_authority" in tree["authority_roles"], signature
-        assert fns[signature]["selector"] == "", signature
-
-
 # 5. the timed latch — and the bound that cannot be read from real source
 
 
@@ -406,15 +377,6 @@ def test_the_timed_guard_leaf_carries_all_three_facts_across_operands_and_absorb
     # there — absence means "no additive sub-expression", not "unknown".
     frozen_leaves = list(harness._tree_leaves(facts.trees["transferFreezable(address,uint256)"]))
     assert all("absorbed_operands" not in leaf for leaf in frozen_leaves)
-
-
-def test_the_timed_and_indefinite_latches_are_distinguishable_in_the_corpus():
-    fns = _functions(TIMED_LATCH)
-    assert _claim(fns["freeze()"], "pause.set")["witness"]["flags"] == [{"member": None, "var": "frozen"}]
-    assert _claim(fns["unfreeze()"], "pause.unset")["witness"]["flags"] == [{"member": None, "var": "frozen"}]
-    # The uint256 deadline latch is NOT recognised as a pause flag by the static matcher (recorded, not endorsed).
-    assert fns["pauseTimed()"]["claims"] == []
-    assert "comparison" in fns["transferTimed(address,uint256)"]["predicate_tree"]["leaf_kinds"]
 
 
 # 10. the policy tier

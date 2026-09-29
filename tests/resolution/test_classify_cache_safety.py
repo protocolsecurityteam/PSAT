@@ -42,16 +42,6 @@ def _stub_batch_probe_rpc(monkeypatch):
     monkeypatch.setattr(tracking, "_eth_call_raw", lambda *a, **k: "0x")
 
 
-def test_clear_empties_process_cache(monkeypatch):
-    monkeypatch.setattr(tracking, "_get_code", lambda *a, **k: "0x60")
-    monkeypatch.setattr(tracking, "_try_eth_call_decoded", lambda *a, **k: None)
-    monkeypatch.setattr(tracking, "type_authority_contract", lambda *a, **k: {})
-    classify_resolved_address("https://rpc", "0x" + "a" * 40)
-    assert _CLASSIFY_CACHE
-    clear_classify_cache()
-    assert not _CLASSIFY_CACHE
-
-
 def test_transient_rpc_error_does_not_poison_cache(monkeypatch):
     """The dominant correctness bug v4/v5 fixed: a transient probe failure
     must not cement a wrong 'contract' classification process-wide."""

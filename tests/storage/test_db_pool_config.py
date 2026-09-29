@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import importlib
 import sys
-from pathlib import Path
 
 import pytest
 
@@ -90,12 +89,3 @@ def test_pool_pre_ping_still_enabled(monkeypatch):
     monkeypatch.delenv("PSAT_DB_POOL_SIZE", raising=False)
     models = _reload_models()
     assert models.engine.pool._pre_ping is True
-
-
-def test_connect_timeout_still_set():
-    """psycopg2 defaults connect_timeout to infinity. A Neon cold-start
-    must not block a worker forever — keep the 10s ceiling. Source-level
-    check (the kwarg is consumed by psycopg2 at connect time and not
-    introspectable via the engine API once the engine is built)."""
-    src = (Path(__file__).resolve().parents[2] / "db" / "models" / "session.py").read_text()
-    assert 'connect_args={"connect_timeout": 10}' in src

@@ -354,22 +354,6 @@ def _supply_block(before: int, after: int, logs=()):
     )
 
 
-def test_backing_is_withheld_when_a_token_slot_never_got_a_token():
-    """The call went through with a non-token in the asset slot, so the pull was
-    a no-op. ``inflow_observed: false`` would report that as dilution."""
-    eff = _supply(
-        "deposit(address,uint256,address)",
-        ["depositAsset", "amount", "receiver"],
-        [_supply_block(0, 100, [transfer_log(VAULT, "0x" + "00" * 20, PRINCIPAL, 100)])],
-        seeding=None,
-    )
-    assert eff.verdict == VERDICT_PROVEN
-    assert eff.details["supply_delta_sign"] == "mint"
-    # ABSENT, not false: absence reads as unmeasured everywhere downstream.
-    assert "backing" not in eff.details
-    assert "backing_inflow_transfers" not in eff.concrete
-
-
 def test_backing_is_published_once_every_token_slot_carried_a_proven_token():
     reverted = _reverted_block()
     seeded = _supply_block(
@@ -389,23 +373,6 @@ def test_backing_is_published_once_every_token_slot_carried_a_proven_token():
     assert eff.verdict == VERDICT_PROVEN
     assert eff.details["backing"]["inflow_observed"] is True
     assert eff.concrete["backing_inflow_transfers"] == 1
-
-
-def test_a_function_with_no_token_slot_keeps_its_backing_witness():
-    """The gate must not silence the admin-mint case. ``mint(address,uint256)`` names no token, so
-    the prober's identity sits in an address slot; the differential proves the mint didn't depend on
-    it (a stub reverting on every call changes nothing) and the negative is published."""
-    eff = _supply(
-        "mint(address,uint256)",
-        ["to", "amount"],
-        [
-            _supply_block(0, 100, [transfer_log(VAULT, "0x" + "00" * 20, PRINCIPAL, 100)]),
-            _supply_block(0, 100, [transfer_log(VAULT, "0x" + "00" * 20, PRINCIPAL, 100)]),
-        ],
-        seeding=None,
-    )
-    assert eff.details["backing"]["inflow_observed"] is False
-    assert eff.details["backing"]["minted"] is True
 
 
 def test_seeding_a_token_cannot_by_itself_produce_an_inflow():

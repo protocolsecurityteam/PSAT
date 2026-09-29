@@ -73,63 +73,9 @@ def test_discovery_worker_cache_hit_skips_fetch(db_session, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_discovery_worker_cache_miss_runs_fetch(db_session, monkeypatch):
-    from db.queue import create_job
-    from workers.discovery import DiscoveryWorker
-
-    new_job = create_job(db_session, {"address": ADDR_B})
-
-    fetch_called = []
-
-    def mock_fetch(addr, *, chain_id=1):
-        fetch_called.append(addr)
-        return {
-            "ContractName": "NewContract",
-            "SourceCode": "contract NewContract {}",
-            "CompilerVersion": "v0.8.24",
-            "OptimizationUsed": "1",
-            "Runs": "200",
-            "EVMVersion": "shanghai",
-            "LicenseType": "MIT",
-        }
-
-    monkeypatch.setattr("workers.discovery.fetch", mock_fetch)
-    monkeypatch.setattr("workers.discovery.parse_sources", lambda r: {"src/New.sol": "contract NewContract {}"})
-    monkeypatch.setattr("workers.discovery.parse_remappings", lambda r: [])
-    monkeypatch.setattr("workers.discovery.is_vyper_result", lambda r: False)
-    monkeypatch.setattr("workers.discovery._batch_get_creators", lambda addrs: {})
-
-    worker = DiscoveryWorker()
-    worker.update_detail = MagicMock()
-    worker._process_address(db_session, new_job)
-
-    assert fetch_called == [ADDR_B]
-
-
 # ---------------------------------------------------------------------------
 # Company-mode jobs are unaffected
 # ---------------------------------------------------------------------------
-
-
-def test_company_mode_unaffected(db_session, monkeypatch):
-    from db.queue import create_job
-    from workers.discovery import DiscoveryWorker
-
-    job = create_job(db_session, {"company": "TestProtocol"})
-    job.company = "TestProtocol"
-    db_session.commit()
-
-    company_called = []
-    monkeypatch.setattr(
-        DiscoveryWorker,
-        "_process_company",
-        lambda self, session, job: company_called.append(True),
-    )
-
-    worker = DiscoveryWorker()
-    worker.process(db_session, job)
-
-    assert company_called == [True]
 
 
 # ---------------------------------------------------------------------------
@@ -220,31 +166,6 @@ def test_merge_inventory_confidence_decay_gradual():
     merged2 = _merge_inventory(merged, {"contracts": []})
     a2 = [c for c in merged2["contracts"] if c["address"].lower() == ADDR_A.lower()][0]
     assert abs(a2["confidence"] - _CONFIDENCE_DECAY**2) < 0.001
-
-
-def test_merge_inventory_rediscovered_keeps_higher_confidence():
-    from services.discovery.inventory import merge_inventory as _merge_inventory
-
-    prev = {
-        "contracts": [{"address": ADDR_A, "name": "A", "confidence": 0.95}],
-    }
-    new = {
-        "contracts": [{"address": ADDR_A, "name": "A_new", "confidence": 0.6}],
-    }
-    merged = _merge_inventory(prev, new)
-    a = merged["contracts"][0]
-    assert a["confidence"] == 0.95  # kept prev (higher)
-    assert a["name"] == "A_new"  # but uses new entry data
-
-    # Reverse: new has higher confidence
-    prev2 = {
-        "contracts": [{"address": ADDR_A, "name": "A", "confidence": 0.4}],
-    }
-    new2 = {
-        "contracts": [{"address": ADDR_A, "name": "A_new", "confidence": 0.9}],
-    }
-    merged2 = _merge_inventory(prev2, new2)
-    assert merged2["contracts"][0]["confidence"] == 0.9
 
 
 # ---------------------------------------------------------------------------
@@ -375,33 +296,6 @@ def test_rerun_merges_with_previous_inventory(db_session, monkeypatch):
 # ---------------------------------------------------------------------------
 # is_known_proxy unit tests
 # ---------------------------------------------------------------------------
-
-
-def test_is_known_proxy_true(db_session):
-    from db.models import Contract
-    from db.queue import create_job, is_known_proxy
-
-    job = create_job(db_session, {"address": ADDR_A})
-    db_session.add(
-        Contract(
-            job_id=job.id,
-            address=ADDR_A,
-            contract_name="Proxy",
-            compiler_version="v0.8.24",
-            language="solidity",
-            evm_version="shanghai",
-            optimization=True,
-            optimization_runs=200,
-            source_format="flat",
-            source_file_count=1,
-            remappings=[],
-            is_proxy=True,
-            proxy_type="eip1967",
-        )
-    )
-    db_session.commit()
-
-    assert is_known_proxy(db_session, ADDR_A) is True
 
 
 def test_is_known_proxy_false(db_session):

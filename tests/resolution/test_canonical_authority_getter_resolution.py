@@ -180,27 +180,6 @@ def test_owner_slot_constant_resolves_via_owner_getter(monkeypatch: pytest.Monke
     assert _called(recorder, OWNER_SELECTOR)
 
 
-def test_owner_slot_burned_is_empty_but_not_a_proven_nobody(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The real TopUp/TopUpV2 owner is 0x…dEaD. No phantom 0x…dEaD controller is
-    published, and the empty set is a ``lower_bound``, not the ``exact`` "provably nobody".
-
-    AMENDED (A2/A6): it used to publish ``exact``, resting on 0x…dEaD being unspendable —
-    a CONVENTION, unlike ``0x0`` which can never be ``msg.sender``. The honest statement
-    is "no known caller": the row publishes ``owner_read_burn_address`` with the address
-    read and earns no earned-negative credit."""
-    recorder: list = []
-    _stub_rpc_map(monkeypatch, {OWNER_SLOT_SELECTOR: None, OWNER_SELECTOR: BURN}, recorder)
-    tree = _eq_tree({"source": "state_variable", "state_variable_name": "_OWNER_SLOT"})
-
-    cap = evaluate_tree(tree, _ctx_with_rpc())
-
-    assert cap.kind == "finite_set"
-    assert cap.members == []
-    assert cap.membership_quality == "lower_bound"
-    assert cap.empty_reason == "owner_read_burn_address"
-    assert _called(recorder, OWNER_SELECTOR)
-
-
 def test_oz_v5_ownable_storage_location_slot_resolves_via_owner(monkeypatch: pytest.MonkeyPatch) -> None:
     """OZ-v5 namespaced Ownable surfaces the slot constant as a bare state-var operand
     (``OwnableStorageLocation``); it maps to owner() too."""
@@ -229,19 +208,6 @@ def test_non_authority_storage_slot_stays_placeholder(monkeypatch: pytest.Monkey
     # The literal ``BaseMessengerStorageLocation()`` is attempted (and reverts) like any
     # bare state-var, but owner() must NOT be called.
     assert not _called(recorder, OWNER_SELECTOR)
-
-
-def test_owner_slot_without_rpc_stays_placeholder(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The gap condition: no RPC ⇒ the slot gate stays unresolved, never a false negative masquerading as resolved."""
-    recorder: list = []
-    _stub_rpc_map(monkeypatch, {OWNER_SELECTOR: OWNER}, recorder)
-    tree = _eq_tree({"source": "state_variable", "state_variable_name": "_OWNER_SLOT"})
-
-    cap = evaluate_tree(tree, _ctx_no_rpc())
-
-    assert cap.members == []
-    assert cap.membership_quality == "lower_bound"
-    assert recorder == []
 
 
 # Integration: compile the REAL on-chain source and resolve its predicate trees

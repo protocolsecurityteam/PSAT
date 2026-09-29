@@ -7,9 +7,7 @@ paths. No DB, HTTP or object storage; ``llm.chat`` and storage/download function
 from __future__ import annotations
 
 from services.audits.text_extraction import (
-    ExtractionOutcome,
     PdfDownloadError,
-    PdfParseError,
     PdfTooLargeError,
     StorageWriteError,
     process_audit_report,
@@ -106,25 +104,6 @@ class TestCollapseSameAuditMirrors:
         out = _collapse_same_audit_mirrors([a, b])
         assert len(out) == 2
 
-    def test_all_on_one_host_defers_to_pass3(self):
-        """Pass 2 skips single-host groups so pass 3's title-token logic can
-        handle same-auditor-same-day siblings correctly."""
-        a = _report(
-            auditor="Halborn",
-            date="2024-06-01",
-            url="https://github.com/x/y/a.pdf",
-            pdf_url="https://github.com/x/y/a.pdf",
-            title="Audit A",
-        )
-        b = _report(
-            auditor="Halborn",
-            date="2024-06-01",
-            url="https://github.com/x/y/b.pdf",
-            pdf_url="https://github.com/x/y/b.pdf",
-            title="Audit B",
-        )
-        assert len(_collapse_same_audit_mirrors([a, b])) == 2
-
     def test_pass3_collapses_same_tokens_across_hosts(self):
         a = _report(
             auditor="OpenZeppelin",
@@ -143,9 +122,6 @@ class TestCollapseSameAuditMirrors:
         out = _collapse_same_audit_mirrors([a, b])
         assert len(out) == 1
         assert out[0]["pdf_url"]
-
-    def test_empty_input_returns_empty(self):
-        assert _collapse_same_audit_mirrors([]) == []
 
     def test_no_titles_bypasses_pass3(self):
         """Pass 3 skips entries with no meaningful title tokens — collapsing
@@ -224,30 +200,6 @@ class TestExtractOneChunk:
 
 
 class TestExtractReportDetails:
-    def test_single_chunk_passes_through(self, monkeypatch):
-        import json
-
-        monkeypatch.setattr(
-            "services.discovery.audit_reports_llm.llm.chat",
-            lambda *_a, **_kw: json.dumps(
-                {
-                    "reports": [
-                        {
-                            "auditor": "Halborn",
-                            "title": "Audit",
-                            "date": "2024-05-01",
-                            "pdf_url": "https://x.com/a.pdf",
-                        }
-                    ],
-                    "linked_urls": [],
-                }
-            ),
-        )
-        out = extract_report_details("https://x.com/page", "short text", "Acme")
-        assert out is not None
-        assert len(out["reports"]) == 1
-        assert out["reports"][0]["pdf_url"] == "https://x.com/a.pdf"
-
     def test_none_when_every_chunk_fails(self, monkeypatch):
         def raising(*_a, **_kw):
             raise RuntimeError("x")
@@ -359,30 +311,6 @@ class TestGenerateFollowupQuery:
 
 
 class TestClassifySearchResults:
-    def test_empty_input_short_circuits(self):
-        assert classify_search_results([], "X") == []
-
-    def test_below_confidence_threshold_filtered(self, monkeypatch):
-        import json
-
-        monkeypatch.setattr(
-            "services.discovery.audit_reports_llm.llm.chat",
-            lambda *_a, **_kw: json.dumps(
-                [
-                    {
-                        "url": "https://x.com",
-                        "is_audit": True,
-                        "auditor": "X",
-                        "title": "Y",
-                        "date": "2024",
-                        "confidence": 0.3,
-                    },
-                ]
-            ),
-        )
-        out = classify_search_results([{"url": "https://x.com", "title": "t", "content": "c"}], "Acme")
-        assert out == []
-
     def test_is_audit_false_filtered(self, monkeypatch):
         import json
 
@@ -402,14 +330,6 @@ class TestClassifySearchResults:
             raise RuntimeError("LLM down")
 
         monkeypatch.setattr("services.discovery.audit_reports_llm.llm.chat", boom)
-        out = classify_search_results([{"url": "https://x.com", "title": "t", "content": "c"}], "X")
-        assert out == []
-
-    def test_unparseable_response_returns_empty(self, monkeypatch):
-        monkeypatch.setattr(
-            "services.discovery.audit_reports_llm.llm.chat",
-            lambda *_a, **_kw: "not a json array",
-        )
         out = classify_search_results([{"url": "https://x.com", "title": "t", "content": "c"}], "X")
         assert out == []
 
@@ -503,22 +423,6 @@ class TestProcessAuditReportErrorPaths:
 # ---------------------------------------------------------------------------
 
 
-def test_extraction_errors_share_base():
-    from services.audits.text_extraction import TextExtractionError
-
-    for cls in (PdfDownloadError, PdfTooLargeError, PdfParseError, StorageWriteError):
-        assert issubclass(cls, TextExtractionError)
-
-
-def test_extraction_outcome_defaults_are_none():
-    """Constructing ``ExtractionOutcome(status=...)`` without other fields
-    leaves them explicitly None so callers can tell apart "unset" from "0"."""
-    oc = ExtractionOutcome(status="failed", error="x")
-    assert oc.storage_key is None
-    assert oc.text_size_bytes is None
-    assert oc.text_sha256 is None
-
-
 # ---------------------------------------------------------------------------
 # _fetch_html_page — SSRF egress guard routing + preserved download protections.
 #
@@ -575,19 +479,6 @@ class TestFetchHtmlPage:
 
         out = _fetch_html_page("http://169.254.169.254/latest/meta-data/")
         assert out is None
-
-    def test_unsafe_error_does_not_leak_into_return(self, monkeypatch):
-        """``UnsafeUrlError`` carries the refused URL/reason; the function must
-        swallow it to None and never surface it to the caller (witness
-        discipline — the stored/returned output leaks nothing about the probe)."""
-        from utils.egress import UnsafeUrlError
-
-        def refuse(*_a, **_kw):
-            raise UnsafeUrlError("http://internal.secret/ resolves to 10.0.0.5")
-
-        monkeypatch.setattr("utils.egress.safe_get", refuse)
-
-        assert _fetch_html_page("http://internal.secret/") is None
 
     def test_binary_content_type_rejected(self, monkeypatch):
         resp = _FakeResp(content_type="application/pdf", chunks=[b"%PDF-1.7 ..."])

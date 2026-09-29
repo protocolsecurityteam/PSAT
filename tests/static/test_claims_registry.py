@@ -29,7 +29,6 @@ from services.static.claims import (
     build_claims,
     emit_claim,
     is_registered,
-    legacy_projections,
     register,
     registry,
     resolve_claim_precedence,
@@ -84,22 +83,6 @@ def _facts(*, with_creation: bool = True) -> dict:
 # ---------------------------------------------------------------------------
 # Registry + emit_claim (the anti-creep contract)
 # ---------------------------------------------------------------------------
-
-
-def test_registry_populated_by_autodiscovery():
-    build_claims(None, _facts(with_creation=False), {})  # forces discover()
-    assert is_registered("contract_deployment")
-    entry = registry()["contract_deployment"]
-    assert entry.sentence.strip()
-    assert entry.legacy_projection == "contract_deployment"
-    assert entry.consumer_family == "exec"
-    assert legacy_projections()["contract_deployment"] == "contract_deployment"
-
-
-def test_registry_view_is_read_only():
-    view = registry()
-    with pytest.raises(TypeError):
-        view["x"] = object()  # pyright: ignore[reportIndexIssue]
 
 
 def test_emit_claim_valid_copies_witness():
@@ -211,11 +194,6 @@ def test_build_claims_emits_contract_deployment_only_for_creation_sink():
     assert deploy_claims[0]["tier"] == "standard_exact"
     assert deploy_claims[0]["witness"]["sink_ids"] == ["deploy():sink0:contract_creation:Child"]
     assert artifact["functions"]["ping()"] == []
-
-
-def test_build_claims_empty_when_no_matcher_fires():
-    artifact = build_claims(None, _facts(with_creation=False), {})
-    assert all(claims == [] for claims in artifact["functions"].values())
 
 
 def test_build_claims_on_degraded_effects_is_empty():

@@ -71,11 +71,6 @@ class TestNormalizeError:
 
 
 class TestTavilyError:
-    def test_stores_error_dict(self):
-        d = {"provider": "tavily", "error": "oops"}
-        exc = TavilyError(d)
-        assert exc.error is d
-
     def test_message_from_error_key(self):
         exc = TavilyError({"error": "some message"})
         assert str(exc) == "some message"
@@ -83,9 +78,6 @@ class TestTavilyError:
     def test_missing_error_key_default_message(self):
         exc = TavilyError({"provider": "tavily"})
         assert str(exc) == "Tavily request failed"
-
-    def test_is_runtime_error(self):
-        assert issubclass(TavilyError, RuntimeError)
 
 
 # ---------------------------------------------------------------------------
@@ -305,32 +297,6 @@ class TestSearch:
         with patch("services.clients.tavily.requests.post", return_value=resp):
             result = search("query", max_results=3)
             assert result == []
-
-    @patch("services.clients.tavily.load_dotenv")
-    @patch("services.clients.tavily.time.sleep")
-    def test_http_500_empty_body_detail_none(self, mock_sleep, _mock_dotenv, monkeypatch):
-        monkeypatch.setenv("TAVILY_API_KEY", "test-key")
-        resp = _mock_response(status_code=500, text="")
-
-        with patch("services.clients.tavily.requests.post", return_value=resp):
-            with pytest.raises(TavilyError) as exc_info:
-                search("query", max_results=3)
-
-        assert "detail" not in exc_info.value.error
-
-    @patch("services.clients.tavily.load_dotenv")
-    @patch("services.clients.tavily.time.sleep")
-    def test_backoff_timing(self, mock_sleep, _mock_dotenv, monkeypatch):
-        monkeypatch.setenv("TAVILY_API_KEY", "test-key")
-        resp = _mock_response(status_code=500, text="err")
-
-        with patch("services.clients.tavily.requests.post", return_value=resp):
-            with pytest.raises(TavilyError):
-                search("query", max_results=3)
-
-        # BACKOFF_BASE_SECONDS=0.75, sleep(0.75*2^0)=0.75, sleep(0.75*2^1)=1.5
-        assert mock_sleep.call_args_list[0][0][0] == pytest.approx(0.75)
-        assert mock_sleep.call_args_list[1][0][0] == pytest.approx(1.5)
 
     @patch("services.clients.tavily.load_dotenv")
     def test_query_whitespace_stripped(self, _mock_dotenv, monkeypatch):

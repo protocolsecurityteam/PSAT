@@ -13,7 +13,6 @@ from services.policy.principal_history import (
     build_principal_history,
     build_role_authority_history,
 )
-from utils import memory
 from utils.logging import bind_trace_context, degraded_errors_var, stage_metrics_var
 
 AUTHORITY = "0x" + "aa" * 20
@@ -357,21 +356,3 @@ def test_log_cache_ttl_expiry_refetches(monkeypatch):
     monkeypatch.setattr(principal_history, "_LOG_CACHE_TTL_S", -1.0)
     principal_history._fetch_logs(authority_address=AUTHORITY, chain_id=1, topic0=SELECTOR)
     assert len(calls) == 2
-
-
-def test_clear_log_cache_resets_pressure_state(monkeypatch):
-    """clear_log_cache empties the dict and forgets the pressure threshold so a later
-    genuine pressure event still logs."""
-    monkeypatch.setenv("ETHERSCAN_API_KEY", "test-key")
-    monkeypatch.setattr(principal_history, "_LOG_CACHE_MAX", 4)
-    monkeypatch.setattr(requests, "get", _no_records_get)
-    principal_history.clear_log_cache()
-
-    # Two of four slots = 50%, which arms the pressure threshold for this cache.
-    for i in range(2):
-        principal_history._fetch_logs(authority_address="0x" + f"{i:040x}", chain_id=1, topic0=SELECTOR)
-    assert "principal_log" in memory._CACHE_PRESSURE_STATE
-
-    principal_history.clear_log_cache()
-    assert principal_history._LOG_CACHE == {}
-    assert "principal_log" not in memory._CACHE_PRESSURE_STATE

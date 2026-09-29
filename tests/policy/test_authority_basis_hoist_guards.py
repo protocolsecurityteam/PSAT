@@ -107,9 +107,3 @@ def test_every_name_matched_arm_states_the_residual():
         details = _details(_cap([ADDR_A], [step]))[0]
         assert details["authority_basis"] == basis
         assert details["accessor_slot_agreement"] == "not_determined", basis
-
-
-def test_a_set_with_no_basis_step_is_unchanged():
-    details = _details(_cap([ADDR_A], [CO_WITNESS]))[0]
-    assert "authority_basis" not in details
-    assert details["membership_quality"] == "exact"

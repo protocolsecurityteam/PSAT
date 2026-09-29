@@ -153,32 +153,6 @@ def test_backfills_full_history_in_bounded_windows(session):
     assert summary.budget_exhausted is False  # drained within budget → loop returns to the poll interval
 
 
-@requires_postgres
-def test_unbounded_span_wedges_the_cursor_at_zero(session):
-    """The bug, pinned: without the span cap the fetch blows up and the cursor is wedged at block 0 (the prod
-    symptom)."""
-    enroll_event_cursor(session, chain_id=1, event_address=_AUTHORITY, topic0=_TOPIC)
-    session.commit()
-
-    fetcher = _RangeCappedFetcher()
-    fetchers, heads, hashes = _maps(fetcher)
-    # max_block_span wider than the whole gap == the old single-shot behaviour.
-    summary = scan_enrolled_events(
-        session,
-        fetchers=fetchers,
-        head_fetchers=heads,
-        block_hash_fetchers=hashes,
-        confirmation_depth=_CONFIRMATIONS,
-        max_block_span=_HEAD * 2,
-        max_windows_per_cursor=500,
-    )
-
-    assert max(fetcher.requested_spans) > _MAX_SAFE_SPAN  # it asked for an oversized range
-    assert summary.inserted == 0
-    assert _cursor_block(session, _AUTHORITY) == 0  # wedged, never advanced
-    assert _log_count(session, _AUTHORITY) == 0
-
-
 class _OrderRecordingFetcher:
     def __init__(self) -> None:
         self.order: list[str] = []

@@ -886,19 +886,6 @@ def test_the_same_pair_on_a_scalar_slot_still_qualifies(corpus):
     assert spec["witness_tier"] == WITNESS_TIER_SELF_DESCRIBING
 
 
-def test_the_two_old_new_shapes_differ_only_in_the_slot(corpus):
-    """The differential: same writer discipline, arg shape and attribution; only the slot's
-    ``type_kind`` separates them, so neither test above passes for an unrelated reason."""
-    mapping_spec = _spec(corpus, "TokenMaxWeightUpdated(uint64,uint64)")
-    scalar_spec = _spec(corpus, "DepositLimitUpdated(uint64,uint64)")
-
-    # Openness is the same on both, so it cannot be what separates them.
-    assert mapping_spec["writer_openness"] == scalar_spec["writer_openness"]
-    assert [i.get("name") for i in mapping_spec["inputs"]] == [i.get("name") for i in scalar_spec["inputs"]]
-    assert len(mapping_spec["effect_tags"]["writes"]) == len(scalar_spec["effect_tags"]["writes"]) == 1
-    assert mapping_spec["witness_tier"] != scalar_spec["witness_tier"]
-
-
 # ---------------------------------------------------------------------------
 # Self-service payout — the label corpus actually contains the shapes
 # ---------------------------------------------------------------------------

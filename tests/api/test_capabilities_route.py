@@ -143,20 +143,6 @@ def test_capabilities_block_query_param(api_client, db_session):
 
 
 @requires_postgres
-def test_capabilities_chain_id_query_param(api_client, db_session):
-    """``chain_id`` defaults to 1 (mainnet) but is overridable for
-    multi-chain contracts. The job pick is a hard filter on the requested
-    chain, so the seeded job lives on the queried chain (137)."""
-    address = "0x" + uuid.uuid4().hex[:8] + "e5" * 16
-    _seed_completed_job_with_artifact(
-        db_session, address=address, predicate_trees=_equality_leaf_artifact(), chain_id=137, chain="polygon"
-    )
-    resp = api_client.get(f"/api/contract/{address}/capabilities", params={"chain_id": 137})
-    assert resp.status_code == 200
-    assert resp.json()["chain_id"] == 137
-
-
-@requires_postgres
 def test_capabilities_explicit_chain_isolates_twin(api_client, db_session, monkeypatch):
     """An explicit ``chain_id`` scopes the job pick to that chain (inv. 12): a
     CREATE2 twin analyzed on two chains resolves against the job on the

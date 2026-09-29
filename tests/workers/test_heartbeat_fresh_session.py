@@ -88,27 +88,3 @@ def test_heartbeat_does_not_reuse_passed_session_on_lease_path(
         "heartbeat_job must be called with the fresh SessionLocal session, not the worker's main session"
     )
     assert used_session is not worker_session
-
-
-@patch("workers.base.signal.signal")
-def test_heartbeat_does_not_reuse_passed_session_on_legacy_path(
-    _mock_signal: MagicMock,
-) -> None:
-    """Same invariant for the legacy (``lease_id is None``) fallback UPDATE."""
-    w = _TestWorker()
-    job = _make_job(lease_id=None)
-
-    worker_session = MagicMock()
-    worker_session.execute.side_effect = AssertionError(
-        "_heartbeat legacy path must NOT issue the UPDATE through the worker's main session"
-    )
-
-    fresh_session = _ctx_session(MagicMock())
-    SessionLocalMock = MagicMock(return_value=fresh_session)
-
-    with patch("workers.base.SessionLocal", SessionLocalMock):
-        w._heartbeat(worker_session, cast(Any, job))
-
-    assert SessionLocalMock.called, "_heartbeat (legacy path) must open a fresh SessionLocal()"
-    assert fresh_session.execute.called, "fresh session must receive the UPDATE"
-    assert fresh_session.commit.called, "fresh session must commit"

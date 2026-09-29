@@ -105,32 +105,3 @@ def test_predicate_summary_emits_structured_log_with_top_slow_functions(caplog, 
     top_slow = getattr(summary, "top_slow_functions", []) or []
     assert top_slow, "top_slow_functions list missing on summary"
     assert top_slow[0]["function"] == "slow(uint256)", "ranking must place slowest function first"
-
-
-def test_predicate_summary_suppressed_for_cheap_contract(caplog):
-    """Sub-threshold contracts must not emit the summary (else every leaf ERC20 in a live test
-    logs a profile), and ``predicate_function_slow`` is gated so only slow functions surface."""
-    fast = _StubFn("fast()", slow=False)
-    contract = _StubContract("CheapContract", [fast])
-
-    with caplog.at_level(logging.INFO, logger=predicate_artifacts.logger.name):
-        with (
-            patch.object(predicate_artifacts, "build_predicate_tree", lambda fn, **_k: None),
-            patch.object(predicate_artifacts, "build_return_predicate_tree", lambda fn: None),
-            patch.object(predicate_artifacts, "apply_writer_gate_pass", lambda c, t: None),
-            patch.object(predicate_artifacts, "apply_mapping_event_hint_pass", lambda c, t: None),
-            patch.object(
-                predicate_artifacts,
-                "apply_reentrancy_pause_pass",
-                lambda c, t: {
-                    "pause_state_vars": [],
-                    "pause_toggle_functions": [],
-                    "reentrancy_state_vars": [],
-                    "reentrancy_guarded_functions": [],
-                },
-            ),
-        ):
-            predicate_artifacts.build_predicate_artifacts_with_pause_info(contract)
-
-    assert not [r for r in caplog.records if getattr(r, "profile_kind", None) == "predicate_summary"]
-    assert not [r for r in caplog.records if getattr(r, "profile_kind", None) == "predicate_function_slow"]

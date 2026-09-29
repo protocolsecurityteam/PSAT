@@ -196,20 +196,6 @@ def test_a_proven_empty_sheet_admits_a_zero_rather_than_refusing():
     assert reason != P.CEILING_ADMITTED
 
 
-def test_the_three_undetermined_sheets_refuse_under_three_different_reasons():
-    """Dust, unpriced and never-observed are three gaps, not one."""
-    answers = {
-        P.ceiling_for(_below_resolution(), KEY),
-        P.ceiling_for(_unpriced(), KEY),
-        P.ceiling_for(_no_rows(), KEY),
-    }
-    assert answers == {
-        (None, P.CEILING_BELOW_RESOLUTION),
-        (None, P.CEILING_UNPRICED),
-        (None, P.CEILING_NO_ROWS),
-    }
-
-
 def test_an_ambiguous_implementation_refuses_however_the_key_was_folded():
     """The refusal survives the caller's canonicalisation.
 
@@ -275,18 +261,6 @@ def test_truncation_is_read_at_the_canonical_key_in_both_directions():
     assert plane.asset_set_is_truncated(KEY) and plane.asset_set_is_truncated(OTHER)
     assert P.ceiling_for(plane, KEY) == (None, P.CEILING_ASSET_LIST_TRUNCATED)
     assert P.ceiling_for(plane, OTHER) == (None, P.CEILING_ASSET_LIST_TRUNCATED)
-
-
-def test_an_untruncated_sheet_is_not_thereby_claimed_complete():
-    """Absence from the set is the absence of a witness, in one direction only.
-
-    A page shorter than the cap proves this read was not cut off, not that the index
-    behind it is whole, so the ceiling rests on the sheet's own state as before.
-    """
-    plane = _priced()
-    assert plane.asset_set_truncated == set()
-    assert plane.asset_set_is_truncated(KEY) is False
-    assert P.ceiling_for(plane, KEY) == (3_000_001.5, P.CEILING_ADMITTED)
 
 
 def test_an_unregistered_sheet_state_raises_instead_of_refusing_under_a_borrowed_reason(

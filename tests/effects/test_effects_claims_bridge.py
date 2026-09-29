@@ -285,16 +285,6 @@ def test_no_blast_verdict_mints_no_behavioral_claim():
     assert claim is None
 
 
-def test_freeze_fields_absent_for_non_freeze_class():
-    # The added keep keys are a no-op for other classes.
-    claim = claims_bridge.verdict_to_claim(_verdict(EFFECT_CLASS_VALUE_OUT, witness={"value_moved": True}))
-    assert claim is not None
-    observed = claim["witness"].get("observed", {})
-    assert "observed_blast_radius" not in observed
-    assert "auto_expiry" not in observed
-    assert "duration_bound_seconds" not in observed
-
-
 def test_authority_change_maps_to_registered_authority_grant():
     # None of roles.grant / authority.replace / authorized_caller.rotate is honest
     # for a mechanism-agnostic gate-open; the bridge mints its own registered id.

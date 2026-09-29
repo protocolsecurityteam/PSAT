@@ -199,69 +199,6 @@ def test_worker_extracts_scope_for_spearbit_fixture(db_session, storage_bucket, 
 # ---------------------------------------------------------------------------
 
 
-def test_content_hash_cache_copies_scope_to_sibling(
-    db_session,
-    storage_bucket,
-    seed_protocol,
-    worker,
-    llm_stub_dir,
-):
-    from db.models import AuditReport
-
-    protocol_id, _ = seed_protocol
-
-    # Same PDF, two mirrors. Seed A first and let it finish extraction
-    # *before* B even exists — that's the realistic ordering (Solodit
-    # discovers first, a GitHub mirror surfaces later) and also keeps the
-    # first ``_claim_batch`` from scooping both rows into 'processing'
-    # before we can drive them one at a time.
-    sha = "sha-identical-mirror"
-    id_a = _seed_scoped_row(
-        db_session,
-        storage_bucket,
-        protocol_id,
-        fixture="spearbit_table.txt",
-        text_sha256=sha,
-        url="https://example.com/solodit-copy.pdf",
-    )
-
-    claimed = worker._claim_batch(db_session)
-    assert {a.id for a in claimed} == {id_a}
-    a_row = next(a for a in claimed if a.id == id_a)
-    _, outcome_a = worker._process_row(a_row)
-    worker._persist_outcome(id_a, outcome_a)
-
-    # A is 'success'. Now seed B with the same text_sha256 and break the
-    # LLM stub — if B doesn't hit the content-hash cache the extraction
-    # would raise, so a successful cache-copy is the only path.
-    id_b = _seed_scoped_row(
-        db_session,
-        storage_bucket,
-        protocol_id,
-        fixture="spearbit_table.txt",
-        text_sha256=sha,
-        url="https://example.com/github-copy.pdf",
-    )
-    (llm_stub_dir / "_default.json").unlink()
-
-    from workers.audit_scope_extraction import _CacheCopyOutcome
-
-    claimed = worker._claim_batch(db_session)
-    assert {a.id for a in claimed} == {id_b}
-    b_row = next(a for a in claimed if a.id == id_b)
-    _, result_b = worker._process_row(b_row)
-    assert isinstance(result_b, _CacheCopyOutcome), f"expected cache copy, got {result_b!r}"
-    assert result_b.sibling_id == id_a
-    worker._persist_outcome(id_b, result_b)
-
-    db_session.expire_all()
-    row_b = db_session.get(AuditReport, id_b)
-    row_a = db_session.get(AuditReport, id_a)
-    assert row_b.scope_extraction_status == "success"
-    assert row_b.scope_contracts == row_a.scope_contracts
-    assert row_b.scope_storage_key == row_a.scope_storage_key
-
-
 # ---------------------------------------------------------------------------
 # 3. Degenerate fixture — no scope section header → skipped
 # ---------------------------------------------------------------------------

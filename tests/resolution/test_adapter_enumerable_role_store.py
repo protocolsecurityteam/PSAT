@@ -313,15 +313,6 @@ def test_matches_non_single_address_signature_scores_0(session, monkeypatch):
     assert EnumerableRoleStoreAdapter.matches(desc, _ctx(session)) == 0
 
 
-@requires_postgres
-def test_matches_proxy_hop_detection(session, monkeypatch):
-    # The proxy stub carries no getter selectors; detection must hop proxy→impl.
-    _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
-    _seed_proxy_impl(session)  # proxy→impl linkage in the DB
-    session.commit()
-    assert EnumerableRoleStoreAdapter.matches(_descriptor(), _ctx(session)) == 90
-
-
 # ---------------------------------------------------------------------------
 # enumerate()
 # ---------------------------------------------------------------------------

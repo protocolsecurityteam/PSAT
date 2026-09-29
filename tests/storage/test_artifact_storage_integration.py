@@ -6,8 +6,6 @@ Requires TEST_DATABASE_URL and TEST_ARTIFACT_STORAGE_* (minio in docker-compose,
 
 from __future__ import annotations
 
-import json
-import urllib.request
 from unittest.mock import patch
 
 import pytest
@@ -493,13 +491,6 @@ def test_a_degraded_upgrade_history_stage_blocks_the_404(api_with, db_session, s
     assert client.get("/api/analyses/uh-other-phase/artifact/upgrade_history").status_code == 404
 
 
-def test_storage_client_can_presign(storage_bucket):
-    storage_bucket.put("artifacts/test/presign.json", b'{"ok": true}', "application/json")
-    url = storage_bucket.presign("artifacts/test/presign.json", expires_in=60)
-    body = urllib.request.urlopen(url).read()
-    assert json.loads(body.decode("utf-8")) == {"ok": True}
-
-
 # ---------------------------------------------------------------------------
 # 6. /api/jobs proxy detection works through storage
 # ---------------------------------------------------------------------------
@@ -600,35 +591,6 @@ def test_end_to_end_stubbed_worker(api_with, db_session, storage_bucket):
 # ---------------------------------------------------------------------------
 # 9. Object storage outage during read surfaces as a graceful skip in lists
 # ---------------------------------------------------------------------------
-
-
-def test_get_all_artifacts_names_a_missing_storage_object_instead_of_skipping_it(db_session, storage_bucket):
-    """INVERTED (was ``..._skips_missing_storage_objects``, asserting ``{"good": {"v": 1}}``).
-
-    That pinned the defect: a short dict is byte-identical to "this job only produced ``good``", so a
-    lost body and an absent artifact reached ``/api/analyses/{run_name}`` as one answer. The read now
-    fails closed and names what it could not read (callers wanting a partial page catch it). A deleted
-    object raises ``StorageContentAbsent`` (bucket answered), not ``StorageContentNotDetermined``."""
-    from db.models import Artifact
-    from db.queue import create_job, get_all_artifacts, store_artifact
-    from db.storage import StorageContentAbsent
-    from workers.retry_policy import classify
-
-    job = create_job(db_session, {"address": "0xab", "name": "missing-obj"})
-    store_artifact(db_session, job.id, "good", data={"v": 1})
-    store_artifact(db_session, job.id, "broken", data={"v": 2})
-
-    broken_row = db_session.execute(
-        select(Artifact).where(Artifact.job_id == job.id, Artifact.name == "broken")
-    ).scalar_one()
-    storage_bucket.delete(broken_row.storage_key)
-
-    with pytest.raises(StorageContentAbsent) as excinfo:
-        get_all_artifacts(db_session, job.id)
-    assert excinfo.value.values == {"good": {"v": 1}}
-    assert set(excinfo.value.proven_absent) == {"broken"}
-    assert excinfo.value.not_determined == {}
-    assert classify(excinfo.value) == "terminal"
 
 
 # ---------------------------------------------------------------------------

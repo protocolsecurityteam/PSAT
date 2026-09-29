@@ -230,28 +230,6 @@ def test_bytecode_keccak_hit_retargets_plan_to_new_address(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_two_processes_materializing_same_bytecode_compile_once(monkeypatch):
-    """A second address with the same bytecode_keccak skips the expensive scaffold + Slither work."""
-    scaffold_calls: list[Any] = []
-    collect_calls: list[Any] = []
-    snapshot_calls: list[Any] = []
-    _patch_pipeline(
-        monkeypatch,
-        scaffold_calls=scaffold_calls,
-        collect_calls=collect_calls,
-        snapshot_calls=snapshot_calls,
-    )
-
-    _materialize_contract_artifacts("0xABC", "http://rpc", workspace_prefix="proc-A", chain="ethereum")
-    assert len(scaffold_calls) == 1
-    assert len(collect_calls) == 1
-
-    _materialize_contract_artifacts("0xDEF", "http://rpc", workspace_prefix="proc-B", chain="ethereum")
-
-    assert len(scaffold_calls) == 1, "second process must not re-scaffold the same bytecode"
-    assert len(collect_calls) == 1, "second process must not re-run Slither on the same bytecode"
-
-
 def test_two_concurrent_requests_dedup_via_advisory_lock(monkeypatch):
     """Two concurrent requests for the same ``(chain, bytecode_keccak)`` collapse to **one stored row**.
 

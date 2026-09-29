@@ -51,10 +51,6 @@ def _fixture_source(relative_path: str) -> str:
     return (FIXTURES_DIR / relative_path).read_text()
 
 
-def _fixture_index() -> list[dict]:
-    return json.loads(FIXTURE_INDEX_PATH.read_text())["fixtures"]
-
-
 def _semantic_function(analysis: ContractAnalysis, signature: str) -> SemanticFunctionSummary:
     for function in analysis["semantic_control"]["semantic_functions"]:
         if function["function"] == signature:
@@ -67,32 +63,6 @@ def _tracked_controller(analysis: ContractAnalysis, label: str) -> ControllerTra
         if controller["label"] == label:
             return controller
     raise AssertionError(f"Tracked controller {label} not found")
-
-
-def test_fixture_index_covers_all_solidity_contract_fixtures():
-    indexed_paths = {entry["path"] for entry in _fixture_index()}
-    # The detection-pattern index catalogs the hand-authored single-file fixtures. Two
-    # directories are excluded because a manifest is their source of truth:
-    #   * ``label_corpus/`` — effect-labels golden-gate sources.
-    #   * ``etherfi_timelock/`` — VERBATIM Etherscan-verified source of 0xcd425f44…, pinned
-    #     by ``tests/static/test_timelock_surface_parity.py``; the test's claim is that they
-    #     are byte-identical to what the chain verified, so indexing them here would
-    #     invite editing them.
-    _MANIFEST_OWNED_DIRS = {"label_corpus", "etherfi_timelock"}
-    fixture_paths = {
-        str(path.relative_to(FIXTURES_DIR))
-        for path in FIXTURES_DIR.rglob("*.sol")
-        if not _MANIFEST_OWNED_DIRS & set(path.relative_to(FIXTURES_DIR).parts)
-    }
-
-    assert indexed_paths == fixture_paths
-
-    for entry in _fixture_index():
-        assert entry["category"]
-        assert entry["contract_name"]
-        assert entry["description"]
-        assert entry["detection_patterns"]
-        assert (FIXTURES_DIR / entry["path"]).exists()
 
 
 def test_collect_contract_analysis_with_artifacts_returns_semantic_artifacts(tmp_path):

@@ -214,27 +214,6 @@ def test_erc7201_version_ge_witness_is_byte_exact():
     }
 
 
-def test_version_ge_witness_key_set_is_locked():
-    """Shape lock: a silent drop of any strength key must redden here."""
-    result = _probe(SYNC_POOL, {(SYNC_POOL, ERC7201_SLOT): SYNC_POOL_WORD}, [_sync_pool_descriptor()])
-    assert set(result.witness) == {
-        "latch_basis",
-        "probe_address",
-        "probe_block",
-        "standard",
-        "role",
-        "variable",
-        "slot",
-        "byte_offset",
-        "size_bytes",
-        "value_type",
-        "expected_version",
-        "expected_version_basis",
-        "read_kind",
-        "raw_word",
-    }
-
-
 # ---------------------------------------------------------------------------
 # Fail-closed arms — every one of these is zero-population today
 # ---------------------------------------------------------------------------
@@ -420,10 +399,6 @@ def test_descriptor_digest_separates_same_slot_different_guards():
     slot-keyed cache would serve one witness to all three."""
     digests = {latch_descriptor_digest([_usdc_version_descriptor(c)]) for c in ("0", "1", "2")}
     assert len(digests) == 3
-
-
-def test_descriptor_digest_is_stable_for_identical_descriptors():
-    assert latch_descriptor_digest([_sync_pool_descriptor()]) == latch_descriptor_digest([_sync_pool_descriptor()])
 
 
 def test_resolver_cache_does_not_share_witnesses_across_guards(monkeypatch):

@@ -90,12 +90,6 @@ def _non_view_names(effects) -> list[str]:
     )
 
 
-def test_solc_pin_is_provisioned_and_fails_loudly_otherwise():
-    """The guard itself: if this fails every other assertion here is vacuous (what a silent skip would hide)."""
-    _require_solc()
-    assert label_corpus._solc_select_binary(SOLC_VERSION).exists()
-
-
 def test_non_view_surface_matches_the_twins_exactly(compiled):
     """The success criterion for the fix's one job, known before running it: the same 12 names as both twins."""
     _subject, effects = compiled

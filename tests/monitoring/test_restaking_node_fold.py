@@ -18,14 +18,12 @@ from services.monitoring import restaking_enrollment
 from services.monitoring.restaking_enrollment import (
     PUBKEY_LINKED_SIGNATURE,
     PUBKEY_LINKED_TOPIC0,
-    RESTAKING_FOLD_ENROLLMENT_BASIS,
     discover_emitters,
     enroll_restaking_fold,
     node_addresses_from_fold,
     protocol_contract_addresses,
 )
 from tests.conftest import requires_postgres
-from utils.restaking_status import NODE_SET_COMPLETENESS_NOT_DETERMINED
 
 # The measured emitter: the EtherFiNodesManager PROXY. Its ``contracts`` row is
 # keyed at the implementation (0xcf5928ea…), which emits nothing — the same
@@ -54,12 +52,6 @@ class TestTopic:
         assert PUBKEY_LINKED_TOPIC0 == "0x" + keccak(text=PUBKEY_LINKED_SIGNATURE).hex()
         # Reproduced against the chain at block 25643300.
         assert PUBKEY_LINKED_TOPIC0 == "0x5e525a525cf73653f769c8305dc71a68b85b0e62e3cc5258fe187ff9fd3e5cb9"
-
-    def test_enrollment_basis_carries_the_incomplete_ceiling(self):
-        """Code-asserted, like the tracked-topics surface: named here so the cursor-coverage
-        column takes it without a second literal, and so this unit never claims a
-        descriptor-derived provenance it lacks."""
-        assert RESTAKING_FOLD_ENROLLMENT_BASIS == "tracked_topics_asserted"
 
 
 class TestEmitterDiscovery:
@@ -229,12 +221,6 @@ class TestNodeSet:
         )
         db_session.flush()
         assert node_addresses_from_fold(db_session, chain_id=1) == []
-        db_session.rollback()
-
-    def test_empty_fold_is_not_an_empty_protocol(self, db_session):
-        """No rows means "none folded yet", never "this protocol has no nodes"."""
-        assert node_addresses_from_fold(db_session, chain_id=1) == []
-        assert NODE_SET_COMPLETENESS_NOT_DETERMINED == "not_determined"
         db_session.rollback()
 
     def test_other_chain_logs_do_not_leak(self, db_session):

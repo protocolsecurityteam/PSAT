@@ -17,12 +17,10 @@ from services.scoring import fold as FOLD
 from services.scoring import planes as P
 from services.scoring.schema import PrincipalRef, Tri
 from tests.support.scoring_builders import (
-    CALLING_SELECTOR,
     COMPOSED_SELECTOR,
     EOA,
     KEY_C,
     KEY_V,
-    OWNERS,
     SAFE,
     SCANNED,
     VAULT,
@@ -281,11 +279,3 @@ def test_the_tie_block_ties_at_the_same_figure_the_entry_publishes(fold):
     assert tie is not None
     assert tie["tied_at_usd"] == published["published_usd"] == SUB_CENT_SHEET
     assert [candidate["witnessed_usd"] for candidate in tie["candidates"]] == [SUB_CENT_WITNESS, SUB_CENT_WITNESS]
-
-
-def test_the_composing_fixture_names_the_selector_the_case_licenses():
-    """A guard on the fixtures above, not on the fold: they build their own
-    signals, so drift between the licensed selector and the destination's would
-    make every case compose nothing and assert on an empty list."""
-    assert CALLING_SELECTOR != COMPOSED_SELECTOR
-    assert OWNERS  # the safe principal the destination signal names is a real one

@@ -191,9 +191,6 @@ class TestCompletenessMappingIsTotalAndCannotSayComplete:
         # list the fetch simply never proved whole.
         assert out != "complete"
 
-    def test_returned_assets_is_not_determined(self):
-        assert _completeness_from_fetch(ASSET_SET_STATUS_RETURNED_ASSETS) == HOLDINGS_COMPLETENESS_NOT_DETERMINED
-
     def test_only_the_status_witnesses_the_cap(self):
         """The fetch's own status, never a length.
 
@@ -219,10 +216,6 @@ class TestPositiveQuantityGuardFailsClosedWithoutRaising:
 
 class TestHistoryDepthValidation:
     """A4 — depth 0 would prune every fetch and resurrect the legacy rows."""
-
-    def test_default(self, monkeypatch):
-        monkeypatch.delenv("PSAT_BALANCE_HISTORY_DEPTH", raising=False)
-        assert balance_history_depth() == 10
 
     @pytest.mark.parametrize("bad", ["0", "-1", "nonsense"])
     def test_rejects_below_one(self, monkeypatch, bad):

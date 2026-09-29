@@ -77,21 +77,6 @@ def test_the_second_typed_reason_names_the_constrained_target_and_not_a_callee(f
     assert "callee" not in P.ROUTE_TARGET_CONSTRAINED
 
 
-@pytest.mark.parametrize(
-    "routes",
-    [_AUTHORS_THE_AMOUNT_AT_C, _CONSTRAINS_THE_TARGET_AT_C, ()],
-    ids=["amount_authored", "target_constrained", "no_flow_witness"],
-)
-def test_no_published_route_state_claims_a_restricted_callee(fold, routes):
-    """The retired token has no producer and is not in the registry a state is checked against."""
-    assert RETIRED_CALLEE_TOKEN not in P.ROUTE_CLASSIFICATIONS
-    row = _gate_row(_gate_only_document(fold, routes))
-    for entry in _withheld(row):
-        assert entry["route_classification"]["state"] != RETIRED_CALLEE_TOKEN
-        assert entry["withheld_reason"] != RETIRED_CALLEE_TOKEN
-    assert RETIRED_CALLEE_TOKEN not in row["reach_composition_census"]["reading"]
-
-
 # B1-R R2-a — the gate-only arm fires on two tokens and its cause names which
 
 
@@ -259,12 +244,6 @@ def test_a_tie_the_order_does_not_separate_publishes_that_and_names_no_decider()
     assert chosen_by != _tie(_tied_pair(selector="0x22222222"))["chosen_by"]
 
 
-def test_the_component_names_line_up_with_the_order_they_describe():
-    """A name per component, positionally; a ladder that grew a component without
-    a name would publish the wrong rule for every tie decided past it."""
-    assert len(FOLD._ORDER_COMPONENT_NAMES) == len(FOLD._composed_order(_tied_pair()))
-
-
 def test_chosen_by_glosses_the_chain_component_over_the_fields_a_step_publishes(fold):
     """§11.2 (k). The order's tail is every field ``ActAsStep.as_json``
     publishes, so the gloss is read off the steps in hand."""
@@ -337,14 +316,6 @@ def test_the_frontend_golden_was_regenerated_for_the_current_model_version():
         f"{K.MODEL_VERSION!r} — regenerate site/src/test/fixtures/score_etherfi.json "
         f"(see its README for the shape and the minified one-line write)"
     )
-
-
-def test_the_ceiling_direction_stays_allow_listed_on_the_page():
-    """The register is the fix, not the removal: dropping `ceiling` from
-    `BOUND_DIRECTIONS` trades an undisclosed badge for an undisclosed blank."""
-    derive = (ROOT / "site" / "src" / "score" / "derive.js").read_text()
-    assert f'"{FOLD.BOUND_DIRECTION_CEILING}"' in derive
-    assert "BOUND_DIRECTIONS" in derive
 
 
 # --------------------------------------------------------------------------

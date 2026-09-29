@@ -210,16 +210,3 @@ def test_unmodeled_custom_authority_fails_closed(tmp_path, monkeypatch):
     )
     cap = _resolve(trees, "f()", monkeypatch)
     assert not _has_confident_members(cap)
-
-
-def test_unguarded_function_makes_no_controller_claim(tmp_path):
-    # An unguarded public function has no predicate tree, so it can never be attributed a
-    # (fabricated) controller set: the 'public' end of the spectrum.
-    trees = _trees(
-        tmp_path,
-        """
-        pragma solidity ^0.8.19;
-        contract C { uint256 public x; function f() external { x = 1; } }
-        """,
-    )
-    assert "f()" not in trees

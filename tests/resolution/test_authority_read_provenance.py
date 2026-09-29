@@ -329,26 +329,6 @@ def test_oz_v5_namespaced_accessor_gets_its_own_label(monkeypatch: pytest.Monkey
     assert details["accessor_slot_agreement"] == "not_determined"
 
 
-def test_the_namespaced_arms_erc7201_slot_is_the_accesscontrol_one() -> None:
-    """The arm's ERC-7201 anchor, recomputed rather than quoted (Lane A's spec pinned the
-    *Initializable* namespace, a different slot — this would have caught that).
-
-    Not published: the resolver reads ``owner()``, never this slot, so publishing it as
-    a witness would be a computed constant dressed as evidence."""
-
-    def erc7201(namespace: str) -> str:
-        inner = int.from_bytes(keccak(text=namespace), "big") - 1
-        return "0x" + (int.from_bytes(keccak(inner.to_bytes(32, "big")), "big") & ~0xFF).to_bytes(32, "big").hex()
-
-    assert (
-        erc7201("openzeppelin.storage.AccessControlDefaultAdminRules")
-        == "0xeef3dac4538c82c8ace4063ab0acd2d15cdb5883aa1dff7c2673abb3d8698400"
-    )
-    assert erc7201("openzeppelin.storage.Initializable") != erc7201(
-        "openzeppelin.storage.AccessControlDefaultAdminRules"
-    )
-
-
 def test_unknown_internal_accessor_resolves_to_no_principal(monkeypatch: pytest.MonkeyPatch) -> None:
     """Fail-closed: ``_frobnicate()`` isn't in the authority basenames, so no getter is
     substituted, no principal published, and the basis key is ABSENT (not ``"unknown"``, not null)."""

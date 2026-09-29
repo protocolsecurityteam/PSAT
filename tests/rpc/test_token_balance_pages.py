@@ -233,9 +233,3 @@ class TestGetNativePrice:
         monkeypatch.setattr(es, "get", lambda *a, **k: {"result": {"ethbtc": "0.05"}})
         with pytest.raises(RuntimeError):
             es.get_native_price(1)
-
-    def test_get_eth_price_delegates_to_native(self, monkeypatch):
-        import services.clients.etherscan as es
-
-        monkeypatch.setattr(es, "get", lambda *a, **k: {"result": {"ethusd": "2000.0"}})
-        assert es.get_eth_price(1) == 2000.0

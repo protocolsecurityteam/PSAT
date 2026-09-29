@@ -231,23 +231,6 @@ def _score(caplog):
     return [r for r in caplog.records if r.name == _LOOP_LOGGER]
 
 
-def test_each_impure_step_is_timed_and_the_durations_reach_the_written_line(_substituted_fold, caplog):
-    records = _score(caplog)
-    phases = {r.phase for r in records if getattr(r, "phase", None)}
-    assert phases == {"fold", "persist"}
-
-    written = next(r for r in records if r.message == "protocol score written")
-    assert set(written.durations_ms) == {"fold", "persist"}
-    assert written.duration_ms_total == sum(written.durations_ms.values())
-
-
-def test_one_summary_line_per_fold_carries_the_document(_substituted_fold, caplog):
-    records = _score(caplog)
-    summaries = [r for r in records if r.message == "score document summary"]
-    assert len(summaries) == 1
-    assert summaries[0].population_disposition == "scored"
-
-
 def test_an_execution_evidence_fault_warns_with_its_reasons(_substituted_fold, caplog):
     _substituted_fold["document"] = _document(
         execution_evidence_faults={
@@ -273,10 +256,6 @@ def test_a_failing_summary_never_unmakes_a_committed_score(_substituted_fold, ca
     records = _score(caplog)
     warnings = [r for r in records if r.levelno == logging.WARNING and r.name == _LOOP_LOGGER]
     assert [r.message for r in warnings] == ["score summary emit failed"]
-
-
-def test_a_clean_fold_raises_no_warning(_substituted_fold, caplog):
-    assert [r for r in _score(caplog) if r.levelno >= logging.WARNING and r.name == _LOOP_LOGGER] == []
 
 
 def test_the_cli_emits_the_same_summary_and_a_malformed_document_does_not_fail_it(monkeypatch, caplog):

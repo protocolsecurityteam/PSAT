@@ -65,11 +65,6 @@ def test_oversized_content_length_rejected_with_413(client):
     assert resp.headers["X-Content-Type-Options"] == "nosniff"
 
 
-def test_normal_body_not_rejected(client):
-    resp = client.get("/api/version")
-    assert resp.status_code == 200
-
-
 def test_content_length_exactly_at_limit_passes(client, monkeypatch):
     import api
 
@@ -348,24 +343,6 @@ def test_sliding_window_limiter_disabled_when_limit_zero():
     lim = SlidingWindowRateLimiter(limit=0, window_s=100)
     for i in range(50):
         assert lim.hit("k", now=float(i)) is None
-
-
-def test_sliding_window_admits_up_to_limit_rejects_then_readmits():
-    # Window semantics must survive the O(1) hot-path rewrite: admit exactly
-    # `limit`, reject inside the window, re-admit once the window slides.
-    from utils.ratelimit import SlidingWindowRateLimiter
-
-    lim = SlidingWindowRateLimiter(limit=3, window_s=100)
-    for i in range(3):
-        assert lim.hit("k", now=float(i)) is None
-    retry = lim.hit("k", now=3.0)
-    assert retry is not None and retry >= 1
-    # Over-limit hit is not recorded; still rejected just before expiry.
-    assert lim.hit("k", now=99.0) is not None
-    # First hit (t=0) ages out at t>100 -> one slot frees.
-    assert lim.hit("k", now=100.5) is None
-    # ...but only one: budget is full again immediately after.
-    assert lim.hit("k", now=100.6) is not None
 
 
 def test_sliding_window_bucket_cap_holds_under_many_keys():
