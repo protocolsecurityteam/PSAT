@@ -17,7 +17,7 @@ import {
 //   `{ global, byChain }` struct from buildLabelMaps (chain-aware display)
 // - chain: string | null — when set (a contract context), edits/reads the
 //   CHAIN-QUALIFIED override row for that network; when omitted (EOA/Safe-signer
-//   context), edits/reads the GLOBAL row (invariant 12). The display lookup is
+//   context), edits/reads the GLOBAL row. The display lookup is
 //   chain-specific-wins-else-global via resolveLabelName.
 // - refreshAll: () => void — called after a successful save/delete so the
 //   caller can refresh its labels map

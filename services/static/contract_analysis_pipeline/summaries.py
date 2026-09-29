@@ -81,13 +81,13 @@ def _operand_is_role_key(leaf: Mapping[str, Any] | None, operand: Mapping[str, A
     **Cross-contract role checks are deliberately NOT admitted, including a
     genuine ``registry.hasRole(ROLE, msg.sender)``.** An ``external_set``
     descriptor records the callee signature from ``ir.function.full_name``
-    (``predicates.py:2338``) — the CALLER's declared interface, not the deployed
-    callee's ABI — so "the callee is ``hasRole(bytes32,address)``" is an
-    unverified claim the caller makes about someone else's code. A slot lens or a
+    (in ``predicates/leaves.py::_build_external_bool_leaf``) — the CALLER's
+    declared interface, not the deployed callee's ABI — so "the callee is
+    ``hasRole(bytes32,address)``" is an unverified claim the caller makes about someone else's code. A slot lens or a
     merkle-tree contract declared under that name lowers identically, and
     ``_build_external_bool_leaf`` fills ``key_sources`` from every call argument,
     so argument position adds no independent witness. Those roles are
-    ``not_determined`` — never "no roles"; see ``SCORING_INVARIANTS.md`` B4c.
+    ``not_determined`` — never "no roles"; omitted role rows do not prove absence.
     """
     if not isinstance(leaf, Mapping):
         return False

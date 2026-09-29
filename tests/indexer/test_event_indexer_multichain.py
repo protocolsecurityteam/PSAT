@@ -1,4 +1,4 @@
-"""M1.1 item 3 — the indexer threads a per-job / per-cursor chain_id instead of
+"""The indexer threads a per-job / per-cursor chain_id instead of
 stamping everything chain 1.
 
 These tests prove a second-chain (Base, 8453) input reaches every threaded path:
@@ -46,7 +46,7 @@ _ERPC_BASE = "https://erpc.example"
 _MAINNET_ERPC = f"{_ERPC_BASE}/main/evm/1"
 _BASE_ERPC = f"{_ERPC_BASE}/main/evm/{_BASE}"
 # A registry chain still marked indexer-disabled (hypersync_url=None). Base used
-# to play the "uncovered chain" role here, but Phase 2 enabled it — so the
+# to play the "uncovered chain" role here, but the registry now enables it — so the
 # placeholder moves to arbitrum, which stays disabled until it earns its slot.
 _UNCOVERED = 42161  # arbitrum
 _AUTHORITY = "0x" + "5c" * 20
@@ -88,7 +88,7 @@ def _base_chaininfo(**overrides) -> ChainInfo:
 def test_build_fetchers_mainnet_uses_erpc(monkeypatch):
     monkeypatch.setenv("ERPC_BASE_URL", _ERPC_BASE)
     fetchers, head_fetchers, block_hash_fetchers = _build_indexer_fetchers()
-    # Covered chains today are mainnet + Base (Phase 2). Both read their own eRPC
+    # Covered chains today are mainnet + Base. Both read their own eRPC
     # route — mainnet is not special, there is no dedicated indexer lane.
     assert set(fetchers) == {1, _BASE}
     assert _url(fetchers[1]) == _MAINNET_ERPC
@@ -267,7 +267,7 @@ def test_scan_uses_registry_confirmation_depth_per_chain(session, monkeypatch):
 @requires_postgres
 def test_scan_logs_once_when_chain_has_no_fetcher(session, caplog):
     # A cursor enrolled on a chain with no fetcher (indexer disabled for it) is
-    # skipped — but loudly, once, so a stalled chain is visible (inv. 4/10).
+    # skipped — but loudly, once, so a stalled chain is visible.
     enroll_event_cursor(session, chain_id=_BASE, event_address=_AUTHORITY, topic0=_TOPIC, start_block=100)
     enroll_event_cursor(
         session, chain_id=_BASE, event_address="0x" + "7d" * 20, topic0="0x" + "cc" * 32, start_block=100

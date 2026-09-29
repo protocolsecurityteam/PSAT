@@ -256,7 +256,7 @@ SCORE_TRIGGERS = (
 
 # --- self-service witness -------------------------------------------------
 # Minted by the claims matcher (``_facts``) and matched by the distiller; the
-# two disclosures ride EVERY proven verdict (SPEC §5 G7) so an excluded row
+# two disclosures ride EVERY proven verdict so an excluded row
 # still carries them.
 SELF_SERVICE_STATE_PROVEN = "proven_self_service"
 SELF_SERVICE_BASIS_BOUNDED = "proven_self_service_bounded"
@@ -275,5 +275,5 @@ TRACE_STEP_ENUMERABLE_ROLE_STORE = "enumerable_role_store"
 NO_SELECTOR = ""
 
 # The model version every score row is stamped with until a second protocol
-# exists to calibrate against. Any constant change bumps it (strategy §7.2).
+# exists to calibrate against. Any constant change bumps it.
 MODEL_VERSION = "1.4.1-provisional"

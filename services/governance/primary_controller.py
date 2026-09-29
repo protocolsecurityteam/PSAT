@@ -152,7 +152,7 @@ def _addr_of(token: str) -> str:
     token. A plain address (no ``"::"``) passes through unchanged, so callers
     that key by bare address (the pre-multichain shape, and the unit tests) work
     identically to callers that key by composite entity (the Surface pipeline,
-    which keeps twins on different chains from merging — inv. 13)."""
+    which keeps twins on different chains from merging)."""
     return token.rsplit("::", 1)[-1]
 
 

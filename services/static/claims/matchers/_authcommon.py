@@ -5,7 +5,7 @@ claim); the ``ownership`` / ``authorized_caller`` / ``roles`` / ``authority``
 modules import from here. Everything reads the tolerant :class:`ClaimContext`
 facts view — canonical selectors, predicate-tree leaves, and the hardened
 ``state_writes`` hygiene facts — so a matcher never reaches into
-``effects.py`` / ``summaries.py`` internals.
+the effects package or summary implementation.
 """
 
 from __future__ import annotations

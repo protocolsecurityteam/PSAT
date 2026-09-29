@@ -79,7 +79,7 @@ def _rpc_url_for_job(job: Job) -> str:
 
 
 def _chain_id_for_job(job: Job) -> int:
-    """The job's first-class ``chain_id`` (invariant 1). Prefers the populated
+    """The job's first-class ``chain_id``. Prefers the populated
     ``jobs.chain_id`` column and falls back to deriving it from
     ``request["chain"]`` via the canonical registry; mainnet (1) is the last
     resort for a chain-less row so behaviour is unchanged there."""
@@ -129,11 +129,11 @@ def _membership_gate_controller_hook(
     *,
     removed_values: set[str] | frozenset[str] = frozenset(),
 ) -> None:
-    """Membership-gate event-2 hook for the resolution stage's ControllerValue
-    commit (spec §3.4 event 2b). Targeted delta, best-effort — a gate failure
-    never fails the stage.
+    """Membership-gate controller-change hook for committed ControllerValue rows.
 
-    ``removed_values`` (F5): controller addresses the rewrite dropped. A
+    Targeted delta, best-effort — a gate failure never fails the stage.
+
+    ``removed_values``: controller addresses the rewrite dropped. A
     Class-A registry row anchored on a removed value must be re-checked in the
     SAME evaluate — the removed addresses ride as changed deployers (stratum-ii
     ladder re-check) and as edge names (revocation-stratum vias)."""
@@ -245,7 +245,7 @@ class ResolutionWorker(BaseWorker):
         # Write to controller_values table
         contract_row = session.execute(select(Contract).where(Contract.job_id == job.id).limit(1)).scalar_one_or_none()
         if contract_row:
-            # F5: the values the rewrite is about to drop — registry rows
+            # The values the rewrite is about to drop — registry rows
             # anchored on them must be re-checked by the same gate pass.
             pre_rewrite_values = {
                 v.lower()
@@ -278,7 +278,7 @@ class ResolutionWorker(BaseWorker):
                     )
                 )
             session.commit()
-            # §3.4 event 2b: the freshly committed ControllerValue rows are the
+            # The freshly committed ControllerValue rows are the
             # gate's W3 fuel — resolved controller addresses as a fact delta,
             # plus the subject itself (its own controllers may now resolve to
             # perimeter entities). The static stage never sees these.
@@ -501,7 +501,7 @@ class ResolutionWorker(BaseWorker):
             return 0
         written = persist_role_holder_planes(session, rows)
         session.commit()
-        # §3.4 event 2: the rewritten plane is a controller-fact delta the gate
+        # The rewritten plane is a controller-fact delta the gate
         # must see — role holders are anchor-chain links, so a grant/revoke
         # here can make or break a standing W3-D1 witness.
         from services.discovery.membership_gate import evaluate_role_plane_change

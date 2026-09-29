@@ -15,7 +15,7 @@ never installed a store, still resolves — byte-identically — the slow way).
 
 The store is keyed on the ``Session`` and cleared when the phase ends, mirroring
 ``calldata._FACTS_CACHE``. Nothing here changes *what* a verdict is — only how
-the rows behind it are fetched (inv.: witness impact zero).
+the rows behind it are fetched (witness impact zero).
 """
 
 from __future__ import annotations

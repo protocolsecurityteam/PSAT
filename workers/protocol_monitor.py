@@ -1,7 +1,7 @@
 """Unified protocol monitor worker — one supervised single-process daemon.
 
 Default mode (no flags) runs the scanner, poller, and TVL loops as three
-supervised daemon threads inside a single interpreter (design §2.5). The
+supervised daemon threads inside a single interpreter. The
 Supervisor restarts any loop that dies with exponential backoff and never lets
 one loop's death touch its siblings or the process; a crash-loop degrades and
 pages (via the ``status="error"`` heartbeat + fly ``[[restart]] policy="always"``)
@@ -312,7 +312,7 @@ def main():
         )
 
         interval = args.interval if args.interval is not None else DEFAULT_RECONCILE_INTERVAL_S
-        # Explicit daemon-edge fallback chain (inv. 6); each protocol's real chain
+        # Explicit daemon-edge fallback chain; each protocol's real chain
         # is still derived per-protocol inside the loop.
         logger.info(
             "Enrollment reconciler starting (interval=%ss, fallback chain=%s)",

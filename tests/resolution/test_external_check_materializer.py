@@ -179,7 +179,7 @@ def test_candidate_hypersync_scan_floors_from_block_at_creation_block(monkeypatc
 
 
 def test_candidate_cache_caps_entry_count(monkeypatch):
-    """P1.4: the per-checker candidate cache caps the NUMBER of entries (the existing
+    """The per-checker candidate cache caps the NUMBER of entries (the existing
     _MAX_CANDIDATES caps each value list's length, not the entry count), so a long-lived
     worker probing many distinct checkers stays bounded."""
     import services.resolution.external_check_materializer as mod

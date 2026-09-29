@@ -592,7 +592,7 @@ def _enumerate_param_keyed_mapping_values(contract: str, writer_specs: list[dict
     block = getattr(outer, "block", None)
     chain_id = getattr(outer, "chain_id", None)
     if not isinstance(chain_id, int):
-        # ctx.chain_id is required (inv. 6); without a chain there is nothing to
+        # ctx.chain_id is required; without a chain there is nothing to
         # scan — return empty rather than defaulting the scan to mainnet.
         return []
     _bump_resolve_counter(outer, "mapping_value_scans")
@@ -626,7 +626,7 @@ def _enumerate_param_keyed_mapping_values(contract: str, writer_specs: list[dict
         scan = enumerate_mapping_values_sync(
             contract,
             cast(Any, writer_specs),
-            # inv. 11: one cache-key token format everywhere (decimal-string chain
+            # one cache-key token format everywhere (decimal-string chain
             # id). ``enumerate_mapping_values_sync`` re-normalizes via the same
             # helper, so mainnet ("1") is byte-identical to the prior ``str(1)``.
             chain=chain_cache_token(chain_id),

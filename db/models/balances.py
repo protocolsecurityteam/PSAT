@@ -299,7 +299,7 @@ class ContractBalanceLatest(Base):
     ``alembic/env.py``) filters it out on the ``info={"is_view": True}`` marker
     below — not by name — because Alembic cannot tell a mapped view from a mapped
     table and would otherwise emit a ``CREATE TABLE`` shadowing it.
-    ``tests/test_alembic_chain.py`` asserts the filtered diff is empty.
+    ``tests/storage/test_alembic_chain.py`` asserts the filtered diff is empty.
     """
 
     __tablename__ = "contract_balances_latest"
@@ -370,7 +370,7 @@ class RestakingPosition(Base):
     # Every read of a row is ISSUED at this height. There is no unpinned path on
     # this plane: without a height nothing is written at all.
     block_number: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    # The reorg witness (inv.11/12). Without it a replay "at block N" cannot tell
+    # The reorg witness. Without it a replay "at block N" cannot tell
     # it is on the same chain history; the event indexer stamps
     # ``last_indexed_block_hash`` for the same reason.
     block_hash: Mapped[bytes] = mapped_column(LargeBinary(32), nullable=False)

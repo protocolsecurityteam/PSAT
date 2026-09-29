@@ -181,7 +181,7 @@ def _rpc_url_for_job(job: Job) -> str:
 
 
 def _chain_id_for_job(job: Job) -> int:
-    """The job's first-class ``chain_id`` (invariant 1): the populated
+    """The job's first-class ``chain_id``: the populated
     ``jobs.chain_id`` column, else derived from ``request["chain"]`` via the
     canonical registry, else mainnet for a chain-less row."""
     chain_id = getattr(job, "chain_id", None)

@@ -15,7 +15,7 @@ Two harnesses, both driving production code:
   proves the two walks actually meet — a unit test alone cannot, because it
   supplies both halves itself.
 
-Per SPEC §5.5 every conjunct has one fixture removing exactly it and asserting
+Every conjunct has one fixture removing exactly it and asserting
 ``not_determined``, paired with a positive sibling differing in one construct;
 assertions are on the whole verdict dict, never ``is not None``.
 """

@@ -17,7 +17,7 @@ The three refusals are the point, and each has its own test:
   parameterised getter's selector is not ``name()``;
 * a formal of an internal helper is not an ABI slot of the entry point.
 
-Protocol-agnostic by construction (§0.0.6): the fixture models shapes — a
+Protocol-agnostic by construction: the fixture models shapes — a
 library-wrapped send, a public immutable, an internal, a constant, a local
 copied out of storage, a collection-typed receiver — never a named protocol.
 """

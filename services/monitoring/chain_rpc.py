@@ -4,7 +4,8 @@ The scan / poll / enrollment / TVL loops run as one process but each works on
 contracts that carry their own chain-name string (``MonitoredContract.chain``,
 ``Contract.chain``). They are handed a single mainnet-seed ``rpc_url``; these
 helpers turn a contract's chain name into that chain's own eRPC route and
-numeric id (invariants 7, 10, 11 of ``MULTICHAIN_INVARIANTS.md``).
+numeric id. RPC routing and numeric chain identity both follow the contract
+chain.
 
 Mainnet is byte-for-byte unchanged: chain 1 returns the caller's incoming URL
 verbatim, so the explicit (often local / stubbed) URL tests inject still flows
@@ -23,8 +24,7 @@ def chain_id_for(chain: str | None, *, default: int = 1) -> int:
     """Resolve a chain-name string to its numeric chain id via the registry.
 
     Unknown / empty chains fall back to *default* (mainnet) so behavior on
-    mainnet and on legacy rows is unchanged; the M1.2 fail-loud flip replaces
-    this tolerance with an explicit raise.
+    mainnet and on legacy rows is unchanged.
     """
     if not chain:
         return default

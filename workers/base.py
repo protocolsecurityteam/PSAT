@@ -112,11 +112,11 @@ def _resolve_job_concurrency(stage_value: str) -> int:
 
 
 def _job_chain_log_value(job: Any, request: dict[str, Any]) -> str | None:
-    """Chain label for the ``chain`` logging contextvar (invariant 4).
+    """Chain label for the ``chain`` logging contextvar.
 
     Prefers the human-readable chain *name* in ``request['chain']`` so existing
     Loki filters (``chain="ethereum"``) keep working. Falls back to the canonical
-    name of the job's first-class ``chain_id`` (M0.2) so a job that carries a
+    name of the job's first-class ``chain_id`` so a job that carries a
     chain_id but whose request omits ``chain`` still tags every log line. Returns
     ``None`` when neither is available (e.g. an address-less company job whose
     request has no chain), which ``bind_trace_context`` treats as "don't bind".
@@ -575,7 +575,7 @@ class BaseWorker:
                             # short-circuit instead of blocking forever, then
                             # mark the row failed_terminal. Routed through an
                             # overridable finalizer so a fail-forward stage
-                            # (effects, inv. 15) can advance instead of terminal.
+                            # (effects) can advance instead of terminal.
                             self._finalize_terminal_failure(
                                 session,
                                 job,
@@ -985,7 +985,7 @@ class BaseWorker:
 
         Overridable so a fail-forward stage advances the job to ``next_stage``
         instead of terminating one whose upstream artifacts are already complete
-        and correct (the effects stage, inv. 15). Called from both the primary-
+        and correct (the effects stage). Called from both the primary-
         and fresh-session failure paths, so ``session`` is whichever succeeded a
         rollback and the same commit discipline as ``fail_job_terminal`` applies.
         """

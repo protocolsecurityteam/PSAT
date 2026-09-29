@@ -8,7 +8,7 @@ dotted heads — the column asserts a state write on 30.5% of them where none wa
 ever proven.
 
 The effects stage already computes all four facts per function
-(``effects.py`` ``EffectInfo``: ``sinks``, ``state_writes``, ``state_changing``,
+(``services/static/contract_analysis_pipeline/effects/types.py`` ``EffectInfo``: ``sinks``, ``state_writes``, ``state_changing``,
 ``writer_selectors``) and all four are present on 2415/2415 function records
 across the 107 stored ``effects`` artifacts. They were discarded at the DB
 boundary. These columns stop discarding them.

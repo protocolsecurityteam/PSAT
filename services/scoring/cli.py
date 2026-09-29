@@ -1,13 +1,13 @@
 """Offline driver: distil every contract in memory, fold, and diff.
 
-Two feeding modes share one distillation and one fold (strategy §7.5). This CLI
+Two feeding modes share one distillation and one fold. This CLI
 is the second: it never writes a signal row, so the differential oracle runs
 against a database it only reads. The persisted pipeline path uses the identical
 code with the signals written to ``function_score_signals`` in between.
 
     python -m services.scoring.cli score --protocol 1 [--out FILE]
     python -m services.scoring.cli differential --protocol 1 \
-        --against scoring_prototype/score_v3.json [--out FILE]
+        --against ORACLE_JSON [--out FILE]
     python -m services.scoring.cli dirty --protocol 1
 
 ``dirty`` is the one persisting command: it queues the protocol so the score
@@ -112,7 +112,7 @@ def _identity_key(row: dict[str, Any]) -> tuple[str, str, str]:
 def _oracle_subsumed_rows(oracle: dict[str, Any]) -> tuple[list[dict[str, Any]], str, int | None]:
     """The oracle's subsumed rows, which shape they came from, and what was left.
 
-    The prototype documents in ``scoring_prototype/`` carry them at top level;
+    Legacy prototype documents carry them at top level;
     every document ``document_json`` writes carries them under ``provenance``.
     Reading one place only mis-reads the other silently — as a whole population
     of rows that are "added" because they were never looked for. ``absent`` is a

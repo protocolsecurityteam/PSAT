@@ -459,7 +459,7 @@ def _build_company_function_entry(
     # ``[]`` that NEGATES it — /api/company/{name}/functions served 0 nulls over
     # 1,109 ether.fi rows whose pool holds 324, contradicting
     # /api/analyses/{job} on the same rows. The two frontend coercers
-    # (surface/layout/controlGraph.js, protocolScore.js) still fold to ``[]``
+    # (the control graph and scoring views) still fold to ``[]``
     # when they iterate, which is fine — a render loop publishes no verdict —
     # but the payload has to carry the true value for a scorer to read.
     authority_roles: Any

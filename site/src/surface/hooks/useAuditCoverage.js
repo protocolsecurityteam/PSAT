@@ -8,7 +8,7 @@ import { coalesceChain } from "../entityKey.js";
 // active audit pick (or the whole proven set when ``all``). Returns a Set of
 // bare lowercased addresses matched against the canvas's bare node ids. Coverage
 // rows are all-chain; only the active chain's rows contribute, so a twin covered
-// solely on another chain does NOT light this chain's same-address node (inv. 13).
+// solely on another chain does NOT light this chain's same-address node.
 export function auditHighlightSet(coverage, activeAuditId, activeChain) {
   const showAll = activeAuditId === "all";
   const out = new Set();

@@ -4,8 +4,6 @@ One caller, one selector, one state-variable-bound call site. Each case below
 changes exactly one fact about the receiver read and asserts the reason moves
 with it — a reason that fires on its neighbour's shape is a reason that
 misstates the evidence.
-
-One of the twenty sections of the former ``test_scoring_redteam.py``.
 """
 
 from __future__ import annotations
@@ -120,7 +118,7 @@ def test_u1_a_label_at_the_pointer_never_refuses_a_read_that_holds_the_destinati
 
 
 def test_u1_an_undetermined_gate_openness_is_never_published_as_needing_no_gate():
-    """SCORER_DISCIPLINE_CONTRACT §2, at both arms of the plane.
+    """Undetermined openness stays distinct from a proven open gate on both arms.
 
     ``the_call_site_needs_no_gate`` is a POSITIVE claim — this function is open —
     and minting it from an ``authority_openness`` the pipeline did not determine
@@ -302,7 +300,7 @@ def test_u1_case_a_two_hop_chain_composes_through_an_undelegated_intermediate(fo
 
 
 def test_u1_case_an_open_intermediate_is_refused_past_hop_1_with_its_reason_named(fold):
-    """inv. 13's assertion for the kept conjunct: the lever is not a sink.
+    """The kept conjunct requires that the lever is not a sink.
 
     Opening an intermediate's calling function REMOVES this row's charge, so the
     refusal must be published with the attribution reason named rather than left

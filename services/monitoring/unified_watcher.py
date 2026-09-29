@@ -252,8 +252,8 @@ def _poll_entry_for_controller(mc: MonitoredContract, controller_id: str | None)
     ``implementation`` would name-match the vendored EIP-1967 slot entry and a
     read against it would publish one storage location's value under a
     different controller's id. It would also let runtime re-classification
-    PROMOTE a spec whose analyzer proved no getter at all, which is invariant 4
-    inverted. The cost of refusing it is bounded and stated: such a controller
+    promote a spec whose analyzer proved no getter at all. That would promote
+    without proof. The cost of refusing it is bounded and stated: such a controller
     is recorded not-determined instead of read, ``last_known_state`` is not
     advanced, and the rotation poller — which does poll the vendored entry —
     remains the backstop that catches the change within one poll interval.
@@ -493,7 +493,7 @@ def _process_window(
                             # is PROVEN to read this controller, so the hint
                             # resolves to nothing. Dropping it silently would
                             # make an unverifiable interval look like a quiet
-                            # one; invariant 9 wants the skip on the record.
+                            # one; record the skipped read explicitly.
                             flag_modified(mc, "last_poll_status")
                 continue
 
@@ -509,7 +509,7 @@ def _process_window(
             event_data["witness_tier"] = witness_tier
             # The spec that classified and decoded this event came out of a
             # tracking plan that could not be re-read at the last enrollment
-            # (F5 keeps the last-good topics rather than manufacturing an
+            # (re-enrollment keeps the last-good topics rather than manufacturing an
             # empty watch-list). The row is real, but the WATCH-LIST behind it
             # is only as current as that timestamp, so the event carries it
             # rather than reading fresh-equivalent. Read-verified events do not
@@ -551,7 +551,7 @@ def _process_window(
         )
         # Gate EVERY side effect on the insert winning: a duplicate (lost to a
         # concurrent/replayed pass) must not double-post Discord, double-queue
-        # reanalysis, or re-sync relational tables (design HR2).
+        # reanalysis, or re-sync relational tables.
         if session.execute(insert_stmt).first() is None:
             continue
 
@@ -842,7 +842,7 @@ def _resolve_verification_reads(
                     # A read observes a slot, not a log: no block and no tx are
                     # knowable. ``log_index`` stays NULL, which keeps these rows
                     # outside the partial identity index exactly like the poll
-                    # path's rows (invariant 12 is preserved, not extended).
+                    # path's rows.
                     block_number=0,
                     tx_hash="",
                     data=event_data,
@@ -981,7 +981,7 @@ def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
                 )
             )
 
-    # Layer-1 singleton gate: a scan pass runs only under the
+    # Singleton gate: a scan pass runs only under the
     # per-chain daemon lease. Acquire at pass start; a chain whose lease is
     # held elsewhere is skipped. If none are held we still beat (note=
     # 'lease_lost') so the fleet view sees a live-but-yielding process, not a
@@ -1844,7 +1844,7 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
     ``protocol_poller:<chain>`` daemon lease and the lease is **load-bearing,
     not belt-and-braces**. ``state_changed_poll`` rows carry ``tx_hash=''`` /
     block 0 and stay ``log_index NULL``, so they sit outside the partial
-    identity index by design; there is no Layer-2 idempotency to catch a
+    identity index by design; there is no identity-index idempotency to catch a
     duplicate poll detection. Two concurrent poll passes without the lease MAY
     double-insert poll events — an accepted risk.
 

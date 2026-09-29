@@ -276,7 +276,7 @@ def test_lz_oapp_counterexample_non_oapp_has_no_peer_claim():
 
 
 # ---------------------------------------------------------------------------
-# user-plane adversarial near-misses (spec §6.2): each peripheral entry gets a
+# user-plane adversarial near-misses: each peripheral entry gets a
 # same-selector / same-named sibling whose *standard gate* is absent, driven
 # through the real build_claims on the documented facts shape (input data, not
 # a faked collaborator — the contract is intentionally absent so is_erc20 / the

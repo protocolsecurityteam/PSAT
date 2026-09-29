@@ -9,7 +9,7 @@ persisted ``effect_targets`` display) fabricate ``TMP_n()``, which seeds nothing
 and can seed the WRONG token. These tests compile the shape and drive production
 ``build_effects`` — the only fakes are none; the solc compile is real.
 
-Protocol-agnostic by construction (§0.0.6): the fixture models the *shape* (a
+Protocol-agnostic by construction: the fixture models the *shape* (a
 library-wrapped pull, a cast of a state var / a parameter / a mapping element),
 never a named protocol's layout.
 """

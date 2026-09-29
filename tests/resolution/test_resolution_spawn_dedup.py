@@ -1,7 +1,7 @@
 """Resolution-worker discovered-contract spawn dedup must be case-insensitive
 and chain-scoped: a checksummed-address job cannot be duplicated by a lowercase
 cascade spawn, and a same-address job on another chain must not suppress this
-chain's child (inv. 12).
+chain's child.
 """
 
 from __future__ import annotations

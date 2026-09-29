@@ -773,7 +773,7 @@ def test_value_predicate_passes_op_handles_addresses_and_any_nonzero():
 
 
 # ---------------------------------------------------------------------------
-# P1.3 — L1 re-key on (chain, address, specs_hash) + size cap.
+# L1 re-key on (chain, address, specs_hash) + size cap.
 #
 # The old address-only L1 key collided across chains and writer-spec sets,
 # defeating L2's careful (chain, address, specs_hash) keying. These pin the
@@ -857,7 +857,7 @@ def test_l1_rekey_distinguishes_chain():
 
 
 def test_l1_enumeration_cache_size_capped(monkeypatch):
-    """P1.3: the present-set L1 cache is size-capped — many distinct addresses evict the
+    """The present-set L1 cache is size-capped — many distinct addresses evict the
     oldest rather than growing unbounded (the lazy per-key TTL del is not a size bound)."""
     monkeypatch.setattr(mapping_enumerator, "_CACHE_MAX", 8)
     rely_topic = _event_topic0("Rely(address)")

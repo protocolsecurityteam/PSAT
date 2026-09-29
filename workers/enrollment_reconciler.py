@@ -41,7 +41,7 @@ def main() -> None:
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
 
-    # Daemon edge (inv. 6): the reconciler is one process serving every chain;
+    # Daemon edge: the reconciler is one process serving every chain;
     # ``RECONCILER_FALLBACK_CHAIN`` is the explicit, documented base + ambiguous-
     # protocol fallback (``_protocol_chain`` still derives each protocol's own
     # chain, and ``rpc_for_chain`` picks the per-chain URL). Logged so the choice

@@ -3,7 +3,7 @@ import { useCallback, useMemo, useState } from "react";
 import { coalesceChain } from "../entityKey.js";
 import { deriveAvailableChains, defaultChainFor, pickActiveChain } from "../chainScope.js";
 
-// Active-chain scope for the whole page (multichain inv. 13). The Surface
+// Active-chain scope for the whole page. The Surface
 // renders exactly one chain at a time; `chosenChain` is the user's explicit
 // pick (via the switcher), seeded once from the shareable ?chain= URL param.
 // null = follow the default chain. Read synchronously at mount so the first

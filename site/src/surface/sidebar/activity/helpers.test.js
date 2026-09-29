@@ -29,7 +29,7 @@ describe("safe_exec split out of the signers group", () => {
   });
 
   it("subscribes a Safe to exactly what it subscribed to before the split", () => {
-    // Invariant 7, the force-subscribe direction: a webhook attached today gets
+    // A webhook attached today gets
     // the same set as one attached before the split — no type added, none lost.
     const derived = eventTypesFromGroupKeys(groupKeysFromConfig({ watch_safe_signers: true }));
     expect(new Set(derived)).toEqual(new Set(PRE_SPLIT_SIGNERS_TYPES));

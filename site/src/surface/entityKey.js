@@ -1,5 +1,5 @@
-// Frontend entity identity is (chain, address), not bare address (multichain
-// invariant 13). Same address on two chains = two distinct entities. These
+// Frontend entity identity is (chain, address), not bare address.
+// Same address on two chains = two distinct entities. These
 // helpers are the single home for building that composite key so every keyed
 // Map/Set/lookup coalesces chain the same way.
 //

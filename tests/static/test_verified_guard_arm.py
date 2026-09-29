@@ -2,9 +2,9 @@
 
 The arm exists to close one fail-open: a reentrancy guard var declared on a
 contract must never license a function that does not carry the guard. Every
-refusal fixture below removes exactly one conjunct of the §2.4 proof and is
-paired with a positive sibling differing in that one construct, so a
-``not_determined`` cannot pass because the analysis never reached the code.
+refusal fixture below removes exactly one conjunct of the structural guard
+proof and is paired with a positive sibling differing in that one construct,
+so a ``not_determined`` cannot pass because the analysis never reached the code.
 
 Assertions are on the whole verdict dict — ``{"state": "not_determined", ...}``
 is as truthy as a proof.
@@ -250,7 +250,7 @@ def test_a13_sibling_adding_only_the_revert_is_proven(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# A14 — no name drives an effect (invariant 1)
+# A14 — no name drives an effect
 # ---------------------------------------------------------------------------
 
 _A14_NAME_ONLY_GUARD = """
@@ -273,8 +273,8 @@ contract C {
 def test_a14_name_only_guard_refuses(tmp_path):
     """``_reentrancyLock`` under a modifier named ``reentrancyGuard`` — every
     identifier says guard, and the post-placeholder write is missing, so there
-    is no placeholder split to prove. ``effects.py``'s name fallback would
-    admit this var; nothing on this arm can reach that fallback."""
+    is no placeholder split to prove. The name fallback in
+    ``effects/state_writes.py`` would admit this var; nothing on this arm can reach that fallback."""
     verdicts = verified_guard_verdicts(_contract(tmp_path, _A14_NAME_ONLY_GUARD, "C"))
     assert verdicts["payout()"] == _refusal(W2_REASON_NO_VERIFIED_GUARD, "C.payout()")
 

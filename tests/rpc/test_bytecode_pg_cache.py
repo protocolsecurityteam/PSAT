@@ -277,8 +277,7 @@ def test_batch_no_db_falls_through_to_wire(monkeypatch):
 
 def test_parity_pg_off_vs_on_byte_identical(monkeypatch):
     """Same wire response with PG enabled vs disabled must produce
-    byte-identical (bytecode, keccak) tuples for the same address.
-    Mirrors the parity convention from memory/feedback_parity_tests.md."""
+    byte-identical (bytecode, keccak) tuples for the same address."""
     monkeypatch.setattr(rpc, "_resolve_chain_id", lambda *_a, **_kw: 1)
     monkeypatch.setattr(rpc, "_pg_bytecode_get", lambda *_a, **_kw: None)
     monkeypatch.setattr(rpc, "_pg_bytecode_put", lambda *_a, **_kw: None)
@@ -318,7 +317,7 @@ def test_pg_address_case_normalized(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# In-memory getcode key re-keyed on (chain_id, address) — P2.4
+# In-memory getcode key re-keyed on (chain_id, address)
 # ---------------------------------------------------------------------------
 
 
@@ -366,7 +365,7 @@ def test_getcode_inmem_key_falls_back_to_url_when_no_chain_id(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# _chain_id_cache is size-capped — P2.3
+# _chain_id_cache is size-capped
 # ---------------------------------------------------------------------------
 
 

@@ -1,4 +1,4 @@
-"""Regression tests for the ``flow.out`` destination/amount lattice (SDG §3).
+"""Regression tests for the ``flow.out`` destination/amount lattice.
 
 Each test compiles a real Solidity fixture with Slither and drives the
 production ``build_effects`` (and, for the passthrough test, ``build_claims``)

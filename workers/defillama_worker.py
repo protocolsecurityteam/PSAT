@@ -123,8 +123,8 @@ class DefiLlamaWorker(BaseWorker):
         # Write ALL discovered addresses to contracts table. Addresses the scan
         # couldn't chain-attribute inherit the job's chain (default_chain) rather
         # than persisting chain=NULL, which would duplicate against a sibling
-        # writer's 'ethereum' stub (NULL ≠ NULL defeats uq_contract_address_chain
-        # — invariants 1/6/12). A chainless company scan is the mainnet edge.
+        # writer's 'ethereum' stub (NULL ≠ NULL defeats uq_contract_address_chain).
+        # A chainless company scan is the mainnet edge.
         protocol_id = protocol_row.id
         chain_id = request.get("chain_id") or 1
         try:

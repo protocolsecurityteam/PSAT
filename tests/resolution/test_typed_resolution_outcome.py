@@ -11,8 +11,7 @@ The P1 cases use NON-pending operands on purpose: they isolate the labeling laye
 serialized capability carries no ``empty_reason`` key, so every assertion here
 fails — pinning that P1 is what adds it.
 
-The second half of the file is the claim-#3 characterization net (merged from
-``test_underresolution_claim3_characterization.py``): the REAL operand shapes
+The second half of the file characterizes the REAL operand shapes
 behind the etherfi under-resolved functions, including the *pending* ones the
 P1 cases avoid. See its section header.
 
@@ -139,8 +138,7 @@ def test_empty_reason_absent_on_populated_set(monkeypatch: pytest.MonkeyPatch) -
 
 
 # ==========================================================================
-# Claim-#3 characterization net (merged from
-# tests/test_underresolution_claim3_characterization.py).
+# Claim-#3 characterization net.
 #
 # Pins the lowering of the operand shapes behind the etherfi (protocol_id=1,
 # run ``1279e07382b24d32``) ``finite_set/lower_bound`` under-resolved

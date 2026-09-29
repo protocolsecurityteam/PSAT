@@ -145,7 +145,7 @@ def _confidence(
     relation FREE confidence: the entities that relation proved are principals of
     gated functions never entered the denominator. ``discovery_entities`` carries
     every endpoint of every relation in the DB's own authority vocabulary, walked
-    or not, so declining one charges confidence and can never relieve it (inv. 6).
+    or not, so declining one charges confidence and can never relieve it.
 
     The fourth term is the honest home for an unproven magnitude. A signal that
     proved reach but not how much value that reach moves is UNANSWERED here — the

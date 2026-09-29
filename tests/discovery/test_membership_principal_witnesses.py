@@ -1,12 +1,11 @@
-"""Principal-edge and member-factory admission (DISCOVERY_MEMBERSHIP_GATE_SPEC.md
-§3.2/§3.3, salvage-wave owner rulings).
+"""Principal-edge and member-factory admission.
 
 The recall gap these close is the dev DB's own shape: a protocol's governance
 components are resolved as ``FunctionPrincipal`` rows on member functions, not
 as ``ControllerValue`` rows on the component, so the old timelock and the
 contracts its principals control held no admitting witness at all.
 
-Both new arms rest on the F2 anchoring discipline: a principal fact hosted only
+Both new arms rest on the independent anchoring discipline: a principal fact hosted only
 on a W3-D2 entry (the EndpointV2 shape) licenses nothing, because the D2 entry
 itself is non-transitive.
 """
@@ -84,7 +83,7 @@ def _anchored_member(db_session, protocol, address, *, factory=None):
 
 
 def _probe_read(db_session, subject, value):
-    """The §3.5 probe read of a governance getter — the derivation a W3-D2
+    """The probe read of a governance getter — the derivation a W3-D2
     witness rests on (``W3_D2_SOURCES``); a bare caller gate is not one."""
     row = db_session.get(ContractProbeAttempt, (subject.id, 1))
     reads = dict(row.results.get("reads", {})) if row is not None and isinstance(row.results, dict) else {}
@@ -196,7 +195,7 @@ def _witness(db_session, contract, protocol, rule, direction=None):
 
 
 # ---------------------------------------------------------------------------
-# Evidence shapes (invariant 2 — constructor-built, round-trip validated)
+# Evidence shapes (constructor-built, round-trip validated)
 # ---------------------------------------------------------------------------
 
 
@@ -376,7 +375,7 @@ def test_owner_that_is_a_member_principal_admits_and_cascades(db_session, protoc
 def test_safe_signer_containment_does_not_prove_the_d1_via(db_session, protocol):
     """A signer set is affiliation, not control of the signer's own wards —
     the same line ``_perimeter_anchor`` draws when it refuses ``safe_owner``
-    facts. The §3.3 ladder still reads them; D1 does not."""
+    facts. The ladder still reads them; D1 does not."""
     member = _anchored_member(db_session, protocol, ADDR(0x2100))
     signer = ADDR(0x2101)
     safe = ADDR(0x2102)
@@ -388,7 +387,7 @@ def test_safe_signer_containment_does_not_prove_the_d1_via(db_session, protocol)
     db_session.flush()
 
     assert subject.protocol_id is None
-    # The ladder's own reading is unchanged: the signer is still a §3.3
+    # The ladder's own reading is unchanged: the signer is still a
     # perimeter fact for deployer classification.
     assert gate._perimeter_fact(db_session, protocol_id=protocol.id, address=signer) is not None
 
@@ -396,7 +395,7 @@ def test_safe_signer_containment_does_not_prove_the_d1_via(db_session, protocol)
 @pytest.mark.parametrize("resolved_type", ["safe", "timelock", "contract"])
 def test_only_an_eoa_principal_proves_d1_transitivity(db_session, protocol, resolved_type):
     """Monotonicity is the reason: a contract-typed via can itself become a
-    member later, and §3.2 decides a member's transitivity from its OWN
+    member later, and a member's transitivity is decided from its OWN
     witnesses. Letting the principal arm also speak for it would let a
     promotion WITHDRAW transitivity and oscillate the fixpoint — and would
     license every ward a shared operator happens to control."""
@@ -434,7 +433,7 @@ def test_d2_only_member_recorded_as_a_principal_still_licenses_nothing(db_sessio
 
 
 def test_d1_via_controlling_a_foreign_row_is_refused(db_session, protocol):
-    """§3.2's shared-operator warning as positive counterevidence: an operator
+    """Shared-operator counterevidence: an operator
     observed controlling a row that provably belongs elsewhere licenses
     nothing here."""
     other = Protocol(name=f"other-{uuid.uuid4().hex[:8]}")
@@ -454,7 +453,7 @@ def test_d1_via_controlling_a_foreign_row_is_refused(db_session, protocol):
 
 
 # ---------------------------------------------------------------------------
-# (c) F2 — a principal hosted only on a D2-only member admits NOTHING
+# (c) Non-transitivity — a principal hosted only on a D2-only member admits NOTHING
 # ---------------------------------------------------------------------------
 
 
@@ -499,7 +498,7 @@ def test_the_same_principals_admit_once_an_anchoring_member_hosts_them(db_sessio
 
 
 # ---------------------------------------------------------------------------
-# (d) Revocation — the hosting member's demotion cascades (invariant 8)
+# Revocation — the hosting member's demotion cascades
 # ---------------------------------------------------------------------------
 
 
@@ -552,7 +551,7 @@ def test_dropping_the_principal_row_revokes_the_witness(db_session, protocol):
 
 
 # ---------------------------------------------------------------------------
-# (e) §2 overreach family stays refused under both new arms
+# (e) overreach family stays refused under both new arms
 # ---------------------------------------------------------------------------
 
 
@@ -561,7 +560,7 @@ def test_dropping_the_principal_row_revokes_the_witness(db_session, protocol):
     ["weth9", "lido_steth", "eigenlayer_strategy", "usdc", "seaport", "deposit_contract"],
 )
 def test_integration_operands_never_admit_through_a_principal_edge(db_session, protocol, external):
-    """The §2 overreach list. A member NAMES these as integration operands —
+    """The overreach list. A member NAMES these as integration operands —
     ``call_target`` controller values and plain dependency rows — and never as
     a resolved principal. Neither arm may reach them."""
     member = _anchored_member(db_session, protocol, ADDR(0x5000))
@@ -746,7 +745,7 @@ def test_principal_arms_settle_identically_across_arrival_orders(db_session):
 
 
 def test_closest_miss_names_a_non_anchoring_factory(db_session, protocol):
-    """Invariant 5: a row parked behind the factory rule says so by name."""
+    """A row parked behind the factory rule says so by name."""
     from scripts.membership_reporting import closest_miss
 
     outsider = _contract(db_session, ADDR(0x6600), nominated=protocol.id)
@@ -791,7 +790,7 @@ def test_losing_the_anchoring_witness_without_demotion_still_cascades(db_session
     """The drift shape reconcile caught on the dev-DB re-earn: a member keeps
     membership on a W3-D2 witness while the W3-D1 witness that made it ANCHOR
     is revoked. Everything resting on its anchoring — factory lineage,
-    principal-keyed W3 — must fall with it (invariant 8)."""
+    principal-keyed W3 — must fall with it."""
     anchor = _anchored_member(db_session, protocol, ADDR(0x8000))
     owner_eoa = ADDR(0x8001)
     _principal(db_session, anchor, owner_eoa, resolved_type="eoa")
@@ -832,11 +831,11 @@ def test_losing_the_anchoring_witness_without_demotion_still_cascades(db_session
     "resolver_path", [None, [], MAPPING_PATH, ["enumerable_role_store", "param_keyed_mapping_enumeration"]]
 )
 def test_a_principal_with_no_authority_derivation_never_admits(db_session, protocol, resolver_path):
-    """The §2 overreach shape as the dev DB carries it: Seaport and the NFT
+    """The overreach shape as the dev DB carries it: Seaport and the NFT
     marketplace TransferManagers are resolved principals of a member NFT's
     transfer entry point, derived by enumerating the token's approval mapping
     or with no derivation recorded at all. Membership of a caller set is a
-    permission its writer granted, never control (invariant 6)."""
+    permission its writer granted, never control."""
     member = _anchored_member(db_session, protocol, ADDR(0x9000))
     marketplace = _contract(db_session, ADDR(0x9001), nominated=protocol.id)
     _principal(db_session, member, marketplace.address, resolved_type="contract", resolver_path=resolver_path)

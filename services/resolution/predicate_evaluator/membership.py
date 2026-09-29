@@ -109,7 +109,7 @@ def _observed_event_key_words(
 
     scan_chain_id = getattr(outer_ctx, "chain_id", None)
     if not isinstance(scan_chain_id, int):
-        # ctx.chain_id is required (inv. 6); a chainless durable read can no longer
+        # ctx.chain_id is required; a chainless durable read can no longer
         # default to mainnet's indexed logs.
         return []
 
@@ -203,9 +203,9 @@ def _observed_event_key_words_from_hypersync(
 
         scan_chain_id = getattr(outer_ctx, "chain_id", None)
         if not isinstance(scan_chain_id, int):
-            # ctx.chain_id is required (inv. 6); no chain → no scan surface.
+            # ctx.chain_id is required; no chain → no scan surface.
             return []
-        # Per-chain HyperSync endpoint (inv. 5), driven by the evaluation's chain:
+        # Per-chain HyperSync endpoint, driven by the evaluation's chain:
         # meta override, then env override, then the registry URL. A chain with no
         # registry coverage has no scan surface — skip the live scan (no members)
         # rather than silently scanning mainnet.

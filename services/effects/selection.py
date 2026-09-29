@@ -1118,7 +1118,7 @@ def _has_effect_evidence():
       selection decision for no recall at all.
 
     **Why ``state_changing IS FALSE`` alone is not the exclusion.**
-    ``tests/test_effective_function_mutability_columns.py``'s
+    ``tests/policy/test_effective_function_mutability_columns.py``'s
     ``test_a_state_write_only_filter_would_suppress_the_positive_control`` — the
     pin for whoever retargets this filter — ends "a sink-only filter is not
     sufficient on its own, ``state_changing`` is", and a stricter reading of it
@@ -1298,9 +1298,9 @@ def _principals_by_function(session: Session, function_ids: list[int]) -> dict[i
 
     The ORDER BY is load-bearing, not cosmetic: element ``[0]`` of
     this list becomes the identity every fork probe impersonates
-    (``candidate.principal_addresses[0]`` at ``calldata.py`` :1395, :1437, :1720,
-    :2312, and the first resolved principal of the code-upgrade plan in
-    ``orchestrator.py``). Without it, WHO the probe runs as — and therefore which
+    (``candidate.principal_addresses[0]`` in ``services/effects/calldata/``
+    and the first resolved principal of the code-upgrade plan in
+    ``services/effects/orchestrator.py``). Without it, WHO the probe runs as — and therefore which
     gate it passes, which revert it records, and what the witness says — was left
     to the query plan / heap order rather than being a function of the data. The
     multi-principal population is not hypothetical: fid 2527 carries 33 principals

@@ -1,9 +1,9 @@
 """Exception shapes the effects stage introduces.
 
 Classified type-only by ``workers.retry_policy`` (never by message substring).
-The fork/anvil transports these represent are Phase 2 work; the classes exist
-now so ``retry_policy._TRANSIENT_TYPES`` can name them and the fail-forward
-semantics (inv. 15) are wired before the harness lands.
+Fork/anvil failures are classified by ``retry_policy._TRANSIENT_TYPES`` so
+transient transport failures can retry before the effects stage advances to
+coverage on retry exhaustion.
 """
 
 from __future__ import annotations

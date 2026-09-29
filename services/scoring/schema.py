@@ -124,7 +124,7 @@ def coalesce_chain(chain: str | None) -> str:
     Load-bearing for MAX-per-entity: without the fold, ``"mainnet"``,
     ``"Ethereum"`` and ``None`` mint three keys for one entity and the
     deduplication silently stops deduplicating — the value axis would then
-    charge the same vault up to three times. ``tests/test_scoring_schema.py``
+    charge the same vault up to three times. ``tests/scoring/test_scoring_schema.py``
     pins this against the canon so the two cannot drift.
     """
     token = str(chain or "").strip().lower()
@@ -277,10 +277,10 @@ class FunctionSignal:
     only thing distinguishing two legitimately different contracts' signals).
     Defaulting it to ``None`` was only survivable on the persisted path, where
     the NOT NULL column eventually rejects it — three layers from the distiller
-    that made the mistake. On the §7.5 in-memory CLI path there is no database
+    that made the mistake. On the in-memory CLI path there is no database
     at all, so a ``None`` would never be caught and split-proxy siblings would
     collapse into one another in the differential oracle, diverging the two
-    feeding modes that §7.5 guarantees are identical.
+    feeding modes that share the same distillation and fold.
 
     ``function_id`` and ``effect_verdict_id`` do keep their defaults: they are
     optional back-references, not identity, and their ``None`` honestly means
@@ -392,7 +392,7 @@ def not_determined_signal_defaults() -> dict[str, Any]:
 
     Deliberately a function a distiller must call and splat, never a set of
     dataclass defaults: the point is that choosing ``not_determined`` is a
-    visible act at the call site. Wave 2 uses this to build a fail-closed row
+    visible act at the call site. The distiller uses this to build a fail-closed row
     when a witness is missing, then overrides the fields it actually proved.
     """
     return {

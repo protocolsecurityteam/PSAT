@@ -1,5 +1,4 @@
-"""A bare caller gate admits nobody (DISCOVERY_MEMBERSHIP_GATE_SPEC.md §3.2
-invariant 6, ``W3_D2_SOURCES``).
+"""A bare caller gate admits nobody (``W3_D2_SOURCES``).
 
 ``ControllerValue.authority_provenance='caller_gate'`` records a proven fact —
 this address is checked against ``msg.sender`` on some entry point — and that
@@ -12,7 +11,7 @@ authority.
 
 Pinned here: the EndpointV2/OneSig shape earns ZERO witnesses on both chains
 and demotes on re-earn, the caller-gate rows survive untouched, and the
-governance derivations (probed ``owner()``/``authority()`` reads, resolved
+governance derivations (probed ``owner``/``authority`` reads, resolved
 proxy-admin slots, authority-derived principals) keep admitting.
 """
 
@@ -161,7 +160,7 @@ def test_endpoint_and_onesig_earn_zero_witnesses(db_session, chain):
 def test_caller_gate_member_demotes_on_re_earn(db_session):
     """A standing member whose only witness was the D2 caller-gate edge loses
     it: the via-fact no longer verifies, so the row demotes to candidate with
-    its nomination and witness history preserved (invariant 4)."""
+    its nomination and witness history preserved."""
     protocol = _protocol(db_session)
     oapp = _member(db_session, protocol, _addr(0xE10))
     endpoint = _contract(db_session, ENDPOINT_V2, protocol_id=protocol.id, nominated_protocol_id=protocol.id)
@@ -223,8 +222,8 @@ def test_caller_gate_controller_facts_stay_recorded(db_session):
 
 
 def test_probed_owner_read_still_admits_the_controller(db_session):
-    """Positive control: a governance derivation — the §3.5 probe's
-    ``owner()`` read on a member — keeps admitting its controller under D2."""
+    """Positive control: a governance derivation — the probe's
+    ``owner`` read on a member — keeps admitting its controller under D2."""
     protocol = _protocol(db_session)
     member = _member(db_session, protocol, _addr(0xE30))
     controller = _contract(db_session, _addr(0xE31), nominated_protocol_id=protocol.id)

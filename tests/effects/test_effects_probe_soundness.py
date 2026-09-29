@@ -5,12 +5,12 @@ then behaves in a way that is about the PROBER's choice rather than about the
 function, and the resulting payload is published as though it described the
 function.
 
-* §5a backing — a call to a CODELESS address is a silent no-op success inside
+* backing — a call to a CODELESS address is a silent no-op success inside
   ``SafeTransferLib``, so a deposit-backed conversion handed the acting identity
   for its asset still mints while pulling nothing. ``inflow_observed: false`` on
   that execution is fabricated dilution. Parameter names cannot rule it out (an
   asset called ``want`` matches no vocabulary), so it is settled by observation.
-* §4.2 value-out and §4.3 code-upgrade — a REVERTED probe has no logs and moved
+* value-out and code-upgrade — a REVERTED probe has no logs and moved
   no slot, exactly like a probe that ran and did nothing. Collapsing the two put
   a precondition revert into the code-plane cache, where it transferred to every
   bytecode twin.
@@ -97,7 +97,7 @@ def _supply(simulate, calldata: str, **kw):
 
 
 # ---------------------------------------------------------------------------
-# FIX 1 — the §5a NEGATIVE must be earned, whatever the asset parameter is called
+# FIX 1 — the NEGATIVE must be earned, whatever the asset parameter is called
 # ---------------------------------------------------------------------------
 
 
@@ -239,7 +239,7 @@ def test_an_executed_value_probe_that_moved_nothing_keeps_its_cacheable_reason()
 
 
 def test_a_reverted_upgrade_probe_is_not_impl_slot_unchanged():
-    """The same conflation in §4.3: the impl slot is unchanged after ANY revert,
+    """The same conflation in code-upgrade probes: the impl slot is unchanged after ANY revert,
     and ``impl_slot_unchanged`` IS code-plane cacheable."""
     slot = recipes.EIP1967_IMPL_SLOT
     old_impl = "0x" + _word("0x" + "01" * 20)
@@ -353,7 +353,7 @@ def test_every_row_carries_an_observation_discriminator():
 
 
 def test_authority_change_records_the_decoded_mutation_revert():
-    """§9.3, seam ``recipes.authority_change``. The class is unrecoverable by
+    """Probe seam ``recipes.authority_change``. The class is unrecoverable by
     construction (no seeder — it reverts on the gate, not a missing asset), but
     the decoded revert must be kept or the next census cannot name why the 31
     mutation_call_reverted rows reverted. Recorded the way ``value_out`` records a
@@ -415,7 +415,7 @@ def test_a_burn_that_wrapped_past_zero_reads_as_a_burn():
 
     assert eff.verdict == VERDICT_PROVEN
     assert eff.details["supply_delta_sign"] == "burn"
-    # The §5a dilution witness belongs to mints alone and must not appear here.
+    # The dilution witness belongs to mints alone and must not appear here.
     assert "backing" not in eff.details
 
 

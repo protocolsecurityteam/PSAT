@@ -237,10 +237,9 @@ def _repointed_entities(
       ``policy_derived`` would admit every tier nobody has classified — including
       the ``not_determined`` an absent or unrecognised ``tier`` token falls to,
       which is precisely a witness that proved nothing. A ``policy_derived``
-      claim is a static inference — the ``configures`` producer's own docstring
-      concedes that "the written set-var stands in for the spec's 'read by the
-      hook fn'" — and an inference about what a function configures is not
-      evidence about where value sits.
+      claim is a static inference: the ``configures`` producer uses a written
+      storage variable as a proxy for what the hook reads. An inference about
+      what a function configures is not evidence about where value sits.
     * The named address must be a contract of THIS protocol on THIS chain, the
       same three checks :func:`_licensed_reach_entities` makes.
     * The burn address is never an entity. It is the graph's single largest

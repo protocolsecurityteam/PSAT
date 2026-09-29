@@ -2,7 +2,7 @@
 
 The scan / poll / TVL loops run outside ``BaseWorker``, so the job-scoped
 ``record_degraded`` / ``record_stage_metric`` accumulators are no-ops here.
-The substitute (house standard §2.4) is a per-cycle ``record_heartbeat`` whose
+The substitute is a per-cycle ``record_heartbeat`` whose
 ``detail`` carries the cycle counts, plus one unconditional INFO per cycle so a
 wedged or silently-idle watcher is detectable even when nothing happened.
 

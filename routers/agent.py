@@ -74,7 +74,7 @@ def agent_address_touches(
 ) -> AddressTouchesResponse:
     """Return contracts an address has function-level authority over.
 
-    ``chain`` scopes the returned contracts to one deployment (inv. 12): the same
+    ``chain`` scopes the returned contracts to one deployment: the same
     address can govern contracts on two chains within one protocol, and the
     chain-scoped Surface page wants only the active chain's touch set. Optional —
     omitted returns every chain (legacy behavior). Legacy NULL-chain rows are

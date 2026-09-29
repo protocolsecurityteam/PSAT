@@ -229,7 +229,7 @@ contract Target {{
 # 6. Cross-contract "mint" via a randomized interface method name.
 #    The retired ``str(ir)`` totalSupply-sandwich parser used to infer mint
 #    from an observed totalSupply delta around an arbitrarily-named call. It is
-#    gone (§5): ``supply.mint`` keys on the canonical ``mint`` selector or an
+#    gone: ``supply.mint`` keys on the canonical ``mint`` selector or an
 #    ERC-20 gate, so a bespoke, non-selector call is not a supply claim — the
 #    honest label is the external-call fact.
 # =========================================================================

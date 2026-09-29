@@ -1,4 +1,4 @@
-"""F9a — coverage states must be visible to an operator.
+"""Coverage states must be visible to an operator.
 
 136 of 183 monitored contracts were watching on the hand-rolled baseline
 registry alone, and the monitor page rendered them exactly like the 21 watching
@@ -127,7 +127,7 @@ def test_ready_stale_row_needs_its_staleness_stamp(fleet, db_session):
 
 
 def test_stale_is_neither_fresh_nor_ignorance(fleet):
-    """The state F5 mints has to survive to the consumer as its own number:
+    """The ``ready_stale`` state has to survive to the consumer as its own number:
     folding it into ready collapses "we cannot re-read this" and folding it into
     not-determined discards a watch list we do hold."""
     counts = plan_coverage_counts(fleet)
@@ -256,7 +256,7 @@ def test_coverage_alarm_posts_and_recovers_through_the_tick(fleet, _clean_heartb
 
 
 # ---------------------------------------------------------------------------
-# Verification-read gaps (F9b's counter, wired onto this surface)
+# Verification-read gaps (the verification-gap counter, wired onto this surface)
 # ---------------------------------------------------------------------------
 
 
@@ -301,7 +301,7 @@ def test_the_gap_census_says_what_its_zeroes_mean(api_client, fleet):
 
 
 def test_ops_collects_the_gap_census_without_a_new_alarm_family(db_session):
-    """Published unconditionally, on G1's precedent — and no invented threshold:
+    """Published unconditionally, with no invented threshold:
     a marker census would page on when the poller last ran as much as on the
     reads."""
     from services.monitoring import ops_alerts

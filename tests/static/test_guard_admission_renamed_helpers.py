@@ -1,10 +1,9 @@
 """Regression test: parametric guards land in semantic_functions but
 resolve to no concrete principals — the EtherFiTimelock symptom.
 
-Original todo (#7 in /home/gnome2/asu/capstone/PSAT/todo.txt): the
-EtherFiTimelock's grantRole/revokeRole/renounceRole show as 'Unresolved'
-in the UI even though the contract is plainly role-controlled. The
-analyzer admits these functions to ``semantic_functions`` (we
+The original reported symptom: EtherFiTimelock's
+grantRole/revokeRole/renounceRole show as 'Unresolved' in the UI even though
+the contract is plainly role-controlled. The analyzer admits these functions to ``semantic_functions`` (we
 verified — see ``test_renamed_helpers_dispense_role_is_admitted``
 below). What it does NOT do is bind them to concrete principals, so
 ``effective_permissions`` emits an entry with empty
@@ -25,7 +24,7 @@ This test pins three claims:
 
 The xfail in (3) flips to passing when the policy stage learns to
 express 'guarded by getRoleAdmin(role_arg) holders' as a typed
-parametric principal — see todo.txt #7's deferred fix block.
+parametric principal.
 """
 
 from __future__ import annotations

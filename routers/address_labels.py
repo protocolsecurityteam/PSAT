@@ -1,6 +1,6 @@
 """Admin-curated address → name labels.
 
-Global-plus-override model (invariant 12): a label row is either *global*
+Global-plus-override model: a label row is either *global*
 (``chain IS NULL`` — applies on every chain, the right semantics for EOA /
 Safe-signer accounts) or *chain-qualified* (a concrete chain name that overrides
 the global label on that chain, so contract labels are safe cross-chain). The

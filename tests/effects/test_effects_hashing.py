@@ -1,9 +1,9 @@
-"""Behavioral-hash ladder tests (EFFECTS_RESOLUTION_SPEC §7 / inv. 2).
+"""Behavioral-hash ladder tests.
 
 Two layers:
   * a real-Slither compile of a mixin default vs a stricter override, gated
     behind local solc availability (the offline-suite convention — CI
-    preinstalls one, a fresh clone skips), proving inv. 2 on real IR;
+    preinstalls one, a fresh clone skips), proving override-sensitive hashing on real IR;
   * lightweight structural doubles (no solc) so the core invariants — override
     diverges, internal-callee inlining, immutable masking, unverified
     determinism, fast-path soundness precondition — are always covered.
@@ -27,7 +27,7 @@ pytestmark = pytest.mark.compile
 
 
 def test_override_hashes_differently_from_mixin_structural():
-    """inv. 2: a stricter override (extra require gate) MUST hash apart from the
+    """A stricter override (extra require gate) MUST hash apart from the
     mixin default even though names are stripped — the divergence is structural,
     not name-based."""
     latch = _var("StateVariable", "_pausedUntil")
@@ -202,7 +202,7 @@ def _solc_086() -> str:
 
 
 def test_override_vs_mixin_resolved_hashes_differ_real_slither(tmp_path: Path):
-    """inv. 2 on real IR: the mixin `pauseUntil` default and a stricter override
+    """Override-sensitive hashing on real IR: the mixin `pauseUntil` default and a stricter override
     resolve to different functions and MUST hash apart (the exact weETH hazard —
     same name, same inherited file, different gate)."""
     from slither.slither import Slither

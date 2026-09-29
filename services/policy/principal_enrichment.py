@@ -43,7 +43,7 @@ def load_protocol_safe_owner_sets(session: Session, protocol_id: int) -> dict[st
     conflict and is OMITTED (no recency column to arbitrate, so we
     never silently pick one contradictory enumeration). The set is only as
     complete as the protocol contracts analyzed so far, which is correct: the
-    comparison pool grows monotonically as more contracts resolve (inv-6), never
+    comparison pool grows monotonically as more contracts resolve, never
     producing a wrong deduction, only fewer comparisons.
     """
     rows = session.execute(

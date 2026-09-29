@@ -1,6 +1,6 @@
-"""Discovery-write nomination conversion (DISCOVERY_MEMBERSHIP_GATE_SPEC.md §5.2).
+"""Discovery-write nomination conversion.
 
-Invariant 1 at the persistence boundary: ``db.queue`` discovery upserts —
+At the persistence boundary: ``db.queue`` discovery upserts —
 the funnel for every discovery writer, the exa/spa/two-pass ``run_discovery``
 entries included — record nominations via the membership gate and never write
 ``Contract.protocol_id``, whatever the source tag.
@@ -166,7 +166,7 @@ class TestSingleUpsertNominates:
 
     def test_unknown_chain_row_nominates_but_stays_candidate(self, db_session, proto_id):
         # The exa resolve-later bucket: a nomination is recorded; membership
-        # is impossible until the chain resolves and W1 lands (invariant 3).
+        # is impossible until the chain resolves and W1 lands.
         addr = ADDR(0x2C01)
         upsert_discovered_contract(
             db_session,

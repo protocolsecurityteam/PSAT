@@ -1,11 +1,11 @@
-"""[P2-pre] company/inventory persist chain threading (MULTICHAIN_INVARIANTS.md Appendix A).
+"""Company/inventory persist chain threading.
 
 Regression coverage for the duplicate-stub bug found in the PR-154 preview DB:
 for 10 mainnet addresses, two unanalyzed Contract stubs coexisted — one
 ``chain=NULL`` (the defillama company-inventory persist path passing no chain)
 and one ``chain='ethereum'`` written ~1 min later by the dapp-crawl persist path.
 ``NULL ≠ NULL`` defeats ``uq_contract_address_chain``, so the second writer minted
-a duplicate instead of matching the first (invariants 1, 6, 12).
+a duplicate instead of matching the first.
 
 The fix lives in ``db.queue.bulk_upsert_discovered_contracts`` — the shared writer
 for all three company-inventory sources (inventory, defillama, dapp_crawl): an
@@ -80,7 +80,7 @@ def test_defillama_then_dapp_crawl_same_mainnet_address_yields_one_row(db_sessio
     row = rows[0]
     assert row.chain == "ethereum"
     assert set(row.discovery_sources or []) == {"defillama", "dapp_crawl"}
-    # Writers nominate, never stamp (membership-gate invariant 1).
+    # Writers nominate, never stamp.
     assert row.protocol_id is None
     assert row.nominated_protocol_id == proto_id
 
@@ -139,7 +139,7 @@ def test_same_address_two_evidence_chains_yields_two_rows(db_session, proto_id):
     db_session.commit()
 
     rows = db_session.query(Contract).filter(Contract.address == addr).all()
-    # Same address on two chains = two distinct deployments (invariant 1).
+    # Same address on two chains = two distinct deployments.
     assert {r.chain for r in rows} == {"ethereum", "base"}
 
 

@@ -1,14 +1,13 @@
-"""Stage-4 lease gating + event-identity tests for the unified watcher (W2a).
+"""Lease gating + event-identity tests for the unified watcher.
 
 Real test DB, real decode/sync/reanalysis/notify pipeline; only the RPC wire
 (``rpc_request`` for head + getLogs, ``rpc_batch_request_classified`` for
 poll) and the Discord HTTP call (``notifier._send_discord``) are stubbed.
-Covers design §2.4
-(two-layer singleton), HR2 (duplicate-pass produces zero extra rows / jobs /
-posts), the batch-timelock identity, the partial-index poll exclusion, the
+Covers the two-layer singleton, duplicate-pass behavior (zero extra rows /
+jobs / posts), the batch-timelock identity, the partial-index poll exclusion, the
 per-chain daemon-lease gate (skip / renew-loss abort / TTL steal / re-acquire),
-the documented poll-path duplicate non-guarantee (Risk #7), and the
-governance-rotation dirty-mark (design §2.3 call-site 5).
+the documented poll-path duplicate non-guarantee, and the
+governance-rotation dirty-mark.
 """
 
 from __future__ import annotations
@@ -206,7 +205,7 @@ def _count_jobs(session, address):
 
 
 # ---------------------------------------------------------------------------
-# THE duplicate-pass property test (design §4 Stage 4 / HR2)
+# THE duplicate-pass property test
 # ---------------------------------------------------------------------------
 
 
@@ -214,8 +213,8 @@ def test_duplicate_scan_pass_adds_zero_rows_jobs_and_posts(db_session, monkeypat
     """Two scan passes over IDENTICAL logs — the second re-scanning the same
     range (cursor reset back to 0, i.e. a lease-bug concurrent scanner that
     never saw the first pass advance) — produce ZERO additional MonitoredEvent
-    rows, reanalysis jobs, and Discord posts. Layer 2 (the partial unique index
-    + RETURNING-gated side effects) carries this WITHOUT the lease: the second
+    rows, reanalysis jobs, and Discord posts. The partial unique index
+    + RETURNING-gated side effects carry this WITHOUT the lease: the second
     pass is the same process holder and so wins the lease on re-entry."""
     import services.monitoring.notifier as notifier
 
@@ -347,7 +346,7 @@ def test_two_poll_detections_same_field_both_insert_with_null_log_index(db_sessi
 
 
 # ---------------------------------------------------------------------------
-# Lease gating (design §2.4 Layer 1)
+# Lease gating
 # ---------------------------------------------------------------------------
 
 
@@ -458,7 +457,7 @@ def test_poll_skips_when_another_holder_owns_the_lease(db_session, monkeypatch):
 
 
 def test_poll_path_may_duplicate_without_lease_protection(db_session, monkeypatch):
-    """Design Risk #7 (documented non-guarantee): the poll path has NO Layer-2
+    """The poll path has no unique event
     identity, so two concurrent detections of the same change (simulated by
     replaying the pre-change state before the second pass — a lease-bug
     concurrent poller) DO produce duplicate state_changed_poll rows. This
@@ -495,7 +494,7 @@ def test_poll_path_may_duplicate_without_lease_protection(db_session, monkeypatc
 
 
 # ---------------------------------------------------------------------------
-# Governance-rotation dirty-mark (design §2.3 call-site 5)
+# Governance-rotation dirty-mark
 # ---------------------------------------------------------------------------
 
 

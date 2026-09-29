@@ -1,4 +1,4 @@
-"""§7 (G7) — the authority-plane §9 direction.
+"""Authority-plane contradictions between resolution and execution.
 
 Effects is the only stage that executes a call AS a resolved principal, so it is
 uniquely able to falsify authority resolution. When the resolver marks a
@@ -83,7 +83,7 @@ def test_ownable_unauthorized_also_files():
 
 
 def test_a_state_precondition_revert_files_nothing():
-    """THE test that matters (§7): a state error carries a different, published
+    """THE test that matters: a state error carries a different, published
     selector, so a selector-keyed detector never mistakes it for a gate rejection —
     where a revert-string substring match would."""
     filed, errors = _run(_transcript(STATE_PRECONDITION))

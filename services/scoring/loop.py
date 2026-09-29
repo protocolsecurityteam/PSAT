@@ -1,7 +1,7 @@
 """The protocol-score loop: the sixth supervised thread in ``protocol_monitor``.
 
-The grade is a whole-protocol fold and cannot live in the effects worker
-(strategy §2): effects runs single-flight behind a process-global anvil, the
+The grade is a whole-protocol fold and cannot live in the effects worker:
+effects runs single-flight behind a process-global anvil, the
 perimeter is not settled at any per-job instant, and audit coverage settles
 *after* effects. So the fold runs here, off the critical path, on a dirty-mark
 with a staleness sweep behind it.
@@ -28,7 +28,7 @@ rather than merely careful about them.
 **A failing protocol backs off.** Marks survive a failed fold on purpose and
 dirty rows sort first, so without ``attempts``/``last_failed_at`` a pass-budget
 of poison protocols would hold the loop forever and the staleness sweep — the
-only cover for the §4 invalidation events that carry no mark — would never run.
+only cover for invalidation events that carry no mark — would never run.
 The accepted cost is stated rather than hidden: a TRANSIENT fold failure delays
 a real invalidation by that protocol's current backoff, up to
 ``DEFAULT_RETRY_BACKOFF_CAP_S`` — deliberately set to the staleness ceiling, so
@@ -67,7 +67,7 @@ DEFAULT_SCORE_INTERVAL = int(os.getenv("PSAT_SCORE_INTERVAL", "300"))
 # rather than draining the whole queue at once.
 DEFAULT_PROTOCOLS_PER_PASS = int(os.getenv("PSAT_SCORE_PROTOCOLS_PER_PASS", "10"))
 # How long a score may stand before the sweep re-folds it regardless of marks.
-# The backstop for the write sites §4 enumerates that carry no mark (hourly
+# The backstop for the write sites that carry no mark (hourly
 # balance rows, TVL snapshots, upgrade indexing) — every one of them moves a
 # scored number without touching a marking path.
 DEFAULT_MAX_SCORE_AGE_S = int(os.getenv("PSAT_SCORE_MAX_AGE_S", "21600"))

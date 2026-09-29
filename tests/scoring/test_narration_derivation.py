@@ -1,4 +1,4 @@
-"""§14 case 8 — no constant data-claim.
+"""Derived narration must change when its supporting data changes.
 
 A published string that DESCRIBES what a field means may be a constant; one that
 makes a CLAIM ABOUT THE DATA must be derived from the carrier's own data,
@@ -484,7 +484,7 @@ def test_the_rollup_reading_counts_the_subsumed_entities_that_charge_a_top_row()
 
 
 def _authored_strings(node: Any, path: str = "") -> list[tuple[str, str]]:
-    """Every authored string in the published document, by ruling 7's scope."""
+    """Inspect every authored string in the published document."""
     keys = ("reading", "note", "basis", "chosen_by", "bound_kind", "fact", "value_at_stake_basis", "licensing")
     out: list[tuple[str, str]] = []
     if isinstance(node, dict):
@@ -590,7 +590,7 @@ def test_every_registered_arm_and_ceiling_carries_its_own_sentence():
     ids=["republished", "withheld"],
 )
 def test_case7_the_derived_readings_hold_on_a_subsumed_row_too(fold, deletability, key):
-    """§14 case 7 applied to case 8: ``_ComposedMagnitude.as_json`` and
+    """``_ComposedMagnitude.as_json`` and
     ``_WithheldComposition.as_json`` have no findings/subsumed branch, and this
     asserts the consequence on the population three earlier passes never
     measured."""

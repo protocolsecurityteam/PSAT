@@ -1,4 +1,4 @@
-"""F3 — deployer expansion runs on the requested chain, not a mainnet default.
+"""Deployer expansion runs on the requested chain, not a mainnet default.
 
 ``search_protocol_inventory`` traces deployer wallets via the Etherscan
 ``getcontractcreation``/``txlist`` endpoints. Those calls must carry the

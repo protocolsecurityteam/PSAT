@@ -1,7 +1,4 @@
-"""Value axis.
-
-One of the twenty sections of the former ``test_scoring_redteam.py``.
-"""
+"""Value axis."""
 
 from __future__ import annotations
 

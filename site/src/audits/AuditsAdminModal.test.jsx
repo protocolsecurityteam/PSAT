@@ -1,5 +1,5 @@
-// Direct render test for AuditsAdminModal's public prop API (split out of the
-// old src/components.test.jsx). Link-safety behavior is covered separately in
+// Direct render test for AuditsAdminModal's public prop API.
+// Link-safety behavior is covered separately in
 // auditLinkSafety.test.jsx.
 
 import React from "react";

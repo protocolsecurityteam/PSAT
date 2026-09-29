@@ -142,7 +142,7 @@ def list_monitored_contracts(
 )
 def upsert_protocol_monitoring(protocol_id: int, request: UpsertMonitoredContractRequest) -> MonitoredContractItem:
     """Create or update one monitored contract for a protocol."""
-    # Allowlist enforcement (inv. 14): enrolling a contract on a chain takes
+    # Allowlist enforcement: enrolling a contract on a chain takes
     # scanner leases and RPC on that chain, so a chain this deployment has not
     # enabled is rejected here (the default 'ethereum' is supported everywhere).
     try:

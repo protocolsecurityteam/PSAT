@@ -802,8 +802,7 @@ WITNESS_TIERS = frozenset({WITNESS_TIER_SELF_DESCRIBING, WITNESS_TIER_HINT, WITN
 
 # Openness of the functions that emit the event, as the analyzer proved it
 # (one shared vocabulary: utils.scoring_status). Absent is NOT ``open`` and NOT
-# ``restricted`` — it is the third state, and it only ever demotes a tier
-# (invariant 4).
+# ``restricted`` — it is the third state, and it only ever demotes a tier.
 
 # ``monitored_events.event_type`` is varchar(100). A claim that cannot be
 # stored under its own identity is not a claim we can publish, so a spec whose
@@ -903,8 +902,8 @@ def normalized_writer_openness(raw: object) -> str:
 def is_member_witness(raw: object) -> TypeGuard[dict]:
     """True only for a populated correspondence record.
 
-    This is the G2↔G3 trust boundary and the strongest promotion in the
-    taxonomy — it is what lets a mapping write publish directly. A truthy
+    This is the analyzer-to-monitoring trust boundary and the strongest
+    promotion in the taxonomy — it is what lets a mapping write publish directly. A truthy
     non-dict (``True``, ``"yes"``, ``1``, a stray list) is not a proof of
     emit-write correspondence, and accepting one would let a serialization bug
     upstream promote every event on the contract. An empty dict is the same
@@ -992,7 +991,7 @@ def read_spec_is_scalar_slot(read_spec: object) -> bool:
     Absent, empty or unrecognized ``type_kind`` returns False. That is the
     not-determined state and it refuses, because this predicate gates a
     promotion: the absence of a proof that the slot is scalar is not a proof
-    that it is (invariant 4).
+    that it is.
     """
     if not isinstance(read_spec, dict):
         return False
@@ -1013,15 +1012,14 @@ def classify_witness_tier(
     """Assign the witness tier for one enrolled event spec.
 
     Every input is a proof or it is nothing: an absent member witness, an
-    unproven writer openness, an unreadable controller each demote. No input
-    can promote (invariant 4), so the worst-informed spec lands on
+    unproven writer openness, an unreadable controller each demote. No missing
+    input can promote, so the worst-informed spec lands on
     ``activity``, which publishes nothing at all.
 
     *poll_decodable* is the caller's proof that the controller can be read
     back — ``polling_plan._is_poll_decodable`` at enrollment, the presence of a
-    projected polling entry at runtime. When F8 teaches that predicate to
-    project struct members, member-path controllers become ``hint`` here with
-    no change to this function.
+    projected polling entry at runtime. Struct-member projections that satisfy
+    that predicate can qualify member-path controllers as ``hint`` here.
 
     *controller_scalar_proven* is the caller's proof that the slot holds a
     single value (:func:`read_spec_is_scalar_slot`). It gates the old/new arm

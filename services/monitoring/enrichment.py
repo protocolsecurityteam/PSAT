@@ -1,6 +1,6 @@
 """Enrichment driver — adds decoded fields to what the taxonomy published.
 
-Ground rules (§3.0, normative):
+Ground rules:
 
 1. Enrichment adds fields to ``monitored_events.data``. It never changes
    ``event_type``, never changes ``witness_tier``, and never causes or
@@ -18,7 +18,7 @@ Ground rules (§3.0, normative):
    ``data.historical`` events from the list this driver receives, so
    pre-enrollment backfill costs zero RPC.
 
-The salience recompute in step 6 is not an optimization: enrichment changes the
+The salience recompute after enrichment is not an optimization: enrichment changes the
 inputs ``assign_salience`` reads (``safe_exec.*``, ``correlated_events``), so
 the mint-time assignment is provisional for enrichable types. Recomputing here,
 inside the window transaction and BEFORE the commit that precedes
@@ -27,12 +27,13 @@ only ever see the post-enrichment level.
 
 What runs, in order, per chain:
 
-* the per-event registry (``ENRICHERS``) — E1 ``execTransaction`` decode, E4
-  MultiSend batch expansion, E2 selector→signature — over the transactions
+* the per-event registry (``ENRICHERS``) — ``execTransaction`` decode,
+  MultiSend batch expansion, and selector→signature resolution — over the
+  transactions
   ``_fetch_txs`` brought back;
 * the salience recompute for the rows those touched, so the correlation join
   reads post-decode levels rather than mint-time provisional ones;
-* the window-level correlation join (E3), which is zero-RPC and writes BOTH
+* the window-level correlation join, which is zero-RPC and writes BOTH
   directions, followed by its own recompute.
 
 ``_SAFE_MULTISEND_ADDRESSES`` provenance
@@ -43,7 +44,7 @@ The pinned MultiSend deployment list is vendored verbatim from
 ``v1.4.1/multi_send.json``, ``v1.4.1/multi_send_call_only.json``. Address
 equality against a pinned deployment is a *witnessed* comparison, and it is the
 only MultiSend witness this run takes: the stronger ``eth_getCode`` code-hash
-check (OQ3) needs live RPC and is deferred out of the run entirely. An address
+check needs live RPC and is deferred out of the run entirely. An address
 NOT on the list is not proven malicious — it is **not proven to be MultiSend**,
 which is exactly why it raises the level instead of lowering it.
 """
@@ -148,7 +149,7 @@ BATCH_REASON_DEPTH_EXCEEDED = "nested_depth_exceeded"
 # effect", and this key is what keeps a consumer from reading the second.
 CORRELATED_SCOPE_MONITORED_ONLY = "monitored_only"
 
-# The execution families §3.4 treats as the cause when they share a transaction
+# The execution families treated as the cause when they share a transaction
 # with anything else monitored. Same transaction hash is a witnessed fact; which
 # side is the cause comes from this registry, not from log ordering (a Safe's
 # ``ExecutionSuccess`` is emitted AFTER the calls it made).
@@ -203,7 +204,7 @@ ENRICHERS: dict[str, Enricher] = {}
 # in it issues no RPC at all.
 NEEDS_TX: frozenset[str] = frozenset()
 
-# Invariant 8, enforced rather than documented: enrichment is ADDITIVE. These
+# Enrichment is ADDITIVE, enforced rather than documented. These
 # are the only ``data`` keys an enricher may write. The list is closed on
 # purpose — ``witness_tier`` is read by ``notifier._may_notify`` and
 # ``historical`` by the scanner's notify gate, so an enricher that returned
@@ -214,8 +215,8 @@ NEEDS_TX: frozenset[str] = frozenset()
 # ``target_function`` is the one widening this lane took, under an explicit
 # orchestrator ruling: the timelock families already publish ``target`` and
 # ``selector`` as bare top-level keys (``event_topics`` decodes them at mint),
-# so their E2 resolution has no ``safe_exec``-shaped block to live inside and
-# gets its own namespaced one. Nothing else is admitted — a key outside this
+# so their signature resolution has no ``safe_exec``-shaped block to live
+# inside and gets its own namespaced one. Nothing else is admitted — a key outside this
 # set stays loudly refused.
 ENRICHABLE_KEYS: frozenset[str] = frozenset(
     {
@@ -319,7 +320,7 @@ def _contested_attributions(
 
 
 # ---------------------------------------------------------------------------
-# E2 — selector → signature, fleet-internal only
+# Selector → signature, fleet-internal only
 # ---------------------------------------------------------------------------
 
 
@@ -360,8 +361,8 @@ def _resolve_signatures(
 
     Fleet-internal and therefore *witnessed*: the signature comes from the
     target's own verified source as this pipeline read it, not from a
-    third-party ABI claim (§3.3's Etherscan fallback is deferred and produces a
-    heuristic, which is why it would have to live under ``heuristics``).
+    third-party ABI claim. An external ABI fallback would be heuristic evidence
+    and would have to live under ``heuristics``; it is not implemented here.
 
     A selector that resolves to more than one DISTINCT signature is left
     unresolved: two contracts at one address across re-analyses disagreeing
@@ -396,7 +397,7 @@ def _resolve_signatures(
 
 
 def _function_block(selector: str | None, signature: str | None) -> dict[str, Any]:
-    """The §3.3 shape. A raw selector is a real fact and renders fine; an
+    """A raw selector is a real fact and renders fine; an
     unresolved one publishes ``signature: null`` rather than a guess, and a
     resolved one names the source that resolved it — a name without a stated
     source is exactly the thing this system does not let stand for a witness."""
@@ -407,7 +408,7 @@ def _function_block(selector: str | None, signature: str | None) -> dict[str, An
 
 
 # ---------------------------------------------------------------------------
-# E4 — MultiSend batch expansion
+# MultiSend batch expansion
 # ---------------------------------------------------------------------------
 
 # (operation: 1B, to: 20B, value: 32B, dataLength: 32B, data: dataLength B)
@@ -485,7 +486,7 @@ def _decode_multisend(payload: bytes, depth: int = 1) -> tuple[list[dict[str, An
 
 
 # ---------------------------------------------------------------------------
-# E1 — Safe ``execTransaction`` decode
+# Safe ``execTransaction`` decode
 # ---------------------------------------------------------------------------
 
 
@@ -622,7 +623,7 @@ def _attach_signatures(
     safe_exec: dict[str, Any],
     batch: list[dict[str, Any]] | None,
 ) -> None:
-    """E2 over the outer call and every inner one, in a single query.
+    """Resolve signatures over the outer call and every inner one, in a single query.
 
     Name resolution is DISPLAY only: nothing here may change a level, and the
     salience rules read none of these keys.
@@ -655,7 +656,7 @@ def _attach_signatures(
     for call in calls:
         call_selector = _normalize_selector(call.get("selector"))
         call_to = _normalize_address(call.get("to"))
-        # The §3.5 entry shape names the signature inline; the source rides
+        # Each decoded call names the signature inline; the source rides
         # with it so a name is never read as sourceless.
         call["signature"] = resolved.get((call_to or "", call_selector or "")) if call_selector else None
         if call["signature"]:
@@ -663,7 +664,7 @@ def _attach_signatures(
 
 
 # ---------------------------------------------------------------------------
-# E2 — the timelock families (no decoder work; the args are already published)
+# The timelock families (no decoder work; the args are already published)
 # ---------------------------------------------------------------------------
 
 
@@ -706,7 +707,7 @@ def _admit_keys(
     event: MonitoredEvent,
     mc: MonitoredContract,
 ) -> dict[str, Any]:
-    """The subset of *produced* an enricher is allowed to write (invariant 8).
+    """The subset of *produced* an enricher is allowed to write.
 
     A rejected key is logged, never dropped in silence: an enricher trying to
     write ``witness_tier`` or ``event_type`` is a bug about who decides what a
@@ -726,7 +727,7 @@ def _admit_keys(
 
 
 # ---------------------------------------------------------------------------
-# E3 — cause/effect correlation join (zero RPC, one query per chain)
+# Cause/effect correlation join (zero RPC, one query per chain)
 # ---------------------------------------------------------------------------
 
 
@@ -751,11 +752,10 @@ def _correlate(
     hand one tenant a row belonging to another. A contract with no protocol is
     not proven to be any tenant's and never joins.
 
-    Not scoped to one window — deliberately, and this is a deviation from the
-    lane's earlier report: §3.4's query has no window restriction, so an effect
+    Not scoped to one window: an effect
     inserted by an earlier window still links when its cause arrives. That is
     additive (the effect is not re-notified and the scope key still rides), and
-    it is not the bounded look-back OQ4 declined to build: no extra lookup is
+    it requires no bounded look-back: no extra lookup is
     performed, the cause's own transaction hash is simply matched against
     whatever is already stored.
     """
@@ -790,7 +790,7 @@ def _correlate(
     members_by_tx: dict[str, list[tuple[MonitoredEvent, MonitoredContract]]] = {}
     for event, mc in rows:
         data = event.data if isinstance(event.data, Mapping) else {}
-        # §3.0 rule 5: historical rows are never enriched. One that predates
+        # Historical rows are never enriched. One that predates
         # enrollment is not a witness to anything this window did.
         if data.get("historical"):
             continue
@@ -895,7 +895,7 @@ def enrich_events(
     won) and before the commit that precedes ``_notify_committed_events``.
 
     Never raises: a failing enricher leaves its row exactly as the taxonomy
-    wrote it (§3.0 rule 4), and a failure in the driver itself must not roll
+    wrote it, and a failure in the driver itself must not roll
     back a window whose rows are already correct.
     """
     if not events:
@@ -977,8 +977,8 @@ def enrich_events(
         # A failed transaction fetch is NOT fatal. It degrades exactly as a
         # per-slot failure does — the hashes are simply absent from ctx.txs,
         # which the context's contract already reads as "not fetched", never as
-        # "no such transaction". The zero-RPC enrichers (§3.9: correlation and
-        # the poll-field classification) need nothing from this map and must
+        # "no such transaction". The zero-RPC enrichers (correlation and
+        # poll-field classification) need nothing from this map and must
         # still run, so a transport blip on the Safe decode may not take them
         # down with it.
         try:
@@ -1046,7 +1046,7 @@ def enrich_events(
         # level read before the decode landed would be the provisional one.
         _recompute(session, changed)
 
-        # E3 is zero-RPC and does not go through ENRICHERS: it writes the
+        # Correlation is zero-RPC and does not go through ENRICHERS: it writes the
         # reciprocal ``caused_by`` onto rows the per-event registry never
         # visits (an effect has no enricher of its own), so the driver owns it
         # the same way it owns the merge.
@@ -1096,8 +1096,8 @@ def _merge(
 
 
 def _recompute(session: Session, changed: list[tuple[MonitoredEvent, MonitoredContract]]) -> None:
-    """Step 6 — the seam that is part of phase 2's contract, not an
-    optimization. Every row whose data an enricher touched (which includes
+    """Re-rate enriched rows before publishing them. Every row whose data
+    an enricher touched (which includes
     every row that gained ``correlated_events`` / ``caused_by``) is re-rated
     before the commit, and therefore before the notifier and the frontend ever
     see it."""
@@ -1124,7 +1124,7 @@ ENRICHERS.update(
 )
 
 # Only the Safe executions need the top-level transaction. The timelock
-# families' arguments are already decoded at mint (``event_topics``), and E3
-# reads nothing off the wire — so a window with no Safe execution in it costs
+# families' arguments are already decoded at mint (``event_topics``), and
+# correlation reads nothing off the wire — so a window with no Safe execution in it costs
 # zero RPC.
 NEEDS_TX = frozenset({"safe_tx_executed", "safe_tx_failed"})

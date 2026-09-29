@@ -119,7 +119,7 @@ def _gate_ref(tree: Any) -> str:
     The gate lives inside that bytecode, so two rows can share a ``gate:none``
     only when their code — and therefore their gate — is identical, and masking
     an immutable authority erases the ADDRESS a gate compares against, never the
-    comparison. ``tests/test_effects_hashing.py`` pins that.
+    comparison. ``tests/effects/test_effects_hashing.py`` pins that.
 
     The consumers of an absent role (the authority-change gate-moving pick, the pauser
     probe) each fail closed to a probe that is not synthesized, so a gate that

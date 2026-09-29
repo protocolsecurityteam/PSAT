@@ -1,9 +1,9 @@
-"""Addresses-payload membership fields (DISCOVERY_MEMBERSHIP_GATE_SPEC.md §5.2).
+"""Addresses-payload membership fields.
 
 The inventory served by ``/api/company/{name}/addresses`` carries members AND
 this protocol's candidates/pruned rows, each with ``membership_state`` derived
 through the gate helper plus witness/probe reason fields — so the UI can show
-a candidate's named missing piece (invariant 5) without composing anything.
+a candidate's named missing piece without composing anything.
 """
 
 from __future__ import annotations
@@ -99,7 +99,7 @@ def test_member_carries_state_and_admitting_witnesses(db_session, protocol):
 
 
 def test_witness_display_entry_flags_heuristic_rules():
-    """§9 invariant 1: no export presents a heuristic membership as proven —
+    """No export presents a heuristic membership as proven —
     the display entry carries the gate's own heuristic predicate."""
     from services.aggregations.company_overview.payload import _witness_display_entry
 

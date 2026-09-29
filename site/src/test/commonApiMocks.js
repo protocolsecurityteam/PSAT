@@ -1,5 +1,4 @@
-// Common /api mock set for component render tests (extracted from the old
-// src/components.test.jsx when its suites moved beside their subjects).
+// Common /api mock set for component render tests shared by suites beside their subjects.
 import { setFetchHandler } from "./fetchMock.js";
 import { ETHERFI_COMPANY, COVERAGE_FIXTURE, ADDRESS_LABELS } from "./fixtures.js";
 

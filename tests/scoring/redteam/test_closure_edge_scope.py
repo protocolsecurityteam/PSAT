@@ -1,7 +1,4 @@
-"""Closure edge scope.
-
-One of the twenty sections of the former ``test_scoring_redteam.py``.
-"""
+"""Closure edge scope."""
 
 from __future__ import annotations
 

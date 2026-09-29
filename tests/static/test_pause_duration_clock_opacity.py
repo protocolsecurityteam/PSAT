@@ -3,9 +3,10 @@
 ``duration_bound_source = "no_time_reference"`` is documented as PROVEN indefinite —
 "the most severe freeze there is" (``effects/config.py``), "the MOST severe freeze"
 (``effects/claims_bridge.py``) — and it gates both frontend prose copies
-(``claimsVocab.js``: ``"(indefinite)"`` and ``"indefinite latch (no self-recovery
-bound)"``). It is a proof BY ABSENCE, so every precondition it rests on has to hold
-against real compiler output, not against a hand-built leaf.
+(``site/src/vocab/claimQualifiers.js``: ``"(indefinite)"`` and
+``site/src/vocab/witnessFacts.js``: ``"indefinite latch (no self-recovery bound)"``).
+It is a proof BY ABSENCE, so every precondition it rests on has to hold against
+real compiler output, not against a hand-built leaf.
 
 Two earlier attempts were tested with hand-built leaves only, and both times the
 defect was a shape the compiler produces and the hand-built fixture did not:
@@ -21,7 +22,8 @@ defect was a shape the compiler produces and the hand-built fixture did not:
 So these cases compile Solidity and run ``build_predicate_artifacts`` — the same call
 the static stage makes, which is also what stamps the ``operand_absorption`` root
 marker the proof requires. Assertions on hand-built leaf shapes live in
-``test_effects_calldata.py``; this file exists to keep the gate on the compiler.
+``tests/effects/test_effects_calldata.py``; this file exists to keep the gate on
+the compiler.
 """
 
 from __future__ import annotations

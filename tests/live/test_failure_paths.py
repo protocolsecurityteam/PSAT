@@ -14,7 +14,7 @@ NO_CODE_ADDRESS = "0x0000000000000000000000000000000000000000"
 UNVERIFIED_ADDRESS = "0xDeAdBeefDeadBeefDEADbEEFdEadbeEFDEADBeef"
 
 # Both deterministic-from-the-start failures resolve to ``JobStatus.failed_terminal``
-# (see db/models.py:JobStatus). ``failed`` is reserved for transient retryable
+# (see db/models/jobs.py:JobStatus). ``failed`` is reserved for transient retryable
 # errors. The poll loop and assertions accept either to stay tolerant of any
 # future re-classification, but the canonical outcome here is terminal.
 TERMINAL_STATUSES = ("failed", "failed_terminal")

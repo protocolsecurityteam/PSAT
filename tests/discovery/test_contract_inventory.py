@@ -706,7 +706,7 @@ class TestResolveUnknownChains:
 
 
 # ---------------------------------------------------------------------------
-# Evidence-based chain membership (invariant 3): probing may CONFIRM membership
+# Evidence-based chain membership: probing may CONFIRM membership
 # on the protocol's declared chains, never ORIGINATE it on an arbitrary chain
 # an address merely has code on (Permit2/Multicall3/Safe are everywhere).
 # ---------------------------------------------------------------------------
@@ -920,7 +920,7 @@ class TestEnrichWithActivity:
     def test_unknown_chain_skips_fetch_and_floors_rank(self, monkeypatch):
         """A contract on an unregistered chain must NOT be ranked by mainnet
         activity — querying mainnet's explorer would score it by an unrelated
-        address's activity (inv. 12). Instead: no fetch, activity score 0."""
+        address's activity. Instead: no fetch, activity score 0."""
         contracts = [{"name": "X", "address": "0x" + "a" * 40, "chains": ["unknown"], "confidence": 0.5}]
         called_with_chain_id = []
 

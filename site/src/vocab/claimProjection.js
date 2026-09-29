@@ -1,7 +1,7 @@
 // Projection layer: the claims carried on a function payload projected onto
 // the presentation facts consumers need — lane, tone, chip sentence, ordering
-// priority and the joined summary line. (Split from claimsVocab.js; the design
-// statement lives at the top of claimVocab.data.js.)
+// priority and the joined summary line. The design
+// statement lives at the top of claimVocab.data.js.
 
 import { CLAIM_VOCAB, OBSERVED_TIER, TIER_RANK, tierLabelFor } from "./claimVocab.data.js";
 // This module and claimQualifiers.js are mutually recursive by design: the

@@ -21,9 +21,9 @@ PREFIX of it and nothing may be concluded from their emptiness:
 
 * ``queued`` — a job was created;
 * ``omitted`` — a candidate this stage COULD have analysed and chose not to
-  (budget, depth, chain, unusable address). This is the ledger: a silently
-  dropped candidate is precisely the C2 defect, so each one is persisted with
-  its reason, not merely counted;
+  (budget, depth, chain, unusable address). Persisting each omission with its
+  reason lets consumers distinguish an explicit exclusion from a candidate
+  that disappeared without being handled; counts alone cannot do that;
 * ``out_of_population`` — never a candidate for this stage at all: the root
   itself, a node the walk did not analyse, a non-contract node, or an address
   that already has a job. These are the fail-closed gates and the dedup arm;
@@ -166,7 +166,7 @@ def _parent_company(session: Session, job: Job) -> str | None:
 def _structural_ownership(session: Session, job: Job) -> tuple[bool, dict[str, str], Contract | None]:
     """``(parent_is_member, {dep_address: relationship}, parent_contract)`` for
     structural same-protocol components of the parent — the W2 producer's edge
-    walk (spec §3.2).
+    walk.
 
     ``cd.relationship_type`` alone isn't sufficient — it's the classifier's
     verdict on what kind of contract the dep IS, not the edge semantics. A
@@ -205,7 +205,7 @@ def _structural_ownership(session: Session, job: Job) -> tuple[bool, dict[str, s
         return False, {}, None
 
     # Membership, never a source tag: only a member parent's stored resolution
-    # can admit (spec §3.2 W2; supersedes the HIGH-source shortcut).
+    # can admit (W2; supersedes the HIGH-source shortcut).
     parent_is_member = getattr(parent_contract, "protocol_id", None) is not None
     parent_id = getattr(parent_contract, "id", None)
     parent_impl = (getattr(parent_contract, "implementation", None) or "").lower() or None
@@ -274,7 +274,7 @@ def produce_structural_witness(
     protocol_id: int | None,
     relationship: str,
 ) -> str | None:
-    """W2 producer (spec §3.2, invariant 6): write the witness only when the
+    """W2 producer: write the witness only when the
     stored resolution on the rows themselves carries the edge — the parent's
     ``implementation``/``beacon`` pointer, or the candidate proxy's back-link
     — never a bare ``relationship_type`` or a request flag.
@@ -329,7 +329,7 @@ def produce_structural_witness(
 
 
 def needs_probe(session: Session, contract: Contract) -> bool:
-    """§3.4 event 1 trigger: no probe attempt persisted for the row's OWN
+    """Nomination trigger: no probe attempt persisted for the row's OWN
     chain, an attempt that never completed (``status != probed`` — an error or
     unroutable outcome is an attempt, never a verdict), or a pruned row seen
     again — re-nomination re-runs W1 (pruned is evidence-at-a-block, not
@@ -354,7 +354,7 @@ def needs_probe(session: Session, contract: Contract) -> bool:
 def probe_predates_revocation(session: Session, contract: Contract) -> bool:
     """A demoted member keeps its completed ``probed`` attempt, so
     ``needs_probe`` skips it. A witness revocation NEWER than that attempt
-    makes the stored probe stale evidence for re-admission (invariant 8), so
+    makes the stored probe stale evidence for re-admission, so
     the probe pass re-targets the row through the normal event flow — the
     pickup path for demotions from request/queue contexts (e.g. the
     protocol-merge deployer cascade) where no inline probe may run."""
@@ -376,7 +376,7 @@ def probe_predates_revocation(session: Session, contract: Contract) -> bool:
 
 def record_code_witness(session: Session, *, contract: Contract, protocol_id: int, probe_result: "ProbeResult") -> bool:
     """W1 from a fresh probe — only a code-present verdict block-stamped on the
-    contract's OWN chain mints the witness (invariant 3)."""
+    contract's OWN chain mints the witness."""
     from db.models import WITNESS_RULE_W1_CODE
     from services.discovery import membership_gate as gate
 
@@ -404,7 +404,7 @@ def _produce_structural_witnesses(
     rows on the parent's chain; a dep with no row yet earns its witness at
     fetch time from the child request's edge hint (re-verified there).
 
-    A witnessed candidate lacking a probe attempt gets the event-1 probe
+    A witnessed candidate lacking a probe attempt gets the nomination probe
     near-line, so a dep that never re-enters the fetch path (existing row +
     existing job) can still complete W2+W1 and promote."""
     from services.discovery import membership_gate as gate
@@ -441,7 +441,7 @@ def _produce_structural_witnesses(
             promoted.append(row.id)
     session.commit()
     if promoted:
-        # A promotion is itself new evidence (spec §3.4 event 2d).
+        # A promotion is itself new evidence.
         gate.evaluate(session, gate.FactsDelta(new_member_contract_ids=tuple(promoted)))
         session.commit()
 

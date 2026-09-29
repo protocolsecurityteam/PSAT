@@ -5,7 +5,7 @@ Revises: b7d3e9a02c51
 Create Date: 2026-08-25 12:00:00.000000
 
 Stores ``getcontractcreation``'s ``contractFactory`` alongside the creation
-tx: the member-factory mapping rule (membership gate §3.3 deviation) needs a
+tx: the member-factory mapping rule needs a
 STORED factory attribution, never a wire read inside a gate check. Nullable —
 NULL is "no factory attribution recorded", never "created directly by an EOA";
 existing rows are not backfilled (the next probe of an address records it).

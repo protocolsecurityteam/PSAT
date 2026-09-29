@@ -1,7 +1,4 @@
-"""Gates and vocabulary.
-
-One of the twenty sections of the former ``test_scoring_redteam.py``.
-"""
+"""Gates and vocabulary."""
 
 from __future__ import annotations
 

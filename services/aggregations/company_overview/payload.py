@@ -48,7 +48,7 @@ def _protocol_inventory_filter(protocol_id: int):
     """Members plus this protocol's candidates/pruned rows. A row whose
     ``protocol_id`` belongs to another protocol is that protocol's member —
     a foreign nomination never surfaces here; unclaimed rows (both ids NULL)
-    are outside the model entirely (spec §3.1)."""
+    are outside the model entirely."""
     return or_(
         Contract.protocol_id == protocol_id,
         and_(Contract.protocol_id.is_(None), Contract.nominated_protocol_id == protocol_id),
@@ -76,14 +76,14 @@ def _witness_display_entry(row: ContractMembershipWitness) -> dict[str, Any]:
     entry: dict[str, Any] = {"rule": row.rule, "via_address": row.via_address}
     if row.rule == WITNESS_RULE_W2_STRUCTURAL and isinstance(row.evidence, dict):
         entry["edge_kind"] = row.evidence.get("edge_kind")
-    # DEPLOYER_HEURISTIC_SPEC.md §9 invariant 1: no export presents a
+    # No export presents a
     # heuristic membership as proven.
     entry["heuristic"] = witness_is_heuristic(row)
     return entry
 
 
 def _candidate_reason(attempt: ContractProbeAttempt | None) -> dict[str, Any]:
-    """Invariant 5: the parked state named from the persisted probe row —
+    """The parked state named from the persisted probe row —
     never a silent default. ``no_probe_attempt`` is itself a named fact:
     no row exists, so no probe has ever run for this (contract, chain)."""
     if attempt is None:
@@ -114,7 +114,7 @@ def _candidate_reason(attempt: ContractProbeAttempt | None) -> dict[str, Any]:
 
 
 def _membership_fields(session: Session, rows: list[Contract]) -> dict[int, dict[str, Any]]:
-    """Per-row membership display fields (spec §5.2): state from the gate
+    """Per-row membership display fields: state from the gate
     helper, reasons only from persisted witness/probe rows. Batched — one
     query per evidence table, never per row."""
     chain_ids = {cr.id: chain_id_for_chain_name(cr.chain) for cr in rows}

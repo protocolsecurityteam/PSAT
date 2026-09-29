@@ -26,9 +26,9 @@ absent                       present                         not_determined
 absent                       absent                          unclassified
 ===========================  ==============================  ================
 
-``ready_stale`` is the state F5 mints: watching continues on the last plan we
-actually read, marked with the instant it stopped being confirmable. It is
-neither fresh (we cannot re-read it) nor ignorance (we know what it said) —
+``ready_stale`` is used when a refresh cannot supply a current plan: watching
+continues on the last plan we actually read, marked with the instant it stopped
+being confirmable. It is neither fresh (we cannot re-read it) nor ignorance (we know what it said) —
 collapsing it into either is the failure this module exists to prevent.
 ``unclassified`` is a row this builder never produced (pre-discriminant), which
 is a not-determined fact about our own record, not about the contract.

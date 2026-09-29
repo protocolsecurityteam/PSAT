@@ -8,7 +8,7 @@ Returns a list of ``RevertGate`` records, each describing:
   * the kind: ``require / assert / custom_revert / inline_asm /
     try_catch_revert / external_call_revert / function_pointer_check / opaque``
 
-Per the v4 plan (round-2 finding #8 on edge-case soundness), we cover:
+The detector covers these revert shapes:
   1. require / require with msg
   2. assert
   3. if (C) revert / revert ErrorName(args)
@@ -98,7 +98,7 @@ class RevertGate:
     # to reach the gate's containing_function from the top-level
     # function being analyzed. Used by the predicate builder to
     # substitute the helper's parameters with the caller's argument
-    # provenance (full ParameterBindingEnv per v4 plan §predicates).
+    # provenance (the full ParameterBindingEnv).
     call_chain: list[Any] = field(default_factory=list)
     # Diagnostic text for predicate.expression / leaf.basis.
     expression_text: str = ""

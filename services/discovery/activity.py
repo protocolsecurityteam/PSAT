@@ -141,7 +141,7 @@ def enrich_with_activity(
         if chain not in CHAIN_IDS:
             # Unregistered/unknown chain: we can't query the right explorer, and
             # defaulting to mainnet would rank this contract by an unrelated
-            # address's mainnet activity (inv. 12). Skip the fetch and floor it.
+            # address's mainnet activity. Skip the fetch and floor it.
             last_ts = None
             score = 0.0
         else:

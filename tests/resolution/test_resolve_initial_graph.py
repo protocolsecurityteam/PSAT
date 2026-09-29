@@ -1,7 +1,7 @@
 """Regression tests for the ``initial_graph`` parameter on
 ``services.resolution.recursive.resolve_control_graph``.
 
-#5 from todo-no-commit-to-gihub.txt — skip the 2nd resolve_control_graph
+Reuse the prior graph during the second resolve_control_graph
 walk that the policy worker triggers after computing
 effective_permissions for the root contract.
 

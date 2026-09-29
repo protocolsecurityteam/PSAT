@@ -56,8 +56,8 @@ function renderSurface() {
 
 // --- Stage-1 selection-refactor helpers (commit-on-Enter model) ---
 // The safe principal + the contracts it controls, derived from the fixture so
-// assertions stay structural (per SELECTION_FILTERING_DIAGNOSIS.md M1: assert
-// "Agent context ≠ any controlled-contract name", not against a pinned name).
+// assertions compare Agent context against every controlled-contract name
+// rather than depending on a pinned fixture name.
 const SAFE_PRINCIPAL = ETHERFI_COMPANY_RICH.principals.find((p) => p.type === "safe");
 const CONTROLLED_NAMES = SAFE_PRINCIPAL.controls
   .map((addr) =>
@@ -459,7 +459,7 @@ describe("ProtocolSurface — per-chain function verdicts (functions chain axis)
 
 // B2: the audit-coverage highlight set is matched against the chain-scoped
 // canvas's bare node ids. Coverage rows are all-chain, so a CREATE2 twin covered
-// only on base must NOT light the same-address ethereum node (inv. 13).
+// only on base must NOT light the same-address ethereum node.
 describe("auditHighlightSet — chain scope (B2)", () => {
   const TWIN = "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0";
   const verified = { audit_id: 7, equivalence_status: "proven", match_type: "reviewed_commit" };
@@ -565,11 +565,9 @@ describe("rich fixture", () => {
   });
 });
 
-// Stage-1 selection-refactor behavior, authored to
-// SELECTION_FILTERING_DIAGNOSIS.md ("Stage 1 concrete design" + M1 asserts).
-// These drive the RENDERED UI through the commit-on-Enter model and are
-// expected RED until the Wave B integration lands (single keys-only selection,
-// SearchNavigator onPreview/onCommit, no smuggled machine on principal results).
+// Selection regressions drive the rendered UI through commit-on-Enter:
+// one selection stores keys only, SearchNavigator separates preview and commit,
+// and principal results do not carry an unrelated machine selection.
 describe("ProtocolSurface — stage-1 selection model", () => {
   beforeEach(() => {
     installApiMocks();
@@ -681,7 +679,7 @@ describe("ProtocolSurface — stage-1 selection model", () => {
     expectNoCrash();
   });
 
-  // (d) Stale-guard bug (SELECTION_FILTERING_DIAGNOSIS.md M1 assertion #4):
+  // (d) Stale-guard regression:
   // select a contract → open a guard in the InspectorCard → select a DIFFERENT
   // entity → the InspectorCard must clear. Pre-refactor, guard-clearing was
   // hand-assembled at each of the seven transition call sites and one of them
@@ -692,7 +690,7 @@ describe("ProtocolSurface — stage-1 selection model", () => {
   //
   // In the commit-on-Enter model, typing never mutates the selection, so the
   // old "type until results go empty" deselect path no longer exists; the
-  // spec's scenario is a commit to a different entity. Two DIFFERENT contracts
+  // regression scenario is a commit to a different entity. Two DIFFERENT contracts
   // (Vault → LiquidityPool) keep the assertion meaningful: LiquidityPool's own
   // InspectorCard renders with selected=null only if the Vault guard key was
   // actually cleared — a leaked key would still resolve to the Vault guard.
@@ -1021,7 +1019,7 @@ describe("ProtocolSurface — M3 polish", () => {
   });
 });
 
-// Motivating bug (UNIFIED_ENTITY_CARD_REFACTOR.md): a machine-only authority —
+// Machine-only authority regression: a machine-only authority —
 // an analyzed contract the server never emits as a principal, e.g.
 // EtherFiTimelock — is reached via a caller button that carries a non-contract
 // type ("timelock"). Pre-collapse that type became view=principal, but the

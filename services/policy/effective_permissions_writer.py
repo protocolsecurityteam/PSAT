@@ -24,8 +24,7 @@ Caller-shaped kinds (``finite_set``, ``threshold_group``,
 ``FunctionPrincipal.address`` semantically means "this address can call
 as itself"; putting blacklists, registry contracts, or external-check
 targets there is a category error that produces false-authority claims
-downstream
-(``ProtocolSurface.jsx:303``, ``protocolScore.js:124``).
+downstream in the protocol surface and scoring consumers.
 """
 
 from __future__ import annotations

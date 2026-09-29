@@ -380,7 +380,7 @@ def refresh_chain_role_holder_planes(
             _record_watermark(session, chain_id=chain_id, candidate=candidate, rows_written=written)
             session.commit()
             if written:
-                # §3.4 event 2: role holders are membership-gate anchor-chain
+                # Role holders are membership-gate anchor-chain
                 # links, so a refreshed plane re-verifies the W3-D1 witnesses
                 # resting on this registry.
                 from services.discovery.membership_gate import evaluate_role_plane_change

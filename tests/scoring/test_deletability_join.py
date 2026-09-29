@@ -151,7 +151,7 @@ def test_host_arm_qualifying_row_is_deletable_without_any_authority_witness():
 
 
 def test_the_basis_is_the_lowest_id_qualifying_row():
-    """Replay (inv. 11): two qualifying rows must not publish either one."""
+    """Replay selects the lowest-id qualifying row regardless of input order."""
     rows = (
         _setter(90, contract=VAULT, function_name="transferOwnership", principal=SAFE),
         _setter(12, contract=VAULT, function_name="setAuthority", principal=SAFE),
@@ -334,7 +334,7 @@ def test_the_earned_negative_publishes_the_authority_it_asked_about():
 
 
 def test_the_three_states_are_three_distinct_tokens():
-    """The refusal a consumer counts must decompose (inv. 1)."""
+    """The refusal a consumer counts must decompose."""
     setter = _roles_setter()
     deletable = P.authority_deletability(_plane((setter,), **_gated()), [SAFE], VAULT_KEY, EXIT)
     negative = P.authority_deletability(_plane((setter,), **_gated()), [EOA], VAULT_KEY, EXIT)
@@ -466,11 +466,11 @@ def test_the_decision_reads_setter_rows_and_never_a_chain_length():
         assert banned not in source
 
 
-# --- the published verdict (inv. 13) ----------------------------------------
+# --- the published verdict ----------------------------------------
 
 
 def test_a_withheld_verdict_discloses_its_state_reason_and_authority_witnesses():
-    """Obscuring evidence must not pay (inv. 13): an unresolvable gating
+    """Obscuring evidence must not pay: an unresolvable gating
     authority withholds the figure and LOWERS published exposure, so the withheld
     entry publishes the state, the typed reason and the authority it asked about
     — the token the consumer's ``refused`` counter is keyed on."""

@@ -12,8 +12,8 @@ from services.scoring.schema import coalesce_chain, is_entity_key
 
 # How an INTERMEDIATE's own body treats the destination call it makes. Three
 # outcomes and the third is the fall-through: a route this reader cannot
-# classify is ``not_determined``, never an arm. The two positive tokens are the
-# spec's, and each is earned from ONE named field of the intermediate function's
+# classify is ``not_determined``, never an arm. Each positive token is earned
+# from ONE named field of the intermediate function's
 # own stored value-flow witness — never from the function's name, its selector,
 # its hop position or the shape of the contract it sits on.
 ROUTE_AMOUNT_AUTHORED = "destination_amount_is_authored_by_the_intermediate"

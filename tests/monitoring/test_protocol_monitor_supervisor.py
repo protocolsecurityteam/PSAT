@@ -1,4 +1,4 @@
-"""Stage 6 — thread-supervisor + stop-event tests (design §2.5, HR3).
+"""Thread-supervisor + stop-event tests.
 
 Two layers:
 

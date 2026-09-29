@@ -4,7 +4,7 @@ Revision ID: c4d6e8f0a1b3
 Revises: b3c5d7e9f1a2
 Create Date: 2026-07-08
 
-Stage 4 (design §2.4 Layer 2 / HR2): give scan-path monitored_events an
+Give scan-path monitored_events an
 identity by construction so a duplicate scan pass can never double-insert.
 
 ``monitored_events.log_index`` (nullable) + a **partial** unique index over
@@ -17,7 +17,7 @@ Design B's full constraint). Historical rows (zero in prod) also stay outside;
 no backfill.
 
 ``monitored_contracts.last_scanned_block`` Integer -> BigInteger, aligning with
-``IndexedEventCursor`` (design §2.8). Additive.
+``IndexedEventCursor``. Additive.
 """
 
 from __future__ import annotations

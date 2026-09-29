@@ -28,7 +28,7 @@ MAX_BATCH_SIZE = 500
 RETRYABLE_HTTP_CODES = {408, 425, 429, 500, 502, 503, 504}
 
 ERPC_SECRET_HEADER = "X-ERPC-Secret-Token"
-# Name/alias → chain-id map, derived from the canonical registry (inv. 5). Kept
+# Name/alias → chain-id map, derived from the canonical registry. Kept
 # as a module constant for the existing ``chain_id_for_chain_name`` lookup.
 COMMON_CHAIN_IDS = chain_name_to_id_map()
 
@@ -94,7 +94,7 @@ def _resolve_chain_id(rpc_url: str, chain_hint: int | None = None) -> int | None
     if cached is not None:
         return cached
     try:
-        # inv-7 exemption: this IS the call that discovers the chain id, so it has
+        # Chain-discovery exemption: this IS the call that discovers the chain id, so it has
         # no independent chain_id to declare — declaring one would be circular.
         raw = rpc_request(rpc_url, "eth_chainId", [], retries=0)
     except Exception:
@@ -328,7 +328,7 @@ def default_rpc_url(
     so callers fail loud via :func:`require_rpc_url` instead of silently hitting
     mainnet or a direct provider. There is intentionally no ``ETH_RPC``,
     public-node, or silent-mainnet fallback: a chainless call is a plumbing bug,
-    not a mainnet request (invariant 6).
+    not a mainnet request.
     """
     if is_local_rpc_url(explicit_rpc_url):
         return explicit_rpc_url
@@ -386,8 +386,7 @@ def require_rpc_url(
 
 @dataclass(frozen=True)
 class ChainContext:
-    """A chain id and the RPC URL resolved for it, bound together (invariant 7 of
-    ``MULTICHAIN_INVARIANTS.md``).
+    """A chain id and the RPC URL resolved for it, bound together.
 
     Construct only via :func:`chain_context` — threading one object instead of
     two loose values is what keeps a caller from pairing chain A's id with
@@ -427,7 +426,7 @@ def _erpc_chain_id_from_url(rpc_url: str) -> int | None:
 
     Returns None when ``ERPC_BASE_URL`` is unset or the URL is not eRPC-shaped
     (local Anvil, explicit hosts, a bare/healthcheck eRPC URL) — the runtime
-    guard is then a no-op. Ported from ``refactor/great-purge`` (invariant 7).
+    guard is then a no-op. Ported from ``refactor/great-purge``.
     """
     if not isinstance(rpc_url, str):
         return None
@@ -450,7 +449,7 @@ def _erpc_chain_id_from_url(rpc_url: str) -> int | None:
 
 
 def _assert_url_chain_id(rpc_url: str, chain_id: int | None) -> None:
-    """Runtime guard (invariant 7): when a caller declares *chain_id* and
+    """Runtime guard: when a caller declares *chain_id* and
     *rpc_url* is a configured-eRPC URL, the chain id embedded in the URL path
     must match the declared one. Raises :class:`RuntimeError` (with both ids and
     a sanitized URL) on disagreement — catching every rpc_url/chain_id plumbing
@@ -671,7 +670,7 @@ def get_code_with_keccak(rpc_url: str, address: str, *, chain_id: int | None = N
 
     # RPC outside the lock so concurrent misses for different addresses don't serialize.
     # Declare the caller's chain_id (never chain_id_eff, which may be discovered FROM
-    # the URL — that would make the inv-7 guard a tautology).
+    # the URL — that would make the URL-to-chain guard a tautology).
     raw = rpc_request(rpc_url, "eth_getCode", [address, "latest"], chain_id=chain_id)
     code = raw if isinstance(raw, str) and raw.startswith("0x") else "0x"
     # Normalize "0x0" → "0x" so bytes.fromhex doesn't raise on odd-length hex.
@@ -751,7 +750,7 @@ def get_code_batch(rpc_url: str, addresses: list[str], *, chain_id: int | None =
 
     calls: list[tuple[str, list[Any]]] = [("eth_getCode", [addr, "latest"]) for addr in to_fetch]
     # Declare the caller's chain_id (not chain_id_eff, which may be discovered
-    # FROM the URL — that would make the inv-7 guard a tautology).
+    # FROM the URL — that would make the URL-to-chain guard a tautology).
     raw_results = rpc_batch_request_with_status(rpc_url, calls, chain_id=chain_id)
     pg_writes: list[tuple[str, str, str]] = []
     with _GETCODE_CACHE_LOCK:

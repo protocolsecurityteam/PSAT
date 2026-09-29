@@ -194,7 +194,7 @@ class MappingEnumerationCache(Base):
     leaves whatever row was already there, so a stale ``complete`` would
     keep being served in place of the honest truncated verdict. The
     column is sized well past the longest current member and
-    ``tests/test_mapping_enumeration_status_vocabulary.py`` round-trips
+    ``tests/resolution/test_mapping_enumeration_status_vocabulary.py`` round-trips
     the whole vocabulary to keep it that way.
     """
 
@@ -412,8 +412,8 @@ class EffectsPlanMarker(Base):
 class OpsKv(Base):
     """Minimal persistent key/value row for operational markers.
 
-    Added for the membership gate's ``enabled_chains_seen`` marker (spec §3.4
-    event 4): workers on boot compare the enabled-chain allowlist against the
+    Added for the membership gate's ``enabled_chains_seen`` marker: workers on boot compare
+    the enabled-chain allowlist against the
     persisted value to detect a chain being enabled. Generic on purpose —
     the next boot-time marker gets a key, not a table.
     """

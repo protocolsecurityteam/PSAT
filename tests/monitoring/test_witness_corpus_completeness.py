@@ -1,4 +1,4 @@
-"""Corpus completeness for the witness taxonomy (spec Part 6, G3 artifact).
+"""Corpus completeness for the witness taxonomy.
 
 A zero-diff on golden fixtures proves nothing unless the corpus actually
 CONTAINS the shapes the taxonomy exists to separate. This module compiles one
@@ -420,7 +420,7 @@ def test_member_controller_drops_a_sibling_members_event(corpus):
 
 
 def test_member_controller_is_readable_through_its_parent_getter(corpus):
-    """F8: the member is one word of ``accountantState()``'s return, so the
+    """The member is one word of ``accountantState()``'s return, so the
     controller has a verification read and its events become hints instead of
     bare activity."""
     spec = _spec(corpus, "PayoutAddressUpdated(address,address)")
@@ -861,7 +861,8 @@ def test_a_latch_var_keeps_its_admin_setter(opaque):
 def test_ordinary_library_use_is_not_opaque(opaque):
     """A library taking no storage pointer cannot write the caller's state, so
     Math-style and SafeERC20-style use must leave the qualification alone —
-    otherwise the guard nullifies F3 on most real contracts."""
+    otherwise the guard nullifies member-witness qualification on most real
+    contracts."""
     from services.static.contract_analysis_pipeline.tracking import _library_storage_write_functions
 
     derived = opaque["PlainLibrary"]

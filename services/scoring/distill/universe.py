@@ -1,4 +1,4 @@
-"""The protocol's discovered address universe (P4)."""
+"""The protocol's discovered address universe."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from utils.logging import record_degraded
 
 logger = logging.getLogger("services.scoring.distill")
 
-# --- the protocol's discovered address universe (P4) --------------------------
+# --- the protocol's discovered address universe --------------------------
 # Every 20-byte address this protocol's own analysis has ever named. It exists
 # for exactly one predicate: a balance-sheet token ABSENT from it is a token
 # nothing in the protocol's code, dependencies, control graph, signals, effects,
@@ -69,9 +69,9 @@ def load_protocol_universe(session: Session, protocol_id: int) -> ProtocolUniver
     The literal arm was measured on the reference corpus to spare 0 balance-sheet
     tokens that no other source already spares (24 distinct literals, 7 of them
     new to the universe): it is cheap and harmless rather than load-bearing,
-    which corrects SHEET_OBSERVATION_SPEC.md §10.3's premise that omitting it
-    fails open. It is kept because a token a contract's own source names is a
-    token the protocol refers to, and that is the claim P4 makes.
+    so omitting it would shrink the reference set rather than fail open. It is
+    kept because a token a contract's own source names is a token the protocol
+    refers to, which is the membership claim this set records.
 
     OPEN PERF ITEM, registered rather than fixed: that arm reads every source
     body of every job the protocol owns out of object storage on EVERY score —
@@ -136,9 +136,9 @@ def load_protocol_universe(session: Session, protocol_id: int) -> ProtocolUniver
 
         The detail/witness blobs are read too, and deliberately: an address the
         analysis recorded inside a resolution record is an address this
-        protocol's discovery named, which is exactly the claim P4 makes. The
-        direction of the error also decides it — a source omitted here makes the
-        universe SHORTER, and a shorter universe condemns MORE.
+        protocol's discovery named, which is exactly the reference-membership
+        claim. The direction of the error also decides it — a source omitted here
+        makes the universe SHORTER, and a shorter universe condemns MORE.
         """
         for value in values:
             if value is None:

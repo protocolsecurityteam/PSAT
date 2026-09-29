@@ -1118,9 +1118,9 @@ def _callee_return_origin(ir: Any, ctx: _UnitCtx, depth: int) -> tuple[str, ...]
     i.e. *provably fixed*. The destination is nothing of the sort: the caller
     picks the key, and a different key is a different address. Publishing it as
     fixed is the worst over-claim this module can make — it is the benign end of
-    the redirectability axis, and §4.2 promotes it to ``immutable_fixed`` on the
-    verdict. The base's mutability is simply not a statement about any one entry,
-    which is exactly why a keyed lookup earns a named kind only where a published
+    the redirectability axis, and ``services/effects/calldata/flows.py`` promotes
+    it to ``immutable_fixed`` on the verdict. The base's mutability is simply not
+    a statement about any one entry, which is exactly why a keyed lookup earns a named kind only where a published
     standard says what it means (``ownerOf`` -> ``token_owner``) and is otherwise
     left unresolved."""
     if depth > _RETURN_ORIGIN_DEPTH or type(ir).__name__ not in _SAME_CONTEXT_CALL_OPS:

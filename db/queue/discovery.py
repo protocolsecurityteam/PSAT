@@ -76,7 +76,7 @@ def bulk_upsert_discovered_contracts(
     for address, chain, entry in norm_entries:
         key = (address, _mainnet_coalesced_chain(chain))
         clean_sources = [s for s in (entry.get("new_sources") or []) if s]
-        # Invariant 1: no discovery source stamps protocol_id — every write
+        # No discovery source stamps protocol_id — every write
         # is a nomination and the membership gate is the sole promoter.
         source_tag = clean_sources[0] if clean_sources else ""
         existing = existing_by_key.get(key)
@@ -144,7 +144,7 @@ def upsert_discovered_contract(
           preserves order so the first discoverer stays first).
         - the nomination is recorded via the membership gate
           (``nominated_protocol_id``); ``protocol_id`` is never written here
-          — promotion is the gate's job (invariant 1).
+          — promotion is the gate's job.
         - ``contract_name`` / ``confidence`` / ``chains`` /
           ``discovery_url`` are first-writer-wins: later writers only
           fill them if the stored value is missing, so a later
@@ -283,11 +283,11 @@ def _merge_witness_rows(session: Session, *, src_id: int, dst_id: int) -> int:
 
 def _merge_deployer_rows(session: Session, *, src_id: int, dst_id: int) -> tuple[int, list[ProtocolDeployer]]:
     """Rewrite src deployer-registry rows to dst. A same-address row under
-    both protocols survives as one row (invariant 7 collision resolved by the
+    both protocols survives as one row (the deployer-registry collision resolved by the
     merge itself: src and dst are the same protocol afterwards) — dst's row is
     kept and revocation resolves conservatively: a revoked side keeps (or
     makes) the survivor revoked, carrying the negative evidence. Returns the
-    dropped-src-row count and the surviving revoked rows whose invariant-8
+    dropped-src-row count and the surviving revoked rows whose revocation
     demotion cascade the caller must run after the FK rewrite."""
     dropped = 0
     cascade: list[ProtocolDeployer] = []
@@ -337,11 +337,11 @@ def _merge_protocol_into(session: Session, src: Protocol, dst: Protocol) -> None
 
     Used when ``get_or_create_protocol`` discovers that a pre-resolver row
     (NULL canonical_slug) is a duplicate of a freshly-resolved family. A gate
-    operation (invariant 1): contract membership, witness rows, and deployer
+    operation: contract membership, witness rows, and deployer
     rows all move to dst in the same transaction, with the (protocol_id, …)
     unique keys on ``contract_membership_witnesses`` / ``protocol_deployers``
     resolved before the blind FK rewrite. A deployer collision whose survivor
-    is revoked runs the invariant-8 demotion cascade after the rewrite.
+    is revoked runs the revocation demotion cascade after the rewrite.
     ``nominated_protocol_id`` is in ``_PROTOCOL_FK_TABLES`` and is rewritten
     here — never left for the src delete's SET NULL. The remaining enumerated
     tables carry no protocol-keyed uniqueness.
@@ -365,7 +365,7 @@ def _merge_protocol_into(session: Session, src: Protocol, dst: Protocol) -> None
     # ``nominate``) for the rest of the transaction.
     session.expire_all()
     for deployer_row in cascade_rows:
-        # Invariant 8 for the surviving revoked registry row: W4 witnesses
+        # Cascade the surviving registry row's revocation: W4 witnesses
         # resting on it are revoked and members left without an admitting
         # witness are demoted, so reconcile reports zero drift post-merge.
         result = gate_demote_deployer(session, deployer_row=deployer_row, reason="protocol_merge_revoked_deployer")

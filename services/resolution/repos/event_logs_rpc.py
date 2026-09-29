@@ -172,8 +172,8 @@ class RpcEventLogFetcher:
         # here too and must keep returning pages an operator's env var would
         # otherwise turn into a raise at the bisect floor.
         self.result_cap = result_cap
-        # Declared so ``rpc_request`` can assert the eRPC URL routes this chain
-        # (inv. 7). None keeps the guard a no-op for callers that lack a chain.
+        # Declared so ``rpc_request`` can assert the eRPC URL routes this chain.
+        # None keeps the guard a no-op for callers that lack a chain.
         self.chain_id = chain_id
         # None = the module default in ``rpc_request``, which is what every
         # landed caller gets. A caller whose windows are wide enough that an

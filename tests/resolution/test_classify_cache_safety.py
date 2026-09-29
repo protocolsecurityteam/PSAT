@@ -126,7 +126,7 @@ def test_cached_details_are_isolated_from_caller_mutation(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# P2.1 — split TTL: immutable classifications keep the long TTL; entries whose
+# Split TTL: immutable classifications keep the long TTL; entries whose
 # details carry mutable Safe owners/threshold or timelock delay use a short TTL at
 # block_tag='latest' so a changed owner-set / delay re-probes sooner. Tests age the
 # cached timestamp directly (no sleeping) to span the short-but-not-long window.

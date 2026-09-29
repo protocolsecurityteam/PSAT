@@ -1,4 +1,4 @@
-"""Side effects follow claim strength (invariant 5), plus the event-type
+"""Side effects follow claim strength, plus the event-type
 column the new vocabulary needs.
 
 The scanner never hands a hint- or activity-tier row to the notifier — it
@@ -149,7 +149,7 @@ def test_the_split_mutes_no_pre_split_signers_filter():
 
 
 def test_a_filter_stating_its_groups_is_not_force_fed_the_neighbouring_group():
-    """The other direction of invariant 7. A save that names its groups used
+    """A filter save that names its groups used
     the post-split vocabulary, so `signers` means signers — the legacy
     expansion may not put executions back."""
     groups = ["signers"]

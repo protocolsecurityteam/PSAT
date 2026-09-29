@@ -132,7 +132,7 @@ def find_dependencies(
 ) -> dict:
     """Resolve an RPC endpoint and return discovered static contract dependencies.
 
-    *chain_id* (the job's chain, threaded from the static worker) arms the inv-7
+    *chain_id* (the job's chain, threaded from the static worker) arms the
     URL↔chain_id guard on every ``eth_getCode`` read; None keeps it a no-op for
     the CLI ``main`` path below (which has no chain in scope)."""
     load_dotenv(Path(__file__).resolve().parents[2] / ".env")
@@ -140,7 +140,7 @@ def find_dependencies(
 
     # The pipeline (static_worker) always passes a chain-resolved rpc_url; this
     # explicit-mainnet base is only reached from the CLI ``main`` below when no
-    # --rpc is given — a documented dev-tool default (inv. 6), not a silent one.
+    # --rpc is given — a documented dev-tool default, not a silent one.
     effective_rpc = rpc_url or default_rpc_url(chain_id=1)
     if not effective_rpc:
         raise RuntimeError("No RPC URL provided and eRPC not configured (set ERPC_BASE_URL)")

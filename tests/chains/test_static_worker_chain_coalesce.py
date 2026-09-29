@@ -1,5 +1,4 @@
-"""NULL-chain Contract lookups in ``workers.static_worker``
-(MULTICHAIN_INVARIANTS.md 1/6/12).
+"""NULL-chain Contract lookups in ``workers.static_worker``.
 
 Two Contract lookups resolved chain from the request JSONB (or not at all) and
 compared it with a raw ``chain == <value>`` predicate:

@@ -7,7 +7,7 @@ and once on the salience level + basis the recompute assigned it. A test that
 only checked the block would let a decode drift the operator's attention
 without failing.
 
-**Mechanical gate (spec Part 8):** every ``alert`` the decode rules can mint
+**Mechanical gate:** every ``alert`` the decode rules can mint
 appears below with its basis —
 
 * ``safe_exec_delegatecall_unrecognized`` from an OUTER delegatecall to an
@@ -137,7 +137,7 @@ def safe(make_mc):
 
 @pytest.fixture()
 def known_target(db_session, protocol):
-    """A target the fleet has itself analysed — E2's only (witnessed) source."""
+    """A target the fleet has itself analysed — signature resolution's only (witnessed) source."""
 
     def make(address: str, selector: str, signature: str) -> Contract:
         contract = db_session.query(Contract).filter_by(address=address, chain="ethereum").one_or_none()
@@ -211,7 +211,7 @@ def tx(*, to: str, input_hex: str, tx_hash: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# E1 — the direct call
+# the direct call
 # ---------------------------------------------------------------------------
 
 
@@ -245,7 +245,7 @@ def test_a_direct_exec_transaction_publishes_the_witnessed_call(db_session, safe
     assert block["gas_token"] == ZERO
     assert block["refund_receiver"] == ZERO
     assert block[sal.SAFE_EXEC_KEY_MULTISEND_RECOGNIZED] is False
-    # E2, and it is display only — the level below is the ``operation == 0``
+    # Signature resolution is display only — the level below is the ``operation == 0``
     # floor either way.
     assert block["target_function"] == {
         "selector": SET_FEE,
@@ -328,7 +328,7 @@ def test_a_signature_from_another_chain_does_not_resolve(db_session, safe, proto
 
 
 # ---------------------------------------------------------------------------
-# E1 — the top-level-call check
+# the top-level-call check
 # ---------------------------------------------------------------------------
 
 
@@ -444,7 +444,7 @@ def test_a_transaction_that_was_never_fetched_publishes_no_block(db_session, saf
 
 
 # ---------------------------------------------------------------------------
-# E1 + E4 — delegatecall, the design-critical trap
+# delegatecall, the design-critical trap
 # ---------------------------------------------------------------------------
 
 
@@ -1048,7 +1048,7 @@ def test_only_needs_tx_types_go_on_the_wire(db_session, safe, make_mc):
 
 
 # ---------------------------------------------------------------------------
-# E2 — the timelock namespace
+# the timelock namespace
 # ---------------------------------------------------------------------------
 
 
@@ -1120,7 +1120,7 @@ def test_a_timelock_without_a_decoded_selector_publishes_nothing(db_session, mak
 
 
 # ---------------------------------------------------------------------------
-# E3 — the correlation join, both directions
+# the correlation join, both directions
 # ---------------------------------------------------------------------------
 
 
@@ -1334,9 +1334,9 @@ def test_a_cause_in_another_tenant_withholds_the_direction(db_session, safe, mak
 
 
 def test_an_effect_from_an_earlier_window_still_links(db_session, safe, make_mc):
-    """DELIBERATE and additive, and recorded as a deviation: §3.4's query has
+    """The correlation query deliberately has
     no window restriction, so an effect already stored when its cause arrives
-    still links. It is not the bounded look-back OQ4 declined to build — no
+    still links. It requires no bounded look-back — no
     extra lookup happens, the cause's own transaction hash is matched against
     what is already there — and it cannot re-notify a committed row. Pinned so
     nobody "fixes" it into a regression."""
@@ -1368,7 +1368,7 @@ def test_a_correlated_entry_publishes_a_normalized_address(db_session, safe, mak
 
 
 def test_a_historical_row_is_never_enriched_by_the_join(db_session, safe, make_mc):
-    """§3.0 rule 5. A pre-enrollment row is not a witness to anything this
+    """A pre-enrollment row is not a witness to anything this
     window did, in either direction."""
     victim = make_mc(address=ADDR(0xC0FFE3), contract_type="regular")
     tx_hash = "0x" + "c5" * 32
@@ -1418,7 +1418,7 @@ def test_the_join_does_not_cross_chains(db_session, safe, protocol):
 
 
 def test_the_corpus_covers_every_alert_the_decode_rules_can_mint(db_session, safe, make_mc):
-    """Part 8's gate: each alert-minting decode shape, with its basis, in one
+    """Alert coverage: each alert-minting decode shape, with its basis, in one
     place. A rule that starts minting an alert from a shape not listed here
     fails this test rather than reaching an operator unannounced."""
     victim = make_mc(address=ADDR(0xC0FFE4), contract_type="regular")
@@ -1484,7 +1484,7 @@ def test_the_corpus_covers_every_alert_the_decode_rules_can_mint(db_session, saf
 
 
 # ---------------------------------------------------------------------------
-# §5a — the Discord embed
+# The Discord embed
 # ---------------------------------------------------------------------------
 
 
@@ -1496,8 +1496,7 @@ def embed_fields(db_session, event) -> dict[str, str]:
 
 
 def test_the_embed_renders_the_decoded_call(db_session, safe, known_target):
-    """The single highest-value operator-facing change in the spec: an embed
-    that said "safe_tx_executed on 0x…" now says what was executed."""
+    """An enriched embed says what was executed alongside "safe_tx_executed on 0x…"."""
     known_target(TARGET, SET_FEE, "setFee(uint256)")
     tx_hash = "0x" + "f1" * 32
     event = seed_event(db_session, safe, "safe_tx_executed", tx_hash)

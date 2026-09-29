@@ -83,7 +83,7 @@ def _disclose_order_ties(findings: list[dict[str, Any]]) -> None:
     alone, and that order is spent twice — on the λ position, which discounts by
     index, and on the exposure budget, which the earlier row consumes first and
     the later row gets the remainder of. Splitting the shared entity correctly
-    needs evidence this fold does not have, so the order stays fixed (inv. 8) and
+    needs evidence this fold does not have, so the order stays fixed and
     what it decided is published instead of read as an attribution.
 
     Findings only. A subsumed row has no λ position and spends no exposure

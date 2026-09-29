@@ -1,4 +1,4 @@
-"""Delegated role-gate refine-only guard (ROLEGATE_FIX_SPEC.md §3.1 [AMENDED]).
+"""Delegated role-gate refine-only guard.
 
 Cross-contract inlining may only *refine* a caller-tainted delegated gate,
 never un-gate it. When the un-inlined outer leaf would fail closed and the
@@ -14,7 +14,7 @@ Two harness layers:
     emission, permissionless/pause classification, and the pure shape
     discriminators. Mirrors ``tests/resolution/test_earned_public.py``.
   * TWO-HOP DB (``resolve_contract_capabilities`` over a seeded caller +
-    registry) — the only path that reaches the ``:1976`` guard, since it
+    registry) — the only path that reaches the refine-only guard, since it
     lives inside ``_maybe_inline_cross_contract_call``. Mirrors the
     cross-contract inline tests in ``tests/resolution/test_capability_resolver.py``.
 
@@ -23,10 +23,10 @@ so the gated verdict is read directly, not re-opened by a live eth_call
 probe. The real registry's opaque ``onlyX`` leaf compiles to a
 ``business/equality/truthy`` leaf with an erased ``view_call`` operand and an
 expression that does NOT start with ``return `` — that shape reaches
-``:1976``. A *minimal* Solady fixture instead folds to a ``computed`` operand
+the refine-only guard. A *minimal* Solady fixture instead folds to a ``computed`` operand
 / ``return ok_1`` expression that routes through the materialization
 fallback (also gated, but not via the guard); FIXTURE 1 therefore seeds the
-faithful ``view_call`` callee tree directly (ROLEGATE_FIX_SPEC §1.2.2).
+faithful ``view_call`` callee tree directly.
 """
 
 from __future__ import annotations
@@ -65,7 +65,7 @@ from tests.conftest import _can_connect  # noqa: E402
 
 
 # The guard runs UNCONDITIONALLY (not behind earned_public_enabled()); every
-# behavioral test therefore runs under both flag states (ROLEGATE_FIX_SPEC §6.9).
+# behavioral test therefore runs under both flag states.
 @pytest.fixture(params=["1", "0"], ids=["earned_on", "earned_off"])
 def both_flags(request, monkeypatch):
     monkeypatch.setenv("PSAT_AUTHORITY_EARNED_PUBLIC", request.param)
@@ -223,7 +223,7 @@ contract CallerLike {{
 
 # The faithful real-registry opaque leaf: business/equality/truthy with the
 # account erased into a `view_call` operand and an expression that does NOT
-# start with "return " -> reaches the :1976 guard (ROLEGATE_FIX_SPEC §1.1).
+# start with "return " -> reaches the refine-only guard.
 def _opaque_callee_tree(callee_sig: str) -> dict[str, Any]:
     return {
         callee_sig: {
@@ -488,14 +488,14 @@ def test_denylist_leaf_emits_root_cofinite(tmp_path, both_flags):
 
 
 # ---------------------------------------------------------------------------
-# Section 3 — the :1976 guard, two-hop DB (both flags).
+# Section 3 — the refine-only guard, two-hop DB (both flags).
 # ---------------------------------------------------------------------------
 
 
 def test_fixture1_real_opaque_shape_gates_via_guard(session, both_flags):
-    """THE acceptance shape (ROLEGATE_FIX_SPEC §6.1): the faithful real
+    """THE acceptance shape: the faithful real
     registry ``onlyOperatingMultisig`` leaf (opaque ``view_call``, non-return
-    expression) reaches :1976. Inline projects public -> guard fires ->
+    expression) reaches the refine-only guard. Inline projects public -> guard fires ->
     external_check_only, authority_public False, basis carries the tag."""
     caller = _build_pipeline(_compile(_tmp(), _caller_src("registry.onlyOperatingMultisig(msg.sender)"), "CallerLike"))
     cap = _seed_two_hop(
@@ -606,7 +606,7 @@ def _external_check(*, target: str, selector: str, sig: str, deferred: bool = Fa
 # Section 3b — the adapter-live flip (Stage 2). Same faithful opaque shape as
 # fixture 1, but with the registry made a recognized Solady role store: the
 # EnumerableRoleStoreAdapter enumerates the controllers, so the outer gate never
-# reaches the :1976 guard and resolves to the concrete multisig.
+# reaches the refine-only guard and resolves to the concrete multisig.
 # ---------------------------------------------------------------------------
 
 _LIVE_IMPL = "0x" + "3b" * 20
@@ -689,7 +689,7 @@ def _install_adapter_live_wire(monkeypatch, callee_sig: str, members: set[str]) 
     control_l = _NEGATIVE_CONTROL_ADDR.lower()
 
     def _stub(rpc_url, method, params=None, **kwargs):
-        # The adapter's pin-once (§A1) reads one eth_blockNumber when the resolver
+        # The adapter's pin-once reads one eth_blockNumber when the resolver
         # left the pass height unpinned (netguard blocks its head read). Answer with
         # a height above the seeded grant so the fold + probe pin to it.
         if method == "eth_blockNumber":
@@ -722,8 +722,8 @@ def _install_adapter_live_wire(monkeypatch, callee_sig: str, members: set[str]) 
 
 
 def test_fixture1_adapter_live_flips_to_finite_set(session, both_flags, monkeypatch):
-    """FIXTURE 1 ADAPTER-LIVE (ROLEGATE_FIX_SPEC §6.12 / CONTROLLER_RESOLUTION_SPEC
-    §6 Stage 2): the SAME faithful opaque ``onlyOperatingMultisig`` shape as the
+    """FIXTURE 1 ADAPTER-LIVE: the SAME faithful opaque ``onlyOperatingMultisig``
+    shape as the
     guard fixture, but the registry is now a recognized Solady role store with
     indexed grants and stubbed gate probes. The EnumerableRoleStoreAdapter
     enumerates the controller, so the function resolves ``finite_set([multisig])``
@@ -807,7 +807,7 @@ def test_fixture7_no_arg_paused_stays_public(session, both_flags):
 
 
 def test_fixture8_unused_arg_paused_now_gates(session, both_flags):
-    """Documented sacrifice (ROLEGATE_FIX_SPEC §6.8): a delegated pause that
+    """Documented sacrifice: a delegated pause that
     pointlessly takes the caller address (``checkNotPaused(msg.sender)``, arg
     unused) now gates. The inline resolves conditional_universal(pause) — NOT
     a cofinite — so the counterfactual does not spare it; the guard fires.
@@ -821,7 +821,7 @@ def test_fixture8_unused_arg_paused_now_gates(session, both_flags):
 
 
 def test_fixture11_transparent_denylist_public_cofinite(session, both_flags):
-    """AMENDED regression anchor (ROLEGATE_FIX_SPEC §6.11): a transparent
+    """AMENDED regression anchor: a transparent
     delegated denylist inline threads taint and emits a root cofinite. The
     guard's counterfactual (root cofinites removed) is NOT public, so the
     guard does not fire — the function stays PUBLIC with a deny-by-exception
@@ -840,7 +840,7 @@ def test_fixture11_transparent_denylist_public_cofinite(session, both_flags):
 
 # Transparent role-store (fixture 5): hasRole via an EXTERNAL RoleRegistry where
 # the account binding survives the helper boundary — the leaf stays a
-# caller-tainted external_bool and gates directly (no :1976 involvement).
+# caller-tainted external_bool and gates directly (no refine-only guard involvement).
 _TRANSPARENT_ROLE_STORE = """
 pragma solidity ^0.8.19;
 interface IRoleRegistry { function hasRole(bytes32 role, address account) external view returns (bool); }
@@ -931,7 +931,7 @@ def test_public_without_root_cofinites_or_with_conditional_is_public():
 
 
 def test_public_without_root_cofinites_or_cofinite_conditional_is_public():
-    """Milestone follow-up (b): OR(root cofinite, conditional_universal) — the
+    """OR(root cofinite, conditional_universal) — the
     counterfactual strips ONLY the root cofinite, leaving the conditional_universal,
     which is still public. So a laundered allowlist that OR-composes a denylist with
     an opaque public arm survives the strip → the guard's antecedent holds (True)."""
@@ -947,10 +947,10 @@ def test_public_without_root_cofinites_or_cofinite_conditional_is_public():
 
 
 # ---------------------------------------------------------------------------
-# Section 6 — transparent role-store variants (milestone follow-up a). Every
+# Section 6 — transparent role-store variants. Every
 # shape where the account binding SURVIVES the helper/modifier boundary keeps
-# gating exactly as today; none opens. Sources from rolegate-failopen-repro/
-# repro_pr151_B.py + repro_2771.py, alongside the fixture-5 pin above.
+# gating exactly as today; none opens. The fixtures below preserve these
+# transparent variants alongside the fixture-5 pin above.
 # ---------------------------------------------------------------------------
 
 _TV_EXTERNAL_ROLEREGISTRY = """
@@ -1047,8 +1047,8 @@ def test_transparent_role_store_variants_gate(tmp_path, both_flags, source, expe
 
 
 # ---------------------------------------------------------------------------
-# Section 7 — two-hop EFFECTFUL permissionless delegation (milestone follow-up
-# c). The guard's ``not is_permissionless_caller_shape`` conjunct must spare a
+# Section 7 — two-hop EFFECTFUL permissionless delegation.
+# The guard's ``not is_permissionless_caller_shape`` conjunct must spare a
 # value-movement self-service call at the inline site — the guard never gates it,
 # so the 11 permissionless rows survive under both flags.
 # ---------------------------------------------------------------------------

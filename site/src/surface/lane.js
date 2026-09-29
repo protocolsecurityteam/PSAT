@@ -62,7 +62,7 @@ export function compactActionSummary(fn) {
   // Every vocab entry carries a sentence, so a claim-bearing function always
   // resolves here and never falls through to the legacy phrases below. The
   // witness qualifier (destination/expiry/backing) is appended when present and
-  // at the bar — absent/indeterminate leaves the plain phrase (§7 honesty rule).
+  // at the bar — absent/indeterminate leaves the plain phrase.
   const claimSentence = sentenceForClaims(fn);
   if (claimSentence) {
     const qualifier = qualifierForClaims(fn);

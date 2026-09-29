@@ -1,7 +1,7 @@
-"""M1.2 fail-loud flip: chain is required, never silently defaulted to mainnet.
+"""Chain is required, never silently defaulted to mainnet.
 
-Covers the invariant-6 kill (``require_chain`` + ``default_rpc_url`` no longer
-mapping a missing/unknown chain to mainnet) and the invariant-7 runtime guard
+Covers the required-chain validation (``require_chain`` + ``default_rpc_url`` no longer
+mapping a missing/unknown chain to mainnet) and the URL-to-chain runtime guard
 (the eRPC URL↔chain_id mismatch check in ``rpc_request``). The edge-keeps that
 legitimately default to mainnet are asserted to still do so.
 """
@@ -145,7 +145,7 @@ class TestRequireRpcUrlDistinctErrors:
 
 
 class TestErpcChainIdGuard:
-    """Invariant-7 runtime guard: eRPC URL path chain id must match the declared one."""
+    """URL-to-chain runtime guard: eRPC URL path chain id must match the declared one."""
 
     @pytest.fixture(autouse=True)
     def _erpc(self, monkeypatch):

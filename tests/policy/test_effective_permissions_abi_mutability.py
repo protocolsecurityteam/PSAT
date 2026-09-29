@@ -291,7 +291,7 @@ def test_inline_assembly_sstore_and_delegatecall_surface_as_sinks(takeover_artif
     """Effects accuracy regression: the assembly ``sstore`` write and the
     assembly ``delegatecall`` fallback must each surface as a sink, with the
     writer selector populated and the delegatecall-execution capability
-    recovered. Fails if the effects.py SolidityCall sstore/delegatecall
+    recovered. Fails if the static effects SolidityCall sstore/delegatecall
     branches are reverted (both sinks vanish)."""
     effects, _ = takeover_artifacts
     functions = effects["functions"]

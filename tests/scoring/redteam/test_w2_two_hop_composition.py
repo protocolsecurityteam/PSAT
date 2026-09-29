@@ -3,8 +3,6 @@
 rule that no hop inherits its predecessor's authority
 bulkDeposit at the teller: a function of the teller nothing on this chain
 admits, used to stand in for every hop the principal cannot drive.
-
-One of the twenty sections of the former ``test_scoring_redteam.py``.
 """
 
 from __future__ import annotations

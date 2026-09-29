@@ -345,7 +345,7 @@ def test_artifact_endpoint_publishes_a_keyless_row_as_the_third_state(api_with, 
     Reachable by construction on the *real* write path, which is how this test
     builds the row rather than hand-inserting one: ``store_artifact`` with an
     unconfigured backend and no payload writes ``storage_key`` NULL beside a
-    NULL inline body (``db/queue.py``), and ``_artifact_row_to_value`` raises
+    NULL inline body (``db/queue/``), and ``_artifact_row_to_value`` raises
     ``StorageKeyAbsent`` for exactly that row. It answered 404
     ``{"detail":"Artifact not found"}`` with no state header — byte-identical to
     the never-produced artifact asserted below as the negative control, which is
@@ -1320,13 +1320,13 @@ def test_hydrate_keeps_outage_absence_and_payload_apart(db_session, storage_buck
 
 
 # ---------------------------------------------------------------------------
-# Job lifecycle (merged from tests/test_queue.py)
+# Job lifecycle
 # ---------------------------------------------------------------------------
 
 
 def test_create_job_extracts_the_address_from_the_request(db_session):
     """``create_job`` lifts ``request["address"]`` onto the column
-    (``db/queue.py:302-304``) — the extraction every address-keyed reader
+    (``db/queue/jobs.py``) — the extraction every address-keyed reader
     depends on."""
     from db.queue import create_job
 

@@ -172,7 +172,7 @@ def _chain_name_for_id(chain_id: int) -> str:
 
 def _indexer_by_chain(session: Session, now: datetime) -> list[dict[str, Any]]:
     """Per-chain event-indexer cursor rollup. The cursor row already carries
-    ``chain_id`` (invariant 4) — a stalled Base indexer shows as its own row
+    ``chain_id`` — a stalled Base indexer shows as its own row
     with an old ``stalest_run_age_s`` while mainnet stays fresh."""
     rows = session.execute(
         select(
@@ -223,7 +223,7 @@ def _indexer_by_chain(session: Session, now: datetime) -> list[dict[str, Any]]:
 def _held_lease_chains(session: Session, now: datetime) -> tuple[set[str], set[str]]:
     """Chain-cache tokens of chains currently holding a live scanner / poller
     daemon lease. The ``protocol_scanner:{chain}`` naming is the reuse of the
-    existing per-chain lease dimension (invariant 4) — no heartbeat schema
+    existing per-chain lease dimension — no heartbeat schema
     change needed to see which chains a monitoring pass is serving."""
     scanner: set[str] = set()
     poller: set[str] = set()
@@ -402,8 +402,8 @@ def build_fleet_status(session: Session, *, now: datetime | None = None) -> Flee
                 "by_chain": idx_by_chain,
             }
         if process == HEARTBEAT_PROTOCOL_SCANNER:
-            # The scanner writes its head-lag into its own heartbeat detail
-            # (design §2.1). Surface it here so "behind" is a first-class number
+            # The scanner writes its head-lag into its own heartbeat detail.
+            # Surface it here so "behind" is a first-class number
             # in the fleet view; tolerate absence (stage-1 scanner deploys
             # separately and older beats predate the field).
             hb = beats.get(process)

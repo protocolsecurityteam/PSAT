@@ -56,14 +56,14 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# W4-H — heuristic deployer affinity (DEPLOYER_HEURISTIC_SPEC.md §1, §5, §6)
+# W4-H — heuristic deployer affinity
 # ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class DeployerAffinity:
-    """The §1 affinity computation for one (protocol, EOA), recomputed from
-    stored witness rows only — no network, no enumeration (§7 ruling 3).
+    """The affinity computation for one (protocol, EOA), recomputed from
+    stored witness rows only — no network, no enumeration.
 
     ``affinity`` is None when the denominator is empty: no anchor either way is
     not_determined, never 0.0."""
@@ -81,7 +81,7 @@ def _nonheuristic_nonlineage_witnesses(session: Session, *, address: str):
     """Every ACTIVE non-lineage, non-heuristic witness on a contract the
     persisted creation attribution assigns to *address*, as
     ``(contract, witness)``. This is the ONE observation the affinity metric
-    reads: unknown creations never enter the denominator (§1, invariant 4)."""
+    reads: unknown creations never enter the denominator."""
     for contract, witness in session.execute(
         select(Contract, ContractMembershipWitness)
         .join(ContractMembershipWitness, ContractMembershipWitness.contract_id == Contract.id)
@@ -98,7 +98,7 @@ def _nonheuristic_nonlineage_witnesses(session: Session, *, address: str):
 
 
 def compute_deployer_affinity(session: Session, *, protocol_id: int, address: str) -> DeployerAffinity:
-    """§1 affinity for (P, E). Deterministic from stored evidence."""
+    """Affinity for (P, E). Deterministic from stored evidence."""
     addr = _require_address(address, "address")
     own: dict[int, tuple[Contract, set[str]]] = {}
     foreign: set[tuple[int, int]] = set()
@@ -125,7 +125,7 @@ def compute_deployer_affinity(session: Session, *, protocol_id: int, address: st
 
 
 def sync_deployer_challenges(session: Session, *, deployer_row: ProtocolDeployer) -> int:
-    """§5: one challenge row per observed FOREIGN anchor, derived from a real
+    """One challenge row per observed FOREIGN anchor, derived from a real
     witness row for another protocol — never from suspicion. A challenge whose
     foreign witness was revoked is revoked with it. Returns the number of
     distinct contested contracts still standing."""
@@ -185,7 +185,7 @@ def heuristic_registry_state(
     affinity: DeployerAffinity | None = None,
     challenges: int | None = None,
 ) -> str:
-    """§5, derived from evidence — never a stored flag. ``revoked_at`` is the
+    """State derived from evidence — never a stored flag. ``revoked_at`` is the
     one stored transition (human confirmation, or the automatic auto-revoke a
     prior pass recorded); everything else is recomputed here.
 
@@ -215,7 +215,7 @@ def heuristic_live_numbers(affinity: DeployerAffinity, *, challenges: int) -> di
     contract shared by the stratum's rewrite-on-drift check and reconcile's
     stale-registry audit. ``anchors`` is order-normalized at derivation
     (sorted by contract id), so an anchor swap that preserves every count is
-    still drift: §8.1 promises a reviewer the actual inputs, not just totals."""
+    still drift: the evidence must record the actual inputs, not just totals."""
     return {
         "anchors": [dict(anchor) for anchor in affinity.anchors],
         "anchor_count": affinity.anchor_count,
@@ -226,7 +226,7 @@ def heuristic_live_numbers(affinity: DeployerAffinity, *, challenges: int) -> di
 
 
 def heuristic_evidence(affinity: DeployerAffinity, *, challenges: int) -> dict[str, Any]:
-    """§8.1 H-row evidence: the inputs AND the computation, recorded so a
+    """H-row evidence: the inputs AND the computation, recorded so a
     reviewer reads the numbers the grant was made on, not just the verdict."""
     return {
         **heuristic_live_numbers(affinity, challenges=challenges),
@@ -243,8 +243,8 @@ def heuristic_evidence(affinity: DeployerAffinity, *, challenges: int) -> dict[s
 def grant_heuristic_deployer(
     session: Session, *, protocol_id: int, address: str, affinity: DeployerAffinity, challenges: int
 ) -> ProtocolDeployer | None:
-    """Mint or refresh the trust-class-H row for (P, E). Returns None when the
-    §1 qualification does not hold, when the quorum is met, or when a proof
+    """Mint or refresh the trust-class-H row for (P, E). Returns None when
+    affinity qualification does not hold, when the quorum is met, or when a proof
     class already covers the EOA — H is granted, never inferred from silence."""
     addr = _require_address(address, "address")
     if not affinity.qualifies() or challenges >= W4H_CHALLENGE_QUORUM:
@@ -255,7 +255,7 @@ def grant_heuristic_deployer(
     ).scalar_one_or_none()
     if existing is not None:
         # A revoked row is a recorded transition, human or automatic; only an
-        # explicit restore lifts it. A standing proof class outranks H (§1).
+        # explicit restore lifts it. A standing proof class outranks H.
         if existing.revoked_at is not None or existing.trust_class in PROOF_DEPLOYER_TRUST_CLASSES:
             return None
         existing.trust_class = DEPLOYER_TRUST_CLASS_H
@@ -322,9 +322,9 @@ def _w4h_pairs(
 def _attempt_w4h_admission(
     session: Session, contract: Contract, *, registry: ProtocolDeployer, affinity: DeployerAffinity
 ) -> bool:
-    """§1 admission for one contract: W1 code-present at (address, chain), the
+    """Heuristic admission for one contract: W1 code-present at (address, chain), the
     persisted creation witness attributes it to the EOA, and the H row's
-    qualification was re-verified by the caller at this write (invariant 2)."""
+    qualification was re-verified by the caller at this write."""
     addr = (contract.address or "").lower()
     chain_id = chain_id_for_chain_name(contract.chain)
     if not addr or chain_id is None:
@@ -363,7 +363,7 @@ def _attempt_w4h_admission(
 
 
 def _w4h_late_inheritance_seed(session: Session, candidate_ids: set[int]) -> set[int]:
-    """§6 late arrival: an implementation discovered AFTER the run that
+    """Same-contract late arrival: an implementation discovered AFTER the run that
     admitted its proxy is unreachable if inheritance seeds only from that
     run's promotions — the proof strata refuse the heuristic via, so nothing
     ever closes it. Return every STANDING heuristic-only member whose
@@ -410,7 +410,7 @@ def _w4h_late_inheritance_seed(session: Session, candidate_ids: set[int]) -> set
 
 
 def _w4h_inheritance_pass(session: Session, heuristic_member_ids: set[int]) -> set[int]:
-    """§6 exception: an H-member proxy carries its implementation / secondary
+    """Same-contract exception: an H-member proxy carries its implementation / secondary
     implementations through W2, with the heuristic status propagated. Bounded
     by the member set it is handed — the derived witnesses are heuristic too,
     so they anchor nothing and cannot widen the frontier past same-contract
@@ -452,7 +452,7 @@ def _w4h_inheritance_pass(session: Session, heuristic_member_ids: set[int]) -> s
 def _w4h_stratum(
     session: Session, candidate_ids: set[int], *, changed_protocol_ids: set[int], named_addresses: set[str]
 ) -> tuple[set[int], set[int]]:
-    """The LAST fixpoint stratum (DEPLOYER_HEURISTIC_SPEC.md §9 invariant 8):
+    """The LAST fixpoint stratum:
     heuristic promotion runs after proof-rule quiescence and feeds nothing
     back, so the cascade stays terminating and confluent and a heuristic can
     never pre-empt a proof. Returns (promoted, demoted)."""
@@ -483,7 +483,7 @@ def _w4h_stratum(
         row = _heuristic_registry_row(session, protocol_id=protocol_id, address=address)
         if row is None:
             # Challenges are an H-class concept: a standing proof row neither
-            # syncs them nor competes with a grant (§1 precedence) — only a
+            # syncs them nor competes with a grant — only a
             # REVOKED H row keeps its challenge bookkeeping current here.
             if _proof_registry_row(session, protocol_id=protocol_id, address=address) is not None:
                 continue

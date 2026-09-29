@@ -132,7 +132,7 @@ export function ActivityPanel({
   }, []);
 
   // The /monitoring payload spans every chain the protocol monitors. Key by
-  // (chain, address) (inv. 13) so a contract selected on the active chain
+  // (chain, address) so a contract selected on the active chain
   // resolves ITS enrollment row, not the other chain's row at the same address
   // (F4). Monitoring rows carry their own chain (NULL≡ethereum via entityKey).
   const contractByAddress = useMemo(() => {

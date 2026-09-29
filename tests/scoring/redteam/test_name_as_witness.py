@@ -1,7 +1,4 @@
-"""Name-as-witness, contradictions and published labels.
-
-One of the twenty sections of the former ``test_scoring_redteam.py``.
-"""
+"""Name-as-witness, contradictions and published labels."""
 
 from __future__ import annotations
 

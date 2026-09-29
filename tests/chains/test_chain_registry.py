@@ -1,4 +1,4 @@
-"""Registry behavior tests (inv. 5): id/name lookup, alias resolution,
+"""Registry behavior tests: id/name lookup, alias resolution,
 raise-on-unknown, supported_chain_ids parsing, and per-chain registry
 invariants (hypersync url, native asset, predeploy constants)."""
 
@@ -64,17 +64,16 @@ def test_all_chain_ids_positive_and_unique():
 
 
 def test_indexer_enabled_chains_have_hypersync_url():
-    # Conservative default (inv. 10): indexer enabled only where coverage is
-    # proven. Mainnet is demonstrated in-codebase; Base is preview-validated
-    # (inv. 14, Phase 2). Every other chain stays None until it earns its slot.
+    # Conservative default: indexer enabled only where coverage is
+    # proven. Mainnet and Base have configured URLs; other chains stay None.
     by_name = {c.name: c for c in all_chains()}
     assert by_name["ethereum"].hypersync_url == "https://eth.hypersync.xyz"
     assert all(c.hypersync_url is None for c in all_chains() if c.name not in ("ethereum", "base"))
 
 
 def test_base_registry_values():
-    # Phase 2 enablement facts for Base (chain 8453). Bridge constants are the
-    # OP-stack L2 predeploys (inv. 15); confirmation depth tracks mainnet's
+    # Registry configuration for Base (chain 8453). Bridge constants are the
+    # OP-stack L2 predeploys; confirmation depth tracks mainnet's
     # wall-clock finality window on Base's ~2s blocks.
     base = chain_by_id(8453)
     assert base.name == "base"
@@ -87,7 +86,7 @@ def test_base_registry_values():
 
 
 def test_every_chain_has_a_native_asset():
-    # inv. 5: the native gas-token symbol is an explicit registry fact for every
+    # The native gas-token symbol is an explicit registry fact for every
     # chain — TVL native-asset pricing dispatches on it (services/monitoring/tvl.py).
     for info in all_chains():
         assert info.native_asset, f"{info.name} is missing a native_asset symbol"

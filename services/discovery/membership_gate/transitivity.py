@@ -70,9 +70,9 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class TransitivityProof:
-    """Which §3.2 arm proved a W3-D1 via transitive. ``anchor_chain`` is set
+    """Which arm proved a W3-D1 via transitive. ``anchor_chain`` is set
     only for the anchored-authority-chain arm; ``principal_fact`` only for the
-    §3.3 perimeter-principal arm."""
+    perimeter-principal arm."""
 
     arm: str
     anchor_chain: dict[str, Any] | None = None
@@ -109,18 +109,18 @@ def _via_transitivity(
     in_progress: frozenset[str] = frozenset(),
     depth: int = 0,
 ) -> TransitivityProof | None:
-    """§3.2 W3-D1: TRANSITIVE ⇔ the via is a member through an INDEPENDENT
+    """W3-D1: TRANSITIVE ⇔ the via is a member through an INDEPENDENT
     witness (w2/w4/w5/w6 or w3-d1), or a D2 controller proven exclusive —
     every contract it is observed to control belongs to this protocol — or
-    (spec §3.2 EXTENSION, see ``_anchor_chain_for``) a D2-only member
+    (see ``_anchor_chain_for``) a D2-only member
     controller whose OWN resolved controllers root in the protocol's
     independently anchored perimeter — or (owner ruling, salvage wave) a
-    resolved perimeter-principal EOA of an anchoring member, the same §3.3
+    resolved perimeter-principal EOA of an anchoring member, the same
     Class-A inference already accepted for deployer EOAs.
 
     Arms are tried strongest-first and the principal arm last, so a via that
     gains a stronger proof publishes the stronger one and re-derivation is
-    stable across rounds (invariant 9). Every arm is MONOTONE in the member set
+    stable across rounds. Every arm is MONOTONE in the member set
     — growing it can add transitivity, never withdraw it — which is what keeps
     the fixpoint from oscillating a candidate between promoted and demoted.
 
@@ -168,7 +168,7 @@ def _via_transitivity(
     )
     if fact is None:
         return None
-    # §3.2's shared-operator warning applied as POSITIVE counterevidence rather
+    # Shared-operator observations used as POSITIVE counterevidence rather
     # than as a positive-exclusivity requirement (which absence of foreign rows
     # could never supply): a perimeter principal observed controlling a row
     # that provably belongs elsewhere licenses nothing here.
@@ -210,7 +210,7 @@ def _role_hash_anchors(plane: RoleHolderPlane) -> bool:
 def _own_controller_links(session: Session, *, protocol_id: int, controller: Contract) -> list[_ControllerLink]:
     """The resolved controllers of *controller* itself, from the three W3
     sources already codified (caller-gating controller values, the proxy-admin
-    slot, §3.5 probe reads) plus two set-valued authorities: AccessControl role
+    slot, probe reads) plus two set-valued authorities: AccessControl role
     holders of an upgrade/admin-class role on this registry, and the signer set
     of a Safe. Deterministic (sorted); self-references and the zero address are
     dropped — they name no separate authority."""
@@ -288,14 +288,14 @@ def _independent_anchor_rule(
 ) -> str | None:
     """The admitting rule by which this member is anchored INDEPENDENTLY of
     every address in *blocked* — the anchor-chain arm's cycle break. W3-D2
-    never anchors (§3.2 non-transitivity); W5/W6 rest on no via-fact at all and
+    never anchors; W5/W6 rest on no via-fact at all and
     anchor outright; W2/W3-D1 anchor only when their via names a member that is
     itself independently anchored, so a chain cannot bootstrap itself through a
     hop resting on the address under evaluation.
 
     Of several anchoring witnesses the SMALLEST rule name wins, not the oldest
     row: the published rule is then a function of the evidence set, not of the
-    order the rows were written (invariant 9)."""
+    order the rows were written."""
     contract = session.get(Contract, contract_id)
     if contract is None:
         return None
@@ -338,7 +338,7 @@ def _independent_anchor_rule(
 
 def _perimeter_anchor(session: Session, *, protocol_id: int, address: str, blocked: frozenset[str]) -> str | None:
     """The anchor-chain arm's reading of the same observations, narrower than
-    the §3.3 ladder's on two counts: the anchoring member must be anchored
+    the ladder's on two counts: the anchoring member must be anchored
     INDEPENDENTLY of *blocked*, and a ``safe_owner`` fact never anchors — only
     the ladder, which names signer-set entries explicitly, reads those.
     Returns the anchoring member's admitting rule, or None."""
@@ -362,7 +362,7 @@ def _link_root(
     require_member_terminal: bool,
 ) -> dict[str, Any] | None:
     """Where a controller link terminates: an independently anchored member at
-    *address*, a §3.3 perimeter principal of such a member, or — recursively —
+    *address*, a perimeter principal of such a member, or — recursively —
     a D2-only member controller that itself anchors through its own
     controllers. Returns the chain suffix (links already walked stay with the
     caller), or None when the link roots nowhere.
@@ -412,7 +412,7 @@ def _anchor_chain_for(
     in_progress: frozenset[str],
     depth: int,
 ) -> dict[str, Any] | None:
-    """Spec §3.2 EXTENSION (deliberate; the owner folds it into the spec text).
+    """Anchored-authority-chain transitivity.
 
     A D2-only member controller is TRANSITIVE when its own resolved
     controllers root in this protocol's independently anchored perimeter:
@@ -468,12 +468,12 @@ def _controller_is_exclusive(
     chain_key: str,
     exclude_contract_ids: set[int],
 ) -> bool:
-    """Shared-operator kill (spec §3.2): every contract the controller is
+    """Shared-operator kill: every contract the controller is
     observed to control (caller-gating resolved controller values +
     proxy-admin pointers) maps into this protocol's member/candidate set, with
     ≥1 member proven under ``member_for_evidence`` — a heuristic-only member
     is not_determined: tolerated as protocol-family, never the mandatory
-    proof (DEPLOYER_HEURISTIC_SPEC.md §9 invariant 3). Control is observed on
+    proof. Control is observed on
     a deployment, and a deployment is (address, chain), so the controlled set
     is scoped to the controller's chain (same NULL≡'ethereum' convention as
     ``_member_rows_at``). Any foreign or unclaimed observation refuses —
@@ -507,7 +507,7 @@ def _controller_is_exclusive(
             if member_for_evidence(session, contract_id=row.id, protocol_id=protocol_id):
                 member_seen = True
             continue
-        # F1: a candidate tolerates the exclusivity check only with real
+        # a candidate tolerates the exclusivity check only with real
         # membership evidence — a bare nomination proves nothing.
         if (
             row.protocol_id is None
@@ -515,7 +515,7 @@ def _controller_is_exclusive(
             and _has_nonlineage_witness(session, contract_id=row.id, protocol_id=protocol_id)
         ):
             continue
-        # Member-factory rule (§3.3 deviation): a child of the protocol's own
+        # Member-factory rule: a child of the protocol's own
         # member factory is a protocol-family observation, not a foreign one.
         if _member_factory_created(session, protocol_id=protocol_id, contract=row):
             continue
@@ -545,7 +545,7 @@ def _witness_fact_holds(
         return _proof_registry_row(session, protocol_id=protocol_id, address=via) is not None
     if rule == WITNESS_RULE_W4H_DEPLOYER_AFFINITY:
         # A standing heuristic witness holds while its H registry row is
-        # UNREVOKED (DEPLOYER_HEURISTIC_SPEC.md §5): a frozen or suspended row
+        # UNREVOKED: a frozen or suspended row
         # stops new admissions and flags, it does not de-stamp what stands.
         if not via or (contract.deployer or "").lower() != via:
             return False
@@ -553,7 +553,7 @@ def _witness_fact_holds(
     if rule == WITNESS_RULE_W4_FACTORY:
         # Re-derived, never trusted: the stored attribution must still name
         # this factory AND the factory must still be an anchoring member —
-        # its demotion is what revokes this witness (invariant 8).
+        # its demotion is what revokes this witness.
         if not via:
             return False
         return _member_factory_lineage(session, protocol_id=protocol_id, contract=contract, factory=via) is not None
@@ -563,7 +563,7 @@ def _witness_fact_holds(
         if member is None or member.protocol_id != protocol_id or _chain_key(member.chain) != chain_key:
             return False
         if evidence.get(W2_HEURISTIC_VIA_KEY) is True:
-            # §6 exception: the via is a heuristic member, so the edge is
+            # Same-contract exception: the via is a heuristic member, so the edge is
             # re-verified without the evidence-membership test — but only for a
             # same-contract edge kind, which ``w2_evidence`` already pins.
             if evidence.get("edge_kind") not in W2_SAME_CONTRACT_EDGE_KINDS:
@@ -581,9 +581,9 @@ def _witness_fact_holds(
         addr = (contract.address or "").lower()
         if direction == W3_DIRECTION_D2:
             if source == "function_principal":
-                # F2 is re-checked here, not only at derivation: a hosting
+                # Anchoring is re-checked here, not only at derivation: a hosting
                 # member demoted to a D2-only entry stops anchoring, and the
-                # principal fact it hosts must fall with it (invariant 8).
+                # principal fact it hosts must fall with it.
                 return any(
                     member.address and member.address.lower() == via
                     for member, _fact in _d2_principal_facts(
@@ -619,7 +619,7 @@ def _witness_fact_holds(
             # A witness that PUBLISHED a proof must still be able to cite it: a
             # re-proof by a different arm, at a different anchor, or off a
             # different hosting member is a different fact and gets re-derived
-            # with its own evidence (invariant 8).
+            # with its own evidence.
             if proof.arm == "anchor_chain":
                 if recorded_principal is not None:
                     return False

@@ -1,12 +1,12 @@
-"""Gate-aware protocol-dedup merge (DISCOVERY_MEMBERSHIP_GATE_SPEC.md §5.2).
+"""Gate-aware protocol-dedup merge.
 
-Invariant 1 through ``_merge_protocol_into``: contract membership, witness
+Through ``_merge_protocol_into``: contract membership, witness
 rows, and deployer-registry rows all move to the destination protocol in one
 transaction. The (protocol_id, …) unique keys on
 ``contract_membership_witnesses`` / ``protocol_deployers`` mean a src+dst
 pair can hold the same key — the destination row survives. A revoked witness
 row is re-armed only by an observation postdating the revocation; a revoked
-deployer row wins conservatively and its invariant-8 demotion cascade runs.
+deployer row wins conservatively and its demotion cascade runs.
 """
 
 from __future__ import annotations
@@ -327,7 +327,7 @@ def test_merge_deployer_collision_keeps_dst_row(db_session, two_protocols):
     db_session.expire_all()
     rows = db_session.query(ProtocolDeployer).filter(ProtocolDeployer.protocol_id == dst.id).all()
     by_address = {r.address: r for r in rows}
-    # Post-merge src and dst are the same protocol, so the invariant-7
+    # Post-merge src and dst are the same protocol, so the
     # collision resolves to ONE surviving row per address.
     assert by_address[shared].id == dst_shared.id
     assert by_address[src_only].id == src_solo.id
@@ -337,7 +337,7 @@ def test_merge_deployer_collision_keeps_dst_row(db_session, two_protocols):
 def test_merge_deployer_revoked_dst_stays_revoked_and_cascades(db_session, two_protocols):
     # Shape (a): dst's registry row is revoked, src's is active. Revoked wins
     # conservatively; the moved W4 witness is revoked and the member resting
-    # only on it is demoted (invariant 8).
+    # only on it is demoted.
     src, dst = two_protocols
     shared = ADDR(0x4D01)
     revoked_at = datetime(2026, 8, 10, tzinfo=timezone.utc)
@@ -375,7 +375,7 @@ def test_merge_deployer_revoked_dst_stays_revoked_and_cascades(db_session, two_p
 def test_merge_deployer_revoked_src_revokes_dst_and_cascades(db_session, two_protocols):
     # Shape (b): src's registry row is revoked, dst's is active. Negative
     # evidence survives the merge — the surviving dst row adopts src's
-    # revocation and dst's dependent members are demoted (invariant 8).
+    # revocation and dst's dependent members are demoted.
     src, dst = two_protocols
     shared = ADDR(0x4E01)
     src_evidence = {"reason": "foreign_creation_observed", "checked_at": "2026-08-10T00:00:00+00:00"}

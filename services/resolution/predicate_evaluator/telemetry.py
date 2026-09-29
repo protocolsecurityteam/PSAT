@@ -18,8 +18,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("services.resolution.predicate_evaluator")
 
-# Telemetry for the delegated-role-gate durability invariant (CONTROLLER_RESOLUTION_
-# SPEC §5): the guard closing a fail-open, and the broader tripwire of a caller gate
+# Telemetry for delegated-role-gate durability: the guard closing a fail-open, and the broader tripwire of a caller gate
 # that settles unresolved. Both keyed by callee signature so a NOVEL role-store
 # standard the adapter can't yet fold shows up as a new label spiking — the one
 # human link (add it to role_store_standards.py). Running counts folded into the

@@ -1,7 +1,4 @@
-"""Round 2: attacking the fixes.
-
-One of the twenty sections of the former ``test_scoring_redteam.py``.
-"""
+"""Round 2: attacking the fixes."""
 
 from __future__ import annotations
 

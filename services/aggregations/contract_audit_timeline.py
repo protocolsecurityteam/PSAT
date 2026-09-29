@@ -171,8 +171,7 @@ def build_contract_audit_timeline(session: Session, contract_id: int) -> dict[st
             brief["bytecode_drift"] = None
         brief["verified_at"] = r.verified_at.isoformat() if r.verified_at else None
         # live_findings: audit.findings filtered to non-'fixed' statuses.
-        # Phase 3a seeds these manually; Phase 3b (deferred) fills them
-        # from scope extraction. None/missing → empty list, not an error.
+        # None/missing findings yield an empty list.
         findings = audit.findings or []
         brief["live_findings"] = [
             f for f in findings if isinstance(f, dict) and (f.get("status") or "").lower() != "fixed"

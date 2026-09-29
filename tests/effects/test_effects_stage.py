@@ -1,5 +1,5 @@
 """Effects-stage foundations: enum placement, flag-dynamic transition, worker
-scaffolding, and fail-forward semantics (EFFECTS_RESOLUTION_SPEC Phase 1).
+scaffolding, and fail-forward semantics.
 
 The DB-backed cases mirror ``tests/workers/test_baseworker_retry.py`` (real Postgres,
 inline-JSONB artifacts, offline-safe). ``PSAT_EFFECTS_STAGE`` is asserted default-
@@ -61,7 +61,7 @@ def clean_jobs(db_session):
 
 
 # ---------------------------------------------------------------------------
-# Enum placement / lifecycle ordering (inv. 11).
+# Enum placement / lifecycle ordering.
 # ---------------------------------------------------------------------------
 
 
@@ -84,7 +84,7 @@ def test_effects_stage_between_policy_and_coverage():
 
 
 # ---------------------------------------------------------------------------
-# Flag-dynamic transition (§3a.4 / inv. 15).
+# Flag-dynamic transition.
 # ---------------------------------------------------------------------------
 
 
@@ -94,7 +94,7 @@ def test_flag_defaults_off(monkeypatch):
 
 
 def test_scoring_tier_translation_resolves_the_string_collision():
-    # §0 tier-string collision guard: the stored "tier2" (fork-observed) must map to
+    # tier-string collision guard: the stored "tier2" (fork-observed) must map to
     # the OBSERVED scoring tier (scoring Tier 1), never scoring Tier 2. Every effects
     # tier is observation-origin, so all three translate to observed; an unknown
     # string fails closed to None.
@@ -128,7 +128,7 @@ def test_policy_next_stage_flag_on_is_effects(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Worker behavior: inert pass-through + fail-forward (inv. 15).
+# Worker behavior: inert pass-through + fail-forward.
 # ---------------------------------------------------------------------------
 
 
@@ -165,7 +165,7 @@ def test_flag_on_zero_candidate_passthrough(clean_jobs, test_session_local):
 
 @requires_postgres
 def test_fail_forward_exhaustion_advances_never_terminal(clean_jobs, test_session_local, monkeypatch):
-    """inv. 15: on retry exhaustion the effects stage advances to ``coverage``
+    """On retry exhaustion the effects stage advances to ``coverage``
     (fail-forward) and NEVER emits ``failed_terminal``."""
     monkeypatch.setenv("PSAT_JOB_MAX_RETRIES", "0")  # first failure = exhaustion
 
@@ -202,7 +202,7 @@ def test_fail_forward_on_terminal_kind_also_advances(clean_jobs, test_session_lo
 
 
 # ---------------------------------------------------------------------------
-# §9 direction 2 is a benign metric, not a degradation: a fully-HEALTHY run of
+# direction 2 is a benign metric, not a degradation: a fully-HEALTHY run of
 # many proven verdicts files ZERO degraded discrepancies and reports the
 # idiom-candidate count as a metric instead.
 # ---------------------------------------------------------------------------
@@ -211,7 +211,7 @@ def test_fail_forward_on_terminal_kind_also_advances(clean_jobs, test_session_lo
 @requires_postgres
 def test_healthy_multi_proven_run_files_no_degraded_discrepancies(clean_effects, monkeypatch):
     """Selection returns only blank-claim functions, so every proven verdict is a
-    §9 direction-2 (static-silent / sim-positive) event. A healthy cold-cache run
+    direction-2 (static-silent / sim-positive) event. A healthy cold-cache run
     of N such verdicts must NOT flood ``stage_errors`` with ``degraded`` entries —
     ``discrepancies_filed`` stays 0 while ``new_idiom_candidates`` reflects N."""
     session = clean_effects

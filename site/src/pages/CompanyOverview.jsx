@@ -166,7 +166,7 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
 
   const { contracts, ownership_hierarchy: hierarchy } = data;
 
-  // Keyed by the composite (chain, address) entity token (inv. 13): a CREATE2
+  // Keyed by the composite (chain, address) entity token: a CREATE2
   // twin on two chains keeps a coverage row each instead of one overwriting the
   // other.
   const coverageByAddr = (() => {

@@ -851,7 +851,7 @@ def scan_enrolled_events(
             max_windows_per_cursor = 1
     block_hash_memo: dict[tuple[int, int], bytes | None] = {}
     # Chains whose cursors were skipped this pass for lack of a fetcher — logged
-    # once each (inv. 4/10). The indexer is deliberately disabled for a chain with
+    # once each. The indexer is deliberately disabled for a chain with
     # ``hypersync_url is None``, but a chain that silently accretes cursors and
     # never advances must be visible in the logs, not a black hole.
     skipped_chains: set[int] = set()
@@ -879,7 +879,7 @@ def scan_enrolled_events(
                     extra={"chain_id": chain_id},
                 )
             continue
-        # Per-chain finality (inv. 10): L2s reorg at different depths, so the
+        # Per-chain finality: L2s reorg at different depths, so the
         # confirmed-head target and every rewind use the registry's depth for THIS
         # chain, not the fleet-wide default. Registry mainnet value == 12, so
         # chain 1 is unchanged; the passed-in ``confirmation_depth`` is the
@@ -1115,9 +1115,9 @@ def enroll_from_completed_jobs(
         if not isinstance(artifact, dict):
             continue
         # Stamp each cursor with the job's own chain — the first-class
-        # ``Job.chain_id`` (backfilled for all address-scoped rows in Phase 0).
+        # ``Job.chain_id`` (backfilled for all address-scoped rows by the chain-id migration).
         # For a not-yet-migrated NULL, derive from the job's own ``request["chain"]``
-        # via the registry rather than a map-wide default (inv. 6), so an address
+        # via the registry rather than a map-wide default, so an address
         # that lives on another chain is never guessed as mainnet.
         job_chain_id = (
             job.chain_id
@@ -1698,7 +1698,7 @@ def _build_indexer_fetchers(
     """Build the per-chain fetcher maps the indexer scan loop dispatches on.
 
     Indexer chain set = registry chains with proven Envio coverage
-    (``hypersync_url is not None``, inv. 10): a chain without it is deliberately
+    (``hypersync_url is not None``): a chain without it is deliberately
     indexer-disabled and gets no fetcher (its cursors are then skipped-and-logged
     by the scan loop).
 

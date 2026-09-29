@@ -132,7 +132,7 @@ def maybe_queue_reanalysis(
     if not should_trigger_reanalysis(event_type, data):
         return None
 
-    # Defense in depth (inv. 14): enrollment already gates off-allowlist chains, so
+    # Defense in depth: enrollment already gates off-allowlist chains, so
     # a monitored contract on a disabled chain should not exist going forward — but
     # a legacy row must never re-spawn analysis work on a chain this deployment has
     # disabled.

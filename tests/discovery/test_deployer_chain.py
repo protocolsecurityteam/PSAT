@@ -1,4 +1,4 @@
-"""Multichain (M1.1): chain_id threading through deployer expansion.
+"""Multichain: chain_id threading through deployer expansion.
 
 The deployer-expansion Etherscan calls (``getcontractcreation`` and
 ``txlist``) must carry the chain being searched, not a hardcoded mainnet

@@ -1564,7 +1564,7 @@ def test_uncertain_marker_not_fired_for_value_gate_under_same_failure(tmp_path, 
     """Discriminator, adverse direction: the SAME constructed lowering failure
     on a value-check gate (``require(amount > 0)``) must NOT flag the function
     — a fail-closed sweep that marks real public functions unsupported is an
-    over-hedge the spec forbids."""
+    over-hedge: a value constraint does not establish caller authority."""
     import services.static.contract_analysis_pipeline.predicates.tree as predicates_mod
 
     sl = _compile(tmp_path, _VALUE_GATED)

@@ -1,15 +1,14 @@
-"""``eth_simulateV1`` capability preflight (EFFECTS_RESOLUTION_SPEC §3 / inv. 14).
+"""``eth_simulateV1`` capability preflight.
 
-Support is *probed, never assumed*: at stage init the worker issues one trivial
-``eth_simulateV1`` per chain and PERSISTS the result. Recipes that need it (§4.2
-value-out, §4.5 supply) consult the persisted capability; where unsupported they
+Support is *probed, never assumed*: worker preflight issues one trivial
+``eth_simulateV1`` per chain when the injected store has no cached answer.
+Value-out and supply recipes consult that capability; where unsupported they
 route to their declared Tier-2 fallback — an explicit cost-model change, never a
 silent degradation.
 
-Persistence is behind an INJECTABLE :class:`CapabilityStore` seam. Phase 2 ships
-the in-memory implementation (all the offline suite needs); the DB-backed store
-that survives worker restarts is Phase 3's wiring, so the harness stays pure and
-the stage boundary (no Phase-2 DB persistence) holds.
+Persistence is behind an injectable :class:`CapabilityStore` seam. The local
+implementation keeps answers in memory and is the worker default. Callers can
+inject another store; this module does not provide durable DB persistence.
 """
 
 from __future__ import annotations
@@ -53,7 +52,7 @@ def probe_simulate_support(
     block: str = "latest",
     force: bool = False,
 ) -> bool:
-    """Probe + persist ``eth_simulateV1`` support for ``chain_id`` (inv. 14).
+    """Probe + persist ``eth_simulateV1`` support for ``chain_id``.
 
     Idempotent: a persisted answer is reused unless ``force``. A structured
     response (even an all-reverting one) proves support; only

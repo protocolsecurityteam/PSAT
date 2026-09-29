@@ -1,5 +1,5 @@
-"""Cross-chain code-plane reuse (invariant 1) + chain-token normalization
-(invariant 11) for ``contract_materializations``.
+"""Cross-chain code-plane reuse + chain-token normalization
+for ``contract_materializations``.
 
 The ``(chain, bytecode_keccak)`` key reuses a bundle only across byte-identical
 deployments. Per-chain immutables make the same source compile to different
@@ -245,7 +245,7 @@ def test_no_source_hash_fn_preserves_keccak_only_behaviour(_route_to_test_db, _c
 
 
 # ---------------------------------------------------------------------------
-# Invariant 11: one cache-key token format (decimal chain id)
+# One cache-key token format (decimal chain id)
 # ---------------------------------------------------------------------------
 
 

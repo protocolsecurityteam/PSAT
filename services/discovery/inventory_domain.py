@@ -67,7 +67,7 @@ CHAIN_SORT_ORDER = {"ethereum": 0, "arbitrum": 1, "optimism": 2, "polygon": 3, "
 # Etherscan v2 chain IDs for chains the inventory pipeline can discover. The set
 # of discoverable chains is intentionally this fixed list (it bounds the
 # all-chain probe in ``chain_resolver``); the id values come from the canonical
-# registry (inv. 5) so they can't drift from the rest of the codebase.
+# registry so they can't drift from the rest of the codebase.
 _INVENTORY_CHAINS = (
     "ethereum",
     "arbitrum",

@@ -962,9 +962,8 @@ def get_token_balances_page(address: str, *, chain_id: int) -> TokenBalancePage:
         )
     else:
         # A proven-empty LIST, as Etherscan's index has it. NOT "this address
-        # holds no tokens" — it is what one third-party index answered, and §2 of
-        # SHEET_OBSERVATION_SPEC.md makes that a trigger to look at the chain, never
-        # a witness of nothing held.
+        # holds no tokens" — it is what one third-party index answered, never
+        # a chain-level witness of nothing held.
         status = ASSET_SET_STATUS_RETURNED_EMPTY
         basis = f"etherscan addresstokenbalance, {pages_read} page(s), empty list"
     return TokenBalancePage(

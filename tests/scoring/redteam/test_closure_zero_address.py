@@ -1,7 +1,4 @@
-"""Closure admission: the zero address, and the authority it proves absent.
-
-One of the twenty sections of the former ``test_scoring_redteam.py``.
-"""
+"""Closure admission: the zero address, and the authority it proves absent."""
 
 from __future__ import annotations
 

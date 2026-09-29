@@ -5,7 +5,7 @@ The caller's outer leaf is an ``external_set`` check against a single-address-pa
 callee on a role registry (``roleRegistry.onlyOperatingMultisig(msg.sender)`` and
 its 9 etherfi siblings). This adapter recovers the concrete controller set for that
 gate by three cooperating reads, none of which parses a role name (dissolved role
-identity, CONTROLLER_RESOLUTION_SPEC.md §3.2):
+identity, pinned-chain resolution):
 
   1. **Fold** the standard's indexed grant/revoke events at the authority PROXY into
      a *candidate universe* — every address currently holding ANY role — union the
@@ -15,14 +15,14 @@ identity, CONTROLLER_RESOLUTION_SPEC.md §3.2):
      (``onlyX(CONTROL)``) that MUST revert (else the gate is not an allowlist), then
      each candidate (``onlyX(candidate)``) — survivors are exactly who the on-chain
      gate passes. The gate is its own ground truth, so false positives are
-     structurally impossible (§7.3); a candidate is asserted a member only if the
+     structurally impossible; a candidate is asserted a member only if the
      real gate passes it.
   3. Optionally **cross-check** the standard's enumerable getter as a consistency
      alarm (default off): a mismatch DECLINES loudly rather than emitting a set the
      getter contradicts.
 
 Every transport failure in the probe is treated as *indeterminate*, never as a
-membership failure (§7.7): a wire error declines to a settled ``probe_unavailable``
+membership failure: a wire error declines to a settled ``probe_unavailable``
 external check, it never classifies a candidate. Cold index → deferral that
 self-heals via ``deferred_reconciler`` (mirrors the Solmate adapter); warm-with-no-
 events → settled unconfirmed (we can't confirm the store speaks the standard we
@@ -67,7 +67,7 @@ _MATCH_SCORE = 90
 
 
 # Settled (non-deferring) adapter declines worth a metric — the persisted row's
-# basis is superseded by the :1976 guard downstream, so the adapter is the only
+# basis is superseded by the refine-only guard downstream, so the adapter is the only
 # site where these are observable. A running count per reason (record_stage_metric
 # folds it into the policy stage's timing artifact) surfaces a store the adapter
 # recognized-but-couldn't-fold (negative control), a fold/getter disagreement, or a
@@ -148,7 +148,7 @@ class EnumerableRoleStoreAdapter:
         if not rpc_url:
             return _check_only(authority, callee_selector, ["no_rpc_for_probe"])
         # Pin ONE height for the fold read, the gate probe, AND the trace frontier so
-        # the enumeration is offline-reproducible and the drift arm (§6 Stage 4) has a
+        # the enumeration is offline-reproducible and the drift arm has a
         # fixed frontier to compare a later indexed row against. The resolver usually
         # pins the whole pass (ctx.block); an unpinned pass (a transient blocknum-read
         # failure upstream) re-reads head once here, and a failed read settles to
@@ -187,7 +187,7 @@ class EnumerableRoleStoreAdapter:
             memo=_pass_memo(ctx),
         )
         if probe.transport_failed:
-            # A wire failure is indeterminate, NOT a membership failure (§7.7): never
+            # A wire failure is indeterminate, NOT a membership failure: never
             # classify a candidate on transport error — settle to a probe.
             return _check_only(authority, callee_selector, ["probe_unavailable"])
         if probe.control_passed:
@@ -530,7 +530,7 @@ def _pin_probe_block(ctx: EvaluationContext, rpc_url: str) -> int | None:
     the pass (``ctx.block`` is an int) is honored verbatim; an unpinned pass reads
     ``eth_blockNumber`` once, memoized per chain in ``live_read_memo`` so a family of
     gated functions shares the read. ``None`` (a failed read) makes the caller settle
-    to ``probe_unavailable`` — the fail-closed direction (§7.7), never a fold/probe/
+    to ``probe_unavailable`` — the fail-closed direction, never a fold/probe/
     trace read at three different heights."""
     if isinstance(ctx.block, int):
         return ctx.block

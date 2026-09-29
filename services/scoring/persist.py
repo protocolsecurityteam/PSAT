@@ -6,7 +6,7 @@ never destroys a row a consumer already read, and the score's movement is free
 history for the Activity timeline.
 
 The document is inline JSONB, spilling to object storage only above
-:data:`INLINE_DOCUMENT_LIMIT_BYTES` (strategy §7.3). The table's
+:data:`INLINE_DOCUMENT_LIMIT_BYTES`. The table's
 ``ck_protocol_scores_document_exactly_one`` makes the two mutually exclusive, so
 a reader is never handed a row carrying both a stale inline copy and a spill —
 which is why the size decision is taken here, once, before the INSERT, rather
@@ -37,7 +37,7 @@ from services.scoring.schema import ScoreDocument
 
 logger = logging.getLogger(__name__)
 
-# The §7.3 spill threshold. Measured on the serialized body, not the Python
+# The inline-document spill threshold. Measured on the serialized body, not the Python
 # object, because the bytes are what Postgres stores and what a reader pays for.
 INLINE_DOCUMENT_LIMIT_BYTES = 1_000_000
 

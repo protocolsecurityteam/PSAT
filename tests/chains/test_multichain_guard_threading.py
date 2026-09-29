@@ -1,4 +1,4 @@
-"""inv-7 URL↔chain_id guard — threading proof (audit finding F6).
+"""URL↔chain_id guard — threading proof (audit finding F6).
 
 ``rpc_request``'s runtime guard (``_assert_url_chain_id``) is a no-op unless the
 caller declares ``chain_id``. These tests drive each threaded production path with

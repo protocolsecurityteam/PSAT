@@ -449,7 +449,7 @@ def pinned_head(chain_id: int, rpc_url: str) -> tuple[int, str] | None:
     ``None`` when either cannot be established. There is no unpinned fallback on
     this plane: without a height nothing read here may be published at all, and
     without the hash a replay cannot tell it is on the same chain history
-    (inv.11/12, the reason the event indexer stamps ``last_indexed_block_hash``).
+    (the reason the event indexer stamps ``last_indexed_block_hash``).
     """
     try:
         head = int(rpc_request(rpc_url, "eth_blockNumber", [], retries=1, chain_id=chain_id), 16)
@@ -483,7 +483,7 @@ def pinned_head(chain_id: int, rpc_url: str) -> tuple[int, str] | None:
     # The header must be the one that was asked for. A racing or load-balanced
     # upstream can answer a different height, and pairing that hash with this
     # number would make the stored reorg witness name a block the reads were not
-    # issued at — which is the replay claim (inv.11/12), not a detail.
+    # issued at — which is the replay claim, not a detail.
     number = header.get("number")
     if not isinstance(number, str) or not number.startswith("0x"):
         return None

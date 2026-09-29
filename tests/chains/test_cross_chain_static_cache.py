@@ -1,4 +1,4 @@
-"""Cross-chain job-level static-cache reuse (invariant 1).
+"""Cross-chain job-level static-cache reuse.
 
 The job-level static cache (``find_completed_static_cache`` + copy) reuses a
 completed job's CODE plane for a new ``(chain, address)`` deployment of the same

@@ -1004,7 +1004,7 @@ def test_self_service_uncharged_row_is_excluded_and_leaves_an_earned_negative(co
     # G7: the UUPS disclosure and the same-function residual survive the exclusion.
     assert neg["conditional_on"] == SELF_SERVICE_DISCLOSE_UPGRADE
     assert neg["residual"] == SELF_SERVICE_DISCLOSE_SIBLING
-    # ... and surface as warnings too (inv. 6's third channel).
+    # ... and surface as warnings too (the warning channel).
     kinds = {w["kind"] for w in payload["warnings"]}
     assert SELF_SERVICE_DISCLOSE_UPGRADE in kinds
     assert SELF_SERVICE_DISCLOSE_SIBLING in kinds
@@ -1353,7 +1353,7 @@ def test_chain_aliases_collapse_to_one_entity(corpus):
 
 
 def test_same_safe_on_two_chains_stays_two_units(corpus):
-    """Same address is not proof of same owner set (#158 / strategy §7.4)."""
+    """Same address is not proof of same owner set (#158)."""
     mainnet = corpus.contract("0x" + "ab" * 20, chain="ethereum")
     optimism = corpus.contract("0x" + "ac" * 20, chain="optimism")
     for contract in (mainnet, optimism):
@@ -1572,7 +1572,7 @@ def test_token_identity_forbids_pricing_and_does_not_zero_the_row(corpus):
 
 
 def test_both_feeding_modes_produce_the_same_document(corpus, db_session):
-    """§7.5: distil-in-memory and distil-then-persist are one implementation.
+    """Distil-in-memory and distil-then-persist are one implementation.
 
     Two contracts whose ids and addresses sort in OPPOSITE orders, so a fold that
     inherited the in-memory iteration order instead of the pinned population

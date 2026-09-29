@@ -301,7 +301,7 @@ class FakeChain:
             return ok(logs=logs)
         if data.startswith(sel("unwrap(uint256)")):
             # Same precondition shape as ``wrap``; the observable difference is
-            # that value LEAVES the vault (the §4.2 witness).
+            # that value LEAVES the vault.
             amount = int(data[10:74], 16)
             held = self._stored(overrides, PRINCIPAL, VAULT, arity=1) or 0
             if held < amount:

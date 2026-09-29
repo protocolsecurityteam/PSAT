@@ -5,7 +5,7 @@
 /* ── Proof-first Audits panel ──────────────────────────────────────────────
  * One verdict only ("Running audited code" — the deployed source hash-matches
  * the reviewed commit). Colored dots, never emoji. No low-confidence or
- * accusatory signals. See site/prototypes/audit-panel/HANDOFF.md. */
+ * accusatory signals. */
 .ps-audits-panel {
   padding: 12px;
   display: flex;

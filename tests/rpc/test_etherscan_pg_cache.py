@@ -389,7 +389,7 @@ def test_pg_cache_put_skips_unverified_source(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# In-memory cache: narrow whitelist (P0.1) + bounded LRU (P0.2)
+# In-memory cache: narrow whitelist + bounded LRU
 # ---------------------------------------------------------------------------
 
 

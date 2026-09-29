@@ -12,7 +12,7 @@ import { principalLabel, shortAddr } from "../format.js";
 // audit_id (that audit's covered set), or ALL_PROVEN (every proven contract).
 const ALL_PROVEN = "all";
 
-// Proof-first audits panel. See site/prototypes/audit-panel/HANDOFF.md.
+// Proof-first audits panel.
 //
 // The governing principle: only assert what we can cryptographically verify.
 // v1 carries a single verdict — "Running audited code" — meaning the deployed,

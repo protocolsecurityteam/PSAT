@@ -175,7 +175,7 @@ def reconcile_control_graph_types(session: Session, contract_ids: Sequence[int])
     # it, so we can pick the best type AND pull intrinsic config from the rows of
     # that type. Keyed by chain too — the same address is a distinct principal on
     # each chain (a Safe on ethereum, a Timelock on base), and control edges never
-    # cross chains (inv. 15), so a per-address fold would let one chain's higher-
+    # cross chains, so a per-address fold would let one chain's higher-
     # priority type overwrite the twin's node on another chain.
     rows_by_key: dict[tuple[str, str], list[tuple[ResolvedControllerType, dict[str, Any]]]] = {}
     for chain, addr, resolved_type, details in session.execute(
@@ -438,7 +438,7 @@ def materialize_fp_principal_nodes(
         result["out_of_population"].append({"address": address, "reason": reason})
 
     contract = session.get(Contract, contract_id)
-    # Mainnet-coalesced: a legacy NULL chain is a mainnet row (inv. 15), and
+    # Mainnet-coalesced: a legacy NULL chain is a mainnet row, and
     # coalescing it here is what keeps a mainnet anchor from being read as a
     # chain we cannot name. An ABSENT contract is not coalesced to anything —
     # there is no chain to claim, so every candidate fails closed below.

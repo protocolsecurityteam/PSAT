@@ -48,7 +48,7 @@ logger = logging.getLogger(__name__)
 # can add delay to either path.
 DEFAULT_RECONCILE_INTERVAL_S = int(os.getenv("PSAT_ENROLLMENT_RECONCILE_INTERVAL", "600"))
 
-# Daemon-edge fallback chain for the reconciler loop (inv. 6): the base RPC chain
+# Daemon-edge fallback chain for the reconciler loop: the base RPC chain
 # and the ambiguous-protocol default handed to ``_protocol_chain``. Explicit and
 # overridable via env rather than a buried ``chain="ethereum"`` signature default.
 RECONCILER_FALLBACK_CHAIN = os.getenv("PSAT_RECONCILER_FALLBACK_CHAIN", "ethereum")
@@ -79,7 +79,7 @@ def _env_int(name: str, default: int) -> int:
 
 
 def _protocol_chain(session: Session, protocol_id: int, default: str) -> str:
-    """The chain a protocol's contracts live on (v1 chain-as-island, inv. 15).
+    """Choose the protocol's sole observed chain, or the supplied fallback.
 
     Reads the distinct non-null ``Contract.chain`` values for the protocol and
     returns the sole chain when unambiguous, else *default*. Used to thread each
@@ -185,7 +185,7 @@ def claim_due_enrollments(
     stamp ``lease_id`` + ``lease_expires_at = now() + ttl`` (server clock), and
     **commit** — the lock is released immediately so the minutes-long
     governance build never holds a row lock (idle-in-transaction hazard on
-    Neon/pgbouncer, design §2.3). ``dirty_at`` is deliberately left untouched so
+    Neon/pgbouncer). ``dirty_at`` is deliberately left untouched so
     the success delete can guard on the exact value seen at claim time.
     """
     from services.worker_lifecycle import claim_allowed, note_claim

@@ -546,7 +546,7 @@ def _assert_proven(verdict: dict[str, Any], shape: str, record: str, disclosures
 
 
 # ---------------------------------------------------------------------------
-# The adversarial set (S1 §5.2 A1-A4, A11) and its positive siblings.
+# The adversarial ordering cases and their positive siblings.
 # ---------------------------------------------------------------------------
 
 
@@ -965,7 +965,7 @@ def test_conditional_write_inside_the_callee_refuses(_unit, _effects):
 
 
 # ---------------------------------------------------------------------------
-# The published shape (the effects.py hookup).
+# The published shape (the effects package hookup).
 # ---------------------------------------------------------------------------
 
 

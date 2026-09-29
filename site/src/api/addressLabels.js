@@ -3,7 +3,7 @@
 // X-PSAT-Admin-Key header is auto-injected; a missing/invalid key triggers
 // the built-in 401 prompt-retry flow.
 //
-// Global-plus-override model (invariant 12): a label is either GLOBAL (applies
+// Global-plus-override model: a label is either GLOBAL (applies
 // on every chain — the right thing for EOA/Safe-signer accounts) or
 // CHAIN-QUALIFIED (overrides the global label for one network — the right thing
 // for contracts, which are a different deployment at the same address per

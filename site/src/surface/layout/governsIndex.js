@@ -21,7 +21,7 @@ export function buildGovernsIndex(machines = [], functionData = {}) {
   // Iterate the machines (already scoped to the active chain) and read each
   // one's functions by its (chain, address) key, rather than walking the raw
   // functionData map — that map is composite-keyed across every chain, so a
-  // bare walk would fold another chain's same-address authority in (inv. 13).
+  // bare walk would fold another chain's same-address authority in.
   const byAuthority = new Map();
   for (const machine of machines) {
     const contractLc = String(machine?.address || "").toLowerCase();

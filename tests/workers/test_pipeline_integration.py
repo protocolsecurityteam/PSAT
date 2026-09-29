@@ -959,7 +959,7 @@ def test_discovery_company_mode_advances_to_selection(monkeypatch):
 
 
 def test_discovery_reads_and_writes_protocol_declared_chains(monkeypatch):
-    """Evidence-based membership (invariant 3): company discovery READS the
+    """Evidence-based membership: company discovery READS the
     protocol's declared chain set (requested chain + prior ``Protocol.chains``)
     to narrow the probe, and WRITES it back with the chains discovered contracts
     were confirmed on — excluding candidate-only hits."""

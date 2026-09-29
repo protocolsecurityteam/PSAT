@@ -159,7 +159,7 @@ ANALYSIS_SCHEMA_VERSION = 6
 
 # ── Provenance ─────────────────────────────────────────────────────────────
 # Who established a row, and from what. Recorded because a materialization is
-# the versioned store monitoring enrolls from: invariant 7 forbids a per-job
+# the versioned store monitoring enrolls from: provenance tracking forbids a per-job
 # artifact entering it without the source job written down, and once three
 # producers exist "which one wrote this" stops being reconstructable.
 PRODUCED_BY_RESOLUTION = "resolution"
@@ -457,7 +457,7 @@ def find_reusable_by_source_hash(
 ) -> ContractMaterialization | None:
     """Return any ``status='ready'`` current-version row with this source hash.
 
-    The cross-chain code-plane lookup (invariant 1): the bundle is a pure
+    The cross-chain code-plane lookup: the bundle is a pure
     function of the source, so a ready row for the same ``source_content_hash``
     on *any* chain/address/keccak carries a bundle the new deployment can reuse.
     Version-gated like the keccak/address reads so a bumped analyzer rebuilds
@@ -563,7 +563,7 @@ def materialize_or_wait(
 ) -> ContractMaterialization:
     """Look up or build the materialization row for the given content key.
 
-    ``source_hash_fn`` enables cross-chain code-plane reuse (invariant 1). It is
+    ``source_hash_fn`` enables cross-chain code-plane reuse. It is
     called at most once, and only on the path where we would otherwise build (a
     ``(chain, bytecode_keccak)`` miss) — so a cheap keccak hit never pays for
     it. It returns the deployment's source content hash (see

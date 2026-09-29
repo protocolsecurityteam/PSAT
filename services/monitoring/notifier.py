@@ -567,7 +567,7 @@ _FILTER_GROUPS_KEY = "groups"
 
 # The group keys the UI can state — mirror of ``MONITOR_ALERT_GROUPS`` in
 # ``site/src/surface/meta.js``. Pinned by
-# ``tests/test_witness_notifier_gating.py`` against that table.
+# ``tests/monitoring/test_witness_notifier_gating.py`` against that table.
 _KNOWN_FILTER_GROUPS = frozenset(
     {"upgrades", "ownership", "pause", "roles", "signers", "safe_exec", "timelock", "state"}
 )
@@ -690,7 +690,7 @@ _SALIENCE_ORDER = {
 def _salience_allows(subscription: ProtocolSubscription, event: MonitoredEvent) -> bool:
     """Does *subscription*'s ``min_salience`` admit *event*?
 
-    **Opt-in, and only opt-in** (invariant 7). A subscription without
+    **Opt-in, and only opt-in**. A subscription without
     ``min_salience`` receives exactly what it receives today — this is the same
     no-default-change contract ``_expand_allowed_event_types`` keeps for saved
     event-type filters, and it is why the threshold rides inside the existing
@@ -708,7 +708,7 @@ def _salience_allows(subscription: ProtocolSubscription, event: MonitoredEvent) 
     level = data.get("salience")
     if level not in _SALIENCE_ORDER:
         # A row minted before salience landed, or one no rule rated. Unrated is
-        # not routine (invariant 5), so it is measured at the not_determined
+        # not routine, so it is measured at the not_determined
         # rank rather than dropped.
         level = SALIENCE_NOT_DETERMINED
     return _SALIENCE_ORDER[level] >= _SALIENCE_ORDER[minimum]
@@ -723,8 +723,8 @@ def notify_protocol_events(session: Session, events: list[MonitoredEvent]) -> No
     if not events:
         return
 
-    # Group events by protocol_id. Side effects follow claim strength
-    # (invariant 5): an occurrence that only proves a writer ran never pages
+    # Group events by protocol_id. Side effects follow claim strength:
+    # an occurrence that only proves a writer ran never pages
     # anyone, whatever route handed it to this function.
     events_by_protocol: dict[int, list[MonitoredEvent]] = {}
     for event in events:

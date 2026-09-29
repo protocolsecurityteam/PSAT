@@ -332,7 +332,7 @@ class ProtocolScore(Base):
     # The constant block the grade was computed under, stored per row rather than
     # read from code: a score compared against a later one must be comparable
     # against the constants it actually used, and recalibration is then a data
-    # change. Carries the uncalibrated-arm flags (strategy §7.2).
+    # change. Carries the uncalibrated-arm flags.
     model_parameters: Mapped[Any] = mapped_column(JSONB(none_as_null=True), nullable=False)
 
     __table_args__ = (

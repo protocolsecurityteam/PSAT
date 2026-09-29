@@ -145,7 +145,7 @@ def company_addresses(company_name: str, response: Response) -> CompanyAddresses
 @router.get("/api/company/{company_name}/functions", response_model=None)
 def company_functions(company_name: str, response: Response) -> CompanyFunctionsResponse:
     """Per-contract function entries for a protocol, keyed by the composite
-    ``"<chain>::<address>"`` entity token (invariant 13) so a same-address
+    ``"<chain>::<address>"`` entity token so a same-address
     cross-chain pair keeps each chain's own analysis. The frontend indexes this
     map with the matching ``entityKey(chain, address)``.
 

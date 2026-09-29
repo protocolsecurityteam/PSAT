@@ -1,4 +1,4 @@
-"""Per-controller outcome markers for scan-pass verification reads (F2/F9b).
+"""Per-controller outcome markers for scan-pass verification reads.
 
 A hint occurrence resolves through one read per dirty controller. Three
 outcomes are publishable facts and one is not:
@@ -18,8 +18,9 @@ wholesale on every answered pass, so a marker states "the most recent
 observation of this field was a verification read that did not answer", not a
 durable history. It is an ops signal, not evidence.
 
-``count_verification_read_gaps`` is the F9b counter, published on the F9a
-surface as ``watchers.verification_gaps`` (``services/aggregations/fleet.py``)
+``count_verification_read_gaps`` is the verification-gap counter, published
+on the fleet health surface as ``watchers.verification_gaps``
+(``services/aggregations/fleet.py``)
 and collected by ``ops_alerts.collect_verification_gaps``. Because of that
 lifetime it is a **census of the markers present when it runs**, not a tally of
 what happened — see the function's own contract, and the scanner heartbeat's
@@ -115,7 +116,7 @@ CENSUS_BASIS = "current_markers"
 
 
 def count_verification_read_gaps(session: Session) -> dict[str, Any]:
-    """Fleet census of verification reads that produced no observation (F9b).
+    """Fleet census of verification reads that produced no observation.
 
     Three buckets, all counting KEYS, plus ``contracts_affected`` counting
     distinct contracts carrying at least one. They stay apart because they are

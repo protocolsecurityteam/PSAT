@@ -1,13 +1,13 @@
-"""code-plane reuse: source_content_hash + inv-11 chain-token on contract_materializations
+"""code-plane reuse: source_content_hash + chain-token on contract_materializations
 
 Revision ID: a3f7c9d21e08
 Revises: f3a9c1d47b02
 Create Date: 2026-07-17 12:00:00.000000
 
 Two independent, populated-prod-safe changes to ``contract_materializations``
-(expand-contract, invariant 9):
+(expand-contract):
 
-1. **source_content_hash (invariant 1 — code-plane reuse).** A nullable content
+1. **source_content_hash (code-plane reuse).** A nullable content
    hash of the normalized verified-source set. The ``(chain, bytecode_keccak)``
    key only reuses a bundle across byte-identical deployments; per-chain
    immutables make the same source compile to different bytecode, so keccak
@@ -19,14 +19,14 @@ Two independent, populated-prod-safe changes to ``contract_materializations``
    their next (re)materialization. A nullable column add is metadata-only in
    Postgres 11+, so this is safe inside the default ``lock_timeout``.
 
-2. **chain token normalization (invariant 11).** The ``chain`` key becomes the
+2. **chain token normalization.** The ``chain`` key becomes the
    canonical decimal-string chain id (``"1"``, ``"8453"``) so a name-keyed
    writer and an id-keyed reader hit the same row, matching
    ``mapping_enumeration_cache``. Existing rows keyed by name (``"ethereum"``)
    are normalized to the id token. **Collision-safe:** a row is only re-keyed
    when no row already occupies the target ``(id, keccak)`` PK or ``(id,
    address)`` unique key; a would-be collision is left on its old (stale) key —
-   per inv-11 a stale cache key is a miss, not corruption. ``*_blob_key`` columns
+   a stale cache key is a miss, not corruption. ``*_blob_key`` columns
    are NOT rewritten: materialization blobs are content-addressed by the old
    ``{chain}/{keccak}`` path, never moved, and reads dereference the stored key
    column directly, so the pointer stays valid.

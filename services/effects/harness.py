@@ -1,17 +1,17 @@
-"""Tier-1 harness core (EFFECTS_RESOLUTION_SPEC §4 / §8).
+"""Tier-1 harness core.
 
 The shared substrate every recipe (``services.effects.recipes`` Tier 1,
 ``services.effects.anvil`` Tier 2) builds on: the returned verdict/discrepancy
 shapes, the identity-selection + raw-revert authorization discipline inherited
-from ``differential_probe`` (§8.2/§8.3), and transcript emission through an
-INJECTED store seam (§8.5 — ``transcript_ptr`` is an artifact key, never inline
-JSONB).
+from ``differential_probe``, and transcript emission through an
+INJECTED store seam (``transcript_ptr`` is an artifact key, never inline JSONB).
 
 Everything here is PURE given its injected seams (``call_batch`` /
 ``Simulate`` / the transcript store), so it runs against stubbed wires with
-recorded transcripts in the offline suite (§8.6, inv. 8). No verdict is
-DB-persisted here — Phase 3 wires selection → harness → persistence; the harness
-only returns/emits :class:`ObservedEffect` objects.
+recorded transcripts in the offline suite. No verdict is
+DB-persisted here: ``workers.effects_worker`` owns selection, persistence, and
+discrepancy routing; ``services.effects.orchestrator`` builds the probe plans.
+The harness returns/emits :class:`ObservedEffect` objects.
 """
 
 from __future__ import annotations
@@ -52,18 +52,18 @@ __all__ = [
 ]
 
 # A transcript store persists a bounded transcript dict and returns its artifact
-# KEY (§8.5). Injected: the real impl wraps ``db.queue.store_artifact`` /
+# KEY. Injected: the real impl wraps ``db.queue.store_artifact`` /
 # nested-artifacts; the offline stub records the dict and hands back a fake key.
 TranscriptStore = Callable[[dict[str, Any]], str]
 
 
 @dataclass(frozen=True)
 class SimContext:
-    """Replay-minimum provenance stamped into every transcript (§8.5, inv. 14).
+    """Replay-minimum provenance stamped into every transcript.
 
     ``hardfork`` is asserted/recorded for both Tier 1 and Tier 2; the anvil /
     foundry versions are Tier-2-only (empty for Tier 1) so a fork witness is
-    reproducible across Dockerfile ``foundryup`` rebuilds (§8.7)."""
+    reproducible across Dockerfile ``foundryup`` rebuilds."""
 
     chain_id: int
     block: int
@@ -79,9 +79,10 @@ class SimContext:
 
 @dataclass
 class Discrepancy:
-    """A §9 plane-disagreement object. Phase 2 RECORDS it on the verdict; it does
-    NOT route it anywhere (Phase 3 owns the warning-channel routing + the
-    closing-rule bookkeeping)."""
+    """A plane-disagreement object attached to the verdict.
+
+    ``workers.effects_worker`` routes it through
+    ``services.effects.discrepancies``, which records the closing rule."""
 
     kind: str
     effect_class: str
@@ -91,13 +92,13 @@ class Discrepancy:
 
 @dataclass
 class ObservedEffect:
-    """A tiered, transcripted effect verdict returned by a recipe (§8.5, inv. 8).
+    """A tiered, transcripted effect verdict returned by a recipe.
 
     ``details`` is the code-plane structural witness (cacheable on the behavioral
     hash — supply-delta sign, destination *shape*, duration bound); ``concrete``
     is the state-plane residue (exact destination, exact impl, current-check
-    result) that must never enter a cache key (inv. 3/12). Both are kept
-    separate so Phase 3 can route each to its correct table.
+    result) that must never enter a cache key. Both are kept
+    separate so the effects worker can persist each to its correct table.
     """
 
     effect_class: str
@@ -114,8 +115,8 @@ class ObservedEffect:
     # A verdict whose truth depends on per-probe STATE MANIPULATION this recipe
     # performed on the fork — a scheduled operation landing, time advancing — is
     # not a code-plane structural fact and must never transfer to a bytecode twin
-    # on the behavioural hash (the same reason ``TIER_HISTORICAL`` never caches,
-    # inv. 13 / §0.0.4). ``_is_cacheable`` refuses any verdict carrying this flag,
+    # on the behavioural hash (the same reason ``TIER_HISTORICAL`` never caches).
+    # ``_is_cacheable`` refuses any verdict carrying this flag,
     # whatever its tier, scope, verdict or reason.
     state_dependent: bool = False
 
@@ -141,7 +142,7 @@ class ObservedEffect:
 
 
 # ---------------------------------------------------------------------------
-# Identity selection + authorization discipline (§8.2 / §8.3)
+# Identity selection + authorization discipline
 # ---------------------------------------------------------------------------
 
 
@@ -153,7 +154,7 @@ def select_identities(
     random_count: int = 2,
 ) -> tuple[list[str], str | None]:
     """The impersonation set: ``random_count`` (≥2) deterministic random controls
-    + the resolved principal (§8.2). Randoms are derived exactly as the
+    + the resolved principal. Randoms are derived exactly as the
     differential probe derives them, so replays reuse the same addresses and a
     curated-allowlist collision is astronomically unlikely."""
     randoms = derive_random_identities(selector, contract_address, max(2, random_count))
@@ -166,11 +167,11 @@ def authorization_opened(
 ) -> bool:
     """Did a state change OPEN a gate to random callers? True only when ≥2
     distinct random identities were consistently REJECTED before and ALL SUCCEED
-    after (§8.2). Uses the differential probe's :func:`attribute` on raw revert
-    data (§8.3) in both directions; an ambiguous/split outcome is never "opened"
+    after. Uses the differential probe's :func:`attribute` on raw revert
+    data in both directions; an ambiguous/split outcome is never "opened"
     (indeterminate ≠ public, fail-closed).
 
-    This is the direction the authority-change kernel (§4.4) and any
+    This is the direction the authority-change kernel and any
     freeze-reversal check reads: a single-identity flip never opens anything.
     """
     if len(randoms_before) < 2 or len(randoms_after) < 2:
@@ -183,12 +184,12 @@ def authorization_opened(
 
 
 # ---------------------------------------------------------------------------
-# Transcript emission (§8.5)
+# Transcript emission
 # ---------------------------------------------------------------------------
 
 
 def new_transcript(ctx: SimContext, *, feature: str, tier: str, effect_class: str) -> dict[str, Any]:
-    """A transcript bounded to the replay minimum (§8.5): tier, forked block,
+    """A transcript bounded to the replay minimum: tier, forked block,
     hardfork, anvil/foundry version. ``calls``/``results`` are appended by
     :func:`record_calls` as the recipe issues them."""
     tr = {
@@ -223,7 +224,7 @@ def record_calls(
 ) -> None:
     """Append issued calls + their raw results to the transcript. Revert data is
     kept raw; a decoded label is added for human replay only (never a verdict
-    input — §8.3)."""
+    input)."""
     for call in calls:
         transcript["calls"].append({"label": label, **{k: _jsonable(v) for k, v in call.items()}})
     for res in results:
@@ -254,11 +255,12 @@ def _jsonable(v: Any) -> Any:
 
 
 def emit(store: TranscriptStore, effect: ObservedEffect) -> ObservedEffect:
-    """Persist the verdict's transcript through the injected store seam and stamp
-    the artifact key (§8.5). No verdict ships without a replayable transcript
-    (inv. 8) — a verdict whose transcript can't be stored keeps the in-memory
-    ``transcript`` for the caller but a ``None`` ``transcript_ptr`` is a bug the
-    §8-rule-5 test guards against."""
+    """Store a present transcript and stamp the returned artifact key.
+
+    The store must return a replayable key; storage exceptions propagate.
+    This helper leaves an absent transcript alone and does not validate the
+    returned key. Recipe tests in ``tests/effects/test_effects_harness.py``
+    assert that emitted verdicts carry a transcript pointer."""
     if effect.transcript is not None:
         effect.transcript_ptr = store(effect.transcript)
         if effect.discrepancy is not None and effect.discrepancy.transcript_ptr is None:
@@ -334,8 +336,8 @@ def unknown(
     transcript: dict[str, Any] | None = None,
     discrepancy: Discrepancy | None = None,
 ) -> ObservedEffect:
-    """The §8 fail-closed verdict for every non-observation. Never carries a
-    proven positive; may carry a §9 discrepancy object (recorded, not routed)."""
+    """The fail-closed verdict for every non-observation. Never carries a
+    proven positive; may carry a discrepancy object (recorded, not routed)."""
     return ObservedEffect(
         effect_class=effect_class,
         verdict=VERDICT_UNKNOWN,

@@ -25,8 +25,8 @@ logger = logging.getLogger("services.scoring.distill")
 # is read from a storage cell the caller is proven to own) ∧ W2 (that cell is
 # cleared before any external call, or a verified reentrancy guard stands in for
 # that order). U5 computed the conjunction; this replays it as a UNIVERSAL over
-# the function's out-flows and never re-derives the proof (inv. 9 — the scorer
-# consumes published witnesses, it does not recompute them).
+# the function's out-flows and never re-derives the proof — the scorer
+# consumes published witnesses, it does not recompute them.
 SELF_SERVICE_BASIS = SELF_SERVICE_BASIS_BOUNDED
 SELF_SERVICE_UNCHARGED_NOTE = "self_service_uncharged_product_surface"
 _SELF_SERVICE_PROVEN_STATE = SELF_SERVICE_STATE_PROVEN

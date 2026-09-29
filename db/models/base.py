@@ -63,14 +63,14 @@ class JobStage(str, enum.Enum):
 def derive_job_chain_id(chain_value: Any, address: str | None) -> int | None:
     """Resolve a job's first-class ``chain_id`` from its ``request["chain"]``.
 
-    Single source of derivation truth for the ``jobs.chain_id`` dual-write
-    (invariant 1). Address-less company/root jobs carry no chain identity
+    Single source of derivation truth for the ``jobs.chain_id`` dual-write.
+    Address-less company/root jobs carry no chain identity
     (a deployment concept) and return None; the CHECK constraint permits that.
     For address-scoped jobs the chain string resolves through the canonical
     registry; missing/empty is the mainnet edge default, and an unrecognized
     value (typo, the ``"unknown"`` sentinel, or a non-string) falls back to
     mainnet with a warning so a misconfiguration is visible without changing
-    mainnet behaviour. Mirrors the M0.2 migration backfill so dual-written and
+    mainnet behaviour. Mirrors the chain-id migration backfill so dual-written and
     legacy rows agree.
     """
     if address is None:

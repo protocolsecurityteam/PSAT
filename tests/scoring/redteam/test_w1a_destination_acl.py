@@ -3,8 +3,6 @@
 The corpus's own AtomicSolverV3 -> Teller shape: a restricted, authority-gated
 function whose callee is a PARAMETER, so no storage of the caller can name the
 destination and the binding lives in the destination's own ACL.
-
-One of the twenty sections of the former ``test_scoring_redteam.py``.
 """
 
 from __future__ import annotations
@@ -52,7 +50,7 @@ def test_w1a_a_parameter_bound_call_site_composes_on_the_destinations_own_acl(fo
 
 
 def test_w1a_an_acl_admitted_step_publishes_the_witness_shape_that_admitted_it(fold):
-    """inv. 16: no abstraction above a witness, and no basis borrowed from one.
+    """No abstraction above a witness, and no basis borrowed from one.
 
     An ACL-admitted step must not be rendered through the state-variable
     sentence — there is no state variable and no on-chain read of one. It names

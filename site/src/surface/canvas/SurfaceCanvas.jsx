@@ -25,7 +25,7 @@ import { REACH_EDGE_STROKE, edgeOnReachPath, reachChipText } from "./reachOverla
 const nodeTypes = { contract: ContractNode, group: GroupNode };
 const edgeTypes = { channeled: ChanneledStepEdge };
 
-// Multichain (inv. 13): every entity this canvas receives — machines,
+// Multichain: every entity this canvas receives — machines,
 // principals, fund-flow endpoints — belongs to the single active `chain` (the
 // page is chain-scoped upstream in ProtocolSurface). So bare-address keys in
 // the graph-topology sets below (connectedNodes, edge endpoint comparisons) are

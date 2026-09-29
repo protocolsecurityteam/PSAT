@@ -1,7 +1,4 @@
-"""W4b — compositional gate-control magnitude (Phase 6).
-
-One of the twenty sections of the former ``test_scoring_redteam.py``.
-"""
+"""W4b — compositional gate-control magnitude."""
 
 from __future__ import annotations
 
@@ -39,7 +36,7 @@ from tests.support.scoring_builders import (
 
 
 def test_w4b_a_gate_composes_the_destination_functions_own_witness(fold):
-    """Phase 6, whole. The dollars are the DESTINATION's witness, not the sheet.
+    """Act-as composition, whole. The dollars are the DESTINATION's witness, not the sheet.
 
     Three witnesses and the row publishes all three: the role licenses ``exit``
     at the vault, ``exit`` carries its own fork-proven ``flow.out`` magnitude,
@@ -426,10 +423,10 @@ def test_w4b_a_destination_with_no_flow_out_witness_composes_nothing(fold):
 
 
 def test_w4b_a_freeze_has_no_compositional_source_and_stays_floored(fold):
-    """pause.set is untouched by Phase 6 (§7).
+    """Act-as composition leaves pause.set unchanged.
 
     Nothing composes into "how much a freeze immobilises": the destination
-    witness Phase 6 reuses answers how much a CALL MOVES, which is a different
+    witness act-as composition reuses answers how much a CALL MOVES, which is a different
     quantity. Even with every act-as witness in place the freeze row publishes
     no magnitude.
     """
@@ -450,7 +447,7 @@ def test_w4b_a_freeze_has_no_compositional_source_and_stays_floored(fold):
 
 
 def test_w4b_a_composed_magnitude_answers_the_confidence_term(fold):
-    """inv. 6: composing an answer may only raise the term, and only where real.
+    """Composing an answer may only raise the term, and only where real.
 
     The signal whose magnitude composed counts as answered; the unwitnessed
     freeze beside it does not, so the term rises by exactly one signal's worth
@@ -470,17 +467,16 @@ def test_w4b_a_composed_magnitude_answers_the_confidence_term(fold):
 
 
 def test_w4b_case2_a_seed_that_cannot_act_composes_nothing_two_hops_out(fold):
-    """§9.5 case 2, as the corpus actually answers it.
+    """A seed without a licensed first hop cannot compose a downstream magnitude.
 
-    The spec expected the timelock behind RolesAuthority ``0x4df6b733`` to regain
-    a witnessed magnitude at Phase 6. It does not, and the shape is this one: the
+    The timelock behind RolesAuthority ``0x4df6b733`` has no witnessed
+    composed magnitude because the
     seized node is an AUTHORITY, its own outgoing hop names no licensed function,
     and the vault two hops out — which has a ``flow.out`` witness and a caller
     with a full act-as witness — is behind that break. A chain is as strong as
     its weakest step, so the magnitude stays not_determined for the timelock
     exactly as it does for the two EOAs the shipped document over-charged. That
-    is §9.5 case 2's OTHER admissible outcome ("both sides fall to
-    not_determined"), not its headline one, and this test pins which.
+    keeps all three magnitudes not_determined, as this test pins.
     """
     signals = _composing_signals()
     document = fold(

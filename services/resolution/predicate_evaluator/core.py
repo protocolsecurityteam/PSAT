@@ -392,7 +392,7 @@ def _evaluate_leaf(leaf: LeafPredicate, ctx: EvaluationContext) -> CapabilityExp
             and leaf_is_caller_tainted(leaf)
             and is_permissionless_caller_shape(leaf)
         ):
-            # Value movement (§2.3): an effectful EXTERNAL call required to
+            # Value movement: an effectful EXTERNAL call required to
             # succeed — ``require(token.transfer(msg.sender, …))`` — moves
             # the caller's own assets; any caller moves their own. The
             # static classifier stamps these leaves ``business`` (see
@@ -636,7 +636,7 @@ def _maybe_inline_cross_contract_call(
 
     chain_id = getattr(outer_ctx, "chain_id", None)
     if not isinstance(chain_id, int):
-        # ctx.chain_id is required (inv. 6); a chainless inline can't key its
+        # ctx.chain_id is required; a chainless inline can't key its
         # recursion stack or resolve the callee on a chain.
         return None
     stack = outer_ctx.evaluation_stack if hasattr(outer_ctx, "evaluation_stack") else set()

@@ -35,7 +35,7 @@ const CONTROL_EDGE_TYPES = new Set(["principal", "controller", "controls", "cont
 // Whether a fund_flows edge belongs to ``activeChain``. A flow is intra-chain
 // (``from_chain`` === ``to_chain`` in the payload), so ``to_chain`` is
 // representative. With no active chain the page is single-chain and every flow
-// is kept; a legacy flow with no chain field is kept on any chain (inv. 13) —
+// is kept; a legacy flow with no chain field is kept on any chain —
 // the single home for this predicate so the canvas fund-flow scope (the edges
 // SurfaceCanvas draws) and the governance-adjacency walk agree.
 export function flowOnChain(flow, activeChain) {
@@ -126,7 +126,7 @@ const AGENCY_CAPABILITIES = new Set([
 // EOA) must gate CLOSED, and that is a different state from an address the
 // payload never emitted as a principal at all (no entry — the walk treats it
 // as a plain contract node and stays blind, matching the backend closure).
-// Detail entries are chain-scoped like the adjacency (inv. 13); an entry with
+// Detail entries are chain-scoped like the adjacency; an entry with
 // no chain field is legacy and kept on any chain.
 export function buildAgencyIndex(principals = [], activeChain = null) {
   const index = new Map();

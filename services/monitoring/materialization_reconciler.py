@@ -1,7 +1,7 @@
 """Keeping every monitored contract's materialization current, at a decided price.
 
-Invariant 8 says a completed analysis leaves a current materialization row.
-The main pipeline now writes one (F4a), so the invariant holds going forward —
+A completed analysis must leave a current materialization row.
+The main pipeline now writes one, so the invariant holds going forward —
 but it does not hold *retroactively*, and it stops holding the moment
 ``ANALYSIS_SCHEMA_VERSION`` is bumped: every existing row reads as a miss at
 once, and the whole monitored fleet silently falls back to baseline-only
@@ -11,12 +11,12 @@ This module is the two halves of not letting that happen quietly:
 
   * :func:`materialization_backlog` — how many active monitored contracts have
     no current row, and why. Published unconditionally on the fleet and ops
-    surfaces (F9c) so the decay is visible while it is small.
+    surfaces so the decay is visible while it is small.
   * :func:`plan_rebuilds` — which contracts to re-analyze, capped by a daily
     budget. Rebuild is real spend (forge + Slither + LLM per job), so the work
     is *decided*, never emergent: the cap is an env knob, the jobs already
     queued against it are counted, and the remainder is reported rather than
-    quietly issued (invariant 11).
+    quietly issued.
 
 The mutating half lives in ``scripts/reconcile_materializations.py``, which is
 ``--dry-run`` by default and operator-run.
@@ -202,7 +202,7 @@ def materialization_backlog(
     now: datetime | None = None,
     _candidates: list[RebuildCandidate] | None = None,
 ) -> dict[str, Any]:
-    """Backlog census for the fleet and ops surfaces (F9c).
+    """Backlog census for the fleet and ops surfaces.
 
     ``by_reason`` partitions ``contracts``. The budget fields are published
     alongside because the backlog on its own does not say whether anything is

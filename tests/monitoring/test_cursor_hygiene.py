@@ -1,4 +1,4 @@
-"""F6 — cursor hygiene: no monitored row starts life with a manufactured
+"""Cursor hygiene: no monitored row starts life with a manufactured
 scan cursor.
 
 The guard: a chain-head read that fails is not-determined. Block 0 is not its

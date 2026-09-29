@@ -1,5 +1,5 @@
-// Membership-state helpers for the AddressesModal (DISCOVERY_MEMBERSHIP_GATE
-// spec §5.3). The addresses payload carries `membership_state` derived by the
+// Membership-state helpers for the AddressesModal. The addresses payload
+// carries `membership_state` derived by the
 // backend gate helper plus witness/probe reason fields; nothing here computes
 // a state of its own — display logic only reads those fields.
 //
@@ -84,8 +84,8 @@ export function candidateReasonText(row) {
   }
   if (kind === "probe_error") return "probe attempt failed";
   if (kind === "no_probe_attempt") return "no probe attempt yet";
-  // An unknown kind surfaces its token verbatim — never a vague default
-  // (invariant 5: the missing piece is always named).
+  // An unknown kind surfaces its token verbatim — never a vague default.
+  // The missing piece is always named.
   return typeof kind === "string" && kind ? kind : "";
 }
 

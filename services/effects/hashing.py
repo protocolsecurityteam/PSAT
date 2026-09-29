@@ -1,6 +1,6 @@
-"""Behavioral-hash identity for effects dedup (EFFECTS_RESOLUTION_SPEC §7).
+"""Behavioral-hash identity for effects dedup.
 
-Three of the four ladder rungs. The bytecode-region lifter (§7 item 4) needs an
+Three of the four ladder rungs. The bytecode-region lifter needs an
 EVM CFG recovery pass this repo does not have and is explicitly out — nothing
 here assumes it.
 
@@ -8,7 +8,7 @@ The naming trap this defends against: the ``PausableUntil`` mixin is
 byte-identical across 11 contracts, but eETH/weETH *override* ``pauseUntil()``
 for stricter gating. Same name, same inherited file, different gate — so the
 sound key is the hash of the *resolved* function (what executes), never a
-declared-name or file hash (inv. 2). The override and the mixin default must
+declared-name or file hash. The override and the mixin default must
 hash apart.
 
 All function-shaped access is duck-typed via ``getattr`` (mirroring
@@ -112,7 +112,7 @@ def _normalize_unit(unit: Any, visited: frozenset[Any]) -> list[str]:
 
 
 def resolved_function_hash(function: Any) -> str:
-    """§7 item 1 — the primary key: the normalized resolved-IR/CFG hash.
+    """The primary key: the normalized resolved-IR/CFG hash.
 
     Compiled-structure-derived, name- and literal-free. The caller is
     responsible for override resolution (passing the *resolved* function object
@@ -181,7 +181,7 @@ def bytecode_fallback_hash(
     *,
     immutable_references: dict[str, Any] | None = None,
 ) -> str:
-    """§7 item 2 — the unverified fallback: metadata-stripped whole-runtime-
+    """The unverified fallback: metadata-stripped whole-runtime-
     bytecode hash + selector.
 
     Sound by construction: identical whole bytecode => identical dispatch =>
@@ -200,7 +200,7 @@ def contract_surface_hash(
     immutable_references: dict[str, Any] | None = None,
 ) -> str:
     """Metadata-stripped whole-runtime-bytecode hash of the *contract* — the
-    projection-level cache key (§7). One hasher serves both cache levels; the
+    projection-level cache key. One hasher serves both cache levels; the
     only difference from ``bytecode_fallback_hash`` is that no selector
     participates, because a projection (blast radius, authorization delta) is a
     property of the whole entry-point surface, not one function."""

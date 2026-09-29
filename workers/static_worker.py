@@ -100,9 +100,9 @@ def _request_rpc_url(job: Job) -> str | None:
 
 
 def _parent_chain_id(job: Job) -> int:
-    """The parent job's first-class ``chain_id`` (inv. 6): the populated
+    """The parent job's first-class ``chain_id``: the populated
     ``jobs.chain_id`` column, else derived from ``request["chain"]`` via the
-    registry, else mainnet. Threaded into RPC reads so the inv-7 URL↔chain_id
+    registry, else mainnet. Threaded into RPC reads so the URL↔chain_id
     guard is armed."""
     chain_id = getattr(job, "chain_id", None)
     if isinstance(chain_id, int):
@@ -113,7 +113,7 @@ def _parent_chain_id(job: Job) -> int:
 
 def _parent_chain_name(job: Job) -> str:
     """Canonical chain name of the parent job, for stamping onto a spawned impl
-    child so chain never cascades as ``None`` (inv. 6). Uses the first-class
+    child so chain never cascades as ``None``. Uses the first-class
     ``jobs.chain_id`` column, else derives from ``request["chain"]`` via the
     registry; mainnet resolves to ``"ethereum"`` so mainnet spawns are unchanged."""
     chain_id = _parent_chain_id(job)
@@ -231,9 +231,9 @@ _GENERIC_PROXY_NAMES = {
 def _contract_label_from_meta(project_dir: Path) -> str:
     """Derive the human-readable contract label for the dependency graph.
 
-    Reads ``contract_meta.json`` written by scaffold/static_worker; falls
-    back to the workspace directory name. Generic proxy contract names are
-    swapped for the job's ``display_name`` when available.
+    Reads ``contract_meta.json`` written by the static source preparation
+    pipeline; falls back to the workspace directory name. Generic proxy contract
+    names are swapped for the job's ``display_name`` when available.
     """
     meta_path = project_dir / "contract_meta.json"
     if not meta_path.exists():
@@ -337,7 +337,7 @@ def _finalize_upgrade_history(
             if backfill_protocol_id is not None and stats["impl_addrs"]:
                 # Impls are NOMINATED here; membership is earned through the
                 # gate (W2 impl-of-member-proxy at the observed upgrade tx),
-                # never inherited from the subject's stamp (invariant 1) —
+                # never inherited from the subject's stamp —
                 # nominating from a candidate subject is safe recall.
                 backfill_historical_impl_contracts(
                     session,
@@ -499,7 +499,7 @@ def _apply_proxy_cache(session, src_contract, contract_row, proxy_state: dict | 
             setattr(contract_row, field, getattr(src_contract, field))
     session.commit()
 
-    # §3.4 event 2a also fires on the cache path: the copied pointers are the
+    # The membership gate also runs on the cache path: the copied pointers are the
     # same fact delta a fresh classification would have committed.
     from services.discovery.membership_gate import FactsDelta, evaluate_committed
 
@@ -639,7 +639,7 @@ class StaticWorker(BaseWorker):
         # request JSONB: a chainless submission has ``request["chain"]=None`` but
         # a real mainnet ``chain_id``, so a request-only read would drop the
         # filter and match any chain's row at this address. Coalesce so a mainnet
-        # lookup also finds legacy NULL-chain rows (invariants 1/6/12).
+        # lookup also finds legacy NULL-chain rows.
         chain_name = _parent_chain_name(job)
         stmt = (
             sa_select(Contract)
@@ -921,10 +921,10 @@ class StaticWorker(BaseWorker):
             contract_row.admin = admin
             session.commit()
 
-            # §3.4 event 2a: the freshly stored pointers are a fact delta the
+            # The freshly stored pointers are a fact delta the
             # membership gate evaluates — the proxy itself (its impl/beacon
             # may be a member) and every pointer target (it may be a member
-            # proxy's impl/beacon/admin). Never a stamp (invariant 1); this
+            # proxy's impl/beacon/admin). Never a stamp; this
             # replaces the ad-hoc proxy-of-HIGH-impl runtime adoption.
             from services.discovery.membership_gate import FactsDelta, evaluate_committed
 
@@ -1030,7 +1030,7 @@ class StaticWorker(BaseWorker):
                 continue
 
             impl_name = f"{base_name}: ({label})"
-            # Spawns key off the gate's promotion result (spec §5.2): the
+            # Spawns key off the gate's promotion result: the
             # parent signal the child carries is the proxy's MEMBERSHIP —
             # the earned stamp the evaluate above may have just set — never
             # a source tag.
@@ -1046,13 +1046,13 @@ class StaticWorker(BaseWorker):
                 "discovery_relationship": "implementation",
                 "parent_is_member": parent_is_member,
             }
-            # Always stamp the child's chain from the parent (inv. 6): a None here
+            # Always stamp the child's chain from the parent: a None here
             # used to cascade and let the impl child derive its own default chain,
             # divorcing it from the proxy's chain. Mainnet parents carry
             # chain="ethereum", so this is unchanged there.
             impl_chain = request.get("chain") or _parent_chain_name(job)
             child_request["chain"] = impl_chain
-            # Defense in depth (inv. 14): the impl shares the proxy's chain, so a
+            # Defense in depth: the impl shares the proxy's chain, so a
             # gated parent implies a gated impl — but a disabled chain must spawn
             # no analysis work, so the gate is asserted here too.
             if not chain_enabled(impl_chain):
@@ -1122,7 +1122,7 @@ class StaticWorker(BaseWorker):
 
             # Chain from the first-class ``jobs.chain_id`` column, coalesced so a
             # mainnet lookup finds legacy NULL-chain rows while an L2 lookup stays
-            # isolated (invariants 1/6/12).
+            # isolated.
             proxy_chain_name = _parent_chain_name(job)
             proxy_stmt = (
                 sa_select(Contract)
@@ -1233,7 +1233,7 @@ class StaticWorker(BaseWorker):
         # ``_parent_chain_name``), not a mainnet default: the dynamic-dependency
         # txlist and the upgrade-history getLogs both hit Etherscan and must
         # query the proxy's own chain, or an L2 proxy's timeline/deps come back
-        # silently empty from mainnet (F1/F2).
+        # silently empty from mainnet.
         phase_chain_id = require_chain(chain=_parent_chain_name(job), context="dependency phase").chain_id
         dynamic_rpc_raw = request.get("dynamic_rpc")
         dynamic_rpc = dynamic_rpc_raw if isinstance(dynamic_rpc_raw, str) and dynamic_rpc_raw.strip() else deps_rpc
@@ -1720,7 +1720,7 @@ class StaticWorker(BaseWorker):
         session.commit()
 
     def _publish_materialization(self, session, job: Job, address: str, contract_name: str) -> None:
-        """Record this job's analysis bundle in ``contract_materializations`` (F4a).
+        """Record this job's analysis bundle in ``contract_materializations``.
 
         Until now the versioned store had exactly one writer: the authority
         recursion, which materializes whichever dependencies it happens to
@@ -1729,7 +1729,7 @@ class StaticWorker(BaseWorker):
         decided by an accident of graph traversal (136 of 183 monitored
         contracts read ``no_current_materialization`` while their own jobs held
         a substantive plan). Publishing here makes coverage follow from analysis
-        having run — invariant 8.
+        having run.
 
         Reads back the three artifacts this stage just stored rather than taking
         them as arguments: the artifacts are what the job actually left behind,

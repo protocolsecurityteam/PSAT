@@ -2,7 +2,7 @@
 
 Canonical (single-address): discovery → static → resolution → policy → effects → coverage → done.
 ``selection`` only fires for company jobs so is not included here. ``effects`` sits
-between ``policy`` and ``coverage`` (EFFECTS_RESOLUTION_SPEC); it is flag-gated
+between ``policy`` and ``coverage``; it is flag-gated
 (``PSAT_EFFECTS_STAGE``), but ``_is_prefix`` tolerates a skipped canonical stage,
 so this order is correct whether or not the effects stage fires.
 """

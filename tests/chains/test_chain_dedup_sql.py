@@ -1,9 +1,9 @@
-"""M0.2 item 2 — SQL-side chain-qualified dedup + the reconcile chain-nesting fix.
+"""SQL-side chain-qualified dedup + the reconcile chain-nesting fix.
 
 Proves the ``db.queue`` dedup helpers and ``reconcile_impl_job_for_proxy`` filter
 by chain via the first-class ``jobs.chain_id`` column, so the same address on two
-chains yields two independent jobs and dedup never returns a cross-chain match
-(invariant 1). These complement the pre-existing ``(address, chain)`` tests in
+chains yields two independent jobs and dedup never returns a cross-chain match.
+These complement the pre-existing ``(address, chain)`` tests in
 ``tests/chains/test_chain_aware_cache.py`` (which cover the four helpers via
 Python-side filtering) and ``tests/resolution/test_deployment_scoping.py`` (reconcile).
 

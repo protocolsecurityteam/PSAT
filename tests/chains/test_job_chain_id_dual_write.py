@@ -1,4 +1,4 @@
-"""M0.2 Item 1 — Job.chain_id dual-write + CHECK constraint.
+"""Job.chain_id dual-write + CHECK constraint.
 
 Proves every enqueue path (all funnel through ``db.queue.create_job``) stamps a
 first-class ``chain_id`` derived from ``request["chain"]`` via the canonical

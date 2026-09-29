@@ -4,7 +4,7 @@ Revision ID: d8f3a1c02e47
 Revises: c2d5e8f1a4b7
 Create Date: 2026-07-21 00:00:00.000000
 
-EFFECTS_RESOLUTION_SPEC Phase 1. Additive only.
+Additive only.
 
   - ``ALTER TYPE jobstage ADD VALUE 'effects' BEFORE 'coverage'`` MUST run in an
     ``autocommit_block`` — Postgres rejects ``ADD VALUE`` inside a transaction.

@@ -131,7 +131,7 @@ class OrderingWitness(TypedDict):
 _Step = tuple[str, str, "int | None"]
 
 # Ops that hand control to code this compilation unit does not own. "Every
-# external call", not "every dangerous external call" (S1 §2.3 / fork F1): the
+# external call", not "every dangerous external call": the
 # analysis cannot prove a callee is view, so narrowing would be policy, not a
 # fact. ``LibraryCall`` is here because ``using SafeTransferLib for IERC20``
 # puts the real token call inside it; ``Transfer``/``Send`` are here because
@@ -152,7 +152,7 @@ _CONTROL_TRANSFER_SOLIDITY_PREFIXES = (
 )
 
 # How deep the CALL enumeration walks before it declares the set unclosed. The
-# clearing write is capped separately at one hop (S1 §2.3); this cap only
+# clearing write is capped separately at one hop; this cap only
 # governs whether we can claim to have seen every call.
 _MAX_CALL_WALK_DEPTH = 6
 
@@ -165,7 +165,7 @@ _MAX_WRITE_PATH = 2
 _MAX_WALKED_UNITS = 256
 
 # ---------------------------------------------------------------------------
-# Slither shims — duck-typed, matching effects.py's convention of never
+# Slither shims — duck-typed, matching the effects package convention of never
 # importing slither at module scope.
 # ---------------------------------------------------------------------------
 
@@ -752,7 +752,7 @@ def _precedes(write: _Site, call: _Site, loops: dict[int, dict[int, frozenset[in
         # is the call. Neither proves the write ran first.
         return False, CLEARING_WRITE_DOES_NOT_DOMINATE_CALLS, False
     if shared == 0 and len(write.path) > 1 and len(call.path) > 1:
-        # Sibling-callee split: S1 §2.3 admits same-unit and one-hop composition
+        # Sibling-callee split: the prover admits same-unit and one-hop composition
         # and refuses the rest, rather than composing two callees' interiors
         # through the entry's dominance.
         return False, CROSS_UNIT_ORDERING_UNPROVEN, False

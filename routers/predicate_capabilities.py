@@ -32,8 +32,8 @@ _ADDRESS_RE = re.compile(r"0x[a-fA-F0-9]{40}")
 # ---------------------------------------------------------------------------
 # Probe rate limiter
 # ---------------------------------------------------------------------------
-# v4 plan §15 spec is "10/min/key/contract" — sliding-window per
-# (admin_key, address). PSAT_PROBE_RATE_LIMIT and PSAT_PROBE_RATE_WINDOW_S
+# Default is "10/min/key/contract" — sliding-window per
+# (admin_key, address, chain_id). PSAT_PROBE_RATE_LIMIT and PSAT_PROBE_RATE_WINDOW_S
 # override. Each worker has its own state so a multi-worker deployment
 # allows up to N×limit requests in aggregate; that's an acceptable first
 # cut. Long-term: shared store (Redis) for fleet-wide accounting.
@@ -59,9 +59,9 @@ def _probe_rate_check(admin_key: str | None, address: str, chain_id: int) -> Non
     window has hit its limit. No-op when the limit is 0 (env override
     for testing / disabled-by-default flag use).
 
-    The chain is part of the bucket key (inv. 12): the same address on two chains
-    is two distinct contracts, so probing one must not consume the other's budget.
-    Defaults to mainnet so a caller that omits it keeps the mainnet bucket."""
+    The chain is part of the bucket key: the same address on two chains is two
+    distinct contracts, so probing one must not consume the other's budget.
+    The route resolves any mainnet default before calling this helper."""
     # The module-level knobs stay authoritative (and monkeypatchable) so an env
     # or test override of the limit/window takes effect without reconstructing.
     _probe_limiter.limit = _PROBE_RATE_LIMIT
@@ -96,9 +96,8 @@ def _capabilities_rate_check(request: Request, route: str) -> None:
 # ---------------------------------------------------------------------------
 # Capabilities response cache
 # ---------------------------------------------------------------------------
-# In-process TTL cache for /api/contract/{addr}/capabilities. Per the v4
-# plan §15 ("Response cache 60 blocks") — at 12s/block on mainnet that's
-# ~12 minutes; we accept seconds for chain-agnostic simplicity.
+# In-process TTL cache for /api/contract/{addr}/capabilities; defaults to
+# 60 seconds.
 # PSAT_CAPABILITIES_CACHE_TTL_S overrides; 0 disables. Each worker process
 # has its own cache; that's fine — the resolver is read-only and the cache
 # is best-effort.
@@ -225,7 +224,7 @@ def probe_contract_membership(
     """
     addr = deps._normalize_address_or_400(address)
     if "chain_id" not in req.model_fields_set:
-        # Admin API edge (inv. 6): chain_id defaults to mainnet; log when taken.
+        # Admin API edge: chain_id defaults to mainnet; log when taken.
         logger.info("probe_membership: chain_id defaulted to mainnet (chain_id=1) for %s", addr)
     _probe_rate_check(x_psat_admin_key, addr, req.chain_id)
 
@@ -245,7 +244,7 @@ def probe_contract_membership(
             .order_by(Job.updated_at.desc(), Job.created_at.desc())
             .limit(1)
         )
-        # An explicit chain_id scopes to that chain's job (inv. 12): a CREATE2
+        # An explicit chain_id scopes to that chain's job: a CREATE2
         # twin's trees must not cross-load. Absent, the mainnet-default edge
         # (logged above) keeps the address-only most-recent pick.
         if "chain_id" in req.model_fields_set:
@@ -324,7 +323,7 @@ def probe_contract_signature(
 
     addr = deps._normalize_address_or_400(address)
     if "chain_id" not in req.model_fields_set:
-        # Admin API edge (inv. 6): chain_id defaults to mainnet; log when taken.
+        # Admin API edge: chain_id defaults to mainnet; log when taken.
         logger.info("probe_signature: chain_id defaulted to mainnet (chain_id=1) for %s", addr)
     _probe_rate_check(x_psat_admin_key, addr, req.chain_id)
     with deps.SessionLocal() as session:
@@ -336,7 +335,7 @@ def probe_contract_signature(
             .order_by(Job.updated_at.desc(), Job.created_at.desc())
             .limit(1)
         )
-        # An explicit chain_id scopes to that chain's job (inv. 12); absent,
+        # An explicit chain_id scopes to that chain's job; absent,
         # the mainnet-default edge (logged above) keeps the most-recent pick.
         if "chain_id" in req.model_fields_set:
             job_stmt = job_stmt.where(Job.chain_id == req.chain_id)
@@ -419,7 +418,7 @@ def get_contract_capabilities(
 
     _capabilities_rate_check(request, "/api/contract/{address}/capabilities")
     addr = deps._normalize_address_or_400(address)
-    # Admin API edge (inv. 6): chain_id query param defaults to mainnet. Logged so
+    # Admin API edge: chain_id query param defaults to mainnet. Logged so
     # the mainnet assumption is visible for a chainless admin query.
     logger.info("get_contract_capabilities: resolving %s on chain_id=%s (default mainnet=1)", addr, chain_id)
     cache_key = (addr, chain_id, block)
@@ -434,7 +433,7 @@ def get_contract_capabilities(
         # job's request when chain is None, but doing it here too keeps
         # cache and direct resolver lookups aligned.
         chain_str: str | None = None
-        # Hard-filter the job pick to the requested chain (inv. 12): a CREATE2
+        # Hard-filter the job pick to the requested chain: a CREATE2
         # twin's trees must never cross-load. Ordering-by-preference used to fall
         # back to another chain's job when the requested chain had none, serving
         # that chain's trees under the requested chain_id. No job on this chain
@@ -536,7 +535,7 @@ def company_semantic_capabilities(request: Request, company_name: str) -> dict[s
         if protocol_row is None:
             raise HTTPException(status_code=404, detail="Company not found")
 
-        # Group completed jobs by composite (chain, address) entity (inv. 13): a
+        # Group completed jobs by composite (chain, address) entity: a
         # CREATE2 twin analyzed on two chains is two entities, resolved against
         # its OWN chain's job. Resolving per bare address collapsed the twin and
         # dropped one chain's capability set. Jobs newest-first within each entity

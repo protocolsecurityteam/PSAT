@@ -366,9 +366,9 @@ def _token_first_transfer(ir: Any) -> tuple[str, ...] | None:
         }
 
     Reading ``_settle(token, treasury, amount)`` at the call site published
-    ``target_kind: immutable`` at ``dispositive_ast`` — and §4.2 promoted it to
-    ``immutable_fixed``, a PROVABLY-UNREDIRECTABLE destination — for a payout any
-    caller can repoint. The walk reaches the library call inside ``_settle``
+    ``target_kind: immutable`` at ``dispositive_ast`` — and the value-out
+    consumer promoted it to ``immutable_fixed``, a PROVABLY-UNREDIRECTABLE
+    destination — for a payout any caller can repoint. The walk reaches the library call inside ``_settle``
     anyway and classifies ``dest`` honestly, so nothing is lost by declining
     here."""
     callee = getattr(ir, "function", None)

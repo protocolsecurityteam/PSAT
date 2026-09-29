@@ -128,7 +128,7 @@ _COVERAGE_PROVING_TRACE_STEPS = frozenset(
 
 #: Empty-reasons that report a COMPLETED READ. Everything else is excluded with
 #: cause: ``empty_by_design`` is a classification whose surviving producer records
-#: ``basis: "accessor_name"`` (an identifier, inv.2); ``unreadable_revert`` /
+#: ``basis: "accessor_name"`` (an identifier); ``unreadable_revert`` /
 #: ``unreadable_empty`` / ``not_read`` / ``bad_input`` are failure states, which
 #: must never license a credit; ``owner_read_burn_address`` rests on the
 #: convention that ``0x…dEaD`` is unspendable, which no read establishes.

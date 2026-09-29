@@ -117,7 +117,7 @@ def _make_result(primary: dict, siblings: list[dict]) -> dict:
         "chains": primary.get("chains", []),
         # The listing's own governance/token address, per sibling — a
         # DefiLlama-curated fact of the same provenance the W6 seed rests on
-        # (spec §3.2), and the only address the listing itself publishes.
+        # and the only address the listing itself publishes.
         "listing_addresses": listing_addresses(siblings),
         "all_slugs": [s.get("slug") for s in siblings if s.get("slug")],
         # Display names for every sibling — used by ``get_or_create_protocol``

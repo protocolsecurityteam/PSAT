@@ -2,7 +2,7 @@
 """Codegen: emit ``site/src/surface/chains.json`` from the canonical chain registry.
 
 The frontend needs chain id / name / explorer-base-url triples but must not keep
-its own hand-maintained map (inv. 5). This script is the single writer of
+its own hand-maintained map. This script is the single writer of
 ``site/src/surface/chains.json``; ``tests/chains/test_chains_json_parity.py`` asserts the
 committed file still matches the registry, so a registry change that forgets to
 regenerate the JSON fails CI (parity-or-die).

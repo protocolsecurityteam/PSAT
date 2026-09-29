@@ -1,8 +1,8 @@
-"""M1.1 item 1 — second-chain threading proofs.
+"""Second-chain threading proofs.
 
 Every test here drives a non-mainnet chain (Base, id 8453) through one of the
 threaded paths and asserts the chain reaches it: the resolver's bound RPC
-URL/chain_id (inv. 7), the balance Etherscan reads, the materialization cache
+URL/chain_id, the balance Etherscan reads, the materialization cache
 name, the monitoring-enroll chain, the probe rate bucket, the company-overview
 join, and the audit-timeline bytecode read. The wire is stubbed (never the
 class) so the offline suite stays hermetic.
@@ -44,7 +44,7 @@ def _erpc_base(monkeypatch: pytest.MonkeyPatch) -> str:
 
 
 # ---------------------------------------------------------------------------
-# inv. 7 — ChainContext binds chain_id to its RPC URL
+# ChainContext binds chain_id to its RPC URL
 # ---------------------------------------------------------------------------
 
 
@@ -269,7 +269,7 @@ def test_job_matches_contract_chain_cross_chain():
 
 
 # ---------------------------------------------------------------------------
-# probe rate-limit bucket is chain-scoped (inv. 12)
+# probe rate-limit bucket is chain-scoped
 # ---------------------------------------------------------------------------
 
 
@@ -317,7 +317,7 @@ def test_audit_timeline_bytecode_read_uses_contract_chain(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# routers/jobs — DELETE chain-qualifies (no more MultipleResultsFound) (inv. 12)
+# routers/jobs — DELETE chain-qualifies (no more MultipleResultsFound)
 # ---------------------------------------------------------------------------
 
 

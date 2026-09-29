@@ -11,7 +11,7 @@ pragma solidity ^0.8.4;
 //   lowers to a caller-equality operand naming the bytes32 constant
 //   `_OWNER_SLOT`. Bug #6: that must NOT become a `role_identifier:_OWNER_SLOT`
 //   target (reading `_OWNER_SLOT()` reverts) — resolution must read `owner()`.
-//   See tests/test_canonical_authority_getter_resolution.py + TopUpSolady.sol.
+//   See tests/resolution/test_canonical_authority_getter_resolution.py + TopUpSolady.sol.
 
 /// @notice Simple single owner authorization mixin.
 /// @author Solady (https://github.com/vectorized/solady/blob/main/src/auth/Ownable.sol)

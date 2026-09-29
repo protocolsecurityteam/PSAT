@@ -1,4 +1,4 @@
-"""Input-asset seeding for Tier-1 value/supply probes (EFFECTS_RESOLUTION_SPEC §4.2/§4.5).
+"""Input-asset seeding for Tier-1 value/supply probes.
 
 A deposit-backed conversion reverts at its ERC-20 precondition, so it never
 reaches the mint and drops out of the backing population. These tests drive the
@@ -266,7 +266,7 @@ def test_seeder_memoizes_identity_and_layout_across_candidates():
 
 
 # ---------------------------------------------------------------------------
-# §4.5 supply — the backing witness
+# supply — the backing witness
 # ---------------------------------------------------------------------------
 
 
@@ -430,7 +430,7 @@ def test_payable_attempt_seeds_only_the_principals_eth_balance():
 
 
 # ---------------------------------------------------------------------------
-# §4.2 value_out
+# value_out
 # ---------------------------------------------------------------------------
 
 

@@ -78,7 +78,7 @@ function upgradeSub(im, isFirst) {
   return isFirst ? addr : `→ ${addr}`;
 }
 
-// The reciprocal half of the backend's same-transaction join (§3.4). Sharing a
+// The reciprocal half of the backend's same-transaction join. Sharing a
 // transaction hash is a witnessed fact, so the row may say what caused it — and
 // it says only what the backend published, with no client-side re-derivation.
 function withCause(sub, ev) {
@@ -205,7 +205,7 @@ export function buildTimeline({ events = [], proxy = null, enrollmentBlock = nul
 // Apply a salience threshold to a built timeline, returning the surviving rows
 // and how many were withheld. The count is not optional bookkeeping: a view
 // that hides rows without saying how many is the suppression this axis exists
-// to prevent (invariant 4), so every caller renders it.
+// to prevent, so every caller renders it.
 // The per-section counts are not bookkeeping either: the Timeline's empty
 // states are claims about what EXISTS (an earned negative, a hedge, or an
 // answer), and a section the filter emptied has not earned any of them. It

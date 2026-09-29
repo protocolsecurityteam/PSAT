@@ -154,7 +154,7 @@ def _log_branch_sha_pressure() -> None:
 def _resolve_branch_commit(owner: str, repo: str, branch: str, debug: bool = False) -> str | None:
     """Return the HEAD commit SHA for a branch, or ``None`` on miss.
 
-    Recorded on every GitHub-sourced audit so phase-2 linking can verify
+    Recorded on every GitHub-sourced audit so linking can verify
     the PDF still lives at the same SHA and build stable permalinks.
     """
     key = (owner.lower(), repo.lower(), branch)

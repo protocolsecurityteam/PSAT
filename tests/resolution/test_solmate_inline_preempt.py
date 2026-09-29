@@ -2,15 +2,15 @@
 Solmate adapter when the inlined delegated check can't be materialized.
 
 PR #104 wired ``SolmateRolesAuthorityAdapter`` into the ``external_set``
-dispatch in ``predicate_evaluator.py`` (line 317), but
-``_maybe_inline_cross_contract_call`` runs first (line 312-316). For a Solmate-
+dispatch in ``services/resolution/predicate_evaluator/core.py``, but
+``_maybe_inline_cross_contract_call`` runs first. For a Solmate-
 protected contract analyzed alongside its ``RolesAuthority``, inlining the
 authority's own ``canCall`` produces an ``external_check_only`` that the
 generic materializer can't satisfy — ``canCall`` is a role-mapping join, not
 expressible from event candidates. The pre-fix code returned an
 ``external_check_only`` dead-end (``basis=["delegated_check_not_materialized"]``)
-from that branch, which is non-None — so the caller short-circuited at line
-313 and the Solmate adapter at line 317 was never reached. Empirically: zero
+from that branch, which is non-None — so the caller short-circuited and
+the Solmate adapter was never reached. Empirically: zero
 adapter activations across an entire complete run with 15 RolesAuthority +
 52 ``canCall``-protected Veda contracts analyzed.
 
@@ -40,10 +40,10 @@ def _callee_artifact_with_unmaterializable_cancall() -> dict:
     """A ``canCall`` tree the resolver evaluates to ``external_check_only``.
 
     The LEAF wraps an ``external_set`` descriptor with a callee signature no
-    adapter handles — so the dispatch at predicate_evaluator.py:317 falls
+    adapter handles — so the dispatch in ``predicate_evaluator/core.py`` falls
     through to ``_external_check_from_descriptor`` → ``external_check_only``.
     ``_inline_result_needs_materialization(external_check_only) == True``
-    (line 1163-1164), so the materializer is invoked next. Stubbing it to
+    so the materializer is invoked next. Stubbing it to
     ``None`` is what trips the branch this test guards.
     """
     return {

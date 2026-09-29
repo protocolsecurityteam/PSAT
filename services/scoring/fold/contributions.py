@@ -293,7 +293,7 @@ def _entity_contribution(
 
     So the fallthrough is ``not_determined``, and the row does NOT disappear:
     membership stands, ``value_at_stake_usd`` publishes null, the band falls to
-    ``UNPRICED_BAND`` (inv. 7's floor — a rug-shaped capability on an empty
+    ``UNPRICED_BAND`` (a rug-shaped capability on an empty
     contract still scores), and the missing magnitude is charged to confidence's
     reach-magnitude term, which is the only place an unknown can sit without
     being published as a number.
@@ -495,9 +495,9 @@ def _sheet_ceiling(instance: _Instance, key: str, value_plane: P.ValuePlane) -> 
     "how much can they move" has an answer nothing further has to witness: at
     most what is there. Gate control has no such argument — the vault's own share
     math, caps and caller conditions are all still standing and none of them has
-    been examined — so it stays where Phase 6 left it. The test is on the
-    capability and never on ``is_proxy``: ``exec.arbitrary`` on a contract that
-    was never a proxy dictates that contract's behaviour just as completely.
+    been examined — so its magnitude still needs a destination call witness.
+    The test is on the capability and never on ``is_proxy``: ``exec.arbitrary``
+    on a contract that was never a proxy dictates that contract's behaviour just as completely.
 
     The ENTITY must be the controlled node itself — the deployment the capability
     was witnessed on, compared under ``canonical`` so an implementation and its
@@ -519,7 +519,7 @@ def _sheet_ceiling(instance: _Instance, key: str, value_plane: P.ValuePlane) -> 
     instance only where ``value_state`` is ``proven_reach``, so an unproven claim
     never reaches this function with an entity to charge.
 
-    ANTI-GAMING (inv. 13), because a branch that reads a protocol's own balance
+    ANTI-GAMING, because a branch that reads a protocol's own balance
     sheet invites the question. Both conjuncts are expensive to move and neither
     is movable by presentation: to lower the figure a protocol must hold less, or
     be genuinely non-upgradeable, and both of those are real facts about it

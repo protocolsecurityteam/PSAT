@@ -48,12 +48,12 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Membership state (spec §3.1) — derived, never a parallel status column
+# Membership state — derived, never a parallel status column
 # ---------------------------------------------------------------------------
 
 
 def membership_state(contract: Contract, *, code_absent_at_probe: bool | None = None) -> MembershipState:
-    """Derive the §3.1 state. ``code_absent_at_probe`` is the persisted probe
+    """Derive the state. ``code_absent_at_probe`` is the persisted probe
     verdict for the row's (address, chain); ``None`` = not probed, which can
     never prove absence — the row stays a candidate."""
     if contract.protocol_id is not None:
@@ -79,7 +79,7 @@ def resolve_membership_state(session: Session, contract: Contract) -> Membership
 
 def _has_nonlineage_witness(session: Session, *, contract_id: int, protocol_id: int) -> bool:
     """Does the row hold ≥1 unrevoked non-lineage witness for *protocol_id*?
-    The F1 membership-evidence test for candidate rows: nomination alone (or
+    The membership-evidence test for candidate rows: nomination alone (or
     W4 alone) proves nothing about belonging."""
     return (
         session.execute(
@@ -97,12 +97,13 @@ def _has_nonlineage_witness(session: Session, *, contract_id: int, protocol_id: 
 
 
 def member_for_evidence(session: Session, *, contract_id: int, protocol_id: int) -> bool:
-    """DEPLOYER_HEURISTIC_SPEC.md §6: may this member stand as the via-fact of
+    """May this member stand as the via-fact of
     another evidence rule? False EXACTLY when its admission is heuristic —
     every active admitting witness it holds is a heuristic one. Heuristic
     members stay full members operationally (``protocol_id`` is unchanged for
     selection, monitoring, scoring, overview); the boundary is evidentiary, so
-    a heuristic admission has zero transitive amplification.
+    a heuristic admission cannot anchor different-entity admissions.
+    Same-contract W2 inheritance is handled separately and stays heuristic.
 
     The predicate judges the witness set, not membership: a row with no
     admitting witness at all is not a HEURISTIC admission, and whether it may
@@ -116,11 +117,11 @@ def member_for_evidence(session: Session, *, contract_id: int, protocol_id: int)
 
 
 def _member_anchors_ladder(session: Session, *, contract_id: int, protocol_id: int) -> bool:
-    """§3.2 D2 non-transitivity mirrored into the ladder (F2, same discipline
+    """D2 non-transitivity mirrored into the ladder (same discipline
     as ``_via_is_transitive``): a member whose ONLY admitting witness is W3-D2
     must not anchor perimeter or corroboration facts — its principals would
     license what the D2 entry itself may not. Heuristic witnesses never anchor
-    either (DEPLOYER_HEURISTIC_SPEC.md §6)."""
+    either."""
     for row in active_witnesses(session, contract_id=contract_id, protocol_id=protocol_id):
         if row.rule not in ADMITTING_WITNESS_RULES or witness_is_heuristic(row):
             continue
@@ -133,8 +134,8 @@ def _member_anchors_ladder(session: Session, *, contract_id: int, protocol_id: i
 
 def _anchoring_member_factory_id(session: Session, *, protocol_id: int, factory: str) -> int | None:
     """The id of this protocol's MEMBER row at *factory* holding a non-D2
-    admitting witness (F2), or None. Lowest member id wins, so the published
-    via is a function of the evidence set, not of row order (invariant 9)."""
+    admitting witness, or None. Lowest member id wins, so the published
+    via is a function of the evidence set, not of row order."""
     for member in session.execute(
         select(Contract)
         .where(Contract.protocol_id == protocol_id, func.lower(Contract.address) == factory)
@@ -147,7 +148,7 @@ def _anchoring_member_factory_id(session: Session, *, protocol_id: int, factory:
 
 def _anchoring_member_factory(session: Session, *, protocol_id: int, factory: str) -> bool:
     """Whether *factory* is this protocol's own MEMBER holding a non-D2
-    admitting witness (F2). The member-factory mapping rule (deliberate §3.3
+    admitting witness. The member-factory mapping rule (deliberate
     deviation, owner ruling): a creation minted by the protocol's own member
     factory is a protocol-family creation — it counts as MAPPED in the Class-B
     exclusivity test and is tolerated by the shared-operator kill. Mapping
@@ -199,7 +200,7 @@ def _member_factory_created(session: Session, *, protocol_id: int, contract: Con
 
 
 # ---------------------------------------------------------------------------
-# Witness-fact verification (spec §3.2 witness invalidation; invariant 6).
+# Witness-fact verification — invalidate witnesses whose via-facts no longer hold.
 # Admission and cascade both re-check the EDGE, never mere witness presence —
 # a caller-written witness row is a claim the gate re-verifies, not a license.
 # ---------------------------------------------------------------------------
@@ -213,7 +214,7 @@ def _chain_key(chain: str | None) -> str:
 
 def _member_rows_at(session: Session, *, protocol_id: int, address: str, chain_key: str) -> list[Contract]:
     """This protocol's EVIDENCE members at (address, chain): heuristic-only
-    members are excluded (DEPLOYER_HEURISTIC_SPEC.md §6) — every caller here
+    members are excluded — every caller here
     reads a member as the via-fact of another rule."""
     rows = session.execute(
         select(Contract)
@@ -231,7 +232,7 @@ _PROBE_CONTROLLER_READS = ("owner", "authority", "admin")
 
 
 def _probe_controller_values(session: Session, contract: Contract) -> set[str]:
-    """Controller addresses the latest §3.5 probe of *contract* resolved
+    """Controller addresses the latest probe of *contract* resolved
     (owner/authority/admin reads only — impl/beacon reads are W2-shaped facts,
     not control edges)."""
     chain_id = chain_id_for_chain_name(contract.chain)
@@ -395,14 +396,14 @@ def _principal_perimeter_fact(
     chain_key: str,
     exclude_contract_id: int | None = None,
 ) -> dict[str, Any] | None:
-    """§3.3 Class-A perimeter reading for the D1-principal arm: *address* is a
+    """Class-A perimeter reading for the D1-principal arm: *address* is a
     resolved EOA principal (:data:`W3_PERIMETER_PRINCIPAL_TYPE`) of a member's
     effective function. The hosting member must itself hold a non-D2 admitting
-    witness (F2) — a principal observed only on a D2-only entry licenses
+    witness — a principal observed only on a D2-only entry licenses
     nothing, since the D2 entry itself is non-transitive.
 
     Smallest principal row wins, so the published fact is a function of the
-    evidence set rather than of row arrival order (invariant 9)."""
+    evidence set rather than of row arrival order."""
     for fp_id, function_id, resolved_type, _safe_address, member in _member_principal_rows(
         session,
         protocol_id=protocol_id,
@@ -447,7 +448,7 @@ def _address_proven_foreign(session: Session, *, protocol_id: int, address: str)
     """Positive counterevidence that *address* belongs elsewhere: it is a
     member of another protocol, or another protocol's unrevoked deployer
     registry row. A bare nomination is deliberately NOT counted — it proves
-    nothing in either direction (F1)."""
+    nothing in either direction."""
     foreign_member = session.execute(
         select(Contract.id)
         .where(
@@ -478,7 +479,7 @@ def _controls_a_foreign_row(session: Session, *, protocol_id: int, controller_ad
     observed controlling a row that PROVABLY belongs elsewhere — another
     protocol's member, or a row another protocol nominated? The observation set
     is the same three W3 sources ``_controller_is_exclusive`` reads:
-    caller-gating controller values, proxy-admin pointers, §3.5 probe reads."""
+    caller-gating controller values, proxy-admin pointers, probe reads."""
     foreign = or_(
         Contract.protocol_id.is_not(None) & (Contract.protocol_id != protocol_id),
         Contract.protocol_id.is_(None)
@@ -531,7 +532,7 @@ def _perimeter_fact(session: Session, *, protocol_id: int, address: str) -> dict
     """A resolved principal fact placing *address* inside the protocol's proven
     control graph: a resolved controller value on a member, a function
     principal of a member, or a resolved Safe signer-set entry. The anchoring
-    member must itself hold a non-D2 admitting witness (F2) — a principal
+    member must itself hold a non-D2 admitting witness — a principal
     observed on a D2-only entry never mints a ladder anchor."""
     for fact, member_id in _perimeter_fact_candidates(session, protocol_id=protocol_id, address=address):
         if _member_anchors_ladder(session, contract_id=member_id, protocol_id=protocol_id):
@@ -540,7 +541,7 @@ def _perimeter_fact(session: Session, *, protocol_id: int, address: str) -> dict
 
 
 def _perimeter_fact_candidates(session: Session, *, protocol_id: int, address: str):
-    """Every §3.3 perimeter observation of *address*, in deterministic order,
+    """Every perimeter observation of *address*, in deterministic order,
     as ``(fact, anchoring_member_id)``. Whether the anchoring member may
     actually anchor is the caller's check."""
     members = _member_ids_subquery(protocol_id)
@@ -556,7 +557,7 @@ def _perimeter_fact_candidates(session: Session, *, protocol_id: int, address: s
         yield {"kind": "controller_value", "contract_id": member_id, "controller_id": controller_id}, member_id
     # A principal produced by enumerating a caller mapping proves membership
     # of a caller set, not control — only an authority-derived principal is a
-    # perimeter observation (invariant 6, :data:`W3_PRINCIPAL_AUTHORITY_RESOLVERS`).
+    # perimeter observation (:data:`W3_PRINCIPAL_AUTHORITY_RESOLVERS`).
     for fp_id, function_id, member_id in session.execute(
         select(FunctionPrincipal.id, FunctionPrincipal.function_id, EffectiveFunction.contract_id)
         .join(EffectiveFunction, FunctionPrincipal.function_id == EffectiveFunction.id)

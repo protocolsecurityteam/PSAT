@@ -761,7 +761,7 @@ def test_holdings_the_fetch_recorded_at_the_page_cap_are_marked_incomplete(db_se
     An at-cap holder is marked ``at_page_cap`` so the reach probe names it as the
     reason an asset could not be valued instead of quietly skipping it.
 
-    THE LENGTH ARM IS GONE (§9.5-addendum B.1). The fetch now pages the endpoint to
+    THE LENGTH ARM IS GONE. The fetch now pages the endpoint to
     exhaustion, so a stored list longer than ``TOKEN_BALANCE_PAGE_SIZE`` is a routine
     COMPLETE list; comparing a count to the cap announced every large sheet as
     possibly incomplete. ``not_determined`` is still the below-cap answer — there is

@@ -212,7 +212,7 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
             chain = (contract_row.chain if contract_row and contract_row.chain else None) or req_chain
             # chain_id is required: bind the resolver's live reads to the
             # job's first-class chain_id, falling back to the registry-backed
-            # derivation from the job's chain string (mirrors the M0.2 backfill).
+            # derivation from the job's chain string (mirrors the chain-id migration backfill).
             from db.models import derive_job_chain_id
 
             chain_id = getattr(job, "chain_id", None)

@@ -67,7 +67,7 @@ function EventRow({ row, chain, now, onPreview, onNavigate }) {
 // Runs of consecutive PROVEN-routine rows collapse into one disclosure row.
 // Only `salience === "routine"` qualifies: `not_determined` is an event no
 // backend rule rated, and collapsing it would be suppression minted from
-// ignorance (invariant 5). A lone routine row renders as itself — a
+// ignorance. A lone routine row renders as itself — a
 // "1 routine event — show" disclosure costs a click and hides nothing useful.
 const MIN_COLLAPSE_RUN = 2;
 

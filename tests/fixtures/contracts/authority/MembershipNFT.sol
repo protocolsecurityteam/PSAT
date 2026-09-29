@@ -11,7 +11,7 @@ pragma solidity ^0.8.13;
 //   `state_variable` gate whose getter (`membershipManager()`) reverts on every
 //   deployment (claim #3 group D). Resolution recovers the principal by reading
 //   the var's *sequential* storage slot with `eth_getStorageAt`. See
-//   tests/test_internal_authority_storage_read.py.
+//   tests/resolution/test_internal_authority_storage_read.py.
 //
 // The OZ upgradeable bases the real contract inherits (Ownable/UUPS/ERC1155) are
 // replaced by `_InheritedStorage`, a stand-in for their preceding storage so the

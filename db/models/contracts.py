@@ -49,7 +49,7 @@ class Contract(Base):
     protocol_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("protocols.id", ondelete="SET NULL"), nullable=True
     )
-    # Which protocol NOMINATED this address (membership gate, spec §3.1).
+    # Which protocol NOMINATED this address.
     # Never a membership claim: ``protocol_id`` stays the single member stamp,
     # and only ``services.discovery.membership_gate`` may write it.
     nominated_protocol_id: Mapped[int | None] = mapped_column(
@@ -500,7 +500,7 @@ class ContractCreationWitness(Base):
     )
 
 
-# ``ContractMembershipWitness.rule`` vocabulary (membership gate, spec §3.2).
+# ``ContractMembershipWitness.rule`` vocabulary.
 # Deterministic evidence only; no rule may ever be produced from LLM output.
 WITNESS_RULE_W1_CODE = "w1_code"
 WITNESS_RULE_W2_STRUCTURAL = "w2_structural"
@@ -513,10 +513,10 @@ WITNESS_RULE_W4_DEPLOYER = "w4_deployer"
 WITNESS_RULE_W4_FACTORY = "w4_factory"
 WITNESS_RULE_W5_HUMAN = "w5_human"
 WITNESS_RULE_W6_LLAMA_SEED = "w6_llama_seed"
-# W4-H (DEPLOYER_HEURISTIC_SPEC.md §1): lineage from a trust-class-H deployer,
+# W4-H: lineage from a trust-class-H deployer,
 # admitted on measured affinity rather than on proof. The distinct rule string
 # is the honesty boundary — no display, export or API may present a heuristic
-# membership as proven (that spec's invariant 1).
+# membership as proven.
 WITNESS_RULE_W4H_DEPLOYER_AFFINITY = "w4h_deployer_affinity"
 WITNESS_RULES = frozenset(
     {
@@ -531,7 +531,7 @@ WITNESS_RULES = frozenset(
     }
 )
 # Rules that admit membership on their own. W1 is the code precondition for
-# every promotion (invariant 3) and alone admits nothing.
+# every promotion and alone admits nothing.
 ADMITTING_WITNESS_RULES = frozenset(WITNESS_RULES - {WITNESS_RULE_W1_CODE})
 
 
@@ -539,7 +539,7 @@ class ContractMembershipWitness(Base):
     """One recorded reason a contract is (or was) a member of a protocol.
 
     Member ⇔ ``contracts.protocol_id`` set AND ≥1 row here with
-    ``revoked_at IS NULL``. Rows are revoked, never deleted (invariant 4).
+    ``revoked_at IS NULL``. Rows are revoked, never deleted.
     """
 
     __tablename__ = "contract_membership_witnesses"
@@ -606,10 +606,10 @@ class ContractMembershipWitness(Base):
 
 
 class ContractProbeAttempt(Base):
-    """Latest corroboration-probe attempt per (contract, chain) — spec §3.5.
+    """Latest corroboration-probe attempt per (contract, chain).
 
-    Exists so a candidate's parked state is explainable from persisted rows
-    (invariant 5): which reads ran, at what block, and what each resolved.
+    Exists so a candidate's parked state is explainable from persisted rows:
+    which reads ran, at what block, and what each resolved.
     Code/creation facts stay in ``contract_creation_witnesses``; this row
     carries the owner/authority/EIP-1967 reads that table cannot express.
     """
@@ -623,7 +623,7 @@ class ContractProbeAttempt(Base):
     block_number: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     # {"status": "probed"|"not_routable", "reads": {read: {ok, value, error}},
     #  "resolved_addresses": [..]} — the address list feeds the gate's targeted
-    # candidate lookups (spec §3.4 event 2).
+    # candidate lookups.
     results: Mapped[Any] = mapped_column(JSONB, nullable=False)
     probed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
@@ -862,9 +862,9 @@ class AddressLabel(Base):
     addresses with no on-chain metadata — a legible name in the UI. Distinct
     from ``PrincipalLabel`` which is worker-populated and scoped per-contract.
 
-    Global-plus-override model (invariant 12): ``chain`` is a nullable
-    chain-NAME string (``'ethereum'``, ``'base'`` — entity tables key on chain
-    names, not ids, per invariant 11).
+    Global-plus-override model: ``chain`` is a nullable
+    chain-NAME string (``'ethereum'``, ``'base'`` — entity tables key on canonical
+    chain names, not ids).
 
       * ``chain IS NULL`` is a **global** label that applies on every chain.
         This is the right semantics for EOA/Safe-signer labels — the same key

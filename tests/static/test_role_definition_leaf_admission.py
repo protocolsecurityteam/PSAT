@@ -19,13 +19,14 @@ failed and are pinned here as regression fixtures:
   root and a CREATE2 salt all minted as roles (``TestExternalArmHostileShapes``);
 * narrowing to the ``hasRole(bytes32,address)`` selector plus argument
   positions — the signature comes from ``ir.function.full_name``
-  (``predicates.py:2338``), the CALLER's declaration, so any contract declared
-  under that name lowers identically (``TestCallerDeclaredInterfaceShapes``).
+  (``_build_external_bool_leaf``), the CALLER's declaration, so any contract
+  declared under that name lowers identically (``TestCallerDeclaredInterfaceShapes``).
 
 The external arm's measured population on the persisted corpus was **zero**: all
 surviving rows across the six role-bearing contracts are mapping-arm and the
 ``external_set`` descriptor count is 0. Cross-contract roles publish as
-``not_determined`` under the B4c coverage caveat, never as "no roles".
+``not_determined`` because the cross-contract role check is unverified,
+never as "no roles".
 
 Every leaf below marked REAL is verbatim from the persisted predicate_trees
 blobs of the PR-161 run (MinIO ``pr-161/artifacts/<job>/predicate_trees``):
@@ -247,8 +248,8 @@ def test_external_registry_role_leaf_is_not_admitted():
     intended outcome.
 
     ``callee_signature`` / ``callee_selector`` come from
-    ``ir.function.full_name`` (``predicates.py:2338``) — the interface the CALLER
-    declared, not the deployed callee's ABI. A slot lens or a merkle-tree
+    ``ir.function.full_name`` (``_build_external_bool_leaf``) — the interface
+    the CALLER declared, not the deployed callee's ABI. A slot lens or a merkle-tree
     contract declared under the name ``hasRole(bytes32,address)`` lowers to a
     byte-identical descriptor (``TestCallerDeclaredInterfaceShapes``), so the
     signature is an unverified claim about someone else's code. Argument position
@@ -258,7 +259,8 @@ def test_external_registry_role_leaf_is_not_admitted():
     The measured cost is zero — across all six role-bearing contracts in the
     persisted corpus every surviving row is mapping-arm and the
     ``external_set`` descriptor count is 0. These roles publish as
-    ``not_determined`` under the B4c coverage caveat, **never** as "no roles".
+    ``not_determined`` because the cross-contract role check is unverified,
+    **never** as "no roles".
     """
     trees = {"trees": {"mint()": _leaf(REAL_EXTERNAL_REGISTRY_ROLE_LEAF)}}
     assert _role_names_from_predicate_trees(trees, _vars("MINTER_ROLE")) == set()
@@ -567,8 +569,9 @@ class TestExternalArmHostileShapes:
     def test_a_genuine_hasrole_gate_mints_nothing_either(self, tmp_path):
         """The honest cost of the excision, pinned: a real cross-contract role
         check publishes NO row. Not "this contract has no roles" — the role is
-        ``not_determined`` under B4c's coverage caveat, alongside the 50
-        role-keyed gates that carry the role as a view_call/parameter operand."""
+        ``not_determined`` because the cross-contract role check is unverified,
+        alongside the 50 role-keyed gates that carry the role as a
+        view_call/parameter operand."""
         roles = _role_names_from_source(
             tmp_path,
             """
@@ -616,8 +619,8 @@ class TestCallerDeclaredInterfaceShapes:
     """The round-2 refutation of the selector+position arm, pinned.
 
     ``callee_signature``/``callee_selector`` are read off ``ir.function.full_name``
-    (``predicates.py:2338``) — the interface the CALLING contract declared. Any
-    contract can be declared under the name ``hasRole(bytes32,address)``, so the
+    (``_build_external_bool_leaf``) — the interface the CALLING contract
+    declared. Any contract can be declared under the name ``hasRole(bytes32,address)``, so the
     selector is not a proven property of the deployed callee, and the bodies that
     refute these gates are sometimes visible in the very same unit."""
 

@@ -1,6 +1,6 @@
 """The score's invalidation mark — one upsert, and it never fails its host.
 
-The grade is a whole-protocol fold (strategy §0): value is MAX per entity,
+The grade is a whole-protocol fold: value is MAX per entity,
 principal units are cross-contract and re-key under new evidence, and
 subsumption needs every row present. None of that can be accumulated one
 contract at a time, so the pipeline's half of the contract is not "add your

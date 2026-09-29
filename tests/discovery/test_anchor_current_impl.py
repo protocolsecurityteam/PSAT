@@ -78,7 +78,7 @@ def test_not_superseded_impl_clause_filters(db_session):
 
 
 def _stub_backfill_io(monkeypatch):
-    """Backfill resolves impl names via Etherscan, runs the near-line §3.5
+    """Backfill resolves impl names via Etherscan, runs the near-line
     probe, and refreshes audit coverage. Stub all three so the test stays
     offline + hermetic."""
     monkeypatch.setattr("services.clients.etherscan.parallel_get", lambda calls: {k: fn() for k, fn in calls.items()})

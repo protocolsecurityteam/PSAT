@@ -55,7 +55,7 @@ class ReceiverDescriptor(TypedDict):
     # :func:`_auto_getter_selector` for why the type — not the name — licenses it.
     auto_getter_selector: str | None
     # The AST identifier, for display and for joining to source. NEVER a
-    # resolution basis: ``variable + "()"`` is the inv.2 shape this descriptor
+    # resolution basis: ``variable + "()"`` is the name-derived shape this descriptor
     # exists to replace.
     variable: str | None
     # caller_named | contract_state_unresolved | not_determined.

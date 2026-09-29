@@ -144,7 +144,7 @@ def queue_secondary_impl_jobs(
 
     if not secondary_addrs:
         return []
-    # Defense in depth (inv. 14): a secondary impl shares the proxy's chain, so a
+    # Defense in depth: a secondary impl shares the proxy's chain, so a
     # gated parent implies a gated child — but a disabled chain must spawn no
     # analysis work. ``chain`` here is the proxy's chain (None → mainnet).
     if not chain_enabled(chain):

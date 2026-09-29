@@ -23,8 +23,8 @@ from utils.scoring_status import (
 
 # Confined to the I/O-EDGE loaders in this module — the handlers that swallow a
 # database error while reading a plane. The resolution work itself publishes
-# every refusal into the document (inv. 11/12: the fold must replay from the
-# document alone), so nothing on a compute path logs. These WARNINGs carry no
+# every refusal into the document — the fold must replay from the
+# document alone, so nothing on a compute path logs. These WARNINGs carry no
 # ``record_degraded`` because no accumulator is bound here today: the fold runs
 # on the score loop's monitor thread and under the offline CLI, and the call
 # would be a permanent no-op rather than a record of anything.

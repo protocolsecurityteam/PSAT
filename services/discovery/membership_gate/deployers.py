@@ -1,4 +1,4 @@
-"""The spec-3.3 deployer trust ladder and its registry rows."""
+"""The deployer trust ladder and its registry rows."""
 
 from __future__ import annotations
 
@@ -38,14 +38,14 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Deployer trust ladder (spec §3.3)
+# Deployer trust ladder
 # ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class DeployerClassification:
     """Ladder verdict. ``trust_class`` is 'A'/'B', or None for Class C —
-    which is the absence of a registry row, never a row (invariant 7)."""
+    which is the absence of a registry row, never a row."""
 
     trust_class: str | None
     evidence: dict[str, Any]
@@ -53,8 +53,8 @@ class DeployerClassification:
 
 def _nonlineage_corroborating_member_ids(session: Session, *, protocol_id: int, address: str) -> list[int]:
     """Members deployed by *address* whose membership rests on a NON-lineage
-    witness (§3.3 Class B condition 1). The member must also hold a non-D2
-    admitting witness (F2) — a D2-only entry is non-transitive and must not
+    witness (for Class B corroboration). The member must also hold a non-D2
+    admitting witness — a D2-only entry is non-transitive and must not
     corroborate exclusivity."""
     candidates = {
         row[0]
@@ -87,7 +87,7 @@ def classify_deployer(
     history_complete: bool = False,
     creation_factories: Mapping[str, str] | None = None,
 ) -> DeployerClassification:
-    """§3.3 trust-ladder verdict for one EOA. Reads only; ``register_deployer``
+    """Trust-ladder verdict for one EOA. Reads only; ``register_deployer``
     writes the registry row for an A/B verdict.
 
     ``creation_history`` is the EOA's Etherscan-enumerated FULL creation list;
@@ -96,7 +96,7 @@ def classify_deployer(
 
     ``creation_factories`` (created address → factory address, from the
     enumeration's internal CREATE frames) feeds the member-factory mapping
-    rule — a DELIBERATE §3.3 deviation (owner ruling): a creation minted by
+    rule — a DELIBERATE deviation (owner ruling): a creation minted by
     this protocol's own anchoring MEMBER factory counts as mapped in the
     exclusivity test. Mapping only — it admits nothing and mints no witness.
     """
@@ -177,7 +177,7 @@ def classify_deployer(
     created = {_require_address(a, "creation_history entry") for a in creation_history}
     known: set[str] = set()
     if created:
-        # F1: a creation "maps in" only as a member or as a candidate holding
+        # a creation "maps in" only as a member or as a candidate holding
         # ≥1 unrevoked non-lineage witness — never on a bare nomination.
         evidenced_candidates = (
             select(ContractMembershipWitness.contract_id)
@@ -245,7 +245,7 @@ def register_deployer(
     classification: DeployerClassification,
 ) -> ProtocolDeployer:
     """Upsert the registry row for a proof-class (A/B) verdict. A Class C
-    verdict may never produce a row (invariant 7) — raise instead of writing.
+    verdict may never produce a row — raise instead of writing.
     Trust class H is not a ladder verdict and is granted by
     ``grant_heuristic_deployer`` instead."""
     if classification.trust_class not in PROOF_DEPLOYER_TRUST_CLASSES:
@@ -289,7 +289,7 @@ def _heuristic_registry_row(session: Session, *, protocol_id: int, address: str)
 
 def _proof_registry_row(session: Session, *, protocol_id: int, address: str) -> ProtocolDeployer | None:
     """The unrevoked Class-A/B row for (P, E), or None. Its existence is what
-    keeps H unminted — the proof classes take precedence (§1)."""
+    keeps H unminted — the proof classes take precedence."""
     return session.execute(
         select(ProtocolDeployer).where(
             ProtocolDeployer.protocol_id == protocol_id,

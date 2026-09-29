@@ -122,15 +122,14 @@ def test_role_definitions_from_predicate_role_keys(tmp_path):
 
     The cross-contract ``registry.hasRole(ROLE, msg.sender)`` gate below names two
     real roles and mints NEITHER. ``callee_signature`` is read off
-    ``ir.function.full_name`` (``predicates.py:2338``), the interface the CALLER
-    declared, so it is not a proven property of the deployed callee: a slot lens
+    ``ir.function.full_name`` (``_build_external_bool_leaf``), the interface
+    the CALLER declared, so it is not a proven property of the deployed callee: a slot lens
     or a merkle-tree contract declared under the name ``hasRole(bytes32,address)``
     lowers to a byte-identical descriptor, and those shapes minted ERC-7201
     pointers as roles (see ``tests/static/test_role_definition_leaf_admission.py``).
 
     The absence is a **coverage caveat**, not a finding: these roles are
-    ``not_determined``, never "this contract has no roles"
-    (``SCORING_INVARIANTS.md`` B4c).
+    ``not_determined``, never "this contract has no roles".
     """
     source = """
     pragma solidity ^0.8.19;

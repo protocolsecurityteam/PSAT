@@ -1,4 +1,4 @@
-"""The three-tier witness taxonomy and its verification reads (F1 / F2 / F9b).
+"""The three-tier witness taxonomy and its verification reads.
 
 Unit coverage of ``classify_witness_tier`` + ``extract_governance_topics``, and
 integration coverage of the runtime halves — the ``_process_window`` tier gate,
@@ -303,8 +303,8 @@ def test_extract_reads_the_g3_qualification_fields():
 
 
 def test_qualification_fields_round_trip_through_the_plan_assembler():
-    """G3 writes ``member_witness`` / ``writer_openness`` onto the analysis
-    events; the tracking-plan artifact must carry them through untouched or
+    """The analysis pipeline writes ``member_witness`` / ``writer_openness`` onto
+    the analysis events; the tracking-plan artifact must carry them through untouched or
     the tier never sees them at enrollment."""
     analysis = {
         "subject": {"address": ADDR(1), "name": "Vault"},
@@ -470,7 +470,7 @@ def test_hint_occurrences_publish_nothing_and_coalesce_to_one_read(db_session, s
 
 
 def test_pre_enrollment_hint_never_marks_a_read(db_session, seeded):
-    """Invariant 9 through the new route: a verification read compares the
+    """A verification read compares the
     CURRENT slot against last_known_state, so letting an ancient occurrence
     trigger one would publish pre-enrollment history as a live change."""
     mc = seeded(WITNESS_TIER_HINT)
@@ -615,8 +615,8 @@ def _scan_detail(db_session, *, batch_result, **kwargs) -> dict:
 
 
 def test_failed_read_is_counted_on_the_pass_not_only_marked(db_session, seeded):
-    """F9b wiring: the markers are erased by the poller's next answered pass, so
-    on a healthy fleet the census is usually blind to a failure that happened.
+    """Verification-gap markers are erased by the poller's next answered pass,
+    so on a healthy fleet the census is usually blind to a failure that happened.
     The pass counts its own outcomes, and the heartbeat carries them."""
     seeded(WITNESS_TIER_HINT, state={"rate": 7})
     detail = _scan_detail(db_session, batch_result=lambda *_a, **_k: [(None, "error")])
@@ -776,7 +776,7 @@ def test_only_a_proven_controller_identity_binds_a_read(db_session, seeded):
 
 
 def test_unbindable_hint_records_not_determined(db_session, seeded):
-    """Invariant 9: a hint that resolves to no read at all is recorded, not
+    """A hint that resolves to no read at all is recorded, not
     dropped — an unverifiable interval must not look like a quiet one."""
     mc = seeded(WITNESS_TIER_HINT, with_plan=False)
     dirty: dict = {}
@@ -949,8 +949,8 @@ def test_budget_rotates_least_recently_verified_first():
 
 @pytest.mark.parametrize("witness", [True, "yes", 1, [], {}, ["x"]])
 def test_only_a_populated_correspondence_record_promotes(witness):
-    """The G2<->G3 trust boundary: a truthy non-dict is not a proof of
-    emit-write correspondence, and accepting one would let a serialization bug
+    """The analyzer-to-monitoring trust boundary: a truthy non-dict is not proof
+    of emit-write correspondence, and accepting one would let a serialization bug
     upstream promote every event on the contract."""
     assert (
         classify_witness_tier(
@@ -965,8 +965,8 @@ def test_only_a_populated_correspondence_record_promotes(witness):
 
 
 def test_events_from_a_stale_plan_carry_its_timestamp(db_session, seeded):
-    """F5 keeps a last-good watch-list rather than manufacturing an empty one.
-    The rows it catches are real, but the watch-list behind them is only as
+    """Re-enrollment keeps a last-good watch-list rather than manufacturing an
+    empty one. The rows it catches are real, but the watch-list behind them is only as
     current as that timestamp, and what it MISSED is invisible by
     construction — so the event says so rather than reading fresh-equivalent."""
     mc = seeded(WITNESS_TIER_SELF_DESCRIBING)

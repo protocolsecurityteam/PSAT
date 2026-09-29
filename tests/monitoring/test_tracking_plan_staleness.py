@@ -1,4 +1,4 @@
-"""F5 — re-enrollment must not convert "cannot read the plan now" into
+"""Re-enrollment must not convert "cannot read the plan now" into
 "nothing to watch".
 
 The observed failure (EtherFiGovernanceToken, 2026-08-04): the contract's
@@ -344,8 +344,8 @@ def test_vanished_materialization_keeps_the_last_read_watch_list(db_session, pro
     """The EtherFiGovernanceToken replay: enrolled with a witnessed watch list,
     the materialization row disappears, re-enrollment runs.
 
-    Before F5 the second config carried the token and NO topics — the watch was
-    silently dropped. Now the watch survives, marked as dated.
+    Before stale-plan retention the second config carried the token and NO
+    topics — the watch was silently dropped. Now the watch survives, marked as dated.
     """
     proto, address = protocol_fixture
     plan = {

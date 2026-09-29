@@ -166,7 +166,7 @@ class SelectionWorker(BaseWorker):
             extra={"protocol_id": job.protocol_id, "analyze_limit": analyze_limit},
         )
 
-        # §3.4 event-1 sweep for the crawl writers: DApp/DefiLlama nominations
+        # Settle fresh candidates from the crawl writers: DApp/DefiLlama nominations
         # land AFTER the discovery stage's inline probe pass, and this claim
         # opens as soon as those siblings settle — without settling here, the
         # cascade's own crawl candidates are still unpromoted and the member
@@ -361,7 +361,7 @@ class SelectionWorker(BaseWorker):
             # NULL-chain row would dedup against a job on ANY chain at this
             # address. chain_enabled already coalesces None the same way.
             chain = entry["__row_chain"] or "ethereum"
-            # Gate on the deployment allowlist (inv. 14): a company inventory can
+            # Gate on the deployment allowlist: a company inventory can
             # carry addresses on chains the protocol declares (DeFiLlama membership
             # evidence) that this deployment has not enabled. Their discovered-stub
             # + Protocol.chains evidence is already written; we must not spawn
@@ -403,7 +403,7 @@ class SelectionWorker(BaseWorker):
         for entry in selected:
             addr = entry["__row_address"]
             # Same NULL→"ethereum" coalesce as the dedup loop above, so the
-            # child request never carries chain=None (inv. 6 — None must not
+            # child request never carries chain=None (None must not
             # cascade into spawned jobs).
             chain = entry["__row_chain"] or "ethereum"
             name = entry.get("name") or (f"{company}_{addr[2:10]}" if company else f"sel_{addr[2:10]}")

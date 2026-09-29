@@ -1,8 +1,7 @@
 """Parity tests for the batched classify path in
 ``services.resolution.tracking``.
 
-#2 from todo-no-commit-to-gihub.txt — JSON-RPC batch classify probes.
-The codex gate explicitly required: ``_PROBE_ERROR`` sentinel
+JSON-RPC batch classify probes must preserve: ``_PROBE_ERROR`` sentinel
 preservation under partial failures, AND identical (kind, details,
 cacheable) on every branch.
 

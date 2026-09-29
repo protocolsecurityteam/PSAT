@@ -200,7 +200,7 @@ def resolve_current_implementation(
     no implementation address and require a storage read at the event block.
 
     *chain_id* (the proxy's chain, threaded from the static worker) arms the
-    inv-7 URL↔chain_id guard on every underlying read; None keeps it a no-op.
+    URL↔chain_id guard on every underlying read; None keeps it a no-op.
     """
     reads: list[_Read] = []
 

@@ -268,9 +268,9 @@ export function undeterminedTargets(finding, index) {
 
 // ── deduction rows ──────────────────────────────────────────────────────────
 
-// spec §3.2 pins the row's points to −net_points_lambda. The re-fold reproduces
-// that field exactly today, but the published number is the witness and the
-// reconstruction is only a model of it: where the producer published one, it
+// The published document pins the row's points to −net_points_lambda.
+// The re-fold reproduces that field exactly today, but the published number is
+// the witness and the reconstruction is only a model of it: where the producer published one, it
 // wins. A field that is present but not a number is unwitnessed, not zero.
 function publishedNet(finding, refolded) {
   const published = finding?.net_points_lambda;

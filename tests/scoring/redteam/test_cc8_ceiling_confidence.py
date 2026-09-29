@@ -6,8 +6,6 @@ composed destination witness. A sheet ceiling is a THIRD answer — a proven
 bound, from a balance observation — and leaving it uncredited would report a
 question as open that the document answers on its own page. The cases below
 pin what is credited, what is not, and that the credit is not the vacuous kind.
-
-One of the twenty sections of the former ``test_scoring_redteam.py``.
 """
 
 from __future__ import annotations

@@ -19,7 +19,7 @@ from utils.scoring_status import (
 
 # The upgrade-authority disclosure and the same-function residual an uncharged
 # row carries, in preference order — the first present on the row wins each slot.
-# Both the self-service pair (SPEC §7 G7) and the msg_value siblings are here, so
+# Both the self-service pair and the msg_value siblings are here, so
 # the earned negative reads the actual token the excluded row published rather
 # than a hard-coded self-service one it may not carry.
 _UNCHARGED_CONDITIONAL_TOKENS = (
@@ -219,7 +219,7 @@ _NOTE_WARNINGS = {
         "an observed sink is existential and cannot prove a fixed destination"
     ),
     # The self-service arm's disclosures. An excluded row publishes no
-    # witness_notes on any finding, so these must surface as warnings (inv. 6's
+    # witness_notes on any finding, so these must surface as warnings (the
     # third channel) as well as ride the earned negative — otherwise a proven
     # benign payout's residuals would be legible on no document surface at all.
     "self_service_uncharged_product_surface": (

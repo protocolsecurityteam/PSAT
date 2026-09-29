@@ -1,4 +1,4 @@
-"""Corroboration probes (DISCOVERY_MEMBERSHIP_GATE_SPEC.md §3.5), wire stubbed
+"""Corroboration probes, wire stubbed
 at the transport boundary (``rpc_request`` / ``eth_call_batch`` /
 ``rpc_batch_request`` / ``etherscan.get``) — never the real network.
 """

@@ -63,7 +63,7 @@ export function SurfaceFilterPanel({
         onPreview={onPreview}
         onCommit={onCommit}
       >
-        {/* Chain row renders only for multi-chain protocols (inv. 13);
+        {/* Chain row renders only for multi-chain protocols;
             single-chain pages show no chain UI at all. */}
         <ChainSwitcher chains={availableChains} active={activeChain} onSelect={onSelectChain} />
         <div className="ps-filter-row">

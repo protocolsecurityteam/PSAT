@@ -170,7 +170,7 @@ def _chain_name_for_token(token: str) -> str:
 
 
 def collect_chain_health(session: Session, *, now: datetime | None = None) -> list[dict[str, Any]]:
-    """Per-chain staleness for the chain-scoped subsystems (invariant 4).
+    """Per-chain staleness for the chain-scoped subsystems.
 
     A fleet-global "monitoring OK" hides a chain whose indexer or scanner has
     stalled while another chain stays fresh. This reads the freshness of the
@@ -250,8 +250,7 @@ def collect_plan_coverage(session: Session) -> dict[str, Any]:
 
 
 def collect_verification_gaps(session: Session) -> dict[str, Any]:
-    """Verification-read gap census for the monitored fleet (F9b on the F9a
-    surface).
+    """Verification-read gap census for the monitored fleet health surface.
 
     Same pass-through role :func:`collect_plan_coverage` plays, and deliberately
     **not** a fourth alarm family: the census counts markers present at read
@@ -265,7 +264,7 @@ def collect_verification_gaps(session: Session) -> dict[str, Any]:
 
 
 def collect_materialization_backlog(session: Session) -> dict[str, Any]:
-    """Materialization-supply backlog for the monitored fleet (F9c).
+    """Materialization-supply backlog for the monitored fleet.
 
     The same pass-through role :func:`collect_plan_coverage` plays, and the same
     deliberate non-alarm: the existing coverage alarm already fires on contracts

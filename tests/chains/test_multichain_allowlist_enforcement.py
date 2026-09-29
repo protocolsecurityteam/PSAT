@@ -1,4 +1,4 @@
-"""Allowlist enforcement at user-facing chain-accepting edges (inv. 14).
+"""Allowlist enforcement at user-facing chain-accepting edges.
 
 The registry validates that a chain *exists*; ``PSAT_SUPPORTED_CHAIN_IDS`` gates
 whether this deployment has *enabled* it. State-writing / work-spawning edges —

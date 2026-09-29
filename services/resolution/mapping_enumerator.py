@@ -117,8 +117,9 @@ def clear_enumeration_cache() -> None:
 
 
 def _chain_key(chain: str | None) -> str:
-    """Chain component of the L1 key: the canonical decimal-string chain-id token
-    (invariant 11). Callers reach this with either a chain *name* (``"ethereum"``)
+    """Chain component of the L1 key: the canonical decimal-string chain-id token.
+
+    Callers reach this with either a chain *name* (``"ethereum"``)
     or ``str(chain_id)`` (``"1"``) for the same contract; ``chain_cache_token``
     folds both onto one token so the two paths share a cache entry. L2
     (``db.mapping_enumeration_cache``) normalizes identically, so the in-process
@@ -602,7 +603,7 @@ def enumerate_mapping_allowlist_sync(
     leaves the prior row standing, so an in-TTL ``complete`` would be
     served in place of the truncated verdict that superseded it. Adding
     a status therefore has a schema obligation —
-    ``tests/test_mapping_enumeration_status_vocabulary.py`` scrapes this
+    ``tests/resolution/test_mapping_enumeration_status_vocabulary.py`` scrapes this
     module for the vocabulary and round-trips every member through the
     real column, so an oversized one is a red suite, not a silent
     republish.

@@ -8,8 +8,8 @@ job-scoped filter, and the moment it did, a protocol's signals would be
 partitioned by job and the fold would either double-count re-analysed contracts
 or drop them entirely — the two failure modes the lifecycle ruling closed.
 
-The ordering is part of the contract, not a convenience. Inv. 11/12 require the
-same DB state to produce a byte-identical document, and a fold over an
+The ordering is part of the contract, not a convenience. The same DB state must
+produce a byte-identical document, and a fold over an
 unordered population is only deterministic by luck.
 """
 
@@ -79,7 +79,7 @@ def current_signals_for_protocol(session: Session, protocol_id: int) -> list[Fun
     """The fold's input: every current signal for one protocol, typed and ordered.
 
     Ordered by the identity key, so the sequence is total — two rows can never
-    tie — and the fold is replayable per inv. 11/12.
+    tie — and the fold is replayable from the same evidence.
     """
     return [signal_from_row(row) for row in current_signal_rows(session, protocol_id)]
 
@@ -211,7 +211,7 @@ def replace_contract_signals(
     Every signal is validated BEFORE the delete, so the operation is
     all-or-nothing regardless of caller discipline. Validating during the insert
     loop would leave a half-replaced contract behind whenever the caller catches
-    the raise — and the distillation call site is fail-forward by spec, so it
+    the raise — and the distillation call site is fail-forward, so it
     does exactly that. A partially replaced contract is worse than an
     unreplaced one: it charges a subset of its exposure with no trace.
 

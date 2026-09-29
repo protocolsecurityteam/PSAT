@@ -299,7 +299,7 @@ async def _candidate_addresses_from_hypersync_async(*, checker_address: str, lim
 
     from services.resolution.repos.event_logs_hypersync import _hypersync_url_for_chain
 
-    # Per-chain HyperSync endpoint (inv. 5), env override kept for backward compat.
+    # Per-chain HyperSync endpoint, env override kept for backward compat.
     # A chain with no registry coverage (or no env override) has no scan surface —
     # return no candidates rather than silently scanning mainnet.
     # NOTE (F7): PSAT_HYPERSYNC_URL is a single-URL global that outranks the

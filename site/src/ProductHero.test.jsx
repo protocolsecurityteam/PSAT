@@ -1,4 +1,4 @@
-// Direct render test for ProductHero (split out of the old components.test.jsx).
+// Direct render test for ProductHero.
 
 import React from "react";
 import { describe, it, expect } from "vitest";

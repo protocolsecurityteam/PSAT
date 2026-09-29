@@ -44,7 +44,7 @@ def _contract_chain_filter(chain: str | None):
     coalesces ``NULL``→``'ethereum'`` to find them while a non-mainnet lookup
     (its own name ≠ ``'ethereum'``) stays isolated from mainnet/NULL rows at the
     same address. Same convention as ``routers/jobs.py`` and
-    ``workers/discovery.py`` (invariants 1/6/12).
+    ``workers/discovery.py``.
     """
     from sqlalchemy import func
 
@@ -660,7 +660,7 @@ def backfill_historical_impl_contracts(
     artifact's events should be present as a Contract row so the audit
     coverage matcher can link audits whose scope names a past impl.
 
-    Rows are NOMINATED, never stamped (membership gate invariant 1): the
+    Rows are NOMINATED, never stamped (membership gate): the
     gate admits an impl via W2 ``historical_implementation`` — a member
     proxy's stored ``UpgradeEvent`` names it, the observed upgrade tx in the
     evidence — once its W1 code probe lands. A row already owned by a
@@ -774,9 +774,9 @@ def backfill_historical_impl_contracts(
     if not rows_by_addr:
         return
 
-    # §3.4 event 1 near-line probe: W1 fuel for rows with no persisted code
+    # near-line probe: W1 fuel for rows with no persisted code
     # verdict yet. Best-effort — a failed probe leaves the row an explainable
-    # candidate, never a member (invariants 3+5).
+    # candidate, never a member.
     probe_chain_id = chain_id_for_chain_name(chain or "ethereum")
     if probe_chain_id is not None:
         for addr in sorted(rows_by_addr):
@@ -934,7 +934,7 @@ def synthesize_from_events(session, contract) -> UpgradeHistoryOutput | None:
 
 
 # ---------------------------------------------------------------------------
-# Upgrade executor fold (C4)
+# Upgrade executor fold
 #
 # ``parse_upgrade_log`` sees one Etherscan log dict — ``transactionHash``,
 # ``blockNumber``, ``timeStamp``, ``topics``, ``address``. Who executed the
@@ -1623,7 +1623,7 @@ def _chain_id_for_contract(chain_name: str | None) -> int | None:
 
     Uses the mainnet coalesce this module already applies in
     ``_contract_chain_filter`` (legacy rows persisted ``chain=NULL`` for
-    mainnet, invariants 1/6/12). An unrecognised chain NAME is a different
+    mainnet). An unrecognised chain NAME is a different
     thing from a NULL one and resolves to ``None`` — never to 1. Guessing here
     would reintroduce exactly the cross-chain twin aliasing #158 closed.
     """

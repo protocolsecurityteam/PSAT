@@ -1,4 +1,4 @@
-"""Deployer creation enumeration + coverage honesty (spec §3.3 Class B).
+"""Deployer creation enumeration + coverage honesty (Class B).
 
 The single Class-B evidence path: the worker-side ladder wire
 (``workers/discovery.py``) and the gate-side fixpoint
@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 #: Cap on one chain's COMBINED creation set (direct ∪ internal) and on each
 #: Etherscan ``txlist`` window. A window that fills, or a combined set at the
 #: cap, is a truncation, never a complete creation history →
-#: ``history_complete=False`` → Class C (spec §3.3).
+#: ``history_complete=False`` → Class C.
 DEPLOYER_ENUMERATION_CAP = 10_000
 
 #: Per-chain bound on the ``txlistinternal&txhash`` calls one enumeration may
@@ -136,8 +136,8 @@ def _internal_creations(
 
 def enumerate_deployer_creations(deployer: str) -> tuple[list[DeployerCreation], list[int], bool]:
     """(creations, enumerated chain scope, history_complete) for one EOA,
-    enumerated on every enabled chain (EOAs are chain-agnostic, spec
-    §3.3/§4.3). The scope is recorded so the registry evidence names WHAT was
+    enumerated on every enabled chain (EOAs are chain-agnostic). The scope
+    is recorded so the registry evidence names WHAT was
     enumerated, never a bare ``complete: True``.
 
     Completeness is POSITIVE evidence: any chain whose ``txlist`` fails, whose
@@ -252,7 +252,7 @@ def enumerate_with_coverage(
     """Enumeration with the coverage refusal folded into ``history_complete``
     — the one place a Class-B-licensing enumeration verdict is minted.
 
-    The fourth element distinguishes the two incompleteness shapes (F3): a
+    The fourth element distinguishes the two incompleteness shapes: a
     COVERAGE GAP (the raw windows were complete, yet a known creation is
     missing or off-scope — positive counterevidence against a standing Class-B
     license) versus budget/cap/wire incompleteness (absence of evidence,
@@ -280,12 +280,12 @@ def creation_factories(creations: Sequence[DeployerCreation]) -> dict[str, str]:
 
 def session_deployer_enumerator(session: Session) -> DeployerEnumerator:
     """Gate-facing adapter (``membership_gate.DeployerEnumerator``): the scope
-    stays internal to the coverage check; the gate consumes only what §3.3
-    needs — the creation set and whether it licenses exclusivity. Coverage
+    stays internal to the coverage check; the gate consumes only what the
+    trust ladder needs — the creation set and whether it licenses exclusivity. Coverage
     gaps are recorded on the adapter's ``coverage_gaps`` and the full creation
     records (chain + factory attribution) on ``creations`` (the same
     attribute-channel pattern as the re-earn budget's ``exhausted``) so the
-    fixpoint can treat gaps as positive counterevidence (F3) and feed the
+    fixpoint can treat gaps as positive counterevidence and feed the
     member-factory mapping."""
     return _SessionEnumerator(session)
 

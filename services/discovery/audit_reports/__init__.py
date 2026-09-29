@@ -146,8 +146,8 @@ def _build_report_entry(
     """Build a final report dict from extracted LLM data.
 
     ``source_commit`` / ``source_repo`` / ``source_path`` (when captured
-    upstream) record exactly where the PDF lived at discovery time — a
-    phase-2 linker uses them to verify the artifact hasn't moved.
+    upstream) record exactly where the PDF lived at discovery time — linking can
+    use this provenance to verify the artifact hasn't moved.
     """
     pdf_url = github_blob_to_raw(str(report.get("pdf_url") or "").strip()) or None
     report_url = github_blob_to_raw(str(report.get("report_url") or "").strip()) or None

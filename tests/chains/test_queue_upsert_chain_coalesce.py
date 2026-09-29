@@ -1,6 +1,6 @@
-"""Latent NULL-chain dedup sites in ``db.queue`` (MULTICHAIN_INVARIANTS.md 1/6/12).
+"""Latent NULL-chain dedup sites in ``db.queue``.
 
-Phase 2 (#154) fixed the bulk discovery writer so a chainless write derives a
+The bulk-discovery fix in #154 updated the writer so a chainless write derives a
 real chain name and dedups against legacy ``chain=NULL`` rows via a mainnet-
 coalesced key. These tests cover the same-class sites left latent at that time:
 

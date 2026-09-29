@@ -1,7 +1,4 @@
-"""W2b: per-call magnitude, budget honesty, order disclosure, floor flag.
-
-One of the twenty sections of the former ``test_scoring_redteam.py``.
-"""
+"""W2b: per-call magnitude, budget honesty, order disclosure, floor flag."""
 
 from __future__ import annotations
 

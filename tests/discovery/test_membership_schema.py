@@ -1,4 +1,4 @@
-"""Membership-gate schema assertions (migration b7d3e9a02c51, spec §4)."""
+"""Membership-gate schema assertions (migration b7d3e9a02c51)."""
 
 from __future__ import annotations
 
@@ -110,7 +110,7 @@ def test_protocol_deployers_shape(db_session):
 
 
 def test_protocol_deployers_rejects_class_c_rows(db_session):
-    # Class C is the ABSENCE of a row (invariant 7) — the CHECK refuses a third value.
+    # Class C is the ABSENCE of a row — the CHECK refuses a third value.
     protocol = _protocol(db_session)
     db_session.add(ProtocolDeployer(protocol_id=protocol.id, address=ADDR(0x302), trust_class="C", evidence={"x": 1}))
     with pytest.raises(IntegrityError):

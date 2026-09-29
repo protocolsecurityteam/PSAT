@@ -293,9 +293,10 @@ class ReentrancyAnalyzer:
 def reentrancy_guard_modifiers(contract: Any) -> dict[int, frozenset[str]]:
     """``id(modifier) -> proven guard vars`` for ``contract``.
 
-    Deliberately NOT the name fallback: ``effects.py::_is_reentrancy_guard_var``
-    ORs its structural proof with an identifier match, which is admissible only
-    because that class is a pure suppressor. Nothing here is reachable from it.
+    Deliberately NOT the name fallback:
+    ``effects/state_writes.py::_is_reentrancy_guard_var`` ORs its structural
+    proof with an identifier match, which is admissible only because that class
+    is a pure suppressor. Nothing here is reachable from it.
     """
     return ReentrancyAnalyzer(contract).reentrancy_guard_modifiers()
 

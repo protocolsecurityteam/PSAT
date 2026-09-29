@@ -53,7 +53,7 @@ def re_enroll_protocol(protocol_id: int, chain: str = "ethereum") -> ReEnrollRes
     in-flight job checks. Useful when enrollment produced wrong results
     or after manual DB changes.
     """
-    # Allowlist enforcement (inv. 14): re-enroll spawns monitoring work on the
+    # Allowlist enforcement: re-enroll spawns monitoring work on the
     # resolved chain, so a chain this deployment has not enabled is rejected here.
     # The admin-edge default 'ethereum' stays and is supported everywhere.
     try:

@@ -112,7 +112,7 @@ def test_self_differential_of_a_written_document_moves_nothing():
 
 
 def test_self_differential_of_a_top_level_oracle_moves_nothing():
-    """The prototype shape (``scoring_prototype/score_v*.json``) still diffs."""
+    """The prototype shape (legacy top-level score JSON) still diffs."""
     document = _corpus()
     payload = copy.deepcopy(document_json(document))
     oracle = {k: v for k, v in payload.items() if k != "provenance"}

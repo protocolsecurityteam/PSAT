@@ -1,7 +1,7 @@
-"""Phase 2 wiring tests: the differential probe's integration into the capability
-resolver (DIFFERENTIAL_PROBE_PLAN §3.6). Hermetic — the wire is injected, no RPC.
+"""Wiring tests: the differential probe's integration into the capability
+resolver. Hermetic — the wire is injected, no RPC.
 
-Asserts the strictly-additive invariant (§7.1): the probe runs ONLY for the
+Asserts the strictly-additive invariant: the probe runs ONLY for the
 gated-unknown population, a confirmed-public verdict re-projects to public, every
 other outcome keeps the static gated verdict, and any failure is swallowed.
 """
@@ -46,7 +46,7 @@ def _gated_unknown_cap(selector_hint: str = "0xabcdef01") -> CapabilityExpr:
 
 
 def test_flag_defaults_on(monkeypatch):
-    # Phase 3 gate green → default ON; delenv removes the conftest hermetic force-off.
+    # Default ON; delenv removes the conftest hermetic force-off.
     monkeypatch.delenv("PSAT_DIFFERENTIAL_PROBE", raising=False)
     assert dp.differential_probe_enabled() is True
     monkeypatch.setenv("PSAT_DIFFERENTIAL_PROBE", "0")  # kill-switch
@@ -74,7 +74,7 @@ def test_should_probe_only_gated_unknown_external_check():
 
 
 # ---------------------------------------------------------------------------
-# §3.6 verdict landing
+# verdict landing
 # ---------------------------------------------------------------------------
 
 
@@ -88,7 +88,7 @@ def test_apply_public_result_mints_conditional_universal_that_projects_public():
     )
     opened = _apply_probe_result(cap, result)
     assert opened.kind == "conditional_universal"
-    # Transcript travels into the persisted capability (replayable, §6.1).
+    # Transcript travels into the persisted capability (replayable).
     cap_dict = capability_to_dict(opened)
     assert any(step.get("step") == "differential_probe" for step in cap_dict.get("trace", []))
     # And it re-projects to a PUBLIC verdict.

@@ -4,7 +4,7 @@ Revision ID: b2c3d4e5f6a7
 Revises: a1b2c3d4e5f6
 Create Date: 2026-07-08
 
-Poller rotation cursor (design §2.2): the driver selects the least-recently-
+Poller rotation cursor: the driver selects the least-recently-
 polled ``needs_polling`` slice (``ORDER BY last_polled_at ASC NULLS FIRST``) and
 stamps this column per chunk-commit. Additive, nullable; existing rows sort
 first until their first poll.

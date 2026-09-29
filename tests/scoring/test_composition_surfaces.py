@@ -1,4 +1,4 @@
-"""The two composed-entry surfaces §8 ruled on, and the disclosures beside them.
+"""The two composed-entry surfaces, and the disclosures beside them.
 
 Each case is a *derivation* pinned by two carriers whose data differs, never by
 one carrier against a literal: the mutation that de-interpolates a derived
@@ -42,7 +42,7 @@ _CONSTRAINS_THE_TARGET_AT_C = ((KEY_C, CALLING_SELECTOR, COMPOSED_SELECTOR, "par
 _GATING_AUTHORITY = "0x" + "9" * 40
 _VAULT_CONSULTS_AN_AUTHORITY = {("ethereum", KEY_V.partition("::")[2], COMPOSED_SELECTOR): (_GATING_AUTHORITY,)}
 
-# The token §7.2 named and CAP-A §R2 retired. Kept as a literal here on purpose:
+# The retired token. Kept as a literal here on purpose:
 # it is the one string this module asserts the ABSENCE of, and a symbol would
 # make the assertion vacuous the day the symbol is deleted.
 RETIRED_CALLEE_TOKEN = "destination_callee_is_restricted_by_the_intermediate"
@@ -62,11 +62,11 @@ def _gate_only_document(fold, routes):
     )
 
 
-# CAP-A §R2 — the token names the field it is earned from
+# The token names the field it is earned from
 
 
 def test_the_second_typed_reason_names_the_constrained_target_and_not_a_callee(fold):
-    """CAP-A §R2. The token is read off ``target_constraint``, which pins the
+    """The token is read off ``target_constraint``, which pins the
     destination call's counterparty ARGUMENT; no stored witness restricts the
     callee, so "the callee is restricted" asserted a property the evidence does
     not earn. The state and the boolean now share one name."""
@@ -157,7 +157,7 @@ def _a_withheld_record() -> FOLD._WithheldComposition:
     )
 
 
-# Ruling 6.2 M4 / §11.2 (k) — chosen_by names what decided THIS tie
+# chosen_by names what decided THIS tie
 
 
 def _tied_pair(**over: Any) -> FOLD._ComposedMagnitude:
@@ -276,7 +276,7 @@ def test_the_component_names_line_up_with_the_order_they_describe():
 
 
 def test_chosen_by_glosses_the_chain_component_over_the_fields_a_step_publishes(fold):
-    """§11.2 (k). The order's tail is every field ``ActAsStep.as_json``
+    """The order's tail is every field ``ActAsStep.as_json``
     publishes, so the gloss is read off the steps in hand."""
     document = fold(_tied_signals(), principals=_composing_principals(), **_tied_case())
     tied = [
@@ -299,7 +299,7 @@ def test_the_chain_gloss_is_read_off_the_steps_and_not_written_into_the_sentence
     assert "receiver_variable" not in chosen_by
 
 
-# CAP-A §B4 — the uncalibrated-arm register
+# The uncalibrated-arm register
 
 
 def test_the_predicate_block_survives_and_claims_nothing_about_this_row(fold):
@@ -329,7 +329,7 @@ def test_the_predicate_block_survives_and_claims_nothing_about_this_row(fold):
         assert (block["descriptions"] is None) == (block["state"] != P.PREDICATES_EXTRACTED)
 
 
-# CAP-B ruling 1 — the migration block is DATED HISTORY, not a live claim
+# The migration block is DATED HISTORY, not a live claim
 
 
 def test_the_frontend_golden_was_regenerated_for_the_current_model_version():
@@ -532,7 +532,7 @@ def _row_for(document, capability: str) -> dict[str, Any]:
 
 
 def test_the_shared_pot_is_priced_once_and_both_admin_powers_stay_attributed(fold):
-    """R2/U-B2, the owner's ruling and its condition, in one document.
+    """One shared pot is charged once while both admin powers stay attributed.
 
     THE RULING: composition stays withheld for the second power, so the pot is
     charged once. THE CONDITION: both powers over that pot remain visibly

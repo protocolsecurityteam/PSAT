@@ -51,7 +51,7 @@ def _entry_points():
 
 
 # ---------------------------------------------------------------------------
-# §4.1 pause — recorded-transcript recipe test
+# pause — recorded-transcript recipe test
 # ---------------------------------------------------------------------------
 
 
@@ -82,7 +82,7 @@ def test_pause_recipe_observes_blast_radius_and_expiry():
     # Snapshot was reverted; principal impersonation was scoped + released.
     assert transport.paused is False
     assert transport.impersonated == [PRINCIPAL]
-    # Transcript records anvil version + hardfork (§8.7).
+    # Transcript records anvil version + hardfork.
     tr = store.stored[-1]
     assert tr["hardfork"] == "prague"
     assert tr["anvil_version"] == "anvil 1.5.1-stable"
@@ -178,7 +178,7 @@ class IneffectivePauseAnvil(StubAnvil):
 
 
 def test_pause_recipe_ineffective_pause_is_distinct_unknown():
-    # §1 A2 follow-up: the resolved pauser cannot enact the pause on this fork state
+    # A2 follow-up: the resolved pauser cannot enact the pause on this fork state
     # → the freeze was never tested → a DISTINCT indeterminate unknown, never
     # conflated with a genuine "pause froze nothing".
     transport = IneffectivePauseAnvil(guarded={GUARDED}, pause_calldata=PAUSE, duration=None)
@@ -321,7 +321,7 @@ def test_every_pause_row_carries_an_observation_discriminator():
 
 
 # ---------------------------------------------------------------------------
-# §9.5 Tier-2 timelock — schedule → advance time → execute
+# Tier-2 timelock — schedule → advance time → execute
 # ---------------------------------------------------------------------------
 
 SCHEDULE = "0x01d5062a"  # schedule(...)
@@ -514,7 +514,7 @@ def test_a_timelock_holding_no_asset_says_so_rather_than_moving_nothing():
     """The measured case on mainnet: a timelock holds authority, not funds, so
     there is no asset for a scheduled operation to move. Reporting that as
     "executed, moved nothing" would state a fact about the CONTRACT when the fact
-    is about our inability to witness one (§0.0.4) — the sequence still ran, and
+    is about our inability to witness one — the sequence still ran, and
     the row has to say which of the two it observed."""
     transport = TimelockAnvil(delay=TIMELOCK_DELAY, moves_value=False)
     eff = timelock_execute_recipe(
@@ -651,7 +651,7 @@ def test_build_anvil_cmd_forking_passes_auth_header():
 
 
 # ---------------------------------------------------------------------------
-# §8 rule 7 — hardfork pinned + recorded
+# hardfork pinned + recorded
 # ---------------------------------------------------------------------------
 
 
@@ -685,14 +685,14 @@ def test_assert_post_cancun_accepts_current_forks():
 
 
 # ---------------------------------------------------------------------------
-# §8 rule 8 — the scored denominator is static's set, never the observed one
+# the scored denominator is static's set, never the observed one
 # ---------------------------------------------------------------------------
 
 
 def test_section8_rule8_scored_denominator_is_static_not_observed():
     # Observe a guarded point ("foo") that static did NOT predict; predicted set is
     # {"bar"}. The scored denominator MUST stay static's set, and the surprise is a
-    # §9 discrepancy (recorded, not routed).
+    # discrepancy (recorded, not routed).
     transport = StubAnvil(guarded={GUARDED}, pause_calldata=PAUSE, duration=None)
     eff = pause_recipe(
         transport=transport,

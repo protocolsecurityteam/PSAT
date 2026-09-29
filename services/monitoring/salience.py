@@ -208,7 +208,7 @@ SAFE_EXEC_KEY_MULTISEND_RECOGNIZED = "multisend_recognized"
 # ---------------------------------------------------------------------------
 
 # Hand-rolled families whose single occurrence IS a control-plane change, with
-# the moved binding in its own decoded args. Verbatim from §4.2; types outside
+# the moved binding in its own decoded args. Types outside
 # this set are not silently folded in — an unlisted type falls through to
 # ``not_determined`` (visible), never to ``routine``.
 CANONICAL_CONFIG_FAMILIES = frozenset(
@@ -379,7 +379,7 @@ def _safe_exec_salience(safe_exec: Mapping[str, Any]) -> tuple[str, list[str]] |
         return level, basis
 
     if operation == 0:
-        # A decoded call is substantive whether or not §3.3 resolves a name.
+        # A decoded call is substantive whether or not signature resolution finds a name.
         # Name resolution affects DISPLAY only: a name is not a witness.
         return SALIENCE_NOTABLE, [BASIS_SAFE_EXEC_CALL]
 
@@ -394,8 +394,8 @@ def _field_diff_salience(data: Mapping[str, Any]) -> tuple[str, list[str]] | Non
 
     An entry carrying no ``signal_class`` stamps nothing, and this returns
     ``None`` so the row falls through to ``not_determined`` (visible). That is
-    the phase-1 steady state for the whole fleet: persisted polling plans
-    predate the stamp, and inventing a class for them would be exactly the
+    the state of legacy polling plans that predate the stamp, and inventing
+    a class for them would be exactly the
     minted-from-absence suppression the mechanical gate forbids.
     """
     signal_class = data.get(DATA_KEY_SIGNAL_CLASS)
@@ -406,7 +406,7 @@ def _field_diff_salience(data: Mapping[str, Any]) -> tuple[str, list[str]] | Non
 
     if signal_class == SIGNAL_CLASS_METRIC:
         # The mechanical gate: ``metric ⇒ routine`` only when the plan states
-        # WHY. ``no_gate_provenance`` counts (§3.6 ruling — a completed
+        # WHY. ``no_gate_provenance`` counts (a completed
         # derivation that carries no gate proof is a measured finding), an
         # absent basis does not.
         if isinstance(signal_basis, str) and signal_basis:
@@ -424,9 +424,9 @@ def assign_salience(
 ) -> tuple[str, list[str]]:
     """The level *event_type* + *data* earn, with the ordered basis codes.
 
-    Rules are evaluated in §4.2's order and the first match wins — except
+    Rules are evaluated in the order below and the first match wins — except
     correlation, which is applied as a MAX over the first match rather than as
-    a rule in the chain (§3.4: a correlated cause is at least as salient as
+    a rule in the chain (a correlated cause is at least as salient as
     its effects).
 
     *session* is used by exactly one rule (``reinitialization``) and only when
@@ -471,7 +471,7 @@ def _assign_first_match(
     if event_type == _SAFE_EXEC_TYPE:
         safe_exec = _block(data, DATA_KEY_SAFE_EXEC)
         if safe_exec is None:
-            # The phase-1 steady state: enrichment absent or failed. A Safe
+            # Enrichment is absent or failed. A Safe
             # execution we could not examine may not be demoted on ignorance.
             return SALIENCE_NOT_DETERMINED, [BASIS_SAFE_EXEC_NOT_ENRICHED]
         decided = _safe_exec_salience(safe_exec)

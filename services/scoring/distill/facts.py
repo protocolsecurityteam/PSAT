@@ -243,8 +243,8 @@ def distill_contract_signals(
 # Transcript bodies, keyed by the ``(job_id, artifact_name)`` a pointer resolves
 # to. An artifact body is immutable once written — the key is the identity of a
 # stored object, not of a mutable row — so caching it across contracts inside one
-# score run cannot make the fold read two different answers to one question
-# (inv. 11). Cleared by :func:`clear_transcript_cache` for tests that stand up a
+# score run cannot make the fold read two different answers to one question.
+# Cleared by :func:`clear_transcript_cache` for tests that stand up a
 # fresh bucket under the same keys.
 _TRANSCRIPT_CACHE: dict[tuple[str, str], Any] = {}
 

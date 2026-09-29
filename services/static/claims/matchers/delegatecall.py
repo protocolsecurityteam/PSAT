@@ -27,8 +27,8 @@ covering an assembly-route delegatecall exists for exactly this and this matcher
 must pass it.
 
 So the walk descends into internal/library callees the way the sink producer
-does (``effects.py`` recurses through ``InternalCall``/``LibraryCall``), binding
-each callee formal to the caller's argument as it goes, and resolves the
+does (``effects/sinks.py`` recurses through ``InternalCall``/``LibraryCall``),
+binding each callee formal to the caller's argument as it goes, and resolves the
 destination operand to the subject's own symbol.
 
 The destination states are earned, never defaulted into: ``storage_setter`` and

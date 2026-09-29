@@ -3,7 +3,7 @@
 A promotion changes the set of rows selection ranks, so a protocol that just
 gained members needs a selection pass. This lives outside the gate module and
 outside ``workers/`` so both can call it without an import cycle: the gate's
-event-2 wrapper fires it, and the discovery worker's direct-``evaluate`` sites
+fact-delta wrapper fires it, and the discovery worker's direct-``evaluate`` sites
 fire it for their own promotions.
 
 Enqueue is guarded twice — a queued/processing pass for the protocol already

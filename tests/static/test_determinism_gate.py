@@ -4,7 +4,7 @@ Two defect classes wear the same word and a test covering one silently passes
 the other:
 
 * **string-hash** — ``set[str]`` iteration, pinnable by ``PYTHONHASHSEED``.
-  Covered by ``test_effects_selection.py::test_reachable_value_is_identical_across_processes``
+  Covered by ``tests/effects/test_effects_selection.py::test_reachable_value_is_identical_across_processes``
   (real child processes, four seeds) plus the seed sweep in
   ``scripts/determinism_gate.sh``.
 * **allocation-order** — ``object.__hash__`` on Slither variables, so iteration

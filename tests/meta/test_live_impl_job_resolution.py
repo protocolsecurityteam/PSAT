@@ -132,7 +132,7 @@ def test_resolve_impl_job_returns_immediately_when_already_completed():
 
 
 def test_resolve_impl_job_returns_failed_terminal_without_polling():
-    """``failed_terminal`` is its own JobStatus enum value (db/models.py:49)
+    """``failed_terminal`` is its own JobStatus enum value (db/models/jobs.py:JobStatus)
     and is just as terminal as ``completed``. The helper must not
     re-classify it as non-terminal and start polling — that was the
     sibling bug fixed in commit fff4cb2."""

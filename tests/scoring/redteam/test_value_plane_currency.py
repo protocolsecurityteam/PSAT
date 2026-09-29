@@ -1,7 +1,4 @@
-"""Value plane: which observation is current, and what a $0.00 reading proves.
-
-One of the twenty sections of the former ``test_scoring_redteam.py``.
-"""
+"""Value plane: which observation is current, and what a $0.00 reading proves."""
 
 from __future__ import annotations
 

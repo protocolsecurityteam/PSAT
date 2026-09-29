@@ -1,4 +1,4 @@
-"""_read_erc1967_implementation decodes strictly (readiness §2.4).
+"""_read_erc1967_implementation decodes strictly.
 
 "Slot is zero ⇒ not a proxy" is a typing verdict, so it is earned only by a
 full 64-nibble zero word. Any shorter return is a transport artifact and must

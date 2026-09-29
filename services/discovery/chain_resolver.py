@@ -299,8 +299,8 @@ def _primary_chain(contract: dict[str, Any]) -> str:
 def _within_run_evidence_chains(contracts: list[dict[str, Any]]) -> list[str]:
     """Registry chains any evidence-bearing entry in this inventory declares.
 
-    These are chain-scoped crawler / deployer-expansion results (invariant 3
-    evidence): a chain another contract in the same run is already placed on.
+    These are chain-scoped crawler / deployer-expansion results: a chain
+    another contract in the same run is already placed on.
     """
     chains: list[str] = []
     seen: set[str] = set()
@@ -321,7 +321,7 @@ def resolve_unknown_chains(
 
     Mutates the contract dicts in-place and returns the same list.
 
-    ``declared_chains`` gates the two behaviours (invariant 3 — "probing may
+    ``declared_chains`` gates the two behaviours ("probing may
     CONFIRM membership, never ORIGINATE it"):
 
     * ``None`` (default, standalone callers): the legacy all-chain probe —
@@ -380,7 +380,7 @@ def resolve_unknown_chains(
         _debug_log(debug, f"Chain resolution: resolved {resolved_count}/{len(unknowns)} contract(s)")
         return contracts
 
-    # Narrowed probe (invariant 3). Declared set = caller-declared chains ∪
+    # Narrowed probe. Declared set = caller-declared chains ∪
     # within-run evidence, restricted to the registry.
     declared_set: list[str] = list(within_run)
     declared_seen: set[str] = set(within_run)

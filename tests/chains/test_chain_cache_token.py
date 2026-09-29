@@ -1,4 +1,4 @@
-"""M0.2 item 2 — one cache-key token format everywhere (invariant 11).
+"""One cache-key token format everywhere.
 
 The mapping-enumeration cache used to key the same contract two ways: a chain
 *name* (``"ethereum"``) from one code path and ``str(chain_id)`` (``"1"``) from

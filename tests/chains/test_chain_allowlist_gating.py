@@ -1,4 +1,4 @@
-"""Allowlist gating at internal work-origination sites (invariant 14).
+"""Allowlist gating at internal work-origination sites.
 
 ``require_supported_chain`` guards the user-facing router edges, but the paths
 that ORIGINATE work internally — the selection worker's analysis-child spawns and

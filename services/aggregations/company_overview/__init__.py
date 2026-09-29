@@ -21,9 +21,9 @@ Stages (each returns plain Python data, not ORM rows that pin a session):
    (all_addresses, latest TVL) and shapes the final dict.
 
 Package layout: ``entity_keys`` (composite chain::address tokens),
-``jobs`` (stages 1–3), ``prefetch`` (child-table fan-out), ``principals``
-(controller vocabulary + principal lookup), ``governance_view`` (stage 4),
-``functions_view`` (the /functions payload), ``payload`` (stage 5 + the
+``jobs`` (job projections), ``prefetch`` (child-table fan-out), ``principals``
+(controller vocabulary + principal lookup), ``governance_view`` (governance payload),
+``functions_view`` (the /functions payload), ``payload`` (membership payload + the
 orchestrators). This ``__init__`` re-exports the full pre-split module
 surface — including the private names tests and sibling services import —
 so ``services.aggregations.company_overview.X`` keeps resolving unchanged.

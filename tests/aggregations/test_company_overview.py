@@ -552,8 +552,7 @@ def test_build_functions_for_protocol_proxy_uses_impl(db_session):
 
 def test_build_functions_for_protocol_two_chains_shared_address(db_session):
     """Same address on two chains under one protocol keeps BOTH chains'
-    function analyses, keyed by the composite ``<chain>::<address>`` token
-    (invariant 13).
+    function analyses, keyed by the composite ``<chain>::<address>`` token.
 
     A CREATE2 twin deployed at the same address on ethereum and base can carry
     a different per-chain authority verdict — ``pause()`` gated on mainnet,
@@ -1204,7 +1203,7 @@ def test_fund_flows_principal_requires_authorization_edge(db_session):
     Real authorization should be evidenced by a ``ControlGraphEdge`` with
     a meaningful ``relation`` (controller_value, direct_owner, …) — the
     node row alone is not sufficient. The non-contract pass at
-    ``company_overview.py:1063-1072`` already filters by
+    the company overview functions view already filters by
     ``resolved_type``; the in-contract pass needs an equivalent guard.
     """
     p = _add_protocol(db_session, f"principal-overreach-{uuid.uuid4().hex[:8]}")
@@ -1254,9 +1253,9 @@ def test_fund_flows_principal_emitted_for_in_contract_function_principal(db_sess
     in-protocol contract holds an actual ``FunctionPrincipal`` row on
     the target's function, the principal flow **is** emitted.
 
-    The post-fix in-contract pass at company_overview.py:1122-1128
-    iterates ``fp_in_contract_principals`` (the prefetch projection at
-    :419-464) rather than walking raw CGN rows. Without this test the
+    The post-fix in-contract pass at the company overview functions view
+    iterates ``fp_in_contract_principals`` (the prefetch projection) rather than
+    walking raw CGN rows. Without this test the
     only coverage of the new code path is the negative
     test_fund_flows_principal_requires_authorization_edge above, which
     deliberately seeds *no* FP row — so the success branch never runs
@@ -1467,9 +1466,9 @@ def test_fund_flows_controller_requires_authorization_relation(db_session):
     variable actually denotes authorization.
 
     Sibling of the WstETH/CGN overreach, narrower blast radius.
-    ``_build_flows_and_principals`` (company_overview.py:1019-1023)
+    ``_build_flows_and_principals``
     walks the contract entry's ``controllers`` dict, which is populated
-    at lines 752-753 from *every* ControllerValue row regardless of
+    in the controllers projection from *every* ControllerValue row regardless of
     semantics. CV rows include any address-typed tracked state variable
     (per ``tracking_plan._is_address_like_read_spec``):
 
@@ -1542,7 +1541,7 @@ def test_fund_flows_controller_admitted_for_reach_witnessed_authority(db_session
     as a ``type=controller`` fund_flow even with no FunctionPrincipal row.
 
     Regression for the RolesAuthority route gap: ``load_control_closure``
-    (services/scoring/planes.py) walks ``controller_value`` edges, so the score
+    (services/scoring/planes/) walks ``controller_value`` edges, so the score
     document publishes "authority reaches vault" — but the FP-gated flow pass
     never emitted the edge (a RolesAuthority gates functions without being a
     FunctionPrincipal itself), so the surface graph carried no route and every
@@ -1653,7 +1652,7 @@ def test_owner_detection_prefers_active_owner_over_pending_owner(db_session):
     contract's ``owner`` field.
 
     Regression for the substring-match heuristic at
-    company_overview.py:749-755:
+    the previous controller-value projection:
 
         if "owner" in cv.controller_id.lower() and cv.value and ...:
             owner = cv.value.lower()
@@ -2032,7 +2031,7 @@ def test_primary_for_surfaces_safe_typed_only_via_function_principal(db_session)
 def test_standalone_twins_do_not_merge_controller_attribution(db_session):
     """Two standalone (non-proxy) CREATE2 twins deployed at the SAME address on
     ethereum and base, each governed by a DIFFERENT Safe, must not have their
-    controller attribution merged (multichain invariant 13).
+    controller attribution merged.
 
     The attribution fold used to render every contract to a BARE address before
     ``assign_primary_controllers`` ran, so the two twins collapsed onto one key
@@ -2176,8 +2175,8 @@ def test_flows_and_principals_carry_chain_fields(db_session):
 def test_controls_detail_rows_carry_chain_for_twins(db_session):
     """One Safe governing same-address CREATE2 twins on two chains yields two
     ``controls_detail`` rows with the SAME bare ``address`` but distinct
-    ``chain`` tokens — so a consumer can tell the two governed contracts apart
-    (multichain invariant 13). Without the chain discriminator the two rows are
+    ``chain`` tokens — so a consumer can tell the two governed contracts apart.
+    Without the chain discriminator the two rows are
     indistinguishable.
     """
     p = _add_protocol(db_session, f"twin-detail-{uuid.uuid4().hex[:8]}")
@@ -2452,7 +2451,7 @@ def test_holdings_the_fetch_recorded_at_the_page_cap_are_flagged_as_possibly_inc
 
 
 def test_a_long_list_the_fetch_paged_to_exhaustion_is_not_read_as_truncated(db_session):
-    """§9.5-addendum B.1. A de-capped list is longer than the page size and WHOLE.
+    """A de-capped list is longer than the page size and WHOLE.
 
     Before the migration onto ``asset_set_status`` this compared the rendered list's
     LENGTH to ``TOKEN_BALANCE_PAGE_SIZE``, so paging the endpoint to exhaustion made

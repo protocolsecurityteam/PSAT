@@ -2,8 +2,9 @@
 
 Wraps the sibling-owned ``effects`` facts artifact, the ``predicate_trees``
 artifact, and the Slither subject contract behind stable accessors, so matcher
-modules never reach into ``effects.py`` internals. Every accessor fails soft: a
-degraded (errored) or absent artifact reads as empty rather than raising, which
+modules never reach into ``contract_analysis_pipeline.effects`` internals.
+Every accessor fails soft: a degraded (errored) or absent artifact reads as empty
+rather than raising, which
 keeps the claims pass a no-op when its inputs are missing.
 """
 

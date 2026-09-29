@@ -34,14 +34,14 @@ logger = logging.getLogger(__name__)
 MembershipState = Literal["member", "candidate", "pruned", "unclaimed"]
 
 #: One reason string for both dirty queues: a promotion/demotion changed the
-#: member set that enrollment and the score fold read (spec §5.2).
+#: member set that enrollment and the score fold read.
 MEMBERSHIP_DIRTY_REASON = "membership_change"
 
 #: The DefiLlama worker's ``discovery_sources`` tag — the W6 provenance key.
 DEFILLAMA_SOURCE_TAG = "defillama"
 
 # W2 edge kinds — each names a verified structural link against STORED
-# resolution, never a bare ``relationship_type`` (spec §3.2, invariant 6).
+# resolution, never a bare ``relationship_type``.
 # ``historical_implementation`` verifies against the member proxy's stored
 # ``UpgradeEvent`` rows (the observed upgrade tx rides in the evidence).
 W2_EDGE_KINDS = frozenset(
@@ -50,8 +50,8 @@ W2_EDGE_KINDS = frozenset(
 
 W3_DIRECTION_D1 = "d1"
 W3_DIRECTION_D2 = "d2"
-# Where a W3 edge may come from (spec §3.2): resolved controller values, a
-# resolved proxy-admin slot, a §3.5 probe read, or a resolved FunctionPrincipal
+# Where a W3 edge may come from: resolved controller values, a
+# resolved proxy-admin slot, a probe read, or a resolved FunctionPrincipal
 # of a member's effective function. Never "appears in a member's control graph".
 W3_SOURCES = frozenset({"controller_values", "proxy_admin_slot", "probe", "function_principal"})
 
@@ -89,7 +89,7 @@ W3_PRINCIPAL_CONTROLLER_TYPES = frozenset({"timelock", "safe", "contract"})
 #: writers populate (an ERC-1155 ``isApprovedForAll`` operator set resolves
 #: exactly here), and an absent/null path means the resolver derived no
 #: authority at all — not_determined, which may never stand in for a witness.
-#: This is the invariant-6 line for principal edges: it is what refuses the §2
+#: This authority-derivation requirement for principal edges refuses the
 #: overreach shape the dev DB carries, where Seaport and the NFT marketplace
 #: TransferManagers are resolved principals of a member NFT's transfer entry
 #: point with no authority derivation behind them.
@@ -104,62 +104,61 @@ W3_PRINCIPAL_AUTHORITY_RESOLVERS = frozenset(
     }
 )
 
-#: The §3.3 perimeter observations a principal-keyed W3 witness may record.
+#: The perimeter observations a principal-keyed W3 witness may record.
 #: ``safe_owner`` (signer-set containment) is recordable but never proves D1
 #: transitivity — the same line ``_perimeter_anchor`` already draws.
 W3_PRINCIPAL_FACT_KINDS = frozenset({"function_principal", "safe_owner"})
 
 #: The ONE resolved type that proves D1 transitivity through a perimeter
-#: principal (§3.3 Class A: "the EOA is a resolved principal inside the
+#: principal (Class A: "the EOA is a resolved principal inside the
 #: protocol's proven control graph"). Restricting the arm to EOAs is what keeps
 #: it MONOTONE in the member set: an EOA is not deployed code, so it can never
 #: itself become a member and the arm's verdict cannot be withdrawn by a later
-#: promotion. Every richer type is a contract, whose transitivity §3.2 decides
+#: promotion. Every richer type is a contract, whose transitivity is decided
 #: from its OWN witnesses — a shared operator's affiliation with one member
 #: must never license every ward it also controls.
 W3_PERIMETER_PRINCIPAL_TYPE = "eoa"
 
 #: Non-lineage witness rules — evidence a row BELONGS beyond deployer lineage.
-#: A bare nomination or a W4-only row is NOT evidence of belonging: §3.3's
-#: literal "member/candidate set" wording is deliberately narrowed here
-#: (owner ruling) to uphold §0 — an LLM-sourced nomination must never convert
+#: A bare nomination or a W4-only row is NOT evidence of belonging: corroboration requires
+#: independently witnessed membership — an LLM-sourced nomination must never convert
 #: a shared deployer's foreign creation into exclusivity corroboration.
 NONLINEAGE_WITNESS_RULES = frozenset(
     {WITNESS_RULE_W2_STRUCTURAL, WITNESS_RULE_W3_CONTROL, WITNESS_RULE_W5_HUMAN, WITNESS_RULE_W6_LLAMA_SEED}
 )
 
 #: Rules whose via-fact is a ``protocol_deployers`` row, so revoking that row
-#: revokes them (DEPLOYER_HEURISTIC_SPEC.md §5; gate invariant 8).
+#: revokes them.
 LINEAGE_REGISTRY_WITNESS_RULES = frozenset({WITNESS_RULE_W4_DEPLOYER, WITNESS_RULE_W4H_DEPLOYER_AFFINITY})
 
-#: HEURISTIC witness rules (DEPLOYER_HEURISTIC_SPEC.md §6): admitted on
-#: measured affinity, not on proof. A heuristic witness is invisible to every
-#: evidence rule — including W4-H's own anchor counting — so a false admission
-#: has zero transitive amplification. It is NOT in
+#: HEURISTIC witness rules: admitted on
+#: measured affinity, not on proof. A heuristic witness anchors no different-entity
+#: evidence rule, including W4-H's own anchor counting. Same-contract W2
+#: inheritance is allowed and preserves the heuristic status. It is NOT in
 #: :data:`NONLINEAGE_WITNESS_RULES`: w4h is lineage.
 HEURISTIC_WITNESS_RULES = frozenset({WITNESS_RULE_W4H_DEPLOYER_AFFINITY})
 
-#: W2 evidence flag for the ONE §6 exception: this structural edge was derived
+#: W2 evidence flag for the ONE exception: this structural edge was derived
 #: from a HEURISTIC member. The derived witness is heuristic itself — the
 #: status propagates, never launders.
 W2_HEURISTIC_VIA_KEY = "heuristic_via"
 
-#: The §6 same-contract structural edges: a proxy and its implementation are one
+#: The same-contract structural edges: a proxy and its implementation are one
 #: logical contract, so an H-member proxy carries them. Different-entity edges
 #: (proxy admin, the beacon contract itself, factory children, every control
 #: edge) never inherit.
 W2_SAME_CONTRACT_EDGE_KINDS = frozenset({"implementation", "secondary_implementation"})
 
-#: The one ``ControllerValue.authority_provenance`` that is a control edge
-#: (invariant 6): the value gates callers. ``call_target`` is an integration
+#: The one ``ControllerValue.authority_provenance`` that is a control edge:
+#: the value gates callers. ``call_target`` is an integration
 #: operand (nativeWrapper, endpoint, stETH — the WETH9/EndpointV2/Lido
 #: overreach shape), and NULL provenance is not-determined — neither may
 #: stand in for a W3 witness, a perimeter fact, or an exclusivity
-#: observation. Probe reads (§3.5 owner/authority/admin slots) are
+#: observation. Probe reads (owner/authority/admin slots) are
 #: caller-gating by construction and carry no provenance column.
 W3_CONTROLLER_PROVENANCE = "caller_gate"
 
-#: W4-H qualification thresholds (DEPLOYER_HEURISTIC_SPEC.md §1/§5). Recorded
+#: W4-H qualification thresholds. Recorded
 #: in every H row's evidence, so a granted row carries the rule it was granted
 #: under rather than only the verdict.
 W4H_MIN_ANCHORS = 2
@@ -168,23 +167,23 @@ W4H_MIN_AFFINITY = 0.9
 W4H_AUTO_REVOKE_AFFINITY = 0.5
 W4H_CHALLENGE_QUORUM = 3
 W4H_EVIDENCE_VERSION = 1
-#: Visibility line, not a cap (DEPLOYER_HEURISTIC_SPEC.md §7 ruling 3): an
+#: Visibility line, not a cap: an
 #: admission-candidate set past this bound warns loudly so a nomination flood
 #: is seen before it becomes the next junk-row incident.
 W4H_ADMISSION_CANDIDATE_SANITY_BOUND = 50
 
-#: Derived H-registry states (§5) — never stored flags. ``revoked_at`` is the
+#: Derived H-registry states — never stored flags. ``revoked_at`` is the
 #: one stored transition; everything else is recomputed from the evidence.
 W4H_STATE_ACTIVE = "active"
 W4H_STATE_FROZEN = "frozen"
 W4H_STATE_SUSPENDED = "suspended"
 W4H_STATE_REVOKED = "revoked"
 
-#: Anchor-chain link kinds (spec §3.2 extension, see ``_own_controller_links``).
+#: Anchor-chain link kinds (see ``_own_controller_links``).
 W3_ANCHOR_LINK_KINDS = frozenset({"owner_or_authority", "proxy_admin", "probe_read", "role_holder", "safe_signer"})
 
 #: How an anchor-chain terminates: at a member holding a non-D2 admitting
-#: witness, or at a §3.3 perimeter principal of such a member.
+#: witness, or at a perimeter principal of such a member.
 W3_ANCHOR_KINDS = frozenset({"member", "perimeter_principal"})
 
 #: Link kinds that name a SET of keys rather than one authority. A set-valued
@@ -247,7 +246,7 @@ def _utcnow() -> datetime:
 
 
 # ---------------------------------------------------------------------------
-# Evidence constructors (invariant 2: rule-specific shapes, built here only)
+# Evidence constructors (rule-specific shapes, built here only)
 # ---------------------------------------------------------------------------
 
 
@@ -274,9 +273,9 @@ def w2_evidence(
     ``upgrade_tx_hash`` belongs to ``historical_implementation`` only — the
     upgrade tx the stored ``UpgradeEvent`` row observed (may be unrecorded).
 
-    ``heuristic_via=True`` records the DEPLOYER_HEURISTIC_SPEC.md §6 exception:
+    ``heuristic_via=True`` records same-contract inheritance:
     the member this edge rests on is itself a heuristic member, and the derived
-    witness inherits that status (§6 invariant 1 — a heuristic membership is
+    witness inherits that status (a heuristic membership is
     never presented as proven)."""
     if edge_kind not in W2_EDGE_KINDS:
         raise ValueError(f"edge_kind must be one of {sorted(W2_EDGE_KINDS)}, got {edge_kind!r}")
@@ -410,9 +409,9 @@ def w3_evidence(
     entry stamped by construction; the caller may not assert transitivity.
 
     ``anchor_chain`` is present exactly when transitivity was proven by the
-    anchored-authority-chain arm (spec §3.2 extension, ``_via_transitivity``);
+    anchored-authority-chain arm (``_via_transitivity``);
     it records WHICH chain fact proved it. ``principal_fact`` is present
-    exactly when it was proven by the §3.3 perimeter-principal arm, or — on a
+    exactly when it was proven by the perimeter-principal arm, or — on a
     D2 witness — when the control edge itself is a resolved FunctionPrincipal
     of the member. The two proofs are mutually exclusive; absence of both on a
     D1 witness means the via was transitive on its own witnesses."""
@@ -506,7 +505,7 @@ def w4h_evidence(
     affinity_at_grant: float,
     anchors_at_grant: int,
 ) -> dict[str, Any]:
-    """W4-H heuristic deployer lineage (DEPLOYER_HEURISTIC_SPEC.md §8.2). The
+    """W4-H heuristic deployer lineage. The
     grant-time affinity and anchor count are HISTORICAL RECORD — what the
     computation said when the witness was minted — not a re-verified claim; the
     live numbers live on the registry row."""
@@ -525,7 +524,7 @@ def w4h_evidence(
 
 
 def w5_evidence(*, actor: str, asserted_at: datetime) -> dict[str, Any]:
-    """W5 human assertion: explicit and attributed (invariant 14)."""
+    """W5 human assertion: explicit and attributed."""
     if not isinstance(actor, str) or not actor.strip():
         raise ValueError("actor is required for a human assertion")
     if not isinstance(asserted_at, datetime):
@@ -541,7 +540,7 @@ def w6_evidence(
     listing_url: str | None = None,
 ) -> dict[str, Any]:
     """W6 DefiLlama seed. Carries its own W1 facts: a seed with no proven code
-    is not constructible (invariant 3 binds W6 at the evidence shape)."""
+    is not constructible (W6 binds code proof in its evidence shape)."""
     if not isinstance(adapter_slug, str) or not adapter_slug.strip():
         raise ValueError("adapter_slug is required for a llama-seed witness")
     evidence: dict[str, Any] = {
@@ -609,7 +608,7 @@ def _rebuild_evidence(rule: str, evidence: dict[str, Any]) -> dict[str, Any]:
 
 
 def _validate_evidence(rule: str, evidence: Any) -> dict[str, Any]:
-    """Invariant 2: a witness row's evidence must be exactly what its rule's
+    """A witness row's evidence must be exactly what its rule's
     constructor produces — a hand-rolled dict with the wrong shape is refused."""
     if not isinstance(evidence, dict) or not evidence:
         raise ValueError("evidence must be a non-empty dict built by a rule constructor")
@@ -682,7 +681,7 @@ def write_witness(
 
 
 def revoke_witness(session: Session, witness: ContractMembershipWitness, *, reason: str) -> bool:
-    """Set ``revoked_at`` (never delete — invariant 4). Returns False when already revoked."""
+    """Set ``revoked_at`` (never delete). Returns False when already revoked."""
     if witness.revoked_at is not None:
         return False
     witness.revoked_at = _utcnow()
@@ -714,8 +713,8 @@ def active_witnesses(session: Session, *, contract_id: int, protocol_id: int) ->
 
 
 def witness_is_heuristic(witness: ContractMembershipWitness) -> bool:
-    """Is this row a HEURISTIC witness (DEPLOYER_HEURISTIC_SPEC.md §6)? Either
-    a heuristic rule outright, or the §6 same-contract structural edge derived
+    """Is this row a HEURISTIC witness? Either
+    a heuristic rule outright, or the same-contract structural edge derived
     from a heuristic member, which carries the status rather than laundering
     it."""
     if witness.rule in HEURISTIC_WITNESS_RULES:

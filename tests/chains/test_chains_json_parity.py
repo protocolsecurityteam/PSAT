@@ -2,7 +2,7 @@
 
 If the chain registry changes and ``scripts/gen_chains_json.py`` isn't re-run,
 this test fails — so the frontend's generated chain map can never silently drift
-from ``utils.chains`` (inv. 5).
+from ``utils.chains``.
 """
 
 from __future__ import annotations

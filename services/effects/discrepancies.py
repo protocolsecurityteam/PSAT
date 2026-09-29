@@ -1,6 +1,6 @@
-"""§9 plane-disagreement routing — two directions with asymmetric severity.
+"""Plane-disagreement routing — two directions with asymmetric severity.
 
-The two §9 directions are NOT the same kind of signal, and they route to
+The two directions are NOT the same kind of signal, and they route to
 different surfaces accordingly:
 
 * **direction 1 — static-positive / simulation-negative** (a static fact
@@ -10,7 +10,7 @@ different surfaces accordingly:
   ``stage_errors`` artifact, severity ``degraded``, surfaced on the /monitor job
   drill-in) with the recipe-attached :class:`~services.effects.harness.Discrepancy`.
   The verdict stays on the penalty side at a LOWERED confidence tier
-  (``unknown``) — the non-observation never refutes the claim (§8 rule 1). This
+  (``unknown``) — the non-observation never refutes the claim. This
   is rare (a static prediction that simulation contradicts).
 
 * **direction 2 — static-silent / simulation-positive** (a blank function, the
@@ -44,7 +44,7 @@ logger = logging.getLogger("services.effects.discrepancies")
 # i.e. a candidate new static idiom.
 NEW_IDIOM_KIND = "static_silent_sim_positive_new_idiom"
 
-# Direction-3 discrepancy kind (§7): the AUTHORITY plane. Effects is the only
+# Direction-3 discrepancy kind: the AUTHORITY plane. Effects is the only
 # stage that executes a call AS a resolved principal, so it alone can falsify
 # authority resolution — and until now it discarded that signal.
 AUTHORITY_CONTRADICTION_KIND = "authority_exact_member_gate_rejected"
@@ -52,10 +52,10 @@ AUTHORITY_CONTRADICTION_KIND = "authority_exact_member_gate_rejected"
 # Canonical, PUBLISHED gate-rejection error selectors (OpenZeppelin v5). Both name
 # the REJECTED CALLER in their ABI payload, so a revert carrying one is
 # unambiguously "this caller is not authorized" — never a state precondition
-# (§9.2b's "operation is not ready" is a state error, not one of these). SELECTORS
+# ("operation is not ready" is a state error, not one of these). SELECTORS
 # ONLY: an ``Error(string)`` "...is missing role..." decoded as text, or a
 # protocol-local ``Unauthorized()`` matched by name, is the substring heuristic
-# that produced two false positives in this investigation (§0.0.1/§7) and stays
+# that produced two false positives in this investigation and stays
 # out. A published standard selector is a proven fact; a revert-string is not.
 _GATE_REJECTION_SELECTORS = frozenset(
     {
@@ -64,7 +64,7 @@ _GATE_REJECTION_SELECTORS = frozenset(
     }
 )
 
-# The only three ways a §9 discrepancy is ever closed (never auto-dropped).
+# The only three ways a discrepancy is ever closed (never auto-dropped).
 _CLOSING_RULE = "matcher_fix | probe_soundness_fix | higher_tier_witness"
 
 
@@ -87,7 +87,7 @@ def authority_contradiction(
     tier: str | None,
     transcript_ptr: str | None,
 ) -> bool:
-    """§7 — the third §9 direction, on the AUTHORITY plane. Files a degraded
+    """The third direction, on the AUTHORITY plane. Files a degraded
     ``StageError`` (direction-1 severity, D3) when ALL hold:
 
     1. the resolved principal came from a ``capability_expr`` the resolver marked
@@ -96,7 +96,7 @@ def authority_contradiction(
     2. the probe — run AS that principal — was rejected with a CANONICAL, published
        gate-rejection selector (:data:`_GATE_REJECTION_SELECTORS`, selectors only);
     3. no override could account for it — always true here: seeding writes token
-       balances only, never roles or gate flags (§7), so the rejection is not an
+       balances only, never roles or gate flags, so the rejection is not an
        artefact of the probe's own state manipulation.
 
     Then the enumeration named the WRONG holder — a resolution defect effects is
@@ -138,7 +138,7 @@ def authority_contradiction(
 
 
 class PlaneDisagreement(RuntimeError):
-    """Carrier passed to ``record_degraded`` for a §9 discrepancy. Type-only
+    """Carrier passed to ``record_degraded`` for a discrepancy. Type-only
     signalling — the message/context hold the detail, mirroring how
     ``policy_worker`` constructs a bespoke ``RuntimeError`` for the channel."""
 
@@ -150,7 +150,7 @@ def route_discrepancy(
     selector: str | None,
     tier: str | None = None,
 ) -> None:
-    """Route a recipe-attached §9 discrepancy (direction 1 / static under-
+    """Route a recipe-attached discrepancy (direction 1 / static under-
     prediction) into the warning channel with the discrepancy attached and the
     closing rule recorded."""
     context: dict[str, Any] = {
@@ -176,7 +176,7 @@ def file_new_idiom_candidate(
     contract_address: str,
     selector: str | None,
 ) -> None:
-    """Direction 2 (§9): a witnessed effect on a static-silent (blank) function.
+    """Direction 2: a witnessed effect on a static-silent (blank) function.
     The witness itself is persisted by the caller; this emits an INFO-level
     vocabulary-growth signal (NOT a degraded ``StageError``) so the static
     vocabulary can grow from evidence harvested off the logs. Every proven

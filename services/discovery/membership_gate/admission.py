@@ -74,7 +74,7 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Nomination (spec §3.4 event 1) + W5 human assertion (spec §5.2, invariant 14)
+# Nomination + W5 human assertion
 # ---------------------------------------------------------------------------
 
 #: ``jobs.request`` key carrying a serialized :class:`HumanAssertion` from the
@@ -85,7 +85,7 @@ HUMAN_ASSERTION_REQUEST_KEY = "human_assertion"
 @dataclass(frozen=True)
 class HumanAssertion:
     """An admin's explicit membership assertion: actor + timestamp, never a
-    source tag (invariant 14)."""
+    source tag."""
 
     actor: str
     asserted_at: datetime
@@ -131,12 +131,12 @@ def nominate(
     Sets ``nominated_protocol_id``, never ``protocol_id``. The first
     nomination wins; a differing later one is logged and kept as provenance in
     ``discovery_sources`` only. An existing MEMBER's empty nomination slot
-    belongs to its own protocol (demotion provenance, invariant 4) — a foreign
+    belongs to its own protocol (demotion provenance) — a foreign
     nomination may never claim it.
 
-    ``human_assertion`` (spec §5.2 W5) writes the W5 witness for
-    *protocol_id* and attempts promotion — which still requires W1
-    (invariant 3): an assertion on an unprobed/unroutable chain yields a
+    ``human_assertion`` (W5) writes the W5 witness for
+    *protocol_id* and attempts promotion — which still requires W1:
+    an assertion on an unprobed/unroutable chain yields a
     candidate-with-W5-witness, not a member.
     """
     _require_positive_int(protocol_id, "protocol_id")
@@ -172,7 +172,7 @@ def nominate(
             contract.discovery_sources = merged
     if human_assertion is not None:
         # A member of ANOTHER protocol accepts no foreign W5 row — the
-        # assertion is provenance in the log only (invariant 1 posture).
+        # assertion is provenance in the log only.
         if contract.protocol_id not in (None, protocol_id):
             logger.info(
                 "human assertion for a foreign protocol not recorded on a member",
@@ -197,12 +197,12 @@ def nominate(
 
 
 def seed_llama_witness(session: Session, *, contract: Contract) -> bool:
-    """W6 seed for the contract's claimed protocol (spec §3.2): the
+    """W6 seed for the contract's claimed protocol: the
     ``defillama`` source tag plus a code-present probe on the row's own chain.
     The ONE producer of W6 rows — the live probe/intake paths and the re-earn
     migration both mint through here. A row already carrying a W6 row, active
     OR revoked, is left alone: re-observing the same listing is not new
-    evidence, so a revoked seed (§3.2 revocation story) is never re-armed."""
+    evidence, so a revoked seed is never re-armed."""
     protocol_id = contract.protocol_id if contract.protocol_id is not None else contract.nominated_protocol_id
     if protocol_id is None or DEFILLAMA_SOURCE_TAG not in (contract.discovery_sources or []):
         return False
@@ -294,11 +294,11 @@ def defer_membership_dirty(session: Session) -> Iterator[None]:
 
 
 def promote(session: Session, *, contract: Contract, protocol_id: int) -> bool:
-    """Promote to member iff W1 holds (invariant 3) AND ≥1 admitting witness
+    """Promote to member iff W1 holds AND ≥1 admitting witness
     is active AND its via-fact verifies against stored resolution — a witness
     row a caller wrote is a claim, not a license. Returns whether the contract
     is a member of *protocol_id* on exit; a refusal logs the named missing
-    piece (invariant 5)."""
+    piece."""
     _require_positive_int(protocol_id, "protocol_id")
     if contract.protocol_id == protocol_id:
         return True
@@ -314,7 +314,7 @@ def promote(session: Session, *, contract: Contract, protocol_id: int) -> bool:
     # elsewhere (or a row whose chain never resolves) satisfies nothing.
     expected_chain = chain_id_for_chain_name(contract.chain)
     # The LATEST persisted probe verdict outranks any stale active W1 row: a
-    # later code-absent probe is proven-absent (§3.1), and proven-absent can
+    # later code-absent probe is proven-absent, and proven-absent can
     # never promote.
     if expected_chain is not None and contract.address:
         code_row = session.get(ContractCreationWitness, (expected_chain, contract.address.lower()))
@@ -394,7 +394,7 @@ def demote_member(
     evidence: dict[str, Any] | None = None,
 ) -> None:
     """Member → candidate: ``protocol_id`` cleared, nomination and witness
-    history preserved (invariant 4). Witness revocation is the caller's step —
+    history preserved. Witness revocation is the caller's step —
     this primitive only moves the stamp and marks the queues."""
     protocol_id = contract.protocol_id
     if protocol_id is None:
@@ -420,7 +420,7 @@ def _attempt_admission(
     """Stratum (iii) for one candidate: derive admitting witnesses from stored
     facts (each verified at derivation AND again in ``promote``), bind W1 from
     the persisted code probe, promote. Returns ``"promoted"``,
-    ``"needs_probe"`` (verdict blocked on a probe fact — invariant 5's named
+    ``"needs_probe"`` (verdict blocked on a probe fact — named
     missing piece), or ``None`` (no admissible evidence / proven-absent)."""
     addr = (contract.address or "").lower()
     if not addr:
@@ -470,11 +470,11 @@ def _derive_admitting_facts(
 ) -> tuple[list[tuple[str, dict[str, Any], str]], bool]:
     """W2/W3/W4 facts provable from stored resolution for one candidate,
     in deterministic order. Only control/lineage edges are consulted —
-    control-graph presence and dependency rows never appear here
-    (invariant 6). Returns ``(facts, w4_blocked_on_creation_witness)``.
+    control-graph presence and dependency rows never appear here.
+    Returns ``(facts, w4_blocked_on_creation_witness)``.
 
-    ``heuristic_inheritance=True`` additionally reads the §6 same-contract
-    exception (DEPLOYER_HEURISTIC_SPEC.md): a HEURISTIC member proxy carries
+    ``heuristic_inheritance=True`` additionally reads the same-contract
+    exception: a HEURISTIC member proxy carries
     its implementation / secondary implementations, and the derived W2 records
     the heuristic via-fact. Off by default — the proof strata never see it."""
     addr = (contract.address or "").lower()
@@ -593,7 +593,7 @@ def _derive_admitting_facts(
             )
 
     # W3 D2 — the candidate is a resolved controller-typed principal of a
-    # member's effective functions. The hosting member must anchor (F2): a
+    # member's effective functions. The hosting member must anchor: a
     # principal fact hosted only on D2-only entries admits nothing.
     for member, principal_fact in _d2_principal_facts(
         session, protocol_id=protocol_id, address=addr, chain_key=chain_key, exclude_contract_id=contract.id
@@ -670,7 +670,7 @@ def _derive_admitting_facts(
     deployer = (contract.deployer or "").lower()
     if deployer and _ADDRESS_RE.match(deployer):
         # PROOF classes only: an H row licenses ``w4h_deployer_affinity`` in
-        # the last stratum and never the proof rule (§1 precedence).
+        # the last stratum and never the proof rule.
         registry = _proof_registry_row(session, protocol_id=protocol_id, address=deployer)
         if registry is not None:
             chain_id = chain_id_for_chain_name(contract.chain)
@@ -692,12 +692,12 @@ def _derive_admitting_facts(
 
 
 # ---------------------------------------------------------------------------
-# Probe delegation (spec §3.5)
+# Probe delegation
 # ---------------------------------------------------------------------------
 
 
 def probe(session: Session, contract: Contract) -> "ProbeResult":
-    """Run the §3.5 corroboration probe for *contract* and persist its results."""
+    """Run the corroboration probe for *contract* and persist its results."""
     from services.discovery.probes import run_probe
 
     return run_probe(session, contract)

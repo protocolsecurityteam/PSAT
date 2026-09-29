@@ -266,7 +266,7 @@ def _derive_transfer_policy_claims(
     that writes a normal-hygiene ``address => bool`` allow/deny mapping is
     configuring that sibling's transfer gating.
 
-    The written set-var stands in for the spec's "read by the hook fn": the
+    The written set-var is used as evidence of hook policy: the
     engine records writes, not reads, so the discriminating evidence is the
     sibling→here hook link plus the allow/deny map shape."""
     if not sibling_transfer_hooks:

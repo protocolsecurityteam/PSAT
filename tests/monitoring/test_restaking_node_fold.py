@@ -267,7 +267,7 @@ def test_no_module_outside_the_plane_imports_the_position_model():
         root / "tests" / "monitoring" / "test_restaking_position.py",
         root / "services" / "monitoring" / "restaking_reads.py",
         root / "services" / "monitoring" / "restaking_enrollment.py",
-        # The scorer's value plane: SCORER_INTEGRATION_STRATEGY §7.1 rules that
+        # The scorer's value plane requires that
         # restaking positions contribute (entity, asset) rows under the same
         # MAX-per-entity fold, keyed by their OWN entity keys — a mandated read,
         # and one that cannot go through the spot-balance readers precisely

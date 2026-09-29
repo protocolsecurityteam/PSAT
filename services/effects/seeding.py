@@ -1,4 +1,4 @@
-"""Input-asset state seeding for Tier-1 probes (EFFECTS_RESOLUTION_SPEC §4.2/§4.5).
+"""Input-asset state seeding for Tier-1 probes.
 
 A deposit-backed conversion (``WeETH.wrap``, a vault ``deposit``) begins by
 PULLING an input asset from the caller. The simulated principal holds none of it,

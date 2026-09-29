@@ -78,7 +78,7 @@ def _grade(
     any_priced = False
     for finding in findings:
         # W2c/R9 hook (this dict lookup is the whole change to this function):
-        # inv.5 is the weakest path TO THAT ENTITY, so a merged unit charges each
+        # The weakest path TO THAT ENTITY wins, so a merged unit charges each
         # entity at the rung of the members proven to reach it, not at the unit's
         # weakest member.
         per_entity_weakness = finding.get("weakness_by_entity") or {}
@@ -94,7 +94,7 @@ def _grade(
         charged_entities = list(finding["reach_entities"]) + [
             k for k in exclusive if k not in finding["reach_entities"]
         ]
-        # §6.4: a SHEET ceiling stays out of the exposure numerator entirely. It
+        # A SHEET ceiling stays out of the exposure numerator entirely. It
         # is a risk-weighted upper bound on a move nobody witnessed, and charging
         # it here would do two things at once — inflate exposure_usd off bounds,
         # and SPEND that entity's budget, which silently displaces a later row
@@ -118,7 +118,7 @@ def _grade(
             key_fraction = finding["severity_proven"] * per_entity_weakness.get(key, finding["weakness"])
             excluded = False
             if key in sheet_ceilings:
-                # §6.4: this row's own figure here is a proven upper bound on a
+                # This row's own figure here is a proven upper bound on a
                 # move nobody witnessed. It charges nothing — which is not the
                 # same as the entity being unmeasurable, so the fall-through to a
                 # subsumed row's WITNESSED figure below still runs.

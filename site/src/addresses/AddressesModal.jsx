@@ -16,7 +16,7 @@ import { coalesceChain, entityKey } from "../surface/entityKey.js";
 
 const ADDRESS_RE = /0x[a-fA-F0-9]{40}/g;
 
-// Which label row an address-inventory contract row edits (invariant 12).
+// Which label row an address-inventory contract row edits.
 // These are CONTRACT rows, so a genuine cross-chain deployment gets its own
 // chain-qualified override. Mainnet and legacy NULL-chain rows (the entire
 // current population) intentionally resolve to `null` = the GLOBAL row, so
@@ -54,7 +54,7 @@ export default function AddressesModal({ companyName, onClose }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
   // { global: Map<addr,name>, byChain: Map<chain, Map<addr,name>> } — chain-aware
-  // so a contract labeled per-network resolves to the right name (invariant 12).
+  // so a contract labeled per-network resolves to the right name.
   const [labels, setLabels] = useState(() => ({ global: new Map(), byChain: new Map() }));
   const [filter, setFilter] = useState("");
   const [sortBy, setSortBy] = useState("rank"); // rank | name | address
@@ -96,7 +96,7 @@ export default function AddressesModal({ companyName, onClose }) {
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  // (chain, address) → row lookup, keyed by entityKey (invariant 13): the
+  // (chain, address) → row lookup, keyed by entityKey: the
   // all-chains payload can carry the same address on two chains, so a bare
   // index would last-wins-collapse them into one entry.
   const addrIndex = useMemo(() => {

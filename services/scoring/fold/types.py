@@ -30,7 +30,7 @@ class _Instance:
     asset_identity_undecidable: bool
     # The principal this instance was witnessed under. A merged unit's row folds
     # instances from several members, and without this the row cannot say WHICH
-    # member is proven to reach a given entity (inv.5 is the weakest path to that
+    # member is proven to reach a given entity (the weakest path is measured to that
     # entity, not the weakest member of the unit).
     principal_address: str = ""
 
@@ -51,7 +51,7 @@ class _Row:
     # rest from this map.
     member_gate: dict[str, tuple[float, str, str]] = field(default_factory=dict)
     # The burn-sentinel admission rule's own count, and the instances it emptied
-    # outright — an admission rule publishes what it refused (§3.1 pt 5).
+    # outright — an admission rule publishes what it refused.
     zero_reach_keys_refused: int = 0
     zero_reach_stripped: list[dict[str, Any]] = field(default_factory=list)
     instances: list[_Instance] = field(default_factory=list)
@@ -101,7 +101,7 @@ class _RowValue:
     # not_determined, so nothing was available to bound them with. Published
     # rather than absorbed: the figure is the witness's, not the entity's.
     unbounded_floor_magnitudes: list[dict[str, Any]] = field(default_factory=list)
-    # Phase 6: the destination witnesses that supplied a gate-control magnitude,
+    # Act-as composition: the destination witnesses that supplied a gate-control magnitude,
     # the census of how far every licensed hop got, and the signals whose
     # magnitude question composition answered.
     composed_magnitudes: dict[str, _ComposedMagnitude] = field(default_factory=dict)
@@ -244,7 +244,7 @@ class _WithheldComposition:
         BOTH halves, never the reason alone: the deletability vocabulary mixes
         one earned negative (a join that ran and returned no row) with three
         undetermined kinds, and bucketing them together would put a proven fact
-        and a disclosed unknown under one count — the inv. 1 collapse the whole
+        and a disclosed unknown under one count — the three-state collapse the whole
         join exists to prevent, relocated into the counter.
         """
         return f"{self.deletability.state}/{self.deletability.reason}"
@@ -278,7 +278,7 @@ class _WithheldComposition:
 
 
 def _gate_claim(chain: tuple[P.ActAsStep, ...], execution: EX.ProvingExecution) -> dict[str, Any]:
-    """§7.2 arm 1's conjunct, EVALUATED, for one entry.
+    """The caller-match conjunct, EVALUATED, for one entry.
 
     The arm is "gate claims transfer ON CALLER MATCH", and the conjunct is not
     satisfied by publishing ``caller_matches`` and leaving a reader to apply it:

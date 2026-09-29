@@ -1,4 +1,4 @@
-"""Bounded cohort-scanner tests for ``scan_for_events`` (Stage 1 / W1a).
+"""Bounded cohort-scanner tests for ``scan_for_events``.
 
 Real test DB, real decode/side-effect pipeline; only the RPC wire is stubbed
 (``rpc_request`` for the head-block read and for the shared getLogs fetcher).
@@ -229,7 +229,7 @@ def test_budget_not_exhausted_when_caught_up(db_session, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Runaway-cursor backstop (F6)
+# Runaway-cursor backstop
 # ---------------------------------------------------------------------------
 
 

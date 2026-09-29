@@ -1,6 +1,6 @@
 """P4 guard: caller-keyed time predicates under the Part-2 openness.
 
-Part-2 decision (plan §5): **open-modulo-condition** by default — a caller-keyed
+Part-2 decision: **open-modulo-condition** by default — a caller-keyed
 time/threshold predicate lowers to a runtime side-condition, not a caller set — EXCEPT a
 deny-by-default time **allowlist**, which is an authorization and stays gated.
 ``predicate_evaluator._is_caller_keyed_time_allowlist`` is the discriminator: it gates a

@@ -1,11 +1,11 @@
-"""Regression tests for the Plane-0 facts hardening in ``effects.py``.
+"""Regression tests for the Plane-0 facts hardening in ``effects/``.
 
 Each test compiles a real Solidity fixture with Slither and drives the
 production ``build_effects`` -> ``build_claims`` -> ``project_effect_labels``
 sequence — no fakes, only the solc compile is real. Precedent:
 ``tests/policy/test_selector_canonicalization.py``.
 
-The six hardening fixes (spec §3 FACT records / §5 facts-plane prerequisites):
+The six facts-plane hardening fixes:
   (a) sink ``origin`` in {body, guard} — a modifier's own auth call is a guard
       fact, not an effect;
   (b) ``build_effects`` keying prefers a concrete body over a 0-node interface

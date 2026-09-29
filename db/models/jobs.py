@@ -35,12 +35,11 @@ class Job(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     address: Mapped[str | None] = mapped_column(String(42), nullable=True)
-    # First-class chain identity for the deployment (invariant 1). Derived at
+    # First-class chain identity for the deployment. Derived at
     # create time from ``request["chain"]`` via the canonical registry and
     # dual-written alongside the string chain in ``request``. Nullable, but a
     # CHECK constraint (see ``__table_args__``) requires it for address-scoped
-    # jobs; company/root jobs with ``address IS NULL`` keep it NULL. Reads still
-    # come from ``request["chain"]`` until the M0.2 Item-2 dedup flip. ``default``
+    # jobs; company/root jobs with ``address IS NULL`` keep it NULL. ``default``
     # derives from this row's own ``request["chain"]`` when a caller omits
     # chain_id, so no construction path can silently violate the CHECK.
     chain_id: Mapped[int | None] = mapped_column(Integer, nullable=True, default=_job_chain_id_insert_default)
@@ -114,7 +113,7 @@ class Job(Base):
             "lease_expires_at",
             postgresql_where=text("status = 'processing'"),
         ),
-        # Serves the M0.2 Item-2 SQL-side dedup lookups keyed on
+        # Serves the SQL-side dedup lookups keyed on
         # ``(lower(address), chain_id)``. Mirrors the ``lower(address)``
         # functional-index style used elsewhere (ix_function_principals_lower_address)
         # since the dedup helpers compare ``func.lower(Job.address)``.
@@ -122,7 +121,7 @@ class Job(Base):
         # Serves the cross-chain source-hash fallback in find_completed_static_cache.
         Index("ix_jobs_source_content_hash", "source_content_hash"),
         # Address-scoped jobs must carry a chain_id; company/root jobs
-        # (address IS NULL) legitimately leave it NULL (invariant 1).
+        # (address IS NULL) legitimately leave it NULL.
         CheckConstraint(
             "address IS NULL OR chain_id IS NOT NULL",
             name="ck_jobs_chain_id_required_for_address",

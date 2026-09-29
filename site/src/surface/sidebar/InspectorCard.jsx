@@ -6,8 +6,8 @@ import { sharedDeployerNote, signerOverlapNote, terminalControllerNote } from ".
 
 // Way-point / terminal-controller copy for a non-terminal principal. Mirrors the
 // backend witness bar: a resolved_type=contract principal is a way-point, never a
-// settled key, so the UI must never imply one where the chain didn't terminate
-// (SCORING plan §4). Renders nothing for a settled key.
+// settled key, so the UI must never imply one where the chain didn't terminate.
+// Renders nothing for a settled key.
 function TerminalNote({ principal }) {
   const note = terminalControllerNote(principal);
   if (!note) return null;
@@ -162,7 +162,7 @@ function PrincipalRefCard({ principal, indirect = false, onPreview, onNavigate }
   );
 }
 
-// Verbose witness facts for the selected function (SCORING plan §7.3): where the
+// Verbose witness facts for the selected function: where the
 // funds go + how much, freeze scope/expiry, mint backing, reach upper bound. Each
 // row derives from a present, at-the-bar witness field — nothing renders from
 // absence, so the block is silent when there is no witnessed fact to show.

@@ -1,4 +1,4 @@
-"""LOCAL-ONLY pytest plugin — proves/maps real network egress from the suite.
+"""Socket-level pytest guard against external network egress.
 
 Load with ``-p local_netguard``. Wraps ``socket.getaddrinfo`` (to learn the
 hostname behind each IP) and ``socket.socket.connect`` / ``connect_ex`` (to
@@ -13,8 +13,9 @@ endpoint. psycopg2 uses libpq (C) and bypasses Python's socket layer, so the DB
 never trips this; requests/httpx/urllib3/boto3 do, which is the surface we map.
 
 Committed: this is the offline suite's socket-level egress backstop, loaded via
-``-p local_netguard`` by ``run_tests_fast.sh`` and the CI offline job
-(``.github/workflows/_ci-checks.yml``). It complements the in-process guard in
+``-p local_netguard`` by the CI offline job
+(``.github/workflows/_ci-checks.yml``). The optional, untracked local runner
+``run_tests_fast.sh`` also loads it. It complements the in-process guard in
 ``tests/conftest.py`` (which fences the ``requests``/``urllib`` wires with clearer
 errors); this one catches anything that bypasses them. A blocked connect fails
 the session, so a leak can't pass silently on a degraded path.

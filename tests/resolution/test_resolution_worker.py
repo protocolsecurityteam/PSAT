@@ -1194,7 +1194,7 @@ class TestStructuralOwnershipPropagation:
     ) -> None:
         """The dep's back-linking Contract row exists only on ANOTHER chain
         (CREATE2 twin): the back-link is not evidence on the parent's chain,
-        so the child must not inherit (readiness §2.5)."""
+        so the child must not inherit."""
         session = db_session_for_resolution
         parent_addr = ("0x" + uuid.uuid4().hex[:40].zfill(40)).lower()
         dep_addr = ("0x" + uuid.uuid4().hex[:40].zfill(40)).lower()
@@ -1312,7 +1312,7 @@ class TestStructuralOwnershipPropagation:
         """Parent is not a member (``protocol_id`` NULL) — its source tags are
         irrelevant. Even with a perfect structural link, ``parent_is_member``
         lands False and no witness can be produced: only a member's stored
-        resolution admits (spec §3.2 W2)."""
+        resolution admits."""
         session = db_session_for_resolution
         dep_addr = ("0x" + uuid.uuid4().hex[:40].zfill(40)).lower()
         parent = self._make_parent(

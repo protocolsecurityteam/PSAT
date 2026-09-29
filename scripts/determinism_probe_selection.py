@@ -13,7 +13,7 @@ Serialization rules, both deliberate:
 * unordered containers (set, frozenset) are serialized SORTED. Comparing
   ``repr(frozenset)`` compares CPython's string hashing, not this code. The one
   set-typed field on a ``Candidate`` is ``restrict_families``, and both of its
-  consumers — ``calldata.py:2295`` and ``orchestrator.py:190`` — read it with
+  consumers — the calldata builder and effects orchestrator — read it with
   ``in`` only, so its iteration order reaches no decision. Without this rule the
   gate fails today for a reason nothing downstream can observe, and a gate that
   cries wolf gets ignored. Any set-order leak that DOES reach a decision still

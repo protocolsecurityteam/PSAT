@@ -1,7 +1,7 @@
 """Observability contract for the scoring boundary.
 
 The fold and the resolution planes are deliberately log-free — every refusal is
-published into the score document (SCORING_INVARIANTS inv. 11/12) — so the only
+published into the score document — so the only
 place a pricing regression, a fail-closed universe or an unreadable execution
 record can become visible to an operator is the impure boundary around them.
 This file locks that boundary in:

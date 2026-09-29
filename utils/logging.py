@@ -23,7 +23,7 @@ Level contract:
                  in the same handler so the swallow shows up in the
                  ``stage_errors`` artifact (queryable via
                  ``GET /api/jobs/{id}/errors``). Enforced by
-                 ``tests/test_log_level_contract.py`` over two perimeters:
+                 ``tests/meta/test_log_level_contract.py`` over two perimeters:
                  ``PIPELINE_WORKERS`` (the BaseWorker subclasses, and it
                  grows as new ones land) and ``PIPELINE_SERVICE_GLOBS``
                  (the service packages that run under those workers' job

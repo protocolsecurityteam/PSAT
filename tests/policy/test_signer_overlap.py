@@ -1,7 +1,6 @@
 """C1: signer-overlap attribution fact + A4 terminal wiring in build_principal_labels.
 
-SCORING plan §2 (signer overlap) and §4 (contract-principal terminal walk). The
-DB-backed test exercises the exact/lower_bound owner-quality gate in
+The DB-backed test exercises the exact/lower_bound owner-quality gate in
 ``load_protocol_safe_owner_sets``; the pure tests exercise the overlap algebra;
 the integration tests confirm the facts land in ``principal_labels.details``.
 """

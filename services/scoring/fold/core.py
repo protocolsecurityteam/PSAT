@@ -99,7 +99,7 @@ def compute_protocol_score(
 ) -> ScoreDocument:
     """The protocol's score document, folded over its current signal rows.
 
-    ``signals`` is the §7.5 in-memory feeding mode and nothing else: the offline
+    ``signals`` is the in-memory feeding mode and nothing else: the offline
     CLI distils every contract without persisting, and passes the result in the
     population order :func:`order_signals` pins. Left unset — every persisted
     path — the population comes from the one pinned query and from nowhere else,
@@ -169,8 +169,8 @@ def compute_protocol_score(
             # confidence credit above (it entered the grade), and here it creates
             # NO row — so no finding, no value_at_stake, no exposure key. Its
             # disclosures already left on the earned-negative record above; this
-            # is the finding-half of the decoupling the ruling needs (inv. 3 — a
-            # permissionless self-service payout is not a finding worth zero).
+            # keeps the earned negative distinct from a finding worth zero: a
+            # permissionless self-service payout creates no finding.
             uncharged_product_rows += 1
             continue
 
@@ -474,7 +474,7 @@ class _UnitResolver:
             if facts.resolved_type == "safe" and facts.owners:
                 by_key[facts.key].append(facts)
         # Last row wins, exactly as before: which contradictory owner set to adopt
-        # is an open ruling (R17), and this fold does not arbitrate it. What it
+        # is an unresolved policy question, and this fold does not arbitrate it. What it
         # will not do is arbitrate SILENTLY — a Safe whose witnesses disagree
         # publishes the disagreement beside the set the merge decision used.
         self._safe_by_key = {key: rows[-1] for key, rows in by_key.items()}
@@ -592,7 +592,7 @@ class _UnitResolver:
             best: dict[str, Any] | None = None
             for safe_key in both:
                 facts = facts_by_key[safe_key]
-                # inv.5 is the WEAKEST path. An unread threshold cannot lose that
+                # The WEAKEST path wins. An unread threshold cannot lose that
                 # comparison: it sorts first, and is then priced at the uncredited
                 # rung rather than at a ratio nobody measured.
                 rank = (0, 0.0) if facts.threshold is None else (1, facts.threshold / len(facts.owners))
@@ -632,7 +632,7 @@ class _UnitResolver:
 
         A unit id is only meaningful beside the members it collapsed: without
         them a consumer cannot tell a re-labelled unit from a re-keyed one, and
-        cannot check the inv.13 collapse that removed a double charge.
+        cannot check which memberships were merged to avoid a double charge.
         """
         return {
             "members": {unit: sorted(members) for unit, members in sorted(self._members.items())},
@@ -959,14 +959,14 @@ def _member_weakness(
     magnitudes: dict[tuple[str, str], _DestinationMagnitude],
     admission: _AdmissionPlanes,
 ) -> tuple[dict[str, float], float, tuple[str, str, str]]:
-    """A merged unit's weakness, per REACHED ENTITY (inv. 5).
+    """A merged unit's weakness, per REACHED ENTITY.
 
     ``_row_for`` keeps the max weakness over a merged Safe unit's members while
     the row folds the UNION of their reach, with no tie between a member's rung
     and the entities that member reaches — so value only the 4/8 member can move
     is published at the 3/7 member's rung, a coalition nobody proved.
 
-    inv. 5's weakest path is the weakest path TO THAT ENTITY: entity ``e`` is
+    The weakest path is the weakest path TO THAT ENTITY: entity ``e`` is
     priced at the max over ONLY the members proven to reach ``e``. The row still
     publishes a single weakness against a union no single member reaches, so that
     union is priced at **the hardest rung among the contributing members** — the
@@ -974,8 +974,8 @@ def _member_weakness(
     ``min_coalition_to_act_as_both``: that field is ``max(k)``, and weakness is
     keyed on ``k/n``, so a 3/4 member (0.20) and a 5/20 member (0.55) put the
     coalition size on the 5/20 Safe while this rung is the 3/4's 0.20. The
-    hardest rung is the deliberate under-claim — inv. 5 forbids pricing a union
-    at a rung no contributing member has to clear. Naming a member's reach needs
+    hardest rung is the deliberate under-claim — the weakest-path rule forbids
+    pricing a union at a rung no contributing member has to clear. Naming a member's reach needs
     the member's own witness, so a row whose instances cannot be attributed to a
     member keeps the unit-level rung rather than inventing an attribution.
     """
@@ -1219,8 +1219,7 @@ def _aggregate(
                 # compares candidates on ``held * fraction`` and charges the
                 # winner through the same loop.
                 #
-                # What keeps THIS change out of the numerator is §6.4, not an
-                # absence of readers: a sheet ceiling is held out of exposure
+                # A sheet ceiling is held out of the exposure numerator
                 # entirely (``held = None`` there), and every sub-cent entity on
                 # this corpus is a sheet ceiling. That is a rule with its own
                 # lifetime and it may be revisited. Where a sub-cent entity is
@@ -1295,10 +1294,10 @@ def _aggregate(
                 # standing alone, which is a different fact from a figure two
                 # witnesses agreed on.
                 "unbounded_floor_magnitudes": valued.unbounded_floor_magnitudes,
-                # Phase 6: every dollar this row carries that came from a
+                # Act-as composition: every dollar this row carries that came from a
                 # DESTINATION function's own flow.out witness rather than from a
                 # witness on this row's own call, with the act-as chain that
-                # licensed it published beside it (inv. 9 exact decomposition).
+                # licensed it published beside it.
                 "reach_composed_magnitudes": [
                     entry.as_json() for _, entry in sorted(valued.composed_magnitudes.items())
                 ],
@@ -1369,7 +1368,7 @@ def _aggregate(
                 "severity_basis": sorted({b for instance in row.instances for b in instance.severity_basis}),
                 "weakness": round(weakness, 4),
                 "weakest_gate": weakest[0],
-                # inv.5 read as the weakest path TO AN ENTITY: present only where a
+                # The weakest path TO AN ENTITY: present only where a
                 # merged unit's members reach different entities at different rungs,
                 # and then the union is priced at the hardest rung among the
                 # contributing members. Absent means one rung priced the whole union.
@@ -1520,7 +1519,7 @@ def _row_value(
     own conditions do not pin their caller to the destination itself.
 
     Where a gate's own call carries no magnitude witness, the DESTINATION
-    function's may supply one (:func:`_compose`, Phase 6). That is a reuse of an
+    function's may supply one (:func:`_compose`). That is a reuse of an
     existing witness and never a second source of dollars: it applies only where
     the instance proved no magnitude itself, and each composed figure is capped
     at the destination's own witness and at the destination's own sheet.
@@ -1638,10 +1637,9 @@ def _row_value(
             for destination, functions in licensed_here.items():
                 licensed[value_plane.canonical(destination)].update(functions)
             if not code_control:
-                # Phase 6. Code control asks no conferral question, so it names
-                # no destination function and has no compositional source; its
-                # magnitude question is a different one and stays where Phase 4
-                # left it.
+                # Act-as composition. Code control asks no conferral question,
+                # so it names no destination function and has no compositional source; its
+                # magnitude question instead uses the controlled node's own sheet.
                 composed, counts, refused, refused_entries = _compose(
                     seeds,
                     walked_hops,
@@ -1761,7 +1759,7 @@ def _row_value(
     licensed_out = {key: [fn.as_json() for fn in sorted(rows)] for key, rows in sorted(licensed.items())}
     refusals_out = dict(sorted(refused_composed.items()))
     withheld_out = tuple(withheld_composed[key] for key in sorted(withheld_composed))
-    # §7.2 arm 1's conjunct, counted over every entry this row publishes —
+    # The caller-match conjunct, counted over every entry this row publishes —
     # republished and withheld alike, because the gate claim is published on
     # both and the conjunct qualifies it on both.
     gate_claims = _counted(
@@ -1807,7 +1805,7 @@ def _row_value(
     # A sheet ceiling is capped by its node's own sheet BY CONSTRUCTION — it is
     # that sheet, and the MAX below only ever replaces it with something larger
     # that is no longer a ceiling. The cap therefore holds PER KEY and is checked
-    # per key (``tests/test_scoring_redteam.py``'s sheet-ceiling cases); it may
+    # per key (``tests/scoring/redteam/test_cc_sheet_ceiling.py``); it may
     # NOT be checked on the total, because a row's value sums across every priced
     # host it reaches and legitimately exceeds any single sheet — $4.217B over
     # eight hosts on the reference corpus, more than the largest of them.

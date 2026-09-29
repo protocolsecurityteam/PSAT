@@ -13,7 +13,7 @@ import { entityKey } from "../entityKey.js";
 // Role-id pseudo addresses (mapping keys coerced to addresses) are excluded;
 // they are never real selectable entities.
 //
-// Keyed by (chain, address) (inv. 13), not bare address: the Surface page is
+// Keyed by (chain, address), not bare address: the Surface page is
 // chain-scoped, so `chain` is the active chain and every entity in one index
 // shares it — but the composite key means the same address on a different chain
 // can never alias into this index. `chain` defaults to mainnet so legacy

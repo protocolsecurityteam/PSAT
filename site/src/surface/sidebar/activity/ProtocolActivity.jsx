@@ -75,8 +75,8 @@ export function ProtocolActivity({
     api(`/api/company/${encodeURIComponent(companyName)}/addresses`)
       .then((addrs) => {
         if (cancelled) return;
-        // The /addresses payload spans every chain, so key by (chain, address)
-        // (inv. 13): a same-address cross-chain pair otherwise last-wins one
+        // The /addresses payload spans every chain, so key by (chain, address).
+        // A same-address cross-chain pair otherwise last-wins one
         // chain's display name onto the other. Rows carry their own chain.
         const map = {};
         for (const a of addrs?.all_addresses || []) {

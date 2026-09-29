@@ -726,8 +726,7 @@ class TestValuePlaneReadsAChainScanAsAnEmptySheet:
     made — and ``ceiling_for`` refused it under "no balance was ever observed".
     The witness is the chain's own transfer history through a named block, and it
     is the ONLY one: a third-party index answering "no tokens" is the trigger
-    that sends the producer to the chain, never the proof (§2 of
-    SHEET_OBSERVATION_SPEC.md).
+    that sends the producer to the chain, never the proof.
     """
 
     SCAN_BASIS = "chain log sweep of Transfer/TransferSingle/TransferBatch, blocks 0-21000000"
@@ -770,7 +769,7 @@ class TestValuePlaneReadsAChainScanAsAnEmptySheet:
     def test_the_etherscan_negative_alone_publishes_nothing(self, db_session):
         """No scan, same empty answer, same pinned zero — and no $0.
 
-        This is §2's ruling as a test: the index's empty list is a completeness
+        The index's empty list is a completeness
         claim about the index, and under-indexing is precisely its failure mode.
         """
         from services.scoring import planes as P

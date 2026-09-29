@@ -1,5 +1,5 @@
 """Queue bounded re-analysis for monitored contracts with no current
-materialization (F4, invariant 11).
+materialization.
 
 The main pipeline now leaves a materialization row behind (F4a) and the sweep
 lifted the historical ones (F4b), so the invariant holds — until

@@ -108,7 +108,7 @@ def _handrolled_events_for_write_target(write_target: str) -> list[str]:
 # slot, ``keccak256("guard_manager.guard.address")``, the literal the 1.3.0 and
 # 1.4.1 singletons carry. Canonical values live in ``utils.evm``
 # (re-exported here for the monitoring tests that import them); the
-# preimage-recompute drift test is tests/test_safe_module_guard_monitoring.py.
+# preimage-recompute drift test is tests/monitoring/test_safe_module_guard_monitoring.py.
 
 # proxy_type → polling entry that resolves the current implementation.
 # Mirrors ``services/monitoring/proxy_watcher._RESOLVE_BY_TYPE`` but
@@ -391,7 +391,7 @@ def _member_word_index(read_spec: Mapping[str, Any]) -> int | None:
 
 
 # ---------------------------------------------------------------------------
-# E5 — signal classification (§3.6)
+# Signal classification
 # ---------------------------------------------------------------------------
 
 # What ONE diff on this entry tells an operator. Stamped at enrollment, read

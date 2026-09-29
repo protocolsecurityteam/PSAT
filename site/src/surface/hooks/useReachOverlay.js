@@ -22,8 +22,8 @@ export function useReachOverlay({
   const visiblePrincipals = useMemo(() => {
     const visibleAddrs = new Set(allMachines.map((m) => m.address?.toLowerCase()));
     // Chain-scope first: a principal observed only on another chain must not
-    // ride in on a same-address twin among the (chain-scoped) visible machines
-    // (inv. 13). Legacy principals without ``chains`` behave as before.
+    // ride in on a same-address twin among the (chain-scoped) visible machines.
+    // Legacy principals without ``chains`` behave as before.
     return (companyData?.principals || []).filter((p) =>
       !isRoleIdAddress(p.address || "") &&
       principalOnChain(p, activeChain) &&

@@ -5,8 +5,8 @@ the resolver evaluates the tree against on-chain state and emits a
 ``CapabilityExpr``. This module defines that type plus the closed,
 total combinators (intersect/union/negate) called by the evaluator.
 
-Per v4 plan + v6 round-3 fix #4 (closed combinators with confidence-
-aware quality), the capability vocabulary is:
+The closed combinators preserve confidence and membership quality across
+this capability vocabulary:
 
   finite_set            — exact / lower_bound / upper_bound members
   threshold_group       — Safe-style M-of-N
@@ -171,13 +171,10 @@ class CapabilityExpr:
     # finite_set. Default-None keeps the wire shape of every populated set and of
     # the pre-existing empty sets byte-identical.
     #
-    # Wire-shape note (A2): the combinators below now propagate this field and
-    # ``last_indexed_block``, and add ``exact_as_of``, so a capability built from
-    # height-bearing operands is NO LONGER byte-identical to what this module
-    # emitted before. That is deliberate — the previous shape was byte-stable
-    # because it discarded the provenance — and it is registered in
-    # SCORING_INVARIANTS B16. Emit-when-non-default still holds, so a capability
-    # whose operands carried nothing is unchanged.
+    # The combinators preserve supported empty-set and height provenance rather
+    # than discarding it. Non-default ``empty_reason``, ``last_indexed_block``
+    # and ``exact_as_of`` values extend the wire shape; capabilities without
+    # those values keep their existing serialized shape.
     empty_reason: EmptyReason | None = None
     last_indexed_block: int | None = None
     # The height at which this set is EXACT, when one is licensed. Three states:

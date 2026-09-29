@@ -246,9 +246,9 @@ def _resolve_chain_context(
     explicit_rpc_url: str | None,
     chain: str | None,
 ) -> ChainContext:
-    """Bind ``chain_id`` to its RPC URL (invariant 7). Registry-backed via
+    """Bind ``chain_id`` to its RPC URL. Registry-backed via
     :func:`services.clients.rpc.chain_context`. An unregistered ``chain_id`` (only reachable
-    from a hand-built job request) now fails loud (invariant 6): ``require_chain``
+    from a hand-built job request) now fails loud: ``require_chain``
     raises :class:`~utils.chains.UnsupportedChainError` with call context instead
     of silently building an eRPC route for an unknown chain. A local (Anvil/test)
     ``explicit_rpc_url`` still wins for fork tests."""
@@ -273,7 +273,7 @@ def resolve_contract_capabilities(
     call — adapters consume the repos lazily inside
     ``evaluate_tree_with_registry``.
 
-    ``chain_id`` is required (invariant 6): it binds the live event/bytecode
+    ``chain_id`` is required: it binds the live event/bytecode
     reads to the right chain via a single :class:`ChainContext`. Callers thread
     the job/contract chain — a chainless call can no longer run the predicate
     tree as mainnet.

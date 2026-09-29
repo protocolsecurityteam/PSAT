@@ -158,7 +158,7 @@ def main(argv: list[str] | None = None) -> int:
                 ContractMaterialization.status == "ready",
             )
             if args.chain:
-                # Rows are keyed by the canonical decimal-id chain token (inv. 11),
+                # Rows are keyed by the canonical decimal-id chain token,
                 # so normalize a name/alias/id filter through the same function.
                 from utils.chains import chain_cache_token
 

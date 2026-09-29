@@ -142,9 +142,8 @@ class _ComposedMagnitude:
         receiver variable, receiver block — and :func:`_composed_order`'s tail is
         every field ``P.ActAsStep.as_json`` publishes, which is more than five and
         grows. Under-stating the key it describes made the string false of every
-        carrier (``COMPOSITION_WITNESS_SHAPE_SPEC.md`` §11.2 (k)). Reading the
-        field names off the steps in hand keeps the gloss exhaustive by
-        construction, including on the day a step publishes a new field.
+        carrier. Reading the field names off the steps in hand keeps the gloss
+        exhaustive by construction, including when a step publishes a new field.
         """
         fields = sorted({name for entry in (self, *self.tied_with) for step in entry.chain for name in step.as_json()})
         if not fields:
@@ -319,7 +318,7 @@ class _ComposedMagnitude:
             # licensed it. Published beside the comparison it is decided from
             # rather than left to be inferred from whether a figure is present.
             "arm_taken": self.arm_taken,
-            # §7.2 arm 1's caller conjunct, evaluated rather than left implicit.
+            # The caller-match conjunct, evaluated rather than left implicit.
             "gate_claim": _gate_claim(self.chain, self.execution),
             # The route the proof took is republished as this entry's own only
             # where the deletability join proved this principal can author the
@@ -648,7 +647,7 @@ def _composition_report(
         # published only the survivors would read as a coverage figure over a
         # population the rule had already narrowed.
         "composed_withheld": len(withheld),
-        # inv. 13's disclosure hook. Keyed on the deletability verdict's STATE
+        # The anti-gaming disclosure hook. Keyed on the deletability verdict's STATE
         # and reason together, so a join that ran and found no row is counted
         # apart from a join whose authority could not be resolved. A protocol
         # that makes its gating authority unresolvable lands in the second
@@ -657,7 +656,7 @@ def _composition_report(
         "composed_withheld_by_deletability": refused_magnitudes,
         "composed_withheld_by_arm": _counted(record.arm for record in withheld),
         "composed_withheld_by_reason": _counted(record.reason for record in withheld),
-        # §7.2 arm 1's caller conjunct over every entry this row publishes. An
+        # The caller-match conjunct over every entry this row publishes. An
         # entry the proof was admitted for a DIFFERENT caller at keeps its gate
         # claim on the act-as witness and is counted apart, so "the gate claim
         # transferred" is never a silent default.
@@ -845,11 +844,11 @@ def _compose(
     admission: _AdmissionPlanes,
     principal_addresses: Iterable[str],
 ) -> tuple[dict[str, _ComposedMagnitude], dict[str, int], dict[str, int], list[_WithheldComposition]]:
-    """The gate-control magnitude the destination's own witness supplies (Phase 6).
+    """The gate-control magnitude the destination's own witness supplies.
 
-    Phase 4 floored every gate-control magnitude to ``not_determined`` because
-    nothing proved how much the reach moves. For a licensed hop that is
-    recoverable without new evidence: the destination function the gate licenses
+    Without a magnitude witness, gate-control reach stays ``not_determined``.
+    For a licensed hop, a magnitude may be recoverable without new evidence:
+    the destination function the gate licenses
     may already carry its OWN ``flow.out`` magnitude witness, and that witness
     bounds what a call to it moves whoever makes the call.
 

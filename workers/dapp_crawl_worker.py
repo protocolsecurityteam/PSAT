@@ -139,7 +139,7 @@ class DAppCrawlWorker(BaseWorker):
 
         # Addresses the crawl couldn't chain-attribute inherit the job's chain
         # (default_chain) via the shared helper rather than persisting chain=NULL
-        # and duplicating against a sibling writer's 'ethereum' stub (inv. 1/6/12).
+        # and duplicating against a sibling writer's 'ethereum' stub.
         bulk_entries: list[dict] = []
         for addr in addresses:
             normalized = addr.lower()

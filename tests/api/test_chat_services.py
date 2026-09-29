@@ -1,7 +1,7 @@
 """Offline coverage for services/chat/* and utils/llm.tool_chat.
 
 These modules ship the company-page agent and were previously only
-exercised by ``tests/live/test_agent_live.py`` (which is excluded from
+exercised by ``tests/test_agent_live.py`` (which is excluded from
 CI's ``-m "not live"`` run). The diff-cover gate at 70% kept rejecting
 the PR until we covered them with real-DB unit tests + a stubbed LLM
 stream.

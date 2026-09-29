@@ -182,7 +182,7 @@ def _effect_info_for_function(function: Any) -> EffectInfo:
         "effects": list(effects),
         "effect_labels": list(labels),
         # Includes both state-write var names and external-call dotted
-        # targets for label/summary rendering. Tracking.py reads ``sinks``
+        # targets for label/summary rendering. ``tracking.py`` reads ``sinks``
         # directly to enumerate state_write writers.
         "effect_targets": list(effect_targets),
         "action_summary": summary,

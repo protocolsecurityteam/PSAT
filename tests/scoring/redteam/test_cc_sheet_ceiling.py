@@ -8,8 +8,6 @@ re-admission of the balance sheet — it is one branch, over one entity, under
 one argument: replacing what a node DOES removes the node's own code from
 between the principal and what the node holds, so the node's own priced sheet
 bounds the move from ABOVE. Every case below pins a boundary of that argument.
-
-One of the twenty sections of the former ``test_scoring_redteam.py``.
 """
 
 from __future__ import annotations
@@ -154,7 +152,7 @@ def test_cc2_gate_control_over_the_same_node_earns_no_ceiling(fold):
 
 
 def test_cc3_a_downstream_entity_of_a_code_controlled_node_earns_no_ceiling(fold):
-    """§3.2, the constraint that keeps this from undoing the reach-model fix.
+    """A downstream governed node cannot borrow the controlled node's ceiling.
 
     Code control expands over the closure — owning A's code lets A do everything
     A is authorised to do — but for a downstream B that A merely governs you are
@@ -395,7 +393,7 @@ def test_cc6_two_holders_over_one_ceiling_do_not_flatten(fold):
 
 
 def test_cc7_a_sheet_ceiling_charges_the_exposure_budget_nothing(fold):
-    """§6.4. Ceilings are risk-weighted upper bounds, never expected loss.
+    """Ceilings are risk-weighted upper bounds, never expected loss.
 
     Two things go wrong if a sheet ceiling enters the numerator, and only the
     first is obvious. It inflates ``exposure_usd`` off bounds — and the coverage

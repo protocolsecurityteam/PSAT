@@ -1,4 +1,4 @@
-"""Cross-chain authority labeling (MULTICHAIN_INVARIANTS.md invariant 15).
+"""Cross-chain authority labeling.
 
 Covers the pure recognizer, its wiring into ``build_principal_labels`` and the
 FunctionPrincipal type resolver, and the mainnet byte-identity guarantee.

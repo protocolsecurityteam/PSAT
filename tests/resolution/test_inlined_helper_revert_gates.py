@@ -14,7 +14,7 @@ The production false-open: ``EtherFiOracle.submitReport`` gates on
 allowlist. The flattened leaf was a ``business`` comparison and submitReport
 resolved public despite rejecting every non-committee caller on-chain.
 
-The fix (``_internal_call_revert_gate_subtrees`` in ``predicates.py``,
+The fix (``_internal_call_revert_gate_subtrees`` in ``services/static/contract_analysis_pipeline/predicates/tree.py``,
 kill-switch ``PSAT_INLINE_HELPER_REVERT_GATES``) conjoins the helper's
 caller-tainted internal revert gates at the call site, with call arguments
 bound to the helper's parameters. These tests compile a minimal fixture with

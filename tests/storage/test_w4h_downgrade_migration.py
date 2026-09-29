@@ -136,7 +136,7 @@ def test_w4h_downgrade_unwinds_heuristic_membership(throwaway_db_url):
         assert rows[contract_a].protocol_id is None
         assert rows[contract_b].protocol_id is None
         assert rows[contract_c].protocol_id == protocol_id
-        # Gate invariant 4: nomination is never a membership claim and is
+        # nomination is never a membership claim and is
         # preserved through the unwind.
         for cid in (contract_a, contract_b, contract_c):
             assert rows[cid].nominated_protocol_id == protocol_id

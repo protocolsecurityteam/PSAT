@@ -1,5 +1,4 @@
-// Direct render tests for AddressesModal's public prop API (split out of the
-// old src/components.test.jsx).
+// Direct render tests for AddressesModal's public prop API.
 
 import React from "react";
 import { describe, it, expect, beforeEach, vi } from "vitest";

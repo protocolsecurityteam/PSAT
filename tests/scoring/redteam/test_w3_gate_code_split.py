@@ -1,7 +1,4 @@
-"""W3: the gate/code split, condition-bounded reach, and the magnitude rule.
-
-One of the twenty sections of the former ``test_scoring_redteam.py``.
-"""
+"""W3: the gate/code split, condition-bounded reach, and the magnitude rule."""
 
 from __future__ import annotations
 

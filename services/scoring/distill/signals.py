@@ -375,7 +375,7 @@ def _build_signal(
         verdict_id = witness.get("effect_verdict_id")
         if verdict_id is not None:
             verdict = next((v for v in facts.verdicts.get(func.id, []) if v.id == int(verdict_id)), None)
-            # inv.9: a published verdict carries its transcript pointer, or is
+            # A published verdict carries its transcript pointer, or is
             # published WITHOUT a traceability claim — never as "no transcript".
             citations.append(
                 {
@@ -458,7 +458,7 @@ def _reach_for_claim(
         return reach
 
     if claim_id == "pause.set":
-        # FIELDS §5: the value membership is GATED on the fork proof that the
+        # The value membership is GATED on the fork proof that the
         # latch takes effect. Charging an entity whose latch is unproven is the
         # balance-sheet error, so an unproven latch reaches nothing.
         effective = any(
@@ -679,7 +679,7 @@ def _severity(
             # both "no witness bounds this payout" and the witness that bounds
             # it. The gate is the destination being PROVEN, not priced — an
             # unread destination still reaches nothing here, so the arm cannot
-            # fire on a payee nobody read. The wave-4 self-service consumer arm
+            # fire on a payee nobody read. The self-service consumer arm
             # sits beside this one the same way, for the same reason.
             #
             # What the zero rests on: the caller is paid its own attached value,
@@ -708,7 +708,7 @@ def _severity(
         # same reason and with the same gate: an open-caller payout has its
         # destination PROVEN and its severity withheld pending an amount witness,
         # and W1 ∧ W2 IS that witness. Evaluated BEFORE the ``severity is None``
-        # withhold so a proven row is reachable (SPEC §4 compose-ordering); gated
+        # withhold so a proven row is reachable; gated
         # on the destination being determined, never priced, so it cannot fire on
         # a payee nobody read; and a REFUSED conjunction falls through to the
         # withhold below, never to a cheaper number.

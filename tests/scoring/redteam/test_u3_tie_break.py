@@ -1,7 +1,4 @@
-"""U3 — the composed-candidate tie-break, and the destination's own predicates.
-
-One of the twenty sections of the former ``test_scoring_redteam.py``.
-"""
+"""U3 — the composed-candidate tie-break, and the destination's own predicates."""
 
 from __future__ import annotations
 
@@ -186,7 +183,7 @@ def _identity(entry: Any) -> tuple[Any, ...]:
 
 
 def test_u3_no_permutation_of_the_candidates_moves_a_dollar():
-    """inv. 8 at the composition level: the order is not evidence.
+    """Composition order: the order is not evidence.
 
     Seven pools, each tied through the ordering key and separated at exactly ONE
     component, so every component is the deciding one somewhere. Every ordering

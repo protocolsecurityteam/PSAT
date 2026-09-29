@@ -1236,7 +1236,7 @@ def test_the_act_as_plane_indexes_the_destinations_own_acceptance_rows(fx):
                     "membership_quality": "exact",
                 },
             ),
-            # the shape the spec's table pointed at: roles OUTSIDE the trace
+            # roles OUTSIDE the trace
             FunctionPrincipal(
                 function_id=unroled.id,
                 address=caller,

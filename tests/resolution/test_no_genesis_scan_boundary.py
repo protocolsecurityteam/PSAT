@@ -333,7 +333,7 @@ def test_resolve_scan_floor_never_fails_open_to_zero(monkeypatch):
 
 
 def test_resolve_scan_floor_does_not_cache_none_permanently(monkeypatch):
-    """P1.4: a DEFER (None) must not pin for the process life — once the creation block
+    """A DEFER (None) must not pin for the process life — once the creation block
     backfills, a later call resolves it instead of serving the stale None."""
     floor_mod.clear_scan_floor_cache()
     monkeypatch.setattr(floor_mod, "_FLOOR_DEFER_TTL_S", 0.0)  # None re-resolves immediately
@@ -452,7 +452,7 @@ def test_resolve_scan_floor_caches_resolved_int_for_process_life(monkeypatch):
 
 
 def test_floor_cache_size_capped(monkeypatch):
-    """P1.4: the per-process floor memo is size-capped — many distinct addresses evict
+    """The per-process floor memo is size-capped — many distinct addresses evict
     the oldest rather than growing unbounded."""
     floor_mod.clear_scan_floor_cache()
     monkeypatch.setattr(floor_mod, "_FLOOR_CACHE_MAX", 8)

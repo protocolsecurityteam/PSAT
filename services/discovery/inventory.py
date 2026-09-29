@@ -376,7 +376,7 @@ def search_protocol_inventory(
         _debug_log(debug, f"Running deployer expansion with {len(seed_addresses)} seed(s)")
         # Trace deployer wallets on the requested chain, not a mainnet default:
         # the deployer getcontractcreation/txlist calls hit Etherscan and would
-        # otherwise search mainnet for L2 seeds (F3). Genuinely chainless
+        # otherwise search mainnet for L2 seeds. Genuinely chainless
         # discovery (chain="any"/unknown) keeps the documented mainnet fallback.
         deployer_chain_id = 1
         if requested_chain:
@@ -406,7 +406,7 @@ def search_protocol_inventory(
     unknown_count = sum(1 for c in contracts if _primary_chain(c) == "unknown")
     if unknown_count:
         _debug_log(debug, f"Resolving chain for {unknown_count} unknown-chain contract(s)")
-        # Fold the requested chain into the declared set (invariant 3): a caller
+        # Fold the requested chain into the declared set: a caller
         # asking for a specific chain is declaring it. ``None`` stays ``None`` so
         # standalone callers keep the legacy all-chain probe.
         resolve_declared = declared_chains

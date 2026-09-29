@@ -1,4 +1,4 @@
-"""The selection stage's omission ledger (C2).
+"""The selection stage's omission ledger.
 
 `contracts.id=11` (0xcd425f44…, a live 2-day OZ TimelockController holding
 authority over 53 `function_principals` rows across 16 contracts) has no
@@ -224,7 +224,7 @@ def test_budget_exhausted_records_every_ranked_loser(db_session, worker, seed):
 def test_prefilled_budget_enumerates_instead_of_returning_empty(db_session, worker, seed):
     """FALSIFIER (A2): the early-return path. With the budget already spent by
     prior children, ``_queue_top_n`` used to ``return []`` BEFORE the loop, so
-    every ranked candidate was dropped without a record — the C2 defect
+    every ranked candidate was dropped without a record — a silent omission
     reproduced inside its own fix. All four must be enumerated."""
     from db.models import Job, JobStage, JobStatus
 

@@ -2,7 +2,7 @@
 
 Historically this module only held the loose-label normalizer
 :func:`canonical_chain` used by discovery writers. It now also carries the
-:class:`ChainInfo` registry (invariant 5 of ``MULTICHAIN_INVARIANTS.md``): every
+:class:`ChainInfo` registry: every
 per-chain constant (ids, aliases, HyperSync/explorer URLs, finality depth,
 getLogs range, bridge constants) lives here, and the four former ad-hoc chain
 maps derive from it. :func:`canonical_chain` stays as the loose-label front door
@@ -75,11 +75,10 @@ def canonical_chain_list(values: Iterable[Any] | None) -> list[str] | None:
 
 
 # ---------------------------------------------------------------------------
-# Chain registry (invariant 5)
+# Chain registry
 # ---------------------------------------------------------------------------
 
-# Fleet-wide defaults. Per-chain tuning happens at chain-enablement (inv. 14);
-# for now every chain carries the values the codebase already used on mainnet.
+# Fleet-wide defaults, overridden by per-chain registry values where configured.
 DEFAULT_CONFIRMATION_DEPTH = 12
 MAX_GETLOGS_RANGE = 2000
 
@@ -100,7 +99,7 @@ class UnknownChainError(ValueError):
 class UnsupportedChainError(ValueError):
     """Raised by :func:`require_chain` when a chain can no longer be defaulted.
 
-    The single fail-loud signal for the M1.2 default-kill sites (invariant 6):
+    The single fail-loud signal for the required-chain sites:
     a missing / empty / ``"unknown"`` / unregistered chain at a site where the
     old code silently resolved to mainnet. Carries the offending value AND the
     call context so a raise names both what was wrong and where. A subclass of
@@ -127,7 +126,7 @@ class ChainInfo:
     native_asset: str
     # Explicit per chain — never pattern-derived. Non-None marks a chain with
     # proven Envio coverage and serves two roles:
-    #   * it is the "event indexer enabled for this chain" signal (inv. 10); and
+    #   * it is the "event indexer enabled for this chain" signal; and
     #   * it is the NATIVE HyperSync query endpoint (``<chain>.hypersync.xyz``) that
     #     the inline resolution repos (``event_logs_hypersync.py``,
     #     ``mapping_enumerator.py``) POST to directly with an ENVIO_API_TOKEN bearer.
@@ -148,7 +147,7 @@ class ChainInfo:
     # any particular block's timestamp; anything that needs a real elapsed time
     # must read block timestamps.
     block_time_s: float
-    # Populated at Phase 2 chain enablement (inv. 15); empty until then.
+    # Known predeploy addresses for authority recognition; empty if none are recorded.
     bridge_executors: tuple[str, ...]
     cross_domain_messengers: tuple[str, ...]
     # Etherscan v2 stats action that returns this chain's native-coin USD price
@@ -169,13 +168,12 @@ class ChainInfo:
         return self.chain_id in supported_chain_ids()
 
 
-# Initial chain set (inv. 5): the 11 inventory chains
+# Initial chain set: the 11 inventory chains
 # (``services/discovery/inventory_domain.py``) plus ``mode``/``berachain`` from
-# the ``services/clients/rpc.py`` alias map. HyperSync URL is set only where the codebase
-# already demonstrates one in use (mainnet); every other chain is None =
-# indexer-disabled until coverage is proven per inv. 14. Explorer URLs are the
-# well-known canonical bases. Finality depth / getLogs range use the current
-# fleet-wide values pending per-chain tuning.
+# the ``services/clients/rpc.py`` alias map. HyperSync URLs are configured for
+# mainnet and Base; other chains use None and remain indexer-disabled.
+# Explorer URLs are the canonical bases. Finality depth / getLogs range use
+# fleet-wide defaults unless the registry entry supplies an override.
 _CHAINS: tuple[ChainInfo, ...] = (
     ChainInfo(
         chain_id=1,
@@ -235,7 +233,7 @@ _CHAINS: tuple[ChainInfo, ...] = (
         name="base",
         aliases=(),
         native_asset="ETH",
-        # Coverage is preview-validated (inv. 14): HyperSync is unreachable from
+        # Coverage is preview-validated: HyperSync is unreachable from
         # the dev network, so the $0-cost indexer path for this URL is proven in
         # the PR preview environment, not here.
         hypersync_url="https://base.hypersync.xyz",
@@ -246,7 +244,7 @@ _CHAINS: tuple[ChainInfo, ...] = (
         confirmation_depth=75,
         max_getlogs_range=MAX_GETLOGS_RANGE,
         block_time_s=2,  # OP-stack: 2s
-        # OP-stack L2 predeploys for authority recognition (inv. 15). The
+        # OP-stack L2 predeploys for authority recognition. The
         # L2StandardBridge *executes* bridged deposits/withdrawals → bridge
         # executor; the L2CrossDomainMessenger *relays* L1↔L2 messages and is
         # the contract whose xDomainMessageSender surfaces an aliased L1 owner
@@ -419,7 +417,7 @@ def require_chain(
 ) -> ChainInfo:
     """Resolve a chain to its :class:`ChainInfo`, or raise :class:`UnsupportedChainError`.
 
-    The single fail-loud mechanism for the M1.2 kill sites (invariant 6): call
+    The single fail-loud mechanism for the required-chain sites: call
     it wherever a chain used to silently default to mainnet. Resolution order is
     ``chain_id`` first (int or decimal string), then the ``chain`` name/alias.
     Anything that cannot be resolved — ``None``, empty, the ``"unknown"``
@@ -454,7 +452,7 @@ def require_supported_chain(
     chain: str | None = None,
     context: str,
 ) -> ChainInfo:
-    """Resolve a chain AND require it be enabled for this deployment (invariant 14).
+    """Resolve a chain AND require it be enabled for this deployment.
 
     The single enforcement point for the user-facing chain-accepting edges: it
     first resolves the chain through :func:`require_chain` (registry lookup +
@@ -476,7 +474,7 @@ def require_supported_chain(
 
 
 def chain_enabled(chain: str | int | None) -> bool:
-    """Whether *chain* is in the ``PSAT_SUPPORTED_CHAIN_IDS`` allowlist (invariant 14).
+    """Whether *chain* is in the ``PSAT_SUPPORTED_CHAIN_IDS`` allowlist.
 
     The gate for internal work-origination sites — analysis-job spawns and
     monitoring enrollment — where an off-allowlist chain is expected input, not
@@ -508,7 +506,7 @@ def chain_enabled(chain: str | int | None) -> bool:
 
 
 def chain_cache_token(chain: str | int | None) -> str:
-    """Canonical cache-key token for a chain (invariant 11): the decimal-string
+    """Canonical cache-key token for a chain: the decimal-string
     chain id (``"1"``, ``"8453"``).
 
     Accepts a chain id (``int`` or decimal string), a chain name/alias
@@ -518,12 +516,12 @@ def chain_cache_token(chain: str | int | None) -> str:
     code path and ``str(chain_id)`` from another — onto one token, so both hit
     the same row.
 
-    ``None``/empty resolves to the mainnet token, mirroring the Phase-0
+    ``None``/empty resolves to the mainnet token, mirroring the chain-id
     dual-write default. An *unregistered* non-numeric name is not silently
     aliased to mainnet (that would let an unknown chain's scan serve mainnet
     resolution and vice versa); it is returned lowercased as its own isolated
     bucket, so a lookup degrades to a miss rather than a cross-chain collision.
-    Fail-loud on unknown chains is the M1.2 kill-the-defaults step, not this one.
+    Fail-loud on unknown chains is the required-chain validation step, not this one.
     """
     if chain is None:
         return "1"

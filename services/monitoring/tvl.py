@@ -57,7 +57,7 @@ DEFAULT_TVL_INTERVAL = int(os.getenv("PROTOCOL_TVL_INTERVAL", "3600"))
 # duplicate rows when the loop is retriggered quickly (restart, signal, etc.).
 MIN_SNAPSHOT_INTERVAL = int(os.getenv("PROTOCOL_TVL_MIN_INTERVAL", "300"))
 # Protocols refreshed per tick, oldest-snapshot-first — bounds the per-tick
-# Etherscan/DefiLlama fan-out (design §2.7).
+# Etherscan/DefiLlama fan-out.
 DEFAULT_TVL_PROTOCOLS_PER_PASS = 10
 # The protocol's signers and capability principals use a daily balance cadence.
 # The shared collector still deduplicates physical reads across protocols.

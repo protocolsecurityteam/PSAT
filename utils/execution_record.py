@@ -645,7 +645,7 @@ def route_comparison(
     }
 
 
-# §7.2 arm 1's CONJUNCT, as a published outcome rather than a field a consumer
+# The caller-match gate's conjunct, as a published outcome rather than a field a consumer
 # has to evaluate for itself.
 #
 # The arm reads "gate claims transfer ON CALLER MATCH; routing is irrelevant to

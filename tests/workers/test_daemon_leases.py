@@ -1,4 +1,4 @@
-"""Daemon-lease primitive (design §2.4 Layer 1) against the real test Postgres.
+"""Daemon-lease primitive against the real test Postgres.
 
 No fakes: these drive ``db.queue.try_acquire_daemon_lease`` /
 ``renew_daemon_lease`` over the real ``daemon_leases`` table. The exclusivity guarantee lives in the

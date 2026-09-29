@@ -1,7 +1,7 @@
 """Two-plane claims subsystem (Plane 1).
 
-Facts (``effects.py``, Plane 0) are the substrate; this package turns them into
-typed, machine-checkable CLAIM objects ``{claim_id, tier, witness}`` minted only
+Facts (``contract_analysis_pipeline.effects``, Plane 0) are the substrate;
+this package turns them into typed, machine-checkable CLAIM objects ``{claim_id, tier, witness}`` minted only
 through a code registry. Public surface:
 
 - ``build_claims`` / ``attach_claims_to_effects`` — produce the claims artifact

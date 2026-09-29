@@ -1,5 +1,5 @@
-"""Promotion-triggered selection enqueue (DISCOVERY_MEMBERSHIP_GATE_SPEC.md
-§3.4): a protocol that just gained members needs a selection pass, and needs
+"""Promotion-triggered selection enqueue: a protocol that just gained members
+needs a selection pass, and needs
 exactly one — the enqueue fires only on net-new promotions, dedupes against a
 queued/processing pass, and never fires from the non-worker ``evaluate`` entry
 the reconcile/re-earn CLIs use.

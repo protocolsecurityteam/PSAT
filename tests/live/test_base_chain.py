@@ -1,8 +1,8 @@
-"""Base (chain 8453) second-chain live analogs — MULTICHAIN_INVARIANTS.md inv. 2/4/14.
+"""Base (chain 8453) second-chain live analogs.
 
-These are the Phase-2 gate's L2 evidence: second-chain analogs of the
+These provide L2 evidence: second-chain analogs of the
 monitored-contract / enrollment / per-chain-observability live tests. They run
-ONLY in the CI preview environment (never from a dev box, per the Phase-2
+ONLY in the CI preview environment (never from a dev box, per the preview-only
 execution-environment rule) and are gated on the deployed server actually
 supporting Base. On a mainnet-only deployment the whole module skips cleanly —
 prod stays mainnet-only; only the Base-enabled preview sets
@@ -134,7 +134,7 @@ def base_monitored_contract(
 
 def test_base_monitored_contract_chain_roundtrips(base_monitored_contract):
     # The chain field must round-trip as 'base' — the whole point of the
-    # second-chain data-model check (inv. 2).
+    # second-chain data-model check.
     assert base_monitored_contract["chain"] == BASE_CHAIN
     assert base_monitored_contract["address"] == WEETH_BASE_ADDRESS.lower()
     assert base_monitored_contract["is_active"] is True
@@ -199,7 +199,7 @@ def test_fleet_exposes_base_by_chain(
     base_monitored_contract,
     live_client: LiveClient,
 ):
-    """`/api/fleet` carries a per-chain breakdown (inv. 4, WI-D).
+    """`/api/fleet` carries a per-chain breakdown.
 
     Base was just enrolled active, so it must appear in the monitoring
     ``by_chain`` rollup; the indexer's ``by_chain`` is shape-checked tolerantly
@@ -233,7 +233,7 @@ def test_monitoring_health_exposes_chains(
     base_monitored_contract,
     live_client: LiveClient,
 ):
-    """`/api/health/monitoring` carries a per-chain staleness breakdown (inv. 4, WI-D).
+    """`/api/health/monitoring` carries a per-chain staleness breakdown.
 
     Shape-tolerant: an idle chain must not fail the test, so Base is allowed to be
     absent or present-and-idle. When present, the documented per-chain shape must

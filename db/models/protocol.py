@@ -216,11 +216,11 @@ class AuditContractCoverage(Base):
     )
 
 
-# ``ProtocolDeployer.trust_class`` vocabulary (membership gate, spec §3.3).
+# ``ProtocolDeployer.trust_class`` vocabulary.
 # Class C is the ABSENCE of a row — never a row with a third value.
 DEPLOYER_TRUST_CLASS_A = "A"
 DEPLOYER_TRUST_CLASS_B = "B"
-# H — heuristic affinity (DEPLOYER_HEURISTIC_SPEC.md §1). Below the proof
+# H — heuristic affinity. Below the proof
 # classes: an H row may exist only while (protocol, address) holds no active
 # A/B row, and the lineage it licenses is recorded under its own witness rule.
 DEPLOYER_TRUST_CLASS_H = "H"
@@ -256,8 +256,7 @@ class ProtocolDeployer(Base):
 
 
 class DeployerAffinityChallenge(Base):
-    """One observed foreign anchor against a trust-class-H registry row
-    (DEPLOYER_HEURISTIC_SPEC.md §5).
+    """One observed foreign anchor against a trust-class-H registry row.
 
     A challenge is derived from a real witness row for another protocol, never
     from suspicion: ``foreign_witness_id`` names it, and revoking that witness

@@ -44,7 +44,7 @@ def _display_name(entry: "Mapping[str, Any]") -> str:
 
 def _merge_proxy_impl_entries(entries: "list[AnalysisListEntry]") -> "list[AnalysisListEntry]":
     # Key the proxy↔impl fold by (coalesced-chain, address) so a CREATE2 twin's
-    # impl folds only into the proxy on its own chain (inv. 12) — a bare address
+    # impl folds only into the proxy on its own chain — a bare address
     # match would attach one chain's impl to the other chain's proxy.
     impl_by_proxy: dict[tuple[str, str], AnalysisListEntry] = {}
     merged_proxies: set[tuple[str, str]] = set()

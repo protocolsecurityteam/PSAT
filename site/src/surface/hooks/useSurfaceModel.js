@@ -54,7 +54,7 @@ export function useSurfaceModel({ companyData, functionData, functionsLoading, a
   // Fund flows feeding the canvas are chain-scoped like the principals + the
   // edge index: SurfaceCanvas draws contract→contract edges keyed by bare
   // address, so a same-address twin's flow on another chain must not draw onto
-  // this chain's nodes (inv. 13). Same predicate the edge index uses.
+  // this chain's nodes. Same predicate the edge index uses.
   const scopedFundFlows = useMemo(
     () => (companyData?.fund_flows || []).filter((f) => flowOnChain(f, activeChain)),
     [companyData, activeChain]
@@ -64,7 +64,7 @@ export function useSurfaceModel({ companyData, functionData, functionsLoading, a
   // principal strip + capability tags. Most contracts have no entry (null).
   // Chain-scoped: a principal governs on the chain(s) in its ``chains`` list
   // (backend-added), so one observed only on another chain must not attach to a
-  // same-address contract card here (inv. 13). Legacy principals without
+  // same-address contract card here. Legacy principals without
   // ``chains`` are kept as before.
   const principalsByAddress = useMemo(() => {
     const map = new Map();

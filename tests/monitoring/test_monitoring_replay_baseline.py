@@ -143,7 +143,7 @@ def test_replay_classifies_every_window_spec(db_session):
     ``_balances`` and ``locked`` are activity — neither controller has a
     poll-decodable read spec, so no verification read exists to witness them.
     ``locked`` is the Solmate reentrancy guard: it is ``private`` and exposes no
-    getter, so it is not readable at all. F7 closes that residual from the other
+    getter, so it is not readable at all. Writer hygiene closes that residual from the other
     end — a latch written and restored inside one call is no longer a writer of
     anything, so it stops being a controller and this spec is not derived at
     all on a re-analysed contract. The row here is the PERSISTED one, which is
@@ -179,7 +179,7 @@ def test_replay_classifies_every_window_spec(db_session):
 
 
 def test_replay_queues_no_reanalysis(db_session):
-    """Invariant 5: none of these writes touch a control slot. Pinned so a
+    """None of these writes touch a control slot. Pinned so a
     taxonomy change cannot widen the trigger set as a side effect."""
     env = build_replay(db_session)
     env.run()
@@ -224,13 +224,13 @@ def test_every_replayed_publication_carries_an_auditable_salience(db_session):
 
 @pytest.mark.parametrize("openness", ["restricted", "open", "not_determined", None])
 def test_member_witness_qualification_republishes_the_transfers(db_session, openness):
-    """Liveness + the G3 interface, on the real logs.
+    """Liveness + the member-witness qualification interface, on the real logs.
 
     The same 388 Transfer logs that publish nothing as activity publish again
     the moment the spec carries a member witness AND a proven-restricted
     writer. Anything weaker than ``restricted`` — including the absent third
-    state — leaves them silent, which is invariant 4 measured on real traffic
-    rather than on a synthetic spec.
+    state — leaves them silent. This tests refusal to promote without proof
+    on real traffic rather than on a synthetic spec.
 
     The injected record is one that could actually be PUBLISHED: it names the
     mapping whose entry moved, and the spec publishes under that vocabulary. A

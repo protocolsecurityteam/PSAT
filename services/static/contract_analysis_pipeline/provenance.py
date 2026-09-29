@@ -5,7 +5,7 @@ Output: a ``ProvenanceMap`` from SSA value → set of ``Source`` records.
 The predicate builder consumes this to populate ``Operand`` records on
 each leaf.
 
-Design (per /tmp/psat-plans/generic-predicate-pipeline-v4.md):
+Dataflow rules:
 
 * Lattice element per value = a ``frozenset[Source]``. Bottom is the
   empty set (unreached); top is ``{Source(kind="top")}`` (saturated by

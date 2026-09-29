@@ -279,7 +279,7 @@ def test_apply_pass_classifies_pause_leaf(tmp_path):
 # The corresponding EtherFi-visible regression (target_address / selector
 # null on the resolved external_check_only capability) lives downstream in
 # the resolver and is covered by the indexed-event test in
-# test_capability_resolver.py.
+# tests/resolution/test_capability_resolver.py.
 # ---------------------------------------------------------------------------
 
 

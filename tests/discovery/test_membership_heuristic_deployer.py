@@ -1,4 +1,4 @@
-"""W4-H heuristic deployer lineage (DEPLOYER_HEURISTIC_SPEC.md §1, §5, §6, §9).
+"""W4-H heuristic deployer lineage.
 
 Covers the qualification bars (≥2 anchors, affinity ≥ 0.9, challenges < 3),
 proof precedence over Class A/B, the derived registry states, the damped
@@ -116,7 +116,7 @@ def _h_row(session, protocol: Protocol, deployer: str) -> ProtocolDeployer | Non
 
 
 # ---------------------------------------------------------------------------
-# Qualification (§1)
+# Qualification
 # ---------------------------------------------------------------------------
 
 
@@ -191,7 +191,7 @@ def test_affinity_below_floor_grants_nothing(db_session):
 
 
 def test_unknown_creations_never_enter_the_denominator(db_session):
-    """§1/invariant 4: a creation with no witness for any protocol is
+    """A creation with no witness for any protocol is
     not_determined — context, never counterevidence."""
     protocol = _protocol(db_session)
     deployer = _addr(0xD04)
@@ -211,7 +211,7 @@ def test_proof_class_takes_precedence(db_session):
     deployer = _addr(0xD05)
     anchor = _anchor(db_session, protocol, _addr(0xF01), deployer=deployer)
     _anchor(db_session, protocol, _addr(0xF02), deployer=deployer)
-    # A real §3.3 Class-A perimeter fact: the EOA is a resolved controller of
+    # A real Class-A perimeter fact: the EOA is a resolved controller of
     # an anchoring member.
     db_session.add(
         ControllerValue(
@@ -252,7 +252,7 @@ def test_admission_requires_w1_and_a_creation_witness(db_session):
 
 
 # ---------------------------------------------------------------------------
-# Damped revocation (§5)
+# Damped revocation
 # ---------------------------------------------------------------------------
 
 
@@ -444,12 +444,12 @@ def test_suspended_when_anchors_erode(db_session):
 
 
 # ---------------------------------------------------------------------------
-# Non-transitivity and the §6 same-contract exception
+# Non-transitivity and the same-contract exception
 # ---------------------------------------------------------------------------
 
 
 def test_heuristic_member_anchors_nothing(db_session):
-    """§6: a heuristic member is invisible to every evidence rule — it is no
+    """A heuristic member anchors no different-entity evidence rule — it is no
     one's anchor, licenses no factory child, and its proxy-admin does not
     inherit."""
     protocol = _protocol(db_session)
@@ -466,13 +466,13 @@ def test_heuristic_member_anchors_nothing(db_session):
     assert gate.member_for_evidence(db_session, contract_id=heuristic.id, protocol_id=protocol.id) is False
     assert admin.protocol_id is None
     assert _rules(db_session, admin) == set()
-    # And it never counts as its own deployer's anchor (invariant 3).
+    # And it never counts as its own deployer's anchor.
     affinity = gate.compute_deployer_affinity(db_session, protocol_id=protocol.id, address=deployer)
     assert affinity.anchor_count == 2
 
 
 def test_same_contract_implementation_inherits_and_rides_the_revocation(db_session):
-    """§6's ONE exception, as measured on CumulativeMerkleDrop: the impl of an
+    """The same-contract exception, as measured on CumulativeMerkleDrop: the impl of an
     H-member proxy is admitted, displays as heuristic, and falls when the
     proxy's own w4h witness is revoked."""
     protocol = _protocol(db_session)
@@ -508,7 +508,7 @@ def test_same_contract_implementation_inherits_and_rides_the_revocation(db_sessi
 
 
 def test_implementation_discovered_after_its_proxy_still_inherits(db_session):
-    """§6 late arrival: the implementation row appears only AFTER the run that
+    """Same-contract late arrival: the implementation row appears only AFTER the run that
     admitted the proxy heuristically — the next evaluate still carries it, as
     the same heuristic_via W2 a same-run discovery would have minted."""
     protocol = _protocol(db_session)
@@ -646,7 +646,7 @@ def test_heuristic_member_without_pointer_seeds_no_late_inheritance(db_session):
 
 
 def test_exclusivity_requires_a_proven_member(db_session):
-    """§9 invariant 3 on the shared-operator kill: a heuristic-only member is
+    """For the shared-operator kill: a heuristic-only member is
     not_determined there — it neither supplies the mandatory proven member nor
     refuses the verdict as foreign."""
     protocol = _protocol(db_session)
@@ -692,7 +692,7 @@ def test_exclusivity_requires_a_proven_member(db_session):
 
 
 def test_proxy_over_heuristic_only_impl_member_derives_no_w2(db_session):
-    """§6 is one-directional: an H-member proxy carries its implementation,
+    """Same-contract inheritance is one-directional: an H-member proxy carries its implementation,
     but a heuristic-only IMPL member is invisible to the reverse proxy edge —
     no W2 for the proxy, flagged or not, and a re-evaluation over unchanged
     facts mints and revokes nothing."""
@@ -730,7 +730,7 @@ def test_heuristic_via_is_same_contract_only(db_session):
 
 
 def test_proof_class_row_never_accrues_challenges(db_session):
-    """Challenges are an H-class concept (§5): the W4-H stratum leaves a
+    """Challenges are an H-class concept: the W4-H stratum leaves a
     standing Class-A row alone — no challenge sync, no grant attempt."""
     protocol = _protocol(db_session)
     other = _protocol(db_session, "other")
@@ -809,7 +809,7 @@ def test_reevaluation_over_unchanged_facts_leaves_evidence_untouched(db_session)
 
 
 def test_anchor_swap_preserving_counts_refreshes_evidence(db_session):
-    """§8.1: the evidence names the actual inputs. An anchor swap that leaves
+    """The evidence names the actual inputs. An anchor swap that leaves
     all four live numbers unchanged still rewrites ``anchors`` (and
     ``computed_at``); a further no-change evaluate leaves it byte-identical."""
     protocol = _protocol(db_session)
@@ -850,7 +850,7 @@ def test_anchor_swap_preserving_counts_refreshes_evidence(db_session):
 
 
 def test_heuristic_promotion_never_preempts_a_proof(db_session):
-    """§9 invariant 8: W4-H is the last stratum, so a row that can be proven is
+    """W4-H is the last stratum, so a row that can be proven is
     proven — the heuristic rule never supplies its witness."""
     protocol = _protocol(db_session)
     deployer = _addr(0xD0E)

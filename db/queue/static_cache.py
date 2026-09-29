@@ -184,7 +184,7 @@ def find_completed_static_cache(
     the cache remains valid even after ``copy_static_cache`` reassigned the
     Contract row to a later target job.
 
-    **Cross-chain fallback (invariant 1):** when the exact ``(address, chain)``
+    **Cross-chain fallback:** when the exact ``(address, chain)``
     lookup misses and *source_content_hash* is supplied, a second lookup finds a
     completed job that analyzed the *same verified source* under the current
     analyzer schema version — regardless of its chain or address. That donor's
@@ -202,8 +202,8 @@ def find_completed_static_cache(
         )
         .order_by(Job.updated_at.desc())
     )
-    # SQL-side chain filtering on the first-class ``jobs.chain_id`` column
-    # (invariant 1). The M0.2 backfill populated chain_id for every
+    # SQL-side chain filtering on the first-class ``jobs.chain_id`` column.
+    # The migration backfilled chain_id for every
     # address-scoped row, so ``chain_id = :id`` is a total, collision-free
     # filter; ``derive_job_chain_id`` maps the caller's chain string to the same
     # id the dual-write stored (unknown/missing → 1) so mainnet is unchanged.
@@ -260,7 +260,7 @@ def find_completed_static_cache(
 
     # Cross-chain fallback: the exact (address, chain) lookup missed; if we know
     # this deployment's source hash, reuse a completed job that analyzed the same
-    # source on any chain (invariant 1).
+    # source on any chain.
     if source_content_hash:
         return _find_static_cache_by_source_hash(session, source_content_hash)
 
@@ -348,7 +348,7 @@ def find_previous_company_inventory(
         .order_by(Job.updated_at.desc())
     )
     # Company/root jobs are address-less, so ``jobs.chain_id`` is NULL for them
-    # (M0.2's CHECK requires chain_id only for address-scoped rows). Their chain
+    # (the CHECK requires chain_id only for address-scoped rows). Their chain
     # identity lives solely in ``request->>'chain'``, so the SQL-side chain
     # predicate keys on the JSONB value — an exact-string match that preserves
     # the prior Python-side ``req.get("chain") != chain`` semantics, including
@@ -378,8 +378,8 @@ def find_existing_job_for_address(session: Session, address: str, chain: str | N
         Job.status != JobStatus.failed,
         Job.request["effects_resume_work_id"].astext.is_(None),
     )
-    # SQL-side chain filtering on ``jobs.chain_id`` (invariant 1). The M0.2
-    # backfill populated every address-scoped row, so this is total;
+    # SQL-side chain filtering on ``jobs.chain_id``. The migration
+    # backfilled every address-scoped row, so this is total;
     # ``derive_job_chain_id`` resolves the caller's chain string to the stored
     # id (unknown/missing → 1), matching the dual-write.
     if chain is not None:

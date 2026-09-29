@@ -1,4 +1,4 @@
-"""§2 sub-part B: shared_deployer witnessed fact (heuristic-for-attribution).
+"""shared_deployer witnessed fact (heuristic-for-attribution).
 
 Same-deployer is a Tier-1 on-chain fact but NOT proof of same organization
 (factories defeat it) — the fact carries a heuristic marker and never mints an

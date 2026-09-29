@@ -3,7 +3,7 @@
 Exercises the collision-safe re-key logic directly (``_normalize_chain_tokens``)
 rather than driving the whole alembic run: a name-keyed row moves to its decimal
 id token, and a row whose target key is already occupied is left on its stale key
-(a cache miss, not corruption — invariant 11).
+(a cache miss, not corruption).
 """
 
 from __future__ import annotations

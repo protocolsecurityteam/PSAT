@@ -48,7 +48,7 @@ from services.static.contract_analysis_pipeline.predicate_types import LeafPredi
 
 
 def earned_public_enabled() -> bool:
-    """The caller-taint default (plan: AUTHORITY_REFACTOR) — ON by default;
+    """The caller-taint default is enabled unless explicitly disabled;
     ``PSAT_AUTHORITY_EARNED_PUBLIC=0`` is the release kill-switch back to the
     legacy E3/E4 point-fix path (precedent: #130's env kill switch)."""
     return os.getenv("PSAT_AUTHORITY_EARNED_PUBLIC", "1").lower() in ("1", "true", "yes")

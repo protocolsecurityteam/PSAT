@@ -69,10 +69,9 @@ def _require_solc() -> None:
     """FAIL, never skip, when the pinned solc is absent.
 
     `_compile_subject` raises `SolcNotInstalled` precisely so callers can skip
-    cleanly — and `WITNESS_INTEGRITY_LEDGER.md:584` records that exact courtesy
-    silently disabling the label-corpus gate in an under-provisioned venv. A
-    producer-parity test that skips proves nothing while reporting green, so
-    this one refuses the skip and routes around every caller that would catch
+    cleanly. That courtesy can silently disable the label-corpus gate in a venv
+    missing the pinned compiler. A producer-parity test that skips proves nothing
+    while reporting green, so this one refuses the skip and routes around every caller that would catch
     the exception for it.
     """
     binary = label_corpus._solc_select_binary(SOLC_VERSION)

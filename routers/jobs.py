@@ -60,7 +60,7 @@ def list_jobs() -> list[JobDict]:
 def analyze_address(request: AnalyzeRequest) -> JobDict:
     # Address shape is enforced by the ``AnalyzeRequest`` field validator (422);
     # any address reaching here is a canonical 0x-prefixed 20-byte hex string.
-    # Allowlist enforcement (inv. 14): the edge keeps its mainnet default, but a
+    # Allowlist enforcement: the edge keeps its mainnet default, but a
     # submission that resolves to a chain this deployment has not enabled is
     # rejected before a job is spawned. Enforce on the *resolved* chain — the same
     # ``derive_job_chain_id`` value the job carries — so a chainless/mainnet
@@ -93,7 +93,7 @@ def analyze_address(request: AnalyzeRequest) -> JobDict:
         # name 404s instead of minting a duplicate protocol (company-only
         # submissions keep resolving/creating theirs during discovery). The
         # admin's membership claim rides on the request as an ATTRIBUTED W5
-        # human assertion (membership gate, invariant 14) — never a source
+        # human assertion (explicit membership approval) — never a source
         # tag; the gate consumes it at nomination time. Address-only
         # submissions stay standalone.
         if request.address and request.company:
@@ -152,7 +152,7 @@ def analyze_remaining(company_name: str) -> AnalyzeRemainingResponse:
             session.refresh(contract, attribute_names=["job_id"])
             if contract.job_id is not None:
                 continue
-            # Allowlist gate (inv. 14), mirroring the selection worker: a stub
+            # Allowlist gate, mirroring the selection worker: a stub
             # on a chain this deployment has not enabled is skipped — its
             # discovery evidence stays for a future widened scan, no job spawns.
             if not chain_enabled(contract.chain):
@@ -227,7 +227,7 @@ def delete_company_address(
     Scoped to the protocol AND chain: the same address can host a contract on
     two chains within one protocol, so keying by address alone used to raise
     ``MultipleResultsFound`` (a 500). ``chain`` disambiguates and defaults to
-    mainnet at this admin edge (inv. 12) so existing single-chain callers are
+    mainnet at this admin edge so existing single-chain callers are
     unchanged. FK cascades on ``contracts.id`` clean up the audit coverage rows
     and any upgrade-event attribution.
     """

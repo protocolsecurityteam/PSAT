@@ -1,10 +1,10 @@
 // Consumption of the server-computed reach block (`companyData.reach`, model
-// scorer_closure_v1 — SURFACE_REACH_UNIFICATION_SPEC.md). The scorer walks;
+// scorer_closure_v1). The scorer walks;
 // the client only follows the keys it shipped. Pure — no React.
 //
 // Payload keys are composite "<chain>::<addr>" entity keys; the canvas keys
 // nodes by bare lowercased address on the single active chain, so everything
-// here is projected through the chain filter (inv. 13) down to bare addresses.
+// here is projected through the chain filter down to bare addresses.
 
 import { coalesceChain, entityKey } from "../entityKey.js";
 
@@ -61,7 +61,7 @@ export function deriveReachOverlay(reach, chain, address) {
     const from = keyOnChain(entry?.from, chain);
     const to = keyOnChain(entry?.to, chain);
     if (!from || !to) continue;
-    // Reached wins — the server merges this way too (spec, fold.py:6101);
+    // Reached wins — the server merges this way too (services/scoring/reach.py);
     // re-asserted so a payload carrying both can never render a walked node
     // as unconfirmed.
     if (to === self || distances.has(to)) continue;

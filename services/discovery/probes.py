@@ -1,11 +1,11 @@
-"""Bounded read-only corroboration probes (DISCOVERY_MEMBERSHIP_GATE_SPEC.md §3.5).
+"""Bounded read-only corroboration probes.
 
-One probe = eth_getCode + Etherscan ``getcontractcreation`` + owner() /
-authority() + the EIP-1967 implementation/admin/beacon slots, all pinned at
+One probe = eth_getCode + Etherscan ``getcontractcreation`` + owner /
+authority + the EIP-1967 implementation/admin/beacon slots, all pinned at
 one just-read block. Probes may run on ANY eRPC-routable chain regardless of
-``PSAT_SUPPORTED_CHAIN_IDS`` (invariant 10). Every outcome — including a read
-that resolved nowhere — is persisted so a parked candidate is explainable
-(invariant 5). Nothing here commits; the caller does.
+``PSAT_SUPPORTED_CHAIN_IDS``. Every outcome — including a read
+that resolved nowhere — is persisted so a parked candidate is explainable.
+Nothing here commits; the caller does.
 """
 
 from __future__ import annotations
@@ -53,7 +53,7 @@ STATUS_PROBED = "probed"
 STATUS_NOT_ROUTABLE = "not_routable"
 STATUS_RPC_ERROR = "rpc_error"
 
-# The five §3.5 resolution reads, in persisted order.
+# The five resolution reads, in persisted order.
 _READS = ("owner", "authority", "implementation", "admin", "beacon")
 
 

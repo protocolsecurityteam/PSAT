@@ -1,9 +1,9 @@
-"""M1.1 item 4 — second-chain threading proof for the monitoring daemons.
+"""Second-chain threading proof for the monitoring daemons.
 
 Every existing monitoring test drives chain-``ethereum`` (chain 1) inputs and so
 only proves mainnet stays unchanged. These tests drive a chain-``base`` (8453)
 input through each threaded path and assert the *base* eRPC route / chain id is
-what actually reaches the wire — the thing M1.1 makes true:
+what actually reaches the wire — the required routing behavior:
 
   - ``poll_for_state_changes`` sends a base contract's batch to the base RPC URL
   - ``scan_for_events`` reads head + getLogs for a base cohort on the base RPC URL
@@ -198,8 +198,8 @@ def test_enroll_bases_watched_proxy_on_contract_chain(db_session, monkeypatch):
     from services.monitoring.enrollment import enroll_protocol_contracts
 
     monkeypatch.setenv("ERPC_BASE_URL", ERPC_BASE)
-    # This test models a deployment where base has passed the inv-14 enablement
-    # checklist; enrollment gates off-allowlist chains (inv. 14), so make the
+    # This test models a deployment where Base is enabled. Enrollment gates
+    # off-allowlist chains, so make the
     # base-enabled premise explicit rather than relying on the {1} default.
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1,8453")
 

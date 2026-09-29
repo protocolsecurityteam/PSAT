@@ -8,15 +8,14 @@ consumed by BOTH the indexer's enrollment branch (``all_topic0s`` /
 ``detect_standards`` → which cursors to seed) and the Stage-2
 ``EnumerableRoleStoreAdapter`` (``matches`` / ``enumerate`` fold), so a future
 protocol upgrade to a *recognized* standard lands enumerated automatically and an
-upgrade to a *novel* one lands fail-closed-and-loud — the durability invariant in
-CONTROLLER_RESOLUTION_SPEC.md §5.
+upgrade to a *novel* one remains unresolved and emits telemetry.
 
 Adding a standard = one ``RoleStoreStandard`` entry in ``STANDARDS``; everything
 downstream (enrollment, fold, probe) is data-driven off it.
 
 Selectors and topic0s are derived from their signatures (keccak) rather than
-pinned as hex, and cross-checked against ``rolegate-fix-evidence/
-roles_ground_truth.json`` (Solady ``RoleSet`` topic0
+pinned as hex, and checked in ``tests/resolution/test_role_store_standards.py``
+(Solady ``RoleSet`` topic0
 0xaddc47d7…758201b8, ``hasRole(address,uint256)`` 0x5c97f4a2, OZ
 AccessControlEnumerable EIP-165 id 0x5a05180f).
 """
@@ -187,8 +186,8 @@ def resolve_standard(code_hex: str | None) -> RoleStoreStandard | None:
     """The single standard a role store speaks, for the adapter's ``matches`` /
     ``enumerate`` (as opposed to the indexer's ``detect_standards``, which
     union-enrolls on ambiguity). Exactly one detected standard → that standard;
-    zero → ``None`` (no recognized store → the adapter declines, the ``:1976``
-    guard backstops, loud). More than one is not a fold the adapter can trust —
+    zero → ``None`` (no recognized store → the adapter declines and the
+    refine-only guard backstops, loud). More than one is not a fold the adapter can trust —
     the marker sets are disjoint, so a double match means a store masquerading as
     both, which we DECLINE rather than guess a fold polarity for (fail-closed, the
     safe direction: the guard still gates it)."""

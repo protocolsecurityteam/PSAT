@@ -1,5 +1,4 @@
-// Shared payload builders for the vocab test files (split from the old
-// claimsVocab.test.js).
+// Shared payload builders for the vocab test files.
 
 export function claim(claim_id, tier = "standard_exact") {
   return { claim_id, tier, witness: {} };

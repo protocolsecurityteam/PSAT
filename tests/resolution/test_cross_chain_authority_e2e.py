@@ -1,5 +1,5 @@
 """Cross-chain authority POSITIVE arm, exercised end-to-end through the real
-resolution/labeling path (MULTICHAIN_INVARIANTS.md invariant 15).
+resolution/labeling path.
 
 ``tests/resolution/test_cross_chain_authority.py`` covers the recognizer and its wiring by
 monkeypatching the *classifier function*. These tests instead stub only the
@@ -20,7 +20,7 @@ Real-target anchoring (Base mainnet, from docs.base.org "Base Contracts"):
   L2StandardBridge / bridge executor:          0x4200000000000000000000000000000000000010
 
 On Base the L2 ``ProxyAdmin`` is owned by the *aliased* L1 ProxyAdminOwner — the
-default L2 ownership pattern invariant 15 exists to label. The L1 owner Safe is
+default L2 ownership pattern the recognizer labels. The L1 owner Safe is
 placed in the run's known-address scope (a same-address on-chain reference is the
 documented trigger), so the alias resolves; strip it from scope and the label
 must vanish (guarded in ``tests/resolution/test_cross_chain_authority.py``).

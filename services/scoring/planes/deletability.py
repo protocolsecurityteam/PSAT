@@ -30,9 +30,9 @@ from utils.scoring_status import TRACE_STEP_SOLMATE_ROLES_AUTHORITY
 # from a hop count, a selector name or a contract shape: on the corpus this was
 # calibrated against, ``len(act_as_chain) == 1`` partitions the population
 # identically, and shipping that correlation would publish an abstraction above
-# an available witness (inv. 16).
+# an available witness.
 #
-# THREE OUTCOMES, none collapsible (inv. 1):
+# THREE OUTCOMES, none collapsible:
 #   * a qualifying row exists                     -> ``deletable``
 #   * the join ran and returned no row            -> ``proven_not_deletable``
 #   * the join could not be run, or was run on a  -> ``not_determined``
@@ -188,7 +188,7 @@ class DeletabilityVerdict:
         Published on WITHHELD entries too, and that is not decoration: under
         this rule a protocol whose gating authority cannot be resolved lands on
         ``not_determined``, its figure is withheld, and its published exposure
-        FALLS. Obscuring evidence must not pay (inv. 13), so the withheld entry
+        FALLS. Obscuring evidence must not pay, so the withheld entry
         discloses the state, the typed reason, the authority it asked about and
         which witnesses answered — a suppressed authority then presents as a
         disclosed unknown rather than as an absent finding. The caller pairs
@@ -303,7 +303,7 @@ def load_deletability_plane(session: Session) -> DeletabilityPlane:
     would return no row and the entry would publish ``proven_not_deletable`` —
     an earned negative minted from our own scoping, which is exactly the defect
     class this plane exists to close. The population is a pure function of the
-    database state, so replay (inv. 11) is unaffected.
+    database state, so replay is unaffected.
 
     The queries are narrow by construction — four setter names, one trace step,
     one controller id, one basis tag — so "unscoped" is a few hundred rows, not

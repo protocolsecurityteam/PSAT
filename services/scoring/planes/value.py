@@ -155,10 +155,9 @@ class ValuePlane:
     # ERC-20 asset list is proven WHOLE by the chain's own transfer history
     # through a named block. Absence from ``asset_set_truncated`` says only that
     # no read reported a cap; membership here is an earned positive, and it is
-    # the only witness under which an empty sheet may be published as $0 (§2 of
-    # SHEET_OBSERVATION_SPEC.md: a third-party index's empty answer is a trigger
-    # to scan, never the proof). The value is the CARRIER's own record — the
-    # source token, the scanned block range and the fetch's basis string — so a
+    # the only witness under which an empty sheet may be published as $0. A third-party
+    # index's empty answer is a trigger to scan, never the proof. The value is
+    # the CARRIER's own record — the source token, the scanned block range and the fetch's basis string — so a
     # published claim derives from stored evidence rather than being re-authored
     # here.
     asset_set_proven_complete: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -508,7 +507,7 @@ def ceiling_for(plane: ValuePlane, key: str) -> tuple[float | None, str]:
     which is not the pipeline that answers "nobody priced these rows".
 
     ``fold._entity_contribution`` and ``fold._unresolved_stake`` are the
-    callers, both with canonical keys. Every reason is pinned by ``tests/test_value_plane_ceiling.py``
+    callers, both with canonical keys. Every reason is pinned by ``tests/scoring/test_value_plane_ceiling.py``
     over hand-built planes, because the corpus does not carry all of them: it now
     carries proven-empty sheets in quantity — the chain-log sweep earned them —
     but no ambiguous alias and no unregistered sheet state, so those two are

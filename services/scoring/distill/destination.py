@@ -157,7 +157,7 @@ def _exec_destination(claim_id: str, witness: dict[str, Any], fork_param: str | 
     # ``sentinel_param``, and only if that IS the parameter this sink calls
     # through does the proof say the destination is caller-chosen. The
     # destination parameter is read from the witness (``destination_param``
-    # under a ``param`` kind), never from the function's name (inv. 1).
+    # under a ``param`` kind), never from the function's name.
     #
     # Every other shape of the join refuses and the row stays not_determined:
     # a verdict about a different parameter licenses nothing here (it is the
@@ -188,7 +188,7 @@ def _caller_relative_destination(shape: str, basis: str, openness: str) -> _Dest
 
     The lattice proof is a UNIVERSAL over every out-flow of the function, so it
     needs no behavioural existence witness the way the fork's ``caller_arbitrary``
-    arm does (inv. 9). But the two kinds it proves make DIFFERENT claims, and one
+    arm does. But the two kinds it proves make DIFFERENT claims, and one
     argument does not cover both:
 
     ``msg_sender`` — the payee IS the caller. The caller names the destination by

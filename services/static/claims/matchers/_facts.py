@@ -745,9 +745,9 @@ def param_constraint(
 # call in the function, or a verified reentrancy guard stands in for that order
 # (W2). Every state traces to a witness; a refusal carries the reason it fell
 # short and is never a bare bool. Two separate producer walks meet here — the
-# amount side (``effects.py`` publishes ``amount_record_*`` on the flow) and the
-# guard side (``predicates.py`` stamps ``element_*`` on the leaf operand). Both
-# name the base off Slither's ``StateVariable.canonical_name`` (the DECLARING
+# amount side (``effects/origins.py`` publishes ``amount_record_*`` on the flow)
+# and the guard side (``predicates/operands.py`` stamps ``element_*`` on the leaf
+# operand). Both name the base off Slither's ``StateVariable.canonical_name`` (the DECLARING
 # contract, so an inherited var reads the same on both sides), so the join
 # compares canonical names and refuses on any disagreement rather than guessing.
 #
@@ -794,7 +794,7 @@ SELF_SERVICE_REFUSAL_REASONS = frozenset(
         "no_verified_guard_modifier",
         "ambiguous_function_declaration",
         _W2_GUARD_FUNCTION_NOT_ANALYZED,
-        # burn variant (SPEC S1 §1.5), registered for forward compatibility —
+        # burn variant, registered for forward compatibility —
         # the shipped producers publish no burn record for this join to read.
         "amount_is_external_conversion_of_burn",
     }

@@ -1,9 +1,7 @@
-"""Verdict/report helpers for the membership reconcile CLI
-(DISCOVERY_MEMBERSHIP_GATE_SPEC.md §5.4).
+"""Verdict/report helpers for the membership reconcile CLI.
 
 Everything here re-uses the gate's own verification internals — the verdict a
-CLI reports is the verdict ``membership_gate`` would reach, never a fork of it
-(invariant 13).
+CLI reports is the verdict ``membership_gate`` would reach, never a fork of it.
 """
 
 from __future__ import annotations
@@ -54,8 +52,7 @@ def active_witness_rules(session: Session, *, contract_id: int, protocol_id: int
 def _heuristic_edge_miss(session: Session, contract: Contract, protocol_id: int) -> dict[str, Any] | None:
     """Near-miss class "impl/child of heuristic member": a member's stored
     pointer names this candidate, but that member holds heuristic witnesses
-    only and the edge is not one of the DEPLOYER_HEURISTIC_SPEC.md §6
-    same-contract kinds that inherit."""
+    only and the edge is not one of the same-contract kinds that inherit."""
     address = (contract.address or "").lower()
     if not address:
         return None
@@ -91,7 +88,7 @@ def _heuristic_edge_miss(session: Session, contract: Contract, protocol_id: int)
 
 def _heuristic_deployer_miss(session: Session, *, protocol_id: int, deployer: str) -> dict[str, Any] | None:
     """Near-miss classes "deployer one anchor short" and "affinity below the
-    floor" — the two W4-H qualification bars (DEPLOYER_HEURISTIC_SPEC.md §1),
+    floor" — the two W4-H qualification bars,
     reported with the measured numbers so a reviewer sees the gap."""
     affinity = gate.compute_deployer_affinity(session, protocol_id=protocol_id, address=deployer)
     if affinity.anchor_count == 0:
@@ -116,7 +113,7 @@ def _heuristic_deployer_miss(session: Session, *, protocol_id: int, deployer: st
 
 def closest_miss(session: Session, contract: Contract, protocol_id: int) -> dict[str, Any]:
     """Which witness rule came nearest and what named piece of evidence is
-    missing (invariant 5's skip+log posture). Token fields only, never
+    missing. Token fields only, never
     composed prose."""
     address = (contract.address or "").lower()
     chain_id = chain_id_for_chain_name(contract.chain)
@@ -150,7 +147,7 @@ def closest_miss(session: Session, contract: Contract, protocol_id: int) -> dict
     ]
     if verified:
         # An admitting witness verifies, so the only thing withholding
-        # membership is the W1 code precondition (invariant 3).
+        # membership is the W1 code precondition.
         if not code_probed:
             missing = "w1_code_probe"
         elif code_row is not None and code_row.code_absent_at_probe:

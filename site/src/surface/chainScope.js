@@ -1,4 +1,4 @@
-// Chain-scope derivation for the Surface page (multichain inv. 13). Pure — no
+// Chain-scope derivation for the Surface page. Pure — no
 // React. Kept out of ProtocolSurface so the coalescing here provably matches the
 // key derivation (entityKey), and so the "unknown/invalid ?chain falls back to
 // default, never a blank canvas" contract is unit-testable in isolation.

@@ -1,4 +1,4 @@
-"""Offline integration tests for chain-qualified address labels (invariant 12, F5).
+"""Offline integration tests for chain-qualified address labels.
 
 Exercises ``routers/address_labels.py`` against the test DB through
 ``api_client``. Covers the global-plus-override model: global rows keep the

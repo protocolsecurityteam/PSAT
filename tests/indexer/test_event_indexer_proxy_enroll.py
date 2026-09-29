@@ -13,7 +13,7 @@ full-history scan — driving both the ~13-min policy stage AND run-to-run
 controller drift (a cold fold lands on the full set / a truncated subset /
 ``external_check`` depending on how the scan races the 45 s timeout). The fix
 routes the fallback through the same ``runtime_addr`` the resolver uses
-(``request['proxy_address']`` when set). See POLICY_STAGE_ROOTCAUSE_VERDICT.md.
+(``request['proxy_address']`` when set).
 """
 
 from __future__ import annotations

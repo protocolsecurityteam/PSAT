@@ -1,6 +1,6 @@
 """Tests for the writer-gate two-pass analyzer.
 
-Per v6/v7 plan: 1-key caller-keyed bool/uint mappings can't be
+Single-key caller-keyed bool/uint mappings can't be
 classified as auth or personal-flag from the read-site alone — the
 discriminator is how the storage var is *written*. The analyzer
 walks the contract, finds writer functions of each candidate

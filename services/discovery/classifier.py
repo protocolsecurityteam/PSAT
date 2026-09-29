@@ -349,7 +349,7 @@ def classify_single(
     When *code_cache* is provided, bytecode lookups are cached to avoid
     duplicate ``eth_getCode`` RPC calls across pipeline stages.
 
-    *chain_id* (the analyzed contract's chain) arms the inv-7 URL↔chain_id guard
+    *chain_id* (the analyzed contract's chain) arms the URL↔chain_id guard
     on every underlying read; None keeps it a no-op.
     """
     address = normalize_address(address)

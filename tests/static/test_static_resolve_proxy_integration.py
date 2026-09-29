@@ -28,7 +28,7 @@ _IMPL_ADDR = "0x3333333333333333333333333333333333333333"
 _FACET1 = "0x4444444444444444444444444444444444444444"
 _FACET2 = "0x5555555555555555555555555555555555555555"
 # A local (Anvil) URL is the one explicit rpc_url that still propagates to child
-# jobs; a hosted URL is ignored in favor of eRPC (see test_erpc_routing.py).
+# jobs; a hosted URL is ignored in favor of eRPC (see tests/rpc/test_erpc_routing.py).
 _RPC = "http://127.0.0.1:8545"
 
 
@@ -158,7 +158,7 @@ def test_proxy_with_implementation_creates_child_job(monkeypatch):
 def test_proxy_child_job_inherits_chain(monkeypatch):
     """When request includes 'chain', child job request also includes it."""
     # Models a base-enabled deployment: impl-child spawns gate off-allowlist
-    # chains (inv. 14), so make the premise explicit rather than relying on {1}.
+    # chains, so make the premise explicit rather than relying on {1}.
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1,8453")
     worker = StaticWorker()
     session = MagicMock()

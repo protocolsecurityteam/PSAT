@@ -128,7 +128,7 @@ def test_bitwise_flag_membership_classifies_caller_authority(tmp_path):
     the mask in at enumeration time. Mutable state vars are
     excluded.
 
-    Implementation: predicates.py:_find_index_value_pair extended
+    Implementation: predicates/leaves.py:_find_index_value_pair extended
     to recognize ``Binary(AND, Index_lvalue, Constant_or_immutable)``
     as the same shape as plain ``Index_lvalue == const``. Writer-
     gate rule b.i then promotes to caller_authority when the
@@ -176,7 +176,7 @@ def test_custom_m_of_n_classifies_threshold_group(tmp_path):
       4. No unguarded settable writers exist (admin-reset risk)
 
     Implementation:
-      - predicates.py:_try_threshold_membership emits a comparison
+      - predicates/leaves.py:_try_threshold_membership emits a comparison
         leaf with set_descriptor populated for ``Index_lvalue [op]
         constant`` with op ∈ gt/gte/lt/lte
       - writer_gate.py:_is_authority_derived_counter walks writers,
@@ -236,7 +236,7 @@ def test_eip1271_classifies_signature_auth(tmp_path):
     Detection is purely structural — by the magic value (which is
     a structural protocol fingerprint), not by function-name match.
 
-    Implementation: predicates.py:_try_external_auth_oracle
+    Implementation: predicates/leaves.py:_try_external_auth_oracle
     detects ``Binary(EQ, external_call_result, constant)``. When
     the constant matches 0x1626ba7e (in any representation: hex
     string, decimal int, decimal string, bytes), emit
@@ -286,7 +286,7 @@ def test_hashed_key_membership_classifies_caller_authority(tmp_path):
     msg_sender]`` instead of a single ``computed`` source. Multi-key
     rule then promotes to caller_authority directly.
 
-    Implementation: predicates.py:_expand_key_operand walks back
+    Implementation: predicates/_helpers.py:_expand_key_operand walks back
     through hash and abi.encode calls and returns one Operand per
     ultimate input. Detection is by Solidity built-in signature
     (``keccak256(bytes)``, ``abi.encode()``, etc.) — structural

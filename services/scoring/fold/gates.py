@@ -124,7 +124,7 @@ def _row_for(
     through paths that cost different things: a Safe that also proposes-and-
     executes on a timelock reaches the timelock's contracts only by paying the
     delay, and one max-weakness row would charge that delayed value at the
-    Safe's undelayed rung. Within one path the weakest gate still wins (inv.5),
+    Safe's undelayed rung. Within one path the weakest gate still wins,
     which is what keeps two merged Safes one power rather than two.
     """
     key = (unit, capability, path)

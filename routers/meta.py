@@ -90,7 +90,7 @@ def monitoring_health() -> Any:
 
     ``chains`` reports per-chain staleness for the chain-scoped subsystems
     (indexer, monitoring scanner) so a stalled Base indexer degrades health —
-    and names the chain — even while mainnet stays fresh (invariant 4).
+    and names the chain — even while mainnet stays fresh.
     """
     from services.monitoring.ops_alerts import collect_chain_health, collect_stale_processes
 
@@ -128,7 +128,7 @@ def pipeline_stats() -> PipelineStatsResponse:
     """Quick stats: unique addresses stored, total jobs, etc."""
     with deps.SessionLocal() as session:
         # Count entities as (chain_id, address): a CREATE2 twin is one address
-        # on two chains, i.e. two distinct entities (inv. 12).
+        # on two chains, i.e. two distinct entities.
         unique_addresses = (
             session.execute(
                 select(func.count(distinct(tuple_(Job.chain_id, Job.address)))).where(Job.address.isnot(None))

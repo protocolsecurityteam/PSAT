@@ -88,7 +88,7 @@ export function collectDirectCallers(fn) {
 }
 
 // Shared context for the indirect-caller derivation: the payload's principals
-// (chain-scoped, inv. 13) plus the same adjacency / agency / edge indexes the
+// (chain-scoped) plus the same adjacency / agency / edge indexes the
 // reach overlay walks, and a per-principal closure cache — one BFS per
 // principal per payload, not one per function. Keyed by payload identity and
 // chain token so a chain switch gets its own scoped indexes.

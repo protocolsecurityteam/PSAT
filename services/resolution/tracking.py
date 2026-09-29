@@ -656,7 +656,7 @@ def probe_declared_vault_backlink(
     V as its vault() at ``probe_block``, with the nonsense-selector control
     passed.** That corroborates the (M, V) PAIRING the projection already
     asserts, from a structural read rather than from the
-    ``ManagerWithMerkleVerification`` label string (inv.2).
+    ``ManagerWithMerkleVerification`` label string.
 
     It earns NOTHING about what M *is*, and on this corpus that is not a corner
     case: of the 20 pairs that publish ``True`` at 25643300, **10 are not

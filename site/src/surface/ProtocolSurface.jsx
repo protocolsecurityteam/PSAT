@@ -64,7 +64,7 @@ function ProtocolSurface({
       // Key by the composite (chain, address) token — uniform with the
       // /functions endpoint payload (initialFunctions/locallyFetched), which is
       // now composite-keyed too. Two chains can share an address, so a bare key
-      // would last-wins one chain's functions onto the other (inv. 13). The
+      // would last-wins one chain's functions onto the other. The
       // per-chain filter is redundant given the composite key but kept so the
       // inline fixture map stays scoped to what the canvas renders.
       return Object.fromEntries(
@@ -399,7 +399,7 @@ function ProtocolSurface({
           }
         : {};
     if (!address && !named) return { ok: false, kind: "empty" };
-    // Identity is (chain, address) (inv. 13) and the surface renders one chain
+    // Identity is (chain, address) and the surface renders one chain
     // at a time. Another chain's entity is not a miss when the payload
     // witnesses it there: switch the page's scope to that chain and park the
     // request — the effect below re-runs it once the graph has re-scoped, so

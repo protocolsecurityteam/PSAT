@@ -1,7 +1,4 @@
-"""W4a — the disclosure items that ride with the conferral test.
-
-One of the twenty sections of the former ``test_scoring_redteam.py``.
-"""
+"""W4a — the disclosure items that ride with the conferral test."""
 
 from __future__ import annotations
 

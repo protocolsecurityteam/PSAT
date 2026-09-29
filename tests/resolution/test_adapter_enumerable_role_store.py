@@ -294,7 +294,7 @@ def test_matches_recognized_standard_scores_90(session, monkeypatch):
 @requires_postgres
 def test_matches_markerless_authority_scores_0(session, monkeypatch):
     # The guard's no-adapter anchor: no recognized store behind the proxy → the
-    # adapter declines to match, so the :1976 guard remains the backstop.
+    # adapter declines to match, so the refine-only guard remains the backstop.
     _stub_probe_code(monkeypatch, "0x00")
     _seed_proxy_impl(session)
     session.commit()
@@ -422,7 +422,7 @@ def test_finite_set_projects_principal_type_controller(session, monkeypatch, bot
 @requires_postgres
 def test_settled_decline_records_metric(session, monkeypatch, both_flags):
     # Adapter-site decline counter: a settled probe_unavailable is observable at the
-    # adapter (its persisted basis is superseded by the :1976 guard downstream).
+    # adapter (its persisted basis is superseded by the refine-only guard downstream).
     _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
     _seed_proxy_impl(session)
     _seed_cursor(session, _ROLE_SET)

@@ -95,7 +95,7 @@ def create_job(
     address = request_dict.get("address")
     job = Job(
         address=address,
-        # Explicit enqueue-path dual-write (invariant 1). Shares the model's
+        # Explicit enqueue-path dual-write. Shares the model's
         # derivation, which also runs as a column default for any non-create_job
         # construction, so the two layers can never disagree.
         chain_id=derive_job_chain_id(request_dict.get("chain"), address),
@@ -392,7 +392,7 @@ def reconcile_impl_job_for_proxy(
         # Chain is filtered in BOTH branches. Previously the chain predicate was
         # nested under ``root_job_id is not None``, so when root_job_id was None a
         # same-address impl job on a *different* chain could masquerade as a
-        # duplicate (invariant 1). Impl jobs are address-scoped, so ``jobs.chain_id``
+        # duplicate. Impl jobs are address-scoped, so ``jobs.chain_id``
         # is populated and the filter is total (``derive_job_chain_id`` maps the
         # chain string to the stored id; unknown/missing → 1).
         if chain is not None:

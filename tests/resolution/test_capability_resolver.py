@@ -481,7 +481,7 @@ def test_signature_auth_signer_zero_address_collapses_to_empty_exact(session):
     """Sibling of the equality path's zero-address handling:
     ``_resolve_equality_principal`` collapses ``msg.sender == _owner``
     to ``finite_set([], exact, enumerable)`` when ``_owner`` is the
-    zero address (predicate_evaluator.py:418-419). The signer path
+    zero address (``services/resolution/predicate_evaluator/equality.py``). The signer path
     must do the same — a zero-addressed signer means no valid
     signature can ever satisfy the gate.
 

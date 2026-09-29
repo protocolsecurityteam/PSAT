@@ -1,4 +1,4 @@
-"""Integration tests for the dirty-queue enrollment reconciler (design §2.3).
+"""Integration tests for the dirty-queue enrollment reconciler.
 
 Real Postgres + the real ``enroll_protocol_contracts`` production stack; the
 only thing stubbed is the RPC wire (``eth_blockNumber``). Covers the queue

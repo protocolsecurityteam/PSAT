@@ -16,7 +16,7 @@ Two leak paths motivated gating membership, and both are exercised here:
      the leak — one EigenPodManager proxy → 7 EigenPodManager impls all
      tagged etherfi.
 
-Under the membership gate (DISCOVERY_MEMBERSHIP_GATE_SPEC.md) no source
+Under the membership gate no source
 tag stamps ``protocol_id`` at all: every discovery write is a nomination,
 and promotion requires a recorded witness. These tests:
 
@@ -39,7 +39,7 @@ import pytest
 from tests.conftest import requires_postgres
 
 # ---------------------------------------------------------------------------
-# 2. Writer-side gate — db/queue.py
+# 2. Writer-side gate — db/queue/discovery.py
 # ---------------------------------------------------------------------------
 
 
@@ -63,7 +63,7 @@ def seed_protocol(db_session):
 
 @requires_postgres
 class TestBulkUpsertOwnershipGate:
-    """Membership-gate model (DISCOVERY_MEMBERSHIP_GATE_SPEC.md): NO source
+    """Membership-gate model: NO source
     tag stamps ``protocol_id`` at the persistence boundary — every write is a
     nomination (``nominated_protocol_id``) and promotion is the gate's job.
     The full writer matrix (tag tiers, re-nominations, the single-row helper)
@@ -109,7 +109,7 @@ class TestBulkUpsertOwnershipGate:
 
 @pytest.fixture()
 def stub_etherscan(monkeypatch):
-    """Stub etherscan name lookup AND the backfill's near-line §3.5 probe so
+    """Stub etherscan name lookup AND the backfill's near-line probe so
     the tests stay offline + hermetic (stub-the-wire rule).
 
     Matches the helpers in ``test_upgrade_history_backfill.py`` —
@@ -307,7 +307,7 @@ class TestCallTargetOverreachShape:
     """The dev-DB shape behind the WETH9 / EndpointV2 / DepositContract / Lido
     admissions: members carry ControllerValue rows naming the externals they
     integrate with. ``call_target`` is an operand and NULL is not-determined —
-    neither admits a D2 controller (invariant 6, ``W3_D2_SOURCES``). The third
+    neither admits a D2 controller (``W3_D2_SOURCES``). The third
     refused provenance, ``caller_gate``, is pinned with the full EndpointV2
     shape in test_membership_caller_gate_admission.py."""
 
@@ -1044,7 +1044,7 @@ class TestRemainingOrphanAdoption:
     Branch A (deployer-cascade) — migration-only sweep of the historical
     orphan set. The runtime helper it mirrored
     (``workers.discovery._deployer_cascade_protocol_id``) is replaced by the
-    membership gate's deployer trust ladder (spec §3.3).
+    membership gate's deployer trust ladder.
 
     Branch B (historical-impl behind HIGH-impl proxy) — migration-only.
     Anchors on the proxy's current implementation's HIGH source, not

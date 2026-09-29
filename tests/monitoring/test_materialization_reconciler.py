@@ -1,9 +1,9 @@
-"""The reconciler that keeps invariant 8 true across a schema bump — at a price
-somebody decided (invariant 11).
+"""The reconciler that restores current materializations across a schema bump
+with an explicit rebuild budget.
 
 A bump to ``ANALYSIS_SCHEMA_VERSION`` makes every existing row read as a miss at
 once, and without this the whole monitored fleet quietly falls back to
-baseline-only watching. The backlog is published while it is still small (F9c),
+baseline-only watching. The backlog is published while it is still small,
 and the rebuild work is capped, counted, and reported rather than emitted.
 """
 
@@ -331,7 +331,7 @@ def test_zero_budget_queues_nothing_but_still_reports_the_backlog(cm_db, monkeyp
 
 @requires_postgres
 def test_fleet_status_publishes_the_backlog(cm_db):
-    """F9c rides the F9a surface: the counts are published unconditionally, with
+    """Materialization backlog rides the fleet health surface: the counts are published unconditionally, with
     no invented alert threshold (see ``ops_alerts.collect_materialization_backlog``)."""
     from services.aggregations import build_fleet_status
 

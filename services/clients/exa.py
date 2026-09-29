@@ -2,12 +2,8 @@
 """Exa (formerly Metaphor) search client — drop-in shape-compatible with
 ``services.clients.tavily``.
 
-Exa's neural/auto search mode embeds the query semantically which is a
-much better fit for our use case than Tavily's phrase-match: "ether fi"
-and "ether.fi" cluster together in embedding space, so quoted / spaced
-/ dotted slug variants all return the same high-quality on-protocol
-URLs. See ``/tmp/exa_vs_tavily.py`` for the benchmark that motivated
-adding this.
+Search requests use Exa's auto mode and request text content. Search results
+are normalized to the same shape as the Tavily client.
 
 Returns objects shaped like Tavily's — ``{title, url, content, score}``
 — so the rest of the pipeline (domain-picker, page-picker, classifier)

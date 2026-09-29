@@ -1,4 +1,4 @@
-"""Invariant-8 revocation: the deployer demotion cascade and revocation
+"""Witness revocation: the deployer demotion cascade and revocation
 quiescence."""
 
 from __future__ import annotations
@@ -55,7 +55,7 @@ def _demote_if_no_verified_witness(
     reason: str,
     evidence: dict[str, Any] | None = None,
 ) -> tuple[list[int], bool]:
-    """Invariant 8: demote exactly the members left with no admitting witness
+    """Demote exactly the members left with no admitting witness
     whose via-fact still verifies; a remaining witness that fails verification
     is revoked in the same pass. Returns (extra revoked ids, demoted?)."""
     contract = session.get(Contract, contract_id)
@@ -134,7 +134,7 @@ def _revoke_deployer_registry_row(
 
 
 def demote(session: Session, *, deployer_row: ProtocolDeployer, reason: str) -> DemotionResult:
-    """Deployer revocation (invariant 8), cascaded to quiescence: dependent
+    """Deployer revocation, cascaded to quiescence: dependent
     W4 witnesses are revoked, members left without a verifying witness are
     demoted, and each demotion recursively invalidates the W2/W3 witnesses
     resting on it. All demoted contracts are re-probe candidates."""
@@ -148,7 +148,7 @@ def demote(session: Session, *, deployer_row: ProtocolDeployer, reason: str) -> 
 
 
 def _cascade_deployer_demotions(session: Session, result: DemotionResult) -> DemotionResult:
-    """§3.2 witness invalidation: each demoted member is itself a via-fact —
+    """Witness invalidation: each demoted member is itself a via-fact —
     recurse the invalidation to quiescence. Terminates because revocations
     only shrink the active witness set."""
     seed: set[str] = set()
@@ -223,7 +223,7 @@ def _vias_citing_evidence_address(session: Session, addresses: Sequence[str] | s
     *addresses* — an anchor-chain link or terminal anchor, or the member
     hosting a perimeter-principal fact.
 
-    Invariant 8's trigger for both proof arms: such a witness's via is the
+    Revocation trigger for both proof arms: such a witness's via is the
     CONTROLLER, not the address whose facts changed, so a broken proof would
     otherwise never reach the revocation frontier.
 
@@ -315,9 +315,9 @@ def _revocation_quiescence(session: Session, seed_vias: Sequence[str] | set[str]
                 demoted.append(contract_id)
             # The frontier follows every revocation, not only the demotions.
             # A member that KEEPS membership can still lose the witness that
-            # made it anchor (``_member_anchors_ladder``), and the F2 facts
+            # made it anchor (``_member_anchors_ladder``), and the anchoring facts
             # resting on that anchoring — factory lineage, principal-keyed W3 —
-            # are keyed on this address alone (invariant 8).
+            # are keyed on this address alone.
             contract = session.get(Contract, contract_id)
             addr = (contract.address or "").lower() if contract is not None else ""
             if addr:

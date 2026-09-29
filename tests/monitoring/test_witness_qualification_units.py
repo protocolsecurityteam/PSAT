@@ -1,4 +1,5 @@
-"""Unit-level adversarial cases for the F3/F7/F8 qualification machinery.
+"""Unit-level adversarial cases for member-witness, writer-hygiene,
+and member-projection qualification.
 
 The corpus test (``test_witness_corpus_completeness``) proves the whole
 derivation on compiled Solidity; these pin the individual judgements at the
@@ -139,7 +140,7 @@ def test_the_kill_switch_cannot_promote(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# F7 — writer hygiene
+# Writer hygiene
 # ---------------------------------------------------------------------------
 
 
@@ -221,7 +222,7 @@ def test_the_opaque_set_reads_both_shapes_the_artifact_records():
 
 
 # ---------------------------------------------------------------------------
-# F8 — member projection
+# Member projection
 # ---------------------------------------------------------------------------
 
 

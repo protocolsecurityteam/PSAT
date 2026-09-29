@@ -162,7 +162,7 @@ def test_capabilities_chain_id_query_param(api_client, db_session):
 
 @requires_postgres
 def test_capabilities_explicit_chain_isolates_twin(api_client, db_session, monkeypatch):
-    """An explicit ``chain_id`` scopes the job pick to that chain (inv. 12): a
+    """An explicit ``chain_id`` scopes the job pick to that chain: a
     CREATE2 twin analyzed on two chains resolves against the job on the
     REQUESTED chain, never falling back to another chain's trees; a chain with
     no completed job 404s instead of silently serving a twin's data."""
@@ -330,7 +330,7 @@ def test_capabilities_cache_keyed_on_block_and_chain(api_client, db_session, mon
     from services.resolution import capability_resolver as resolver_mod
 
     address = "0x" + uuid.uuid4().hex[:8] + "cc" * 16
-    # The job pick is a hard filter on chain (inv. 12), so seed the twin on both
+    # The job pick is a hard filter on chain, so seed the twin on both
     # queried chains; the chain_id=137 request resolves its own job rather than
     # relying on a cross-chain fallback.
     _seed_completed_job_with_artifact(

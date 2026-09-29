@@ -668,7 +668,7 @@ def test_find_dynamic_dependencies_parity_parallel_vs_sequential(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Multichain (M1.1): chain_id threading to Etherscan tx calls
+# Multichain: chain_id threading to Etherscan tx calls
 # ---------------------------------------------------------------------------
 
 
@@ -708,7 +708,7 @@ def test_find_dynamic_dependencies_threads_chain_id_to_fetch(monkeypatch):
         return []
 
     monkeypatch.setattr(ddc, "fetch_contract_transactions", fake_fetch)
-    # Trace RPC is a separate (M1.2) concern — stub it so no network is touched.
+    # Trace RPC is a separate concern — stub it so no network is touched.
     monkeypatch.setattr(ddc, "resolve_trace_rpc", lambda url=None: "https://rpc.example")
 
     with pytest.raises(ddc.NoNewTransactionsError):

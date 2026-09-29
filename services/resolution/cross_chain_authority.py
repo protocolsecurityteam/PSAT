@@ -1,16 +1,16 @@
-"""Cross-chain authority recognition (invariant 15: label early, model late).
+"""Cross-chain authority recognition: labels without cross-chain control edges.
 
 L2 deployments overwhelmingly hand ownership to an *aliased* L1 address or to an
 OP-stack bridge predeploy. Left alone those principals classify as anonymous
-EOAs / generic contracts — exactly the silent under-labeling invariant 15
-forbids. This module recognises them from data that is already on hand: the
-chain's registry constants (``ChainInfo.bridge_executors`` /
+EOAs / generic contracts, obscuring the bridge authority. This module recognises
+them from data already on hand: the chain's registry constants
+(``ChainInfo.bridge_executors`` /
 ``cross_domain_messengers``) and the run's own set of known addresses. No
 cross-chain RPC, no probing, no control edge — the recognition attaches a
 *label* (``resolved_type == "cross_chain_authority"``) and, for an aliased
 owner, the implied L1 address as a non-authoritative hint.
 
-v1 is chain-as-island (inv. 15): the implied L1 address is a hint only, never a
+v1 is chain-as-island: the implied L1 address is a hint only, never a
 control edge. Modeling real cross-chain edges is a later phase.
 
 Chain scoping: recognition is a no-op on any chain whose registry entry carries
@@ -99,7 +99,7 @@ def classify_cross_chain_authority(
             return CROSS_CHAIN_AUTHORITY_TYPE, {
                 "address": norm,
                 "role": "aliased_l1_owner",
-                # Hint only (inv. 15): the L1 principal this alias stands in for.
+                # Hint only: the L1 principal this alias stands in for.
                 # NOT a control edge — v1 is chain-as-island.
                 "implied_l1_address": implied,
             }

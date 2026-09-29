@@ -6,8 +6,6 @@ that admit it, and the resolver evaluates that tree. No
 shape-name labels in the routing path; shape labels are diagnostic
 only.
 
-The plan is /tmp/psat-plans/generic-predicate-pipeline-v{4,5,6,7}.md.
-
 These types live in their own module so the runtime predicate builder,
 the schema, and the resolver can import them without circular deps.
 """

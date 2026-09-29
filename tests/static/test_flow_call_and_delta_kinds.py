@@ -1,4 +1,4 @@
-"""Regression tests for the two lattice kinds added by SDG §3 A1-recall:
+"""Regression tests for the two lattice kinds:
 ``token_owner`` destinations and ``balance_delta`` amounts.
 
 Same harness as ``tests/static/test_flow_lattice.py`` — a real solc compile driving the
@@ -461,9 +461,9 @@ def test_a_keyed_lookup_return_is_never_published_as_fixed(_returns):
 
     ``_owners`` has no setter function, so the element rule would classify the
     BASE as ``storage_no_setter`` — i.e. provably FIXED, the benign end of the
-    axis, which §4.2 promotes to ``immutable_fixed`` on the verdict. The caller
-    picks the key, and a different key is a different address. Resolving this at
-    all is the worst over-claim available here."""
+    axis, which the value-out consumer promotes to ``immutable_fixed`` on the
+    verdict. The caller picks the key, and a different key is a different
+    address. Resolving this at all is the worst over-claim available here."""
     target = _out_flow(_returns["payBeneficiary(uint256,uint256)"])["target_kind"]
     assert target["kind"] == "indeterminate", target
 
@@ -597,8 +597,9 @@ def _recognizer(tmp_path_factory):
 def test_an_internal_helper_that_redirects_is_not_read_off_the_call_site(_recognizer):
     """`_settle(token, treasury, amount)` looks like a token-first transfer, but
     the helper repoints the destination through a permissionless mapping. Reading
-    the call site published `immutable` at `dispositive_ast`, which §4.2 promotes
-    to a PROVABLY-unredirectable destination — for a payout anyone can capture."""
+    the call site published `immutable` at `dispositive_ast`, which the
+    value-out consumer promotes to a PROVABLY-unredirectable destination — for a
+    payout anyone can capture."""
     target = _out_flow(_recognizer["sweep(IERC20,uint256)"])["target_kind"]
     assert target["kind"] == "indeterminate", target
 
