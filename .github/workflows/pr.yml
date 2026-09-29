@@ -141,8 +141,18 @@ jobs:
           DB_URL=$(python -m deploy.preview.control database-url \
             --user "$NEON_STAGING_RUNTIME_USER" --host "$NEON_STAGING_RUNTIME_POOLER_HOST" \
             --database "$PREVIEW_DATABASE")
+          # Process-group ownership holds session advisory locks, which a
+          # transaction pooler cannot keep; production uses a direct endpoint too.
+          [[ "$NEON_STAGING_ADMIN_HOST" != *-pooler* ]] || {
+            echo "::error::NEON_STAGING_HOST must be the direct (non-pooler) endpoint"
+            exit 1
+          }
+          LIFECYCLE_DB_URL=$(python -m deploy.preview.control database-url \
+            --user "$NEON_STAGING_RUNTIME_USER" --host "$NEON_STAGING_ADMIN_HOST" \
+            --database "$PREVIEW_DATABASE")
           flyctl secrets set --stage -a "$APP_NAME" \
-            DATABASE_URL="$DB_URL" PSAT_ADMIN_KEY="$PSAT_STAGING_ADMIN_KEY" \
+            DATABASE_URL="$DB_URL" PSAT_LIFECYCLE_DATABASE_URL="$LIFECYCLE_DB_URL" \
+            PSAT_ADMIN_KEY="$PSAT_STAGING_ADMIN_KEY" \
             PSAT_EDGE_MODE="preview" PSAT_SITE_ORIGIN="$PRIVATE_URL" \
             ETHERSCAN_API_KEY="$STAGING_ETHERSCAN_API_KEY" \
             ERPC_BASE_URL="$STAGING_ERPC_BASE_URL" ERPC_SECRET="$STAGING_ERPC_SECRET" \
@@ -156,14 +166,35 @@ jobs:
             ARTIFACT_STORAGE_PREFIX="${{ steps.plan.outputs.artifact_prefix }}" \
             PSAT_SUPPORTED_CHAIN_IDS="1,8453"
 
+      - name: Stage app-scoped worker lifecycle token
+        env:
+          APP_NAME: ${{ steps.plan.outputs.app }}
+        run: |
+          # The monitor's lifecycle controller lists and starts workers, as in
+          # production. The staging token may not mint tokens, so attenuate it
+          # offline to this one app with read + control ("rC"): enough to list
+          # and start machines, not to write, create or delete anything.
+          query=$(jq -nc --arg app "$APP_NAME" \
+            '{query: "query($app: String!) { app(name: $app) { internalNumericId } }", variables: {app: $app}}')
+          app_id=$(curl -fsS https://api.fly.io/graphql -H "Authorization: $FLY_API_TOKEN" \
+            -H "Content-Type: application/json" --data "$query" | jq -er '.data.app.internalNumericId')
+          [[ "$app_id" =~ ^[1-9][0-9]*$ ]] || { echo "::error::Could not resolve preview app ID"; exit 1; }
+          token=$(jq -nc --arg id "$app_id" '[{type: "Apps", body: {apps: {($id): "rC"}}}]' | flyctl tokens attenuate)
+          token="${token//[$'\r\n']/}"
+          [[ "$token" == FlyV1\ * ]] || { echo "::error::Token attenuation failed"; exit 1; }
+          echo "::add-mask::$token"
+          printf 'PSAT_WORKER_LIFECYCLE_TOKEN=%s\n' "$token" | flyctl secrets import --stage -a "$APP_NAME"
+
       - name: Generate private preview Fly configuration
         run: |
-          # Fly resolves [build].dockerfile relative to the generated config,
-          # so keep this file at the repository root beside deploy/Dockerfile.
+          # Previews run production's fly.toml with only the allowlisted
+          # differences in deploy/preview/control.py. Fly resolves
+          # [build].dockerfile relative to the generated config, so keep this
+          # file at the repository root beside deploy/Dockerfile.
           python -m deploy.preview.control render-config \
             --pr-number "$PR_NUMBER" --organization "$PSAT_STAGING_FLY_ORG" \
             --app-prefix "$PSAT_PREVIEW_APP_PREFIX" \
-            --template deploy/preview/fly.preview.toml.template --output "$GITHUB_WORKSPACE/fly-preview.toml"
+            --source fly.toml --output "$GITHUB_WORKSPACE/fly-preview.toml"
 
       - name: Deploy private preview
         run: |
@@ -185,6 +216,16 @@ jobs:
               flyctl machines start "$machine" -a "${{ steps.plan.outputs.app }}"
             done
           done
+
+      - name: Activate worker lifecycle
+        env:
+          PGPASSWORD: ${{ secrets.NEON_STAGING_PASSWORD }}
+          PREVIEW_DATABASE: ${{ steps.plan.outputs.database }}
+        run: |
+          # Migrations create the gate paused; production's deploy resumes it
+          # after verification. Without this the controller only observes.
+          psql "sslmode=require host=$NEON_STAGING_ADMIN_HOST user=$NEON_STAGING_ADMIN_USER dbname=$PREVIEW_DATABASE" \
+            -v ON_ERROR_STOP=1 -c "UPDATE worker_lifecycle SET paused = false WHERE id = 1;"
 
       - name: Post private preview instructions
         uses: marocchino/sticky-pull-request-comment@773744901bac0e8cbb5a0dc842800d45e9b2b405

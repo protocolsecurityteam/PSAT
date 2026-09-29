@@ -8,10 +8,12 @@ from pathlib import Path
 import pytest
 import tomli
 
+from deploy.preview import control
 from deploy.preview.control import (
     ConfigurationError,
     build_plan,
     database_url,
+    dump_toml,
     render_config,
     validate_app_inventory,
     validate_ip_inventory,
@@ -49,9 +51,15 @@ def test_preview_plan_rejects_production_and_command_injection(pr: str, org: str
         build_plan(pr, org, prefix)
 
 
+def _render_preview() -> tuple[dict, dict]:
+    plan = build_plan(42, "psat-staging", "psat-stage-pr")
+    source = (ROOT / "fly.toml").read_text()
+    return tomli.loads(source), tomli.loads(render_config(source, plan))
+
+
 def test_generated_config_is_private_flycast_http_with_idle_wake() -> None:
     plan = build_plan(42, "psat-staging", "psat-stage-pr")
-    rendered = render_config((PREVIEW / "fly.preview.toml.template").read_text(), plan)
+    rendered = render_config((ROOT / "fly.toml").read_text(), plan)
     config = tomli.loads(rendered)
     assert config["app"] == "psat-stage-pr-42"
     assert (ROOT / config["build"]["dockerfile"]).is_file()
@@ -75,13 +83,36 @@ def test_generated_config_is_private_flycast_http_with_idle_wake() -> None:
         ],
     }
     assert ".fly.dev" not in rendered
+    assert "REPLACE_WITH_PSAT_HEALTH_SECRET" not in rendered
 
 
-def test_render_rejects_template_that_can_force_public_https() -> None:
+def _changed(a: dict, b: dict) -> set[str]:
+    return {key for key in a.keys() | b.keys() if a.get(key) != b.get(key)}
+
+
+def test_preview_differs_from_production_only_by_allowlisted_settings() -> None:
+    # A live run is only evidence about production if the preview runs the same
+    # process layout (lifecycle mode, indexer placement), sizing and settings.
+    production, preview = _render_preview()
+    assert _changed(production, preview) == {"app", "env", "http_service"}
+    assert _changed(production["env"], preview["env"]) == {"PSAT_EDGE_MODE", "PSAT_SITE_ORIGIN", "PSAT_PIN_BLOCKS"}
+    assert "PSAT_SITE_ORIGIN" not in preview["env"]
+    prod_http, preview_http = production["http_service"], preview["http_service"]
+    assert _changed(prod_http, preview_http) == {"force_https", "min_machines_running", "checks"}
+    unheadered = [{k: v for k, v in check.items() if k != "headers"} for check in prod_http["checks"]]
+    assert preview_http["checks"] == unheadered
+
+
+def test_toml_dump_round_trips_production_config() -> None:
+    source = tomli.loads((ROOT / "fly.toml").read_text())
+    assert tomli.loads(dump_toml(source)) == source
+
+
+def test_render_rejects_overrides_that_can_force_public_https(monkeypatch: pytest.MonkeyPatch) -> None:
     plan = build_plan(42, "psat-staging", "psat-stage-pr")
-    unsafe = (PREVIEW / "fly.preview.toml.template").read_text().replace("force_https = false", "force_https = true")
+    monkeypatch.setitem(control.PREVIEW_HTTP, "force_https", True)
     with pytest.raises(ConfigurationError, match="unsafe preview config"):
-        render_config(unsafe, plan)
+        render_config((ROOT / "fly.toml").read_text(), plan)
 
 
 def test_app_inventory_requires_exact_staging_owner() -> None:
@@ -252,6 +283,27 @@ def test_deploy_and_http_jobs_enforce_private_path() -> None:
         assert "private_proxy.sh start" in workflow
         assert "private_proxy.sh stop" in workflow
         assert "http://127.0.0.1:" in workflow
+
+
+def test_preview_deploy_provisions_managed_worker_lifecycle() -> None:
+    pr = (WORKFLOWS / "pr.yml").read_text()
+    deploy_job = pr.split("\n  deploy:\n", 1)[1].split("\n  live-tests:\n", 1)[0]
+    # Session advisory locks need the direct endpoint, never the pooler.
+    assert 'PSAT_LIFECYCLE_DATABASE_URL="$LIFECYCLE_DB_URL"' in deploy_job
+    assert '--host "$NEON_STAGING_ADMIN_HOST"' in deploy_job
+    assert "!= *-pooler*" in deploy_job
+    # Scoped to the one preview app with read + control only; the staging token
+    # is org-wide and cannot mint app tokens.
+    assert '{apps: {($id): "rC"}}' in deploy_job
+    assert "flyctl tokens attenuate" in deploy_job
+    assert "flyctl tokens create" not in deploy_job
+    assert "::add-mask::$token" in deploy_job
+    assert "flyctl secrets import --stage" in deploy_job
+    assert "PSAT_WORKER_LIFECYCLE_TOKEN=$" not in deploy_job
+    assert deploy_job.index("Stage app-scoped worker lifecycle token") < deploy_job.index("Deploy private preview")
+    assert deploy_job.index("Start non-web process groups") < deploy_job.index("Activate worker lifecycle")
+    for workflow in (deploy_job, (WORKFLOWS / "reset-pr-db.yml").read_text()):
+        assert "UPDATE worker_lifecycle SET paused = false WHERE id = 1;" in workflow
 
 
 def test_tunnel_jobs_use_staging_org_token_without_inventory_commands() -> None:
